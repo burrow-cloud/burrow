@@ -144,10 +144,11 @@ faked in tests. See [CLAUDE.md](../CLAUDE.md) for the package conventions and
 ## State
 
 The control plane keeps its own state — deploy records, rollout history, and operational
-metadata — in **Neon (Postgres)**, behind a database interface so it can be faked in unit
-tests. This state is independent of Kubernetes cluster state; the cluster is the source of
-truth for what is running, and the control plane's database is the source of truth for the
-deploy history and the rollback handles.
+metadata — in **Postgres running in the cluster** (ADR-0012), behind a database interface
+so it can be faked in unit tests. Burrow's own state lives in the user's cluster, not an
+external managed service. This state is independent of Kubernetes cluster state; the
+cluster is the source of truth for what is running, and the control plane's database is
+the source of truth for the deploy history and the rollback handles.
 
 ## What is in scope, and when
 

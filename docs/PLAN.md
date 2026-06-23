@@ -54,7 +54,7 @@ guardrails and returns a structured result the agent can reason over
   logs, and scale — with a real client adapter and a fake for unit tests.
 - **A registry/pull assumption** — the cluster can pull the referenced image (image-pull
   secrets); the control plane handles bytes never ([ADR-0004](adr/0004-code-never-over-mcp.md)).
-- **The deploy record** in the control plane's own database (Neon/Postgres) behind a
+- **The deploy record** in the control plane's own in-cluster Postgres (ADR-0012) behind a
   database interface, holding the rollback handles
   ([ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)).
 - **The MCP tool surface** (`deploy`, `status`, `logs`, `rollback`, `scale`) with schemas

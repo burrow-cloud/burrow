@@ -61,7 +61,8 @@ tests pass. Each has an ADR.
   justify itself. The Kubernetes client, an MCP library, and a Postgres driver are expected
   costs; speculative dependencies are not.
 - The stack: **Go** for the control plane, MCP server, and CLI. **Kubernetes** as the
-  target. **Neon (Postgres)** for the control plane's own state. **Resend** for email.
+  target. **Postgres** (self-hosted, running in the cluster — ADR-0012) for the control
+  plane's own state. **Resend** for email.
   **HTMX** if and when a self-host dashboard is needed. **DigitalOcean** as the reference
   cluster target.
 

@@ -20,11 +20,11 @@ import "github.com/burrow-cloud/burrow/controlplane"
 type Op string
 
 const (
-	OpApply         Op = "ApplyDeployment"
-	OpStatus        Op = "DeploymentStatus"
-	OpScale         Op = "ScaleDeployment"
+	OpApply         Op = "ApplyWorkload"
+	OpStatus        Op = "WorkloadStatus"
+	OpScale         Op = "ScaleWorkload"
 	OpLogs          Op = "Logs"
-	OpDelete        Op = "DeleteDeployment"
+	OpDelete        Op = "DeleteWorkload"
 	OpResolve       Op = "Resolve"
 	OpSaveRelease   Op = "SaveRelease"
 	OpRelease       Op = "Release"

@@ -32,14 +32,14 @@ func TestKubernetesApplyStatusScale(t *testing.T) {
 	ctx := context.Background()
 	k := NewKubernetes()
 
-	spec := controlplane.DeploymentSpec{App: "web", Image: "img:1", Replicas: 3}
-	if err := k.ApplyDeployment(ctx, spec); err != nil {
-		t.Fatalf("ApplyDeployment: %v", err)
+	spec := controlplane.WorkloadSpec{App: "web", Image: "img:1", Replicas: 3}
+	if err := k.ApplyWorkload(ctx, spec); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
 	}
 
-	st, err := k.DeploymentStatus(ctx, "web")
+	st, err := k.WorkloadStatus(ctx, "web")
 	if err != nil {
-		t.Fatalf("DeploymentStatus: %v", err)
+		t.Fatalf("WorkloadStatus: %v", err)
 	}
 	if st.DesiredReplicas != 3 || st.ReadyReplicas != 3 || !st.Available {
 		t.Fatalf("status = %+v, want desired=3 ready=3 available", st)
@@ -48,17 +48,17 @@ func TestKubernetesApplyStatusScale(t *testing.T) {
 		t.Fatalf("status image = %q, want img:1", st.Image)
 	}
 
-	if err := k.ScaleDeployment(ctx, "web", 5); err != nil {
-		t.Fatalf("ScaleDeployment: %v", err)
+	if err := k.ScaleWorkload(ctx, "web", 5); err != nil {
+		t.Fatalf("ScaleWorkload: %v", err)
 	}
-	st, _ = k.DeploymentStatus(ctx, "web")
+	st, _ = k.WorkloadStatus(ctx, "web")
 	if st.DesiredReplicas != 5 || st.ReadyReplicas != 5 {
 		t.Fatalf("after scale status = %+v, want desired=5 ready=5", st)
 	}
 
 	// Partial readiness => not available.
 	k.SetReady("web", 2)
-	st, _ = k.DeploymentStatus(ctx, "web")
+	st, _ = k.WorkloadStatus(ctx, "web")
 	if st.Available {
 		t.Fatalf("with 2/5 ready, Available should be false")
 	}
@@ -75,13 +75,13 @@ func TestKubernetesNotFound(t *testing.T) {
 		var err error
 		switch op {
 		case "status":
-			_, err = k.DeploymentStatus(ctx, "ghost")
+			_, err = k.WorkloadStatus(ctx, "ghost")
 		case "scale":
-			err = k.ScaleDeployment(ctx, "ghost", 1)
+			err = k.ScaleWorkload(ctx, "ghost", 1)
 		case "logs":
 			_, err = k.Logs(ctx, "ghost", controlplane.LogOptions{})
 		case "delete":
-			err = k.DeleteDeployment(ctx, "ghost")
+			err = k.DeleteWorkload(ctx, "ghost")
 		}
 		if !errors.Is(err, controlplane.ErrNotFound) {
 			t.Errorf("%s on missing app: err = %v, want ErrNotFound", op, err)
@@ -92,7 +92,7 @@ func TestKubernetesNotFound(t *testing.T) {
 func TestKubernetesLogsTail(t *testing.T) {
 	ctx := context.Background()
 	k := NewKubernetes()
-	_ = k.ApplyDeployment(ctx, controlplane.DeploymentSpec{App: "web", Image: "img:1", Replicas: 1})
+	_ = k.ApplyWorkload(ctx, controlplane.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1})
 	lines := []controlplane.LogLine{
 		{Pod: "web-1", Message: "a"},
 		{Pod: "web-1", Message: "b"},
@@ -115,12 +115,12 @@ func TestKubernetesErrorInjection(t *testing.T) {
 	k := NewKubernetes()
 	boom := errors.New("boom")
 	k.SetError(OpApply, boom)
-	if err := k.ApplyDeployment(ctx, controlplane.DeploymentSpec{App: "web", Image: "img:1"}); !errors.Is(err, boom) {
+	if err := k.ApplyWorkload(ctx, controlplane.WorkloadSpec{App: "web", Image: "img:1"}); !errors.Is(err, boom) {
 		t.Fatalf("injected apply error = %v, want boom", err)
 	}
 	k.SetError(OpApply, nil) // clear
-	if err := k.ApplyDeployment(ctx, controlplane.DeploymentSpec{App: "web", Image: "img:1", Replicas: 1}); err != nil {
-		t.Fatalf("after clearing error, ApplyDeployment = %v", err)
+	if err := k.ApplyWorkload(ctx, controlplane.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("after clearing error, ApplyWorkload = %v", err)
 	}
 }
 

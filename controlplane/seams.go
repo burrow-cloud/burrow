@@ -28,20 +28,36 @@ type Clock interface {
 	Now() time.Time
 }
 
-// DeploymentSpec is the desired state of one App's Kubernetes workload — the small,
-// code-free description a deploy turns into (ADR-0004): a pullable image plus metadata.
-type DeploymentSpec struct {
+// WorkloadKind names the Kubernetes resource a workload maps to (ADR-0011). The seam
+// speaks in workloads rather than a single resource type so new kinds are additive. The
+// empty value means WorkloadDeployment.
+type WorkloadKind string
+
+const (
+	// WorkloadDeployment is a stateless Deployment — the only kind v0.1 uses.
+	WorkloadDeployment WorkloadKind = "Deployment"
+	// WorkloadStatefulSet is a stateful StatefulSet, for workloads needing stable
+	// identity, persistent volumes, or ordered rollout. Not used in v0.1; reserved so
+	// adding it later is additive, not a rename.
+	WorkloadStatefulSet WorkloadKind = "StatefulSet"
+)
+
+// WorkloadSpec is the desired state of one App's Kubernetes workload — the small,
+// code-free description a deploy turns into (ADR-0004): a kind, a pullable image, and
+// metadata.
+type WorkloadSpec struct {
 	App      string
+	Kind     WorkloadKind
 	Image    string
 	Env      map[string]string
 	Command  []string
 	Replicas int32
 }
 
-// DeploymentStatus is the observed state of an App's workload, as reported by the
-// cluster.
-type DeploymentStatus struct {
+// WorkloadStatus is the observed state of an App's workload, as reported by the cluster.
+type WorkloadStatus struct {
 	App             string
+	Kind            WorkloadKind
 	Image           string
 	DesiredReplicas int32
 	ReadyReplicas   int32
@@ -69,18 +85,18 @@ type LogLine struct {
 // to the runtime. It is deliberately narrow — the v0.1 operations (deploy, status,
 // logs, scale, and the delete that supports teardown) and nothing more.
 type Kubernetes interface {
-	// ApplyDeployment creates or updates the workload for spec.App to match spec.
-	ApplyDeployment(ctx context.Context, spec DeploymentSpec) error
-	// DeploymentStatus returns the observed state of app's workload, or ErrNotFound
-	// if no workload exists for it.
-	DeploymentStatus(ctx context.Context, app string) (DeploymentStatus, error)
-	// ScaleDeployment sets the desired replica count for app's workload.
-	ScaleDeployment(ctx context.Context, app string, replicas int32) error
+	// ApplyWorkload creates or updates the workload for spec.App to match spec.
+	ApplyWorkload(ctx context.Context, spec WorkloadSpec) error
+	// WorkloadStatus returns the observed state of app's workload, or ErrNotFound if
+	// no workload exists for it.
+	WorkloadStatus(ctx context.Context, app string) (WorkloadStatus, error)
+	// ScaleWorkload sets the desired replica count for app's workload.
+	ScaleWorkload(ctx context.Context, app string, replicas int32) error
 	// Logs returns recent log lines for app's workload.
 	Logs(ctx context.Context, app string, opts LogOptions) ([]LogLine, error)
-	// DeleteDeployment removes app's workload. Deleting a missing workload returns
+	// DeleteWorkload removes app's workload. Deleting a missing workload returns
 	// ErrNotFound.
-	DeleteDeployment(ctx context.Context, app string) error
+	DeleteWorkload(ctx context.Context, app string) error
 }
 
 // ImageInfo is what a registry knows about an image reference.

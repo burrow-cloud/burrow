@@ -174,8 +174,8 @@ func TestStatus(t *testing.T) {
 	if !st.HasRelease || !st.Running {
 		t.Fatalf("status = %+v, want hasRelease and running", st)
 	}
-	if st.Deployment.DesiredReplicas != 3 || !st.Deployment.Available {
-		t.Errorf("deployment = %+v, want desired 3 available", st.Deployment)
+	if st.Workload.DesiredReplicas != 3 || !st.Workload.Available {
+		t.Errorf("deployment = %+v, want desired 3 available", st.Workload)
 	}
 	if st.Release.Image != "img:1" {
 		t.Errorf("release image = %q, want img:1", st.Release.Image)
@@ -218,7 +218,7 @@ func TestScale(t *testing.T) {
 	if res.PreviousReplicas != 2 || res.Replicas != 5 {
 		t.Errorf("scale result = %+v, want prev 2 new 5", res)
 	}
-	if st, _ := k.DeploymentStatus(ctx, "web"); st.DesiredReplicas != 5 {
+	if st, _ := k.WorkloadStatus(ctx, "web"); st.DesiredReplicas != 5 {
 		t.Errorf("cluster desired = %d, want 5", st.DesiredReplicas)
 	}
 

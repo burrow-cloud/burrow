@@ -33,10 +33,10 @@ type StatusResult struct {
 	// app; Release holds the most recent one when true.
 	HasRelease bool
 	Release    Release
-	// Running reports whether a workload currently exists in the cluster; Deployment
+	// Running reports whether a workload currently exists in the cluster; Workload
 	// holds its observed state when true.
-	Running    bool
-	Deployment DeploymentStatus
+	Running  bool
+	Workload WorkloadStatus
 }
 
 // ScaleResult reports the outcome of a scale.

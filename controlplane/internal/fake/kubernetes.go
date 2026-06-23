@@ -24,7 +24,7 @@ type Kubernetes struct {
 }
 
 type deployState struct {
-	spec  controlplane.DeploymentSpec
+	spec  controlplane.WorkloadSpec
 	ready int32
 	logs  []controlplane.LogLine
 }
@@ -68,16 +68,16 @@ func (k *Kubernetes) SetLogs(app string, lines []controlplane.LogLine) {
 }
 
 // Spec returns the currently applied spec for app and whether a workload exists.
-func (k *Kubernetes) Spec(app string) (controlplane.DeploymentSpec, bool) {
+func (k *Kubernetes) Spec(app string) (controlplane.WorkloadSpec, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if d := k.deploys[app]; d != nil {
 		return d.spec, true
 	}
-	return controlplane.DeploymentSpec{}, false
+	return controlplane.WorkloadSpec{}, false
 }
 
-func (k *Kubernetes) ApplyDeployment(ctx context.Context, spec controlplane.DeploymentSpec) error {
+func (k *Kubernetes) ApplyWorkload(ctx context.Context, spec controlplane.WorkloadSpec) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.errs[OpApply]; err != nil {
@@ -93,18 +93,19 @@ func (k *Kubernetes) ApplyDeployment(ctx context.Context, spec controlplane.Depl
 	return nil
 }
 
-func (k *Kubernetes) DeploymentStatus(ctx context.Context, app string) (controlplane.DeploymentStatus, error) {
+func (k *Kubernetes) WorkloadStatus(ctx context.Context, app string) (controlplane.WorkloadStatus, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.errs[OpStatus]; err != nil {
-		return controlplane.DeploymentStatus{}, err
+		return controlplane.WorkloadStatus{}, err
 	}
 	d := k.deploys[app]
 	if d == nil {
-		return controlplane.DeploymentStatus{}, fmt.Errorf("kubernetes: deployment %q: %w", app, controlplane.ErrNotFound)
+		return controlplane.WorkloadStatus{}, fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
-	return controlplane.DeploymentStatus{
+	return controlplane.WorkloadStatus{
 		App:             app,
+		Kind:            d.spec.Kind,
 		Image:           d.spec.Image,
 		DesiredReplicas: d.spec.Replicas,
 		ReadyReplicas:   d.ready,
@@ -113,7 +114,7 @@ func (k *Kubernetes) DeploymentStatus(ctx context.Context, app string) (controlp
 	}, nil
 }
 
-func (k *Kubernetes) ScaleDeployment(ctx context.Context, app string, replicas int32) error {
+func (k *Kubernetes) ScaleWorkload(ctx context.Context, app string, replicas int32) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.errs[OpScale]; err != nil {
@@ -121,7 +122,7 @@ func (k *Kubernetes) ScaleDeployment(ctx context.Context, app string, replicas i
 	}
 	d := k.deploys[app]
 	if d == nil {
-		return fmt.Errorf("kubernetes: deployment %q: %w", app, controlplane.ErrNotFound)
+		return fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
 	d.spec.Replicas = replicas
 	d.ready = replicas
@@ -136,7 +137,7 @@ func (k *Kubernetes) Logs(ctx context.Context, app string, opts controlplane.Log
 	}
 	d := k.deploys[app]
 	if d == nil {
-		return nil, fmt.Errorf("kubernetes: deployment %q: %w", app, controlplane.ErrNotFound)
+		return nil, fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
 	lines := d.logs
 	if opts.TailLines > 0 && len(lines) > opts.TailLines {
@@ -145,14 +146,14 @@ func (k *Kubernetes) Logs(ctx context.Context, app string, opts controlplane.Log
 	return append([]controlplane.LogLine(nil), lines...), nil
 }
 
-func (k *Kubernetes) DeleteDeployment(ctx context.Context, app string) error {
+func (k *Kubernetes) DeleteWorkload(ctx context.Context, app string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.errs[OpDelete]; err != nil {
 		return err
 	}
 	if _, ok := k.deploys[app]; !ok {
-		return fmt.Errorf("kubernetes: deployment %q: %w", app, controlplane.ErrNotFound)
+		return fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
 	delete(k.deploys, app)
 	return nil

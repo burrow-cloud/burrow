@@ -119,8 +119,8 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		return DeployResult{}, fmt.Errorf("deploy %s: recording release: %w", req.App, err)
 	}
 
-	spec := DeploymentSpec{App: req.App, Image: req.Image, Env: req.Env, Command: req.Command, Replicas: req.Replicas}
-	if err := e.k8s.ApplyDeployment(ctx, spec); err != nil {
+	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: req.Env, Command: req.Command, Replicas: req.Replicas}
+	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
 		return DeployResult{}, fmt.Errorf("deploy %s: applying to cluster: %w", req.App, err)
@@ -160,13 +160,13 @@ func (e *Engine) Status(ctx context.Context, app string) (StatusResult, error) {
 		res.Release = latest
 	}
 
-	st, errK := e.k8s.DeploymentStatus(ctx, app)
+	st, errK := e.k8s.WorkloadStatus(ctx, app)
 	if errK != nil && !errors.Is(errK, ErrNotFound) {
 		return StatusResult{}, fmt.Errorf("status %s: reading cluster: %w", app, errK)
 	}
 	if errK == nil {
 		res.Running = true
-		res.Deployment = st
+		res.Workload = st
 	}
 
 	if !res.HasRelease && !res.Running {
@@ -180,7 +180,7 @@ func (e *Engine) Logs(ctx context.Context, app string, opts LogOptions) ([]LogLi
 	lines, err := e.k8s.Logs(ctx, app, opts)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, fmt.Errorf("logs %s: no running deployment: %w", app, err)
+			return nil, fmt.Errorf("logs %s: no running workload: %w", app, err)
 		}
 		return nil, fmt.Errorf("logs %s: %w", app, err)
 	}
@@ -201,16 +201,16 @@ func (e *Engine) Scale(ctx context.Context, app string, replicas int32) (ScaleRe
 		return ScaleResult{}, err
 	}
 
-	st, err := e.k8s.DeploymentStatus(ctx, app)
+	st, err := e.k8s.WorkloadStatus(ctx, app)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return ScaleResult{}, fmt.Errorf("scale %s: no running deployment: %w", app, err)
+			return ScaleResult{}, fmt.Errorf("scale %s: no running workload: %w", app, err)
 		}
 		return ScaleResult{}, fmt.Errorf("scale %s: reading current state: %w", app, err)
 	}
 	prev := st.DesiredReplicas
 
-	if err := e.k8s.ScaleDeployment(ctx, app, replicas); err != nil {
+	if err := e.k8s.ScaleWorkload(ctx, app, replicas); err != nil {
 		return ScaleResult{}, fmt.Errorf("scale %s: %w", app, err)
 	}
 	return ScaleResult{App: app, PreviousReplicas: prev, Replicas: replicas}, nil
@@ -254,8 +254,8 @@ func (e *Engine) Rollback(ctx context.Context, app string) (RollbackResult, erro
 		return RollbackResult{}, fmt.Errorf("rollback %s: recording release: %w", app, err)
 	}
 
-	spec := DeploymentSpec{App: app, Image: target.Image, Env: target.Env, Command: target.Command, Replicas: target.Replicas}
-	if err := e.k8s.ApplyDeployment(ctx, spec); err != nil {
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: target.Env, Command: target.Command, Replicas: target.Replicas}
+	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)
 		return RollbackResult{}, fmt.Errorf("rollback %s: applying to cluster: %w", app, err)

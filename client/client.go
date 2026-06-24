@@ -28,12 +28,23 @@ type Client struct {
 	http    *http.Client
 }
 
-// NewClient returns a control-plane API client for baseURL authenticating with token.
+// NewClient returns a control-plane API client for baseURL authenticating with token,
+// using a default HTTP client.
 func NewClient(baseURL, token string) *Client {
+	return NewClientWithHTTP(baseURL, token, nil)
+}
+
+// NewClientWithHTTP is like NewClient but uses the supplied *http.Client. The connect
+// package uses this to route requests through the Kubernetes API-server proxy with a
+// kubeconfig-authenticated transport (ADR-0014). A nil hc gets a default client.
+func NewClientWithHTTP(baseURL, token string, hc *http.Client) *Client {
+	if hc == nil {
+		hc = &http.Client{Timeout: 60 * time.Second}
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		http:    &http.Client{Timeout: 60 * time.Second},
+		http:    hc,
 	}
 }
 
@@ -169,7 +180,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return err
 	}
+	// Send the token both ways: Authorization for the direct/ingress path, and
+	// X-Burrow-Token for the Kubernetes API-server proxy path, where the kubeconfig
+	// transport owns the Authorization header (ADR-0014).
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("X-Burrow-Token", c.token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

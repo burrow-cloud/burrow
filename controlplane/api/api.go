@@ -142,13 +142,23 @@ type logsResponse struct {
 func requireToken(token string, next http.Handler) http.Handler {
 	want := []byte(token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := bearerToken(r)
+		got := presentedToken(r)
 		if got == "" || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
-			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token", "unauthorized")
+			writeError(w, http.StatusUnauthorized, "missing or invalid token", "unauthorized")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// presentedToken reads the API token from X-Burrow-Token (the header that survives the
+// Kubernetes API-server proxy, since the kubeconfig transport owns Authorization there —
+// ADR-0014) or, failing that, an Authorization: Bearer header (direct / ingress path).
+func presentedToken(r *http.Request) string {
+	if t := r.Header.Get("X-Burrow-Token"); t != "" {
+		return t
+	}
+	return bearerToken(r)
 }
 
 func bearerToken(r *http.Request) string {

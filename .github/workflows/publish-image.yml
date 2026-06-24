@@ -1,0 +1,57 @@
+name: Publish burrowd image
+
+# Builds the burrowd control-plane image from the Dockerfile and pushes it to GHCR so a
+# cluster (e.g. DigitalOcean) can pull it. Trigger it manually to publish a tag for
+# testing, or it runs automatically on a v* git tag (the release flow).
+#
+# After the first publish, make the `burrowd` package public in the repo's GitHub
+# Packages settings so the image can be pulled anonymously.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (e.g. v0.1.0)"
+        required: true
+        default: v0.1.0
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: build and push to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: resolve image tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/burrowd:${{ steps.meta.outputs.tag }}
+
+      - name: summary
+        run: |
+          echo "Published ghcr.io/${{ github.repository_owner }}/burrowd:${{ steps.meta.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "If this is the first publish, make the package public in GitHub > Packages so clusters can pull it anonymously." >> "$GITHUB_STEP_SUMMARY"

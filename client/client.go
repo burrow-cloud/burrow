@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Nicholas Phillips
 
-package mcp
+package client
 
 import (
 	"bytes"

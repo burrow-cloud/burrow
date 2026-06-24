@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/burrow-cloud/burrow/client"
 	burrowmcp "github.com/burrow-cloud/burrow/mcp"
 )
 
@@ -37,6 +38,6 @@ func run() error {
 		return errors.New("BURROW_API_TOKEN is required (the bearer token to authenticate to the control plane)")
 	}
 
-	client := burrowmcp.NewClient(baseURL, token)
-	return burrowmcp.Serve(context.Background(), client, version)
+	c := client.NewClient(baseURL, token)
+	return burrowmcp.Serve(context.Background(), c, version)
 }

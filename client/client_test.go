@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Nicholas Phillips
 
-package mcp_test
+package client_test
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/burrow-cloud/burrow/mcp"
+	"github.com/burrow-cloud/burrow/client"
 )
 
 func TestClientDeploy(t *testing.T) {
@@ -29,8 +29,8 @@ func TestClientDeploy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := mcp.NewClient(srv.URL, "tok")
-	res, err := c.Deploy(context.Background(), "web", mcp.DeployRequest{Image: "img:1", Replicas: 2})
+	c := client.NewClient(srv.URL, "tok")
+	res, err := c.Deploy(context.Background(), "web", client.DeployRequest{Image: "img:1", Replicas: 2})
 	if err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -58,9 +58,9 @@ func TestClientErrorMapping(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := mcp.NewClient(srv.URL, "tok")
-	_, err := c.Deploy(context.Background(), "web", mcp.DeployRequest{Image: "img:1", Replicas: 99})
-	var apiErr *mcp.APIError
+	c := client.NewClient(srv.URL, "tok")
+	_, err := c.Deploy(context.Background(), "web", client.DeployRequest{Image: "img:1", Replicas: 99})
+	var apiErr *client.APIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("err = %v, want *APIError", err)
 	}
@@ -80,7 +80,7 @@ func TestClientLogsTail(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := mcp.NewClient(srv.URL, "tok")
+	c := client.NewClient(srv.URL, "tok")
 	lines, err := c.Logs(context.Background(), "web", 5)
 	if err != nil {
 		t.Fatalf("Logs: %v", err)
@@ -102,7 +102,7 @@ func TestClientScaleBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := mcp.NewClient(srv.URL, "tok")
+	c := client.NewClient(srv.URL, "tok")
 	res, err := c.Scale(context.Background(), "web", 4)
 	if err != nil {
 		t.Fatalf("Scale: %v", err)
@@ -124,7 +124,7 @@ func TestClientStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := mcp.NewClient(srv.URL, "tok")
+	c := client.NewClient(srv.URL, "tok")
 	res, err := c.Status(context.Background(), "web")
 	if err != nil {
 		t.Fatalf("Status: %v", err)

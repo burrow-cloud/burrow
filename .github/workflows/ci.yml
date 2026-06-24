@@ -48,3 +48,27 @@ jobs:
       - uses: actions/checkout@v5
       - name: check SPDX headers
         run: bash scripts/check-spdx.sh
+
+  kube-integration:
+    name: kubernetes integration (k3d)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - name: install k3d
+        run: curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+      - name: create cluster
+        run: k3d cluster create burrow-ci --wait --timeout 120s
+      - name: preload test image
+        run: |
+          docker pull busybox:1.36
+          k3d image import busybox:1.36 -c burrow-ci
+      - name: run the kube integration test against k3d
+        run: |
+          KCFG=$(k3d kubeconfig write burrow-ci)
+          BURROW_TEST_KUBECONFIG="$KCFG" go test ./controlplane/kube/ -run TestIntegration -v -timeout 280s
+      - name: delete cluster
+        if: always()
+        run: k3d cluster delete burrow-ci

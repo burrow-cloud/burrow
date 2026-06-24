@@ -35,6 +35,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
+	case "install":
+		return cmdInstall(ctx, rest, stdout, stderr)
 	case "deploy":
 		return cmdDeploy(ctx, rest, stdout, stderr)
 	case "status":
@@ -61,6 +63,7 @@ Usage:
   burrow <command> [flags]
 
 Commands:
+  install          Install the Burrow control plane into your cluster
   deploy <app>     Deploy an app by image reference (optionally build & push first)
   status <app>     Show an app's release and live workload status
   logs <app>       Show recent logs for an app

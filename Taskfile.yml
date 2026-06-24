@@ -1,0 +1,78 @@
+# Task targets for Burrow (https://taskfile.dev). Run `task` to list them.
+#
+# Targets are split into LIGHT (safe to run anytime — pure Go, no Docker) and HEAVY
+# (start a real Postgres or a k3d/Docker cluster). `task check` is the light pre-commit
+# gate; the heavy integration targets must be invoked deliberately.
+version: "3"
+
+silent: true
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  # --- light targets (no Docker, safe anytime) ---
+
+  build:
+    desc: Build all packages and binaries
+    cmds:
+      - go build ./...
+
+  fmt:
+    desc: Format all Go code in place
+    cmds:
+      - gofmt -w .
+
+  fmt:check:
+    desc: Fail if any Go file needs gofmt
+    cmds:
+      - test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  spdx:
+    desc: Check per-directory SPDX license headers
+    cmds:
+      - bash scripts/check-spdx.sh
+
+  test:
+    desc: Run unit tests (integration tests skip unless their env vars are set)
+    cmds:
+      - go test ./...
+
+  test:race:
+    desc: Run tests under the race detector
+    cmds:
+      - go test -race ./...
+
+  check:
+    desc: Pre-commit gate — fmt, vet, build, unit tests, SPDX (all light, no Docker)
+    cmds:
+      - task: fmt:check
+      - task: vet
+      - task: build
+      - task: test
+      - task: spdx
+
+  # --- heavy targets (start real services / Docker; run deliberately) ---
+
+  test:pg:
+    desc: "HEAVY: Postgres integration tests against an ephemeral local Postgres"
+    cmds:
+      - bash scripts/with-test-postgres.sh go test ./controlplane/postgres/... -v
+
+  test:k3d:
+    desc: "HEAVY (Docker): Kubernetes integration test against a disposable k3d cluster"
+    cmds:
+      - bash scripts/with-k3d.sh go test ./controlplane/kube/ -run TestIntegration -v -timeout 300s
+
+  test:integration:
+    desc: "HEAVY: all integration tests (Postgres + k3d/Docker)"
+    cmds:
+      - task: test:pg
+      - task: test:k3d

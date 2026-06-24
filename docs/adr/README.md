@@ -41,3 +41,4 @@ alternatives that were rejected.
 | [0013](0013-database-migrations-and-upgrade-policy.md) | Database migrations (embedded goose) and the single-minor-step upgrade policy | Accepted |
 | [0014](0014-self-host-connectivity-via-kubeconfig.md) | Self-host connectivity via the developer's kubeconfig and the API-server proxy (refines ADR-0005) | Accepted (token-header detail corrected by ADR-0015) |
 | [0015](0015-token-header-only-x-burrow-token.md) | Burrow's token is sent only in X-Burrow-Token (corrects ADR-0014) | Accepted |
+| [0016](0016-cli-distribution-and-upgrade-lifecycle.md) | CLI distribution via Homebrew and the CLI-driven upgrade lifecycle | Proposed |

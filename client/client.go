@@ -180,10 +180,12 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return err
 	}
-	// Send the token both ways: Authorization for the direct/ingress path, and
-	// X-Burrow-Token for the Kubernetes API-server proxy path, where the kubeconfig
-	// transport owns the Authorization header (ADR-0014).
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	// Authenticate with X-Burrow-Token only — never Authorization. On the API-server
+	// proxy path the kubeconfig transport authenticates to the API server via the
+	// Authorization header, and client-go does not overwrite an Authorization header that
+	// is already set, so setting it here would block the kubeconfig credential and the API
+	// server would reject the request. burrowd reads X-Burrow-Token, which the proxy
+	// forwards untouched; the direct/ingress path works the same way (ADR-0015).
 	req.Header.Set("X-Burrow-Token", c.token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

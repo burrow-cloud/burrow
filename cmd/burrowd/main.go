@@ -56,7 +56,7 @@ func run() error {
 	}
 
 	ctx := context.Background()
-	store, err := postgres.Open(ctx, dsn)
+	store, err := openWithRetry(ctx, dsn, 2*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -135,4 +135,22 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// openWithRetry waits for the database to accept connections, retrying for up to timeout
+// rather than crashing — so burrowd comes up gracefully alongside an in-cluster Postgres
+// that is still starting, instead of crash-looping until it is ready.
+func openWithRetry(ctx context.Context, dsn string, timeout time.Duration) (*postgres.Store, error) {
+	deadline := time.Now().Add(timeout)
+	for attempt := 1; ; attempt++ {
+		store, err := postgres.Open(ctx, dsn)
+		if err == nil {
+			return store, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("connecting to the database after %s: %w", timeout, err)
+		}
+		log.Printf("waiting for the database (attempt %d): %v", attempt, err)
+		time.Sleep(2 * time.Second)
+	}
 }

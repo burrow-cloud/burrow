@@ -20,12 +20,8 @@ echo "=== build + import the burrowd image ==="
 docker build -t burrowd:e2e .
 k3d image import burrowd:e2e -c "$CLUSTER"
 
-echo "=== burrow install ==="
+echo "=== burrow install (waits for the control plane to be ready) ==="
 "$BURROW" install --burrowd-image burrowd:e2e --kubeconfig "$KCFG"
-
-echo "=== wait for postgres + burrowd to be ready ==="
-kubectl -n burrow rollout status deploy/postgres --timeout=180s
-kubectl -n burrow rollout status deploy/burrowd --timeout=180s
 
 echo "=== burrow deploy (auto-connect: kubeconfig + API-server proxy, no port-forward) ==="
 "$BURROW" deploy web --image nginx:alpine --kubeconfig "$KCFG"

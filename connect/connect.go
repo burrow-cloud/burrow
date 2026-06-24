@@ -66,7 +66,7 @@ func (o *Options) setDefaults() {
 // Secret.
 func Client(ctx context.Context, o Options) (*client.Client, error) {
 	o.setDefaults()
-	cfg, err := restConfig(o.Kubeconfig)
+	cfg, err := RESTConfig(o.Kubeconfig)
 	if err != nil {
 		return nil, err
 	}
@@ -104,10 +104,10 @@ func readToken(ctx context.Context, cs kubernetes.Interface, namespace, secret, 
 	return string(v), nil
 }
 
-// restConfig prefers in-cluster config (when burrow runs inside Kubernetes) and otherwise
+// RESTConfig prefers in-cluster config (when burrow runs inside Kubernetes) and otherwise
 // loads the kubeconfig at path, or the ambient KUBECONFIG / ~/.kube/config when path is
-// empty.
-func restConfig(path string) (*rest.Config, error) {
+// empty. It is exported so the CLI can build a clientset from the same config logic.
+func RESTConfig(path string) (*rest.Config, error) {
 	if path == "" {
 		if cfg, err := rest.InClusterConfig(); err == nil {
 			return cfg, nil

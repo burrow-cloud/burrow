@@ -12,8 +12,7 @@ safely on your cluster.
 > yet** — this repository currently holds the foundations: the architecture, the design
 > records, and the v0.1 plan. Everything below is a goal until it ships and is marked in
 > the [version status](#version-status) table ([ADR-0009](docs/adr/0009-honest-status.md)).
-> Burrow is **open core**, not unqualified "open source" — see
-> [licensing](#license-and-contributing).
+> See [licensing](#license-and-contributing) for how the code is licensed.
 
 ## What it is
 
@@ -23,10 +22,8 @@ operates their infrastructure by talking to the agent. **Compute first:** the v0
 deploying your code and running it. Databases, domains, autoscaling, and cost controls come
 later ([roadmap](docs/ROADMAP.md)).
 
-This repository is the **open core**: the single-tenant control plane, the MCP server, and
-the CLI, packaged so you can self-host the whole thing. A separate, private product — the
-multi-tenant managed cloud (billing, teams, dashboard, SSO) — is built on top of this core
-and does not live here.
+It's fully self-hostable: the single-tenant control plane, the MCP server, and the CLI,
+packaged so you can run the whole thing on your own cluster.
 
 ## How it works
 
@@ -83,7 +80,7 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code
 
 ## License and contributing
 
-Burrow is **open core** ([LICENSING.md](LICENSING.md),
+How the code is licensed ([LICENSING.md](LICENSING.md),
 [ADR-0001](docs/adr/0001-license-and-dco.md)):
 
 - The **client surface is Apache-2.0** — the CLI (`cmd/burrow/`) and the MCP server

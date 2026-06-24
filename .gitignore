@@ -30,3 +30,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Built command binaries (go build ./cmd/... writes these to the repo root)
+/burrow
+/burrowd
+/burrow-mcp

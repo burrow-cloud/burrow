@@ -77,6 +77,20 @@ func TestAuthRequired(t *testing.T) {
 	}
 }
 
+func TestAuthViaCustomHeader(t *testing.T) {
+	h, _, r, _ := newAPI(t)
+	r.Add("img:1", "sha256:1")
+	// X-Burrow-Token (no Authorization) is accepted — the header that survives the
+	// API-server proxy (ADR-0014).
+	req := httptest.NewRequest("POST", "/v1/apps/web/deploy", strings.NewReader(`{"image":"img:1","replicas":2}`))
+	req.Header.Set("X-Burrow-Token", token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("X-Burrow-Token auth: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestDeployHappyPath(t *testing.T) {
 	h, k, r, _ := newAPI(t)
 	r.Add("registry.example.com/web:1", "sha256:web1")

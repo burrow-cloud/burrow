@@ -39,4 +39,5 @@ alternatives that were rejected.
 | [0011](0011-kubernetes-integration.md) | Kubernetes integration: client-go behind the seam, workload-typed resources (Deployment for v0.1) | Accepted |
 | [0012](0012-in-cluster-postgres.md) | Control-plane state runs in an in-cluster Postgres (no external managed database) | Accepted |
 | [0013](0013-database-migrations-and-upgrade-policy.md) | Database migrations (embedded goose) and the single-minor-step upgrade policy | Accepted |
-| [0014](0014-self-host-connectivity-via-kubeconfig.md) | Self-host connectivity via the developer's kubeconfig and the API-server proxy (refines ADR-0005) | Accepted |
+| [0014](0014-self-host-connectivity-via-kubeconfig.md) | Self-host connectivity via the developer's kubeconfig and the API-server proxy (refines ADR-0005) | Accepted (token-header detail corrected by ADR-0015) |
+| [0015](0015-token-header-only-x-burrow-token.md) | Burrow's token is sent only in X-Burrow-Token (corrects ADR-0014) | Accepted |

@@ -4,6 +4,9 @@
 
 Accepted. Refines [ADR-0005](0005-mcp-server-holds-no-cluster-credentials.md) for the
 self-host model (it does not supersede it; ADR-0005 stands in full for the managed model).
+The token-header detail in the Consequences below ("the client sends both headers") is
+corrected by [ADR-0015](0015-token-header-only-x-burrow-token.md) — the client sends the
+token only in `X-Burrow-Token`.
 
 ## Context
 

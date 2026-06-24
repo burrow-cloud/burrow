@@ -17,9 +17,9 @@ import (
 )
 
 func TestClientDeploy(t *testing.T) {
-	var gotAuth, gotPath, gotBody, gotMethod string
+	var gotAuth, gotToken, gotPath, gotBody, gotMethod string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth, gotPath, gotMethod = r.Header.Get("Authorization"), r.URL.Path, r.Method
+		gotAuth, gotToken, gotPath, gotMethod = r.Header.Get("Authorization"), r.Header.Get("X-Burrow-Token"), r.URL.Path, r.Method
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -40,8 +40,11 @@ func TestClientDeploy(t *testing.T) {
 	if res.SupersededReleaseID != "r0" {
 		t.Errorf("superseded = %q, want r0", res.SupersededReleaseID)
 	}
-	if gotAuth != "Bearer tok" {
-		t.Errorf("auth = %q, want Bearer tok", gotAuth)
+	if gotToken != "tok" {
+		t.Errorf("X-Burrow-Token = %q, want tok", gotToken)
+	}
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty (the token must ride X-Burrow-Token only, ADR-0015)", gotAuth)
 	}
 	if gotMethod != "POST" || gotPath != "/v1/apps/web/deploy" {
 		t.Errorf("request = %s %s", gotMethod, gotPath)

@@ -40,7 +40,7 @@ echo "--- final status ---"
 "$BURROW" status web --kubeconfig "$KCFG"
 if [ -z "$ok" ]; then
   echo "FAIL: app never became available"
-  kubectl -n burrow get pods
+  kubectl get pods -A
   exit 1
 fi
 

@@ -35,19 +35,23 @@ var installManifests string
 
 var installTemplate = template.Must(template.New("install").Parse(installManifests))
 
-// installOptions are the values rendered into the install manifests.
+// installOptions are the values rendered into the install manifests. Namespace holds the
+// control plane (burrowd, Postgres); AppNamespace is where deployed apps go — separate, so
+// app workloads aren't mixed in with the control-plane infrastructure.
 type installOptions struct {
-	Namespace  string
-	Image      string
-	Token      string
-	DBPassword string
-	Port       int
+	Namespace    string
+	AppNamespace string
+	Image        string
+	Token        string
+	DBPassword   string
+	Port         int
 }
 
 func cmdInstall(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	namespace := fs.String("namespace", connect.DefaultNamespace, "namespace to install Burrow into")
+	namespace := fs.String("namespace", connect.DefaultNamespace, "namespace to install the control plane into")
+	appNamespace := fs.String("app-namespace", "default", "namespace to deploy applications into")
 	image := fs.String("burrowd-image", defaultBurrowdImage, "burrowd container image to deploy (must be pullable by the cluster)")
 	kubeconfig := fs.String("kubeconfig", "", "path to kubeconfig (default: ambient)")
 	dryRun := fs.Bool("dry-run", false, "print the manifests instead of applying them")
@@ -67,11 +71,12 @@ func cmdInstall(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 
 	manifests, err := renderManifests(installOptions{
-		Namespace:  *namespace,
-		Image:      *image,
-		Token:      token,
-		DBPassword: dbPassword,
-		Port:       connect.DefaultPort,
+		Namespace:    *namespace,
+		AppNamespace: *appNamespace,
+		Image:        *image,
+		Token:        token,
+		DBPassword:   dbPassword,
+		Port:         connect.DefaultPort,
 	})
 	if err != nil {
 		return err

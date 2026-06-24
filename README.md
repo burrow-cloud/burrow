@@ -6,20 +6,21 @@ deploy and operate real applications on your own Kubernetes cluster. You tell yo
 "deploy this," "roll it back," "show me the logs," "scale it," and Burrow carries it out
 safely on your cluster.
 
-> ### 🚧 Status: pre-implementation
+> ### ✅ v0.1 is shipped
 >
-> Burrow is being designed in the open, ahead of the code. **Nothing described here works
-> yet** — this repository currently holds the foundations: the architecture, the design
-> records, and the v0.1 plan. Everything below is a goal until it ships and is marked in
-> the [version status](#version-status) table ([ADR-0009](docs/adr/0009-honest-status.md)).
-> See [licensing](#license-and-contributing) for how the code is licensed.
+> The vertical slice runs: install the control plane into your own Kubernetes cluster,
+> point an MCP agent at it, and deploy and operate a real app — `deploy`, `status`,
+> `logs`, `rollback`, `scale`, plus in-place `upgrade` — every mutating operation guarded
+> by the control plane. The [version status](#version-status) table tracks what's shipped
+> vs. planned ([ADR-0009](docs/adr/0009-honest-status.md)). See
+> [licensing](#license-and-contributing) for how the code is licensed.
 
 ## What it is
 
 The first user is a solo developer or small agency who already has a Kubernetes cluster
 (for example on DigitalOcean), installs Burrow into it, points their agent at it, and
-operates their infrastructure by talking to the agent. **Compute first:** the v0.1 job is
-deploying your code and running it. Databases, domains, autoscaling, and cost controls come
+operates their infrastructure by talking to the agent. **Compute first:** v0.1
+deploys your code and runs it. Databases, domains, autoscaling, and cost controls come
 later ([roadmap](docs/ROADMAP.md)).
 
 It's fully self-hostable: the single-tenant control plane, the MCP server, and the CLI,
@@ -50,11 +51,29 @@ Two ideas keep it safe and fast:
 
 ## How to try it
 
-**Not yet — there is nothing to install.** When the v0.1 slice ships, the flow will be:
-install the control plane and MCP server into your existing cluster, point your agent at
-the MCP server, build and push your image to a registry, and ask your agent to deploy it by
-reference — then `status`, `logs`, `rollback`, and `scale`. The exact v0.1 scope is in
-[docs/PLAN.md](docs/PLAN.md).
+You need a Kubernetes cluster you can reach with `kubectl` (DigitalOcean is the reference
+target) and Go to build the CLI — a Homebrew tap is
+[proposed](docs/adr/0016-cli-distribution-and-upgrade-lifecycle.md) so this won't need a Go
+toolchain later.
+
+```sh
+# Build the CLI and the MCP server
+go build -o burrow     ./cmd/burrow
+go build -o burrow-mcp ./cmd/burrow-mcp
+
+# Install the control plane into your cluster (uses your kubeconfig; waits until ready)
+./burrow install
+
+# Point your agent at the MCP server — it auto-connects via your kubeconfig, no extra config.
+#   (Claude Code, for example:)  claude mcp add burrow "$(pwd)/burrow-mcp"
+
+# Build and push your image to a registry your cluster can pull from, then ask your agent to
+# deploy it — or do it directly with the CLI:
+./burrow deploy web --image nginx:alpine
+./burrow status web
+```
+
+Update the control plane later with `burrow upgrade` — in place, preserving your state.
 
 ## Version status
 
@@ -63,8 +82,8 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code
 
 | Version | Scope | Status |
 | --- | --- | --- |
-| **v0.1** | Install into an existing cluster · connect an agent over MCP · deploy an image by reference · status · logs · rollback · scale | 🚧 in progress (pre-implementation; [scope proposed](docs/PLAN.md)) |
-| v0.2+ | Server-side build · richer guardrails · databases · domains/TLS · autoscaling · cost controls | planned ([roadmap](docs/ROADMAP.md)) |
+| **v0.1** | Install into an existing cluster · connect an agent over MCP · deploy an image by reference · status · logs · rollback · scale · in-place upgrade | ✅ shipped ([v0.1.1](https://github.com/burrow-cloud/burrow/tree/v0.1.1)) |
+| **v0.2** | Ingress, domains & TLS (reach a deployed app at a URL) · richer guardrails · server-side build | 🚧 next ([roadmap](docs/ROADMAP.md)) |
 | v1.0 | Production self-host: hardened deploy-and-operate core with day-two operations | planned ([roadmap](docs/ROADMAP.md)) |
 
 ## Documentation

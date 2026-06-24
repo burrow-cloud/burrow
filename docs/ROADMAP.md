@@ -1,7 +1,7 @@
 # Burrow Roadmap
 
-> **Status: pre-implementation.** These are version milestones, not shipped features.
-> Each milestone is a goal until it ships ([ADR-0009](adr/0009-honest-status.md)); the
+> **Status: v0.1 shipped; v0.2 next.** These are version milestones; each unshipped one is
+> a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
 > [README](../README.md) status table is the authoritative shipped/in-progress/planned
 > surface. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the current
 > execution detail.
@@ -10,11 +10,12 @@ Burrow follows semver from v0.1 toward v1.0. The theme of the 0.x series is **co
 first**: deploy someone's code and run it well, safely, agent-driven. Databases, domains,
 autoscaling, and cost controls come after the deploy-and-operate core is solid.
 
-## v0.1 — Deploy and operate (the vertical slice)
+## v0.1 — Deploy and operate (the vertical slice) ✅ shipped
 
-The thin end-to-end slice that proves the architecture. Install Burrow into an existing
-cluster, point an agent at it over MCP, and deploy and operate a real application by image
-reference. Detailed scope and the explicit out-of-scope list are in [PLAN.md](PLAN.md).
+The thin end-to-end slice that proves the architecture, shipped and validated on the
+reference DigitalOcean cluster. Install Burrow into an existing cluster, point an agent at
+it over MCP, and deploy and operate a real application by image reference. The record lives
+in git history, the now-green tests, and the ADRs.
 
 - Install the control plane and MCP server into an existing Kubernetes cluster.
 - Connect any MCP agent to the MCP server.
@@ -27,8 +28,9 @@ reference. Detailed scope and the explicit out-of-scope list are in [PLAN.md](PL
 
 ## v0.2 and beyond — candidate themes (unsequenced)
 
-The order and contents below are provisional and will be refined as v0.1 lands. They are
-listed to show direction, not commitment.
+The themes below show direction, not commitment. The chosen v0.2 focus is **ingress,
+domains, and TLS** (making a deployed app reachable at a URL) — see [PLAN.md](PLAN.md) for
+the current sequencing; the rest remain candidates.
 
 - **Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) —
   the second build path, toward the managed experience.

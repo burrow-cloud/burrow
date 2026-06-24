@@ -88,16 +88,13 @@ Burrow is **open core** ([LICENSING.md](LICENSING.md),
 
 - The **client surface is Apache-2.0** — the CLI (`cmd/burrow/`) and the MCP server
   (`mcp/`). Integrate against it freely.
-- The **control plane and operator are source-available under FSL-1.1-ALv2** — you can read,
-  modify, and self-host them; the only thing forbidden is reselling Burrow as a competing
-  hosted service. **Each release converts to Apache-2.0 two years after it ships.** This is
-  a deliberate starting posture, opening over time — not a permanent enclosure.
-- **Commercial licenses are available** for use outside the FSL grant (e.g. offering Burrow
-  as a service) — see [COMMERCIAL.md](COMMERCIAL.md), contact Nicholas Phillips
-  <hello@burrow-cloud.dev>.
+- The **control plane and operator are source-available under FSL-1.1-ALv2** — read,
+  modify, and self-host them, with the full source in the open. **Each release converts to
+  Apache-2.0 two years after it ships** — a posture that opens up over time.
+- **Commercial licenses** are available for teams that want terms beyond the FSL grant —
+  see [COMMERCIAL.md](COMMERCIAL.md).
 
-**Contributing:** issues and discussions are the way to contribute and are fully open; the
-maintainer keeps sole copyright (so Burrow can be offered under commercial licenses), so
-outside *code* PRs are not merged except under a CLA. All commits are signed off under the
-Developer Certificate of Origin (`git commit -s`). See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+**Contributions are welcome** — open an issue or a discussion. Bug reports, ideas, and
+design feedback are the best way to help and to shape where Burrow goes. Commits are signed
+off under the Developer Certificate of Origin (`git commit -s`). See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the details.

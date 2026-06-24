@@ -69,18 +69,25 @@ tests pass. Each has an ADR.
 
 ## Build, test, and lint
 
-Standard Go tooling (no Taskfile yet; add one if the command set grows):
+Targets live in `Taskfile.yml` ([Task](https://taskfile.dev)). They split into **light**
+(pure Go, safe anytime) and **heavy** (start a real Postgres or a k3d/Docker cluster):
 
 ```sh
-go build ./...            # build all binaries and packages
-go vet ./...              # vet
-gofmt -l .                # must print nothing (formatting clean)
-go test ./...             # unit tests against faked Kubernetes/registry/database seams
-bash scripts/check-spdx.sh  # per-directory SPDX license headers (see LICENSING.md)
+task check        # LIGHT pre-commit gate: fmt, vet, build, unit tests, SPDX
+task test         # LIGHT: unit tests (integration tests skip without their env vars)
+task test:race    # LIGHT: tests under the race detector
+
+task test:pg      # HEAVY: Postgres integration vs an ephemeral local Postgres
+task test:k3d     # HEAVY (Docker): Kubernetes integration vs a disposable k3d cluster
+task test:integration  # HEAVY: both of the above
 ```
 
-`go build`, `go vet`, `gofmt`, `go test ./...`, and the SPDX check must pass before any
-commit. CI runs all of these (`.github/workflows/ci.yml`).
+**`task check` must pass before any commit** — it is all light (no Docker). The heavy
+integration targets are run deliberately, not on every commit; their helper scripts
+(`scripts/with-test-postgres.sh`, `scripts/with-k3d.sh`) stand up and tear down the
+service themselves. CI runs the same checks plus both integration suites
+(`.github/workflows/ci.yml`) on GitHub's runners, so the heavy paths are always exercised
+remotely even if you only run `task check` locally.
 
 **Testing posture — this is where Burrow DIFFERS from the sibling project Hamster: there is
 no global simulation harness. The full rationale is [ADR-0010](docs/adr/0010-testing-strategy.md).**

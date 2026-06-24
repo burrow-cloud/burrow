@@ -22,10 +22,11 @@ import (
 	"github.com/burrow-cloud/burrow/connect"
 )
 
-// defaultBurrowdImage is where the control-plane image is expected to live. Until it is
-// published, `burrow install` needs --burrowd-image pointing at an image the cluster can
-// pull (the e2e builds one and imports it into k3d).
-const defaultBurrowdImage = "ghcr.io/burrow-cloud/burrowd:v0.1.0"
+// defaultBurrowdImage is the published control-plane image `burrow install` deploys by
+// default. Pinned to an immutable release tag so the cluster always pulls a known build;
+// override with --burrowd-image to run a different build (the e2e builds one locally and
+// imports it into k3d). Bump this in lockstep with each burrowd release tag.
+const defaultBurrowdImage = "ghcr.io/burrow-cloud/burrowd:v0.1.1"
 
 // installManifests is the control-plane install manifest template, embedded from
 // manifests/install.yaml.tmpl (like the migrations are embedded in controlplane/postgres).

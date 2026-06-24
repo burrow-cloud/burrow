@@ -13,6 +13,7 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/mcp"
 )
 
@@ -23,7 +24,7 @@ func connect(t *testing.T, apiHandler http.HandlerFunc) *sdk.ClientSession {
 	api := httptest.NewServer(apiHandler)
 	t.Cleanup(api.Close)
 
-	server := mcp.NewServer(mcp.NewClient(api.URL, "tok"), "test")
+	server := mcp.NewServer(client.NewClient(api.URL, "tok"), "test")
 	ct, st := sdk.NewInMemoryTransports()
 	if _, err := server.Connect(context.Background(), st, nil); err != nil {
 		t.Fatalf("server connect: %v", err)
@@ -86,7 +87,7 @@ func TestDeployToolRoundTrip(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("tool returned error: %v", res.Content)
 	}
-	out := decodeStructured[mcp.DeployResult](t, res)
+	out := decodeStructured[client.DeployResult](t, res)
 	if out.Release.ID != "r1" || out.Release.Status != "deployed" {
 		t.Errorf("release = %+v", out.Release)
 	}

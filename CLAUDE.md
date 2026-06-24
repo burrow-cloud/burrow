@@ -62,7 +62,9 @@ tests pass. Each has an ADR.
   costs; speculative dependencies are not.
 - The stack: **Go** for the control plane, MCP server, and CLI. **Kubernetes** as the
   target. **Postgres** (self-hosted, running in the cluster — ADR-0012) for the control
-  plane's own state. **Resend** for email.
+  plane's own state, accessed with **pgx via `database/sql`** and schema-managed by
+  **embedded goose migrations** with single-minor-step upgrades (ADR-0013). **Resend**
+  for email.
   **HTMX** if and when a self-host dashboard is needed. **DigitalOcean** as the reference
   cluster target.
 

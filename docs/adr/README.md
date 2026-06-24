@@ -38,3 +38,4 @@ alternatives that were rejected.
 | [0010](0010-testing-strategy.md) | Testing strategy: seam-isolated units, ephemeral-cluster integration, targeted fault injection; no global simulation harness | Accepted |
 | [0011](0011-kubernetes-integration.md) | Kubernetes integration: client-go behind the seam, workload-typed resources (Deployment for v0.1) | Accepted |
 | [0012](0012-in-cluster-postgres.md) | Control-plane state runs in an in-cluster Postgres (no external managed database) | Accepted |
+| [0013](0013-database-migrations-and-upgrade-policy.md) | Database migrations (embedded goose) and the single-minor-step upgrade policy | Accepted |

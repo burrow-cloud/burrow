@@ -29,11 +29,32 @@ func openStore(t *testing.T) *postgres.Store {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(s.Close)
-	if err := s.Migrate(ctx); err != nil {
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Migrate(ctx, "0.1.0"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	return s
+}
+
+// TestStoreUpgradeGate exercises the single-minor-step gate against a real database.
+// It only ever stamps v0.1.0 (the refused jump never stamps), so it does not disturb
+// the shared burrow_meta other tests rely on.
+func TestStoreUpgradeGate(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t) // migrates and stamps v0.1.0
+
+	// A jump of more than one minor is refused.
+	if err := s.Migrate(ctx, "0.5.0"); err == nil {
+		t.Fatalf("Migrate v0.1.0 -> v0.5.0 should be refused")
+	}
+	// Re-running the recorded version is fine.
+	if err := s.Migrate(ctx, "0.1.0"); err != nil {
+		t.Fatalf("re-migrate same version: %v", err)
+	}
+	// The store still works after a refused upgrade.
+	if err := s.SaveRelease(ctx, cp.Release{ID: t.Name() + "-r1", App: t.Name() + "-web", Image: "img:1"}); err != nil {
+		t.Fatalf("SaveRelease after refused upgrade: %v", err)
+	}
 }
 
 func TestStoreSaveAndQuery(t *testing.T) {

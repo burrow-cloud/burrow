@@ -4,9 +4,9 @@
 // Command burrowd is the Burrow control plane: the component that holds the cluster
 // credentials, runs the deploy/rollout/rollback/logs/scale orchestration, enforces the
 // guardrails, and records who deployed what (ADR-0002). It connects to the in-cluster
-// Postgres (ADR-0012), applies migrations, and serves the authenticated control-plane
-// HTTP API (ADR-0005). The real cluster and registry adapters arrive in v0.1 Phase 5;
-// until then cluster operations are reported honestly as not implemented.
+// Postgres (ADR-0012) and applies migrations, drives the cluster through the client-go
+// adapter (ADR-0011), resolves images through the registry resolver (ADR-0004), and
+// serves the authenticated control-plane HTTP API (ADR-0005).
 package main
 
 import (
@@ -23,7 +23,9 @@ import (
 
 	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/api"
+	"github.com/burrow-cloud/burrow/controlplane/kube"
 	"github.com/burrow-cloud/burrow/controlplane/postgres"
+	"github.com/burrow-cloud/burrow/controlplane/registry"
 	"github.com/burrow-cloud/burrow/controlplane/sys"
 )
 
@@ -63,9 +65,24 @@ func run() error {
 		return err
 	}
 
+	namespace := envOr("BURROW_NAMESPACE", "default")
+	kubeCfg, err := kube.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("loading kubernetes config: %w", err)
+	}
+	k8s, err := kube.NewFromConfig(kubeCfg, namespace)
+	if err != nil {
+		return err
+	}
+
+	var regOpts []registry.Option
+	if os.Getenv("BURROW_REGISTRY_INSECURE") == "true" {
+		regOpts = append(regOpts, registry.WithInsecure())
+	}
+
 	engine, err := controlplane.New(controlplane.Deps{
-		Kubernetes: notImplementedKubernetes{},
-		Registry:   notImplementedRegistry{},
+		Kubernetes: k8s,
+		Registry:   registry.New(regOpts...),
 		Database:   store,
 		Clock:      sys.Clock{},
 		IDs:        sys.IDs{},
@@ -95,7 +112,7 @@ func serve(srv *http.Server) error {
 
 	errc := make(chan error, 1)
 	go func() {
-		log.Printf("burrowd v%s listening on %s (cluster operations are not wired yet — v0.1 Phase 5)", version, srv.Addr)
+		log.Printf("burrowd v%s listening on %s", version, srv.Addr)
 		errc <- srv.ListenAndServe()
 	}()
 

@@ -36,7 +36,16 @@ listed to show direction, not commitment.
   limits for destructive operations.
 - **Database provisioning** — managed Postgres (and friends) as a first-class deploy
   dependency.
-- **Domains and TLS** — public ingress, certificates, routing.
+- **Ingress, domains, and TLS** — make a deployed app reachable at a public URL. Three
+  pieces: an in-cluster **ingress controller** (e.g. nginx) for routing; **TLS
+  certificates** (e.g. ACME/cert-manager); and, to point a domain at the cluster,
+  **DNS-provider integrations** so the agent can configure DNS records — DigitalOcean
+  first, matching the reference cluster target, with others behind a common seam. DNS
+  write access is security-sensitive and easy to break, so it gets careful, scoped
+  guardrails (read vs. write vs. delete, per the control-plane guardrail model in
+  [ADR-0006](adr/0006-guardrails-in-the-control-plane.md)); the integration credentials,
+  like the cluster credentials, live only in the control plane
+  ([ADR-0005](adr/0005-mcp-server-holds-no-cluster-credentials.md)).
 - **Autoscaling** — horizontal/vertical scaling driven by load.
 - **Cost controls and caps** — visibility and limits on cluster spend.
 - **Optional passive deploy mode** — GitOps-style tag-watching as an *option* layered on

@@ -137,7 +137,7 @@ separate private managed module can import their public API (see
 
 The intended shape (filled in with the v0.1 slice — see [PLAN.md](PLAN.md)) keeps
 control-plane logic **pure and seam-isolated**: anything that touches Kubernetes, the
-container registry, the clock, the database, or email lives behind an interface so it can be
+container registry, the clock, or the database lives behind an interface so it can be
 faked in tests. See [CLAUDE.md](../CLAUDE.md) for the package conventions and
 [ADR-0010](adr/0010-testing-strategy.md) for the testing posture.
 

@@ -10,40 +10,40 @@ package controlplane
 // DeployRequest is the small, code-free description of a deploy: a pullable image plus
 // metadata (ADR-0004). No code travels here.
 type DeployRequest struct {
-	App      string
-	Image    string
-	Env      map[string]string
-	Command  []string
-	Replicas int32
+	App      string            `json:"app"`
+	Image    string            `json:"image"`
+	Env      map[string]string `json:"env,omitempty"`
+	Command  []string          `json:"command,omitempty"`
+	Replicas int32             `json:"replicas"`
 }
 
 // DeployResult reports the outcome of a successful deploy.
 type DeployResult struct {
 	// Release is the new release that is now running.
-	Release Release
+	Release Release `json:"release"`
 	// SupersededReleaseID is the release this deploy replaced, or "" if it was the
 	// first deploy of the app. It is the handle a rollback would return to.
-	SupersededReleaseID string
+	SupersededReleaseID string `json:"superseded_release_id,omitempty"`
 }
 
 // StatusResult is the combined control-plane and cluster view of an app.
 type StatusResult struct {
-	App string
+	App string `json:"app"`
 	// HasRelease reports whether the control plane has any release recorded for the
 	// app; Release holds the most recent one when true.
-	HasRelease bool
-	Release    Release
+	HasRelease bool    `json:"has_release"`
+	Release    Release `json:"release,omitempty"`
 	// Running reports whether a workload currently exists in the cluster; Workload
 	// holds its observed state when true.
-	Running  bool
-	Workload WorkloadStatus
+	Running  bool           `json:"running"`
+	Workload WorkloadStatus `json:"workload,omitempty"`
 }
 
 // ScaleResult reports the outcome of a scale.
 type ScaleResult struct {
-	App              string
-	PreviousReplicas int32
-	Replicas         int32
+	App              string `json:"app"`
+	PreviousReplicas int32  `json:"previous_replicas"`
+	Replicas         int32  `json:"replicas"`
 }
 
 // RollbackResult reports the outcome of a rollback. A rollback is itself a forward
@@ -51,9 +51,9 @@ type ScaleResult struct {
 type RollbackResult struct {
 	// Release is the new release created by the rollback (carrying the prior
 	// reference) and now running.
-	Release Release
+	Release Release `json:"release"`
 	// RolledBackToReleaseID is the prior release whose reference was restored.
-	RolledBackToReleaseID string
+	RolledBackToReleaseID string `json:"rolled_back_to_release_id"`
 	// SupersededReleaseID is the release that was running before the rollback.
-	SupersededReleaseID string
+	SupersededReleaseID string `json:"superseded_release_id"`
 }

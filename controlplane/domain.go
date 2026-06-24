@@ -67,28 +67,28 @@ func (s ReleaseStatus) Valid() bool {
 type Release struct {
 	// ID is the control-plane-assigned identifier for this release. It is minted by
 	// the deploy engine, not here, so the domain type stays free of ambient identity.
-	ID string
+	ID string `json:"id"`
 	// App is the name of the App this release belongs to.
-	App string
+	App string `json:"app"`
 	// Image is the pullable container image reference the deploy named (ADR-0007).
-	Image string
+	Image string `json:"image"`
 	// Digest is the content digest the registry resolved Image to, when known
 	// (e.g. "sha256:..."). It is what makes a rollback deterministic.
-	Digest string
+	Digest string `json:"digest,omitempty"`
 	// Env is the environment passed to the workload.
-	Env map[string]string
+	Env map[string]string `json:"env,omitempty"`
 	// Command overrides the image's default command, when set.
-	Command []string
+	Command []string `json:"command,omitempty"`
 	// Replicas is the desired replica count.
-	Replicas int32
+	Replicas int32 `json:"replicas"`
 	// Status is the lifecycle state of this release.
-	Status ReleaseStatus
+	Status ReleaseStatus `json:"status"`
 	// Supersedes is the ID of the release this one replaced, if any — the chain that
 	// lets rollback walk back to a prior known-good release.
-	Supersedes string
+	Supersedes string `json:"supersedes,omitempty"`
 	// CreatedAt is when the control plane recorded this release, read from the
 	// injected clock (never from ambient time).
-	CreatedAt time.Time
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Validate reports whether the release is well-formed enough to act on. It checks the

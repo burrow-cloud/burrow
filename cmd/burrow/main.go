@@ -38,6 +38,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	switch cmd {
 	case "install":
 		return cmdInstall(ctx, rest, stdout, stderr)
+	case "upgrade":
+		return cmdUpgrade(ctx, rest, stdout, stderr)
 	case "deploy":
 		return cmdDeploy(ctx, rest, stdout, stderr)
 	case "status":
@@ -65,6 +67,7 @@ Usage:
 
 Commands:
   install          Install the Burrow control plane into your cluster
+  upgrade          Upgrade the in-cluster control plane in place (preserves state)
   deploy <app>     Deploy an app by image reference (optionally build & push first)
   status <app>     Show an app's release and live workload status
   logs <app>       Show recent logs for an app

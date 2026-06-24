@@ -88,6 +88,17 @@ func cmdInstall(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return nil
 	}
 
+	cs, err := clientset(*kubeconfig)
+	if err != nil {
+		return err
+	}
+	if installed, err := alreadyInstalled(ctx, cs, *namespace); err != nil {
+		return err
+	} else if installed {
+		return fmt.Errorf("Burrow is already installed in namespace %q; run `burrow upgrade` to update it "+
+			"(re-running install would mint new secrets and break the existing control plane)", *namespace)
+	}
+
 	if err := kubectlApply(ctx, *kubeconfig, manifests, stdout, stderr); err != nil {
 		return err
 	}
@@ -109,13 +120,9 @@ func cmdInstall(ctx context.Context, args []string, stdout, stderr io.Writer) er
 // progress. burrowd only becomes ready after it has reached Postgres and applied its
 // migrations, so this confirms the whole control plane is up.
 func waitForReady(ctx context.Context, kubeconfig, namespace string, out io.Writer) error {
-	cfg, err := connect.RESTConfig(kubeconfig)
+	cs, err := clientset(kubeconfig)
 	if err != nil {
 		return err
-	}
-	cs, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("building clientset: %w", err)
 	}
 	fmt.Fprintln(out, "\nWaiting for Burrow to become ready...")
 	if err := waitForDeployment(ctx, cs, namespace, "postgres", "database", out, 3*time.Minute); err != nil {

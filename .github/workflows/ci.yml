@@ -63,7 +63,7 @@ jobs:
         run: k3d cluster create burrow-ci --wait --timeout 120s
       - name: preload test images
         run: |
-          for img in busybox:1.36 busybox:1.37 mendhak/http-https-echo:31; do
+          for img in busybox:1.36 busybox:1.37 mendhak/http-https-echo:31 nginx:alpine nginx:1.27-alpine; do
             docker pull "$img"
             k3d image import "$img" -c burrow-ci
           done
@@ -74,6 +74,10 @@ jobs:
           go test ./controlplane/kube/ -run TestIntegration -v -timeout 280s
           go test ./controlplane/e2e/ -v -timeout 300s
           go test ./connect/ -run TestProxyForwardsCustomHeader -v -timeout 300s
+      - name: capstone e2e (install + deploy through the CLI)
+        run: bash test/e2e/install-and-deploy.sh
+        env:
+          K3D_CLUSTER: burrow-ci
       - name: delete cluster
         if: always()
         run: k3d cluster delete burrow-ci

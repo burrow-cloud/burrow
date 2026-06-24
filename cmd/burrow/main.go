@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/burrow-cloud/burrow/client"
+	"github.com/burrow-cloud/burrow/connect"
 )
 
 func main() {
@@ -83,26 +84,34 @@ Run "burrow <command> -h" for command-specific flags.
 type commonOpts struct {
 	controlPlane string
 	token        string
+	kubeconfig   string
+	namespace    string
 	json         bool
 }
 
 // addCommon registers the shared flags on fs, defaulting from the environment.
 func addCommon(fs *flag.FlagSet) *commonOpts {
 	o := &commonOpts{}
-	fs.StringVar(&o.controlPlane, "control-plane", os.Getenv("BURROW_CONTROL_PLANE_URL"), "control-plane API base URL")
-	fs.StringVar(&o.token, "token", os.Getenv("BURROW_API_TOKEN"), "control-plane API token")
+	fs.StringVar(&o.controlPlane, "control-plane", os.Getenv("BURROW_CONTROL_PLANE_URL"), "control-plane API base URL (default: auto-connect via kubeconfig)")
+	fs.StringVar(&o.token, "token", os.Getenv("BURROW_API_TOKEN"), "control-plane API token (default: read from the install Secret)")
+	fs.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig for auto-connect (default: ambient)")
+	fs.StringVar(&o.namespace, "namespace", connect.DefaultNamespace, "namespace Burrow is installed in")
 	fs.BoolVar(&o.json, "json", false, "print the raw JSON result")
 	return o
 }
 
-func (o *commonOpts) client() (*client.Client, error) {
-	if o.controlPlane == "" {
-		return nil, errors.New("control-plane URL is required (set BURROW_CONTROL_PLANE_URL or --control-plane)")
+// client returns a control-plane client. With --control-plane set it talks to that URL
+// directly (e.g. an ingress) using --token. Otherwise it auto-connects through the
+// Kubernetes API-server proxy with the ambient kubeconfig, reading the token from the
+// install Secret — so a developer with kubectl access configures nothing (ADR-0014).
+func (o *commonOpts) client(ctx context.Context) (*client.Client, error) {
+	if o.controlPlane != "" {
+		if o.token == "" {
+			return nil, errors.New("--token (or BURROW_API_TOKEN) is required with --control-plane")
+		}
+		return client.NewClient(o.controlPlane, o.token), nil
 	}
-	if o.token == "" {
-		return nil, errors.New("API token is required (set BURROW_API_TOKEN or --token)")
-	}
-	return client.NewClient(o.controlPlane, o.token), nil
+	return connect.Client(ctx, connect.Options{Kubeconfig: o.kubeconfig, Namespace: o.namespace})
 }
 
 // emit prints v as indented JSON when asJSON, otherwise the human-readable line.

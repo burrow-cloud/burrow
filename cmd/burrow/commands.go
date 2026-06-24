@@ -30,7 +30,7 @@ func cmdDeploy(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if app == "" || *image == "" {
 		return fmt.Errorf("usage: burrow deploy <app> --image <ref> [--replicas n] [--env K=V] [--build dir]")
 	}
-	c, err := o.client()
+	c, err := o.client(ctx)
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,7 @@ func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if app == "" {
 		return fmt.Errorf("usage: burrow status <app>")
 	}
-	c, err := o.client()
+	c, err := o.client(ctx)
 	if err != nil {
 		return err
 	}
@@ -93,7 +93,7 @@ func cmdLogs(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if app == "" {
 		return fmt.Errorf("usage: burrow logs <app> [--tail n]")
 	}
-	c, err := o.client()
+	c, err := o.client(ctx)
 	if err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func cmdRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if app == "" {
 		return fmt.Errorf("usage: burrow rollback <app>")
 	}
-	c, err := o.client()
+	c, err := o.client(ctx)
 	if err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func cmdScale(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return fmt.Errorf("replicas must be a number, got %q", nStr)
 	}
-	c, err := o.client()
+	c, err := o.client(ctx)
 	if err != nil {
 		return err
 	}

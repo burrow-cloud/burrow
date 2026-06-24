@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -130,13 +131,24 @@ func TestDeployGuardrailErrorSurfaces(t *testing.T) {
 	}
 }
 
-func TestMissingConfig(t *testing.T) {
-	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+func TestExplicitControlPlaneNeedsToken(t *testing.T) {
 	t.Setenv("BURROW_API_TOKEN", "")
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"status", "web"}, &out, &errb)
-	if err == nil || !strings.Contains(err.Error(), "control-plane URL is required") {
-		t.Fatalf("err = %v, want a missing-config error", err)
+	err := run(context.Background(), []string{"status", "web", "--control-plane", "http://example"}, &out, &errb)
+	if err == nil || !strings.Contains(err.Error(), "--token") {
+		t.Fatalf("err = %v, want a missing-token error", err)
+	}
+}
+
+func TestAutoConnectFailsWithoutCluster(t *testing.T) {
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	// No --control-plane → auto-connect via kubeconfig; a bogus kubeconfig path fails
+	// deterministically regardless of the ambient environment.
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"status", "web", "--kubeconfig", filepath.Join(t.TempDir(), "missing")}, &out, &errb)
+	if err == nil {
+		t.Fatalf("expected an error when the kubeconfig is unreadable")
 	}
 }
 

@@ -12,7 +12,7 @@ import (
 
 func TestRenderManifests(t *testing.T) {
 	out, err := renderManifests(installOptions{
-		Namespace: "burrow", Image: "registry.example.com/burrowd:1",
+		Namespace: "burrow", AppNamespace: "apps", Image: "registry.example.com/burrowd:1",
 		Token: "tok-123", DBPassword: "pw-456", Port: 8080,
 	})
 	if err != nil {
@@ -21,6 +21,7 @@ func TestRenderManifests(t *testing.T) {
 
 	for _, want := range []string{
 		"kind: Namespace",
+		"name: apps", // a custom app namespace is created
 		"kind: ServiceAccount",
 		"kind: Role",
 		"kind: RoleBinding",
@@ -29,7 +30,7 @@ func TestRenderManifests(t *testing.T) {
 		`postgres://burrow:pw-456@postgres:5432/burrow`,
 		"image: postgres:18",
 		"image: registry.example.com/burrowd:1",
-		"name: BURROW_NAMESPACE",
+		"{ name: BURROW_NAMESPACE, value: apps }", // burrowd deploys apps into the app namespace
 		"-listen=:8080",
 		"path: /healthz",
 		`verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]`,
@@ -39,9 +40,27 @@ func TestRenderManifests(t *testing.T) {
 		}
 	}
 
-	// Least privilege: the ServiceAccount Role must not grant access to secrets.
+	// Least privilege: the Role must not grant access to secrets.
 	if strings.Contains(out, `["secrets"]`) {
 		t.Errorf("RBAC should not grant secrets access")
+	}
+}
+
+func TestRenderManifestsDefaultAppNamespace(t *testing.T) {
+	out, err := renderManifests(installOptions{
+		Namespace: "burrow", AppNamespace: "default", Image: "img:1",
+		Token: "t", DBPassword: "p", Port: 8080,
+	})
+	if err != nil {
+		t.Fatalf("renderManifests: %v", err)
+	}
+	// The default app namespace already exists, so we must not emit a Namespace for it
+	// (which would relabel the cluster's default namespace).
+	if strings.Contains(out, "name: default") {
+		t.Errorf("must not create/relabel the default namespace")
+	}
+	if !strings.Contains(out, "{ name: BURROW_NAMESPACE, value: default }") {
+		t.Errorf("burrowd should deploy apps into the default namespace")
 	}
 }
 

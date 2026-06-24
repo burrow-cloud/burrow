@@ -7,6 +7,14 @@ kind: Namespace
 metadata:
   name: {{.Namespace}}
   labels: { app.kubernetes.io/managed-by: burrow }
+{{- if and (ne .AppNamespace "default") (ne .AppNamespace .Namespace) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{.AppNamespace}}
+  labels: { app.kubernetes.io/managed-by: burrow }
+{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -14,11 +22,13 @@ metadata:
   name: burrowd
   namespace: {{.Namespace}}
 ---
+# The control plane manages app workloads in the app namespace, so its Role and binding
+# live there (the ServiceAccount itself lives in the control-plane namespace).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: burrowd
-  namespace: {{.Namespace}}
+  namespace: {{.AppNamespace}}
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
@@ -34,7 +44,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: burrowd
-  namespace: {{.Namespace}}
+  namespace: {{.AppNamespace}}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -133,7 +143,7 @@ spec:
           image: {{.Image}}
           args: ["-listen=:{{.Port}}"]
           env:
-            - { name: BURROW_NAMESPACE, value: {{.Namespace}} }
+            - { name: BURROW_NAMESPACE, value: {{.AppNamespace}} }
             - name: BURROW_API_TOKEN
               valueFrom: { secretKeyRef: { name: burrowd-api-token, key: token } }
             - name: BURROW_DATABASE_URL

@@ -28,8 +28,8 @@ jobs:
       # above instead of skipping them (ADR-0012: in-cluster Postgres, tested for real).
       BURROW_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/burrow_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
       - name: gofmt
@@ -45,6 +45,6 @@ jobs:
     name: SPDX license headers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: check SPDX headers
         run: bash scripts/check-spdx.sh

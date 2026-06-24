@@ -72,13 +72,13 @@ func New(d Deps) (*Engine, error) {
 // (ADR-0004).
 func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, error) {
 	if err := (App{Name: req.App}).Validate(); err != nil {
-		return DeployResult{}, fmt.Errorf("deploy: %w", err)
+		return DeployResult{}, fmt.Errorf("deploy: %w: %w", ErrInvalid, err)
 	}
 	if req.Image == "" {
-		return DeployResult{}, fmt.Errorf("deploy %s: image reference is empty", req.App)
+		return DeployResult{}, fmt.Errorf("deploy %s: image reference is empty: %w", req.App, ErrInvalid)
 	}
 	if req.Replicas < 0 {
-		return DeployResult{}, fmt.Errorf("deploy %s: replicas %d is negative", req.App, req.Replicas)
+		return DeployResult{}, fmt.Errorf("deploy %s: replicas %d is negative: %w", req.App, req.Replicas, ErrInvalid)
 	}
 	if err := e.policy.checkReplicas("deploy", req.Replicas); err != nil {
 		return DeployResult{}, err
@@ -192,10 +192,10 @@ func (e *Engine) Logs(ctx context.Context, app string, opts LogOptions) ([]LogLi
 // workload, while a release records a deploy.
 func (e *Engine) Scale(ctx context.Context, app string, replicas int32) (ScaleResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
-		return ScaleResult{}, fmt.Errorf("scale: %w", err)
+		return ScaleResult{}, fmt.Errorf("scale: %w: %w", ErrInvalid, err)
 	}
 	if replicas < 0 {
-		return ScaleResult{}, fmt.Errorf("scale %s: replicas %d is negative", app, replicas)
+		return ScaleResult{}, fmt.Errorf("scale %s: replicas %d is negative: %w", app, replicas, ErrInvalid)
 	}
 	if err := e.policy.checkReplicas("scale", replicas); err != nil {
 		return ScaleResult{}, err

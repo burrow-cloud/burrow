@@ -56,15 +56,15 @@ type WorkloadSpec struct {
 
 // WorkloadStatus is the observed state of an App's workload, as reported by the cluster.
 type WorkloadStatus struct {
-	App             string
-	Kind            WorkloadKind
-	Image           string
-	DesiredReplicas int32
-	ReadyReplicas   int32
-	UpdatedReplicas int32
+	App             string       `json:"app"`
+	Kind            WorkloadKind `json:"kind"`
+	Image           string       `json:"image"`
+	DesiredReplicas int32        `json:"desired_replicas"`
+	ReadyReplicas   int32        `json:"ready_replicas"`
+	UpdatedReplicas int32        `json:"updated_replicas"`
 	// Available reports whether the workload currently meets its availability
 	// condition (enough ready replicas to serve).
-	Available bool
+	Available bool `json:"available"`
 }
 
 // LogOptions selects which log lines to return.
@@ -76,9 +76,9 @@ type LogOptions struct {
 
 // LogLine is a single line of application log output.
 type LogLine struct {
-	Pod       string
-	Timestamp time.Time
-	Message   string
+	Pod       string    `json:"pod"`
+	Timestamp time.Time `json:"timestamp"`
+	Message   string    `json:"message"`
 }
 
 // Kubernetes is the seam over the target cluster: the only path from the control plane

@@ -14,6 +14,10 @@ import (
 	"os/exec"
 	"strings"
 	"text/template"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/burrow-cloud/burrow/connect"
 )
@@ -47,6 +51,7 @@ func cmdInstall(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	image := fs.String("burrowd-image", defaultBurrowdImage, "burrowd container image to deploy (must be pullable by the cluster)")
 	kubeconfig := fs.String("kubeconfig", "", "path to kubeconfig (default: ambient)")
 	dryRun := fs.Bool("dry-run", false, "print the manifests instead of applying them")
+	wait := fs.Bool("wait", true, "wait for the control plane to become ready")
 	_, flagArgs := splitArgs(args)
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -80,10 +85,60 @@ func cmdInstall(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if err := kubectlApply(ctx, *kubeconfig, manifests, stdout, stderr); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "\nBurrow installed into namespace %q.\n"+
-		"Once burrowd is ready, deploy with your kubeconfig — no further config:\n"+
-		"  burrow deploy <app> --image <ref>\n", *namespace)
+
+	if *wait {
+		if err := waitForReady(ctx, *kubeconfig, *namespace, stdout); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "\nBurrow is installed and ready in namespace %q.\n"+
+			"Deploy with your kubeconfig — no further config:\n"+
+			"  burrow deploy <app> --image <ref>\n", *namespace)
+		return nil
+	}
+	fmt.Fprintf(stdout, "\nBurrow installed into namespace %q (not waiting for readiness).\n", *namespace)
 	return nil
+}
+
+// waitForReady blocks until the in-cluster Postgres and burrowd are ready, printing
+// progress. burrowd only becomes ready after it has reached Postgres and applied its
+// migrations, so this confirms the whole control plane is up.
+func waitForReady(ctx context.Context, kubeconfig, namespace string, out io.Writer) error {
+	cfg, err := connect.RESTConfig(kubeconfig)
+	if err != nil {
+		return err
+	}
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("building clientset: %w", err)
+	}
+	fmt.Fprintln(out, "\nWaiting for Burrow to become ready...")
+	if err := waitForDeployment(ctx, cs, namespace, "postgres", "database", out, 3*time.Minute); err != nil {
+		return err
+	}
+	return waitForDeployment(ctx, cs, namespace, "burrowd", "control plane", out, 3*time.Minute)
+}
+
+func waitForDeployment(ctx context.Context, cs kubernetes.Interface, namespace, name, label string, out io.Writer, timeout time.Duration) error {
+	fmt.Fprintf(out, "  %s ...", label)
+	deadline := time.Now().Add(timeout)
+	for {
+		d, err := cs.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			desired := int32(1)
+			if d.Spec.Replicas != nil {
+				desired = *d.Spec.Replicas
+			}
+			if desired > 0 && d.Status.ObservedGeneration >= d.Generation && d.Status.ReadyReplicas >= desired {
+				fmt.Fprintln(out, " ready")
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintln(out, " timed out")
+			return fmt.Errorf("%s did not become ready within %s", label, timeout)
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // kubectlApply pipes the manifests to `kubectl apply -f -`.

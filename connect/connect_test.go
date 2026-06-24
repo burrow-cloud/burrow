@@ -63,9 +63,9 @@ func TestProxyForwardsCustomHeader(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	cfg, err := restConfig(kubeconfig)
+	cfg, err := RESTConfig(kubeconfig)
 	if err != nil {
-		t.Fatalf("restConfig: %v", err)
+		t.Fatalf("RESTConfig: %v", err)
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {

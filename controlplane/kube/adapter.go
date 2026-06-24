@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/burrow-cloud/burrow/controlplane"
 )
@@ -57,21 +58,27 @@ func (a *Adapter) ApplyWorkload(ctx context.Context, spec controlplane.WorkloadS
 		return fmt.Errorf("kube: workload kind %q is not supported in v0.1 (Deployment only): %w", spec.Kind, controlplane.ErrNotImplemented)
 	}
 	deployments := a.client.AppsV1().Deployments(a.namespace)
-	desired := a.buildDeployment(spec)
 
-	existing, err := deployments.Get(ctx, spec.App, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		if _, err := deployments.Create(ctx, desired, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("kube: creating deployment %q: %w", spec.App, err)
+	// Create-or-update under conflict retry: the Deployment controller continuously
+	// updates the live object (its status), so a get-then-update can lose the
+	// resourceVersion race and 409. We re-read and retry on conflict. The closure
+	// returns raw API errors so retry.RetryOnConflict can recognize a conflict.
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, err := deployments.Get(ctx, spec.App, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			_, err := deployments.Create(ctx, a.buildDeployment(spec), metav1.CreateOptions{})
+			return err
 		}
-		return nil
-	}
+		if err != nil {
+			return err
+		}
+		desired := a.buildDeployment(spec)
+		desired.ResourceVersion = existing.ResourceVersion
+		_, err = deployments.Update(ctx, desired, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("kube: reading deployment %q: %w", spec.App, err)
-	}
-	desired.ResourceVersion = existing.ResourceVersion // optimistic update over the live object
-	if _, err := deployments.Update(ctx, desired, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("kube: updating deployment %q: %w", spec.App, err)
+		return fmt.Errorf("kube: applying deployment %q: %w", spec.App, err)
 	}
 	return nil
 }

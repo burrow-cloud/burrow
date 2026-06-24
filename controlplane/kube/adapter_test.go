@@ -10,8 +10,12 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	cp "github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
@@ -75,6 +79,38 @@ func TestApplyUpdatesDeployment(t *testing.T) {
 	dep := list.Items[0]
 	if dep.Spec.Template.Spec.Containers[0].Image != "img:2" || *dep.Spec.Replicas != 3 {
 		t.Errorf("after update: image=%q replicas=%d, want img:2/3", dep.Spec.Template.Spec.Containers[0].Image, *dep.Spec.Replicas)
+	}
+}
+
+// TestApplyRetriesOnConflict reproduces the resourceVersion race the e2e exposed: the
+// first Update returns a 409 Conflict (as it does when the controller has modified the
+// live object), and ApplyWorkload must re-read and retry rather than fail.
+func TestApplyRetriesOnConflict(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("initial apply: %v", err)
+	}
+
+	var updates int
+	client.PrependReactor("update", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		updates++
+		if updates == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "web", errors.New("the object has been modified"))
+		}
+		return false, nil, nil // fall through to the default tracker
+	})
+
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:2", Replicas: 2}); err != nil {
+		t.Fatalf("apply should retry past the conflict: %v", err)
+	}
+	if updates < 2 {
+		t.Errorf("expected a retry (>= 2 update attempts), got %d", updates)
+	}
+	dep, _ := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if dep.Spec.Template.Spec.Containers[0].Image != "img:2" {
+		t.Errorf("image = %q, want img:2 after retried update", dep.Spec.Template.Spec.Containers[0].Image)
 	}
 }
 

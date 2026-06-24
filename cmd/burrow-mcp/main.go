@@ -19,7 +19,7 @@ import (
 )
 
 // version is the Burrow version this binary reports to MCP clients.
-var version = "0.1.0"
+var version = "v0.1.0"
 
 func main() {
 	if err := run(); err != nil {

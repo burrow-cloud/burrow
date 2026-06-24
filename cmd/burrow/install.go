@@ -20,7 +20,7 @@ import (
 // defaultBurrowdImage is where the control-plane image is expected to live. Until it is
 // published, `burrow install` needs --burrowd-image pointing at an image the cluster can
 // pull (the e2e builds one and imports it into k3d).
-const defaultBurrowdImage = "ghcr.io/burrow-cloud/burrowd:0.1.0"
+const defaultBurrowdImage = "ghcr.io/burrow-cloud/burrowd:v0.1.0"
 
 // installOptions are the values rendered into the install manifests.
 type installOptions struct {

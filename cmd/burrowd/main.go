@@ -31,7 +31,7 @@ import (
 
 // version is the Burrow version this binary reports and stamps into the database for
 // the upgrade gate (ADR-0013). A release build may override it via -ldflags.
-var version = "0.1.0"
+var version = "v0.1.0"
 
 func main() {
 	if err := run(); err != nil {

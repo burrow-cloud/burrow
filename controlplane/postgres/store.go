@@ -1,0 +1,168 @@
+// SPDX-License-Identifier: FSL-1.1-ALv2
+// Copyright 2026 Nicholas Phillips
+
+// Package postgres is the production controlplane.Database adapter, backed by Postgres
+// running in the cluster (ADR-0012). It implements the deploy-record seam (ADR-0007):
+// the durable history of releases and the rollback handles, independent of cluster
+// state. Schema changes are applied by embedded goose migrations on startup, gated to
+// single-minor-step upgrades (ADR-0013).
+//
+// It uses the pgx driver through the standard database/sql interface (not pgxpool, not
+// the maintenance-mode lib/pq), so one *sql.DB serves both the migrations and the app.
+// It lives under controlplane/ (not controlplane/internal) so cmd/burrowd and the
+// managed module can wire it; it is source-available under FSL-1.1-ALv2 (LICENSING.md,
+// ADR-0001).
+package postgres
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
+
+	"github.com/burrow-cloud/burrow/controlplane"
+)
+
+var _ controlplane.Database = (*Store)(nil)
+
+const columns = `id, app, image, digest, env, command, replicas, status, supersedes, created_at`
+
+// Store is a Postgres-backed controlplane.Database.
+type Store struct {
+	db *sql.DB
+}
+
+// Open connects to the database at dsn and verifies the connection. The caller closes
+// the Store with Close. It does not apply the schema; call Migrate for that.
+func Open(ctx context.Context, dsn string) (*Store, error) {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: opening: %w", err)
+	}
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("postgres: ping: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+// Close releases the database connections.
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+func (s *Store) SaveRelease(ctx context.Context, r controlplane.Release) error {
+	if r.ID == "" {
+		return fmt.Errorf("postgres: save release: empty ID")
+	}
+	env := r.Env
+	if env == nil {
+		env = map[string]string{}
+	}
+	cmd := r.Command
+	if cmd == nil {
+		cmd = []string{}
+	}
+	envJSON, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("postgres: save release %s: encoding env: %w", r.ID, err)
+	}
+	cmdJSON, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("postgres: save release %s: encoding command: %w", r.ID, err)
+	}
+
+	// env/command are cast to jsonb explicitly so the JSON is passed as text and
+	// stored as jsonb regardless of how the driver encodes a parameter.
+	const q = `
+INSERT INTO releases (` + columns + `)
+VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
+ON CONFLICT (id) DO UPDATE SET
+    app = EXCLUDED.app, image = EXCLUDED.image, digest = EXCLUDED.digest,
+    env = EXCLUDED.env, command = EXCLUDED.command, replicas = EXCLUDED.replicas,
+    status = EXCLUDED.status, supersedes = EXCLUDED.supersedes, created_at = EXCLUDED.created_at`
+
+	_, err = s.db.ExecContext(ctx, q,
+		r.ID, r.App, r.Image, r.Digest, string(envJSON), string(cmdJSON), r.Replicas, string(r.Status), r.Supersedes, r.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("postgres: save release %s: %w", r.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) Release(ctx context.Context, id string) (controlplane.Release, error) {
+	const q = `SELECT ` + columns + ` FROM releases WHERE id = $1`
+	r, err := scanRelease(s.db.QueryRowContext(ctx, q, id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return controlplane.Release{}, fmt.Errorf("postgres: release %q: %w", id, controlplane.ErrNotFound)
+		}
+		return controlplane.Release{}, fmt.Errorf("postgres: release %q: %w", id, err)
+	}
+	return r, nil
+}
+
+func (s *Store) LatestRelease(ctx context.Context, app string) (controlplane.Release, error) {
+	const q = `SELECT ` + columns + ` FROM releases WHERE app = $1 ORDER BY seq DESC LIMIT 1`
+	r, err := scanRelease(s.db.QueryRowContext(ctx, q, app))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return controlplane.Release{}, fmt.Errorf("postgres: latest release for app %q: %w", app, controlplane.ErrNotFound)
+		}
+		return controlplane.Release{}, fmt.Errorf("postgres: latest release for app %q: %w", app, err)
+	}
+	return r, nil
+}
+
+func (s *Store) Releases(ctx context.Context, app string) ([]controlplane.Release, error) {
+	const q = `SELECT ` + columns + ` FROM releases WHERE app = $1 ORDER BY seq ASC`
+	rows, err := s.db.QueryContext(ctx, q, app)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: releases for app %q: %w", app, err)
+	}
+	defer rows.Close()
+
+	out := make([]controlplane.Release, 0)
+	for rows.Next() {
+		r, err := scanRelease(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: releases for app %q: %w", app, err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: releases for app %q: %w", app, err)
+	}
+	return out, nil
+}
+
+// scanner is the read side common to *sql.Row and *sql.Rows.
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRelease(sc scanner) (controlplane.Release, error) {
+	var (
+		r       controlplane.Release
+		envJSON []byte
+		cmdJSON []byte
+		status  string
+		created time.Time
+	)
+	if err := sc.Scan(&r.ID, &r.App, &r.Image, &r.Digest, &envJSON, &cmdJSON, &r.Replicas, &status, &r.Supersedes, &created); err != nil {
+		return controlplane.Release{}, err
+	}
+	if err := json.Unmarshal(envJSON, &r.Env); err != nil {
+		return controlplane.Release{}, fmt.Errorf("decoding env: %w", err)
+	}
+	if err := json.Unmarshal(cmdJSON, &r.Command); err != nil {
+		return controlplane.Release{}, fmt.Errorf("decoding command: %w", err)
+	}
+	r.Status = controlplane.ReleaseStatus(status)
+	r.CreatedAt = created
+	return r, nil
+}

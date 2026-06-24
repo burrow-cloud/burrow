@@ -53,7 +53,7 @@ tests pass. Each has an ADR.
   comments.
 - Errors are wrapped with context (`fmt.Errorf("...: %w", err)`) and checked, not ignored.
 - **No global mutable state; pass dependencies explicitly** so they can be faked in tests.
-- **Anything that touches Kubernetes, the container registry, the database, or email goes
+- **Anything that touches Kubernetes, the container registry, or the database goes
   behind an interface** (a seam) that tests can substitute. Control-plane logic stays pure
   and seam-isolated. Determinism comes from injected dependencies, not from a global
   simulator.
@@ -61,7 +61,9 @@ tests pass. Each has an ADR.
   justify itself. The Kubernetes client, an MCP library, and a Postgres driver are expected
   costs; speculative dependencies are not.
 - The stack: **Go** for the control plane, MCP server, and CLI. **Kubernetes** as the
-  target. **Neon (Postgres)** for the control plane's own state. **Resend** for email.
+  target. **Postgres** (self-hosted, running in the cluster — ADR-0012) for the control
+  plane's own state, accessed with **pgx via `database/sql`** and schema-managed by
+  **embedded goose migrations** with single-minor-step upgrades (ADR-0013).
   **HTMX** if and when a self-host dashboard is needed. **DigitalOcean** as the reference
   cluster target.
 
@@ -125,7 +127,7 @@ SPDX header matching its directory.
 - [`operator`](operator/) — the Kubernetes **operator**: CRD types and reconciler entry, guts
   in [`operator/internal`](operator/internal/).
 
-Everything that touches Kubernetes, the registry, the clock, the database, or email lives
+Everything that touches Kubernetes, the registry, the clock, or the database lives
 behind a seam (interface) with a real adapter and a fake. The packages above currently hold
 only doc-stubs establishing the license boundary and layout; the implementation arrives with
 the v0.1 slice ([docs/PLAN.md](docs/PLAN.md)).

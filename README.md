@@ -93,6 +93,8 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the system design: the four layers, the
   invariants, and the request paths.
+- [docs/HARDENING.md](docs/HARDENING.md) — securing your agent: keep the control plane its
+  only path to the cluster so the guardrails actually bound it.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — version milestones, v0.1 → v1.0.
 - [docs/PLAN.md](docs/PLAN.md) — the current execution plan and the v0.1 scope.
 - [docs/adr/](docs/adr/README.md) — Architecture Decision Records: every load-bearing

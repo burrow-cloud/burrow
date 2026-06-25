@@ -21,7 +21,10 @@ func newEngine(t *testing.T, policy cp.Policy) (*cp.Engine, *fake.Kubernetes, *f
 	d := fake.NewDatabase()
 	d.SetPolicy(policy)
 	c := fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC))
-	e, err := cp.New(cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver()})
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -49,7 +52,10 @@ func mustGuardrail(t *testing.T, err error, code cp.GuardrailCode) {
 
 func TestNewValidatesDeps(t *testing.T) {
 	k, r, d, c, id := fake.NewKubernetes(), fake.NewRegistry(), fake.NewDatabase(), fake.NewClock(time.Now()), fake.NewIDs()
-	good := cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: id, Resolver: fake.NewResolver()}
+	good := cp.Deps{
+		Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: id, Resolver: fake.NewResolver(),
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+	}
 
 	if _, err := cp.New(good); err != nil {
 		t.Fatalf("valid deps: %v", err)
@@ -70,6 +76,16 @@ func TestNewValidatesDeps(t *testing.T) {
 	bad.Database = nil
 	if _, err := cp.New(bad); err == nil {
 		t.Errorf("missing Database should error")
+	}
+	bad = good
+	bad.Credentials = nil
+	if _, err := cp.New(bad); err == nil {
+		t.Errorf("missing Credentials should error")
+	}
+	bad = good
+	bad.DNS = nil
+	if _, err := cp.New(bad); err == nil {
+		t.Errorf("missing DNS should error")
 	}
 }
 
@@ -363,6 +379,7 @@ func TestReachability(t *testing.T) {
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Registry: reg, Database: fake.NewDatabase(),
 		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: dns,
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

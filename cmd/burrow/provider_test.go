@@ -72,6 +72,49 @@ func TestWriteCredentialUpsertsIntoExistingEmptySecret(t *testing.T) {
 	}
 }
 
+func TestReadAndDeleteCredential(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	if err := writeCredential(ctx, cs, "burrow", "digitalocean", "tok"); err != nil {
+		t.Fatal(err)
+	}
+
+	if v, existed, err := readCredential(ctx, cs, "burrow", "digitalocean"); err != nil || !existed || v != "tok" {
+		t.Fatalf("readCredential = %q %v %v, want tok true nil", v, existed, err)
+	}
+	if _, existed, _ := readCredential(ctx, cs, "burrow", "absent"); existed {
+		t.Errorf("absent key reported as existing")
+	}
+
+	if err := deleteCredential(ctx, cs, "burrow", "digitalocean"); err != nil {
+		t.Fatalf("deleteCredential: %v", err)
+	}
+	if _, existed, _ := readCredential(ctx, cs, "burrow", "digitalocean"); existed {
+		t.Errorf("key still present after delete")
+	}
+}
+
+func TestRestoreCredentialRollsBack(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+
+	// A new key that fails validation is removed entirely.
+	_ = writeCredential(ctx, cs, "burrow", "cloudflare", "bad")
+	restoreCredential(ctx, cs, "burrow", "cloudflare", "", false)
+	if _, existed, _ := readCredential(ctx, cs, "burrow", "cloudflare"); existed {
+		t.Errorf("a never-existed key should be deleted on rollback")
+	}
+
+	// Rotating an existing key to a bad token rolls back to the prior value.
+	_ = writeCredential(ctx, cs, "burrow", "digitalocean", "good")
+	prior, existed, _ := readCredential(ctx, cs, "burrow", "digitalocean")
+	_ = writeCredential(ctx, cs, "burrow", "digitalocean", "bad-rotation")
+	restoreCredential(ctx, cs, "burrow", "digitalocean", prior, existed)
+	if v, _, _ := readCredential(ctx, cs, "burrow", "digitalocean"); v != "good" {
+		t.Errorf("rollback left %q, want the prior good token", v)
+	}
+}
+
 func TestReadSecretStdinTrims(t *testing.T) {
 	got, err := readSecretStdin(strings.NewReader("  dop_v1_abc\n"))
 	if err != nil {

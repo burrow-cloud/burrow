@@ -189,6 +189,10 @@ spec:
           args: ["-listen=:{{.Port}}"]
           env:
             - { name: BURROW_NAMESPACE, value: {{.AppNamespace}} }
+            # POD_NAMESPACE is burrowd's own (control-plane) namespace, where it reads the
+            # burrow-credentials Secret — distinct from BURROW_NAMESPACE, the app namespace.
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             - name: BURROW_API_TOKEN
               valueFrom: { secretKeyRef: { name: burrowd-api-token, key: token } }
             - name: BURROW_DATABASE_URL

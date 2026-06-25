@@ -35,3 +35,6 @@ go.work.sum
 /burrow
 /burrowd
 /burrow-mcp
+
+# Local build output directory (e.g. `go build -o bin/...`)
+/bin/

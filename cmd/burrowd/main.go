@@ -18,12 +18,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/api"
+	"github.com/burrow-cloud/burrow/controlplane/dns"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
 	"github.com/burrow-cloud/burrow/controlplane/postgres"
 	"github.com/burrow-cloud/burrow/controlplane/registry"
@@ -139,13 +141,23 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		regOpts = append(regOpts, registry.WithInsecure())
 	}
 
+	// Vendor tokens live in the burrow-credentials Secret in burrowd's own (control-plane)
+	// namespace — not the app namespace — read through a get scoped to that one object
+	// (ADR-0023).
+	creds, err := kube.NewCredentialsFromConfig(kubeCfg, controlPlaneNamespace(), kube.DefaultCredentialsSecret)
+	if err != nil {
+		return err
+	}
+
 	engine, err := controlplane.New(controlplane.Deps{
-		Kubernetes: k8s,
-		Registry:   registry.New(regOpts...),
-		Database:   store,
-		Clock:      sys.Clock{},
-		IDs:        sys.IDs{},
-		Resolver:   sys.Resolver{},
+		Kubernetes:  k8s,
+		Registry:    registry.New(regOpts...),
+		Database:    store,
+		Clock:       sys.Clock{},
+		IDs:         sys.IDs{},
+		Resolver:    sys.Resolver{},
+		Credentials: creds,
+		DNS:         dns.NewFactory(),
 	})
 	if err != nil {
 		return err
@@ -191,6 +203,22 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// controlPlaneNamespace returns the namespace burrowd itself runs in — where the
+// burrow-credentials Secret lives (distinct from BURROW_NAMESPACE, the app namespace). It
+// prefers the POD_NAMESPACE the install injects via the downward API, falls back to the
+// service-account namespace file every in-cluster pod has, and finally to "burrow".
+func controlPlaneNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns := strings.TrimSpace(string(b)); ns != "" {
+			return ns
+		}
+	}
+	return "burrow"
 }
 
 // openWithRetry waits for the database to accept connections, retrying for up to timeout

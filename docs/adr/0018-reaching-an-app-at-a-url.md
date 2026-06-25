@@ -92,9 +92,14 @@ Automated DNS is in scope for v0.2, DigitalOcean first:
 - A **DNS-provider seam** (interface + DigitalOcean adapter + fake; others later) lets burrowd
   create/update/delete records.
 - **`burrow domain add <host>` / `remove <host>`** (CLI + MCP tool) are guarded operations:
-  burrowd points `<host>` at the ingress controller's external address. DNS writes are the
-  sharp edge — they are **scoped to domains the user has delegated to Burrow**, and
-  read/write/**delete** are separately gated with destructive changes confirmed (ADR-0006).
+  burrowd points `<host>` at the ingress controller's external address. The agent *initiates*
+  these writes exactly as it initiates `deploy` — but it never holds the provider credential
+  and never calls the DNS API directly; **burrowd holds the token and is the only thing that
+  talks to the provider**, so every write is scoped and gated. That is the whole point of
+  putting the credential in the control plane: agent-initiated DNS writes are fine *because*
+  they can only happen through burrowd's guardrails. DNS writes are the sharp edge — they are
+  **scoped to domains the user has delegated to Burrow**, and read/write/**delete** are
+  separately gated with destructive changes confirmed (ADR-0006).
 
 ### Surface summary
 

@@ -2,10 +2,9 @@
 
 ## Status
 
-Proposed. This is the v0.2 design; it is recorded for review before the code lands and will
-be built in stages (see Consequences). Sub-policies it defers — the exact guardrail
-thresholds, the precise resource annotations — are refined as each stage ships, not pinned
-here.
+Accepted. This is the v0.2 design, built in stages (see Consequences). Sub-policies it
+defers — the exact guardrail thresholds, the precise resource annotations — are refined as
+each stage ships, not pinned here.
 
 ## Context
 

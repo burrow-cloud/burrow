@@ -20,9 +20,11 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 
@@ -171,6 +173,111 @@ func (a *Adapter) DeleteWorkload(ctx context.Context, app string) error {
 		return fmt.Errorf("kube: deleting deployment %q: %w", app, err)
 	}
 	return nil
+}
+
+func (a *Adapter) Expose(ctx context.Context, spec controlplane.ExposeSpec) error {
+	services := a.client.CoreV1().Services(a.namespace)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, err := services.Get(ctx, spec.App, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			_, err := services.Create(ctx, a.buildService(spec), metav1.CreateOptions{})
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		desired := a.buildService(spec)
+		desired.ResourceVersion = existing.ResourceVersion
+		desired.Spec.ClusterIP = existing.Spec.ClusterIP // ClusterIP is immutable
+		_, err = services.Update(ctx, desired, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("kube: applying service %q: %w", spec.App, err)
+	}
+
+	ingresses := a.client.NetworkingV1().Ingresses(a.namespace)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, err := ingresses.Get(ctx, spec.App, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			_, err := ingresses.Create(ctx, a.buildIngress(spec), metav1.CreateOptions{})
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		desired := a.buildIngress(spec)
+		desired.ResourceVersion = existing.ResourceVersion
+		_, err = ingresses.Update(ctx, desired, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("kube: applying ingress %q: %w", spec.App, err)
+	}
+	return nil
+}
+
+func (a *Adapter) Unexpose(ctx context.Context, app string) error {
+	ingErr := a.client.NetworkingV1().Ingresses(a.namespace).Delete(ctx, app, metav1.DeleteOptions{})
+	svcErr := a.client.CoreV1().Services(a.namespace).Delete(ctx, app, metav1.DeleteOptions{})
+
+	// Treat the operation as not-found only when neither resource existed; otherwise we
+	// removed at least one and report any real failure.
+	if apierrors.IsNotFound(ingErr) && apierrors.IsNotFound(svcErr) {
+		return fmt.Errorf("kube: exposure for %q: %w", app, controlplane.ErrNotFound)
+	}
+	if ingErr != nil && !apierrors.IsNotFound(ingErr) {
+		return fmt.Errorf("kube: deleting ingress %q: %w", app, ingErr)
+	}
+	if svcErr != nil && !apierrors.IsNotFound(svcErr) {
+		return fmt.Errorf("kube: deleting service %q: %w", app, svcErr)
+	}
+	return nil
+}
+
+// buildService is a ClusterIP Service fronting the app's Pods, forwarding port 80 to the
+// app's container port.
+func (a *Adapter) buildService(spec controlplane.ExposeSpec) *corev1.Service {
+	labels := map[string]string{nameLabel: spec.App, managedByLabel: managedByValue}
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: spec.App, Namespace: a.namespace, Labels: labels},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{nameLabel: spec.App},
+			Ports: []corev1.ServicePort{{
+				Port:       80,
+				TargetPort: intstr.FromInt32(spec.Port),
+				Protocol:   corev1.ProtocolTCP,
+			}},
+		},
+	}
+}
+
+// buildIngress routes spec.Host to the app's Service on port 80.
+func (a *Adapter) buildIngress(spec controlplane.ExposeSpec) *networkingv1.Ingress {
+	labels := map[string]string{nameLabel: spec.App, managedByLabel: managedByValue}
+	pathType := networkingv1.PathTypePrefix
+	return &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: spec.App, Namespace: a.namespace, Labels: labels},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{
+				Host: spec.Host,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Path:     "/",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: spec.App,
+									Port: networkingv1.ServiceBackendPort{Number: 80},
+								},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
 }
 
 func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deployment {

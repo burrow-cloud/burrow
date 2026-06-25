@@ -4,11 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # merge_group runs the required checks against the queued PR merged onto main, so the
+  # merge queue tests the actual merge result (not just the PR branch in isolation).
+  # Without this trigger an enabled queue stalls — its required checks never run.
+  merge_group:
 
 jobs:
   # changes detects whether anything other than documentation changed, so the heavy build
   # and integration jobs can be skipped on docs-only PRs. A skipped required check still
-  # counts as passing for branch protection, so auto-merge keeps working.
+  # counts as passing for branch protection and the merge queue, so auto-merge keeps working.
   changes:
     name: detect changes
     runs-on: ubuntu-latest

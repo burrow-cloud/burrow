@@ -161,6 +161,26 @@ type Guardrail struct {
 	Description string `json:"description"`
 }
 
+// Provider mirrors a control-plane provider registry entry (ADR-0023). It carries no
+// token — only the non-secret registry: the vendor type, the capabilities it serves, and
+// the key under which its token lives in the burrow-credentials Secret.
+type Provider struct {
+	Name         string    `json:"name"`
+	Type         string    `json:"type"`
+	Capabilities []string  `json:"capabilities"`
+	SecretKey    string    `json:"secret_key"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// AddProviderRequest registers a vendor credential. The token is not part of this request:
+// the CLI writes it into the burrow-credentials Secret with the developer's kubeconfig, and
+// only the registry entry — naming the Secret key — flows through the control plane.
+type AddProviderRequest struct {
+	Name      string `json:"name,omitempty"`
+	Type      string `json:"type"`
+	SecretKey string `json:"secret_key,omitempty"`
+}
+
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "deploy"), req, &out)
@@ -237,6 +257,23 @@ func (c *Client) SetGuardrail(ctx context.Context, code, disposition string) ([]
 	body := map[string]string{"disposition": disposition}
 	err := c.do(ctx, http.MethodPut, "/v1/guard/"+url.PathEscape(code), body, &out)
 	return out.Guardrails, err
+}
+
+// AddProvider registers a vendor credential in the control-plane registry and returns the
+// recorded provider (ADR-0023).
+func (c *Client) AddProvider(ctx context.Context, req AddProviderRequest) (Provider, error) {
+	var out Provider
+	err := c.do(ctx, http.MethodPost, "/v1/providers", req, &out)
+	return out, err
+}
+
+// Providers lists the configured providers, name order.
+func (c *Client) Providers(ctx context.Context) ([]Provider, error) {
+	var out struct {
+		Providers []Provider `json:"providers"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/providers", nil, &out)
+	return out.Providers, err
 }
 
 // do issues a request, decoding a 2xx body into out and a non-2xx body into an APIError.

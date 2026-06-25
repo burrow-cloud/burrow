@@ -61,13 +61,15 @@ The shape (per ADR-0018):
   that **detects an existing controller** and installs one only if absent.
 - **`expose` / `unexpose`** — guarded operations through burrowd that create the
   Service + Ingress (RBAC grows to services/ingresses, no credential access).
-- **DNS automation** (DigitalOcean first): a provider seam, provider credentials held **only**
-  in the control plane and injected into burrowd (not RBAC-read), and `domain add/remove`
-  operations with scoped read/write/delete guardrails
+- **DNS automation** (DigitalOcean / Cloudflare): a **provider registry** — vendor tokens in
+  one `burrow-credentials` Secret with the structure in the database, read by burrowd through
+  a `resourceNames`-scoped `get` so adding or rotating a token needs no restart
+  ([ADR-0023](adr/0023-provider-credentials.md)) — a DNS-provider seam over it, and
+  `domain add/remove` operations with scoped read/write/delete guardrails
   ([ADR-0006](adr/0006-guardrails-in-the-control-plane.md)).
 
 **Build order (all in v0.2 scope):** (1) `expose`/`unexpose` + the reachability surface;
-(2) TLS via cert-manager; (3) the DNS-provider seam + `dns configure` + `domain` operations.
+(2) TLS via cert-manager; (3) the provider registry + DNS-provider seam + `domain` operations.
 Each stage is a thin slice that ends green. Stage 1 is landing: `expose`/`unexpose` are
 wired end to end behind the `expose_public` guardrail (confirm by default), and the
 **reachability surface** (`burrow reachability`, `burrow_reachability`) reports the chain —
@@ -76,9 +78,15 @@ full structured chain (ADR-0022's layered model). It reads the external address 
 app's own Ingress status, so it needs **no new RBAC**. `expose --tls` now requests an HTTPS
 certificate: the Ingress carries the `cert-manager.io/cluster-issuer` annotation + a TLS
 stanza, and cert-manager (once installed) fills the cert; reachability reports whether TLS is
-configured. Next: **DNS automation** (DigitalOcean first), and the **`burrow ingress install`**
-setup command (ingress-nginx + cert-manager + a Let's Encrypt issuer) that makes the manual
-prerequisites turnkey.
+configured. Stage 3 is beginning: the **provider registry** is landing — `burrow provider
+add/list` registers a vendor credential, writing the token into the one `burrow-credentials`
+Secret with the developer's kubeconfig and recording the non-secret registry (type,
+capabilities, Secret key) in the database; `burrow install` creates the empty Secret and
+burrowd's only secrets grant, a `resourceNames`-scoped `get` on it
+([ADR-0023](adr/0023-provider-credentials.md)). Next on top of it: the **DNS-provider seam**
+(DigitalOcean / Cloudflare adapters + a fake) and **`domain add/remove`** guarded operations,
+plus the **`burrow ingress install`** setup command (ingress-nginx + cert-manager + a Let's
+Encrypt issuer) that makes the manual prerequisites turnkey.
 
 ### Out of scope for v0.2 (explicit)
 

@@ -6,6 +6,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/burrow-cloud/burrow/controlplane"
@@ -18,20 +19,22 @@ var _ controlplane.Database = (*Database)(nil)
 // copied in and out, so callers never share Env/Command memory with the store — the
 // same isolation a real database gives. Errors can be injected per operation.
 type Database struct {
-	mu     sync.Mutex
-	byID   map[string]controlplane.Release
-	order  map[string][]string // app -> release IDs, save order, deduplicated
-	errs   map[Op]error
-	policy controlplane.Policy
+	mu        sync.Mutex
+	byID      map[string]controlplane.Release
+	order     map[string][]string // app -> release IDs, save order, deduplicated
+	providers map[string]controlplane.Provider
+	errs      map[Op]error
+	policy    controlplane.Policy
 }
 
 // NewDatabase returns an empty fake database with the default guardrail policy.
 func NewDatabase() *Database {
 	return &Database{
-		byID:   make(map[string]controlplane.Release),
-		order:  make(map[string][]string),
-		errs:   make(map[Op]error),
-		policy: controlplane.DefaultPolicy(),
+		byID:      make(map[string]controlplane.Release),
+		order:     make(map[string][]string),
+		providers: make(map[string]controlplane.Provider),
+		errs:      make(map[Op]error),
+		policy:    controlplane.DefaultPolicy(),
 	}
 }
 
@@ -130,6 +133,51 @@ func (d *Database) Releases(ctx context.Context, app string) ([]controlplane.Rel
 	out := make([]controlplane.Release, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, cloneRelease(d.byID[id]))
+	}
+	return out, nil
+}
+
+// SaveProvider upserts a provider by name. It stores only the non-secret registry entry.
+func (d *Database) SaveProvider(ctx context.Context, p controlplane.Provider) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpSaveProvider]; err != nil {
+		return err
+	}
+	if p.Name == "" {
+		return fmt.Errorf("database: save provider: empty name")
+	}
+	d.providers[p.Name] = cloneProvider(p)
+	return nil
+}
+
+func (d *Database) Provider(ctx context.Context, name string) (controlplane.Provider, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpProvider]; err != nil {
+		return controlplane.Provider{}, err
+	}
+	p, ok := d.providers[name]
+	if !ok {
+		return controlplane.Provider{}, fmt.Errorf("database: provider %q: %w", name, controlplane.ErrNotFound)
+	}
+	return cloneProvider(p), nil
+}
+
+func (d *Database) Providers(ctx context.Context) ([]controlplane.Provider, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpProviders]; err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(d.providers))
+	for name := range d.providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]controlplane.Provider, 0, len(names))
+	for _, name := range names {
+		out = append(out, cloneProvider(d.providers[name]))
 	}
 	return out, nil
 }

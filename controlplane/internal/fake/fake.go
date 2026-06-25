@@ -35,6 +35,9 @@ const (
 	OpReleases       Op = "Releases"
 	OpPolicy         Op = "Policy"
 	OpSetGuardrail   Op = "SetGuardrail"
+	OpSaveProvider   Op = "SaveProvider"
+	OpProvider       Op = "Provider"
+	OpProviders      Op = "Providers"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or
@@ -53,4 +56,15 @@ func cloneRelease(r controlplane.Release) controlplane.Release {
 		r.Command = c
 	}
 	return r
+}
+
+// cloneProvider returns a deep copy of p so a fake never aliases a caller's Capabilities
+// slice — matching a real database, which serializes its records.
+func cloneProvider(p controlplane.Provider) controlplane.Provider {
+	if p.Capabilities != nil {
+		c := make([]controlplane.Capability, len(p.Capabilities))
+		copy(c, p.Capabilities)
+		p.Capabilities = c
+	}
+	return p
 }

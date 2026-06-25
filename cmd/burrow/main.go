@@ -58,6 +58,7 @@ func newRootCmd() *cobra.Command {
 		newInstallCmd(),
 		newUpgradeCmd(),
 		newRegistryCmd(),
+		newProviderCmd(),
 		newDeployCmd(),
 		newStatusCmd(),
 		newLogsCmd(),

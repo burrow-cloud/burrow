@@ -54,6 +54,8 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/reachability", s.reachability)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
+	v1.HandleFunc("POST /v1/providers", s.addProvider)
+	v1.HandleFunc("GET /v1/providers", s.listProviders)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", requireToken(cfg.Token, v1))
@@ -184,6 +186,34 @@ func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, guardResponse{Guardrails: gs})
+}
+
+func (s *server) addProvider(w http.ResponseWriter, r *http.Request) {
+	var req controlplane.AddProviderRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	p, err := s.engine.AddProvider(r.Context(), req)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *server) listProviders(w http.ResponseWriter, r *http.Request) {
+	ps, err := s.engine.Providers(r.Context())
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, providersResponse{Providers: ps})
+}
+
+// providersResponse wraps the registry list so the shape can grow without breaking clients
+// that decode an object.
+type providersResponse struct {
+	Providers []controlplane.Provider `json:"providers"`
 }
 
 // guardResponse is the body of a guard list/set call: the full guardrail policy.

@@ -80,6 +80,44 @@ stringData:
   password: "{{.DBPassword}}"
   url: "postgres://burrow:{{.DBPassword}}@postgres:5432/burrow?sslmode=disable"
 ---
+# The vendor-credential Secret (ADR-0023): one opaque bag of provider tokens, one key per
+# provider. Install creates it empty; `burrow provider add` upserts keys with the developer's
+# kubeconfig. burrowd never writes it — it only reads it, through the scoped Role below.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: burrow-credentials
+  namespace: {{.Namespace}}
+type: Opaque
+---
+# burrowd reads provider tokens from burrow-credentials at call time so a rotation needs no
+# restart (ADR-0023). This is its only access to a Secret's contents: get on exactly that one
+# object in the control-plane namespace — not list, not watch, not write, and no other Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burrowd-credentials
+  namespace: {{.Namespace}}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["burrow-credentials"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burrowd-credentials
+  namespace: {{.Namespace}}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: burrowd-credentials
+subjects:
+  - kind: ServiceAccount
+    name: burrowd
+    namespace: {{.Namespace}}
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

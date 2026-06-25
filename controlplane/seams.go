@@ -189,4 +189,14 @@ type Database interface {
 	// SetGuardrail persists the disposition for one guardrail — the write behind
 	// `guard set`. It rejects an invalid disposition.
 	SetGuardrail(ctx context.Context, code GuardrailCode, d Disposition) error
+
+	// SaveProvider upserts a provider in the registry by name (ADR-0023). It stores only
+	// the non-secret registry entry — type, capabilities, and the key under which the token
+	// lives in the burrow-credentials Secret — never the token itself.
+	SaveProvider(ctx context.Context, p Provider) error
+	// Provider returns the provider with the given name, or ErrNotFound.
+	Provider(ctx context.Context, name string) (Provider, error)
+	// Providers returns all configured providers, name order. None yields an empty slice
+	// and no error.
+	Providers(ctx context.Context) ([]Provider, error)
 }

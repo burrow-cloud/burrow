@@ -6,8 +6,29 @@ on:
   pull_request:
 
 jobs:
+  # changes detects whether anything other than documentation changed, so the heavy build
+  # and integration jobs can be skipped on docs-only PRs. A skipped required check still
+  # counts as passing for branch protection, so auto-merge keeps working.
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+
   build:
     name: build, vet, fmt, test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -51,6 +72,8 @@ jobs:
 
   kube-integration:
     name: kubernetes integration (k3d)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

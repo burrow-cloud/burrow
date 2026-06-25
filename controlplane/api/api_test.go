@@ -26,9 +26,11 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake
 	d.SetPolicy(cp.Policy{MaxReplicas: 5})
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Registry: r, Database: d,
-		Clock:    fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
-		IDs:      fake.NewIDs(),
-		Resolver: fake.NewResolver(),
+		Clock:       fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs:         fake.NewIDs(),
+		Resolver:    fake.NewResolver(),
+		Credentials: fake.NewCredentials(),
+		DNS:         fake.NewDNSFactory(),
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)
@@ -61,8 +63,34 @@ func TestGuardEndpoints(t *testing.T) {
 	}
 }
 
+// newProviderAPI builds an API whose engine exposes the credential store and DNS factory, so
+// the provider-endpoint test can seed the token the CLI would have written and control the
+// vendor's verdict.
+func newProviderAPI(t *testing.T) (http.Handler, *fake.Credentials, *fake.DNSFactory) {
+	t.Helper()
+	d := fake.NewDatabase()
+	d.SetPolicy(cp.Policy{MaxReplicas: 5})
+	creds := fake.NewCredentials()
+	dnsF := fake.NewDNSFactory()
+	e, err := cp.New(cp.Deps{
+		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
+		Clock: fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)),
+		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
+		Credentials: creds, DNS: dnsF,
+	})
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	h, err := api.New(api.Config{Engine: e, Token: token})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	return h, creds, dnsF
+}
+
 func TestProviderEndpoints(t *testing.T) {
-	h, _, _, _ := newAPI(t)
+	h, creds, dnsF := newProviderAPI(t)
+	creds.Set("digitalocean", "tok") // the CLI wrote the token before POSTing
 
 	// Add a provider: capabilities are derived from the type, and the token is not part of
 	// the request (it is stored in the Secret by the CLI, not via the API).
@@ -79,6 +107,13 @@ func TestProviderEndpoints(t *testing.T) {
 	// An unsupported type is a 400 (ErrInvalid).
 	if rr := do(h, "POST", "/v1/providers", token, `{"type":"aws"}`); rr.Code != 400 {
 		t.Errorf("unknown type code = %d, want 400", rr.Code)
+	}
+
+	// A token the vendor rejects is a 400, and nothing is recorded.
+	dnsF.SetVerifyError(fmt.Errorf("rejected: %w", cp.ErrInvalid))
+	creds.Set("cloudflare", "bad")
+	if rr := do(h, "POST", "/v1/providers", token, `{"type":"cloudflare"}`); rr.Code != 400 {
+		t.Errorf("rejected token code = %d, want 400", rr.Code)
 	}
 
 	// The endpoints require the token like every other /v1 route.

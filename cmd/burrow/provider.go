@@ -78,24 +78,31 @@ func newProviderAddCmd() *cobra.Command {
 				key = providerName
 			}
 
-			// Record the registry entry first: burrowd validates the type and name, so a bad
-			// request fails before any Secret is written. Only then store the token with the
-			// developer's kubeconfig (ADR-0017) — burrowd never writes the credential.
-			c, err := o.client(ctx)
-			if err != nil {
-				return err
-			}
-			p, err := c.AddProvider(ctx, client.AddProviderRequest{Name: providerName, Type: providerType, SecretKey: key})
-			if err != nil {
-				return err
-			}
+			// Store the token first so burrowd can verify it: provider add writes the token
+			// into burrow-credentials with the developer's kubeconfig (ADR-0017), then asks
+			// burrowd to validate it against the vendor and record the registry entry. burrowd
+			// reads the token from the Secret — it never crosses the API. If validation fails,
+			// roll the Secret back so a rejected token is not left behind.
 			cs, err := clientset(o.kubeconfig)
 			if err != nil {
 				return err
 			}
-			if err := writeCredential(ctx, cs, o.namespace, p.SecretKey, token); err != nil {
-				return fmt.Errorf("provider %q is registered but storing its token failed: %w\n"+
-					"re-run `burrow provider add` to store the token", p.Name, err)
+			prior, existed, err := readCredential(ctx, cs, o.namespace, key)
+			if err != nil {
+				return err
+			}
+			if err := writeCredential(ctx, cs, o.namespace, key, token); err != nil {
+				return err
+			}
+			c, err := o.client(ctx)
+			if err != nil {
+				restoreCredential(ctx, cs, o.namespace, key, prior, existed)
+				return err
+			}
+			p, err := c.AddProvider(ctx, client.AddProviderRequest{Name: providerName, Type: providerType, SecretKey: key})
+			if err != nil {
+				restoreCredential(ctx, cs, o.namespace, key, prior, existed)
+				return err
 			}
 
 			human := fmt.Sprintf("registered provider %q (type %s, capabilities %s)\n"+
@@ -180,6 +187,52 @@ func writeCredential(ctx context.Context, cs kubernetes.Interface, namespace, ke
 	}
 	if err != nil {
 		return fmt.Errorf("writing credentials secret: %w", err)
+	}
+	return nil
+}
+
+// readCredential returns the token currently stored under key and whether it was present, so a
+// failed `provider add` can roll the Secret back to exactly its prior state. A missing Secret
+// reads as absent, not an error.
+func readCredential(ctx context.Context, cs kubernetes.Interface, namespace, key string) (string, bool, error) {
+	s, err := cs.CoreV1().Secrets(namespace).Get(ctx, credentialsSecretName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("reading credentials secret: %w", err)
+	}
+	v, ok := s.Data[key]
+	return string(v), ok, nil
+}
+
+// restoreCredential rolls key back to prior (or removes it if it was absent), best effort —
+// the caller is already returning the original failure, so a cleanup error must not mask it.
+func restoreCredential(ctx context.Context, cs kubernetes.Interface, namespace, key, prior string, existed bool) {
+	if existed {
+		_ = writeCredential(ctx, cs, namespace, key, prior)
+		return
+	}
+	_ = deleteCredential(ctx, cs, namespace, key)
+}
+
+// deleteCredential removes one key from the burrow-credentials Secret, leaving any other
+// providers' tokens in place.
+func deleteCredential(ctx context.Context, cs kubernetes.Interface, namespace, key string) error {
+	secrets := cs.CoreV1().Secrets(namespace)
+	s, err := secrets.Get(ctx, credentialsSecretName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading credentials secret: %w", err)
+	}
+	if _, ok := s.Data[key]; !ok {
+		return nil
+	}
+	delete(s.Data, key)
+	if _, err := secrets.Update(ctx, s, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("updating credentials secret: %w", err)
 	}
 	return nil
 }

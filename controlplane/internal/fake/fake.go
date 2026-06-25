@@ -38,6 +38,9 @@ const (
 	OpSaveProvider   Op = "SaveProvider"
 	OpProvider       Op = "Provider"
 	OpProviders      Op = "Providers"
+	OpToken          Op = "Token"
+	OpDNS            Op = "DNS"
+	OpVerifyAccess   Op = "VerifyAccess"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

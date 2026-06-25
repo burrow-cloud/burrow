@@ -49,12 +49,14 @@ func TestEngineDeployRollbackE2E(t *testing.T) {
 	t.Cleanup(func() { _ = client.CoreV1().Namespaces().Delete(context.Background(), nsName, metav1.DeleteOptions{}) })
 
 	engine, err := cp.New(cp.Deps{
-		Kubernetes: kube.New(client, nsName),
-		Registry:   registry.New(),
-		Database:   fake.NewDatabase(),
-		Clock:      fake.NewClock(time.Now()),
-		IDs:        fake.NewIDs(),
-		Resolver:   fake.NewResolver(),
+		Kubernetes:  kube.New(client, nsName),
+		Registry:    registry.New(),
+		Database:    fake.NewDatabase(),
+		Clock:       fake.NewClock(time.Now()),
+		IDs:         fake.NewIDs(),
+		Resolver:    fake.NewResolver(),
+		Credentials: fake.NewCredentials(),
+		DNS:         fake.NewDNSFactory(),
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)

@@ -200,3 +200,32 @@ type Database interface {
 	// and no error.
 	Providers(ctx context.Context) ([]Provider, error)
 }
+
+// Credentials is the seam over the one burrow-credentials Secret that holds every vendor
+// token (ADR-0023). The control plane reads a provider's token through it at call time, so a
+// rotation is picked up with no restart. It is the only path by which the control plane reads
+// a Secret's contents, and the production adapter is scoped to that single object — burrowd's
+// least-privilege Role grants `get` on exactly burrow-credentials and nothing else.
+type Credentials interface {
+	// Token returns the token stored under key in burrow-credentials, or ErrNotFound when
+	// the Secret or the key is absent.
+	Token(ctx context.Context, key string) (string, error)
+}
+
+// DNSProvider is the seam over a single vendor's DNS API, holding one provider's token
+// (ADR-0018, ADR-0023). burrowd is the only thing that talks to the vendor — the agent never
+// holds the token and never calls the API directly. v0.2 starts with verifying the token;
+// record management (for `domain add/remove`) lands on this seam in a following slice.
+type DNSProvider interface {
+	// VerifyAccess confirms the token authenticates and can manage DNS, with a cheap read
+	// call against the vendor. It returns ErrInvalid when the vendor rejects the token.
+	VerifyAccess(ctx context.Context) error
+}
+
+// DNSFactory builds a DNSProvider for a vendor type and token (ADR-0023). It is the seam that
+// lets the engine reach a vendor without importing its adapter: production maps each
+// ProviderType to its adapter (controlplane/dns), and tests substitute a fake. It returns
+// ErrNotImplemented for a type no adapter serves.
+type DNSFactory interface {
+	DNS(t ProviderType, token string) (DNSProvider, error)
+}

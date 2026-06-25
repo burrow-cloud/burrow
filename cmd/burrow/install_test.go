@@ -38,6 +38,7 @@ func TestRenderManifests(t *testing.T) {
 		`resources: ["ingresses"]`,              // ... and Ingresses
 		"name: burrow-credentials",              // the empty vendor-credential Secret (ADR-0023)
 		`resourceNames: ["burrow-credentials"]`, // burrowd's only secrets grant, scoped to it
+		"fieldPath: metadata.namespace",         // POD_NAMESPACE: where burrowd reads credentials
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered manifests missing %q", want)

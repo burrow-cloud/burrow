@@ -16,12 +16,14 @@ import (
 // randomness — every external dependency is an injected seam (ADR-0010), so the engine
 // is deterministic and unit-testable against fakes.
 type Engine struct {
-	k8s      Kubernetes
-	registry Registry
-	db       Database
-	clock    Clock
-	ids      IDSource
-	resolver Resolver
+	k8s         Kubernetes
+	registry    Registry
+	db          Database
+	clock       Clock
+	ids         IDSource
+	resolver    Resolver
+	credentials Credentials
+	dns         DNSFactory
 }
 
 // Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
@@ -34,6 +36,10 @@ type Deps struct {
 	Clock      Clock
 	IDs        IDSource
 	Resolver   Resolver
+	// Credentials reads vendor tokens from the burrow-credentials Secret (ADR-0023).
+	Credentials Credentials
+	// DNS builds a DNSProvider for a vendor type and token (ADR-0023).
+	DNS DNSFactory
 }
 
 // New constructs an Engine, validating that every seam is supplied and the policy is
@@ -53,14 +59,20 @@ func New(d Deps) (*Engine, error) {
 		return nil, fmt.Errorf("controlplane: New: IDs seam is required")
 	case d.Resolver == nil:
 		return nil, fmt.Errorf("controlplane: New: Resolver seam is required")
+	case d.Credentials == nil:
+		return nil, fmt.Errorf("controlplane: New: Credentials seam is required")
+	case d.DNS == nil:
+		return nil, fmt.Errorf("controlplane: New: DNS seam is required")
 	}
 	return &Engine{
-		k8s:      d.Kubernetes,
-		registry: d.Registry,
-		db:       d.Database,
-		clock:    d.Clock,
-		ids:      d.IDs,
-		resolver: d.Resolver,
+		k8s:         d.Kubernetes,
+		registry:    d.Registry,
+		db:          d.Database,
+		clock:       d.Clock,
+		ids:         d.IDs,
+		resolver:    d.Resolver,
+		credentials: d.Credentials,
+		dns:         d.DNS,
 	}, nil
 }
 

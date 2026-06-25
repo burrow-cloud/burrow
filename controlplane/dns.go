@@ -11,34 +11,6 @@ import (
 	"strings"
 )
 
-// AddDomainRequest points a host at an address through a configured DNS provider (ADR-0018).
-// The address is the cluster's external entry point — the ingress controller's IP or hostname,
-// which `burrow reachability` reports — so the agent supplies it explicitly rather than the
-// control plane guessing.
-type AddDomainRequest struct {
-	Host     string `json:"host"`
-	Provider string `json:"provider"`
-	Address  string `json:"address"`
-	// Confirm acknowledges the dns_write guardrail so the operation proceeds past it.
-	Confirm bool `json:"confirm,omitempty"`
-}
-
-// RemoveDomainRequest removes the DNS record a provider holds for a host (ADR-0018).
-type RemoveDomainRequest struct {
-	Host     string `json:"host"`
-	Provider string `json:"provider"`
-	// Confirm acknowledges the dns_delete guardrail so the operation proceeds past it.
-	Confirm bool `json:"confirm,omitempty"`
-}
-
-// DomainResult reports the DNS record a domain operation created, updated, or removed.
-type DomainResult struct {
-	Host     string `json:"host"`
-	Provider string `json:"provider"`
-	Type     string `json:"type,omitempty"`
-	Address  string `json:"address,omitempty"`
-}
-
 // AddDomain creates or updates a DNS record pointing Host at Address, through the named
 // provider (ADR-0018). It is a guarded operation: pointing a public hostname at the cluster is
 // a blast-radius change, so it trips the dns_write guardrail (confirm by default). The record

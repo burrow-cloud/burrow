@@ -98,3 +98,44 @@ type RollbackResult struct {
 	// SupersededReleaseID is the release that was running before the rollback.
 	SupersededReleaseID string `json:"superseded_release_id"`
 }
+
+// AddProviderRequest registers a vendor credential (ADR-0023). The token is deliberately not
+// part of this request: the CLI writes it into the burrow-credentials Secret with the
+// developer's kubeconfig (the setup-vs-operation split, ADR-0017), and only the non-secret
+// registry entry — naming the Secret key — flows through the control plane.
+type AddProviderRequest struct {
+	// Name identifies the provider; empty defaults to the type.
+	Name string `json:"name,omitempty"`
+	// Type is the vendor this provider talks to.
+	Type ProviderType `json:"type"`
+	// SecretKey is the key in burrow-credentials holding the token; empty defaults to Name.
+	SecretKey string `json:"secret_key,omitempty"`
+}
+
+// AddDomainRequest points a host at an address through a configured DNS provider (ADR-0018).
+// The address is the cluster's external entry point — the ingress controller's IP or hostname,
+// which `burrow reachability` reports — so the agent supplies it explicitly rather than the
+// control plane guessing.
+type AddDomainRequest struct {
+	Host     string `json:"host"`
+	Provider string `json:"provider"`
+	Address  string `json:"address"`
+	// Confirm acknowledges the dns_write guardrail so the operation proceeds past it.
+	Confirm bool `json:"confirm,omitempty"`
+}
+
+// RemoveDomainRequest removes the DNS record a provider holds for a host (ADR-0018).
+type RemoveDomainRequest struct {
+	Host     string `json:"host"`
+	Provider string `json:"provider"`
+	// Confirm acknowledges the dns_delete guardrail so the operation proceeds past it.
+	Confirm bool `json:"confirm,omitempty"`
+}
+
+// DomainResult reports the DNS record a domain operation created, updated, or removed.
+type DomainResult struct {
+	Host     string `json:"host"`
+	Provider string `json:"provider"`
+	Type     string `json:"type,omitempty"`
+	Address  string `json:"address,omitempty"`
+}

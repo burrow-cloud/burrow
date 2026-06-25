@@ -68,9 +68,10 @@ The shape (per ADR-0018):
 
 **Build order (all in v0.2 scope):** (1) `expose`/`unexpose` + the reachability surface;
 (2) TLS via cert-manager; (3) the DNS-provider seam + `dns configure` + `domain` operations.
-Each stage is a thin slice that ends green. Stage 1 is underway: the Kubernetes seam now has
-`Expose`/`Unexpose` (Service + Ingress) behind the adapter; the engine/API/CLI/MCP wiring and
-the reachability surface follow.
+Each stage is a thin slice that ends green. Stage 1 is underway: `expose`/`unexpose` are
+wired end to end (Kubernetes adapter → engine → API → client → CLI → MCP) behind the new
+`expose_public` guardrail (confirm by default), with RBAC for services/ingresses. The
+**reachability surface** is next, then TLS, then DNS.
 
 ### Out of scope for v0.2 (explicit)
 

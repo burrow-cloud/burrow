@@ -34,6 +34,8 @@ func TestRenderManifests(t *testing.T) {
 		"-listen=:8080",
 		"path: /healthz",
 		`verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]`,
+		`resources: ["services"]`,  // expose creates Services (ADR-0018)
+		`resources: ["ingresses"]`, // ... and Ingresses
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered manifests missing %q", want)

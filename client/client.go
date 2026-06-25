@@ -128,6 +128,13 @@ type RollbackResult struct {
 	SupersededReleaseID   string  `json:"superseded_release_id"`
 }
 
+type ExposeResult struct {
+	App  string `json:"app"`
+	Host string `json:"host"`
+	Port int32  `json:"port"`
+	URL  string `json:"url"`
+}
+
 type LogLine struct {
 	Pod       string    `json:"pod"`
 	Timestamp time.Time `json:"timestamp"`
@@ -175,6 +182,17 @@ func (c *Client) Scale(ctx context.Context, app string, replicas int32, confirm 
 	body := map[string]any{"replicas": replicas, "confirm": confirm}
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "scale"), body, &out)
 	return out, err
+}
+
+func (c *Client) Expose(ctx context.Context, app, host string, port int32, confirm bool) (ExposeResult, error) {
+	var out ExposeResult
+	body := map[string]any{"host": host, "port": port, "confirm": confirm}
+	err := c.do(ctx, http.MethodPost, c.appPath(app, "expose"), body, &out)
+	return out, err
+}
+
+func (c *Client) Unexpose(ctx context.Context, app string) error {
+	return c.do(ctx, http.MethodPost, c.appPath(app, "unexpose"), nil, nil)
 }
 
 func (c *Client) appPath(app, verb string) string {

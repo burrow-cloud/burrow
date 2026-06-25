@@ -49,6 +49,8 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/logs", s.logs)
 	v1.HandleFunc("POST /v1/apps/{app}/rollback", s.rollback)
 	v1.HandleFunc("POST /v1/apps/{app}/scale", s.scale)
+	v1.HandleFunc("POST /v1/apps/{app}/expose", s.expose)
+	v1.HandleFunc("POST /v1/apps/{app}/unexpose", s.unexpose)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
 
@@ -123,6 +125,28 @@ func (s *server) scale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) expose(w http.ResponseWriter, r *http.Request) {
+	var req controlplane.ExposeRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	req.App = r.PathValue("app") // the path is authoritative for the app name
+	res, err := s.engine.Expose(r.Context(), req)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) unexpose(w http.ResponseWriter, r *http.Request) {
+	if err := s.engine.Unexpose(r.Context(), r.PathValue("app")); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app")})
 }
 
 func (s *server) guardList(w http.ResponseWriter, r *http.Request) {

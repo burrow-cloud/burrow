@@ -220,6 +220,34 @@ func TestScaleAndGuardrail(t *testing.T) {
 	}
 }
 
+func TestExposeEndpoints(t *testing.T) {
+	h, _, r, d := newAPI(t)
+	d.SetPolicy(cp.DefaultPolicy().With(cp.GuardrailExposePublic, cp.DispositionAllow))
+	r.Add("img:1", "sha256:1")
+	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
+
+	rec := do(h, "POST", "/v1/apps/web/expose", token, `{"host":"web.example.com","port":8080}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "web.example.com") {
+		t.Fatalf("expose = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, "POST", "/v1/apps/web/unexpose", token, ""); rec.Code != http.StatusOK {
+		t.Fatalf("unexpose = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, "POST", "/v1/apps/web/unexpose", token, ""); rec.Code != http.StatusNotFound {
+		t.Errorf("second unexpose = %d, want 404", rec.Code)
+	}
+}
+
+func TestExposeGuardrailHolds(t *testing.T) {
+	h, _, r, _ := newAPI(t)
+	r.Add("img:1", "sha256:1")
+	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
+	// newAPI leaves expose_public unset → deny, so exposure is refused (422 guardrail).
+	if rec := do(h, "POST", "/v1/apps/web/expose", token, `{"host":"web.example.com","port":8080}`); rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("expose code = %d, want 422", rec.Code)
+	}
+}
+
 func TestRollback(t *testing.T) {
 	h, k, r, _ := newAPI(t)
 	r.Add("img:1", "sha256:1")

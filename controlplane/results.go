@@ -43,6 +43,23 @@ type StatusResult struct {
 }
 
 // ScaleResult reports the outcome of a scale.
+// ExposeRequest describes making an app reachable at a hostname (ADR-0018).
+type ExposeRequest struct {
+	App  string `json:"app"`
+	Host string `json:"host"`
+	Port int32  `json:"port"`
+	// Confirm acknowledges the expose_public guardrail so the operation proceeds past it.
+	Confirm bool `json:"confirm,omitempty"`
+}
+
+// ExposeResult reports the outcome of exposing an app.
+type ExposeResult struct {
+	App  string `json:"app"`
+	Host string `json:"host"`
+	Port int32  `json:"port"`
+	URL  string `json:"url"`
+}
+
 type ScaleResult struct {
 	App              string `json:"app"`
 	PreviousReplicas int32  `json:"previous_replicas"`

@@ -289,6 +289,46 @@ func TestGuardrailsListAndSet(t *testing.T) {
 	}
 }
 
+func TestExpose(t *testing.T) {
+	ctx := context.Background()
+	e, k, r, _, _ := newEngine(t, cp.DefaultPolicy())
+	r.Add("img:1", "sha256:1")
+
+	// Exposing before deploy is ErrNotFound (confirm to get past the expose guardrail).
+	if _, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080, Confirm: true}); !errors.Is(err, cp.ErrNotFound) {
+		t.Fatalf("expose before deploy = %v, want ErrNotFound", err)
+	}
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	// Without confirm, the expose_public guardrail holds it for confirmation (the default).
+	_, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080})
+	if g, ok := cp.AsGuardrail(err); !ok || g.Code != cp.GuardrailExposePublic || !g.NeedsConfirmation {
+		t.Fatalf("expose without confirm = %v, want expose_public needs-confirmation", err)
+	}
+
+	// With confirm it proceeds and records the exposure.
+	res, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080, Confirm: true})
+	if err != nil {
+		t.Fatalf("expose confirmed: %v", err)
+	}
+	if res.Host != "web.example.com" || res.URL != "http://web.example.com" {
+		t.Errorf("expose result = %+v", res)
+	}
+	if exp, ok := k.Exposure("web"); !ok || exp.Host != "web.example.com" || exp.Port != 8080 {
+		t.Errorf("recorded exposure = %+v ok=%v", exp, ok)
+	}
+
+	// Unexpose removes it; a second unexpose is ErrNotFound.
+	if err := e.Unexpose(ctx, "web"); err != nil {
+		t.Fatalf("unexpose: %v", err)
+	}
+	if err := e.Unexpose(ctx, "web"); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("second unexpose = %v, want ErrNotFound", err)
+	}
+}
+
 func TestRollback(t *testing.T) {
 	ctx := context.Background()
 	e, k, r, d, _ := newEngine(t, permissive())

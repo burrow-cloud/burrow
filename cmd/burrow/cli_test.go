@@ -121,6 +121,21 @@ func TestRollback(t *testing.T) {
 	}
 }
 
+func TestExposeCommand(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/v1/apps/web/expose" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "host": "web.example.com", "port": 8080, "url": "http://web.example.com"})
+	}, "expose", "web", "--host", "web.example.com", "--port", "8080")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "exposed web at web.example.com") {
+		t.Errorf("output = %q", out)
+	}
+}
+
 func TestGuardList(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.URL.Path != "/v1/guard" {

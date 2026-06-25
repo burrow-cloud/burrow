@@ -20,7 +20,18 @@ control plane forward in place ([ADR-0016](adr/0016-cli-distribution-and-upgrade
 The detail lives in git history, the now-green tests (unit + k3d integration + the capstone
 e2e), and the ADRs.
 
-## Now: v0.2 — reach a deployed app at a URL (ingress, domains, TLS)
+## Now: private registry auth (landing first)
+
+Real apps live in private registries, so pulling a private image is table-stakes and lands
+ahead of the URL work. `burrow registry login/logout/list` provisions a `dockerconfigjson`
+pull Secret with the developer's kubeconfig and attaches it to the app namespace's default
+ServiceAccount, so app Pods inherit it — the control plane, burrowd's RBAC, and the deploy
+path are untouched, and the credential never crosses MCP
+([ADR-0017](adr/0017-private-registry-authentication.md)). This also makes explicit the
+**setup-vs-operation boundary**: `install`, `upgrade`, and `registry` act with the
+kubeconfig; `deploy`/`status`/`logs`/`rollback`/`scale` go through burrowd.
+
+## Next: v0.2 — reach a deployed app at a URL (ingress, domains, TLS)
 
 **Goal:** an agent can make a deployed app reachable at a real hostname over HTTPS, on the
 user's own cluster — the missing half of "deploy and operate" (today a deployed app is only

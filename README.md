@@ -67,6 +67,9 @@ go build -o burrow-mcp ./cmd/burrow-mcp
 # Point your agent at the MCP server — it auto-connects via your kubeconfig, no extra config.
 #   (Claude Code, for example:)  claude mcp add burrow "$(pwd)/burrow-mcp"
 
+# Using a private registry? Give the cluster a pull credential once (reuses your docker login):
+./burrow registry login ghcr.io --from-docker-config
+
 # Build and push your image to a registry your cluster can pull from, then ask your agent to
 # deploy it — or do it directly with the CLI:
 ./burrow deploy web --image nginx:alpine

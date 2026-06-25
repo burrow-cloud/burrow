@@ -49,6 +49,8 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/logs", s.logs)
 	v1.HandleFunc("POST /v1/apps/{app}/rollback", s.rollback)
 	v1.HandleFunc("POST /v1/apps/{app}/scale", s.scale)
+	v1.HandleFunc("GET /v1/guard", s.guardList)
+	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", requireToken(cfg.Token, v1))
@@ -121,6 +123,43 @@ func (s *server) scale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) guardList(w http.ResponseWriter, r *http.Request) {
+	gs, err := s.engine.Guardrails(r.Context())
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, guardResponse{Guardrails: gs})
+}
+
+func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
+	var req guardSetRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	code := controlplane.GuardrailCode(r.PathValue("code"))
+	if err := s.engine.SetGuardrail(r.Context(), code, controlplane.Disposition(req.Disposition)); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	gs, err := s.engine.Guardrails(r.Context())
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, guardResponse{Guardrails: gs})
+}
+
+// guardResponse is the body of a guard list/set call: the full guardrail policy.
+type guardResponse struct {
+	Guardrails []controlplane.GuardrailInfo `json:"guardrails"`
+}
+
+// guardSetRequest is the body of a guard set call (the guardrail code comes from the path).
+type guardSetRequest struct {
+	Disposition string `json:"disposition"`
 }
 
 func health(w http.ResponseWriter, _ *http.Request) {

@@ -134,6 +134,12 @@ type LogLine struct {
 	Message   string    `json:"message"`
 }
 
+type Guardrail struct {
+	Code        string `json:"code"`
+	Disposition string `json:"disposition"`
+	Description string `json:"description"`
+}
+
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "deploy"), req, &out)
@@ -173,6 +179,25 @@ func (c *Client) Scale(ctx context.Context, app string, replicas int32, confirm 
 
 func (c *Client) appPath(app, verb string) string {
 	return "/v1/apps/" + url.PathEscape(app) + "/" + verb
+}
+
+// Guardrails lists the control-plane guardrails and their current dispositions.
+func (c *Client) Guardrails(ctx context.Context) ([]Guardrail, error) {
+	var out struct {
+		Guardrails []Guardrail `json:"guardrails"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/guard", nil, &out)
+	return out.Guardrails, err
+}
+
+// SetGuardrail sets a guardrail's disposition and returns the updated policy.
+func (c *Client) SetGuardrail(ctx context.Context, code, disposition string) ([]Guardrail, error) {
+	var out struct {
+		Guardrails []Guardrail `json:"guardrails"`
+	}
+	body := map[string]string{"disposition": disposition}
+	err := c.do(ctx, http.MethodPut, "/v1/guard/"+url.PathEscape(code), body, &out)
+	return out.Guardrails, err
 }
 
 // do issues a request, decoding a 2xx body into out and a non-2xx body into an APIError.

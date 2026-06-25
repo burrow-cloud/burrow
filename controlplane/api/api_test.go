@@ -39,6 +39,27 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake
 	return h, k, r, d
 }
 
+func TestGuardEndpoints(t *testing.T) {
+	h, _, _, _ := newAPI(t)
+
+	if rr := do(h, "GET", "/v1/guard", token, ""); rr.Code != 200 || !strings.Contains(rr.Body.String(), "scale_to_zero") {
+		t.Fatalf("guard list = %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr := do(h, "PUT", "/v1/guard/scale_to_zero", token, `{"disposition":"allow"}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"disposition":"allow"`) {
+		t.Fatalf("guard set = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// Invalid disposition and unknown guardrail are rejected (ErrInvalid -> 400).
+	if rr := do(h, "PUT", "/v1/guard/scale_to_zero", token, `{"disposition":"nope"}`); rr.Code != 400 {
+		t.Errorf("invalid disposition code = %d, want 400", rr.Code)
+	}
+	if rr := do(h, "PUT", "/v1/guard/bogus", token, `{"disposition":"allow"}`); rr.Code != 400 {
+		t.Errorf("unknown guardrail code = %d, want 400", rr.Code)
+	}
+}
+
 func do(h http.Handler, method, path, tok, body string) *httptest.ResponseRecorder {
 	var br io.Reader
 	if body != "" {

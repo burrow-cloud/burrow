@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -56,11 +57,69 @@ func run() error {
 	}
 
 	ctx := context.Background()
+
+	// Start the HTTP server immediately and reflect startup state through readiness, rather
+	// than blocking the server on the database. /healthz returns 503 until the control plane
+	// has connected to Postgres, migrated, and wired its API, then 200 — so burrowd is up in
+	// milliseconds, and a database that is slow or briefly unreachable shows as not-ready
+	// instead of blocking startup or crash-looping.
+	var (
+		ready      atomic.Bool
+		apiHandler atomic.Pointer[http.Handler]
+		store      atomic.Pointer[postgres.Store]
+	)
+	go func() {
+		if err := startControlPlane(ctx, dsn, token, &apiHandler, &store, &ready); err != nil {
+			log.Printf("burrowd: control plane failed to start (staying not-ready): %v", err)
+		}
+	}()
+	defer func() {
+		if s := store.Load(); s != nil {
+			s.Close()
+		}
+	}()
+
+	srv := &http.Server{
+		Addr:              *listen,
+		Handler:           serverHandler(&ready, &apiHandler),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return serve(srv)
+}
+
+// serverHandler serves /healthz as the readiness signal (503 until the control plane has
+// finished starting) and delegates everything else to the API handler once it is wired.
+func serverHandler(ready *atomic.Bool, apiHandler *atomic.Pointer[http.Handler]) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			http.Error(w, "control plane starting up", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok"}`)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if h := apiHandler.Load(); h != nil {
+			(*h).ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "control plane starting up", http.StatusServiceUnavailable)
+	})
+	return mux
+}
+
+// startControlPlane connects to the database, applies migrations, wires the
+// Kubernetes/engine/API stack, and flips readiness. It runs in the background so the HTTP
+// server is serving (and answering health checks) immediately. A database that is slow or
+// briefly unreachable leaves burrowd not-ready rather than blocking startup or exiting, so
+// it does not crash-loop while Postgres is coming up.
+func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomic.Pointer[http.Handler], storeOut *atomic.Pointer[postgres.Store], ready *atomic.Bool) error {
 	store, err := openWithRetry(ctx, dsn, 2*time.Minute)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	storeOut.Store(store)
 	if err := store.Migrate(ctx, version); err != nil {
 		return err
 	}
@@ -96,13 +155,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	return serve(srv)
+	apiHandler.Store(&handler)
+	ready.Store(true)
+	log.Printf("burrowd %s ready", version)
+	return nil
 }
 
 // serve runs the HTTP server and shuts it down gracefully on SIGINT/SIGTERM.

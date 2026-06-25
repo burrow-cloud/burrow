@@ -15,6 +15,9 @@ type DeployRequest struct {
 	Env      map[string]string `json:"env,omitempty"`
 	Command  []string          `json:"command,omitempty"`
 	Replicas int32             `json:"replicas"`
+	// Confirm acknowledges a guardrail whose disposition is confirm, letting the operation
+	// proceed past it (ADR-0020). It has no effect on a guardrail set to deny.
+	Confirm bool `json:"confirm,omitempty"`
 }
 
 // DeployResult reports the outcome of a successful deploy.

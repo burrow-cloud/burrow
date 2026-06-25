@@ -101,7 +101,7 @@ func TestDeploySaveErrorBeforeApply(t *testing.T) {
 // a failed operation must never change what is running.
 func TestSeededSchedule(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, d, _ := newEngine(t, cp.Policy{MaxReplicas: 1000, AllowScaleToZero: true})
+	e, k, r, d, _ := newEngine(t, cp.Policy{MaxReplicas: 1000}.With(cp.GuardrailScaleToZero, cp.DispositionAllow))
 
 	images := []string{"img:a", "img:b", "img:c"}
 	for _, im := range images {
@@ -144,7 +144,7 @@ func TestSeededSchedule(t *testing.T) {
 				expectedImage = res.Release.Image
 			}
 		case 2:
-			_, _ = e.Scale(ctx, app, int32(1+rng.Intn(5)))
+			_, _ = e.Scale(ctx, app, int32(1+rng.Intn(5)), false)
 		case 3:
 			res, err := e.Rollback(ctx, app)
 			if err == nil {

@@ -114,27 +114,49 @@ func (r Release) Validate() error {
 // operations against (ADR-0006). This type carries the limits; the evaluation that
 // gates, constrains, or refuses an operation against them is the deploy engine's job.
 type Policy struct {
-	// MaxReplicas is the largest replica count a single operation may request. A
-	// scale or deploy above it is refused. Must be positive.
+	// Dispositions configures how each guardrail is enforced — allow, confirm, or deny
+	// (ADR-0020), keyed by GuardrailCode. A guardrail with no entry here defaults to deny:
+	// the safe default.
+	Dispositions map[GuardrailCode]Disposition
+	// MaxReplicas is the largest replica count permitted before the replica_ceiling
+	// guardrail's disposition applies. Must be positive.
 	MaxReplicas int32
-	// AllowScaleToZero permits scaling an app down to zero replicas. When false,
-	// scale-to-zero is a gated operation rather than a silent one.
-	AllowScaleToZero bool
 }
 
 // DefaultPolicy returns the conservative starting guardrail policy: a modest replica
-// ceiling and scale-to-zero treated as dangerous.
+// ceiling, with both the ceiling and scale-to-zero denied until the operator relaxes them
+// (ADR-0020). Scale-to-zero moves to confirm once the confirmation flag is wired through
+// the CLI and MCP surfaces.
 func DefaultPolicy() Policy {
 	return Policy{
-		MaxReplicas:      50,
-		AllowScaleToZero: false,
+		Dispositions: map[GuardrailCode]Disposition{
+			GuardrailReplicaCeiling: DispositionDeny,
+			GuardrailScaleToZero:    DispositionDeny,
+		},
+		MaxReplicas: 50,
 	}
+}
+
+// With returns a copy of the policy with code's disposition set, leaving the receiver
+// unchanged — the basis for `guard set` and for composing policies.
+func (p Policy) With(code GuardrailCode, d Disposition) Policy {
+	next := make(map[GuardrailCode]Disposition, len(p.Dispositions)+1)
+	for k, v := range p.Dispositions {
+		next[k] = v
+	}
+	next[code] = d
+	return Policy{Dispositions: next, MaxReplicas: p.MaxReplicas}
 }
 
 // Validate reports whether the policy is internally coherent.
 func (p Policy) Validate() error {
 	if p.MaxReplicas <= 0 {
 		return fmt.Errorf("policy MaxReplicas %d must be positive", p.MaxReplicas)
+	}
+	for code, d := range p.Dispositions {
+		if !d.Valid() {
+			return fmt.Errorf("policy disposition %q for guardrail %q is not valid", d, code)
+		}
 	}
 	return nil
 }

@@ -118,28 +118,6 @@ type Credentials interface {
 	Token(ctx context.Context, key string) (string, error)
 }
 
-// DNSRecordType is the kind of DNS record the control plane manages (ADR-0018). A host is
-// pointed at an IPv4 address with an A record or at another hostname with a CNAME; the engine
-// chooses based on the address it is given.
-type DNSRecordType string
-
-const (
-	RecordA     DNSRecordType = "A"
-	RecordCNAME DNSRecordType = "CNAME"
-)
-
-// DNSRecord is one record the control plane manages on the user's behalf.
-type DNSRecord struct {
-	// Type is A or CNAME.
-	Type DNSRecordType
-	// Name is the fully-qualified host, e.g. app.example.com.
-	Name string
-	// Value is the target: an IPv4 address for an A record, a hostname for a CNAME.
-	Value string
-	// TTL is the record's time to live in seconds; 0 means the provider's default.
-	TTL int
-}
-
 // DNSProvider is the seam over a single vendor's DNS API, holding one provider's token
 // (ADR-0018, ADR-0023). burrowd is the only thing that talks to the vendor — the agent never
 // holds the token and never calls the API directly. Writes are scoped to the zones the

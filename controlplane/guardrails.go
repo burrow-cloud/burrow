@@ -41,6 +41,12 @@ const (
 	// GuardrailExposePublic: the operation would make an app reachable from outside the
 	// cluster (expose it at a hostname).
 	GuardrailExposePublic GuardrailCode = "expose_public"
+	// GuardrailDNSWrite: the operation would create or update a public DNS record at a
+	// configured provider (ADR-0018).
+	GuardrailDNSWrite GuardrailCode = "dns_write"
+	// GuardrailDNSDelete: the operation would delete a public DNS record at a configured
+	// provider — the destructive side of DNS management (ADR-0018).
+	GuardrailDNSDelete GuardrailCode = "dns_delete"
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through
@@ -58,6 +64,8 @@ var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailReplicaCeiling, Description: "deploy or scale above the replica ceiling"},
 	{Code: GuardrailScaleToZero, Description: "scale an application to zero replicas"},
 	{Code: GuardrailExposePublic, Description: "expose an application to the public internet at a hostname"},
+	{Code: GuardrailDNSWrite, Description: "create or update a public DNS record at a configured provider"},
+	{Code: GuardrailDNSDelete, Description: "delete a public DNS record at a configured provider"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.

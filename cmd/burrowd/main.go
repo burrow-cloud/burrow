@@ -111,7 +111,7 @@ func serve(srv *http.Server) error {
 
 	errc := make(chan error, 1)
 	go func() {
-		log.Printf("burrowd v%s listening on %s", version, srv.Addr)
+		log.Printf("burrowd %s listening on %s", version, srv.Addr)
 		errc <- srv.ListenAndServe()
 	}()
 

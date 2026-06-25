@@ -236,6 +236,9 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 	if req.Port <= 0 {
 		return ExposeResult{}, fmt.Errorf("expose %s: port %d must be positive: %w", req.App, req.Port, ErrInvalid)
 	}
+	if req.TLS && req.Issuer == "" {
+		return ExposeResult{}, fmt.Errorf("expose %s: TLS requires an issuer: %w", req.App, ErrInvalid)
+	}
 
 	pol, err := e.db.Policy(ctx)
 	if err != nil {
@@ -254,10 +257,14 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 		return ExposeResult{}, fmt.Errorf("expose %s: reading workload: %w", req.App, err)
 	}
 
-	if err := e.k8s.Expose(ctx, ExposeSpec{App: req.App, Host: req.Host, Port: req.Port}); err != nil {
+	if err := e.k8s.Expose(ctx, ExposeSpec{App: req.App, Host: req.Host, Port: req.Port, TLS: req.TLS, Issuer: req.Issuer}); err != nil {
 		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
 	}
-	return ExposeResult{App: req.App, Host: req.Host, Port: req.Port, URL: "http://" + req.Host}, nil
+	scheme := "http"
+	if req.TLS {
+		scheme = "https"
+	}
+	return ExposeResult{App: req.App, Host: req.Host, Port: req.Port, URL: scheme + "://" + req.Host}, nil
 }
 
 // Reachability reports, link by link, whether an app is reachable at its hostname (ADR-0018):
@@ -288,6 +295,7 @@ func (e *Engine) Reachability(ctx context.Context, app string) (ReachabilityResu
 	res.Exposed = exp.Exposed
 	res.Host = exp.Host
 	res.Address = exp.Address
+	res.TLS = exp.TLS
 
 	if exp.Exposed && exp.Host != "" {
 		if addrs, err := e.resolver.LookupHost(ctx, exp.Host); err == nil {
@@ -318,6 +326,8 @@ func reachabilitySummary(r ReachabilityResult) string {
 		return fmt.Sprintf("%s is exposed at %s but no external address is assigned yet — is an ingress controller installed and running?", r.App, r.Host)
 	case !r.DNSPointsAtCluster:
 		return fmt.Sprintf("%s is exposed at %s, but DNS for %s doesn't point at the cluster yet — add a DNS record pointing %s at %s.", r.App, r.Host, r.Host, r.Host, r.Address)
+	case r.TLS:
+		return fmt.Sprintf("%s is reachable at https://%s.", r.App, r.Host)
 	default:
 		return fmt.Sprintf("%s is reachable at http://%s.", r.App, r.Host)
 	}

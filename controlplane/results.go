@@ -48,6 +48,10 @@ type ExposeRequest struct {
 	App  string `json:"app"`
 	Host string `json:"host"`
 	Port int32  `json:"port"`
+	// TLS requests an HTTPS certificate for Host via cert-manager; Issuer names the
+	// ClusterIssuer to use.
+	TLS    bool   `json:"tls,omitempty"`
+	Issuer string `json:"issuer,omitempty"`
 	// Confirm acknowledges the expose_public guardrail so the operation proceeds past it.
 	Confirm bool `json:"confirm,omitempty"`
 }
@@ -70,6 +74,7 @@ type ReachabilityResult struct {
 	Exposed            bool     `json:"exposed"`
 	Host               string   `json:"host,omitempty"`
 	Address            string   `json:"address,omitempty"` // controller-assigned external address
+	TLS                bool     `json:"tls"`               // the Ingress requests an HTTPS certificate
 	DNSPointsAtCluster bool     `json:"dns_points_at_cluster"`
 	DNSAddresses       []string `json:"dns_addresses,omitempty"`
 	Reachable          bool     `json:"reachable"`

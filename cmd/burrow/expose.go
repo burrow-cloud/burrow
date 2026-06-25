@@ -12,9 +12,9 @@ import (
 
 func newExposeCmd() *cobra.Command {
 	o := &commonOpts{}
-	var host string
+	var host, issuer string
 	var port int
-	var confirm bool
+	var tls, confirm bool
 	cmd := &cobra.Command{
 		Use:   "expose <app>",
 		Short: "Make an app reachable at a hostname (creates a Service + Ingress)",
@@ -31,7 +31,7 @@ func newExposeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Expose(ctx, args[0], host, int32(port), confirm)
+			res, err := c.Expose(ctx, args[0], host, int32(port), tls, issuer, confirm)
 			if err != nil {
 				return err
 			}
@@ -43,6 +43,8 @@ func newExposeCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().StringVar(&host, "host", "", "external hostname to route to the app (required)")
 	cmd.Flags().IntVar(&port, "port", 0, "the app's container port to forward to (required)")
+	cmd.Flags().BoolVar(&tls, "tls", false, "request an HTTPS certificate for the host via cert-manager")
+	cmd.Flags().StringVar(&issuer, "tls-issuer", "letsencrypt", "cert-manager ClusterIssuer to request the certificate from")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }

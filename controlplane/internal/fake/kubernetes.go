@@ -67,7 +67,7 @@ func (k *Kubernetes) ExposureStatus(ctx context.Context, app string) (controlpla
 	if !ok {
 		return controlplane.ExposureStatus{}, nil
 	}
-	return controlplane.ExposureStatus{Exposed: true, Host: spec.Host, Address: k.addresses[app]}, nil
+	return controlplane.ExposureStatus{Exposed: true, Host: spec.Host, Address: k.addresses[app], TLS: spec.TLS}, nil
 }
 
 // SetError makes op return err until cleared with SetError(op, nil).

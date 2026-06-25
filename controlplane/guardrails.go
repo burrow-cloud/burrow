@@ -38,6 +38,9 @@ const (
 	GuardrailReplicaCeiling GuardrailCode = "replica_ceiling"
 	// GuardrailScaleToZero: the operation would scale to zero replicas.
 	GuardrailScaleToZero GuardrailCode = "scale_to_zero"
+	// GuardrailExposePublic: the operation would make an app reachable from outside the
+	// cluster (expose it at a hostname).
+	GuardrailExposePublic GuardrailCode = "expose_public"
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through
@@ -54,6 +57,7 @@ type GuardrailInfo struct {
 var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailReplicaCeiling, Description: "deploy or scale above the replica ceiling"},
 	{Code: GuardrailScaleToZero, Description: "scale an application to zero replicas"},
+	{Code: GuardrailExposePublic, Description: "expose an application to the public internet at a hostname"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.
@@ -154,6 +158,12 @@ func (p Policy) enforce(op string, code GuardrailCode, confirmed bool, what stri
 			Message:   what + " is denied by the current guardrail policy",
 		}
 	}
+}
+
+// evaluateGuardrail applies a categorical guardrail — one that always trips when its
+// operation is attempted, like public exposure — using the configured disposition.
+func (p Policy) evaluateGuardrail(op string, code GuardrailCode, confirmed bool, what string) error {
+	return p.enforce(op, code, confirmed, what, 0, 0)
 }
 
 // disposition returns the configured disposition for a guardrail, defaulting to deny when

@@ -63,6 +63,8 @@ func newRootCmd() *cobra.Command {
 		newLogsCmd(),
 		newRollbackCmd(),
 		newScaleCmd(),
+		newExposeCmd(),
+		newUnexposeCmd(),
 		newGuardCmd(),
 	)
 	return root

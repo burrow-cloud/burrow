@@ -218,6 +218,58 @@ func (e *Engine) Scale(ctx context.Context, app string, replicas int32, confirm 
 	return ScaleResult{App: app, PreviousReplicas: prev, Replicas: replicas}, nil
 }
 
+// Expose makes an app reachable at a hostname through an Ingress (ADR-0018). It is a guarded
+// operation: public exposure trips the expose_public guardrail, which holds for confirmation
+// by default. The app must already be deployed.
+func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, error) {
+	if err := (App{Name: req.App}).Validate(); err != nil {
+		return ExposeResult{}, fmt.Errorf("expose: %w: %w", ErrInvalid, err)
+	}
+	if req.Host == "" {
+		return ExposeResult{}, fmt.Errorf("expose %s: host is empty: %w", req.App, ErrInvalid)
+	}
+	if req.Port <= 0 {
+		return ExposeResult{}, fmt.Errorf("expose %s: port %d must be positive: %w", req.App, req.Port, ErrInvalid)
+	}
+
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return ExposeResult{}, fmt.Errorf("expose %s: loading guardrail policy: %w", req.App, err)
+	}
+	if err := pol.evaluateGuardrail("expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host)); err != nil {
+		return ExposeResult{}, err
+	}
+
+	// The app must be deployed: exposing a workload that does not exist would create a
+	// Service with no backends.
+	if _, err := e.k8s.WorkloadStatus(ctx, req.App); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ExposeResult{}, fmt.Errorf("expose %s: no running workload — deploy it first: %w", req.App, err)
+		}
+		return ExposeResult{}, fmt.Errorf("expose %s: reading workload: %w", req.App, err)
+	}
+
+	if err := e.k8s.Expose(ctx, ExposeSpec{App: req.App, Host: req.Host, Port: req.Port}); err != nil {
+		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
+	}
+	return ExposeResult{App: req.App, Host: req.Host, Port: req.Port, URL: "http://" + req.Host}, nil
+}
+
+// Unexpose removes an app's exposure (its Service and Ingress). It does not affect the
+// workload. Unexposing an app that was never exposed returns ErrNotFound.
+func (e *Engine) Unexpose(ctx context.Context, app string) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("unexpose: %w: %w", ErrInvalid, err)
+	}
+	if err := e.k8s.Unexpose(ctx, app); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("unexpose %s: not exposed: %w", app, err)
+		}
+		return fmt.Errorf("unexpose %s: %w", app, err)
+	}
+	return nil
+}
+
 // Guardrails returns the current guardrail policy as a list for inspection (ADR-0020).
 func (e *Engine) Guardrails(ctx context.Context) ([]GuardrailInfo, error) {
 	p, err := e.db.Policy(ctx)

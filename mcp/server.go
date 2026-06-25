@@ -45,6 +45,16 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, scaleTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_expose",
+		Description: "Make a deployed application reachable from outside the cluster at a hostname, by creating a Service and an Ingress. Public exposure is held for confirmation by a guardrail by default; when held, the error says so — ask the user, then retry with confirm set to true. Reachability also needs an ingress controller and DNS pointing the host at the cluster.",
+	}, exposeTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_unexpose",
+		Description: "Remove an application's exposure (its Service and Ingress). Does not affect the running workload.",
+	}, unexposeTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_guard",
 		Description: "List the control-plane guardrails and their current dispositions (allow, confirm, or deny), so you can tell in advance whether an operation will be allowed, held for the user's confirmation, or denied. Read-only: guardrail policy is changed only by the operator via the CLI, never by an agent.",
 	}, guardTool(c))
@@ -133,6 +143,37 @@ func scaleTool(c *client.Client) sdk.ToolHandlerFor[scaleInput, client.ScaleResu
 			return nil, client.ScaleResult{}, err
 		}
 		return nil, res, nil
+	}
+}
+
+type exposeInput struct {
+	App     string `json:"app" jsonschema:"the application name"`
+	Host    string `json:"host" jsonschema:"the external hostname to route to the app, e.g. app.example.com"`
+	Port    int32  `json:"port" jsonschema:"the app's container port to forward to"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed exposing the app to the public internet; do not self-confirm"`
+}
+
+func exposeTool(c *client.Client) sdk.ToolHandlerFor[exposeInput, client.ExposeResult] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in exposeInput) (*sdk.CallToolResult, client.ExposeResult, error) {
+		res, err := c.Expose(ctx, in.App, in.Host, in.Port, in.Confirm)
+		if err != nil {
+			return nil, client.ExposeResult{}, err
+		}
+		return nil, res, nil
+	}
+}
+
+// unexposeOutput is a small structured ack for the unexpose tool.
+type unexposeOutput struct {
+	App string `json:"app"`
+}
+
+func unexposeTool(c *client.Client) sdk.ToolHandlerFor[appInput, unexposeOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, unexposeOutput, error) {
+		if err := c.Unexpose(ctx, in.App); err != nil {
+			return nil, unexposeOutput{}, err
+		}
+		return nil, unexposeOutput{App: in.App}, nil
 	}
 }
 

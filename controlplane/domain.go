@@ -132,6 +132,7 @@ func DefaultPolicy() Policy {
 		Dispositions: map[GuardrailCode]Disposition{
 			GuardrailReplicaCeiling: DispositionDeny,
 			GuardrailScaleToZero:    DispositionConfirm,
+			GuardrailExposePublic:   DispositionConfirm,
 		},
 		MaxReplicas: 50,
 	}

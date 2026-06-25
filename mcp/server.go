@@ -44,6 +44,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 		Description: "Change an application's replica count. A guardrail may refuse it (e.g. above the replica ceiling) or hold it for confirmation (e.g. scaling to zero); when held, the error says so — ask the user, then retry with confirm set to true.",
 	}, scaleTool(c))
 
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_guard",
+		Description: "List the control-plane guardrails and their current dispositions (allow, confirm, or deny), so you can tell in advance whether an operation will be allowed, held for the user's confirmation, or denied. Read-only: guardrail policy is changed only by the operator via the CLI, never by an agent.",
+	}, guardTool(c))
+
 	return s
 }
 
@@ -128,5 +133,22 @@ func scaleTool(c *client.Client) sdk.ToolHandlerFor[scaleInput, client.ScaleResu
 			return nil, client.ScaleResult{}, err
 		}
 		return nil, res, nil
+	}
+}
+
+// guardInput has no fields: listing guardrails takes no arguments.
+type guardInput struct{}
+
+type guardOutput struct {
+	Guardrails []client.Guardrail `json:"guardrails"`
+}
+
+func guardTool(c *client.Client) sdk.ToolHandlerFor[guardInput, guardOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, _ guardInput) (*sdk.CallToolResult, guardOutput, error) {
+		gs, err := c.Guardrails(ctx)
+		if err != nil {
+			return nil, guardOutput{}, err
+		}
+		return nil, guardOutput{Guardrails: gs}, nil
 	}
 }

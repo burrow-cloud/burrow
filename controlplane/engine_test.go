@@ -253,6 +253,42 @@ func TestPolicyReadLive(t *testing.T) {
 	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
 }
 
+func TestGuardrailsListAndSet(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _, _ := newEngine(t, cp.DefaultPolicy())
+
+	gs, err := e.Guardrails(ctx)
+	if err != nil {
+		t.Fatalf("Guardrails: %v", err)
+	}
+	got := map[cp.GuardrailCode]cp.Disposition{}
+	for _, g := range gs {
+		got[g.Code] = g.Disposition
+	}
+	if got[cp.GuardrailReplicaCeiling] != cp.DispositionDeny || got[cp.GuardrailScaleToZero] != cp.DispositionConfirm {
+		t.Errorf("default dispositions = %v, want ceiling=deny scale_to_zero=confirm", got)
+	}
+
+	// A valid set is reflected on the next list.
+	if err := e.SetGuardrail(ctx, cp.GuardrailScaleToZero, cp.DispositionAllow); err != nil {
+		t.Fatalf("SetGuardrail: %v", err)
+	}
+	gs, _ = e.Guardrails(ctx)
+	for _, g := range gs {
+		if g.Code == cp.GuardrailScaleToZero && g.Disposition != cp.DispositionAllow {
+			t.Errorf("after set, scale_to_zero = %q, want allow", g.Disposition)
+		}
+	}
+
+	// Unknown guardrail and invalid disposition are rejected as ErrInvalid.
+	if err := e.SetGuardrail(ctx, "nonsense", cp.DispositionAllow); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("unknown guardrail err = %v, want ErrInvalid", err)
+	}
+	if err := e.SetGuardrail(ctx, cp.GuardrailScaleToZero, "maybe"); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("invalid disposition err = %v, want ErrInvalid", err)
+	}
+}
+
 func TestRollback(t *testing.T) {
 	ctx := context.Background()
 	e, k, r, d, _ := newEngine(t, permissive())

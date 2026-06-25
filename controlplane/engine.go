@@ -218,6 +218,28 @@ func (e *Engine) Scale(ctx context.Context, app string, replicas int32, confirm 
 	return ScaleResult{App: app, PreviousReplicas: prev, Replicas: replicas}, nil
 }
 
+// Guardrails returns the current guardrail policy as a list for inspection (ADR-0020).
+func (e *Engine) Guardrails(ctx context.Context) ([]GuardrailInfo, error) {
+	p, err := e.db.Policy(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("guardrails: loading policy: %w", err)
+	}
+	return p.Guardrails(), nil
+}
+
+// SetGuardrail sets one guardrail's disposition (ADR-0020). It rejects an unknown guardrail
+// or an invalid disposition as ErrInvalid. This is the operator's lever — exposed via the
+// CLI, never as an MCP tool, so the agent cannot change its own guardrails.
+func (e *Engine) SetGuardrail(ctx context.Context, code GuardrailCode, d Disposition) error {
+	if !KnownGuardrail(code) {
+		return fmt.Errorf("set guardrail: unknown guardrail %q: %w", code, ErrInvalid)
+	}
+	if !d.Valid() {
+		return fmt.Errorf("set guardrail: invalid disposition %q (want allow, confirm, or deny): %w", d, ErrInvalid)
+	}
+	return e.db.SetGuardrail(ctx, code, d)
+}
+
 // Rollback restores the app's previously running release by redeploying its reference
 // (ADR-0007). It finds the current running release, re-applies the release that one
 // superseded, and records the rollback as a new release. It returns ErrNotFound when

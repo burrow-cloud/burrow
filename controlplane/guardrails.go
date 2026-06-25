@@ -40,6 +40,41 @@ const (
 	GuardrailScaleToZero GuardrailCode = "scale_to_zero"
 )
 
+// GuardrailInfo describes a guardrail and its current disposition, for inspection through
+// `guard list` and the read-only MCP guard tool (ADR-0020).
+type GuardrailInfo struct {
+	Code        GuardrailCode `json:"code"`
+	Disposition Disposition   `json:"disposition"`
+	Description string        `json:"description"`
+}
+
+// knownGuardrails enumerates every configurable guardrail in a stable order with a human
+// description, so inspection shows the full set — including unset ones, which read as their
+// default disposition.
+var knownGuardrails = []GuardrailInfo{
+	{Code: GuardrailReplicaCeiling, Description: "deploy or scale above the replica ceiling"},
+	{Code: GuardrailScaleToZero, Description: "scale an application to zero replicas"},
+}
+
+// KnownGuardrail reports whether code names a configurable guardrail.
+func KnownGuardrail(code GuardrailCode) bool {
+	for _, g := range knownGuardrails {
+		if g.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+// Guardrails returns each known guardrail with its effective disposition under the policy.
+func (p Policy) Guardrails() []GuardrailInfo {
+	out := make([]GuardrailInfo, len(knownGuardrails))
+	for i, g := range knownGuardrails {
+		out[i] = GuardrailInfo{Code: g.Code, Disposition: p.disposition(g.Code), Description: g.Description}
+	}
+	return out
+}
+
 // GuardrailError is returned when the control plane declines a dangerous operation or holds
 // it for confirmation. It is a structured outcome, not a system failure: the operation was
 // understood and deliberately gated. Callers distinguish it with AsGuardrail.

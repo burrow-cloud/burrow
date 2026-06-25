@@ -78,15 +78,20 @@ full structured chain (ADR-0022's layered model). It reads the external address 
 app's own Ingress status, so it needs **no new RBAC**. `expose --tls` now requests an HTTPS
 certificate: the Ingress carries the `cert-manager.io/cluster-issuer` annotation + a TLS
 stanza, and cert-manager (once installed) fills the cert; reachability reports whether TLS is
-configured. Stage 3 is beginning: the **provider registry** is landing — `burrow provider
-add/list` registers a vendor credential, writing the token into the one `burrow-credentials`
-Secret with the developer's kubeconfig and recording the non-secret registry (type,
-capabilities, Secret key) in the database; `burrow install` creates the empty Secret and
-burrowd's only secrets grant, a `resourceNames`-scoped `get` on it
-([ADR-0023](adr/0023-provider-credentials.md)). Next on top of it: the **DNS-provider seam**
-(DigitalOcean / Cloudflare adapters + a fake) and **`domain add/remove`** guarded operations,
-plus the **`burrow ingress install`** setup command (ingress-nginx + cert-manager + a Let's
-Encrypt issuer) that makes the manual prerequisites turnkey.
+configured. Stage 3 has landed: the **provider registry** (`burrow provider add/list`) records
+a vendor credential — writing the token into the one `burrow-credentials` Secret with the
+developer's kubeconfig and the non-secret registry (type, capabilities, Secret key) in the
+database; `burrow install` creates the empty Secret and burrowd's only secrets grant, a
+`resourceNames`-scoped `get` on it ([ADR-0023](adr/0023-provider-credentials.md)). On top of
+it the **DNS-provider seam** (DigitalOcean + Cloudflare adapters over `net/http` + a fake)
+verifies a token on `provider add` and now manages records, and **`domain add/remove`**
+(`burrow domain …`, `burrow_domain_add` / `burrow_domain_remove`) point a host at the
+cluster's external address through a configured provider — guarded by the `dns_write` /
+`dns_delete` guardrails (confirm by default). burrowd reads the token at call time and is the
+only thing that talks to the vendor. Next: the **`burrow ingress install`** setup command
+(ingress-nginx + cert-manager + a Let's Encrypt issuer) that makes the manual prerequisites
+turnkey, and folding the provider's DNS record into the **reachability** surface ("the
+provider holds the record").
 
 ### Out of scope for v0.2 (explicit)
 

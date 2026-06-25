@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/burrow-cloud/burrow/controlplane"
@@ -59,6 +60,143 @@ func (c *cloudflare) VerifyAccess(ctx context.Context) error {
 		return fmt.Errorf("cloudflare reports the token is not active (status %q): %w", env.Result.Status, controlplane.ErrInvalid)
 	}
 	return nil
+}
+
+// cfRecord is one Cloudflare DNS record. Name is the fully-qualified host.
+type cfRecord struct {
+	ID      string `json:"id,omitempty"`
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	TTL     int    `json:"ttl,omitempty"`
+}
+
+// EnsureRecord creates or updates the record so r.Name resolves to r.Value (ADR-0018). It
+// resolves the zone that covers the host, then upserts the record in it.
+func (c *cloudflare) EnsureRecord(ctx context.Context, r controlplane.DNSRecord) error {
+	zid, err := c.zoneFor(ctx, r.Name)
+	if err != nil {
+		return err
+	}
+	existing, err := c.recordsFor(ctx, zid, r.Name, string(r.Type))
+	if err != nil {
+		return err
+	}
+	ttl := r.TTL
+	if ttl == 0 {
+		ttl = defaultTTL
+	}
+	rec := cfRecord{Type: string(r.Type), Name: r.Name, Content: r.Value, TTL: ttl}
+	if len(existing) > 0 {
+		cur := existing[0]
+		if cur.Content == r.Value && (r.TTL == 0 || cur.TTL == ttl) {
+			return nil // idempotent
+		}
+		status, body, err := doJSON(ctx, c.http, http.MethodPut,
+			c.baseURL+"/zones/"+zid+"/dns_records/"+cur.ID, c.token, rec)
+		if err != nil {
+			return fmt.Errorf("cloudflare: updating record: %w", err)
+		}
+		return checkResponse("cloudflare", "updating record", status, body)
+	}
+	status, body, err := doJSON(ctx, c.http, http.MethodPost,
+		c.baseURL+"/zones/"+zid+"/dns_records", c.token, rec)
+	if err != nil {
+		return fmt.Errorf("cloudflare: creating record: %w", err)
+	}
+	return checkResponse("cloudflare", "creating record", status, body)
+}
+
+// DeleteRecord removes the A/CNAME record(s) held for host.
+func (c *cloudflare) DeleteRecord(ctx context.Context, host string) error {
+	zid, err := c.zoneFor(ctx, host)
+	if err != nil {
+		return err
+	}
+	recs, err := c.recordsFor(ctx, zid, host, "")
+	if err != nil {
+		return err
+	}
+	if len(recs) == 0 {
+		return fmt.Errorf("cloudflare: no record for %q: %w", host, controlplane.ErrNotFound)
+	}
+	for _, rec := range recs {
+		status, body, err := doJSON(ctx, c.http, http.MethodDelete,
+			c.baseURL+"/zones/"+zid+"/dns_records/"+rec.ID, c.token, nil)
+		if err != nil {
+			return fmt.Errorf("cloudflare: deleting record: %w", err)
+		}
+		if err := checkResponse("cloudflare", "deleting record", status, body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// zoneFor returns the id of the zone that is the longest suffix of host, or ErrNotFound.
+func (c *cloudflare) zoneFor(ctx context.Context, host string) (string, error) {
+	status, body, err := getAuthorized(ctx, c.http, c.baseURL+"/zones?per_page=50", c.token)
+	if err != nil {
+		return "", fmt.Errorf("cloudflare: listing zones: %w", err)
+	}
+	if err := checkResponse("cloudflare", "listing zones", status, body); err != nil {
+		return "", err
+	}
+	var env struct {
+		Result []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return "", fmt.Errorf("cloudflare: decoding zones: %w", err)
+	}
+	names := make([]string, len(env.Result))
+	byName := make(map[string]string, len(env.Result))
+	for i, z := range env.Result {
+		names[i] = z.Name
+		byName[z.Name] = z.ID
+	}
+	zone, ok := longestZoneSuffix(host, names)
+	if !ok {
+		return "", fmt.Errorf("cloudflare manages no zone covering %q: %w", host, controlplane.ErrNotFound)
+	}
+	return byName[zone], nil
+}
+
+// recordsFor lists the A/CNAME records for host in the zone, optionally narrowed to one type.
+func (c *cloudflare) recordsFor(ctx context.Context, zoneID, host, recordType string) ([]cfRecord, error) {
+	u := c.baseURL + "/zones/" + zoneID + "/dns_records?per_page=100&name=" + url.QueryEscape(host)
+	if recordType != "" {
+		u += "&type=" + recordType
+	}
+	status, body, err := getAuthorized(ctx, c.http, u, c.token)
+	if err != nil {
+		return nil, fmt.Errorf("cloudflare: listing records: %w", err)
+	}
+	if err := checkResponse("cloudflare", "listing records", status, body); err != nil {
+		return nil, err
+	}
+	var env struct {
+		Result []cfRecord `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("cloudflare: decoding records: %w", err)
+	}
+	out := make([]cfRecord, 0, len(env.Result))
+	for _, rec := range env.Result {
+		if !strings.EqualFold(rec.Name, host) {
+			continue
+		}
+		if recordType != "" && !strings.EqualFold(rec.Type, recordType) {
+			continue
+		}
+		if recordType == "" && !strings.EqualFold(rec.Type, "A") && !strings.EqualFold(rec.Type, "CNAME") {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out, nil
 }
 
 // snippet trims a response body to a short, single-line form for error messages.

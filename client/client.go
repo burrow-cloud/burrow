@@ -181,6 +181,14 @@ type AddProviderRequest struct {
 	SecretKey string `json:"secret_key,omitempty"`
 }
 
+// DomainResult mirrors the control plane's DNS-record outcome (ADR-0018).
+type DomainResult struct {
+	Host     string `json:"host"`
+	Provider string `json:"provider"`
+	Type     string `json:"type,omitempty"`
+	Address  string `json:"address,omitempty"`
+}
+
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "deploy"), req, &out)
@@ -274,6 +282,25 @@ func (c *Client) Providers(ctx context.Context) ([]Provider, error) {
 	}
 	err := c.do(ctx, http.MethodGet, "/v1/providers", nil, &out)
 	return out.Providers, err
+}
+
+// AddDomain points host at address through the named DNS provider (ADR-0018).
+func (c *Client) AddDomain(ctx context.Context, host, provider, address string, confirm bool) (DomainResult, error) {
+	var out DomainResult
+	body := map[string]any{"host": host, "provider": provider, "address": address, "confirm": confirm}
+	err := c.do(ctx, http.MethodPost, "/v1/domains", body, &out)
+	return out, err
+}
+
+// RemoveDomain removes the DNS record the provider holds for host.
+func (c *Client) RemoveDomain(ctx context.Context, host, provider string, confirm bool) (DomainResult, error) {
+	var out DomainResult
+	path := "/v1/domains/" + url.PathEscape(host) + "?provider=" + url.QueryEscape(provider)
+	if confirm {
+		path += "&confirm=true"
+	}
+	err := c.do(ctx, http.MethodDelete, path, nil, &out)
+	return out, err
 }
 
 // do issues a request, decoding a 2xx body into out and a non-2xx body into an APIError.

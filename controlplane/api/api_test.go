@@ -69,7 +69,7 @@ func TestGuardEndpoints(t *testing.T) {
 func newProviderAPI(t *testing.T) (http.Handler, *fake.Credentials, *fake.DNSFactory) {
 	t.Helper()
 	d := fake.NewDatabase()
-	d.SetPolicy(cp.Policy{MaxReplicas: 5})
+	d.SetPolicy(cp.DefaultPolicy()) // dns_write/dns_delete default to confirm
 	creds := fake.NewCredentials()
 	dnsF := fake.NewDNSFactory()
 	e, err := cp.New(cp.Deps{
@@ -119,6 +119,36 @@ func TestProviderEndpoints(t *testing.T) {
 	// The endpoints require the token like every other /v1 route.
 	if rr := do(h, "GET", "/v1/providers", "", ""); rr.Code != 401 {
 		t.Errorf("unauthenticated list code = %d, want 401", rr.Code)
+	}
+}
+
+func TestDomainEndpoints(t *testing.T) {
+	h, creds, _ := newProviderAPI(t)
+	creds.Set("digitalocean", "tok")
+	if rr := do(h, "POST", "/v1/providers", token, `{"type":"digitalocean"}`); rr.Code != 200 {
+		t.Fatalf("register provider = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// Add with confirm succeeds and reports the inferred record type.
+	rr := do(h, "POST", "/v1/domains", token, `{"host":"app.example.com","provider":"digitalocean","address":"203.0.113.5","confirm":true}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"type":"A"`) {
+		t.Fatalf("add domain = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// Without confirm the dns_write guardrail holds it (422, needs confirmation).
+	rr = do(h, "POST", "/v1/domains", token, `{"host":"x.example.com","provider":"digitalocean","address":"203.0.113.6"}`)
+	if rr.Code != 422 || !strings.Contains(rr.Body.String(), `"needs_confirmation":true`) {
+		t.Errorf("unconfirmed add = %d %s, want 422 needs_confirmation", rr.Code, rr.Body.String())
+	}
+
+	// Remove via DELETE with provider + confirm in the query.
+	if rr := do(h, "DELETE", "/v1/domains/app.example.com?provider=digitalocean&confirm=true", token, ""); rr.Code != 200 {
+		t.Errorf("remove domain = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// Authenticated like every other /v1 route.
+	if rr := do(h, "POST", "/v1/domains", "", `{}`); rr.Code != 401 {
+		t.Errorf("unauthenticated add code = %d, want 401", rr.Code)
 	}
 }
 

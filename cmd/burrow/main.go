@@ -67,6 +67,7 @@ func newRootCmd() *cobra.Command {
 		newExposeCmd(),
 		newUnexposeCmd(),
 		newReachabilityCmd(),
+		newDomainCmd(),
 		newGuardCmd(),
 	)
 	return root

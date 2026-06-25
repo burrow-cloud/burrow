@@ -60,6 +60,16 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, reachabilityTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_domain_add",
+		Description: "Point a hostname at the cluster by creating or updating a DNS record at a configured provider (e.g. DigitalOcean or Cloudflare). Give the cluster's external address (the IP or hostname from burrow_reachability once the app is exposed); an IPv4 address becomes an A record, a hostname a CNAME. A guardrail holds public DNS writes for confirmation by default; when held, the error says so — ask the user, then retry with confirm set to true. The provider must already be configured by the operator.",
+	}, domainAddTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_domain_remove",
+		Description: "Remove the DNS record a configured provider holds for a hostname. Deleting a public DNS record is held for confirmation by a guardrail by default; when held, the error says so — ask the user, then retry with confirm set to true.",
+	}, domainRemoveTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_guard",
 		Description: "List the control-plane guardrails and their current dispositions (allow, confirm, or deny), so you can tell in advance whether an operation will be allowed, held for the user's confirmation, or denied. Read-only: guardrail policy is changed only by the operator via the CLI, never by an agent.",
 	}, guardTool(c))
@@ -189,6 +199,39 @@ func reachabilityTool(c *client.Client) sdk.ToolHandlerFor[appInput, client.Reac
 		res, err := c.Reachability(ctx, in.App)
 		if err != nil {
 			return nil, client.ReachabilityResult{}, err
+		}
+		return nil, res, nil
+	}
+}
+
+type domainAddInput struct {
+	Host     string `json:"host" jsonschema:"the hostname to point at the cluster, e.g. app.example.com"`
+	Provider string `json:"provider" jsonschema:"the configured DNS provider to write the record at (its name from the registry, e.g. digitalocean)"`
+	Address  string `json:"address" jsonschema:"the cluster's external IPv4 address or hostname to point at (from burrow_reachability)"`
+	Confirm  bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed writing the public DNS record; do not self-confirm"`
+}
+
+func domainAddTool(c *client.Client) sdk.ToolHandlerFor[domainAddInput, client.DomainResult] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in domainAddInput) (*sdk.CallToolResult, client.DomainResult, error) {
+		res, err := c.AddDomain(ctx, in.Host, in.Provider, in.Address, in.Confirm)
+		if err != nil {
+			return nil, client.DomainResult{}, err
+		}
+		return nil, res, nil
+	}
+}
+
+type domainRemoveInput struct {
+	Host     string `json:"host" jsonschema:"the hostname whose DNS record to remove"`
+	Provider string `json:"provider" jsonschema:"the configured DNS provider holding the record"`
+	Confirm  bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed deleting the public DNS record; do not self-confirm"`
+}
+
+func domainRemoveTool(c *client.Client) sdk.ToolHandlerFor[domainRemoveInput, client.DomainResult] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in domainRemoveInput) (*sdk.CallToolResult, client.DomainResult, error) {
+		res, err := c.RemoveDomain(ctx, in.Host, in.Provider, in.Confirm)
+		if err != nil {
+			return nil, client.DomainResult{}, err
 		}
 		return nil, res, nil
 	}

@@ -56,6 +56,8 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
 	v1.HandleFunc("POST /v1/providers", s.addProvider)
 	v1.HandleFunc("GET /v1/providers", s.listProviders)
+	v1.HandleFunc("POST /v1/domains", s.addDomain)
+	v1.HandleFunc("DELETE /v1/domains/{host}", s.removeDomain)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", requireToken(cfg.Token, v1))
@@ -214,6 +216,33 @@ func (s *server) listProviders(w http.ResponseWriter, r *http.Request) {
 // that decode an object.
 type providersResponse struct {
 	Providers []controlplane.Provider `json:"providers"`
+}
+
+func (s *server) addDomain(w http.ResponseWriter, r *http.Request) {
+	var req controlplane.AddDomainRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.engine.AddDomain(r.Context(), req)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) removeDomain(w http.ResponseWriter, r *http.Request) {
+	req := controlplane.RemoveDomainRequest{
+		Host:     r.PathValue("host"), // the path is authoritative for the host
+		Provider: r.URL.Query().Get("provider"),
+		Confirm:  r.URL.Query().Get("confirm") == "true",
+	}
+	res, err := s.engine.RemoveDomain(r.Context(), req)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // guardResponse is the body of a guard list/set call: the full guardrail policy.

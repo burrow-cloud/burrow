@@ -133,6 +133,8 @@ func DefaultPolicy() Policy {
 			GuardrailReplicaCeiling: DispositionDeny,
 			GuardrailScaleToZero:    DispositionConfirm,
 			GuardrailExposePublic:   DispositionConfirm,
+			GuardrailDNSWrite:       DispositionConfirm,
+			GuardrailDNSDelete:      DispositionConfirm,
 		},
 		MaxReplicas: 50,
 	}

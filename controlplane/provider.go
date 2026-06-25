@@ -124,19 +124,6 @@ func (p Provider) Validate() error {
 	return nil
 }
 
-// AddProviderRequest registers a vendor credential. The token is deliberately not part of
-// this request: the CLI writes it into the burrow-credentials Secret with the developer's
-// kubeconfig (the setup-vs-operation split, ADR-0017), and only the non-secret registry
-// entry — naming the Secret key — flows through the control plane.
-type AddProviderRequest struct {
-	// Name identifies the provider; empty defaults to the type.
-	Name string `json:"name,omitempty"`
-	// Type is the vendor this provider talks to.
-	Type ProviderType `json:"type"`
-	// SecretKey is the key in burrow-credentials holding the token; empty defaults to Name.
-	SecretKey string `json:"secret_key,omitempty"`
-}
-
 // AddProvider records a vendor credential in the registry, after verifying the token works
 // (ADR-0023). It does not write the burrow-credentials Secret — the CLI writes the token there
 // with the developer's kubeconfig before calling this, and burrowd only ever reads it: it

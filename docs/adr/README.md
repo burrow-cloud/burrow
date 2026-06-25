@@ -43,8 +43,9 @@ alternatives that were rejected.
 | [0015](0015-token-header-only-x-burrow-token.md) | Burrow's token is sent only in X-Burrow-Token (corrects ADR-0014) | Accepted |
 | [0016](0016-cli-distribution-and-upgrade-lifecycle.md) | CLI distribution via Homebrew and the CLI-driven upgrade lifecycle | Proposed |
 | [0017](0017-private-registry-authentication.md) | Private registry authentication via a developer-provisioned pull secret | Accepted |
-| [0018](0018-reaching-an-app-at-a-url.md) | Reaching a deployed app at a URL — ingress, TLS, and DNS, with a reachability surface | Accepted |
+| [0018](0018-reaching-an-app-at-a-url.md) | Reaching a deployed app at a URL — ingress, TLS, and DNS, with a reachability surface | Accepted (credential detail refined by ADR-0023) |
 | [0019](0019-cli-framework-cobra.md) | Cobra for the CLI command framework; stdlib tabwriter for output | Accepted |
 | [0020](0020-guardrails-as-configurable-policy.md) | Guardrails as inspectable, configurable policy with a confirm disposition | Accepted |
 | [0021](0021-guardrails-require-control-plane-only-agent-access.md) | Guardrails bound the control-plane path; the operator restricts the agent's other paths | Accepted |
 | [0022](0022-routing-backend-and-supported-kubernetes.md) | HTTP routing via a shared ingress (Ingress now, Gateway-ready) and supported Kubernetes versions | Accepted |
+| [0023](0023-provider-credentials.md) | Provider credentials — a registry of vendor tokens in one scoped Secret | Accepted |

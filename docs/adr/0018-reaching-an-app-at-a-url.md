@@ -4,7 +4,11 @@
 
 Accepted. This is the v0.2 design, built in stages (see Consequences). Sub-policies it
 defers — the exact guardrail thresholds, the precise resource annotations — are refined as
-each stage ships, not pinned here.
+each stage ships, not pinned here. The DNS-credential storage detail in Section 5 ("injected
+into burrowd via the pod spec") is refined by
+[ADR-0023](0023-provider-credentials.md): vendor tokens live in one `burrow-credentials`
+Secret that burrowd reads via a `resourceNames`-scoped `get`, with the registry in the
+database.
 
 ## Context
 

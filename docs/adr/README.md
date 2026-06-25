@@ -47,3 +47,4 @@ alternatives that were rejected.
 | [0019](0019-cli-framework-cobra.md) | Cobra for the CLI command framework; stdlib tabwriter for output | Accepted |
 | [0020](0020-guardrails-as-configurable-policy.md) | Guardrails as inspectable, configurable policy with a confirm disposition | Accepted |
 | [0021](0021-guardrails-require-control-plane-only-agent-access.md) | Guardrails bound the control-plane path; the operator restricts the agent's other paths | Accepted |
+| [0022](0022-routing-backend-and-supported-kubernetes.md) | HTTP routing via a shared ingress (Ingress now, Gateway-ready) and supported Kubernetes versions | Accepted |

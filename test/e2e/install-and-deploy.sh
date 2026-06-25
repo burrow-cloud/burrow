@@ -11,6 +11,25 @@ CLUSTER="${K3D_CLUSTER:-burrow-ci}"
 KCFG=$(k3d kubeconfig write "$CLUSTER")
 export KUBECONFIG="$KCFG"
 
+# On any failure (including the install readiness wait, which otherwise exits before any
+# diagnostics), dump cluster state so a flake is debuggable — pod status plus the control
+# plane's describe and logs (including a crashed container's previous logs).
+dump_diagnostics() {
+  echo "=== DIAGNOSTICS: a step failed, dumping cluster state ==="
+  kubectl get pods -A -o wide || true
+  echo "--- burrow namespace events ---"
+  kubectl -n burrow get events --sort-by=.lastTimestamp | tail -n 30 || true
+  echo "--- postgres logs ---"
+  kubectl -n burrow logs deploy/postgres --tail=40 || true
+  echo "--- burrowd describe ---"
+  kubectl -n burrow describe deploy/burrowd || true
+  echo "--- burrowd logs (current) ---"
+  kubectl -n burrow logs deploy/burrowd --tail=80 || true
+  echo "--- burrowd logs (previous, if it restarted) ---"
+  kubectl -n burrow logs deploy/burrowd --previous --tail=80 || true
+}
+trap dump_diagnostics ERR
+
 WORK=$(mktemp -d)
 BURROW="$WORK/burrow"
 echo "=== build the burrow CLI ==="
@@ -40,8 +59,7 @@ echo "--- final status ---"
 "$BURROW" status web --kubeconfig "$KCFG"
 if [ -z "$ok" ]; then
   echo "FAIL: app never became available"
-  kubectl get pods -A
-  exit 1
+  exit 1 # the ERR trap dumps diagnostics
 fi
 
 echo "=== rollback path: deploy a second image, then roll back ==="

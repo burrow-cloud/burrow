@@ -96,6 +96,31 @@ func TestClientLogsTail(t *testing.T) {
 	}
 }
 
+func TestClientNeedsConfirmation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":              "scaling to zero replicas requires confirmation to proceed",
+			"code":               "scale_to_zero",
+			"needs_confirmation": true,
+		})
+	}))
+	defer srv.Close()
+
+	c := client.NewClient(srv.URL, "tok")
+	_, err := c.Scale(context.Background(), "web", 0, false)
+	var ae *client.APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err = %v, want *client.APIError", err)
+	}
+	if !ae.NeedsConfirmation {
+		t.Errorf("APIError.NeedsConfirmation = false, want true")
+	}
+	if !strings.Contains(ae.Error(), "--confirm") {
+		t.Errorf("error should hint at --confirm, got %q", ae.Error())
+	}
+}
+
 func TestClientScaleBody(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +131,7 @@ func TestClientScaleBody(t *testing.T) {
 	defer srv.Close()
 
 	c := client.NewClient(srv.URL, "tok")
-	res, err := c.Scale(context.Background(), "web", 4)
+	res, err := c.Scale(context.Background(), "web", 4, false)
 	if err != nil {
 		t.Fatalf("Scale: %v", err)
 	}

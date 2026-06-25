@@ -123,15 +123,15 @@ type Policy struct {
 	MaxReplicas int32
 }
 
-// DefaultPolicy returns the conservative starting guardrail policy: a modest replica
-// ceiling, with both the ceiling and scale-to-zero denied until the operator relaxes them
-// (ADR-0020). Scale-to-zero moves to confirm once the confirmation flag is wired through
-// the CLI and MCP surfaces.
+// DefaultPolicy returns the conservative starting guardrail policy (ADR-0020): a modest
+// replica ceiling that denies oversized scale-ups, and scale-to-zero held for confirmation
+// — recoverable with an explicit confirm rather than silently allowed or hard-denied. The
+// operator can relax or tighten any of these with `guard set`.
 func DefaultPolicy() Policy {
 	return Policy{
 		Dispositions: map[GuardrailCode]Disposition{
 			GuardrailReplicaCeiling: DispositionDeny,
-			GuardrailScaleToZero:    DispositionDeny,
+			GuardrailScaleToZero:    DispositionConfirm,
 		},
 		MaxReplicas: 50,
 	}

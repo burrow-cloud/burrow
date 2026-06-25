@@ -41,7 +41,7 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_scale",
-		Description: "Change an application's replica count. May be refused by policy (e.g. scaling to zero or above the replica ceiling).",
+		Description: "Change an application's replica count. A guardrail may refuse it (e.g. above the replica ceiling) or hold it for confirmation (e.g. scaling to zero); when held, the error says so — ask the user, then retry with confirm set to true.",
 	}, scaleTool(c))
 
 	return s
@@ -58,6 +58,7 @@ type deployInput struct {
 	Env      map[string]string `json:"env,omitempty" jsonschema:"environment variables to set on the workload"`
 	Command  []string          `json:"command,omitempty" jsonschema:"optional command override for the container"`
 	Replicas int32             `json:"replicas" jsonschema:"desired number of replicas"`
+	Confirm  bool              `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an operation a guardrail held for confirmation; do not self-confirm"`
 }
 
 type appInput struct {
@@ -72,11 +73,12 @@ type logsInput struct {
 type scaleInput struct {
 	App      string `json:"app" jsonschema:"the application name"`
 	Replicas int32  `json:"replicas" jsonschema:"desired number of replicas"`
+	Confirm  bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an operation a guardrail held for confirmation (e.g. scaling to zero); do not self-confirm"`
 }
 
 func deployTool(c *client.Client) sdk.ToolHandlerFor[deployInput, client.DeployResult] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in deployInput) (*sdk.CallToolResult, client.DeployResult, error) {
-		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Image: in.Image, Env: in.Env, Command: in.Command, Replicas: in.Replicas})
+		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Image: in.Image, Env: in.Env, Command: in.Command, Replicas: in.Replicas, Confirm: in.Confirm})
 		if err != nil {
 			return nil, client.DeployResult{}, err
 		}
@@ -121,7 +123,7 @@ func rollbackTool(c *client.Client) sdk.ToolHandlerFor[appInput, client.Rollback
 
 func scaleTool(c *client.Client) sdk.ToolHandlerFor[scaleInput, client.ScaleResult] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in scaleInput) (*sdk.CallToolResult, client.ScaleResult, error) {
-		res, err := c.Scale(ctx, in.App, in.Replicas)
+		res, err := c.Scale(ctx, in.App, in.Replicas, in.Confirm)
 		if err != nil {
 			return nil, client.ScaleResult{}, err
 		}

@@ -20,6 +20,7 @@ var _ controlplane.Kubernetes = (*Kubernetes)(nil)
 type Kubernetes struct {
 	mu      sync.Mutex
 	deploys map[string]*deployState
+	exposed map[string]controlplane.ExposeSpec
 	errs    map[Op]error
 }
 
@@ -33,8 +34,17 @@ type deployState struct {
 func NewKubernetes() *Kubernetes {
 	return &Kubernetes{
 		deploys: make(map[string]*deployState),
+		exposed: make(map[string]controlplane.ExposeSpec),
 		errs:    make(map[Op]error),
 	}
+}
+
+// Exposure returns the recorded exposure for app and whether one exists.
+func (k *Kubernetes) Exposure(app string) (controlplane.ExposeSpec, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	s, ok := k.exposed[app]
+	return s, ok
 }
 
 // SetError makes op return err until cleared with SetError(op, nil).
@@ -156,5 +166,28 @@ func (k *Kubernetes) DeleteWorkload(ctx context.Context, app string) error {
 		return fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
 	delete(k.deploys, app)
+	return nil
+}
+
+func (k *Kubernetes) Expose(ctx context.Context, spec controlplane.ExposeSpec) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpExpose]; err != nil {
+		return err
+	}
+	k.exposed[spec.App] = spec
+	return nil
+}
+
+func (k *Kubernetes) Unexpose(ctx context.Context, app string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpUnexpose]; err != nil {
+		return err
+	}
+	if _, ok := k.exposed[app]; !ok {
+		return fmt.Errorf("kubernetes: exposure %q: %w", app, controlplane.ErrNotFound)
+	}
+	delete(k.exposed, app)
 	return nil
 }

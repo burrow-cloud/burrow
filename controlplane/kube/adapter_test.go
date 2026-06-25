@@ -25,6 +25,72 @@ const ns = "default"
 
 func i32p(v int32) *int32 { return &v }
 
+func TestExposeCreatesServiceAndIngress(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	if err := a.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.example.com", Port: 8080}); err != nil {
+		t.Fatalf("Expose: %v", err)
+	}
+
+	svc, err := client.CoreV1().Services(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get service: %v", err)
+	}
+	if svc.Spec.Selector["app.kubernetes.io/name"] != "web" {
+		t.Errorf("service selector = %v", svc.Spec.Selector)
+	}
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != 80 || svc.Spec.Ports[0].TargetPort.IntValue() != 8080 {
+		t.Errorf("service ports = %+v, want 80->8080", svc.Spec.Ports)
+	}
+
+	ing, err := client.NetworkingV1().Ingresses(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get ingress: %v", err)
+	}
+	rule := ing.Spec.Rules[0]
+	if rule.Host != "web.example.com" {
+		t.Errorf("ingress host = %q, want web.example.com", rule.Host)
+	}
+	if b := rule.HTTP.Paths[0].Backend.Service; b.Name != "web" || b.Port.Number != 80 {
+		t.Errorf("ingress backend = %+v, want web:80", b)
+	}
+
+	// Expose is idempotent (update path).
+	if err := a.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web2.example.com", Port: 8080}); err != nil {
+		t.Fatalf("re-Expose: %v", err)
+	}
+	ing, _ = client.NetworkingV1().Ingresses(ns).Get(ctx, "web", metav1.GetOptions{})
+	if ing.Spec.Rules[0].Host != "web2.example.com" {
+		t.Errorf("host after update = %q, want web2.example.com", ing.Spec.Rules[0].Host)
+	}
+}
+
+func TestUnexpose(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	// Unexposing nothing is ErrNotFound.
+	if err := a.Unexpose(ctx, "web"); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("Unexpose missing = %v, want ErrNotFound", err)
+	}
+
+	if err := a.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.example.com", Port: 8080}); err != nil {
+		t.Fatalf("Expose: %v", err)
+	}
+	if err := a.Unexpose(ctx, "web"); err != nil {
+		t.Fatalf("Unexpose: %v", err)
+	}
+	if _, err := client.CoreV1().Services(ns).Get(ctx, "web", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("service should be deleted, got %v", err)
+	}
+	if _, err := client.NetworkingV1().Ingresses(ns).Get(ctx, "web", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("ingress should be deleted, got %v", err)
+	}
+}
+
 func TestApplyCreatesDeployment(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

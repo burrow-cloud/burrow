@@ -54,6 +54,17 @@ type WorkloadSpec struct {
 	Replicas int32
 }
 
+// ExposeSpec describes how to make an app reachable at a hostname (ADR-0018). v0.2 routes
+// HTTP to the app's Service via an Ingress.
+type ExposeSpec struct {
+	// App is the application to expose; its workload provides the Service's backends.
+	App string
+	// Host is the external hostname to route, e.g. app.example.com.
+	Host string
+	// Port is the app's container port the Service forwards to. Must be positive.
+	Port int32
+}
+
 // WorkloadStatus is the observed state of an App's workload, as reported by the cluster.
 type WorkloadStatus struct {
 	App             string       `json:"app"`
@@ -97,6 +108,15 @@ type Kubernetes interface {
 	// DeleteWorkload removes app's workload. Deleting a missing workload returns
 	// ErrNotFound.
 	DeleteWorkload(ctx context.Context, app string) error
+
+	// Expose makes app reachable at a hostname by creating (or updating) a Service and an
+	// Ingress that routes the host to it (ADR-0018). It does not create the workload —
+	// Deploy does — and whether the host is actually reachable also depends on an ingress
+	// controller and DNS, which the reachability surface reports on.
+	Expose(ctx context.Context, spec ExposeSpec) error
+	// Unexpose removes the Service and Ingress created by Expose. Unexposing an app that
+	// was never exposed returns ErrNotFound.
+	Unexpose(ctx context.Context, app string) error
 }
 
 // ImageInfo is what a registry knows about an image reference.

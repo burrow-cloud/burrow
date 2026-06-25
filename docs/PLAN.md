@@ -31,17 +31,18 @@ e2e), and the ADRs.
 - **CLI on Cobra** — the command surface moved to Cobra
   ([ADR-0019](adr/0019-cli-framework-cobra.md)), so the v0.2 commands are built on it.
 
-## Now: guardrails as configurable policy
+## Shipped since v0.1 (continued)
 
-Before the v0.2 URL work adds DNS write/delete and public-exposure gates, generalize the
-compiled-in, deny-or-allow guardrails into inspectable, configurable **policy** with an
-`allow | confirm | deny` disposition per action, stored in the control plane and evaluated by
-burrowd ([ADR-0020](adr/0020-guardrails-as-configurable-policy.md)). `burrow guard list` is
-read-only and exposed over MCP so the agent knows the rules before acting; `burrow guard set`
-is **CLI-only** — the agent can never change its own guardrails. The DNS and exposure gates
-then plug in as policy rather than new hardcodes. ADR-0020 is in review before this is built.
+- **Guardrails as configurable policy** — the compiled-in, deny-or-allow guardrails are now
+  `allow | confirm | deny` policy stored in the control plane and read live by burrowd
+  ([ADR-0020](adr/0020-guardrails-as-configurable-policy.md)). `burrow guard list` is
+  read-only (and an MCP tool); `burrow guard set` is CLI-only — the agent cannot change its
+  own guardrails. The DNS and exposure gates plug in as policy rather than new hardcodes.
+  Operators must keep the control plane the agent's only cluster path for the guardrails to
+  bind ([ADR-0021](adr/0021-guardrails-require-control-plane-only-agent-access.md),
+  [docs/HARDENING.md](HARDENING.md)).
 
-## Next: v0.2 — reach a deployed app at a URL (ingress, TLS, DNS)
+## Now: v0.2 — reach a deployed app at a URL (ingress, TLS, DNS)
 
 **Goal:** an agent can make a deployed app reachable at a real hostname over HTTPS, on the
 user's own cluster — the missing half of "deploy and operate" (today a deployed app is only
@@ -49,7 +50,7 @@ reachable by port-forward). Reachability is a chain (controller → Service/Ingr
 DNS), and the design is built around making that chain **introspectable** so the agent can
 reason about which link is broken and act on the gaps it owns. The full design — including
 the human-setup vs. agent-operation split — is **[ADR-0018](adr/0018-reaching-an-app-at-a-url.md)
-(Proposed, in review)**.
+(Accepted)**.
 
 The shape (per ADR-0018):
 
@@ -67,8 +68,9 @@ The shape (per ADR-0018):
 
 **Build order (all in v0.2 scope):** (1) `expose`/`unexpose` + the reachability surface;
 (2) TLS via cert-manager; (3) the DNS-provider seam + `dns configure` + `domain` operations.
-Each stage is a thin slice that ends green. ADR-0018 awaits maintainer sign-off before
-stage 1 begins.
+Each stage is a thin slice that ends green. Stage 1 is underway: the Kubernetes seam now has
+`Expose`/`Unexpose` (Service + Ingress) behind the adapter; the engine/API/CLI/MCP wiring and
+the reachability surface follow.
 
 ### Out of scope for v0.2 (explicit)
 

@@ -25,6 +25,8 @@ const (
 	OpScale         Op = "ScaleWorkload"
 	OpLogs          Op = "Logs"
 	OpDelete        Op = "DeleteWorkload"
+	OpExpose        Op = "Expose"
+	OpUnexpose      Op = "Unexpose"
 	OpResolve       Op = "Resolve"
 	OpSaveRelease   Op = "SaveRelease"
 	OpRelease       Op = "Release"

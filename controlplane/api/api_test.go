@@ -61,6 +61,32 @@ func TestGuardEndpoints(t *testing.T) {
 	}
 }
 
+func TestProviderEndpoints(t *testing.T) {
+	h, _, _, _ := newAPI(t)
+
+	// Add a provider: capabilities are derived from the type, and the token is not part of
+	// the request (it is stored in the Secret by the CLI, not via the API).
+	rr := do(h, "POST", "/v1/providers", token, `{"type":"digitalocean"}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"capabilities":["dns"]`) {
+		t.Fatalf("add provider = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// List shows it.
+	if rr := do(h, "GET", "/v1/providers", token, ""); rr.Code != 200 || !strings.Contains(rr.Body.String(), `"name":"digitalocean"`) {
+		t.Fatalf("list providers = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// An unsupported type is a 400 (ErrInvalid).
+	if rr := do(h, "POST", "/v1/providers", token, `{"type":"aws"}`); rr.Code != 400 {
+		t.Errorf("unknown type code = %d, want 400", rr.Code)
+	}
+
+	// The endpoints require the token like every other /v1 route.
+	if rr := do(h, "GET", "/v1/providers", "", ""); rr.Code != 401 {
+		t.Errorf("unauthenticated list code = %d, want 401", rr.Code)
+	}
+}
+
 func do(h http.Handler, method, path, tok, body string) *httptest.ResponseRecorder {
 	var br io.Reader
 	if body != "" {

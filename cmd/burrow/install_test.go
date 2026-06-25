@@ -34,17 +34,21 @@ func TestRenderManifests(t *testing.T) {
 		"-listen=:8080",
 		"path: /healthz",
 		`verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]`,
-		`resources: ["services"]`,  // expose creates Services (ADR-0018)
-		`resources: ["ingresses"]`, // ... and Ingresses
+		`resources: ["services"]`,               // expose creates Services (ADR-0018)
+		`resources: ["ingresses"]`,              // ... and Ingresses
+		"name: burrow-credentials",              // the empty vendor-credential Secret (ADR-0023)
+		`resourceNames: ["burrow-credentials"]`, // burrowd's only secrets grant, scoped to it
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered manifests missing %q", want)
 		}
 	}
 
-	// Least privilege: the Role must not grant access to secrets.
-	if strings.Contains(out, `["secrets"]`) {
-		t.Errorf("RBAC should not grant secrets access")
+	// Least privilege on Secrets (ADR-0023): burrowd's only access to a Secret's contents is
+	// `get` on the single burrow-credentials object. There must be exactly one secrets grant,
+	// and it must be the resourceNames-scoped one — no second, broader grant.
+	if c := strings.Count(out, `resources: ["secrets"]`); c != 1 {
+		t.Errorf("expected exactly one (scoped) secrets grant, found %d", c)
 	}
 }
 

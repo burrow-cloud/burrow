@@ -1,0 +1,185 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Nicholas Phillips
+
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+
+	"github.com/burrow-cloud/burrow/client"
+)
+
+// credentialsSecretName is the single Secret in the control-plane namespace that holds every
+// vendor token, one key per provider (ADR-0023). `burrow install` creates it empty; `provider
+// add` upserts a key into it with the developer's kubeconfig, and burrowd reads it via a
+// resourceNames-scoped get. The token never travels over MCP and burrowd never writes it.
+const credentialsSecretName = "burrow-credentials"
+
+// newProviderCmd manages cloud-provider credentials. `provider add` is a setup command: it
+// writes the token into the burrow-credentials Secret with the developer's kubeconfig and
+// then records the (non-secret) registry entry through burrowd — the setup-vs-operation split
+// of ADR-0017. burrowd holds and reads the token; the agent never does.
+func newProviderCmd() *cobra.Command {
+	parent := &cobra.Command{
+		Use:   "provider",
+		Short: "Configure cloud-provider credentials (add/list)",
+		Long: "provider registers the cloud-provider credentials Burrow uses on your behalf —\n" +
+			"e.g. a DigitalOcean or Cloudflare API token for DNS. The token is stored in a\n" +
+			"Kubernetes Secret in the control-plane namespace and read by the control plane; it\n" +
+			"never travels over MCP and the agent never holds it.",
+	}
+	parent.AddCommand(newProviderAddCmd(), newProviderListCmd())
+	return parent
+}
+
+func newProviderAddCmd() *cobra.Command {
+	o := &commonOpts{}
+	var name, secretKey string
+	var tokenStdin bool
+	cmd := &cobra.Command{
+		Use:   "add <type>",
+		Short: "Register a provider credential (e.g. digitalocean, cloudflare)",
+		Long: "add registers a provider of the given type and stores its API token. The token is\n" +
+			"read from standard input (--token-stdin) so it never lands in your shell history or\n" +
+			"the process table, written into the burrow-credentials Secret with your kubeconfig,\n" +
+			"and recorded in the control-plane registry. Pass --name to register more than one\n" +
+			"provider of the same type.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			providerType := args[0]
+			if !tokenStdin {
+				return errors.New("--token-stdin is required (the API token is read from standard input)")
+			}
+			token, err := readSecretStdin(cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			if token == "" {
+				return errors.New("no token read from standard input")
+			}
+
+			providerName := name
+			if providerName == "" {
+				providerName = providerType
+			}
+			key := secretKey
+			if key == "" {
+				key = providerName
+			}
+
+			// Record the registry entry first: burrowd validates the type and name, so a bad
+			// request fails before any Secret is written. Only then store the token with the
+			// developer's kubeconfig (ADR-0017) — burrowd never writes the credential.
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			p, err := c.AddProvider(ctx, client.AddProviderRequest{Name: providerName, Type: providerType, SecretKey: key})
+			if err != nil {
+				return err
+			}
+			cs, err := clientset(o.kubeconfig)
+			if err != nil {
+				return err
+			}
+			if err := writeCredential(ctx, cs, o.namespace, p.SecretKey, token); err != nil {
+				return fmt.Errorf("provider %q is registered but storing its token failed: %w\n"+
+					"re-run `burrow provider add` to store the token", p.Name, err)
+			}
+
+			human := fmt.Sprintf("registered provider %q (type %s, capabilities %s)\n"+
+				"token stored in %s/%s under key %q",
+				p.Name, p.Type, strings.Join(p.Capabilities, ", "), o.namespace, credentialsSecretName, p.SecretKey)
+			return emit(cmd.OutOrStdout(), o.json, p, human)
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	cmd.Flags().StringVar(&name, "name", "", "name for this provider (default: the type)")
+	cmd.Flags().StringVar(&secretKey, "secret-key", "", "key in the burrow-credentials Secret to store the token under (default: the name)")
+	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "read the provider API token from standard input")
+	return cmd
+}
+
+func newProviderListCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List configured providers",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			providers, err := c.Providers(ctx)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if o.json {
+				return emit(out, true, providers, "")
+			}
+			if len(providers) == 0 {
+				fmt.Fprintln(out, "no providers configured")
+				return nil
+			}
+			for _, p := range providers {
+				fmt.Fprintf(out, "%s\t%s\t%s\n", p.Name, p.Type, strings.Join(p.Capabilities, ","))
+			}
+			return nil
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	return cmd
+}
+
+// readSecretStdin reads a secret value from r and trims surrounding whitespace, so a token
+// piped in (with or without a trailing newline) is read cleanly.
+func readSecretStdin(r io.Reader) (string, error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return "", fmt.Errorf("reading token from standard input: %w", err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// writeCredential upserts the token under key in the burrow-credentials Secret in the
+// control-plane namespace, creating the Secret if `burrow install` has not yet (so the
+// command works against an older install). It acts with the developer's kubeconfig; burrowd
+// only ever reads this Secret (ADR-0023).
+func writeCredential(ctx context.Context, cs kubernetes.Interface, namespace, key, token string) error {
+	secrets := cs.CoreV1().Secrets(namespace)
+	existing, err := secrets.Get(ctx, credentialsSecretName, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		_, err = secrets.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: credentialsSecretName, Namespace: namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{key: []byte(token)},
+		}, metav1.CreateOptions{})
+	case err != nil:
+		return fmt.Errorf("reading credentials secret: %w", err)
+	default:
+		if existing.Data == nil {
+			existing.Data = map[string][]byte{}
+		}
+		existing.Data[key] = []byte(token)
+		_, err = secrets.Update(ctx, existing, metav1.UpdateOptions{})
+	}
+	if err != nil {
+		return fmt.Errorf("writing credentials secret: %w", err)
+	}
+	return nil
+}

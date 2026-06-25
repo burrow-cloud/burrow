@@ -45,3 +45,4 @@ alternatives that were rejected.
 | [0017](0017-private-registry-authentication.md) | Private registry authentication via a developer-provisioned pull secret | Accepted |
 | [0018](0018-reaching-an-app-at-a-url.md) | Reaching a deployed app at a URL — ingress, TLS, and DNS, with a reachability surface | Proposed |
 | [0019](0019-cli-framework-cobra.md) | Cobra for the CLI command framework; stdlib tabwriter for output | Accepted |
+| [0020](0020-guardrails-as-configurable-policy.md) | Guardrails as inspectable, configurable policy with a confirm disposition | Proposed |

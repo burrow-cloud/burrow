@@ -167,6 +167,12 @@ the v0.1 slice ([docs/PLAN.md](docs/PLAN.md)).
 - **Do not add AI/agent attribution to commits or PRs.** No `Co-Authored-By: Claude`
   trailer, no "Generated with Claude Code" line, no `Claude-Session` trailer — commit
   messages and PR descriptions carry only their own content and the DCO sign-off.
+- **Write commit messages and PR descriptions in the maintainer's outward voice.** They are
+  the author's own record to the project, not a reply to the maintainer. Describe the change
+  and its rationale impersonally — never address the reader in the second person or reference
+  "your" decision/point/request (e.g. "Built around your point that…", "Records your call",
+  "Closes the gap you hit"). State the thing itself ("Adopt Cobra because…", "Fix the 401 by…").
+  The same outward voice applies to the README and other repo prose.
 - **Licensing follows the package boundary** ([LICENSING.md](LICENSING.md),
   [ADR-0001](docs/adr/0001-license-and-dco.md)): Apache-2.0 on the client surface
   (`cmd/burrow`, `mcp`, `internal`), FSL-1.1-ALv2 on the product (`controlplane`, `operator`,

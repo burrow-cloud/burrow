@@ -26,8 +26,9 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake
 	d.SetPolicy(cp.Policy{MaxReplicas: 5})
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Registry: r, Database: d,
-		Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
-		IDs:   fake.NewIDs(),
+		Clock:    fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs:      fake.NewIDs(),
+		Resolver: fake.NewResolver(),
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)
@@ -235,6 +236,16 @@ func TestExposeEndpoints(t *testing.T) {
 	}
 	if rec := do(h, "POST", "/v1/apps/web/unexpose", token, ""); rec.Code != http.StatusNotFound {
 		t.Errorf("second unexpose = %d, want 404", rec.Code)
+	}
+}
+
+func TestReachabilityEndpoint(t *testing.T) {
+	h, _, r, _ := newAPI(t)
+	r.Add("img:1", "sha256:1")
+	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
+	rec := do(h, "GET", "/v1/apps/web/reachability", token, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "not exposed") {
+		t.Fatalf("reachability = %d %s", rec.Code, rec.Body.String())
 	}
 }
 

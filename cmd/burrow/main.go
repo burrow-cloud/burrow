@@ -65,6 +65,7 @@ func newRootCmd() *cobra.Command {
 		newScaleCmd(),
 		newExposeCmd(),
 		newUnexposeCmd(),
+		newReachabilityCmd(),
 		newGuardCmd(),
 	)
 	return root

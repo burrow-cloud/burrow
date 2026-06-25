@@ -10,6 +10,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -88,6 +89,37 @@ func TestUnexpose(t *testing.T) {
 	}
 	if _, err := client.NetworkingV1().Ingresses(ns).Get(ctx, "web", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("ingress should be deleted, got %v", err)
+	}
+}
+
+func TestExposureStatus(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	// Not exposed → zero status, no error.
+	if st, err := a.ExposureStatus(ctx, "web"); err != nil || st.Exposed {
+		t.Fatalf("unexposed status = %+v err=%v", st, err)
+	}
+
+	if err := a.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.example.com", Port: 8080}); err != nil {
+		t.Fatalf("expose: %v", err)
+	}
+	// Before the controller assigns an address, the host is known but the address is empty.
+	st, err := a.ExposureStatus(ctx, "web")
+	if err != nil || !st.Exposed || st.Host != "web.example.com" || st.Address != "" {
+		t.Fatalf("pre-address status = %+v err=%v", st, err)
+	}
+
+	// Simulate the ingress controller writing the external address into the Ingress status.
+	ing, _ := client.NetworkingV1().Ingresses(ns).Get(ctx, "web", metav1.GetOptions{})
+	ing.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{{IP: "1.2.3.4"}}
+	if _, err := client.NetworkingV1().Ingresses(ns).UpdateStatus(ctx, ing, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+	st, err = a.ExposureStatus(ctx, "web")
+	if err != nil || st.Address != "1.2.3.4" {
+		t.Errorf("status with address = %+v err=%v", st, err)
 	}
 }
 

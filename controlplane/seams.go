@@ -28,6 +28,13 @@ type Clock interface {
 	Now() time.Time
 }
 
+// Resolver is the control plane's DNS lookups, injected so reachability checks stay
+// deterministic in tests (ADR-0018). It reports the addresses a hostname resolves to.
+type Resolver interface {
+	// LookupHost returns the IP addresses host resolves to, or an error (e.g. NXDOMAIN).
+	LookupHost(ctx context.Context, host string) ([]string, error)
+}
+
 // WorkloadKind names the Kubernetes resource a workload maps to (ADR-0011). The seam
 // speaks in workloads rather than a single resource type so new kinds are additive. The
 // empty value means WorkloadDeployment.
@@ -117,6 +124,20 @@ type Kubernetes interface {
 	// Unexpose removes the Service and Ingress created by Expose. Unexposing an app that
 	// was never exposed returns ErrNotFound.
 	Unexpose(ctx context.Context, app string) error
+	// ExposureStatus reports whether app is exposed, at what host, and the external address
+	// the ingress controller assigned its Ingress (read from the Ingress's
+	// status.loadBalancer — empty until a controller processes it). A never-exposed app
+	// returns a zero ExposureStatus and no error.
+	ExposureStatus(ctx context.Context, app string) (ExposureStatus, error)
+}
+
+// ExposureStatus is the observed state of an app's exposure, for the reachability surface
+// (ADR-0018). Address is the controller-assigned external IP or hostname, read from the
+// Ingress's status; it is empty until an ingress controller assigns one.
+type ExposureStatus struct {
+	Exposed bool
+	Host    string
+	Address string
 }
 
 // ImageInfo is what a registry knows about an image reference.

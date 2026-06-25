@@ -60,6 +60,22 @@ type ExposeResult struct {
 	URL  string `json:"url"`
 }
 
+// ReachabilityResult reports whether an app is reachable at its hostname, link by link, for
+// the reachability surface (ADR-0018, ADR-0022). Summary is a one-line, plain-English verdict
+// for a non-expert; the fields are the full chain for advanced users and the agent.
+type ReachabilityResult struct {
+	App                string   `json:"app"`
+	Deployed           bool     `json:"deployed"`
+	Ready              bool     `json:"ready"`
+	Exposed            bool     `json:"exposed"`
+	Host               string   `json:"host,omitempty"`
+	Address            string   `json:"address,omitempty"` // controller-assigned external address
+	DNSPointsAtCluster bool     `json:"dns_points_at_cluster"`
+	DNSAddresses       []string `json:"dns_addresses,omitempty"`
+	Reachable          bool     `json:"reachable"`
+	Summary            string   `json:"summary"`
+}
+
 type ScaleResult struct {
 	App              string `json:"app"`
 	PreviousReplicas int32  `json:"previous_replicas"`

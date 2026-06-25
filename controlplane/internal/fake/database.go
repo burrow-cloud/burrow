@@ -18,19 +18,53 @@ var _ controlplane.Database = (*Database)(nil)
 // copied in and out, so callers never share Env/Command memory with the store — the
 // same isolation a real database gives. Errors can be injected per operation.
 type Database struct {
-	mu    sync.Mutex
-	byID  map[string]controlplane.Release
-	order map[string][]string // app -> release IDs, save order, deduplicated
-	errs  map[Op]error
+	mu     sync.Mutex
+	byID   map[string]controlplane.Release
+	order  map[string][]string // app -> release IDs, save order, deduplicated
+	errs   map[Op]error
+	policy controlplane.Policy
 }
 
-// NewDatabase returns an empty fake database.
+// NewDatabase returns an empty fake database with the default guardrail policy.
 func NewDatabase() *Database {
 	return &Database{
-		byID:  make(map[string]controlplane.Release),
-		order: make(map[string][]string),
-		errs:  make(map[Op]error),
+		byID:   make(map[string]controlplane.Release),
+		order:  make(map[string][]string),
+		errs:   make(map[Op]error),
+		policy: controlplane.DefaultPolicy(),
 	}
+}
+
+// SetPolicy replaces the whole guardrail policy. It is a test helper for arranging a
+// specific policy before exercising the engine.
+func (d *Database) SetPolicy(p controlplane.Policy) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.policy = p
+}
+
+// Policy returns the current guardrail policy.
+func (d *Database) Policy(ctx context.Context) (controlplane.Policy, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpPolicy]; err != nil {
+		return controlplane.Policy{}, err
+	}
+	return d.policy, nil
+}
+
+// SetGuardrail persists one guardrail's disposition, overlaying it on the current policy.
+func (d *Database) SetGuardrail(ctx context.Context, code controlplane.GuardrailCode, disp controlplane.Disposition) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpSetGuardrail]; err != nil {
+		return err
+	}
+	if !disp.Valid() {
+		return fmt.Errorf("database: set guardrail: invalid disposition %q", disp)
+	}
+	d.policy = d.policy.With(code, disp)
+	return nil
 }
 
 // SetError makes op return err until cleared with SetError(op, nil).

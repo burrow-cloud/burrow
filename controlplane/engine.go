@@ -21,19 +21,17 @@ type Engine struct {
 	db       Database
 	clock    Clock
 	ids      IDSource
-	policy   Policy
 }
 
-// Deps are the dependencies an Engine needs. All seams are required; Policy defaults to
-// a conservative guardrail policy via DefaultPolicy if left zero is *not* done here —
-// callers pass an explicit, validated Policy.
+// Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
+// is not a dependency here: the engine reads the live policy from the Database seam on each
+// guarded operation (ADR-0020), so a `guard set` takes effect without restarting.
 type Deps struct {
 	Kubernetes Kubernetes
 	Registry   Registry
 	Database   Database
 	Clock      Clock
 	IDs        IDSource
-	Policy     Policy
 }
 
 // New constructs an Engine, validating that every seam is supplied and the policy is
@@ -52,16 +50,12 @@ func New(d Deps) (*Engine, error) {
 	case d.IDs == nil:
 		return nil, fmt.Errorf("controlplane: New: IDs seam is required")
 	}
-	if err := d.Policy.Validate(); err != nil {
-		return nil, fmt.Errorf("controlplane: New: policy: %w", err)
-	}
 	return &Engine{
 		k8s:      d.Kubernetes,
 		registry: d.Registry,
 		db:       d.Database,
 		clock:    d.Clock,
 		ids:      d.IDs,
-		policy:   d.Policy,
 	}, nil
 }
 
@@ -80,7 +74,11 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	if req.Replicas < 0 {
 		return DeployResult{}, fmt.Errorf("deploy %s: replicas %d is negative: %w", req.App, req.Replicas, ErrInvalid)
 	}
-	if err := e.policy.evaluateReplicas("deploy", req.Replicas, req.Confirm); err != nil {
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return DeployResult{}, fmt.Errorf("deploy %s: loading guardrail policy: %w", req.App, err)
+	}
+	if err := pol.evaluateReplicas("deploy", req.Replicas, req.Confirm); err != nil {
 		return DeployResult{}, err
 	}
 
@@ -197,7 +195,11 @@ func (e *Engine) Scale(ctx context.Context, app string, replicas int32, confirm 
 	if replicas < 0 {
 		return ScaleResult{}, fmt.Errorf("scale %s: replicas %d is negative: %w", app, replicas, ErrInvalid)
 	}
-	if err := e.policy.evaluateReplicas("scale", replicas, confirm); err != nil {
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return ScaleResult{}, fmt.Errorf("scale %s: loading guardrail policy: %w", app, err)
+	}
+	if err := pol.evaluateReplicas("scale", replicas, confirm); err != nil {
 		return ScaleResult{}, err
 	}
 

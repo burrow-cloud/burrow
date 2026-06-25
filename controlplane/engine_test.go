@@ -18,8 +18,9 @@ func newEngine(t *testing.T, policy cp.Policy) (*cp.Engine, *fake.Kubernetes, *f
 	k := fake.NewKubernetes()
 	r := fake.NewRegistry()
 	d := fake.NewDatabase()
+	d.SetPolicy(policy)
 	c := fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC))
-	e, err := cp.New(cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: fake.NewIDs(), Policy: policy})
+	e, err := cp.New(cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: fake.NewIDs()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -47,7 +48,7 @@ func mustGuardrail(t *testing.T, err error, code cp.GuardrailCode) {
 
 func TestNewValidatesDeps(t *testing.T) {
 	k, r, d, c, id := fake.NewKubernetes(), fake.NewRegistry(), fake.NewDatabase(), fake.NewClock(time.Now()), fake.NewIDs()
-	good := cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: id, Policy: cp.DefaultPolicy()}
+	good := cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: id}
 
 	if _, err := cp.New(good); err != nil {
 		t.Fatalf("valid deps: %v", err)
@@ -65,9 +66,9 @@ func TestNewValidatesDeps(t *testing.T) {
 		t.Errorf("missing IDs should error")
 	}
 	bad = good
-	bad.Policy = cp.Policy{MaxReplicas: 0}
+	bad.Database = nil
 	if _, err := cp.New(bad); err == nil {
-		t.Errorf("invalid policy should error")
+		t.Errorf("missing Database should error")
 	}
 }
 
@@ -235,6 +236,21 @@ func TestScale(t *testing.T) {
 	if _, err := e.Scale(ctx, "ghost", 3, false); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("scale ghost err = %v, want ErrNotFound", err)
 	}
+}
+
+// TestPolicyReadLive proves the engine reads the guardrail policy from the database on each
+// operation, so a `guard set` takes effect without a restart (ADR-0020).
+func TestPolicyReadLive(t *testing.T) {
+	ctx := context.Background()
+	e, _, r, d, _ := newEngine(t, permissive())
+	r.Add("img:1", "sha256:1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	// Tighten the policy at runtime; the next operation must observe it.
+	d.SetPolicy(cp.Policy{MaxReplicas: 1})
+	_, err := e.Scale(ctx, "web", 5, false)
+	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
 }
 
 func TestRollback(t *testing.T) {

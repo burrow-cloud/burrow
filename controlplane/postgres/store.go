@@ -140,6 +140,44 @@ func (s *Store) Releases(ctx context.Context, app string) ([]controlplane.Releas
 	return out, nil
 }
 
+// Policy returns the current guardrail policy: the built-in defaults with any stored
+// guardrail dispositions overlaid (ADR-0020). An empty table yields DefaultPolicy.
+func (s *Store) Policy(ctx context.Context) (controlplane.Policy, error) {
+	const q = `SELECT code, disposition FROM guardrail_policy`
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return controlplane.Policy{}, fmt.Errorf("postgres: policy: %w", err)
+	}
+	defer rows.Close()
+
+	p := controlplane.DefaultPolicy()
+	for rows.Next() {
+		var code, disp string
+		if err := rows.Scan(&code, &disp); err != nil {
+			return controlplane.Policy{}, fmt.Errorf("postgres: policy: %w", err)
+		}
+		p = p.With(controlplane.GuardrailCode(code), controlplane.Disposition(disp))
+	}
+	if err := rows.Err(); err != nil {
+		return controlplane.Policy{}, fmt.Errorf("postgres: policy: %w", err)
+	}
+	return p, nil
+}
+
+// SetGuardrail upserts one guardrail's disposition.
+func (s *Store) SetGuardrail(ctx context.Context, code controlplane.GuardrailCode, disp controlplane.Disposition) error {
+	if !disp.Valid() {
+		return fmt.Errorf("postgres: set guardrail %q: invalid disposition %q", code, disp)
+	}
+	const q = `
+INSERT INTO guardrail_policy (code, disposition) VALUES ($1, $2)
+ON CONFLICT (code) DO UPDATE SET disposition = EXCLUDED.disposition`
+	if _, err := s.db.ExecContext(ctx, q, string(code), string(disp)); err != nil {
+		return fmt.Errorf("postgres: set guardrail %q: %w", code, err)
+	}
+	return nil
+}
+
 // scanner is the read side common to *sql.Row and *sql.Rows.
 type scanner interface {
 	Scan(dest ...any) error

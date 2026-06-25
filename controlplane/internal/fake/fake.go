@@ -30,6 +30,8 @@ const (
 	OpRelease       Op = "Release"
 	OpLatestRelease Op = "LatestRelease"
 	OpReleases      Op = "Releases"
+	OpPolicy        Op = "Policy"
+	OpSetGuardrail  Op = "SetGuardrail"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

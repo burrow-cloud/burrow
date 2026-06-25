@@ -86,7 +86,6 @@ func run() error {
 		Database:   store,
 		Clock:      sys.Clock{},
 		IDs:        sys.IDs{},
-		Policy:     controlplane.DefaultPolicy(),
 	})
 	if err != nil {
 		return err

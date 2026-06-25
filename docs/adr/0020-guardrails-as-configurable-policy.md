@@ -2,10 +2,10 @@
 
 ## Status
 
-Proposed. This refines [ADR-0006](0006-guardrails-in-the-control-plane.md) (guardrails live
+Accepted. This refines [ADR-0006](0006-guardrails-in-the-control-plane.md) (guardrails live
 in the control plane) by making the policy inspectable and configurable and adding a
-`confirm` disposition. Recorded for review before the code lands; exact default thresholds
-are tuned as it ships, not pinned here.
+`confirm` disposition. Built in stages; exact default thresholds are tuned as it ships, not
+pinned here.
 
 ## Context
 

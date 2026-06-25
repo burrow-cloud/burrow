@@ -115,7 +115,7 @@ func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig 
 			return err
 		}
 		fmt.Fprintf(stdout, "\nBurrow is installed and ready in namespace %q.\n"+
-			"Deploy with your kubeconfig — no further config:\n"+
+			"Deploy an app:\n"+
 			"  burrow deploy <app> --image <ref>\n", namespace)
 		return nil
 	}

@@ -142,6 +142,7 @@ type ReachabilityResult struct {
 	Exposed            bool     `json:"exposed"`
 	Host               string   `json:"host,omitempty"`
 	Address            string   `json:"address,omitempty"`
+	TLS                bool     `json:"tls"`
 	DNSPointsAtCluster bool     `json:"dns_points_at_cluster"`
 	DNSAddresses       []string `json:"dns_addresses,omitempty"`
 	Reachable          bool     `json:"reachable"`
@@ -197,9 +198,9 @@ func (c *Client) Scale(ctx context.Context, app string, replicas int32, confirm 
 	return out, err
 }
 
-func (c *Client) Expose(ctx context.Context, app, host string, port int32, confirm bool) (ExposeResult, error) {
+func (c *Client) Expose(ctx context.Context, app, host string, port int32, tls bool, issuer string, confirm bool) (ExposeResult, error) {
 	var out ExposeResult
-	body := map[string]any{"host": host, "port": port, "confirm": confirm}
+	body := map[string]any{"host": host, "port": port, "tls": tls, "issuer": issuer, "confirm": confirm}
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "expose"), body, &out)
 	return out, err
 }

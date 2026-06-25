@@ -330,6 +330,31 @@ func TestExpose(t *testing.T) {
 	}
 }
 
+func TestExposeTLS(t *testing.T) {
+	ctx := context.Background()
+	e, _, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailExposePublic, cp.DispositionAllow))
+	r.Add("img:1", "sha256:1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	res, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080, TLS: true, Issuer: "letsencrypt"})
+	if err != nil {
+		t.Fatalf("expose tls: %v", err)
+	}
+	if res.URL != "https://web.example.com" {
+		t.Errorf("URL = %q, want https://web.example.com", res.URL)
+	}
+	if rr, _ := e.Reachability(ctx, "web"); !rr.TLS {
+		t.Errorf("reachability TLS = false, want true")
+	}
+
+	// TLS without an issuer is rejected.
+	if _, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080, TLS: true}); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("TLS without issuer err = %v, want ErrInvalid", err)
+	}
+}
+
 func TestReachability(t *testing.T) {
 	ctx := context.Background()
 	k := fake.NewKubernetes()

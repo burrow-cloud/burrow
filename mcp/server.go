@@ -155,12 +155,14 @@ type exposeInput struct {
 	App     string `json:"app" jsonschema:"the application name"`
 	Host    string `json:"host" jsonschema:"the external hostname to route to the app, e.g. app.example.com"`
 	Port    int32  `json:"port" jsonschema:"the app's container port to forward to"`
+	TLS     bool   `json:"tls,omitempty" jsonschema:"request an HTTPS certificate for the host via cert-manager"`
+	Issuer  string `json:"issuer,omitempty" jsonschema:"the cert-manager ClusterIssuer to use when tls is set (e.g. letsencrypt)"`
 	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed exposing the app to the public internet; do not self-confirm"`
 }
 
 func exposeTool(c *client.Client) sdk.ToolHandlerFor[exposeInput, client.ExposeResult] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in exposeInput) (*sdk.CallToolResult, client.ExposeResult, error) {
-		res, err := c.Expose(ctx, in.App, in.Host, in.Port, in.Confirm)
+		res, err := c.Expose(ctx, in.App, in.Host, in.Port, in.TLS, in.Issuer, in.Confirm)
 		if err != nil {
 			return nil, client.ExposeResult{}, err
 		}

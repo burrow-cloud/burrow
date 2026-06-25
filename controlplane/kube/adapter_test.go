@@ -92,6 +92,27 @@ func TestUnexpose(t *testing.T) {
 	}
 }
 
+func TestExposeTLS(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	if err := a.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.example.com", Port: 8080, TLS: true, Issuer: "letsencrypt"}); err != nil {
+		t.Fatalf("Expose: %v", err)
+	}
+	ing, err := client.NetworkingV1().Ingresses(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get ingress: %v", err)
+	}
+	if ing.Annotations["cert-manager.io/cluster-issuer"] != "letsencrypt" {
+		t.Errorf("issuer annotation = %q, want letsencrypt", ing.Annotations["cert-manager.io/cluster-issuer"])
+	}
+	if len(ing.Spec.TLS) != 1 || ing.Spec.TLS[0].SecretName != "web-tls" ||
+		len(ing.Spec.TLS[0].Hosts) != 1 || ing.Spec.TLS[0].Hosts[0] != "web.example.com" {
+		t.Errorf("ingress TLS = %+v, want host web.example.com secret web-tls", ing.Spec.TLS)
+	}
+}
+
 func TestExposureStatus(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

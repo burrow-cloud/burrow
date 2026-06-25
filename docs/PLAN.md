@@ -73,8 +73,12 @@ wired end to end behind the `expose_public` guardrail (confirm by default), and 
 **reachability surface** (`burrow reachability`, `burrow_reachability`) reports the chain —
 deployed → ready → exposed → external address → DNS — as a one-line plain summary plus the
 full structured chain (ADR-0022's layered model). It reads the external address from the
-app's own Ingress status, so it needs **no new RBAC**. Next: **TLS** (cert-manager), then
-**DNS automation** (DigitalOcean first).
+app's own Ingress status, so it needs **no new RBAC**. `expose --tls` now requests an HTTPS
+certificate: the Ingress carries the `cert-manager.io/cluster-issuer` annotation + a TLS
+stanza, and cert-manager (once installed) fills the cert; reachability reports whether TLS is
+configured. Next: **DNS automation** (DigitalOcean first), and the **`burrow ingress install`**
+setup command (ingress-nginx + cert-manager + a Let's Encrypt issuer) that makes the manual
+prerequisites turnkey.
 
 ### Out of scope for v0.2 (explicit)
 

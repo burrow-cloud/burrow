@@ -243,7 +243,7 @@ func (a *Adapter) ExposureStatus(ctx context.Context, app string) (controlplane.
 	if err != nil {
 		return controlplane.ExposureStatus{}, fmt.Errorf("kube: reading ingress %q: %w", app, err)
 	}
-	out := controlplane.ExposureStatus{Exposed: true}
+	out := controlplane.ExposureStatus{Exposed: true, TLS: len(ing.Spec.TLS) > 0}
 	if len(ing.Spec.Rules) > 0 {
 		out.Host = ing.Spec.Rules[0].Host
 	}
@@ -278,13 +278,22 @@ func (a *Adapter) buildService(spec controlplane.ExposeSpec) *corev1.Service {
 	}
 }
 
-// buildIngress routes spec.Host to the app's Service on port 80.
+// buildIngress routes spec.Host to the app's Service on port 80, optionally requesting a
+// cert-manager TLS certificate for the host.
 func (a *Adapter) buildIngress(spec controlplane.ExposeSpec) *networkingv1.Ingress {
 	labels := map[string]string{nameLabel: spec.App, managedByLabel: managedByValue}
 	pathType := networkingv1.PathTypePrefix
+	meta := metav1.ObjectMeta{Name: spec.App, Namespace: a.namespace, Labels: labels}
+	var tls []networkingv1.IngressTLS
+	if spec.TLS {
+		// cert-manager watches this annotation and issues a cert into the named Secret.
+		meta.Annotations = map[string]string{"cert-manager.io/cluster-issuer": spec.Issuer}
+		tls = []networkingv1.IngressTLS{{Hosts: []string{spec.Host}, SecretName: spec.App + "-tls"}}
+	}
 	return &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{Name: spec.App, Namespace: a.namespace, Labels: labels},
+		ObjectMeta: meta,
 		Spec: networkingv1.IngressSpec{
+			TLS: tls,
 			Rules: []networkingv1.IngressRule{{
 				Host: spec.Host,
 				IngressRuleValue: networkingv1.IngressRuleValue{

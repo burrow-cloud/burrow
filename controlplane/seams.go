@@ -62,7 +62,7 @@ type WorkloadSpec struct {
 }
 
 // ExposeSpec describes how to make an app reachable at a hostname (ADR-0018). v0.2 routes
-// HTTP to the app's Service via an Ingress.
+// HTTP to the app's Service via an Ingress, optionally with TLS issued by cert-manager.
 type ExposeSpec struct {
 	// App is the application to expose; its workload provides the Service's backends.
 	App string
@@ -70,6 +70,11 @@ type ExposeSpec struct {
 	Host string
 	// Port is the app's container port the Service forwards to. Must be positive.
 	Port int32
+	// TLS requests an HTTPS certificate for Host via cert-manager (the Ingress is annotated
+	// for the Issuer ClusterIssuer, and a TLS Secret is named for cert-manager to fill).
+	TLS bool
+	// Issuer is the cert-manager ClusterIssuer to request the certificate from when TLS.
+	Issuer string
 }
 
 // WorkloadStatus is the observed state of an App's workload, as reported by the cluster.
@@ -138,6 +143,8 @@ type ExposureStatus struct {
 	Exposed bool
 	Host    string
 	Address string
+	// TLS reports whether the Ingress requests a certificate (its spec has a TLS entry).
+	TLS bool
 }
 
 // ImageInfo is what a registry knows about an image reference.

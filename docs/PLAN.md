@@ -20,16 +20,26 @@ control plane forward in place ([ADR-0016](adr/0016-cli-distribution-and-upgrade
 The detail lives in git history, the now-green tests (unit + k3d integration + the capstone
 e2e), and the ADRs.
 
-## Now: private registry auth (landing first)
+## Shipped since v0.1
 
-Real apps live in private registries, so pulling a private image is table-stakes and lands
-ahead of the URL work. `burrow registry login/logout/list` provisions a `dockerconfigjson`
-pull Secret with the developer's kubeconfig and attaches it to the app namespace's default
-ServiceAccount, so app Pods inherit it — the control plane, burrowd's RBAC, and the deploy
-path are untouched, and the credential never crosses MCP
-([ADR-0017](adr/0017-private-registry-authentication.md)). This also makes explicit the
-**setup-vs-operation boundary**: `install`, `upgrade`, and `registry` act with the
-kubeconfig; `deploy`/`status`/`logs`/`rollback`/`scale` go through burrowd.
+- **Private registry auth** — `burrow registry login/logout/list` provisions a
+  `dockerconfigjson` pull Secret with the developer's kubeconfig and attaches it to the app
+  namespace's default ServiceAccount; the credential never crosses MCP
+  ([ADR-0017](adr/0017-private-registry-authentication.md)). It also made the
+  **setup-vs-operation boundary** explicit: `install`/`upgrade`/`registry` act with the
+  kubeconfig; `deploy`/`status`/`logs`/`rollback`/`scale` go through burrowd.
+- **CLI on Cobra** — the command surface moved to Cobra
+  ([ADR-0019](adr/0019-cli-framework-cobra.md)), so the v0.2 commands are built on it.
+
+## Now: guardrails as configurable policy
+
+Before the v0.2 URL work adds DNS write/delete and public-exposure gates, generalize the
+compiled-in, deny-or-allow guardrails into inspectable, configurable **policy** with an
+`allow | confirm | deny` disposition per action, stored in the control plane and evaluated by
+burrowd ([ADR-0020](adr/0020-guardrails-as-configurable-policy.md)). `burrow guard list` is
+read-only and exposed over MCP so the agent knows the rules before acting; `burrow guard set`
+is **CLI-only** — the agent can never change its own guardrails. The DNS and exposure gates
+then plug in as policy rather than new hardcodes. ADR-0020 is in review before this is built.
 
 ## Next: v0.2 — reach a deployed app at a URL (ingress, TLS, DNS)
 

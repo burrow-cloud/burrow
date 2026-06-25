@@ -9,38 +9,46 @@ import (
 	"testing"
 )
 
-func TestCheckReplicas(t *testing.T) {
-	p := Policy{MaxReplicas: 10, AllowScaleToZero: false}
-	pz := Policy{MaxReplicas: 10, AllowScaleToZero: true}
+func TestEvaluateReplicas(t *testing.T) {
+	deny := Policy{MaxReplicas: 10} // ceiling + scale-to-zero default to deny
+	allowZero := Policy{MaxReplicas: 10}.With(GuardrailScaleToZero, DispositionAllow)
+	confirmZero := Policy{MaxReplicas: 10}.With(GuardrailScaleToZero, DispositionConfirm)
 
 	cases := []struct {
-		name     string
-		policy   Policy
-		replicas int32
-		wantCode GuardrailCode // "" means allowed
+		name        string
+		policy      Policy
+		replicas    int32
+		confirmed   bool
+		wantCode    GuardrailCode // "" means allowed
+		wantConfirm bool
 	}{
-		{"within limits", p, 3, ""},
-		{"at ceiling", p, 10, ""},
-		{"above ceiling", p, 11, GuardrailReplicaCeiling},
-		{"zero disallowed", p, 0, GuardrailScaleToZero},
-		{"zero allowed", pz, 0, ""},
-		{"zero allowed still ceiling", pz, 11, GuardrailReplicaCeiling},
+		{"within limits", deny, 3, false, "", false},
+		{"at ceiling", deny, 10, false, "", false},
+		{"above ceiling denied", deny, 11, false, GuardrailReplicaCeiling, false},
+		{"zero denied", deny, 0, false, GuardrailScaleToZero, false},
+		{"zero allowed", allowZero, 0, false, "", false},
+		{"zero allowed still ceiling", allowZero, 11, false, GuardrailReplicaCeiling, false},
+		{"zero needs confirmation", confirmZero, 0, false, GuardrailScaleToZero, true},
+		{"zero confirmed proceeds", confirmZero, 0, true, "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := c.policy.checkReplicas("test", c.replicas)
+			err := c.policy.evaluateReplicas("test", c.replicas, c.confirmed)
 			if c.wantCode == "" {
 				if err != nil {
-					t.Fatalf("checkReplicas(%d) = %v, want allowed", c.replicas, err)
+					t.Fatalf("evaluateReplicas(%d, confirmed=%v) = %v, want allowed", c.replicas, c.confirmed, err)
 				}
 				return
 			}
 			g, ok := AsGuardrail(err)
 			if !ok {
-				t.Fatalf("checkReplicas(%d) = %v, want GuardrailError", c.replicas, err)
+				t.Fatalf("evaluateReplicas(%d) = %v, want GuardrailError", c.replicas, err)
 			}
 			if g.Code != c.wantCode {
 				t.Fatalf("code = %q, want %q", g.Code, c.wantCode)
+			}
+			if g.NeedsConfirmation != c.wantConfirm {
+				t.Fatalf("NeedsConfirmation = %v, want %v", g.NeedsConfirmation, c.wantConfirm)
 			}
 			if g.Operation != "test" {
 				t.Fatalf("operation = %q, want test", g.Operation)

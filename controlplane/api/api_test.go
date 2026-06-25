@@ -27,7 +27,7 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake
 		Kubernetes: k, Registry: r, Database: d,
 		Clock:  fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
 		IDs:    fake.NewIDs(),
-		Policy: cp.Policy{MaxReplicas: 5, AllowScaleToZero: false},
+		Policy: cp.Policy{MaxReplicas: 5},
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)

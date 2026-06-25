@@ -27,7 +27,11 @@ func newEngine(t *testing.T, policy cp.Policy) (*cp.Engine, *fake.Kubernetes, *f
 }
 
 // permissive avoids guardrail interference for tests not about guardrails.
-func permissive() cp.Policy { return cp.Policy{MaxReplicas: 1000, AllowScaleToZero: true} }
+func permissive() cp.Policy {
+	p := cp.DefaultPolicy()
+	p.MaxReplicas = 1000
+	return p.With(cp.GuardrailScaleToZero, cp.DispositionAllow)
+}
 
 // mustGuardrail asserts err is a guardrail refusal with the given code.
 func mustGuardrail(t *testing.T, err error, code cp.GuardrailCode) {
@@ -117,7 +121,7 @@ func TestDeployImageNotFound(t *testing.T) {
 
 func TestDeployGuardrails(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 5, AllowScaleToZero: false})
+	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 5})
 	r.Add("img:1", "sha256:1")
 
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 6})
@@ -207,11 +211,11 @@ func TestLogs(t *testing.T) {
 
 func TestScale(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 10, AllowScaleToZero: false})
+	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 10})
 	r.Add("img:1", "sha256:1")
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2})
 
-	res, err := e.Scale(ctx, "web", 5)
+	res, err := e.Scale(ctx, "web", 5, false)
 	if err != nil {
 		t.Fatalf("Scale: %v", err)
 	}
@@ -223,12 +227,12 @@ func TestScale(t *testing.T) {
 	}
 
 	// Guardrails apply to scale too.
-	_, err = e.Scale(ctx, "web", 0)
+	_, err = e.Scale(ctx, "web", 0, false)
 	mustGuardrail(t, err, cp.GuardrailScaleToZero)
-	_, err = e.Scale(ctx, "web", 99)
+	_, err = e.Scale(ctx, "web", 99, false)
 	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
 	// Unknown app.
-	if _, err := e.Scale(ctx, "ghost", 3); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.Scale(ctx, "ghost", 3, false); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("scale ghost err = %v, want ErrNotFound", err)
 	}
 }

@@ -88,8 +88,8 @@ func TestDefaultPolicyIsValid(t *testing.T) {
 	if p.MaxReplicas <= 0 {
 		t.Errorf("DefaultPolicy().MaxReplicas = %d, want positive", p.MaxReplicas)
 	}
-	if p.AllowScaleToZero {
-		t.Errorf("DefaultPolicy() should treat scale-to-zero as dangerous by default")
+	if p.disposition(GuardrailScaleToZero) != DispositionDeny {
+		t.Errorf("DefaultPolicy() should treat scale-to-zero as dangerous (deny) by default")
 	}
 }
 

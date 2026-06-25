@@ -80,7 +80,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	if req.Replicas < 0 {
 		return DeployResult{}, fmt.Errorf("deploy %s: replicas %d is negative: %w", req.App, req.Replicas, ErrInvalid)
 	}
-	if err := e.policy.checkReplicas("deploy", req.Replicas); err != nil {
+	if err := e.policy.evaluateReplicas("deploy", req.Replicas, req.Confirm); err != nil {
 		return DeployResult{}, err
 	}
 
@@ -190,14 +190,14 @@ func (e *Engine) Logs(ctx context.Context, app string, opts LogOptions) ([]LogLi
 // Scale changes an app's replica count, guarded against scale-to-zero and the policy
 // ceiling (ADR-0006). It does not create a new release: scaling adjusts the running
 // workload, while a release records a deploy.
-func (e *Engine) Scale(ctx context.Context, app string, replicas int32) (ScaleResult, error) {
+func (e *Engine) Scale(ctx context.Context, app string, replicas int32, confirm bool) (ScaleResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return ScaleResult{}, fmt.Errorf("scale: %w: %w", ErrInvalid, err)
 	}
 	if replicas < 0 {
 		return ScaleResult{}, fmt.Errorf("scale %s: replicas %d is negative: %w", app, replicas, ErrInvalid)
 	}
-	if err := e.policy.checkReplicas("scale", replicas); err != nil {
+	if err := e.policy.evaluateReplicas("scale", replicas, confirm); err != nil {
 		return ScaleResult{}, err
 	}
 

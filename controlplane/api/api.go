@@ -115,7 +115,7 @@ func (s *server) scale(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.Scale(r.Context(), r.PathValue("app"), req.Replicas)
+	res, err := s.engine.Scale(r.Context(), r.PathValue("app"), req.Replicas, req.Confirm)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -130,6 +130,9 @@ func health(w http.ResponseWriter, _ *http.Request) {
 // scaleRequest is the body of a scale call (the app comes from the path).
 type scaleRequest struct {
 	Replicas int32 `json:"replicas"`
+	// Confirm acknowledges a confirm-disposition guardrail so the scale proceeds past it
+	// (ADR-0020).
+	Confirm bool `json:"confirm,omitempty"`
 }
 
 // logsResponse wraps the log lines so the shape can grow (cursors, truncation) without
@@ -192,6 +195,9 @@ type errorResponse struct {
 	Code      string `json:"code,omitempty"`
 	Requested *int32 `json:"requested,omitempty"`
 	Limit     *int32 `json:"limit,omitempty"`
+	// NeedsConfirmation is set on a guardrail that holds the operation for confirmation
+	// rather than refusing it: the caller may retry with confirm set (ADR-0020).
+	NeedsConfirmation bool `json:"needs_confirmation,omitempty"`
 }
 
 func writeError(w http.ResponseWriter, status int, msg, code string) {
@@ -204,6 +210,7 @@ func writeEngineError(w http.ResponseWriter, err error) {
 		req, lim := g.Requested, g.Limit
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
 			Error: g.Error(), Code: string(g.Code), Requested: &req, Limit: &lim,
+			NeedsConfirmation: g.NeedsConfirmation,
 		})
 		return
 	}

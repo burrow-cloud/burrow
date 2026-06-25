@@ -4,167 +4,173 @@
 package main
 
 import (
-	"context"
-	"flag"
+	"errors"
 	"fmt"
-	"io"
 	"strconv"
+
+	"github.com/spf13/cobra"
 
 	"github.com/burrow-cloud/burrow/client"
 )
 
-func cmdDeploy(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	o := addCommon(fs)
-	image := fs.String("image", "", "container image reference to deploy (required)")
-	replicas := fs.Int("replicas", 1, "number of replicas")
-	build := fs.String("build", "", "build and push the image from this directory before deploying")
+func newDeployCmd() *cobra.Command {
+	o := &commonOpts{}
+	var image, build string
+	var replicas int
 	var env kvFlag
-	fs.Var(&env, "env", "environment variable KEY=VALUE (repeatable)")
-	pos, flagArgs := splitArgs(args)
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
+	cmd := &cobra.Command{
+		Use:   "deploy <app>",
+		Short: "Deploy an app by image reference (optionally build & push first)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			app := args[0]
+			if image == "" {
+				return errors.New("--image is required")
+			}
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			if build != "" {
+				if err := buildAndPush(ctx, build, image, execRunner(cmd.ErrOrStderr(), cmd.ErrOrStderr())); err != nil {
+					return err
+				}
+			}
+			res, err := c.Deploy(ctx, app, client.DeployRequest{
+				Image:    image,
+				Env:      env.m,
+				Replicas: int32(replicas),
+			})
+			if err != nil {
+				return err
+			}
+			human := fmt.Sprintf("deployed %s as release %s (image %s, %d replica(s), %s)",
+				app, res.Release.ID, res.Release.Image, res.Release.Replicas, res.Release.Status)
+			if res.SupersededReleaseID != "" {
+				human += fmt.Sprintf("; superseded release %s", res.SupersededReleaseID)
+			}
+			return emit(cmd.OutOrStdout(), o.json, res, human)
+		},
 	}
-	app := arg(pos, 0)
-	if app == "" || *image == "" {
-		return fmt.Errorf("usage: burrow deploy <app> --image <ref> [--replicas n] [--env K=V] [--build dir]")
-	}
-	c, err := o.client(ctx)
-	if err != nil {
-		return err
-	}
-
-	if *build != "" {
-		if err := buildAndPush(ctx, *build, *image, execRunner(stderr, stderr)); err != nil {
-			return err
-		}
-	}
-
-	res, err := c.Deploy(ctx, app, client.DeployRequest{
-		Image:    *image,
-		Env:      env.m,
-		Replicas: int32(*replicas),
-	})
-	if err != nil {
-		return err
-	}
-	human := fmt.Sprintf("deployed %s as release %s (image %s, %d replica(s), %s)",
-		app, res.Release.ID, res.Release.Image, res.Release.Replicas, res.Release.Status)
-	if res.SupersededReleaseID != "" {
-		human += fmt.Sprintf("; superseded release %s", res.SupersededReleaseID)
-	}
-	return emit(stdout, o.json, res, human)
+	bindCommon(cmd.Flags(), o)
+	cmd.Flags().StringVar(&image, "image", "", "container image reference to deploy (required)")
+	cmd.Flags().IntVar(&replicas, "replicas", 1, "number of replicas")
+	cmd.Flags().StringVar(&build, "build", "", "build and push the image from this directory before deploying")
+	cmd.Flags().Var(&env, "env", "environment variable KEY=VALUE (repeatable)")
+	return cmd
 }
 
-func cmdStatus(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	o := addCommon(fs)
-	pos, flagArgs := splitArgs(args)
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
+func newStatusCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "status <app>",
+		Short: "Show an app's release and live workload status",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			res, err := c.Status(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			return emit(cmd.OutOrStdout(), o.json, res, formatStatus(res))
+		},
 	}
-	app := arg(pos, 0)
-	if app == "" {
-		return fmt.Errorf("usage: burrow status <app>")
-	}
-	c, err := o.client(ctx)
-	if err != nil {
-		return err
-	}
-	res, err := c.Status(ctx, app)
-	if err != nil {
-		return err
-	}
-	return emit(stdout, o.json, res, formatStatus(res))
+	bindCommon(cmd.Flags(), o)
+	return cmd
 }
 
-func cmdLogs(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	o := addCommon(fs)
-	tail := fs.Int("tail", 0, "maximum number of recent log lines (0 = adapter default)")
-	pos, flagArgs := splitArgs(args)
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
+func newLogsCmd() *cobra.Command {
+	o := &commonOpts{}
+	var tail int
+	cmd := &cobra.Command{
+		Use:   "logs <app>",
+		Short: "Show recent logs for an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			lines, err := c.Logs(ctx, args[0], tail)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if o.json {
+				return emit(out, true, lines, "")
+			}
+			if len(lines) == 0 {
+				fmt.Fprintln(out, "(no logs)")
+				return nil
+			}
+			for _, l := range lines {
+				fmt.Fprintf(out, "%s  %s\n", l.Pod, l.Message)
+			}
+			return nil
+		},
 	}
-	app := arg(pos, 0)
-	if app == "" {
-		return fmt.Errorf("usage: burrow logs <app> [--tail n]")
-	}
-	c, err := o.client(ctx)
-	if err != nil {
-		return err
-	}
-	lines, err := c.Logs(ctx, app, *tail)
-	if err != nil {
-		return err
-	}
-	if o.json {
-		return emit(stdout, true, lines, "")
-	}
-	if len(lines) == 0 {
-		fmt.Fprintln(stdout, "(no logs)")
-		return nil
-	}
-	for _, l := range lines {
-		fmt.Fprintf(stdout, "%s  %s\n", l.Pod, l.Message)
-	}
-	return nil
+	bindCommon(cmd.Flags(), o)
+	cmd.Flags().IntVar(&tail, "tail", 0, "maximum number of recent log lines (0 = adapter default)")
+	return cmd
 }
 
-func cmdRollback(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	o := addCommon(fs)
-	pos, flagArgs := splitArgs(args)
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
+func newRollbackCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "rollback <app>",
+		Short: "Roll an app back to its previous release",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			res, err := c.Rollback(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			human := fmt.Sprintf("rolled %s back to release %s (image %s) as release %s; superseded release %s",
+				args[0], res.RolledBackToReleaseID, res.Release.Image, res.Release.ID, res.SupersededReleaseID)
+			return emit(cmd.OutOrStdout(), o.json, res, human)
+		},
 	}
-	app := arg(pos, 0)
-	if app == "" {
-		return fmt.Errorf("usage: burrow rollback <app>")
-	}
-	c, err := o.client(ctx)
-	if err != nil {
-		return err
-	}
-	res, err := c.Rollback(ctx, app)
-	if err != nil {
-		return err
-	}
-	human := fmt.Sprintf("rolled %s back to release %s (image %s) as release %s; superseded release %s",
-		app, res.RolledBackToReleaseID, res.Release.Image, res.Release.ID, res.SupersededReleaseID)
-	return emit(stdout, o.json, res, human)
+	bindCommon(cmd.Flags(), o)
+	return cmd
 }
 
-func cmdScale(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("scale", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	o := addCommon(fs)
-	pos, flagArgs := splitArgs(args)
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
+func newScaleCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "scale <app> <replicas>",
+		Short: "Set an app's replica count",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			n, err := strconv.Atoi(args[1])
+			if err != nil {
+				return fmt.Errorf("replicas must be a number, got %q", args[1])
+			}
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			res, err := c.Scale(ctx, args[0], int32(n))
+			if err != nil {
+				return err
+			}
+			human := fmt.Sprintf("scaled %s from %d to %d replica(s)", args[0], res.PreviousReplicas, res.Replicas)
+			return emit(cmd.OutOrStdout(), o.json, res, human)
+		},
 	}
-	app, nStr := arg(pos, 0), arg(pos, 1)
-	if app == "" || nStr == "" {
-		return fmt.Errorf("usage: burrow scale <app> <replicas>")
-	}
-	n, err := strconv.Atoi(nStr)
-	if err != nil {
-		return fmt.Errorf("replicas must be a number, got %q", nStr)
-	}
-	c, err := o.client(ctx)
-	if err != nil {
-		return err
-	}
-	res, err := c.Scale(ctx, app, int32(n))
-	if err != nil {
-		return err
-	}
-	human := fmt.Sprintf("scaled %s from %d to %d replica(s)", app, res.PreviousReplicas, res.Replicas)
-	return emit(stdout, o.json, res, human)
+	bindCommon(cmd.Flags(), o)
+	return cmd
 }
 
 func formatStatus(res client.StatusResult) string {

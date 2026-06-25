@@ -5,10 +5,10 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 
+	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -27,24 +27,31 @@ const dbSecretName = "burrowd-db"
 // defaults to this CLI's pinned release, so `burrow upgrade` after a CLI update is the whole
 // control-plane upgrade. Migrations ride burrowd's startup behind the single-minor-step gate
 // (ADR-0013). See ADR-0016.
-func cmdUpgrade(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	namespace := fs.String("namespace", connect.DefaultNamespace, "namespace the control plane is installed in")
-	image := fs.String("burrowd-image", defaultBurrowdImage, "burrowd image to upgrade to (default: this CLI's pinned release)")
-	kubeconfig := fs.String("kubeconfig", "", "path to kubeconfig (default: ambient)")
-	dryRun := fs.Bool("dry-run", false, "print the manifests instead of applying them")
-	wait := fs.Bool("wait", true, "wait for the control plane to become ready")
-	_, flagArgs := splitArgs(args)
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
+func newUpgradeCmd() *cobra.Command {
+	var namespace, image, kubeconfig string
+	var dryRun, wait bool
+	cmd := &cobra.Command{
+		Use:   "upgrade",
+		Short: "Upgrade the in-cluster control plane in place (preserves state)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runUpgrade(cmd.Context(), namespace, image, kubeconfig, dryRun, wait, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		},
 	}
+	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace the control plane is installed in")
+	cmd.Flags().StringVar(&image, "burrowd-image", defaultBurrowdImage, "burrowd image to upgrade to (default: this CLI's pinned release)")
+	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")
+	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the control plane to become ready")
+	return cmd
+}
 
-	cs, err := clientset(*kubeconfig)
+func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun, wait bool, stdout, stderr io.Writer) error {
+	cs, err := clientset(kubeconfig)
 	if err != nil {
 		return err
 	}
-	opts, err := upgradeOptions(ctx, cs, *namespace, *image)
+	opts, err := upgradeOptions(ctx, cs, namespace, image)
 	if err != nil {
 		return err
 	}
@@ -53,23 +60,23 @@ func cmdUpgrade(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if err != nil {
 		return err
 	}
-	if *dryRun {
+	if dryRun {
 		fmt.Fprint(stdout, manifests)
 		return nil
 	}
 
-	fmt.Fprintf(stdout, "Upgrading Burrow in namespace %q to image %q...\n", *namespace, *image)
-	if err := kubectlApply(ctx, *kubeconfig, manifests, stdout, stderr); err != nil {
+	fmt.Fprintf(stdout, "Upgrading Burrow in namespace %q to image %q...\n", namespace, image)
+	if err := kubectlApply(ctx, kubeconfig, manifests, stdout, stderr); err != nil {
 		return err
 	}
-	if !*wait {
-		fmt.Fprintf(stdout, "\nBurrow upgrade applied in namespace %q (not waiting for readiness).\n", *namespace)
+	if !wait {
+		fmt.Fprintf(stdout, "\nBurrow upgrade applied in namespace %q (not waiting for readiness).\n", namespace)
 		return nil
 	}
-	if err := waitForReady(ctx, *kubeconfig, *namespace, stdout); err != nil {
+	if err := waitForReady(ctx, kubeconfig, namespace, stdout); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "\nBurrow is upgraded and ready in namespace %q.\n", *namespace)
+	fmt.Fprintf(stdout, "\nBurrow is upgraded and ready in namespace %q.\n", namespace)
 	return nil
 }
 

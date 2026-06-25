@@ -8,14 +8,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,93 +39,117 @@ type dockerAuth struct {
 	Auth     string `json:"auth,omitempty"`
 }
 
-// cmdRegistry manages the cluster's registry pull credentials. It is a setup command: it acts
-// with the developer's kubeconfig to provision a Kubernetes pull Secret, distinct from the
-// agent-driven operations that flow through burrowd (ADR-0017). The credential never travels
-// over MCP and burrowd never handles it.
-func cmdRegistry(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("usage: burrow registry <login|logout|list> [flags]")
+// newRegistryCmd manages the cluster's registry pull credentials. It is a setup command: it
+// acts with the developer's kubeconfig to provision a Kubernetes pull Secret, distinct from
+// the agent-driven operations that flow through burrowd (ADR-0017). The credential never
+// travels over MCP and burrowd never handles it. The login/logout/list subcommands share the
+// namespace flags and resolve the app namespace from the install.
+func newRegistryCmd() *cobra.Command {
+	var namespace, appNamespace, kubeconfig string
+	parent := &cobra.Command{
+		Use:   "registry",
+		Short: "Configure credentials for a private image registry (login/logout/list)",
 	}
-	sub, rest := args[0], args[1:]
+	parent.PersistentFlags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "control-plane namespace Burrow is installed in")
+	parent.PersistentFlags().StringVar(&appNamespace, "app-namespace", "", "namespace apps deploy into (default: discovered from the install)")
+	parent.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 
-	fs := flag.NewFlagSet("registry "+sub, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	namespace := fs.String("namespace", connect.DefaultNamespace, "control-plane namespace Burrow is installed in")
-	appNamespace := fs.String("app-namespace", "", "namespace apps deploy into (default: discovered from the install)")
-	kubeconfig := fs.String("kubeconfig", "", "path to kubeconfig (default: ambient)")
+	// resolve builds a clientset and determines the app namespace (from the flag or the
+	// install) for whichever subcommand runs.
+	resolve := func(ctx context.Context) (kubernetes.Interface, string, error) {
+		cs, err := clientset(kubeconfig)
+		if err != nil {
+			return nil, "", err
+		}
+		appNS := appNamespace
+		if appNS == "" {
+			appNS, err = appNamespaceOf(ctx, cs, namespace)
+			if err != nil {
+				return nil, "", err
+			}
+		}
+		return cs, appNS, nil
+	}
+
 	var username, password string
 	var fromDocker bool
-	if sub == "login" {
-		fs.StringVar(&username, "u", "", "registry username")
-		fs.StringVar(&username, "username", "", "registry username")
-		fs.StringVar(&password, "p", "", "registry password or token")
-		fs.StringVar(&password, "password", "", "registry password or token")
-		fs.BoolVar(&fromDocker, "from-docker-config", false, "read the credential for <host> from ~/.docker/config.json")
-	}
-	pos, flagArgs := splitArgs(rest)
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
-	}
-
-	cs, err := clientset(*kubeconfig)
-	if err != nil {
-		return err
-	}
-	appNS := *appNamespace
-	if appNS == "" {
-		appNS, err = appNamespaceOf(ctx, cs, *namespace)
-		if err != nil {
-			return err
-		}
-	}
-
-	switch sub {
-	case "login":
-		host := arg(pos, 0)
-		if host == "" {
-			return errors.New("usage: burrow registry login <host> [-u user -p token | --from-docker-config]")
-		}
-		if fromDocker {
-			username, password, err = dockerConfigAuth(host)
+	login := &cobra.Command{
+		Use:   "login <host>",
+		Short: "Store a credential for a private registry",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			host := args[0]
+			cs, appNS, err := resolve(ctx)
 			if err != nil {
 				return err
 			}
-		}
-		if username == "" || password == "" {
-			return errors.New("a username and password/token are required (use -u/-p or --from-docker-config)")
-		}
-		if err := registryLogin(ctx, cs, appNS, host, username, password); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "configured registry %q for apps in namespace %q\n", host, appNS)
-		return nil
-	case "logout":
-		host := arg(pos, 0)
-		if host == "" {
-			return errors.New("usage: burrow registry logout <host>")
-		}
-		if err := registryLogout(ctx, cs, appNS, host); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "removed registry %q from namespace %q\n", host, appNS)
-		return nil
-	case "list":
-		hosts, err := registryList(ctx, cs, appNS)
-		if err != nil {
-			return err
-		}
-		if len(hosts) == 0 {
-			fmt.Fprintf(stdout, "no registries configured in namespace %q\n", appNS)
+			u, p := username, password
+			if fromDocker {
+				if u, p, err = dockerConfigAuth(host); err != nil {
+					return err
+				}
+			}
+			if u == "" || p == "" {
+				return errors.New("a username and password/token are required (use -u/-p or --from-docker-config)")
+			}
+			if err := registryLogin(ctx, cs, appNS, host, u, p); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "configured registry %q for apps in namespace %q\n", host, appNS)
 			return nil
-		}
-		for _, h := range hosts {
-			fmt.Fprintln(stdout, h)
-		}
-		return nil
-	default:
-		return fmt.Errorf("unknown registry subcommand %q (want login, logout, or list)", sub)
+		},
 	}
+	login.Flags().StringVarP(&username, "username", "u", "", "registry username")
+	login.Flags().StringVarP(&password, "password", "p", "", "registry password or token")
+	login.Flags().BoolVar(&fromDocker, "from-docker-config", false, "read the credential for <host> from ~/.docker/config.json")
+
+	logout := &cobra.Command{
+		Use:   "logout <host>",
+		Short: "Remove a registry's stored credential",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			cs, appNS, err := resolve(ctx)
+			if err != nil {
+				return err
+			}
+			if err := registryLogout(ctx, cs, appNS, args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "removed registry %q from namespace %q\n", args[0], appNS)
+			return nil
+		},
+	}
+
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List configured registries",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			cs, appNS, err := resolve(ctx)
+			if err != nil {
+				return err
+			}
+			hosts, err := registryList(ctx, cs, appNS)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if len(hosts) == 0 {
+				fmt.Fprintf(out, "no registries configured in namespace %q\n", appNS)
+				return nil
+			}
+			for _, h := range hosts {
+				fmt.Fprintln(out, h)
+			}
+			return nil
+		},
+	}
+
+	parent.AddCommand(login, logout, list)
+	return parent
 }
 
 // registryLogin upserts the host's credential into the burrow-registry Secret and ensures the

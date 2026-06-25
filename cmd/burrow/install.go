@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	_ "embed"
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"io"
 	"os/exec"
@@ -16,6 +15,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -48,20 +48,27 @@ type installOptions struct {
 	Port         int
 }
 
-func cmdInstall(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	namespace := fs.String("namespace", connect.DefaultNamespace, "namespace to install the control plane into")
-	appNamespace := fs.String("app-namespace", "default", "namespace to deploy applications into")
-	image := fs.String("burrowd-image", defaultBurrowdImage, "burrowd container image to deploy (must be pullable by the cluster)")
-	kubeconfig := fs.String("kubeconfig", "", "path to kubeconfig (default: ambient)")
-	dryRun := fs.Bool("dry-run", false, "print the manifests instead of applying them")
-	wait := fs.Bool("wait", true, "wait for the control plane to become ready")
-	_, flagArgs := splitArgs(args)
-	if err := fs.Parse(flagArgs); err != nil {
-		return err
+func newInstallCmd() *cobra.Command {
+	var namespace, appNamespace, image, kubeconfig string
+	var dryRun, wait bool
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install the Burrow control plane into your cluster",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runInstall(cmd.Context(), namespace, appNamespace, image, kubeconfig, dryRun, wait, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		},
 	}
+	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace to install the control plane into")
+	cmd.Flags().StringVar(&appNamespace, "app-namespace", "default", "namespace to deploy applications into")
+	cmd.Flags().StringVar(&image, "burrowd-image", defaultBurrowdImage, "burrowd container image to deploy (must be pullable by the cluster)")
+	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")
+	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the control plane to become ready")
+	return cmd
+}
 
+func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig string, dryRun, wait bool, stdout, stderr io.Writer) error {
 	token, err := randHex(16)
 	if err != nil {
 		return err
@@ -72,9 +79,9 @@ func cmdInstall(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 
 	manifests, err := renderManifests(installOptions{
-		Namespace:    *namespace,
-		AppNamespace: *appNamespace,
-		Image:        *image,
+		Namespace:    namespace,
+		AppNamespace: appNamespace,
+		Image:        image,
 		Token:        token,
 		DBPassword:   dbPassword,
 		Port:         connect.DefaultPort,
@@ -83,36 +90,36 @@ func cmdInstall(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return err
 	}
 
-	if *dryRun {
+	if dryRun {
 		fmt.Fprint(stdout, manifests)
 		return nil
 	}
 
-	cs, err := clientset(*kubeconfig)
+	cs, err := clientset(kubeconfig)
 	if err != nil {
 		return err
 	}
-	if installed, err := alreadyInstalled(ctx, cs, *namespace); err != nil {
+	if installed, err := alreadyInstalled(ctx, cs, namespace); err != nil {
 		return err
 	} else if installed {
 		return fmt.Errorf("Burrow is already installed in namespace %q; run `burrow upgrade` to update it "+
-			"(re-running install would mint new secrets and break the existing control plane)", *namespace)
+			"(re-running install would mint new secrets and break the existing control plane)", namespace)
 	}
 
-	if err := kubectlApply(ctx, *kubeconfig, manifests, stdout, stderr); err != nil {
+	if err := kubectlApply(ctx, kubeconfig, manifests, stdout, stderr); err != nil {
 		return err
 	}
 
-	if *wait {
-		if err := waitForReady(ctx, *kubeconfig, *namespace, stdout); err != nil {
+	if wait {
+		if err := waitForReady(ctx, kubeconfig, namespace, stdout); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "\nBurrow is installed and ready in namespace %q.\n"+
 			"Deploy with your kubeconfig — no further config:\n"+
-			"  burrow deploy <app> --image <ref>\n", *namespace)
+			"  burrow deploy <app> --image <ref>\n", namespace)
 		return nil
 	}
-	fmt.Fprintf(stdout, "\nBurrow installed into namespace %q (not waiting for readiness).\n", *namespace)
+	fmt.Fprintf(stdout, "\nBurrow installed into namespace %q (not waiting for readiness).\n", namespace)
 	return nil
 }
 

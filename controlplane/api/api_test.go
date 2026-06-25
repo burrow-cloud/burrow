@@ -23,11 +23,11 @@ const token = "secret-token"
 func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake.Database) {
 	t.Helper()
 	k, r, d := fake.NewKubernetes(), fake.NewRegistry(), fake.NewDatabase()
+	d.SetPolicy(cp.Policy{MaxReplicas: 5})
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Registry: r, Database: d,
-		Clock:  fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
-		IDs:    fake.NewIDs(),
-		Policy: cp.Policy{MaxReplicas: 5},
+		Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs:   fake.NewIDs(),
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)

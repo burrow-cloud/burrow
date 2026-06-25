@@ -133,4 +133,12 @@ type Database interface {
 	// Releases returns all releases for app, oldest first. An app with no releases
 	// yields an empty slice and no error.
 	Releases(ctx context.Context, app string) ([]Release, error)
+
+	// Policy returns the current guardrail policy: the stored guardrail dispositions
+	// overlaid on the built-in defaults (DefaultPolicy), so a store with nothing set
+	// returns DefaultPolicy and newly-added guardrails get a sensible default (ADR-0020).
+	Policy(ctx context.Context) (Policy, error)
+	// SetGuardrail persists the disposition for one guardrail — the write behind
+	// `guard set`. It rejects an invalid disposition.
+	SetGuardrail(ctx context.Context, code GuardrailCode, d Disposition) error
 }

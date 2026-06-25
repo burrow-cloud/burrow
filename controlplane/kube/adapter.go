@@ -235,6 +235,32 @@ func (a *Adapter) Unexpose(ctx context.Context, app string) error {
 	return nil
 }
 
+func (a *Adapter) ExposureStatus(ctx context.Context, app string) (controlplane.ExposureStatus, error) {
+	ing, err := a.client.NetworkingV1().Ingresses(a.namespace).Get(ctx, app, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return controlplane.ExposureStatus{}, nil
+	}
+	if err != nil {
+		return controlplane.ExposureStatus{}, fmt.Errorf("kube: reading ingress %q: %w", app, err)
+	}
+	out := controlplane.ExposureStatus{Exposed: true}
+	if len(ing.Spec.Rules) > 0 {
+		out.Host = ing.Spec.Rules[0].Host
+	}
+	// The ingress controller writes the assigned external address into the Ingress status.
+	for _, lb := range ing.Status.LoadBalancer.Ingress {
+		if lb.IP != "" {
+			out.Address = lb.IP
+			break
+		}
+		if lb.Hostname != "" {
+			out.Address = lb.Hostname
+			break
+		}
+	}
+	return out, nil
+}
+
 // buildService is a ClusterIP Service fronting the app's Pods, forwarding port 80 to the
 // app's container port.
 func (a *Adapter) buildService(spec controlplane.ExposeSpec) *corev1.Service {

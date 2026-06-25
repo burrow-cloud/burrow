@@ -51,6 +51,7 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/apps/{app}/scale", s.scale)
 	v1.HandleFunc("POST /v1/apps/{app}/expose", s.expose)
 	v1.HandleFunc("POST /v1/apps/{app}/unexpose", s.unexpose)
+	v1.HandleFunc("GET /v1/apps/{app}/reachability", s.reachability)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
 
@@ -147,6 +148,15 @@ func (s *server) unexpose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app")})
+}
+
+func (s *server) reachability(w http.ResponseWriter, r *http.Request) {
+	res, err := s.engine.Reachability(r.Context(), r.PathValue("app"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *server) guardList(w http.ResponseWriter, r *http.Request) {

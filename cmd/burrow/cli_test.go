@@ -121,6 +121,21 @@ func TestRollback(t *testing.T) {
 	}
 }
 
+func TestReachabilityCommand(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/v1/apps/web/reachability" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "summary": "web is reachable at http://web.example.com", "reachable": true})
+	}, "reachability", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "reachable at http://web.example.com") {
+		t.Errorf("output = %q", out)
+	}
+}
+
 func TestExposeCommand(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || r.URL.Path != "/v1/apps/web/expose" {

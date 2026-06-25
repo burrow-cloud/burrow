@@ -68,10 +68,13 @@ The shape (per ADR-0018):
 
 **Build order (all in v0.2 scope):** (1) `expose`/`unexpose` + the reachability surface;
 (2) TLS via cert-manager; (3) the DNS-provider seam + `dns configure` + `domain` operations.
-Each stage is a thin slice that ends green. Stage 1 is underway: `expose`/`unexpose` are
-wired end to end (Kubernetes adapter → engine → API → client → CLI → MCP) behind the new
-`expose_public` guardrail (confirm by default), with RBAC for services/ingresses. The
-**reachability surface** is next, then TLS, then DNS.
+Each stage is a thin slice that ends green. Stage 1 is landing: `expose`/`unexpose` are
+wired end to end behind the `expose_public` guardrail (confirm by default), and the
+**reachability surface** (`burrow reachability`, `burrow_reachability`) reports the chain —
+deployed → ready → exposed → external address → DNS — as a one-line plain summary plus the
+full structured chain (ADR-0022's layered model). It reads the external address from the
+app's own Ingress status, so it needs **no new RBAC**. Next: **TLS** (cert-manager), then
+**DNS automation** (DigitalOcean first).
 
 ### Out of scope for v0.2 (explicit)
 

@@ -21,6 +21,7 @@ type Engine struct {
 	db       Database
 	clock    Clock
 	ids      IDSource
+	resolver Resolver
 }
 
 // Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
@@ -32,6 +33,7 @@ type Deps struct {
 	Database   Database
 	Clock      Clock
 	IDs        IDSource
+	Resolver   Resolver
 }
 
 // New constructs an Engine, validating that every seam is supplied and the policy is
@@ -49,6 +51,8 @@ func New(d Deps) (*Engine, error) {
 		return nil, fmt.Errorf("controlplane: New: Clock seam is required")
 	case d.IDs == nil:
 		return nil, fmt.Errorf("controlplane: New: IDs seam is required")
+	case d.Resolver == nil:
+		return nil, fmt.Errorf("controlplane: New: Resolver seam is required")
 	}
 	return &Engine{
 		k8s:      d.Kubernetes,
@@ -56,6 +60,7 @@ func New(d Deps) (*Engine, error) {
 		db:       d.Database,
 		clock:    d.Clock,
 		ids:      d.IDs,
+		resolver: d.Resolver,
 	}, nil
 }
 
@@ -253,6 +258,69 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
 	}
 	return ExposeResult{App: req.App, Host: req.Host, Port: req.Port, URL: "http://" + req.Host}, nil
+}
+
+// Reachability reports, link by link, whether an app is reachable at its hostname (ADR-0018):
+// deployed and ready, exposed, given an external address by an ingress controller, and DNS
+// pointing the host at that address. It returns a structured chain plus a one-line plain
+// summary for a non-expert; it never errors on a missing link — that is the answer.
+func (e *Engine) Reachability(ctx context.Context, app string) (ReachabilityResult, error) {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return ReachabilityResult{}, fmt.Errorf("reachability: %w: %w", ErrInvalid, err)
+	}
+	res := ReachabilityResult{App: app}
+
+	ws, err := e.k8s.WorkloadStatus(ctx, app)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			res.Summary = fmt.Sprintf("%s is not deployed yet — deploy it first.", app)
+			return res, nil
+		}
+		return ReachabilityResult{}, fmt.Errorf("reachability %s: reading workload: %w", app, err)
+	}
+	res.Deployed = true
+	res.Ready = ws.Available
+
+	exp, err := e.k8s.ExposureStatus(ctx, app)
+	if err != nil {
+		return ReachabilityResult{}, fmt.Errorf("reachability %s: reading exposure: %w", app, err)
+	}
+	res.Exposed = exp.Exposed
+	res.Host = exp.Host
+	res.Address = exp.Address
+
+	if exp.Exposed && exp.Host != "" {
+		if addrs, err := e.resolver.LookupHost(ctx, exp.Host); err == nil {
+			res.DNSAddresses = addrs
+			for _, a := range addrs {
+				if exp.Address != "" && a == exp.Address {
+					res.DNSPointsAtCluster = true
+					break
+				}
+			}
+		}
+	}
+
+	res.Reachable = res.Ready && res.Exposed && res.Address != "" && res.DNSPointsAtCluster
+	res.Summary = reachabilitySummary(res)
+	return res, nil
+}
+
+// reachabilitySummary turns the chain into a one-line, plain-English verdict naming the
+// first unsatisfied link and the next action (ADR-0022's novice altitude).
+func reachabilitySummary(r ReachabilityResult) string {
+	switch {
+	case !r.Ready:
+		return fmt.Sprintf("%s is deployed but not ready yet — check `burrow logs %s`.", r.App, r.App)
+	case !r.Exposed:
+		return fmt.Sprintf("%s is running but not exposed — run `burrow expose %s --host <name> --port <n>`.", r.App, r.App)
+	case r.Address == "":
+		return fmt.Sprintf("%s is exposed at %s but no external address is assigned yet — is an ingress controller installed and running?", r.App, r.Host)
+	case !r.DNSPointsAtCluster:
+		return fmt.Sprintf("%s is exposed at %s, but DNS for %s doesn't point at the cluster yet — add a DNS record pointing %s at %s.", r.App, r.Host, r.Host, r.Host, r.Address)
+	default:
+		return fmt.Sprintf("%s is reachable at http://%s.", r.App, r.Host)
+	}
 }
 
 // Unexpose removes an app's exposure (its Service and Ingress). It does not affect the

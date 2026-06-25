@@ -18,10 +18,11 @@ var _ controlplane.Kubernetes = (*Kubernetes)(nil)
 // tests can override readiness (SetReady) and seed logs (SetLogs) to model partial or
 // failed rollouts. Errors can be injected per operation with SetError.
 type Kubernetes struct {
-	mu      sync.Mutex
-	deploys map[string]*deployState
-	exposed map[string]controlplane.ExposeSpec
-	errs    map[Op]error
+	mu        sync.Mutex
+	deploys   map[string]*deployState
+	exposed   map[string]controlplane.ExposeSpec
+	addresses map[string]string // app -> ingress external address (controller-assigned)
+	errs      map[Op]error
 }
 
 type deployState struct {
@@ -33,9 +34,10 @@ type deployState struct {
 // NewKubernetes returns an empty fake cluster.
 func NewKubernetes() *Kubernetes {
 	return &Kubernetes{
-		deploys: make(map[string]*deployState),
-		exposed: make(map[string]controlplane.ExposeSpec),
-		errs:    make(map[Op]error),
+		deploys:   make(map[string]*deployState),
+		exposed:   make(map[string]controlplane.ExposeSpec),
+		addresses: make(map[string]string),
+		errs:      make(map[Op]error),
 	}
 }
 
@@ -45,6 +47,27 @@ func (k *Kubernetes) Exposure(app string) (controlplane.ExposeSpec, bool) {
 	defer k.mu.Unlock()
 	s, ok := k.exposed[app]
 	return s, ok
+}
+
+// SetIngressAddress sets the controller-assigned external address reported for app's
+// exposure, modelling the ingress controller having processed the Ingress.
+func (k *Kubernetes) SetIngressAddress(app, addr string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.addresses[app] = addr
+}
+
+func (k *Kubernetes) ExposureStatus(ctx context.Context, app string) (controlplane.ExposureStatus, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpExposureStatus]; err != nil {
+		return controlplane.ExposureStatus{}, err
+	}
+	spec, ok := k.exposed[app]
+	if !ok {
+		return controlplane.ExposureStatus{}, nil
+	}
+	return controlplane.ExposureStatus{Exposed: true, Host: spec.Host, Address: k.addresses[app]}, nil
 }
 
 // SetError makes op return err until cleared with SetError(op, nil).

@@ -86,6 +86,7 @@ func run() error {
 		Database:   store,
 		Clock:      sys.Clock{},
 		IDs:        sys.IDs{},
+		Resolver:   sys.Resolver{},
 	})
 	if err != nil {
 		return err

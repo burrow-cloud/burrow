@@ -54,6 +54,7 @@ func TestEngineDeployRollbackE2E(t *testing.T) {
 		Database:   fake.NewDatabase(),
 		Clock:      fake.NewClock(time.Now()),
 		IDs:        fake.NewIDs(),
+		Resolver:   fake.NewResolver(),
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)

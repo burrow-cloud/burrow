@@ -55,6 +55,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, unexposeTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_reachability",
+		Description: "Report whether an application is reachable at its hostname, link by link: deployed and ready, exposed, given an external address by an ingress controller, and DNS pointing the host at that address. Returns a plain one-line summary plus the full chain, so you can tell the user exactly which link is missing and what to do. Read-only.",
+	}, reachabilityTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_guard",
 		Description: "List the control-plane guardrails and their current dispositions (allow, confirm, or deny), so you can tell in advance whether an operation will be allowed, held for the user's confirmation, or denied. Read-only: guardrail policy is changed only by the operator via the CLI, never by an agent.",
 	}, guardTool(c))
@@ -174,6 +179,16 @@ func unexposeTool(c *client.Client) sdk.ToolHandlerFor[appInput, unexposeOutput]
 			return nil, unexposeOutput{}, err
 		}
 		return nil, unexposeOutput{App: in.App}, nil
+	}
+}
+
+func reachabilityTool(c *client.Client) sdk.ToolHandlerFor[appInput, client.ReachabilityResult] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, client.ReachabilityResult, error) {
+		res, err := c.Reachability(ctx, in.App)
+		if err != nil {
+			return nil, client.ReachabilityResult{}, err
+		}
+		return nil, res, nil
 	}
 }
 

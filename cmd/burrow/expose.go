@@ -47,6 +47,30 @@ func newExposeCmd() *cobra.Command {
 	return cmd
 }
 
+func newReachabilityCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "reachability <app>",
+		Short: "Report whether an app is reachable at its hostname (controller, address, DNS)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			res, err := c.Reachability(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			// The plain summary is the human default; --json carries the full chain.
+			return emit(cmd.OutOrStdout(), o.json, res, res.Summary)
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	return cmd
+}
+
 func newUnexposeCmd() *cobra.Command {
 	o := &commonOpts{}
 	cmd := &cobra.Command{

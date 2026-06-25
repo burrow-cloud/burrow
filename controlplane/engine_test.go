@@ -6,6 +6,7 @@ package controlplane_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ func newEngine(t *testing.T, policy cp.Policy) (*cp.Engine, *fake.Kubernetes, *f
 	d := fake.NewDatabase()
 	d.SetPolicy(policy)
 	c := fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC))
-	e, err := cp.New(cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: fake.NewIDs()})
+	e, err := cp.New(cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -48,7 +49,7 @@ func mustGuardrail(t *testing.T, err error, code cp.GuardrailCode) {
 
 func TestNewValidatesDeps(t *testing.T) {
 	k, r, d, c, id := fake.NewKubernetes(), fake.NewRegistry(), fake.NewDatabase(), fake.NewClock(time.Now()), fake.NewIDs()
-	good := cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: id}
+	good := cp.Deps{Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: id, Resolver: fake.NewResolver()}
 
 	if _, err := cp.New(good); err != nil {
 		t.Fatalf("valid deps: %v", err)
@@ -326,6 +327,56 @@ func TestExpose(t *testing.T) {
 	}
 	if err := e.Unexpose(ctx, "web"); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("second unexpose = %v, want ErrNotFound", err)
+	}
+}
+
+func TestReachability(t *testing.T) {
+	ctx := context.Background()
+	k := fake.NewKubernetes()
+	reg := fake.NewRegistry()
+	dns := fake.NewResolver()
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Registry: reg, Database: fake.NewDatabase(),
+		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: dns,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Not deployed.
+	if r, _ := e.Reachability(ctx, "web"); r.Deployed || r.Reachable || !strings.Contains(r.Summary, "not deployed") {
+		t.Errorf("not-deployed = %+v", r)
+	}
+
+	reg.Add("img:1", "sha256:1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	// Deployed and ready, but not exposed.
+	if r, _ := e.Reachability(ctx, "web"); !r.Ready || r.Exposed || !strings.Contains(r.Summary, "not exposed") {
+		t.Errorf("not-exposed = %+v", r)
+	}
+
+	// Exposed, but no external address assigned yet.
+	if err := k.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.example.com", Port: 8080}); err != nil {
+		t.Fatalf("expose: %v", err)
+	}
+	if r, _ := e.Reachability(ctx, "web"); !r.Exposed || r.Address != "" || !strings.Contains(r.Summary, "no external address") {
+		t.Errorf("no-address = %+v", r)
+	}
+
+	// Address assigned, but DNS points elsewhere.
+	k.SetIngressAddress("web", "1.2.3.4")
+	dns.Set("web.example.com", "9.9.9.9")
+	if r, _ := e.Reachability(ctx, "web"); r.DNSPointsAtCluster || !strings.Contains(r.Summary, "doesn't point at the cluster") {
+		t.Errorf("dns-mismatch = %+v", r)
+	}
+
+	// DNS points at the cluster → reachable.
+	dns.Set("web.example.com", "1.2.3.4")
+	if r, _ := e.Reachability(ctx, "web"); !r.Reachable || !r.DNSPointsAtCluster || !strings.Contains(r.Summary, "reachable at http://web.example.com") {
+		t.Errorf("reachable = %+v", r)
 	}
 }
 

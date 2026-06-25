@@ -135,6 +135,19 @@ type ExposeResult struct {
 	URL  string `json:"url"`
 }
 
+type ReachabilityResult struct {
+	App                string   `json:"app"`
+	Deployed           bool     `json:"deployed"`
+	Ready              bool     `json:"ready"`
+	Exposed            bool     `json:"exposed"`
+	Host               string   `json:"host,omitempty"`
+	Address            string   `json:"address,omitempty"`
+	DNSPointsAtCluster bool     `json:"dns_points_at_cluster"`
+	DNSAddresses       []string `json:"dns_addresses,omitempty"`
+	Reachable          bool     `json:"reachable"`
+	Summary            string   `json:"summary"`
+}
+
 type LogLine struct {
 	Pod       string    `json:"pod"`
 	Timestamp time.Time `json:"timestamp"`
@@ -193,6 +206,13 @@ func (c *Client) Expose(ctx context.Context, app, host string, port int32, confi
 
 func (c *Client) Unexpose(ctx context.Context, app string) error {
 	return c.do(ctx, http.MethodPost, c.appPath(app, "unexpose"), nil, nil)
+}
+
+// Reachability reports whether an app is reachable at its hostname, link by link.
+func (c *Client) Reachability(ctx context.Context, app string) (ReachabilityResult, error) {
+	var out ReachabilityResult
+	err := c.do(ctx, http.MethodGet, c.appPath(app, "reachability"), nil, &out)
+	return out, err
 }
 
 func (c *Client) appPath(app, verb string) string {

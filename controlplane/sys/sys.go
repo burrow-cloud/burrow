@@ -9,8 +9,10 @@
 package sys
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"net"
 	"time"
 
 	"github.com/burrow-cloud/burrow/controlplane"
@@ -19,6 +21,7 @@ import (
 var (
 	_ controlplane.Clock    = Clock{}
 	_ controlplane.IDSource = IDs{}
+	_ controlplane.Resolver = Resolver{}
 )
 
 // Clock is the real wall clock.
@@ -26,6 +29,14 @@ type Clock struct{}
 
 // Now returns the current time.
 func (Clock) Now() time.Time { return time.Now() }
+
+// Resolver does real DNS lookups via the system resolver.
+type Resolver struct{}
+
+// LookupHost returns the addresses host resolves to.
+func (Resolver) LookupHost(ctx context.Context, host string) ([]string, error) {
+	return net.DefaultResolver.LookupHost(ctx, host)
+}
 
 // IDs mints release identifiers from crypto/rand: 128 bits of randomness, hex-encoded.
 type IDs struct{}

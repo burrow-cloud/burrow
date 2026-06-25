@@ -31,31 +31,34 @@ path are untouched, and the credential never crosses MCP
 **setup-vs-operation boundary**: `install`, `upgrade`, and `registry` act with the
 kubeconfig; `deploy`/`status`/`logs`/`rollback`/`scale` go through burrowd.
 
-## Next: v0.2 — reach a deployed app at a URL (ingress, domains, TLS)
+## Next: v0.2 — reach a deployed app at a URL (ingress, TLS, DNS)
 
 **Goal:** an agent can make a deployed app reachable at a real hostname over HTTPS, on the
 user's own cluster — the missing half of "deploy and operate" (today a deployed app is only
-reachable by port-forward). The capability is security-sensitive (DNS write access, public
-exposure), so it is **designed before it is built**.
+reachable by port-forward). Reachability is a chain (controller → Service/Ingress → TLS →
+DNS), and the design is built around making that chain **introspectable** so the agent can
+reason about which link is broken and act on the gaps it owns. The full design — including
+the human-setup vs. agent-operation split — is **[ADR-0018](adr/0018-reaching-an-app-at-a-url.md)
+(Proposed, in review)**.
 
-The three pieces, in the order they unlock value:
+The shape (per ADR-0018):
 
-1. **HTTP routing.** An in-cluster ingress controller (e.g. ingress-nginx) plus an MCP/CLI
-   surface to expose a deployed app at a hostname — `expose <app> --host <name>` — creating
-   the Service/Ingress through the same guarded control-plane path as deploy. Reachable over
-   HTTP once DNS points at the cluster.
-2. **TLS.** Automatic certificates (ACME via cert-manager) so the hostname serves HTTPS with
-   no manual cert handling.
-3. **DNS automation.** A DNS-provider seam (DigitalOcean first, matching the reference
-   target; others behind the seam) so the agent can point a domain at the cluster. DNS write
-   access is the sharp edge — it gets scoped guardrails (read vs. write vs. delete) and, like
-   the cluster credentials, its provider credentials live **only** in the control plane
-   ([ADR-0005](adr/0005-mcp-server-holds-no-cluster-credentials.md)).
+- **A reachability surface** (read-only CLI + MCP tool, folded into `status`): the state of
+  each link — controller present + external address, Service/Ingress, TLS cert, DNS — with a
+  next action tagged agent-fixable or human-setup.
+- **Ingress + cert-manager** via a dedicated setup command (not folded into `burrow install`)
+  that **detects an existing controller** and installs one only if absent.
+- **`expose` / `unexpose`** — guarded operations through burrowd that create the
+  Service + Ingress (RBAC grows to services/ingresses, no credential access).
+- **DNS automation** (DigitalOcean first): a provider seam, provider credentials held **only**
+  in the control plane and injected into burrowd (not RBAC-read), and `domain add/remove`
+  operations with scoped read/write/delete guardrails
+  ([ADR-0006](adr/0006-guardrails-in-the-control-plane.md)).
 
-**Next step (before code): a design ADR** for the ingress/domains/TLS approach — the
-controller and cert-manager choices, the Ingress resource model behind the Kubernetes seam
-([ADR-0011](adr/0011-kubernetes-integration.md)), the new tool surface, the DNS-provider
-seam, and the DNS guardrail policy. Then the thin first slice (piece 1) lands behind it.
+**Build order (all in v0.2 scope):** (1) `expose`/`unexpose` + the reachability surface;
+(2) TLS via cert-manager; (3) the DNS-provider seam + `dns configure` + `domain` operations.
+Each stage is a thin slice that ends green. ADR-0018 awaits maintainer sign-off before
+stage 1 begins.
 
 ### Out of scope for v0.2 (explicit)
 

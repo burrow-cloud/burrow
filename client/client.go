@@ -54,13 +54,20 @@ type APIError struct {
 	StatusCode int
 	Code       string
 	Message    string
+	// NeedsConfirmation is true when a guardrail held the operation for confirmation
+	// rather than refusing it: retrying with confirm set lets it proceed (ADR-0020).
+	NeedsConfirmation bool
 }
 
 func (e *APIError) Error() string {
-	if e.Code != "" {
-		return fmt.Sprintf("control plane: %s (%s, http %d)", e.Message, e.Code, e.StatusCode)
+	hint := ""
+	if e.NeedsConfirmation {
+		hint = " — re-run with --confirm to proceed"
 	}
-	return fmt.Sprintf("control plane: %s (http %d)", e.Message, e.StatusCode)
+	if e.Code != "" {
+		return fmt.Sprintf("control plane: %s (%s, http %d)%s", e.Message, e.Code, e.StatusCode, hint)
+	}
+	return fmt.Sprintf("control plane: %s (http %d)%s", e.Message, e.StatusCode, hint)
 }
 
 // The DTOs below mirror the control-plane API's JSON shapes (snake_case).
@@ -70,6 +77,7 @@ type DeployRequest struct {
 	Env      map[string]string `json:"env,omitempty"`
 	Command  []string          `json:"command,omitempty"`
 	Replicas int32             `json:"replicas"`
+	Confirm  bool              `json:"confirm,omitempty"`
 }
 
 type Release struct {
@@ -156,9 +164,10 @@ func (c *Client) Rollback(ctx context.Context, app string) (RollbackResult, erro
 	return out, err
 }
 
-func (c *Client) Scale(ctx context.Context, app string, replicas int32) (ScaleResult, error) {
+func (c *Client) Scale(ctx context.Context, app string, replicas int32, confirm bool) (ScaleResult, error) {
 	var out ScaleResult
-	err := c.do(ctx, http.MethodPost, c.appPath(app, "scale"), map[string]int32{"replicas": replicas}, &out)
+	body := map[string]any{"replicas": replicas, "confirm": confirm}
+	err := c.do(ctx, http.MethodPost, c.appPath(app, "scale"), body, &out)
 	return out, err
 }
 
@@ -200,8 +209,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 	if resp.StatusCode/100 != 2 {
 		var e struct {
-			Error string `json:"error"`
-			Code  string `json:"code"`
+			Error             string `json:"error"`
+			Code              string `json:"code"`
+			NeedsConfirmation bool   `json:"needs_confirmation"`
 		}
 		_ = json.Unmarshal(data, &e)
 		msg := e.Error
@@ -210,7 +220,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 				msg = resp.Status
 			}
 		}
-		return &APIError{StatusCode: resp.StatusCode, Code: e.Code, Message: msg}
+		return &APIError{StatusCode: resp.StatusCode, Code: e.Code, Message: msg, NeedsConfirmation: e.NeedsConfirmation}
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {

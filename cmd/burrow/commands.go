@@ -17,6 +17,7 @@ func newDeployCmd() *cobra.Command {
 	o := &commonOpts{}
 	var image, build string
 	var replicas int
+	var confirm bool
 	var env kvFlag
 	cmd := &cobra.Command{
 		Use:   "deploy <app>",
@@ -41,6 +42,7 @@ func newDeployCmd() *cobra.Command {
 				Image:    image,
 				Env:      env.m,
 				Replicas: int32(replicas),
+				Confirm:  confirm,
 			})
 			if err != nil {
 				return err
@@ -58,6 +60,7 @@ func newDeployCmd() *cobra.Command {
 	cmd.Flags().IntVar(&replicas, "replicas", 1, "number of replicas")
 	cmd.Flags().StringVar(&build, "build", "", "build and push the image from this directory before deploying")
 	cmd.Flags().Var(&env, "env", "environment variable KEY=VALUE (repeatable)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }
 
@@ -147,6 +150,7 @@ func newRollbackCmd() *cobra.Command {
 
 func newScaleCmd() *cobra.Command {
 	o := &commonOpts{}
+	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "scale <app> <replicas>",
 		Short: "Set an app's replica count",
@@ -161,7 +165,7 @@ func newScaleCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Scale(ctx, args[0], int32(n))
+			res, err := c.Scale(ctx, args[0], int32(n), confirm)
 			if err != nil {
 				return err
 			}
@@ -170,6 +174,7 @@ func newScaleCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }
 

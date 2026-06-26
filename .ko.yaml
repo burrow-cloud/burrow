@@ -1,0 +1,11 @@
+# ko build config for the burrowd image (https://ko.build). ko compiles the Go binary on the
+# host — reusing the Go build cache — and lays it into a minimal base image, with no Dockerfile.
+# The base and flags match what the Dockerfile produced: a static binary on distroless/nonroot.
+defaultBaseImage: gcr.io/distroless/static:nonroot
+builds:
+  - id: burrowd
+    main: ./cmd/burrowd
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath

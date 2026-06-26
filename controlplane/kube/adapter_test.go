@@ -50,6 +50,11 @@ func TestExposeCreatesServiceAndIngress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get ingress: %v", err)
 	}
+	// The Ingress must name the ingress-nginx class, or the controller (which runs with
+	// --ingress-class=nginx) ignores it and it never gets an external address.
+	if ing.Spec.IngressClassName == nil || *ing.Spec.IngressClassName != "nginx" {
+		t.Errorf("ingress class = %v, want nginx", ing.Spec.IngressClassName)
+	}
 	rule := ing.Spec.Rules[0]
 	if rule.Host != "web.example.com" {
 		t.Errorf("ingress host = %q, want web.example.com", rule.Host)

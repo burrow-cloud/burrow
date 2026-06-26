@@ -37,6 +37,9 @@ const (
 	nameLabel      = "app.kubernetes.io/name"
 	managedByLabel = "app.kubernetes.io/managed-by"
 	managedByValue = "burrow"
+	// defaultIngressClass is the IngressClass `burrow ingress install` creates (ingress-nginx).
+	// The exposed app's Ingress is bound to it so the controller adopts and routes it.
+	defaultIngressClass = "nginx"
 )
 
 // Adapter operates Burrow workloads in a single Kubernetes namespace.
@@ -290,10 +293,16 @@ func (a *Adapter) buildIngress(spec controlplane.ExposeSpec) *networkingv1.Ingre
 		meta.Annotations = map[string]string{"cert-manager.io/cluster-issuer": spec.Issuer}
 		tls = []networkingv1.IngressTLS{{Hosts: []string{spec.Host}, SecretName: spec.App + "-tls"}}
 	}
+	// Bind the Ingress to the ingress-nginx controller. ingress-nginx runs with
+	// --ingress-class=nginx and (by default) ignores Ingresses that carry no class, so without
+	// this the app Ingress is orphaned: it never gets an external address and the reachability
+	// chain stalls. "nginx" is the class `burrow ingress install` sets up (ADR-0018).
+	ingressClass := defaultIngressClass
 	return &networkingv1.Ingress{
 		ObjectMeta: meta,
 		Spec: networkingv1.IngressSpec{
-			TLS: tls,
+			IngressClassName: &ingressClass,
+			TLS:              tls,
 			Rules: []networkingv1.IngressRule{{
 				Host: spec.Host,
 				IngressRuleValue: networkingv1.IngressRuleValue{

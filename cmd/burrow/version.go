@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -44,7 +45,7 @@ func newVersionCmd() *cobra.Command {
 			case err != nil:
 				fmt.Fprintf(out, "control plane: unknown (%v)\n", err)
 			default:
-				fmt.Fprintf(out, "control plane: %s (namespace %q)\n", img, namespace)
+				fmt.Fprintf(out, "control plane: %s (namespace %q)\n", imageTag(img), namespace)
 			}
 			return nil
 		},
@@ -61,6 +62,19 @@ func cliVersion() string {
 		return bi.Main.Version
 	}
 	return "dev"
+}
+
+// imageTag returns just the version tag of an image reference (the part after the last colon,
+// ignoring any registry-host port and stripping a digest), e.g.
+// "ghcr.io/burrow-cloud/burrowd:v0.2.1" -> "v0.2.1". An untagged image is returned unchanged.
+func imageTag(image string) string {
+	if at := strings.Index(image, "@"); at >= 0 {
+		image = image[:at] // drop a digest: name@sha256:...
+	}
+	if colon := strings.LastIndex(image, ":"); colon > strings.LastIndex(image, "/") {
+		return image[colon+1:]
+	}
+	return image
 }
 
 // burrowdImage returns the image of the installed burrowd Deployment, or an error — an

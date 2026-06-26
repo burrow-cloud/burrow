@@ -49,6 +49,21 @@ func TestBurrowdImage(t *testing.T) {
 	}
 }
 
+func TestImageTag(t *testing.T) {
+	cases := map[string]string{
+		"ghcr.io/burrow-cloud/burrowd:v0.2.1": "v0.2.1",
+		"burrowd:e2e":                         "e2e",
+		"registry:5000/burrowd:v1":            "v1",                // a registry-host port colon is not the tag
+		"ghcr.io/x/burrowd@sha256:abcd":       "ghcr.io/x/burrowd", // digest, no tag
+		"burrowd":                             "burrowd",           // untagged
+	}
+	for in, want := range cases {
+		if got := imageTag(in); got != want {
+			t.Errorf("imageTag(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestVersionCommandPrintsCLILine(t *testing.T) {
 	var out, errb bytes.Buffer
 	// No reachable cluster in the test env, so the control-plane line is best-effort; the CLI

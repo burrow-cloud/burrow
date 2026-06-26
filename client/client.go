@@ -201,6 +201,15 @@ func (c *Client) Status(ctx context.Context, app string) (StatusResult, error) {
 	return out, err
 }
 
+// Apps lists the workload status of every Burrow-managed app.
+func (c *Client) Apps(ctx context.Context) ([]WorkloadStatus, error) {
+	var out struct {
+		Apps []WorkloadStatus `json:"apps"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/apps", nil, &out)
+	return out.Apps, err
+}
+
 func (c *Client) Logs(ctx context.Context, app string, tail int) ([]LogLine, error) {
 	path := c.appPath(app, "logs")
 	if tail > 0 {

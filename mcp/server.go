@@ -25,6 +25,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, deployTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_apps",
+		Description: "List the applications Burrow manages and each one's running state (image, ready/desired replicas, availability), so you can discover what is deployed before operating on it. Read-only.",
+	}, appsTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_status",
 		Description: "Report an application's status: its most recent release and the live workload state (desired/ready replicas, availability).",
 	}, statusTool(c))
@@ -255,6 +260,39 @@ type providerInfo struct {
 
 type providersOutput struct {
 	Providers []providerInfo `json:"providers"`
+}
+
+// appsInput has no fields: listing apps takes no arguments.
+type appsInput struct{}
+
+// appInfo is one app's running state in the apps listing.
+type appInfo struct {
+	App             string `json:"app"`
+	Image           string `json:"image"`
+	DesiredReplicas int32  `json:"desired_replicas"`
+	ReadyReplicas   int32  `json:"ready_replicas"`
+	Available       bool   `json:"available"`
+}
+
+type appsOutput struct {
+	Apps []appInfo `json:"apps"`
+}
+
+func appsTool(c *client.Client) sdk.ToolHandlerFor[appsInput, appsOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, _ appsInput) (*sdk.CallToolResult, appsOutput, error) {
+		apps, err := c.Apps(ctx)
+		if err != nil {
+			return nil, appsOutput{}, err
+		}
+		out := appsOutput{Apps: make([]appInfo, 0, len(apps))}
+		for _, a := range apps {
+			out.Apps = append(out.Apps, appInfo{
+				App: a.App, Image: a.Image,
+				DesiredReplicas: a.DesiredReplicas, ReadyReplicas: a.ReadyReplicas, Available: a.Available,
+			})
+		}
+		return nil, out, nil
+	}
 }
 
 func providersTool(c *client.Client) sdk.ToolHandlerFor[providersInput, providersOutput] {

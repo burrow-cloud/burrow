@@ -13,6 +13,41 @@ import (
 	"github.com/burrow-cloud/burrow/client"
 )
 
+func newAppListCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List the apps Burrow manages",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			apps, err := c.Apps(ctx)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if o.json {
+				return emit(out, true, apps, "")
+			}
+			if len(apps) == 0 {
+				fmt.Fprintln(out, "No apps deployed. Deploy one with `burrow app deploy <app> --image <ref>`.")
+				return nil
+			}
+			fmt.Fprintf(out, "%-20s%-34s%-12s%s\n", "NAME", "IMAGE", "REPLICAS", "AVAILABLE")
+			for _, a := range apps {
+				fmt.Fprintf(out, "%-20s%-34s%-12s%t\n", a.App, a.Image, fmt.Sprintf("%d/%d", a.ReadyReplicas, a.DesiredReplicas), a.Available)
+			}
+			return nil
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	return cmd
+}
+
 func newDeployCmd() *cobra.Command {
 	o := &commonOpts{}
 	var image, build string

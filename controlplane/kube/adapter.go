@@ -115,6 +115,38 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 	}, nil
 }
 
+func (a *Adapter) ListWorkloads(ctx context.Context) ([]controlplane.WorkloadStatus, error) {
+	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: managedByLabel + "=" + managedByValue,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kube: listing deployments: %w", err)
+	}
+	out := make([]controlplane.WorkloadStatus, 0, len(deps.Items))
+	for i := range deps.Items {
+		dep := &deps.Items[i]
+		var desired int32
+		if dep.Spec.Replicas != nil {
+			desired = *dep.Spec.Replicas
+		}
+		image := ""
+		if c := dep.Spec.Template.Spec.Containers; len(c) > 0 {
+			image = c[0].Image
+		}
+		out = append(out, controlplane.WorkloadStatus{
+			App:             dep.Name,
+			Kind:            controlplane.WorkloadDeployment,
+			Image:           image,
+			DesiredReplicas: desired,
+			ReadyReplicas:   dep.Status.ReadyReplicas,
+			UpdatedReplicas: dep.Status.UpdatedReplicas,
+			Available:       deploymentAvailable(dep, desired),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].App < out[j].App })
+	return out, nil
+}
+
 func (a *Adapter) ScaleWorkload(ctx context.Context, app string, replicas int32) error {
 	patch := []byte(fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas))
 	_, err := a.client.AppsV1().Deployments(a.namespace).Patch(ctx, app, types.MergePatchType, patch, metav1.PatchOptions{})

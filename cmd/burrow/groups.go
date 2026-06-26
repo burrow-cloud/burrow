@@ -19,6 +19,7 @@ func newAppCmd() *cobra.Command {
 			"status and logs, scale, and make it reachable at a hostname (publish + domain).",
 	}
 	cmd.AddCommand(
+		newAppListCmd(),
 		newDeployCmd(),
 		newStatusCmd(),
 		newLogsCmd(),

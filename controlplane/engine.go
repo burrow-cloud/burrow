@@ -161,6 +161,16 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 }
 
 // Status returns the combined control-plane and cluster view of an app: the most recent
+// ListApps returns the workload status of every Burrow-managed app, for an apps listing. It
+// reads the cluster — the source of truth for what is running.
+func (e *Engine) ListApps(ctx context.Context) ([]WorkloadStatus, error) {
+	apps, err := e.k8s.ListWorkloads(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list apps: reading cluster: %w", err)
+	}
+	return apps, nil
+}
+
 // recorded release and the live workload state. It returns ErrNotFound only when the
 // app is unknown to both.
 func (e *Engine) Status(ctx context.Context, app string) (StatusResult, error) {

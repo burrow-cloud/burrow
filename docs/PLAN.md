@@ -51,12 +51,20 @@ can reason about which link is broken and act on the gaps it owns. The full desi
 the human-setup vs. agent-operation split — is **[ADR-0018](adr/0018-reaching-an-app-at-a-url.md)
 (Accepted)**.
 
-## Next
+## Next (v0.4)
 
-Polish on the v0.2 surface and the start of v0.3: a **DNS-01 issuer solver** (issue certs
-before the host is public, using the provider token), folding the provider's record into the
-**reachability** surface ("the provider holds the record"), and **server-side build from a git
-reference** ([ADR-0008](adr/0008-two-build-paths.md)). See [ROADMAP.md](ROADMAP.md).
+**Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) leads —
+building the image in-cluster from a repo, the second build path toward the managed experience.
+Alongside it, TLS/DNS hardening: a **DNS-01 issuer solver** (issue certs before the host is
+public, using the provider token), folding the provider's record into the **reachability**
+surface ("the provider holds the record"), and **`app delete`** (with its own guardrail). See
+[ROADMAP.md](ROADMAP.md).
+
+Shipped in **v0.3**: the CLI regrouped by task (`app`/`config`/`system`, `expose`→`publish` —
+[ADR-0024](adr/0024-cli-command-taxonomy.md)) with `app list`; the Cloudflare adapter verifying
+account-scoped (`cfat_`) tokens by listing zones; the app Ingress bound to the ingress-nginx
+class so it gets an address; reachability resolving via public DNS so a freshly added record is
+seen (the chain converges for an agent); and a burrowd request log.
 
 Shipped in **v0.2.1** (patch): quieter `install`/`upgrade` output with `--verbose`, helpful
 CLI argument errors, ko-built images (no Dockerfile) with a warm CI build cache, a read-only

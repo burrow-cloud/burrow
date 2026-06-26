@@ -149,6 +149,48 @@ func TestExposureStatus(t *testing.T) {
 	}
 }
 
+func TestListWorkloads(t *testing.T) {
+	ctx := context.Background()
+	mk := func(name, image string, desired, ready int32, managed bool) *appsv1.Deployment {
+		labels := map[string]string{"app.kubernetes.io/name": name}
+		if managed {
+			labels["app.kubernetes.io/managed-by"] = "burrow"
+		}
+		return &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: i32p(desired),
+				Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: image}}}},
+			},
+			Status: appsv1.DeploymentStatus{ReadyReplicas: ready},
+		}
+	}
+	client := fake.NewSimpleClientset(
+		mk("web", "nginx:alpine", 2, 2, true),
+		mk("api", "api:1", 3, 1, true),
+		mk("other", "x:1", 1, 1, false), // not Burrow-managed → excluded
+	)
+	a := kube.New(client, ns)
+
+	apps, err := a.ListWorkloads(ctx)
+	if err != nil {
+		t.Fatalf("ListWorkloads: %v", err)
+	}
+	if len(apps) != 2 {
+		t.Fatalf("got %d apps, want 2 (managed only): %+v", len(apps), apps)
+	}
+	// Sorted by name: api, web.
+	if apps[0].App != "api" || apps[1].App != "web" {
+		t.Fatalf("apps not sorted by name: %+v", apps)
+	}
+	if apps[1].Image != "nginx:alpine" || apps[1].DesiredReplicas != 2 || apps[1].ReadyReplicas != 2 || !apps[1].Available {
+		t.Errorf("web = %+v, want nginx:alpine 2/2 available", apps[1])
+	}
+	if apps[0].Available {
+		t.Errorf("api is 1/3 ready and should be unavailable: %+v", apps[0])
+	}
+}
+
 func TestApplyCreatesDeployment(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

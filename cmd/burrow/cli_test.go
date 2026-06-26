@@ -63,6 +63,23 @@ func TestDeployJSON(t *testing.T) {
 	}
 }
 
+func TestAppList(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/v1/apps" {
+			t.Errorf("request = %s %s, want GET /v1/apps", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"apps": []map[string]any{
+			{"app": "web", "image": "nginx:alpine", "desired_replicas": 2, "ready_replicas": 2, "available": true},
+		}})
+	}, "app", "list")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "NAME") || !strings.Contains(out, "web") || !strings.Contains(out, "nginx:alpine") || !strings.Contains(out, "2/2") {
+		t.Errorf("output = %q", out)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

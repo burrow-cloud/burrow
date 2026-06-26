@@ -6,6 +6,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/burrow-cloud/burrow/controlplane"
@@ -145,6 +146,28 @@ func (k *Kubernetes) WorkloadStatus(ctx context.Context, app string) (controlpla
 		UpdatedReplicas: d.ready,
 		Available:       d.spec.Replicas > 0 && d.ready >= d.spec.Replicas,
 	}, nil
+}
+
+func (k *Kubernetes) ListWorkloads(ctx context.Context) ([]controlplane.WorkloadStatus, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpStatus]; err != nil {
+		return nil, err
+	}
+	out := make([]controlplane.WorkloadStatus, 0, len(k.deploys))
+	for app, d := range k.deploys {
+		out = append(out, controlplane.WorkloadStatus{
+			App:             app,
+			Kind:            d.spec.Kind,
+			Image:           d.spec.Image,
+			DesiredReplicas: d.spec.Replicas,
+			ReadyReplicas:   d.ready,
+			UpdatedReplicas: d.ready,
+			Available:       d.spec.Replicas > 0 && d.ready >= d.spec.Replicas,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].App < out[j].App })
+	return out, nil
 }
 
 func (k *Kubernetes) ScaleWorkload(ctx context.Context, app string, replicas int32) error {

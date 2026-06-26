@@ -1,6 +1,6 @@
 # Burrow Roadmap
 
-> **Status: v0.1 shipped; v0.2 next.** These are version milestones; each unshipped one is
+> **Status: v0.1–v0.2 shipped; v0.3 in progress.** These are version milestones; each unshipped one is
 > a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
 > [README](../README.md) status table is the authoritative shipped/in-progress/planned
 > surface. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the current
@@ -26,11 +26,26 @@ in git history, the now-green tests, and the ADRs.
 - Integration tests running the real deploy/rollback/logs/scale paths against an ephemeral
   local cluster (kind or k3d).
 
-## v0.2 and beyond — candidate themes (unsequenced)
+## v0.2 — Reach an app at a URL ✅ shipped
 
-The themes below show direction, not commitment. The chosen v0.2 focus is **ingress,
-domains, and TLS** (making a deployed app reachable at a URL) — see [PLAN.md](PLAN.md) for
-the current sequencing; the rest remain candidates.
+Make a deployed app reachable at a public hostname over HTTPS: shared-ingress routing,
+`publish` + cert-manager TLS, a `reachability` surface, DNS automation (DigitalOcean /
+Cloudflare) with `domain add/remove`, and `ingress install` setup
+([ADR-0018](adr/0018-reaching-an-app-at-a-url.md)).
+
+## v0.3 — Operability + agent-experience hardening 🚧 in progress
+
+Tighten the v0.2 surface for real agent-driven use: the CLI regrouped by task
+(`app`/`config`/`system`, `expose`→`publish` — [ADR-0024](adr/0024-cli-command-taxonomy.md))
+with `app list`; account-scoped Cloudflare tokens; the app Ingress bound to its controller;
+reachability resolving via public DNS so the chain converges for an agent; and a burrowd
+request log. A breaking CLI change, taken while the surface is small.
+
+## v0.4 and beyond — candidate themes (unsequenced)
+
+The themes below show direction, not commitment. v0.4 is expected to lead with
+**server-side build from a git reference**; the rest remain candidates — see
+[PLAN.md](PLAN.md) for current sequencing.
 
 - **Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) —
   the second build path, toward the managed experience.

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -12,6 +13,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+func TestProviderAddWithoutTypeListsSupportedTypes(t *testing.T) {
+	var out, errb bytes.Buffer
+	// Missing <type>: the error and usage must name the available types so the user isn't left
+	// guessing what to pass.
+	_ = run(context.Background(), []string{"provider", "add"}, &out, &errb)
+	s := errb.String()
+	for _, want := range []string{"needs <type>", "cloudflare", "digitalocean"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("provider add (no type) output missing %q:\n%s", want, s)
+		}
+	}
+}
 
 func credentialValue(t *testing.T, cs *fake.Clientset, ns, key string) (string, bool) {
 	t.Helper()

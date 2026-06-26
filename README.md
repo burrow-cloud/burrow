@@ -6,13 +6,16 @@ deploy and operate real applications on your own Kubernetes cluster. You tell yo
 "deploy this," "roll it back," "show me the logs," "scale it," and Burrow carries it out
 safely on your cluster.
 
-> ### ✅ v0.1 is shipped
+> ### ✅ v0.2 is shipped
 >
-> The vertical slice runs: install the control plane into your own Kubernetes cluster,
-> point an MCP agent at it, and deploy and operate a real app — `deploy`, `status`,
-> `logs`, `rollback`, `scale`, plus in-place `upgrade` — every mutating operation guarded
-> by the control plane. The [version status](#version-status) table tracks what's shipped
-> vs. planned ([ADR-0009](docs/adr/0009-honest-status.md)). See
+> Install the control plane into your own Kubernetes cluster, point an MCP agent at it, and
+> deploy and operate a real app — `deploy`, `status`, `logs`, `rollback`, `scale`, plus
+> in-place `upgrade`. v0.2 adds the other half: **reach a deployed app at a URL** — `expose`
+> an app over HTTPS (ingress + cert-manager TLS), register a DNS provider (DigitalOcean or
+> Cloudflare), and point a domain at the cluster with `domain add`, all guided by an
+> introspectable `reachability` report. Every mutating operation is guarded by the control
+> plane. The [version status](#version-status) table tracks what's shipped vs. planned
+> ([ADR-0009](docs/adr/0009-honest-status.md)). See
 > [licensing](#license-and-contributing) for how the code is licensed.
 
 ## What it is
@@ -86,7 +89,8 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code
 | Version | Scope | Status |
 | --- | --- | --- |
 | **v0.1** | Install into an existing cluster · connect an agent over MCP · deploy an image by reference · status · logs · rollback · scale · in-place upgrade | ✅ shipped ([v0.1.1](https://github.com/burrow-cloud/burrow/tree/v0.1.1)) |
-| **v0.2** | Ingress, domains & TLS (reach a deployed app at a URL) · richer guardrails · server-side build | 🚧 next ([roadmap](docs/ROADMAP.md)) |
+| **v0.2** | Reach a deployed app at a URL: shared-ingress routing · `expose` + TLS via cert-manager · `reachability` surface · DNS automation (DigitalOcean / Cloudflare providers, `domain add/remove`) · `ingress install` setup · configurable guardrail policy | ✅ shipped ([v0.2.0](https://github.com/burrow-cloud/burrow/tree/v0.2.0)) |
+| v0.3 | Server-side build from a git reference · DNS-01 issuer · further day-two operations | planned ([roadmap](docs/ROADMAP.md)) |
 | v1.0 | Production self-host: hardened deploy-and-operate core with day-two operations | planned ([roadmap](docs/ROADMAP.md)) |
 
 ## Documentation

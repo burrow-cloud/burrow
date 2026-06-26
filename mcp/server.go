@@ -207,13 +207,14 @@ func reachabilityTool(c *client.Client) sdk.ToolHandlerFor[appInput, client.Reac
 type domainAddInput struct {
 	Host     string `json:"host" jsonschema:"the hostname to point at the cluster, e.g. app.example.com"`
 	Provider string `json:"provider" jsonschema:"the configured DNS provider to write the record at (its name from the registry, e.g. digitalocean)"`
-	Address  string `json:"address" jsonschema:"the cluster's external IPv4 address or hostname to point at (from burrow_reachability)"`
+	Address  string `json:"address,omitempty" jsonschema:"the cluster's external IPv4 address or hostname to point at; omit if you set app instead"`
+	App      string `json:"app,omitempty" jsonschema:"an exposed app whose external address to point at, instead of address — the control plane reads it from the app's ingress"`
 	Confirm  bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed writing the public DNS record; do not self-confirm"`
 }
 
 func domainAddTool(c *client.Client) sdk.ToolHandlerFor[domainAddInput, client.DomainResult] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in domainAddInput) (*sdk.CallToolResult, client.DomainResult, error) {
-		res, err := c.AddDomain(ctx, in.Host, in.Provider, in.Address, in.Confirm)
+		res, err := c.AddDomain(ctx, in.Host, in.Provider, in.Address, in.App, in.Confirm)
 		if err != nil {
 			return nil, client.DomainResult{}, err
 		}

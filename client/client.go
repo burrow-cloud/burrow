@@ -284,10 +284,11 @@ func (c *Client) Providers(ctx context.Context) ([]Provider, error) {
 	return out.Providers, err
 }
 
-// AddDomain points host at address through the named DNS provider (ADR-0018).
-func (c *Client) AddDomain(ctx context.Context, host, provider, address string, confirm bool) (DomainResult, error) {
+// AddDomain points host at an address through the named DNS provider (ADR-0018). Give either an
+// explicit address or the name of an exposed app whose ingress address the control plane reads.
+func (c *Client) AddDomain(ctx context.Context, host, provider, address, app string, confirm bool) (DomainResult, error) {
 	var out DomainResult
-	body := map[string]any{"host": host, "provider": provider, "address": address, "confirm": confirm}
+	body := map[string]any{"host": host, "provider": provider, "address": address, "app": app, "confirm": confirm}
 	err := c.do(ctx, http.MethodPost, "/v1/domains", body, &out)
 	return out, err
 }

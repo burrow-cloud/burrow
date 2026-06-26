@@ -1,0 +1,60 @@
+name: Release
+
+# A release is a single git push of a v* tag. This workflow stamps the version into the burrowd
+# binary, builds and pushes the image with ko, and creates the GitHub release with auto-generated
+# notes — no release PR, no hand-edited version constants. workflow_dispatch publishes an image
+# only (no GitHub release), to test a tag before cutting it.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (e.g. v0.2.2)"
+        required: true
+        default: v0.2.2
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub release
+  packages: write # push the image to GHCR
+
+jobs:
+  release:
+    name: build, push, release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - uses: ko-build/setup-ko@v0.8
+
+      - name: resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: stamp burrowd version
+        # The released burrowd reports the release version (logs + the upgrade gate). This rewrites
+        # the source default (v0.0.0) in the CI checkout only — it is never committed.
+        run: sed -i "s/^var version = .*/var version = \"${{ steps.meta.outputs.tag }}\"/" cmd/burrowd/main.go
+
+      - name: build and push image
+        run: ko build --bare --platform=linux/amd64 --tags "${{ steps.meta.outputs.tag }}" ./cmd/burrowd
+        env:
+          KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/burrowd
+
+      - name: create GitHub release
+        if: github.event_name == 'push'
+        run: gh release create "${{ steps.meta.outputs.tag }}" --generate-notes --latest --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: summary
+        run: |
+          echo "Published ghcr.io/${{ github.repository_owner }}/burrowd:${{ steps.meta.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "If this is the first publish, make the package public in GitHub > Packages so clusters can pull it anonymously." >> "$GITHUB_STEP_SUMMARY"

@@ -32,9 +32,11 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane/sys"
 )
 
-// version is the Burrow version this binary reports and stamps into the database for
-// the upgrade gate (ADR-0013). A release build may override it via -ldflags.
-var version = "v0.2.1"
+// version is the Burrow version this binary reports and stamps into the database for the
+// upgrade gate (ADR-0013). This is the development default; the release workflow rewrites it to
+// the git tag before building the published image, so a released burrowd reports its real
+// version. v0.0.0 keeps the upgrade gate's version parser happy for local and e2e builds.
+var version = "v0.0.0"
 
 func main() {
 	if err := run(); err != nil {

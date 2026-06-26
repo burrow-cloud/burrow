@@ -331,9 +331,9 @@ func (e *Engine) Reachability(ctx context.Context, app string) (ReachabilityResu
 func reachabilitySummary(r ReachabilityResult) string {
 	switch {
 	case !r.Ready:
-		return fmt.Sprintf("%s is deployed but not ready yet — check `burrow logs %s`.", r.App, r.App)
+		return fmt.Sprintf("%s is deployed but not ready yet — check `burrow app logs %s`.", r.App, r.App)
 	case !r.Exposed:
-		return fmt.Sprintf("%s is running but not exposed — run `burrow expose %s --host <name> --port <n>`.", r.App, r.App)
+		return fmt.Sprintf("%s is running but not exposed — run `burrow app publish %s --host <name> --port <n>`.", r.App, r.App)
 	case r.Address == "":
 		return fmt.Sprintf("%s is exposed at %s but no external address is assigned yet — is an ingress controller installed and running?", r.App, r.Host)
 	case !r.DNSPointsAtCluster:

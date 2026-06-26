@@ -115,7 +115,7 @@ type AddProviderRequest struct {
 // AddDomainRequest points a host at an address through a configured DNS provider (ADR-0018).
 // The address is the cluster's external entry point — the ingress controller's IP or hostname.
 // Supply it explicitly with Address, or name an exposed App and the control plane reads the
-// controller-assigned address from that app's Ingress (the value `burrow reachability` reports).
+// controller-assigned address from that app's Ingress (the value `burrow app reachability` reports).
 type AddDomainRequest struct {
 	Host     string `json:"host"`
 	Provider string `json:"provider"`

@@ -100,22 +100,16 @@ func newRootCmd() *cobra.Command {
 	}
 	root.CompletionOptions.HiddenDefaultCmd = true
 	root.AddCommand(
-		newVersionCmd(),
+		// Bootstrap + lifecycle of the control plane — top level (ADR-0024).
 		newInstallCmd(),
 		newUpgradeCmd(),
-		newRegistryCmd(),
-		newIngressCmd(),
-		newProviderCmd(),
-		newDeployCmd(),
-		newStatusCmd(),
-		newLogsCmd(),
-		newRollbackCmd(),
-		newScaleCmd(),
-		newExposeCmd(),
-		newUnexposeCmd(),
-		newReachabilityCmd(),
-		newDomainCmd(),
+		// Task groups.
+		newAppCmd(),
+		newConfigCmd(),
+		newSystemCmd(),
+		// Cross-cutting policy + meta — top level.
 		newGuardCmd(),
+		newVersionCmd(),
 	)
 	return root
 }

@@ -83,7 +83,7 @@ func TestIngressDetection(t *testing.T) {
 func TestIngressInstallDryRun(t *testing.T) {
 	var out, errb bytes.Buffer
 	// dry-run must not touch a cluster (no kubeconfig needed) — it only prints the plan.
-	err := run(context.Background(), []string{"ingress", "install", "--dry-run", "--staging", "--email", "a@b.com"}, &out, &errb)
+	err := run(context.Background(), []string{"system", "ingress", "install", "--dry-run", "--staging", "--email", "a@b.com"}, &out, &errb)
 	if err != nil {
 		t.Fatalf("ingress install --dry-run: %v", err)
 	}

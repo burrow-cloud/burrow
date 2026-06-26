@@ -112,7 +112,7 @@ func (e *Engine) resolveDNSProvider(ctx context.Context, name string) (Provider,
 	}
 	switch len(dns) {
 	case 0:
-		return Provider{}, fmt.Errorf("no DNS provider is configured — add one with `burrow provider add`: %w", ErrInvalid)
+		return Provider{}, fmt.Errorf("no DNS provider is configured — add one with `burrow config provider add`: %w", ErrInvalid)
 	case 1:
 		return dns[0], nil
 	default:
@@ -132,7 +132,7 @@ func (e *Engine) loadDNSProvider(ctx context.Context, name string) (Provider, er
 	p, err := e.db.Provider(ctx, name)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return Provider{}, fmt.Errorf("provider %q is not configured — add it with `burrow provider add`: %w", name, ErrNotFound)
+			return Provider{}, fmt.Errorf("provider %q is not configured — add it with `burrow config provider add`: %w", name, ErrNotFound)
 		}
 		return Provider{}, fmt.Errorf("reading provider %q: %w", name, err)
 	}
@@ -148,7 +148,7 @@ func (e *Engine) dnsAdapter(ctx context.Context, p Provider) (DNSProvider, error
 	token, err := e.credentials.Token(ctx, p.SecretKey)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, fmt.Errorf("no token for provider %q in burrow-credentials — re-run `burrow provider add`: %w", p.Name, ErrInvalid)
+			return nil, fmt.Errorf("no token for provider %q in burrow-credentials — re-run `burrow config provider add`: %w", p.Name, ErrInvalid)
 		}
 		return nil, fmt.Errorf("reading token for provider %q: %w", p.Name, err)
 	}
@@ -176,7 +176,7 @@ func (e *Engine) resolveDomainAddress(ctx context.Context, host string, req AddD
 		return "", fmt.Errorf("domain add %s: reading the exposure of %q: %w", host, app, err)
 	}
 	if !exp.Exposed {
-		return "", fmt.Errorf("domain add %s: app %q is not exposed — run `burrow expose %s` first, or pass --address: %w", host, app, app, ErrInvalid)
+		return "", fmt.Errorf("domain add %s: app %q is not exposed — run `burrow app publish %s` first, or pass --address: %w", host, app, app, ErrInvalid)
 	}
 	if exp.Address == "" {
 		return "", fmt.Errorf("domain add %s: app %q has no external address yet — the ingress controller has not assigned one; wait and retry, or pass --address: %w", host, app, ErrInvalid)

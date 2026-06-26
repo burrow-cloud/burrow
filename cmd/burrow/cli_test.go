@@ -35,7 +35,7 @@ func TestDeploy(t *testing.T) {
 			"release":               map[string]any{"id": "r1", "app": "web", "image": "img:1", "status": "deployed", "replicas": 2},
 			"superseded_release_id": "r0",
 		})
-	}, "deploy", "web", "--image", "img:1", "--replicas", "2", "--env", "K=V")
+	}, "app", "deploy", "web", "--image", "img:1", "--replicas", "2", "--env", "K=V")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestDeploy(t *testing.T) {
 func TestDeployJSON(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"release": map[string]any{"id": "r1", "app": "web", "image": "img:1", "status": "deployed", "replicas": 1}})
-	}, "deploy", "web", "--image", "img:1", "--json")
+	}, "app", "deploy", "web", "--image", "img:1", "--json")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestStatus(t *testing.T) {
 			"release":  map[string]any{"id": "r1", "image": "img:1", "status": "deployed"},
 			"workload": map[string]any{"desired_replicas": 3, "ready_replicas": 3, "available": true},
 		})
-	}, "status", "web")
+	}, "app", "status", "web")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestLogs(t *testing.T) {
 			t.Errorf("tail query = %q, want 2", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"lines": []map[string]any{{"pod": "web-1", "message": "hello"}}})
-	}, "logs", "web", "--tail", "2")
+	}, "app", "logs", "web", "--tail", "2")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestLogs(t *testing.T) {
 func TestScale(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "previous_replicas": 2, "replicas": 4})
-	}, "scale", "web", "4")
+	}, "app", "scale", "web", "4")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestRollback(t *testing.T) {
 			"release":                   map[string]any{"id": "r3", "image": "img:1", "status": "deployed"},
 			"rolled_back_to_release_id": "r1", "superseded_release_id": "r2",
 		})
-	}, "rollback", "web")
+	}, "app", "rollback", "web")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestReachabilityCommand(t *testing.T) {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "summary": "web is reachable at http://web.example.com", "reachable": true})
-	}, "reachability", "web")
+	}, "app", "reachability", "web")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -142,11 +142,11 @@ func TestExposeCommand(t *testing.T) {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "host": "web.example.com", "port": 8080, "url": "http://web.example.com"})
-	}, "expose", "web", "--host", "web.example.com", "--port", "8080")
+	}, "app", "publish", "web", "--host", "web.example.com", "--port", "8080")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(out, "exposed web at web.example.com") {
+	if !strings.Contains(out, "published web at web.example.com") {
 		t.Errorf("output = %q", out)
 	}
 }
@@ -172,7 +172,7 @@ func TestDeployGuardrailErrorSurfaces(t *testing.T) {
 	_, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "exceeds the replica ceiling", "code": "replica_ceiling"})
-	}, "deploy", "web", "--image", "img:1", "--replicas", "99")
+	}, "app", "deploy", "web", "--image", "img:1", "--replicas", "99")
 	if err == nil || !strings.Contains(err.Error(), "replica_ceiling") {
 		t.Fatalf("err = %v, want it to surface the guardrail code", err)
 	}
@@ -181,7 +181,7 @@ func TestDeployGuardrailErrorSurfaces(t *testing.T) {
 func TestExplicitControlPlaneNeedsToken(t *testing.T) {
 	t.Setenv("BURROW_API_TOKEN", "")
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"status", "web", "--control-plane", "http://example"}, &out, &errb)
+	err := run(context.Background(), []string{"app", "status", "web", "--control-plane", "http://example"}, &out, &errb)
 	if err == nil || !strings.Contains(err.Error(), "--token") {
 		t.Fatalf("err = %v, want a missing-token error", err)
 	}
@@ -193,7 +193,7 @@ func TestAutoConnectFailsWithoutCluster(t *testing.T) {
 	// No --control-plane → auto-connect via kubeconfig; a bogus kubeconfig path fails
 	// deterministically regardless of the ambient environment.
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"status", "web", "--kubeconfig", filepath.Join(t.TempDir(), "missing")}, &out, &errb)
+	err := run(context.Background(), []string{"app", "status", "web", "--kubeconfig", filepath.Join(t.TempDir(), "missing")}, &out, &errb)
 	if err == nil {
 		t.Fatalf("expected an error when the kubeconfig is unreadable")
 	}
@@ -273,28 +273,28 @@ func TestExactArgsErrorNamesArgsAndPrintsUsage(t *testing.T) {
 	// A missing <app> names the argument and prints the command's usage, not Cobra's bare
 	// "accepts 1 arg(s), received 0".
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"status"}, &out, &errb)
+	err := run(context.Background(), []string{"app", "status"}, &out, &errb)
 	if err == nil {
 		t.Fatal("status with no arg should error")
 	}
 	s := errb.String()
-	if !strings.Contains(s, "burrow status needs <app>.") {
+	if !strings.Contains(s, "burrow app status needs <app>.") {
 		t.Errorf("missing-arg message = %q, want it to name <app>", s)
 	}
-	if !strings.Contains(s, "Usage:") || !strings.Contains(s, "burrow status <app>") {
+	if !strings.Contains(s, "Usage:") || !strings.Contains(s, "burrow app status <app>") {
 		t.Errorf("should print the command usage, got %q", s)
 	}
 
 	// A two-arg command names both placeholders.
 	errb.Reset()
-	_ = run(context.Background(), []string{"scale"}, &out, &errb)
-	if !strings.Contains(errb.String(), "burrow scale needs <app> <replicas>.") {
+	_ = run(context.Background(), []string{"app", "scale"}, &out, &errb)
+	if !strings.Contains(errb.String(), "burrow app scale needs <app> <replicas>.") {
 		t.Errorf("scale message = %q, want both args named", errb.String())
 	}
 
 	// Too many args is reported too.
 	errb.Reset()
-	_ = run(context.Background(), []string{"status", "web", "extra"}, &out, &errb)
+	_ = run(context.Background(), []string{"app", "status", "web", "extra"}, &out, &errb)
 	if !strings.Contains(errb.String(), "takes only <app>") {
 		t.Errorf("extra-arg message = %q", errb.String())
 	}

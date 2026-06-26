@@ -19,7 +19,7 @@ func TestProviderAddWithoutTypeListsSupportedTypes(t *testing.T) {
 	var out, errb bytes.Buffer
 	// Missing <type>: the error and usage must name the available types so the user isn't left
 	// guessing what to pass.
-	_ = run(context.Background(), []string{"provider", "add"}, &out, &errb)
+	_ = run(context.Background(), []string{"config", "provider", "add"}, &out, &errb)
 	s := errb.String()
 	for _, want := range []string{"needs <type>", "cloudflare", "digitalocean"} {
 		if !strings.Contains(s, want) {
@@ -143,7 +143,7 @@ func TestReadTokenFromPipe(t *testing.T) {
 
 func TestProviderTypesCommand(t *testing.T) {
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"provider", "types"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"config", "provider", "types"}, &out, &errb); err != nil {
 		t.Fatalf("provider types: %v", err)
 	}
 	s := out.String()

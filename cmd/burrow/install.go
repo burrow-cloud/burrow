@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -40,13 +41,25 @@ func defaultBurrowdImage() string {
 	return "ghcr.io/burrow-cloud/burrowd:" + burrowdTag()
 }
 
+// pseudoVersionSuffix matches the tail of a Go module pseudo-version —
+// vX.Y.Z-0.<14-digit-timestamp>-<12-hex-commit> — which Go 1.24+ stamps into a plain
+// `go build`. No burrowd image is published at such a tag (only real release tags are), so it
+// must not be used as a default image.
+var pseudoVersionSuffix = regexp.MustCompile(`\d{14}-[0-9a-f]{12}$`)
+
+// isReleaseVersion reports whether v is a clean published release version with a matching
+// burrowd image — not empty, not the local-build "(devel)", and not a pseudo-version. A real
+// release tag (v0.2.1) or a release candidate (v0.2.2-rc1) qualifies; a pseudo-version does not.
+func isReleaseVersion(v string) bool {
+	return v != "" && v != "(devel)" && !pseudoVersionSuffix.MatchString(v)
+}
+
 // burrowdTag returns this CLI's release version from the build info (set when installed via
-// `go install …@version`), or the fallback for an unversioned local build.
+// `go install …@version`), or the fallback for a local/unreleased build whose version has no
+// published image. The version `burrow version` reports is separate and may be a pseudo-version.
 func burrowdTag() string {
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		if v := bi.Main.Version; v != "" && v != "(devel)" {
-			return v
-		}
+	if bi, ok := debug.ReadBuildInfo(); ok && isReleaseVersion(bi.Main.Version) {
+		return bi.Main.Version
 	}
 	return fallbackBurrowdVersion
 }

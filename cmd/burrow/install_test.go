@@ -109,3 +109,26 @@ func TestInstallDryRun(t *testing.T) {
 		t.Errorf("dry-run should not print the post-apply message")
 	}
 }
+
+func TestIsReleaseVersion(t *testing.T) {
+	release := []string{"v0.2.1", "v0.2.2-rc1", "v1.0.0"}
+	notRelease := []string{
+		"",
+		"(devel)",
+		"v0.2.2-0.20260626184728-3751fc89929b", // Go pseudo-version (go build on Go 1.24+)
+	}
+	for _, v := range release {
+		if !isReleaseVersion(v) {
+			t.Errorf("isReleaseVersion(%q) = false, want true", v)
+		}
+	}
+	for _, v := range notRelease {
+		if isReleaseVersion(v) {
+			t.Errorf("isReleaseVersion(%q) = true, want false", v)
+		}
+	}
+	// A build with no release tag must default to a real, published image — never a pseudo tag.
+	if got := defaultBurrowdImage(); got != "ghcr.io/burrow-cloud/burrowd:"+fallbackBurrowdVersion {
+		t.Errorf("defaultBurrowdImage() in test = %q, want the fallback", got)
+	}
+}

@@ -85,10 +85,39 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           serverHandler(&ready, &apiHandler),
+		Handler:           logRequests(serverHandler(&ready, &apiHandler)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return serve(srv)
+}
+
+// logRequests is an access log: it logs each request as it completes — method, path, status,
+// and how long it took (the standard logger prepends the timestamp). The frequent /healthz
+// readiness probe is skipped so the log shows real API traffic; direct control-plane traffic is
+// low even on a busy cluster, so logging every request is fine.
+func logRequests(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			h.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h.ServeHTTP(rec, r)
+		log.Printf("%s %s %d %s", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// statusRecorder wraps a ResponseWriter to capture the status code for the access log, defaulting
+// to 200 (the status when a handler writes a body without calling WriteHeader).
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 // serverHandler serves /healthz as the readiness signal (503 until the control plane has

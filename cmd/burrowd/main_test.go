@@ -4,13 +4,42 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 )
+
+func TestLogRequests(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(nil) })
+
+	h := logRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+
+	// A real request is logged with method, path, and status.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/providers", nil))
+	if got := buf.String(); !strings.Contains(got, "POST /v1/providers 400") {
+		t.Errorf("access log = %q, want it to record the request and status", got)
+	}
+
+	// The readiness probe is not logged (it would be every-few-seconds noise).
+	buf.Reset()
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/healthz", nil))
+	if buf.Len() != 0 {
+		t.Errorf("healthz should not be logged, got %q", buf.String())
+	}
+}
 
 func TestServerHandlerReadiness(t *testing.T) {
 	var ready atomic.Bool

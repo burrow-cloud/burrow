@@ -47,13 +47,13 @@ k3d image import "$BURROWD_IMAGE" -c "$CLUSTER"
 echo "=== burrow install (waits for the control plane to be ready) ==="
 "$BURROW" install --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
 
-echo "=== burrow deploy (auto-connect: kubeconfig + API-server proxy, no port-forward) ==="
-"$BURROW" deploy web --image nginx:alpine --kubeconfig "$KCFG"
+echo "=== burrow app deploy (auto-connect: kubeconfig + API-server proxy, no port-forward) ==="
+"$BURROW" app deploy web --image nginx:alpine --kubeconfig "$KCFG"
 
 echo "=== wait for the app to become available ==="
 ok=
 for _ in $(seq 1 45); do
-  if "$BURROW" status web --kubeconfig "$KCFG" | grep -q "ready, available"; then
+  if "$BURROW" app status web --kubeconfig "$KCFG" | grep -q "ready, available"; then
     ok=1
     break
   fi
@@ -61,14 +61,14 @@ for _ in $(seq 1 45); do
 done
 
 echo "--- final status ---"
-"$BURROW" status web --kubeconfig "$KCFG"
+"$BURROW" app status web --kubeconfig "$KCFG"
 if [ -z "$ok" ]; then
   echo "FAIL: app never became available"
   exit 1 # the ERR trap dumps diagnostics
 fi
 
 echo "=== rollback path: deploy a second image, then roll back ==="
-"$BURROW" deploy web --image nginx:1.27-alpine --kubeconfig "$KCFG"
-"$BURROW" rollback web --kubeconfig "$KCFG" | grep -q "nginx:alpine" || { echo "FAIL: rollback did not restore nginx:alpine"; exit 1; }
+"$BURROW" app deploy web --image nginx:1.27-alpine --kubeconfig "$KCFG"
+"$BURROW" app rollback web --kubeconfig "$KCFG" | grep -q "nginx:alpine" || { echo "FAIL: rollback did not restore nginx:alpine"; exit 1; }
 
 echo "=== CAPSTONE E2E PASSED: install -> deploy -> status -> rollback, all via the CLI over the proxy ==="

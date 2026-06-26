@@ -42,15 +42,25 @@ e2e), and the ADRs.
   bind ([ADR-0021](adr/0021-guardrails-require-control-plane-only-agent-access.md),
   [docs/HARDENING.md](HARDENING.md)).
 
-## Now: v0.2 — reach a deployed app at a URL (ingress, TLS, DNS)
+## Shipped: v0.2 — reach a deployed app at a URL (ingress, TLS, DNS) ✅
 
-**Goal:** an agent can make a deployed app reachable at a real hostname over HTTPS, on the
-user's own cluster — the missing half of "deploy and operate" (today a deployed app is only
-reachable by port-forward). Reachability is a chain (controller → Service/Ingress → TLS →
-DNS), and the design is built around making that chain **introspectable** so the agent can
-reason about which link is broken and act on the gaps it owns. The full design — including
+Released as **v0.2.0**. An agent can make a deployed app reachable at a real hostname over
+HTTPS on the user's own cluster — the missing half of "deploy and operate." Reachability is a
+chain (controller → Service/Ingress → TLS → DNS), built to be **introspectable** so the agent
+can reason about which link is broken and act on the gaps it owns. The full design — including
 the human-setup vs. agent-operation split — is **[ADR-0018](adr/0018-reaching-an-app-at-a-url.md)
 (Accepted)**.
+
+## Next
+
+Polish on the v0.2 surface and the start of v0.3: a **DNS-01 issuer solver** (issue certs
+before the host is public, using the provider token), folding the provider's record into the
+**reachability** surface ("the provider holds the record"), `provider list` as a read-only MCP
+tool plus provider auto-detection so the agent needs no `--provider`, and **server-side build
+from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)). See
+[ROADMAP.md](ROADMAP.md).
+
+<!-- v0.2 build detail below is retained for now; prune as the next front line forms. -->
 
 The shape (per ADR-0018):
 

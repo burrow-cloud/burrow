@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,13 +27,27 @@ import (
 // resourceNames-scoped get. The token never travels over MCP and burrowd never writes it.
 const credentialsSecretName = "burrow-credentials"
 
-// supportedProviderTypes mirrors controlplane.SupportedProviderTypes for the CLI's help text,
-// so a user can see the available types without guessing. The control plane validates the type
-// authoritatively on `provider add` (and its error names the supported types), so this list is
-// only a hint and never rejects a type itself.
-var supportedProviderTypes = []string{"cloudflare", "digitalocean"}
+// providerCatalog is the provider types this CLI knows about and the capabilities each serves,
+// mirroring controlplane's known provider types — the reference behind `provider types` and the
+// add command's help. The control plane validates the type authoritatively on `provider add`
+// (its error names the supported types), so this is only a hint and never rejects a type itself.
+var providerCatalog = []struct {
+	Type         string
+	Capabilities []string
+}{
+	{"cloudflare", []string{"dns"}},
+	{"digitalocean", []string{"dns"}},
+}
 
-func providerTypesHint() string { return strings.Join(supportedProviderTypes, ", ") }
+func supportedProviderTypes() []string {
+	out := make([]string, len(providerCatalog))
+	for i, p := range providerCatalog {
+		out[i] = p.Type
+	}
+	return out
+}
+
+func providerTypesHint() string { return strings.Join(supportedProviderTypes(), ", ") }
 
 // newProviderCmd manages cloud-provider credentials. `provider add` is a setup command: it
 // writes the token into the burrow-credentials Secret with the developer's kubeconfig and
@@ -46,39 +62,54 @@ func newProviderCmd() *cobra.Command {
 			"Kubernetes Secret in the control-plane namespace and read by the control plane; it\n" +
 			"never travels over MCP and the agent never holds it.",
 	}
-	parent.AddCommand(newProviderAddCmd(), newProviderListCmd())
+	parent.AddCommand(newProviderTypesCmd(), newProviderAddCmd(), newProviderListCmd())
 	return parent
+}
+
+// newProviderTypesCmd lists the provider types Burrow supports and the capabilities each
+// serves, so a user can see what is available before configuring one. It needs no cluster.
+func newProviderTypesCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "types",
+		Short: "List the available provider types and what each supports",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "%-16s%s\n", "TYPE", "SUPPORTS")
+			for _, p := range providerCatalog {
+				fmt.Fprintf(out, "%-16s%s\n", p.Type, strings.Join(p.Capabilities, ", "))
+			}
+			return nil
+		},
+	}
 }
 
 func newProviderAddCmd() *cobra.Command {
 	o := &commonOpts{}
 	var name, secretKey string
-	var tokenStdin bool
 	cmd := &cobra.Command{
 		Use:   "add <type>",
 		Short: "Register a provider credential (type: " + providerTypesHint() + ")",
-		Long: "add registers a provider of the given type and stores its API token. The token is\n" +
-			"read from standard input (--token-stdin) so it never lands in your shell history or\n" +
-			"the process table, written into the burrow-credentials Secret with your kubeconfig,\n" +
-			"and recorded in the control-plane registry. Pass --name to register more than one\n" +
-			"provider of the same type.\n\n" +
-			"Supported types: " + providerTypesHint() + ".",
-		Example: "  printf '%s' \"$TOKEN\" | burrow provider add cloudflare --token-stdin\n" +
-			"  printf '%s' \"$TOKEN\" | burrow provider add digitalocean --token-stdin",
-		ValidArgs: supportedProviderTypes,
+		Long: "add registers a provider of the given type and stores its API token. You are\n" +
+			"prompted for the token with the input hidden, so it never lands in your shell\n" +
+			"history or the process table; for scripts, pipe it in instead\n" +
+			"(echo \"$TOKEN\" | burrow provider add cloudflare). The token is written into the\n" +
+			"burrow-credentials Secret with your kubeconfig and recorded in the control-plane\n" +
+			"registry. Pass --name to register more than one provider of the same type.\n\n" +
+			"Supported types: " + providerTypesHint() + " (see `burrow provider types`).",
+		Example: "  burrow provider add cloudflare\n" +
+			"  burrow provider add digitalocean --name do-dns",
+		ValidArgs: supportedProviderTypes(),
 		Args:      exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			providerType := args[0]
-			if !tokenStdin {
-				return errors.New("--token-stdin is required (the API token is read from standard input)")
-			}
-			token, err := readSecretStdin(cmd.InOrStdin())
+			token, err := readToken(cmd.InOrStdin(), cmd.OutOrStdout(), fmt.Sprintf("Enter the %s API token: ", providerType))
 			if err != nil {
 				return err
 			}
 			if token == "" {
-				return errors.New("no token read from standard input")
+				return errors.New("no token provided")
 			}
 
 			providerName := name
@@ -126,7 +157,6 @@ func newProviderAddCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().StringVar(&name, "name", "", "name for this provider (default: the type)")
 	cmd.Flags().StringVar(&secretKey, "secret-key", "", "key in the burrow-credentials Secret to store the token under (default: the name)")
-	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "read the provider API token from standard input")
 	return cmd
 }
 
@@ -151,9 +181,8 @@ func newProviderListCmd() *cobra.Command {
 				return emit(out, true, providers, "")
 			}
 			if len(providers) == 0 {
-				fmt.Fprintf(out, "No providers configured. Add one:\n"+
-					"  printf '%%s' \"$TOKEN\" | burrow provider add <type> --token-stdin\n"+
-					"Supported types: %s.\n", providerTypesHint())
+				fmt.Fprintf(out, "No providers configured. Add one with `burrow provider add <type>`.\n"+
+					"Supported types: %s (see `burrow provider types`).\n", providerTypesHint())
 				return nil
 			}
 			fmt.Fprintf(out, "%-16s%-14s%s\n", "NAME", "TYPE", "CAPABILITIES")
@@ -167,10 +196,21 @@ func newProviderListCmd() *cobra.Command {
 	return cmd
 }
 
-// readSecretStdin reads a secret value from r and trims surrounding whitespace, so a token
-// piped in (with or without a trailing newline) is read cleanly.
-func readSecretStdin(r io.Reader) (string, error) {
-	b, err := io.ReadAll(r)
+// readToken reads a secret token. When in is an interactive terminal it prints prompt and reads
+// the token without echoing it (so it never shows on screen or in shell history); when in is
+// piped or redirected (a script, `echo "$TOKEN" | …`) it reads the token from there instead.
+// Surrounding whitespace is trimmed.
+func readToken(in io.Reader, out io.Writer, prompt string) (string, error) {
+	if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		fmt.Fprint(out, prompt)
+		b, err := term.ReadPassword(int(f.Fd()))
+		fmt.Fprintln(out) // terminate the line the hidden input was typed on
+		if err != nil {
+			return "", fmt.Errorf("reading token: %w", err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	b, err := io.ReadAll(in)
 	if err != nil {
 		return "", fmt.Errorf("reading token from standard input: %w", err)
 	}

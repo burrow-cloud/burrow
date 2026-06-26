@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"testing"
 
@@ -129,12 +130,26 @@ func TestRestoreCredentialRollsBack(t *testing.T) {
 	}
 }
 
-func TestReadSecretStdinTrims(t *testing.T) {
-	got, err := readSecretStdin(strings.NewReader("  dop_v1_abc\n"))
+func TestReadTokenFromPipe(t *testing.T) {
+	// A non-terminal reader (a pipe/redirect, as in a script) is read directly and trimmed.
+	got, err := readToken(strings.NewReader("  dop_v1_abc\n"), io.Discard, "token: ")
 	if err != nil {
-		t.Fatalf("readSecretStdin: %v", err)
+		t.Fatalf("readToken: %v", err)
 	}
 	if got != "dop_v1_abc" {
-		t.Errorf("readSecretStdin = %q, want trimmed token", got)
+		t.Errorf("readToken = %q, want the trimmed token", got)
+	}
+}
+
+func TestProviderTypesCommand(t *testing.T) {
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"provider", "types"}, &out, &errb); err != nil {
+		t.Fatalf("provider types: %v", err)
+	}
+	s := out.String()
+	for _, want := range []string{"TYPE", "SUPPORTS", "cloudflare", "digitalocean", "dns"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("provider types output missing %q:\n%s", want, s)
+		}
 	}
 }

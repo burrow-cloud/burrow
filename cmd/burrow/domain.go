@@ -36,9 +36,6 @@ func newDomainAddCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			if provider == "" {
-				return errors.New("--provider is required")
-			}
 			if address == "" && app == "" {
 				return errors.New("give --address (the cluster's external address) or --app (an exposed app to read it from)")
 			}
@@ -55,7 +52,7 @@ func newDomainAddCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
-	cmd.Flags().StringVar(&provider, "provider", "", "configured DNS provider to write the record at (required)")
+	cmd.Flags().StringVar(&provider, "provider", "", "configured DNS provider to write the record at (default: the only one configured)")
 	cmd.Flags().StringVar(&address, "address", "", "the cluster's external IP or hostname to point at (or use --app)")
 	cmd.Flags().StringVar(&app, "app", "", "an exposed app whose external address to point at (instead of --address)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
@@ -72,9 +69,6 @@ func newDomainRemoveCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			if provider == "" {
-				return errors.New("--provider is required")
-			}
 			c, err := o.client(ctx)
 			if err != nil {
 				return err
@@ -88,7 +82,7 @@ func newDomainRemoveCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
-	cmd.Flags().StringVar(&provider, "provider", "", "configured DNS provider holding the record (required)")
+	cmd.Flags().StringVar(&provider, "provider", "", "configured DNS provider holding the record (default: the only one configured)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }

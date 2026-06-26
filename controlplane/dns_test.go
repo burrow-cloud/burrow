@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	cp "github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/internal/fake"
@@ -124,4 +125,67 @@ func TestRemoveDomainGuardrailHoldsWithoutConfirm(t *testing.T) {
 	}
 	_, err := e.RemoveDomain(context.Background(), cp.RemoveDomainRequest{Host: "app.example.com", Provider: "digitalocean"})
 	mustGuardrail(t, err, cp.GuardrailDNSDelete)
+}
+
+func TestAddDomainDerivesAddressFromExposedApp(t *testing.T) {
+	k := fake.NewKubernetes()
+	creds := fake.NewCredentials()
+	creds.Set("digitalocean", "tok")
+	dnsF := fake.NewDNSFactory()
+	d := fake.NewDatabase()
+	d.SetPolicy(permissive())
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Registry: fake.NewRegistry(), Database: d,
+		Clock: fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)),
+		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
+		Credentials: creds, DNS: dnsF,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean}); err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+
+	// Expose an app and let the ingress controller assign it an address.
+	if err := k.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.svc", Port: 80}); err != nil {
+		t.Fatalf("Expose: %v", err)
+	}
+	k.SetIngressAddress("web", "203.0.113.50")
+
+	// --app, no --address: the address is read from the app's exposure.
+	res, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "web.example.com", Provider: "digitalocean", App: "web", Confirm: true})
+	if err != nil {
+		t.Fatalf("AddDomain from app: %v", err)
+	}
+	if res.Address != "203.0.113.50" || res.Type != "A" {
+		t.Errorf("result = %+v, want address 203.0.113.50 / A", res)
+	}
+	if rec, ok := dnsF.Provider().Record("web.example.com"); !ok || rec.Value != "203.0.113.50" {
+		t.Errorf("record = %+v ok=%v", rec, ok)
+	}
+
+	// An explicit --address still wins over --app.
+	if res, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "web.example.com", Provider: "digitalocean", App: "web", Address: "198.51.100.7", Confirm: true}); err != nil || res.Address != "198.51.100.7" {
+		t.Errorf("explicit address should win: %+v %v", res, err)
+	}
+
+	// Neither address nor app → ErrInvalid.
+	if _, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "x.example.com", Provider: "digitalocean", Confirm: true}); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("no address/app err = %v, want ErrInvalid", err)
+	}
+
+	// An app that is not exposed → ErrInvalid with guidance.
+	if _, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "x.example.com", Provider: "digitalocean", App: "ghost", Confirm: true}); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("unexposed app err = %v, want ErrInvalid", err)
+	}
+
+	// Exposed but no external address assigned yet → ErrInvalid (wait or pass --address).
+	if err := k.Expose(ctx, cp.ExposeSpec{App: "pending", Host: "pending.svc", Port: 80}); err != nil {
+		t.Fatalf("Expose pending: %v", err)
+	}
+	if _, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "pending.example.com", Provider: "digitalocean", App: "pending", Confirm: true}); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("no-address-yet err = %v, want ErrInvalid", err)
+	}
 }

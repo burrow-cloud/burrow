@@ -11,20 +11,21 @@ import (
 	"strings"
 )
 
-// AddDomain creates or updates a DNS record pointing Host at Address, through the named
-// provider (ADR-0018). It is a guarded operation: pointing a public hostname at the cluster is
-// a blast-radius change, so it trips the dns_write guardrail (confirm by default). The record
-// is an A record when Address is an IPv4 address, a CNAME otherwise. The provider must be
-// configured and serve DNS; burrowd holds the token and is the only thing that calls the
-// vendor.
+// AddDomain creates or updates a DNS record pointing Host at an address, through the named
+// provider (ADR-0018). The address is given explicitly (req.Address) or derived from an exposed
+// app's ingress (req.App) so the agent need not look it up. It is a guarded operation: pointing
+// a public hostname at the cluster is a blast-radius change, so it trips the dns_write guardrail
+// (confirm by default). The record is an A record when the address is an IPv4 address, a CNAME
+// otherwise. The provider must be configured and serve DNS; burrowd holds the token and is the
+// only thing that calls the vendor.
 func (e *Engine) AddDomain(ctx context.Context, req AddDomainRequest) (DomainResult, error) {
 	host := strings.TrimSpace(req.Host)
-	address := strings.TrimSpace(req.Address)
 	if host == "" {
 		return DomainResult{}, fmt.Errorf("domain add: host is empty: %w", ErrInvalid)
 	}
-	if address == "" {
-		return DomainResult{}, fmt.Errorf("domain add %s: address is empty: %w", host, ErrInvalid)
+	address, err := e.resolveDomainAddress(ctx, host, req)
+	if err != nil {
+		return DomainResult{}, err
 	}
 
 	p, err := e.loadDNSProvider(ctx, req.Provider)
@@ -123,6 +124,31 @@ func (e *Engine) dnsAdapter(ctx context.Context, p Provider) (DNSProvider, error
 		return nil, err
 	}
 	return dnsp, nil
+}
+
+// resolveDomainAddress returns the address to point host at: req.Address when given, otherwise
+// the controller-assigned external address of the exposed app named in req.App. Deriving it
+// from the app's ingress is how `domain add --app web` spares the agent from copying the
+// cluster's IP by hand — it is the same address the reachability surface reports.
+func (e *Engine) resolveDomainAddress(ctx context.Context, host string, req AddDomainRequest) (string, error) {
+	if a := strings.TrimSpace(req.Address); a != "" {
+		return a, nil
+	}
+	app := strings.TrimSpace(req.App)
+	if app == "" {
+		return "", fmt.Errorf("domain add %s: provide an address (--address) or an exposed app (--app): %w", host, ErrInvalid)
+	}
+	exp, err := e.k8s.ExposureStatus(ctx, app)
+	if err != nil {
+		return "", fmt.Errorf("domain add %s: reading the exposure of %q: %w", host, app, err)
+	}
+	if !exp.Exposed {
+		return "", fmt.Errorf("domain add %s: app %q is not exposed — run `burrow expose %s` first, or pass --address: %w", host, app, app, ErrInvalid)
+	}
+	if exp.Address == "" {
+		return "", fmt.Errorf("domain add %s: app %q has no external address yet — the ingress controller has not assigned one; wait and retry, or pass --address: %w", host, app, ErrInvalid)
+	}
+	return exp.Address, nil
 }
 
 // recordTypeFor picks A for an IPv4 address and CNAME for anything else (a hostname).

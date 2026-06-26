@@ -28,25 +28,25 @@ func newDomainCmd() *cobra.Command {
 
 func newDomainAddCmd() *cobra.Command {
 	o := &commonOpts{}
-	var provider, address string
+	var provider, address, app string
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "add <host>",
-		Short: "Point a hostname at an address (creates/updates a DNS record)",
+		Short: "Point a hostname at the cluster (creates/updates a DNS record)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if provider == "" {
 				return errors.New("--provider is required")
 			}
-			if address == "" {
-				return errors.New("--address is required (the cluster's external address, from `burrow reachability`)")
+			if address == "" && app == "" {
+				return errors.New("give --address (the cluster's external address) or --app (an exposed app to read it from)")
 			}
 			c, err := o.client(ctx)
 			if err != nil {
 				return err
 			}
-			res, err := c.AddDomain(ctx, args[0], provider, address, confirm)
+			res, err := c.AddDomain(ctx, args[0], provider, address, app, confirm)
 			if err != nil {
 				return err
 			}
@@ -56,7 +56,8 @@ func newDomainAddCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().StringVar(&provider, "provider", "", "configured DNS provider to write the record at (required)")
-	cmd.Flags().StringVar(&address, "address", "", "the cluster's external IP or hostname to point at (required)")
+	cmd.Flags().StringVar(&address, "address", "", "the cluster's external IP or hostname to point at (or use --app)")
+	cmd.Flags().StringVar(&app, "app", "", "an exposed app whose external address to point at (instead of --address)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }

@@ -92,9 +92,11 @@ only thing that talks to the vendor. **`burrow ingress install`** closes the man
 setup command that detects an existing ingress-nginx / cert-manager and installs only what is
 missing (pinned upstream manifests via the developer's kubeconfig), then waits for cert-manager
 and creates a Let's Encrypt ClusterIssuer (HTTP-01, named `letsencrypt` to match
-`expose --tls`). With that, the v0.2 reachability chain is end to end. Remaining polish:
-auto-deriving the DNS address from an exposed app, a DNS-01 issuer solver, and folding the
-provider's record into the **reachability** surface ("the provider holds the record").
+`expose --tls`). With that, the v0.2 reachability chain is end to end, and `burrow domain add
+--app <app>` reads the controller-assigned address from the app's ingress so neither the human
+nor the agent copies an IP by hand. Remaining polish: a DNS-01 issuer solver (issue before the
+host is public, using the provider token), and folding the provider's record into the
+**reachability** surface ("the provider holds the record").
 
 ### Out of scope for v0.2 (explicit)
 

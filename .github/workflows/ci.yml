@@ -91,9 +91,25 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
+          # Manage the build cache explicitly below: setup-go keys only on go.sum (not the build
+          # flags) and never re-saves on an exact key hit, so it would restore a stale cache built
+          # with this job's old flags and recompile client-go cold every run.
+          cache: false
       # ko builds the burrowd image for the capstone e2e from the host Go cache (warm from the
       # test runs in this job), instead of recompiling inside a docker build.
       - uses: ko-build/setup-ko@v0.8
+      # Cache compiled packages + modules across runs so the test compiles (and ko, which reuses
+      # them) are warm. Keyed on go.sum and scoped to this job, whose flags are constant — so the
+      # client-go objects stay cached; only Burrow's own (changed) packages recompile each run.
+      - name: cache go build + module caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: gocache-kube-${{ runner.os }}-go1.26-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            gocache-kube-${{ runner.os }}-go1.26-
       - name: install k3d
         run: curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
       - name: create cluster

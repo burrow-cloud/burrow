@@ -39,7 +39,7 @@ func newUpgradeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace the control plane is installed in")
-	cmd.Flags().StringVar(&image, "burrowd-image", defaultBurrowdImage, "burrowd image to upgrade to (default: this CLI's pinned release)")
+	cmd.Flags().StringVar(&image, "burrowd-image", defaultBurrowdImage(), "burrowd image to upgrade to (default: this CLI's pinned release)")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")
 	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the control plane to become ready")

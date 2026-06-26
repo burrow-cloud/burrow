@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"text/template"
@@ -24,11 +25,31 @@ import (
 	"github.com/burrow-cloud/burrow/connect"
 )
 
-// defaultBurrowdImage is the published control-plane image `burrow install` deploys by
-// default. Pinned to an immutable release tag so the cluster always pulls a known build;
-// override with --burrowd-image to run a different build (the e2e builds one locally and
-// imports it into k3d). Bump this in lockstep with each burrowd release tag.
-const defaultBurrowdImage = "ghcr.io/burrow-cloud/burrowd:v0.2.1"
+// fallbackBurrowdVersion is the burrowd image tag used when the CLI carries no release version
+// — a local `go build` reports "(devel)". A CLI installed via `go install …@vX.Y.Z` (or a future
+// Homebrew build) carries its module version and installs the matching burrowd automatically, so
+// this only affects local source builds, which can override with --burrowd-image. It needs no
+// per-release bump; keep it roughly current as a convenience.
+const fallbackBurrowdVersion = "v0.2.1"
+
+// defaultBurrowdImage is the control-plane image `install`/`upgrade` deploy by default: the
+// burrowd release matching this CLI's own version, so the CLI and the control plane it installs
+// move in lockstep without a hand-maintained constant. Override with --burrowd-image to run a
+// specific build (the e2e builds one locally and imports it into k3d).
+func defaultBurrowdImage() string {
+	return "ghcr.io/burrow-cloud/burrowd:" + burrowdTag()
+}
+
+// burrowdTag returns this CLI's release version from the build info (set when installed via
+// `go install …@version`), or the fallback for an unversioned local build.
+func burrowdTag() string {
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if v := bi.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return fallbackBurrowdVersion
+}
 
 // installManifests is the control-plane install manifest template, embedded from
 // manifests/install.yaml.tmpl (like the migrations are embedded in controlplane/postgres).
@@ -63,7 +84,7 @@ func newInstallCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace to install the control plane into")
 	cmd.Flags().StringVar(&appNamespace, "app-namespace", "default", "namespace to deploy applications into")
-	cmd.Flags().StringVar(&image, "burrowd-image", defaultBurrowdImage, "burrowd container image to deploy (must be pullable by the cluster)")
+	cmd.Flags().StringVar(&image, "burrowd-image", defaultBurrowdImage(), "burrowd container image to deploy (must be pullable by the cluster)")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")
 	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the control plane to become ready")

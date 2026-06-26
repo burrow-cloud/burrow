@@ -67,52 +67,38 @@ func TestDigitalOceanVerifyAccess(t *testing.T) {
 }
 
 func TestCloudflareVerifyAccess(t *testing.T) {
-	var body, code string
+	var code int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/user/tokens/verify" {
-			t.Errorf("path = %q, want /user/tokens/verify", r.URL.Path)
+		// VerifyAccess lists zones (works for account-scoped tokens too), not /user/tokens/verify.
+		if r.URL.Path != "/zones" {
+			t.Errorf("path = %q, want /zones", r.URL.Path)
 		}
-		switch code {
-		case "401":
-			w.WriteHeader(http.StatusUnauthorized)
-		default:
-			w.WriteHeader(http.StatusOK)
-		}
-		_, _ = w.Write([]byte(body))
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(`{"success":true,"result":[]}`))
 	}))
 	defer srv.Close()
 
 	cf := &cloudflare{token: "cf_tok", baseURL: srv.URL, http: srv.Client()}
 	ctx := context.Background()
 
-	// Active token.
-	body, code = `{"success":true,"result":{"status":"active"}}`, "200"
+	// A token that can list zones is accepted.
+	code = http.StatusOK
 	if err := cf.VerifyAccess(ctx); err != nil {
-		t.Fatalf("active token: %v", err)
+		t.Fatalf("valid token: %v", err)
 	}
 
-	// 200 but not active → invalid.
-	body, code = `{"success":true,"result":{"status":"disabled"}}`, "200"
-	if err := cf.VerifyAccess(ctx); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("inactive err = %v, want ErrInvalid", err)
+	// A rejected or under-permissioned token (401/403) is ErrInvalid.
+	for _, c := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		code = c
+		if err := cf.VerifyAccess(ctx); !errors.Is(err, cp.ErrInvalid) {
+			t.Errorf("http %d err = %v, want ErrInvalid", c, err)
+		}
 	}
 
-	// success:false → invalid.
-	body, code = `{"success":false,"result":{"status":""}}`, "200"
-	if err := cf.VerifyAccess(ctx); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("success=false err = %v, want ErrInvalid", err)
-	}
-
-	// 401 → invalid.
-	body, code = "", "401"
-	if err := cf.VerifyAccess(ctx); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("401 err = %v, want ErrInvalid", err)
-	}
-
-	// 200 with unparseable body → a non-ErrInvalid error.
-	body, code = "not json", "200"
+	// A vendor error (500) is not ErrInvalid.
+	code = http.StatusInternalServerError
 	if err := cf.VerifyAccess(ctx); err == nil || errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("bad json err = %v, want a non-ErrInvalid error", err)
+		t.Errorf("500 err = %v, want a non-ErrInvalid error", err)
 	}
 }
 

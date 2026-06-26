@@ -88,10 +88,13 @@ verifies a token on `provider add` and now manages records, and **`domain add/re
 (`burrow domain …`, `burrow_domain_add` / `burrow_domain_remove`) point a host at the
 cluster's external address through a configured provider — guarded by the `dns_write` /
 `dns_delete` guardrails (confirm by default). burrowd reads the token at call time and is the
-only thing that talks to the vendor. Next: the **`burrow ingress install`** setup command
-(ingress-nginx + cert-manager + a Let's Encrypt issuer) that makes the manual prerequisites
-turnkey, and folding the provider's DNS record into the **reachability** surface ("the
-provider holds the record").
+only thing that talks to the vendor. **`burrow ingress install`** closes the manual gap: a
+setup command that detects an existing ingress-nginx / cert-manager and installs only what is
+missing (pinned upstream manifests via the developer's kubeconfig), then waits for cert-manager
+and creates a Let's Encrypt ClusterIssuer (HTTP-01, named `letsencrypt` to match
+`expose --tls`). With that, the v0.2 reachability chain is end to end. Remaining polish:
+auto-deriving the DNS address from an exposed app, a DNS-01 issuer solver, and folding the
+provider's record into the **reachability** surface ("the provider holds the record").
 
 ### Out of scope for v0.2 (explicit)
 

@@ -29,13 +29,13 @@ const dbSecretName = "burrowd-db"
 // (ADR-0013). See ADR-0016.
 func newUpgradeCmd() *cobra.Command {
 	var namespace, image, kubeconfig string
-	var dryRun, wait bool
+	var dryRun, wait, verbose bool
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Upgrade the in-cluster control plane in place (preserves state)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpgrade(cmd.Context(), namespace, image, kubeconfig, dryRun, wait, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return runUpgrade(cmd.Context(), namespace, image, kubeconfig, dryRun, wait, verbose, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace the control plane is installed in")
@@ -43,10 +43,11 @@ func newUpgradeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")
 	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the control plane to become ready")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "show every resource kubectl applies instead of a summary")
 	return cmd
 }
 
-func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun, wait bool, stdout, stderr io.Writer) error {
+func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun, wait, verbose bool, stdout, stderr io.Writer) error {
 	cs, err := clientset(kubeconfig)
 	if err != nil {
 		return err
@@ -66,7 +67,7 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	}
 
 	fmt.Fprintf(stdout, "Upgrading Burrow in namespace %q to image %q...\n", namespace, image)
-	if err := kubectlApply(ctx, kubeconfig, manifests, stdout, stderr); err != nil {
+	if err := kubectlApply(ctx, kubeconfig, manifests, verbose, stdout, stderr); err != nil {
 		return err
 	}
 	if !wait {

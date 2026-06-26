@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	_ "embed"
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -50,13 +52,13 @@ type installOptions struct {
 
 func newInstallCmd() *cobra.Command {
 	var namespace, appNamespace, image, kubeconfig string
-	var dryRun, wait bool
+	var dryRun, wait, verbose bool
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install the Burrow control plane into your cluster",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runInstall(cmd.Context(), namespace, appNamespace, image, kubeconfig, dryRun, wait, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return runInstall(cmd.Context(), namespace, appNamespace, image, kubeconfig, dryRun, wait, verbose, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace to install the control plane into")
@@ -65,10 +67,11 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")
 	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the control plane to become ready")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "show every resource kubectl applies instead of a summary")
 	return cmd
 }
 
-func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig string, dryRun, wait bool, stdout, stderr io.Writer) error {
+func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig string, dryRun, wait, verbose bool, stdout, stderr io.Writer) error {
 	token, err := randHex(16)
 	if err != nil {
 		return err
@@ -106,7 +109,7 @@ func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig 
 			"(re-running install would mint new secrets and break the existing control plane)", namespace)
 	}
 
-	if err := kubectlApply(ctx, kubeconfig, manifests, stdout, stderr); err != nil {
+	if err := kubectlApply(ctx, kubeconfig, manifests, verbose, stdout, stderr); err != nil {
 		return err
 	}
 
@@ -161,20 +164,77 @@ func waitForDeployment(ctx context.Context, cs kubernetes.Interface, namespace, 
 	}
 }
 
-// kubectlApply pipes the manifests to `kubectl apply -f -`.
-func kubectlApply(ctx context.Context, kubeconfig, manifests string, stdout, stderr io.Writer) error {
-	args := []string{"apply", "-f", "-"}
+// kubectlApply pipes the manifests to `kubectl apply -f -`. By default it prints a one-line
+// summary of how many resources changed; with verbose it streams kubectl's per-resource output.
+func kubectlApply(ctx context.Context, kubeconfig, manifests string, verbose bool, stdout, stderr io.Writer) error {
+	return applyAndSummarize(ctx, applyArgs(kubeconfig, "-"), manifests, verbose, stdout, stderr)
+}
+
+func applyArgs(kubeconfig, source string) []string {
+	args := []string{"apply", "-f", source}
 	if kubeconfig != "" {
 		args = append([]string{"--kubeconfig", kubeconfig}, args...)
 	}
+	return args
+}
+
+// applyAndSummarize runs `kubectl apply` (optionally feeding manifests on stdin) and reports
+// the result the way a non-Kubernetes user wants by default: a single line of what changed,
+// rather than a wall of per-resource output. With verbose, or on failure (so the error is
+// debuggable), it shows kubectl's full output. kubectl's stderr always passes through.
+func applyAndSummarize(ctx context.Context, args []string, stdin string, verbose bool, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, "kubectl", args...)
-	cmd.Stdin = strings.NewReader(manifests)
-	cmd.Stdout = stdout
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
 	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if err != nil {
+		fmt.Fprint(stdout, out.String())
 		return fmt.Errorf("kubectl apply: %w", err)
 	}
+	if verbose {
+		fmt.Fprint(stdout, out.String())
+		return nil
+	}
+	summarizeApply(out.String(), stdout)
 	return nil
+}
+
+// summarizeApply prints a one-line summary of kubectl apply output, counting resources by the
+// trailing action word kubectl prints (e.g. "created", "configured", "unchanged").
+func summarizeApply(out string, w io.Writer) {
+	counts := map[string]int{}
+	total := 0
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		counts[strings.ToLower(fields[len(fields)-1])]++
+		total++
+	}
+	if total == 0 {
+		return
+	}
+	var parts []string
+	for _, action := range []string{"created", "configured", "unchanged", "deleted", "pruned"} {
+		if n := counts[action]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, action))
+			delete(counts, action)
+		}
+	}
+	others := make([]string, 0, len(counts))
+	for action := range counts {
+		others = append(others, action)
+	}
+	sort.Strings(others)
+	for _, action := range others {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[action], action))
+	}
+	fmt.Fprintf(w, "Applied %d resource(s): %s.\n", total, strings.Join(parts, ", "))
 }
 
 func randHex(n int) (string, error) {

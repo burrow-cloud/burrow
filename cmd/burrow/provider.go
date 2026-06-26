@@ -54,7 +54,7 @@ func newProviderAddCmd() *cobra.Command {
 			"the process table, written into the burrow-credentials Secret with your kubeconfig,\n" +
 			"and recorded in the control-plane registry. Pass --name to register more than one\n" +
 			"provider of the same type.",
-		Args: cobra.ExactArgs(1),
+		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			providerType := args[0]

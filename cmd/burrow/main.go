@@ -27,9 +27,54 @@ import (
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, "burrow:", err)
+		// errArgsReported is already printed (the friendly message + the command's usage), so
+		// don't print it again — just exit non-zero.
+		if !errors.Is(err, errArgsReported) {
+			fmt.Fprintln(os.Stderr, "burrow:", err)
+		}
 		os.Exit(1)
 	}
+}
+
+// errArgsReported is returned by exactArgs after it has printed a helpful message naming the
+// expected arguments and the command's usage; main exits non-zero without reprinting it.
+var errArgsReported = errors.New("invalid arguments (already reported)")
+
+// exactArgs requires exactly n positional arguments. On a mismatch it prints a plain message
+// naming the arguments the command expects — drawn from its Use line, e.g. "<app>" — followed
+// by the command's usage, so a user who forgets an argument sees what to pass instead of
+// Cobra's bare "accepts 1 arg(s), received 0".
+func exactArgs(n int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) == n {
+			return nil
+		}
+		w := cmd.ErrOrStderr()
+		expected := usageArgs(cmd.Use)
+		if len(args) < n {
+			fmt.Fprintf(w, "%s needs %s.\n\n", cmd.CommandPath(), expected)
+		} else {
+			fmt.Fprintf(w, "%s takes only %s.\n\n", cmd.CommandPath(), expected)
+		}
+		fmt.Fprint(w, cmd.UsageString())
+		return errArgsReported
+	}
+}
+
+// usageArgs extracts the argument placeholders from a command's Use line — the <...> / [...]
+// tokens after the command name, e.g. "scale <app> <replicas>" -> "<app> <replicas>".
+func usageArgs(use string) string {
+	fields := strings.Fields(use)
+	var parts []string
+	for _, f := range fields[1:] { // skip the command name itself
+		if strings.HasPrefix(f, "<") || strings.HasPrefix(f, "[") {
+			parts = append(parts, f)
+		}
+	}
+	if len(parts) == 0 {
+		return "different arguments"
+	}
+	return strings.Join(parts, " ")
 }
 
 // run builds the root command and executes it with args. It is the single entry point the

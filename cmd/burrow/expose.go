@@ -18,7 +18,7 @@ func newExposeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "expose <app>",
 		Short: "Make an app reachable at a hostname (creates a Service + Ingress)",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if host == "" {
@@ -54,7 +54,7 @@ func newReachabilityCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "reachability <app>",
 		Short: "Report whether an app is reachable at its hostname (controller, address, DNS)",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := o.client(ctx)
@@ -78,7 +78,7 @@ func newUnexposeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "unexpose <app>",
 		Short: "Remove an app's exposure (Service + Ingress)",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := o.client(ctx)

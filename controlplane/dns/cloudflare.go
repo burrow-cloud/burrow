@@ -36,30 +36,22 @@ func newCloudflare(token string, hc *http.Client) *cloudflare {
 // active status; a rejected token returns 401/403 (ErrInvalid). Cloudflare also reports
 // failure in the JSON envelope, so a 200 whose token is not active is treated as invalid too.
 func (c *cloudflare) VerifyAccess(ctx context.Context) error {
-	status, body, err := getAuthorized(ctx, c.http, c.baseURL+"/user/tokens/verify", c.token)
+	// List zones — the read the adapter performs to resolve a record's zone — rather than
+	// /user/tokens/verify. The verify endpoint only accepts user-scoped tokens and rejects an
+	// account-scoped token (the cfat_ kind) with a 401, even when it is valid; listing zones
+	// works for both and confirms the DNS permission Burrow actually needs.
+	status, body, err := getAuthorized(ctx, c.http, c.baseURL+"/zones?per_page=1", c.token)
 	if err != nil {
 		return fmt.Errorf("cloudflare: verifying token: %w", err)
 	}
 	switch {
+	case status >= 200 && status < 300:
+		return nil
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return fmt.Errorf("cloudflare rejected the token (http %d): %w", status, controlplane.ErrInvalid)
-	case status < 200 || status >= 300:
+		return fmt.Errorf("cloudflare rejected the token (http %d) — it needs Zone:Read and DNS:Edit: %w", status, controlplane.ErrInvalid)
+	default:
 		return fmt.Errorf("cloudflare: unexpected response verifying token (http %d): %s", status, snippet(body))
 	}
-
-	var env struct {
-		Success bool `json:"success"`
-		Result  struct {
-			Status string `json:"status"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return fmt.Errorf("cloudflare: decoding verify response: %w", err)
-	}
-	if !env.Success || !strings.EqualFold(env.Result.Status, "active") {
-		return fmt.Errorf("cloudflare reports the token is not active (status %q): %w", env.Result.Status, controlplane.ErrInvalid)
-	}
-	return nil
 }
 
 // cfRecord is one Cloudflare DNS record. Name is the fully-qualified host.

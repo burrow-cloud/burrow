@@ -38,6 +38,9 @@ type Kubernetes interface {
 	// WorkloadStatus returns the observed state of app's workload, or ErrNotFound if
 	// no workload exists for it.
 	WorkloadStatus(ctx context.Context, app string) (WorkloadStatus, error)
+	// ListWorkloads returns the observed state of every Burrow-managed workload in the
+	// namespace (for an apps listing). No workloads is an empty slice, not an error.
+	ListWorkloads(ctx context.Context) ([]WorkloadStatus, error)
 	// ScaleWorkload sets the desired replica count for app's workload.
 	ScaleWorkload(ctx context.Context, app string, replicas int32) error
 	// Logs returns recent log lines for app's workload.

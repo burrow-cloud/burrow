@@ -161,6 +161,16 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 }
 
 // Status returns the combined control-plane and cluster view of an app: the most recent
+// ListApps returns the workload status of every Burrow-managed app, for an apps listing. It
+// reads the cluster — the source of truth for what is running.
+func (e *Engine) ListApps(ctx context.Context) ([]WorkloadStatus, error) {
+	apps, err := e.k8s.ListWorkloads(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list apps: reading cluster: %w", err)
+	}
+	return apps, nil
+}
+
 // recorded release and the live workload state. It returns ErrNotFound only when the
 // app is unknown to both.
 func (e *Engine) Status(ctx context.Context, app string) (StatusResult, error) {
@@ -331,9 +341,9 @@ func (e *Engine) Reachability(ctx context.Context, app string) (ReachabilityResu
 func reachabilitySummary(r ReachabilityResult) string {
 	switch {
 	case !r.Ready:
-		return fmt.Sprintf("%s is deployed but not ready yet — check `burrow logs %s`.", r.App, r.App)
+		return fmt.Sprintf("%s is deployed but not ready yet — check `burrow app logs %s`.", r.App, r.App)
 	case !r.Exposed:
-		return fmt.Sprintf("%s is running but not exposed — run `burrow expose %s --host <name> --port <n>`.", r.App, r.App)
+		return fmt.Sprintf("%s is running but not exposed — run `burrow app publish %s --host <name> --port <n>`.", r.App, r.App)
 	case r.Address == "":
 		return fmt.Sprintf("%s is exposed at %s but no external address is assigned yet — is an ingress controller installed and running?", r.App, r.Host)
 	case !r.DNSPointsAtCluster:

@@ -44,6 +44,7 @@ func New(cfg Config) (http.Handler, error) {
 	s := &server{engine: cfg.Engine}
 
 	v1 := http.NewServeMux()
+	v1.HandleFunc("GET /v1/apps", s.listApps)
 	v1.HandleFunc("POST /v1/apps/{app}/deploy", s.deploy)
 	v1.HandleFunc("GET /v1/apps/{app}/status", s.status)
 	v1.HandleFunc("GET /v1/apps/{app}/logs", s.logs)
@@ -81,6 +82,21 @@ func (s *server) deploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) listApps(w http.ResponseWriter, r *http.Request) {
+	apps, err := s.engine.ListApps(r.Context())
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, appsResponse{Apps: apps})
+}
+
+// appsResponse wraps the apps list so the shape can grow without breaking clients that decode
+// an object.
+type appsResponse struct {
+	Apps []controlplane.WorkloadStatus `json:"apps"`
 }
 
 func (s *server) status(w http.ResponseWriter, r *http.Request) {

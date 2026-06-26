@@ -10,15 +10,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newExposeCmd() *cobra.Command {
+func newPublishCmd() *cobra.Command {
 	o := &commonOpts{}
 	var host, issuer string
 	var port int
 	var tls, confirm bool
 	cmd := &cobra.Command{
-		Use:   "expose <app>",
-		Short: "Make an app reachable at a hostname (creates a Service + Ingress)",
-		Args:  exactArgs(1),
+		Use:   "publish <app>",
+		Short: "Make an app reachable at a hostname over HTTP(S)",
+		Long: "publish routes an external hostname to the app (a Service + Ingress), optionally with\n" +
+			"an HTTPS certificate via cert-manager (--tls). Point the hostname's DNS at the cluster\n" +
+			"with `burrow app domain add` to finish the reachability chain.",
+		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if host == "" {
@@ -35,7 +38,7 @@ func newExposeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			human := fmt.Sprintf("exposed %s at %s (%s)\nReachable once an ingress controller is running and DNS points %s at the cluster.",
+			human := fmt.Sprintf("published %s at %s (%s)\nReachable once an ingress controller is running and DNS points %s at the cluster.",
 				res.App, res.Host, res.URL, res.Host)
 			return emit(cmd.OutOrStdout(), o.json, res, human)
 		},
@@ -73,11 +76,11 @@ func newReachabilityCmd() *cobra.Command {
 	return cmd
 }
 
-func newUnexposeCmd() *cobra.Command {
+func newUnpublishCmd() *cobra.Command {
 	o := &commonOpts{}
 	cmd := &cobra.Command{
-		Use:   "unexpose <app>",
-		Short: "Remove an app's exposure (Service + Ingress)",
+		Use:   "unpublish <app>",
+		Short: "Stop serving an app at its hostname (removes its Service + Ingress)",
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -88,7 +91,7 @@ func newUnexposeCmd() *cobra.Command {
 			if err := c.Unexpose(ctx, args[0]); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "unexposed %s\n", args[0])
+			fmt.Fprintf(cmd.OutOrStdout(), "unpublished %s\n", args[0])
 			return nil
 		},
 	}

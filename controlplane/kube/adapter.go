@@ -37,6 +37,9 @@ const (
 	nameLabel      = "app.kubernetes.io/name"
 	managedByLabel = "app.kubernetes.io/managed-by"
 	managedByValue = "burrow"
+	// defaultIngressClass is the IngressClass `burrow ingress install` creates (ingress-nginx).
+	// The exposed app's Ingress is bound to it so the controller adopts and routes it.
+	defaultIngressClass = "nginx"
 )
 
 // Adapter operates Burrow workloads in a single Kubernetes namespace.
@@ -110,6 +113,38 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 		UpdatedReplicas: dep.Status.UpdatedReplicas,
 		Available:       deploymentAvailable(dep, desired),
 	}, nil
+}
+
+func (a *Adapter) ListWorkloads(ctx context.Context) ([]controlplane.WorkloadStatus, error) {
+	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: managedByLabel + "=" + managedByValue,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kube: listing deployments: %w", err)
+	}
+	out := make([]controlplane.WorkloadStatus, 0, len(deps.Items))
+	for i := range deps.Items {
+		dep := &deps.Items[i]
+		var desired int32
+		if dep.Spec.Replicas != nil {
+			desired = *dep.Spec.Replicas
+		}
+		image := ""
+		if c := dep.Spec.Template.Spec.Containers; len(c) > 0 {
+			image = c[0].Image
+		}
+		out = append(out, controlplane.WorkloadStatus{
+			App:             dep.Name,
+			Kind:            controlplane.WorkloadDeployment,
+			Image:           image,
+			DesiredReplicas: desired,
+			ReadyReplicas:   dep.Status.ReadyReplicas,
+			UpdatedReplicas: dep.Status.UpdatedReplicas,
+			Available:       deploymentAvailable(dep, desired),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].App < out[j].App })
+	return out, nil
 }
 
 func (a *Adapter) ScaleWorkload(ctx context.Context, app string, replicas int32) error {
@@ -290,10 +325,16 @@ func (a *Adapter) buildIngress(spec controlplane.ExposeSpec) *networkingv1.Ingre
 		meta.Annotations = map[string]string{"cert-manager.io/cluster-issuer": spec.Issuer}
 		tls = []networkingv1.IngressTLS{{Hosts: []string{spec.Host}, SecretName: spec.App + "-tls"}}
 	}
+	// Bind the Ingress to the ingress-nginx controller. ingress-nginx runs with
+	// --ingress-class=nginx and (by default) ignores Ingresses that carry no class, so without
+	// this the app Ingress is orphaned: it never gets an external address and the reachability
+	// chain stalls. "nginx" is the class `burrow ingress install` sets up (ADR-0018).
+	ingressClass := defaultIngressClass
 	return &networkingv1.Ingress{
 		ObjectMeta: meta,
 		Spec: networkingv1.IngressSpec{
-			TLS: tls,
+			IngressClassName: &ingressClass,
+			TLS:              tls,
 			Rules: []networkingv1.IngressRule{{
 				Host: spec.Host,
 				IngressRuleValue: networkingv1.IngressRuleValue{

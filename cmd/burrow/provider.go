@@ -93,12 +93,12 @@ func newProviderAddCmd() *cobra.Command {
 		Long: "add registers a provider of the given type and stores its API token. You are\n" +
 			"prompted for the token with the input hidden, so it never lands in your shell\n" +
 			"history or the process table; for scripts, pipe it in instead\n" +
-			"(echo \"$TOKEN\" | burrow provider add cloudflare). The token is written into the\n" +
+			"(echo \"$TOKEN\" | burrow config provider add cloudflare). The token is written into the\n" +
 			"burrow-credentials Secret with your kubeconfig and recorded in the control-plane\n" +
 			"registry. Pass --name to register more than one provider of the same type.\n\n" +
-			"Supported types: " + providerTypesHint() + " (see `burrow provider types`).",
-		Example: "  burrow provider add cloudflare\n" +
-			"  burrow provider add digitalocean --name do-dns",
+			"Supported types: " + providerTypesHint() + " (see `burrow config provider types`).",
+		Example: "  burrow config provider add cloudflare\n" +
+			"  burrow config provider add digitalocean --name do-dns",
 		ValidArgs: supportedProviderTypes(),
 		Args:      exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -181,8 +181,8 @@ func newProviderListCmd() *cobra.Command {
 				return emit(out, true, providers, "")
 			}
 			if len(providers) == 0 {
-				fmt.Fprintf(out, "No providers configured. Add one with `burrow provider add <type>`.\n"+
-					"Supported types: %s (see `burrow provider types`).\n", providerTypesHint())
+				fmt.Fprintf(out, "No providers configured. Add one with `burrow config provider add <type>`.\n"+
+					"Supported types: %s (see `burrow config provider types`).\n", providerTypesHint())
 				return nil
 			}
 			fmt.Fprintf(out, "%-16s%-14s%s\n", "NAME", "TYPE", "CAPABILITIES")

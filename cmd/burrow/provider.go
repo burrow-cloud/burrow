@@ -25,6 +25,14 @@ import (
 // resourceNames-scoped get. The token never travels over MCP and burrowd never writes it.
 const credentialsSecretName = "burrow-credentials"
 
+// supportedProviderTypes mirrors controlplane.SupportedProviderTypes for the CLI's help text,
+// so a user can see the available types without guessing. The control plane validates the type
+// authoritatively on `provider add` (and its error names the supported types), so this list is
+// only a hint and never rejects a type itself.
+var supportedProviderTypes = []string{"cloudflare", "digitalocean"}
+
+func providerTypesHint() string { return strings.Join(supportedProviderTypes, ", ") }
+
 // newProviderCmd manages cloud-provider credentials. `provider add` is a setup command: it
 // writes the token into the burrow-credentials Secret with the developer's kubeconfig and
 // then records the (non-secret) registry entry through burrowd — the setup-vs-operation split
@@ -48,13 +56,17 @@ func newProviderAddCmd() *cobra.Command {
 	var tokenStdin bool
 	cmd := &cobra.Command{
 		Use:   "add <type>",
-		Short: "Register a provider credential (e.g. digitalocean, cloudflare)",
+		Short: "Register a provider credential (type: " + providerTypesHint() + ")",
 		Long: "add registers a provider of the given type and stores its API token. The token is\n" +
 			"read from standard input (--token-stdin) so it never lands in your shell history or\n" +
 			"the process table, written into the burrow-credentials Secret with your kubeconfig,\n" +
 			"and recorded in the control-plane registry. Pass --name to register more than one\n" +
-			"provider of the same type.",
-		Args: exactArgs(1),
+			"provider of the same type.\n\n" +
+			"Supported types: " + providerTypesHint() + ".",
+		Example: "  printf '%s' \"$TOKEN\" | burrow provider add cloudflare --token-stdin\n" +
+			"  printf '%s' \"$TOKEN\" | burrow provider add digitalocean --token-stdin",
+		ValidArgs: supportedProviderTypes,
+		Args:      exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			providerType := args[0]
@@ -139,11 +151,14 @@ func newProviderListCmd() *cobra.Command {
 				return emit(out, true, providers, "")
 			}
 			if len(providers) == 0 {
-				fmt.Fprintln(out, "no providers configured")
+				fmt.Fprintf(out, "No providers configured. Add one:\n"+
+					"  printf '%%s' \"$TOKEN\" | burrow provider add <type> --token-stdin\n"+
+					"Supported types: %s.\n", providerTypesHint())
 				return nil
 			}
+			fmt.Fprintf(out, "%-16s%-14s%s\n", "NAME", "TYPE", "CAPABILITIES")
 			for _, p := range providers {
-				fmt.Fprintf(out, "%s\t%s\t%s\n", p.Name, p.Type, strings.Join(p.Capabilities, ","))
+				fmt.Fprintf(out, "%-16s%-14s%s\n", p.Name, p.Type, strings.Join(p.Capabilities, ","))
 			}
 			return nil
 		},

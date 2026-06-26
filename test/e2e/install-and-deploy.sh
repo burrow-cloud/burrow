@@ -4,7 +4,8 @@
 # the Kubernetes API-server proxy (no port-forward). This exercises the entire stack the
 # way a user would.
 #
-# Expects a running k3d cluster named $K3D_CLUSTER, plus kubectl, docker, and go.
+# Expects a running k3d cluster named $K3D_CLUSTER, plus kubectl, docker, go, and ko
+# (https://ko.build — `brew install ko`), which builds the burrowd image.
 set -euo pipefail
 
 CLUSTER="${K3D_CLUSTER:-burrow-ci}"
@@ -35,12 +36,16 @@ BURROW="$WORK/burrow"
 echo "=== build the burrow CLI ==="
 go build -o "$BURROW" ./cmd/burrow
 
-echo "=== build + import the burrowd image ==="
-docker build -t burrowd:e2e .
-k3d image import burrowd:e2e -c "$CLUSTER"
+echo "=== build + import the burrowd image (ko) ==="
+# ko builds the Go binary on the host (reusing the build cache warm from the test runs above,
+# instead of recompiling client-go inside a docker build) and loads it into the local docker
+# daemon. KO_DOCKER_REPO=ko.local routes the load to the daemon; capture the exact image ref
+# ko prints to stdout and use it for the import and the install.
+BURROWD_IMAGE=$(KO_DOCKER_REPO=ko.local ko build ./cmd/burrowd)
+k3d image import "$BURROWD_IMAGE" -c "$CLUSTER"
 
 echo "=== burrow install (waits for the control plane to be ready) ==="
-"$BURROW" install --burrowd-image burrowd:e2e --kubeconfig "$KCFG"
+"$BURROW" install --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
 
 echo "=== burrow deploy (auto-connect: kubeconfig + API-server proxy, no port-forward) ==="
 "$BURROW" deploy web --image nginx:alpine --kubeconfig "$KCFG"

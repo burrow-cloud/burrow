@@ -1,0 +1,11 @@
+# ko build config for the burrowd image (https://ko.build). ko compiles the Go binary on the
+# host — reusing the Go build cache — and lays it into a minimal base image: a static binary on
+# distroless/nonroot. The build flags are kept identical to a plain `go test`/`go build` (CGO
+# off, no -trimpath) so ko reuses the package objects the test steps already compiled in the
+# same CI job, rather than recompiling client-go from scratch.
+defaultBaseImage: gcr.io/distroless/static:nonroot
+builds:
+  - id: burrowd
+    main: ./cmd/burrowd
+    env:
+      - CGO_ENABLED=0

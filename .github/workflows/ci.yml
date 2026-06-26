@@ -79,11 +79,13 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # CGO off for the whole job so the `go test` steps and ko's burrowd build share build-cache
-    # keys: ko then reuses the client-go objects the tests already compiled, instead of a cold
-    # recompile (CGO defaults on under CI's C compiler, which would mismatch ko's static build).
+    # Make the `go test` steps compile with the same flags ko uses for the burrowd build, so ko
+    # reuses the client-go objects the tests already compiled instead of a cold recompile. ko
+    # builds static (CGO off) and with -trimpath by default; CI's go test would otherwise default
+    # to CGO on and no -trimpath, giving every package a different build-cache key.
     env:
       CGO_ENABLED: "0"
+      GOFLAGS: "-trimpath"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6

@@ -33,7 +33,7 @@ func newDomainAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <host>",
 		Short: "Point a hostname at the cluster (creates/updates a DNS record)",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if provider == "" {
@@ -69,7 +69,7 @@ func newDomainRemoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove <host>",
 		Short: "Remove the DNS record for a hostname",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if provider == "" {

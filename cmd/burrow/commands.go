@@ -22,7 +22,7 @@ func newDeployCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "deploy <app>",
 		Short: "Deploy an app by image reference (optionally build & push first)",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			app := args[0]
@@ -69,7 +69,7 @@ func newStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status <app>",
 		Short: "Show an app's release and live workload status",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := o.client(ctx)
@@ -93,7 +93,7 @@ func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs <app>",
 		Short: "Show recent logs for an app",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := o.client(ctx)
@@ -128,7 +128,7 @@ func newRollbackCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rollback <app>",
 		Short: "Roll an app back to its previous release",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := o.client(ctx)
@@ -154,7 +154,7 @@ func newScaleCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "scale <app> <replicas>",
 		Short: "Set an app's replica count",
-		Args:  cobra.ExactArgs(2),
+		Args:  exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			n, err := strconv.Atoi(args[1])

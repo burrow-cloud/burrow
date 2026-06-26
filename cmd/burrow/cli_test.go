@@ -268,3 +268,34 @@ func TestKVFlag(t *testing.T) {
 		t.Errorf("expected an error for a flag without =")
 	}
 }
+
+func TestExactArgsErrorNamesArgsAndPrintsUsage(t *testing.T) {
+	// A missing <app> names the argument and prints the command's usage, not Cobra's bare
+	// "accepts 1 arg(s), received 0".
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"status"}, &out, &errb)
+	if err == nil {
+		t.Fatal("status with no arg should error")
+	}
+	s := errb.String()
+	if !strings.Contains(s, "burrow status needs <app>.") {
+		t.Errorf("missing-arg message = %q, want it to name <app>", s)
+	}
+	if !strings.Contains(s, "Usage:") || !strings.Contains(s, "burrow status <app>") {
+		t.Errorf("should print the command usage, got %q", s)
+	}
+
+	// A two-arg command names both placeholders.
+	errb.Reset()
+	_ = run(context.Background(), []string{"scale"}, &out, &errb)
+	if !strings.Contains(errb.String(), "burrow scale needs <app> <replicas>.") {
+		t.Errorf("scale message = %q, want both args named", errb.String())
+	}
+
+	// Too many args is reported too.
+	errb.Reset()
+	_ = run(context.Background(), []string{"status", "web", "extra"}, &out, &errb)
+	if !strings.Contains(errb.String(), "takes only <app>") {
+		t.Errorf("extra-arg message = %q", errb.String())
+	}
+}

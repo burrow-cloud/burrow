@@ -58,7 +58,7 @@ func newGuardSetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set <guardrail> <allow|confirm|deny>",
 		Short: "Set a guardrail's disposition",
-		Args:  cobra.ExactArgs(2),
+		Args:  exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := o.client(ctx)

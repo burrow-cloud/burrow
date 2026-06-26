@@ -76,7 +76,7 @@ func newRegistryCmd() *cobra.Command {
 	login := &cobra.Command{
 		Use:   "login <host>",
 		Short: "Store a credential for a private registry",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			host := args[0]
@@ -107,7 +107,7 @@ func newRegistryCmd() *cobra.Command {
 	logout := &cobra.Command{
 		Use:   "logout <host>",
 		Short: "Remove a registry's stored credential",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			cs, appNS, err := resolve(ctx)

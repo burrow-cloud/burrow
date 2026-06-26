@@ -70,6 +70,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, domainRemoveTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_providers",
+		Description: "List the configured cloud providers and the capabilities each serves (e.g. dns), so you know which provider name to pass for an operation like burrow_domain_add. Read-only: provider credentials are configured by the operator via the CLI, never by an agent.",
+	}, providersTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_guard",
 		Description: "List the control-plane guardrails and their current dispositions (allow, confirm, or deny), so you can tell in advance whether an operation will be allowed, held for the user's confirmation, or denied. Read-only: guardrail policy is changed only by the operator via the CLI, never by an agent.",
 	}, guardTool(c))
@@ -235,6 +240,34 @@ func domainRemoveTool(c *client.Client) sdk.ToolHandlerFor[domainRemoveInput, cl
 			return nil, client.DomainResult{}, err
 		}
 		return nil, res, nil
+	}
+}
+
+// providersInput has no fields: listing providers takes no arguments.
+type providersInput struct{}
+
+// providerInfo is the non-secret view of a configured provider the agent sees.
+type providerInfo struct {
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	Capabilities []string `json:"capabilities"`
+}
+
+type providersOutput struct {
+	Providers []providerInfo `json:"providers"`
+}
+
+func providersTool(c *client.Client) sdk.ToolHandlerFor[providersInput, providersOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, _ providersInput) (*sdk.CallToolResult, providersOutput, error) {
+		ps, err := c.Providers(ctx)
+		if err != nil {
+			return nil, providersOutput{}, err
+		}
+		out := providersOutput{Providers: make([]providerInfo, 0, len(ps))}
+		for _, p := range ps {
+			out.Providers = append(out.Providers, providerInfo{Name: p.Name, Type: p.Type, Capabilities: p.Capabilities})
+		}
+		return nil, out, nil
 	}
 }
 

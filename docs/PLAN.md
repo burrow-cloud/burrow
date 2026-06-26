@@ -55,10 +55,13 @@ the human-setup vs. agent-operation split — is **[ADR-0018](adr/0018-reaching-
 
 Polish on the v0.2 surface and the start of v0.3: a **DNS-01 issuer solver** (issue certs
 before the host is public, using the provider token), folding the provider's record into the
-**reachability** surface ("the provider holds the record"), `provider list` as a read-only MCP
-tool plus provider auto-detection so the agent needs no `--provider`, and **server-side build
-from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)). See
-[ROADMAP.md](ROADMAP.md).
+**reachability** surface ("the provider holds the record"), and **server-side build from a git
+reference** ([ADR-0008](adr/0008-two-build-paths.md)). See [ROADMAP.md](ROADMAP.md).
+
+Shipped in **v0.2.1** (patch): quieter `install`/`upgrade` output with `--verbose`, helpful
+CLI argument errors, ko-built images (no Dockerfile) with a warm CI build cache, a read-only
+`burrow_providers` MCP tool, and `domain add/remove` auto-selecting the sole configured DNS
+provider so `--provider` is optional.
 
 <!-- v0.2 build detail below is retained for now; prune as the next front line forms. -->
 

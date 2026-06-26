@@ -100,6 +100,7 @@ func newRootCmd() *cobra.Command {
 	}
 	root.CompletionOptions.HiddenDefaultCmd = true
 	root.AddCommand(
+		newVersionCmd(),
 		newInstallCmd(),
 		newUpgradeCmd(),
 		newRegistryCmd(),

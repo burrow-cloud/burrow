@@ -4,10 +4,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 	"text/template"
 	"time"
@@ -67,6 +67,7 @@ type ingressOptions struct {
 	kubeconfig string
 	dryRun     bool
 	wait       bool
+	verbose    bool
 }
 
 func (o ingressOptions) acmeServer() string {
@@ -107,6 +108,7 @@ func newIngressCmd() *cobra.Command {
 	install.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print what would be installed instead of applying it")
 	install.Flags().BoolVar(&o.wait, "wait", true, "wait for cert-manager to become ready before creating the issuer")
+	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource kubectl applies instead of a summary")
 
 	parent.AddCommand(install)
 	return parent
@@ -143,7 +145,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdout, stderr io.
 		fmt.Fprintln(stdout, "ingress-nginx already present — using it.")
 	} else {
 		fmt.Fprintln(stdout, "Installing ingress-nginx...")
-		if err := kubectlApplyURL(ctx, o.kubeconfig, ingressNginxManifest, stdout, stderr); err != nil {
+		if err := kubectlApplyURL(ctx, o.kubeconfig, ingressNginxManifest, o.verbose, stdout, stderr); err != nil {
 			return err
 		}
 		if o.wait {
@@ -162,7 +164,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdout, stderr io.
 		fmt.Fprintln(stdout, "cert-manager already present — using it.")
 	} else {
 		fmt.Fprintln(stdout, "Installing cert-manager...")
-		if err := kubectlApplyURL(ctx, o.kubeconfig, certManagerManifest, stdout, stderr); err != nil {
+		if err := kubectlApplyURL(ctx, o.kubeconfig, certManagerManifest, o.verbose, stdout, stderr); err != nil {
 			return err
 		}
 	}
@@ -179,7 +181,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdout, stderr io.
 		fmt.Fprintln(stderr, "note: no --email given; Let's Encrypt expiry notices will not be sent.")
 	}
 	fmt.Fprintf(stdout, "Creating ClusterIssuer %q...\n", o.issuerName)
-	if err := applyIssuer(ctx, o.kubeconfig, issuer, stdout, stderr); err != nil {
+	if err := applyIssuer(ctx, o.kubeconfig, issuer, o.verbose, stdout, stderr); err != nil {
 		return err
 	}
 
@@ -237,33 +239,34 @@ func certManagerPresent(ctx context.Context, cs kubernetes.Interface) (bool, err
 	return true, nil
 }
 
-// kubectlApplyURL applies a manifest from a URL with `kubectl apply -f <url>`.
-func kubectlApplyURL(ctx context.Context, kubeconfig, url string, stdout, stderr io.Writer) error {
-	args := []string{"apply", "-f", url}
-	if kubeconfig != "" {
-		args = append([]string{"--kubeconfig", kubeconfig}, args...)
-	}
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("kubectl apply -f %s: %w", url, err)
-	}
-	return nil
+// kubectlApplyURL applies a manifest from a URL, summarizing what changed (or streaming it
+// with verbose), like the in-cluster install manifests.
+func kubectlApplyURL(ctx context.Context, kubeconfig, url string, verbose bool, stdout, stderr io.Writer) error {
+	return applyAndSummarize(ctx, applyArgs(kubeconfig, url), "", verbose, stdout, stderr)
 }
 
 // applyIssuer applies the ClusterIssuer, retrying briefly: just after cert-manager reports
 // ready its validating webhook can still reject the call ("failed calling webhook") for a few
-// seconds, and the CRD may take a moment to register.
-func applyIssuer(ctx context.Context, kubeconfig, issuer string, stdout, stderr io.Writer) error {
+// seconds, and the CRD may take a moment to register. Those rejections are expected, so each
+// attempt's stderr is buffered and surfaced only if verbose or if every attempt fails.
+func applyIssuer(ctx context.Context, kubeconfig, issuer string, verbose bool, stdout, stderr io.Writer) error {
 	var lastErr error
+	var lastStderr bytes.Buffer
 	for attempt := 1; attempt <= 6; attempt++ {
-		if err := kubectlApply(ctx, kubeconfig, issuer, stdout, stderr); err == nil {
+		attemptStderr := io.Writer(stderr)
+		if !verbose {
+			lastStderr.Reset()
+			attemptStderr = &lastStderr
+		}
+		if err := kubectlApply(ctx, kubeconfig, issuer, verbose, stdout, attemptStderr); err == nil {
 			return nil
 		} else {
 			lastErr = err
 		}
 		time.Sleep(5 * time.Second)
+	}
+	if !verbose {
+		fmt.Fprint(stderr, lastStderr.String())
 	}
 	return fmt.Errorf("creating the ClusterIssuer (cert-manager not accepting it yet): %w", lastErr)
 }

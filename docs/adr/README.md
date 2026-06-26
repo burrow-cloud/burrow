@@ -49,3 +49,4 @@ alternatives that were rejected.
 | [0021](0021-guardrails-require-control-plane-only-agent-access.md) | Guardrails bound the control-plane path; the operator restricts the agent's other paths | Accepted |
 | [0022](0022-routing-backend-and-supported-kubernetes.md) | HTTP routing via a shared ingress (Ingress now, Gateway-ready) and supported Kubernetes versions | Accepted |
 | [0023](0023-provider-credentials.md) | Provider credentials — a registry of vendor tokens in one scoped Secret | Accepted |
+| [0024](0024-cli-command-taxonomy.md) | Noun-grouped CLI command taxonomy (`app` / `config` / `system`, `expose`→`publish`) | Accepted |

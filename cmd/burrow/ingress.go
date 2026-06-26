@@ -32,7 +32,7 @@ const (
 	acmeProductionURL = "https://acme-v02.api.letsencrypt.org/directory"
 	acmeStagingURL    = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
-	// defaultIssuerName matches `burrow expose --tls-issuer`'s default, so an exposed app's
+	// defaultIssuerName matches `burrow app publish --tls-issuer`'s default, so an exposed app's
 	// cert-manager annotation points at the issuer this command creates.
 	defaultIssuerName = "letsencrypt"
 )
@@ -59,7 +59,7 @@ spec:
             class: nginx
 `))
 
-// ingressOptions are the inputs to `burrow ingress install`.
+// ingressOptions are the inputs to `burrow system ingress install`.
 type ingressOptions struct {
 	email      string
 	issuerName string
@@ -186,8 +186,8 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdout, stderr io.
 	}
 
 	fmt.Fprintf(stdout, "\nIngress and TLS are set up. Expose an app and request a certificate:\n"+
-		"  burrow expose <app> --host <name> --port <n> --tls\n"+
-		"The controller's external address can take a few minutes; check `burrow reachability <app>`.\n")
+		"  burrow app publish <app> --host <name> --port <n> --tls\n"+
+		"The controller's external address can take a few minutes; check `burrow app reachability <app>`.\n")
 	return nil
 }
 

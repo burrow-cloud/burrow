@@ -22,7 +22,7 @@ e2e), and the ADRs.
 
 ## Shipped since v0.1
 
-- **Private registry auth** — `burrow registry login/logout/list` provisions a
+- **Private registry auth** — `burrow config registry login/logout/list` provisions a
   `dockerconfigjson` pull Secret with the developer's kubeconfig and attaches it to the app
   namespace's default ServiceAccount; the credential never crosses MCP
   ([ADR-0017](adr/0017-private-registry-authentication.md)). It also made the
@@ -85,27 +85,27 @@ The shape (per ADR-0018):
 (2) TLS via cert-manager; (3) the provider registry + DNS-provider seam + `domain` operations.
 Each stage is a thin slice that ends green. Stage 1 is landing: `expose`/`unexpose` are
 wired end to end behind the `expose_public` guardrail (confirm by default), and the
-**reachability surface** (`burrow reachability`, `burrow_reachability`) reports the chain —
+**reachability surface** (`burrow app reachability`, `burrow_reachability`) reports the chain —
 deployed → ready → exposed → external address → DNS — as a one-line plain summary plus the
 full structured chain (ADR-0022's layered model). It reads the external address from the
 app's own Ingress status, so it needs **no new RBAC**. `expose --tls` now requests an HTTPS
 certificate: the Ingress carries the `cert-manager.io/cluster-issuer` annotation + a TLS
 stanza, and cert-manager (once installed) fills the cert; reachability reports whether TLS is
-configured. Stage 3 has landed: the **provider registry** (`burrow provider add/list`) records
+configured. Stage 3 has landed: the **provider registry** (`burrow config provider add/list`) records
 a vendor credential — writing the token into the one `burrow-credentials` Secret with the
 developer's kubeconfig and the non-secret registry (type, capabilities, Secret key) in the
 database; `burrow install` creates the empty Secret and burrowd's only secrets grant, a
 `resourceNames`-scoped `get` on it ([ADR-0023](adr/0023-provider-credentials.md)). On top of
 it the **DNS-provider seam** (DigitalOcean + Cloudflare adapters over `net/http` + a fake)
 verifies a token on `provider add` and now manages records, and **`domain add/remove`**
-(`burrow domain …`, `burrow_domain_add` / `burrow_domain_remove`) point a host at the
+(`burrow app domain …`, `burrow_domain_add` / `burrow_domain_remove`) point a host at the
 cluster's external address through a configured provider — guarded by the `dns_write` /
 `dns_delete` guardrails (confirm by default). burrowd reads the token at call time and is the
-only thing that talks to the vendor. **`burrow ingress install`** closes the manual gap: a
+only thing that talks to the vendor. **`burrow system ingress install`** closes the manual gap: a
 setup command that detects an existing ingress-nginx / cert-manager and installs only what is
 missing (pinned upstream manifests via the developer's kubeconfig), then waits for cert-manager
 and creates a Let's Encrypt ClusterIssuer (HTTP-01, named `letsencrypt` to match
-`expose --tls`). With that, the v0.2 reachability chain is end to end, and `burrow domain add
+`expose --tls`). With that, the v0.2 reachability chain is end to end, and `burrow app domain add
 --app <app>` reads the controller-assigned address from the app's ingress so neither the human
 nor the agent copies an IP by hand. Remaining polish: a DNS-01 issuer solver (issue before the
 host is public, using the provider token), and folding the provider's record into the

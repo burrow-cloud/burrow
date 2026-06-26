@@ -71,12 +71,12 @@ go build -o burrow-mcp ./cmd/burrow-mcp
 #   (Claude Code, for example:)  claude mcp add burrow "$(pwd)/burrow-mcp"
 
 # Using a private registry? Give the cluster a pull credential once (reuses your docker login):
-./burrow registry login ghcr.io --from-docker-config
+./burrow config registry login ghcr.io --from-docker-config
 
 # Build and push your image to a registry your cluster can pull from, then ask your agent to
 # deploy it — or do it directly with the CLI:
-./burrow deploy web --image nginx:alpine
-./burrow status web
+./burrow app deploy web --image nginx:alpine
+./burrow app status web
 ```
 
 Update the control plane later with `burrow upgrade` — in place, preserving your state.

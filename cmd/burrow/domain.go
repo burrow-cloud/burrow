@@ -20,7 +20,7 @@ func newDomainCmd() *cobra.Command {
 		Short: "Point a hostname at the cluster via a DNS provider (add/remove)",
 		Long: "domain manages the DNS record that points a hostname at your cluster's external\n" +
 			"address through a configured provider (e.g. DigitalOcean or Cloudflare). Get the\n" +
-			"address from `burrow reachability <app>` once the app is exposed.",
+			"address from `burrow app reachability <app>` once the app is exposed.",
 	}
 	parent.AddCommand(newDomainAddCmd(), newDomainRemoveCmd())
 	return parent

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,5 +188,38 @@ func TestAddDomainDerivesAddressFromExposedApp(t *testing.T) {
 	}
 	if _, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "pending.example.com", Provider: "digitalocean", App: "pending", Confirm: true}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("no-address-yet err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestAddDomainAutoSelectsSoleDNSProvider(t *testing.T) {
+	e, dnsF, _ := configuredDNSEngine(t) // one provider configured: digitalocean
+	// No Provider given — the engine auto-selects the only configured DNS provider.
+	res, err := e.AddDomain(context.Background(), cp.AddDomainRequest{Host: "app.example.com", Address: "203.0.113.5", Confirm: true})
+	if err != nil {
+		t.Fatalf("AddDomain with auto provider: %v", err)
+	}
+	if res.Provider != "digitalocean" {
+		t.Errorf("auto-selected provider = %q, want digitalocean", res.Provider)
+	}
+	if _, ok := dnsF.Provider().Record("app.example.com"); !ok {
+		t.Errorf("record not created via the auto-selected provider")
+	}
+}
+
+func TestDomainProviderResolutionErrors(t *testing.T) {
+	e, _, _, d, _ := newProviderEngine(t)
+	ctx := context.Background()
+
+	// Zero DNS providers configured → actionable error, not a guess.
+	if _, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "app.example.com", Address: "203.0.113.5", Confirm: true}); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("no-provider err = %v, want ErrInvalid", err)
+	}
+
+	// Several DNS providers → must ask which one (recorded directly to skip token validation).
+	_ = d.SaveProvider(ctx, cp.Provider{Name: "do", Type: cp.ProviderDigitalOcean, Capabilities: []cp.Capability{cp.CapabilityDNS}, SecretKey: "do"})
+	_ = d.SaveProvider(ctx, cp.Provider{Name: "cf", Type: cp.ProviderCloudflare, Capabilities: []cp.Capability{cp.CapabilityDNS}, SecretKey: "cf"})
+	_, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "app.example.com", Address: "203.0.113.5", Confirm: true})
+	if !errors.Is(err, cp.ErrInvalid) || !strings.Contains(err.Error(), "multiple") {
+		t.Errorf("multiple-provider err = %v, want ErrInvalid mentioning multiple", err)
 	}
 }

@@ -28,7 +28,7 @@ func (e *Engine) AddDomain(ctx context.Context, req AddDomainRequest) (DomainRes
 		return DomainResult{}, err
 	}
 
-	p, err := e.loadDNSProvider(ctx, req.Provider)
+	p, err := e.resolveDNSProvider(ctx, req.Provider)
 	if err != nil {
 		return DomainResult{}, err
 	}
@@ -64,7 +64,7 @@ func (e *Engine) RemoveDomain(ctx context.Context, req RemoveDomainRequest) (Dom
 		return DomainResult{}, fmt.Errorf("domain remove: host is empty: %w", ErrInvalid)
 	}
 
-	p, err := e.loadDNSProvider(ctx, req.Provider)
+	p, err := e.resolveDNSProvider(ctx, req.Provider)
 	if err != nil {
 		return DomainResult{}, err
 	}
@@ -89,6 +89,39 @@ func (e *Engine) RemoveDomain(ctx context.Context, req RemoveDomainRequest) (Dom
 		return DomainResult{}, fmt.Errorf("domain remove %s: %w", host, err)
 	}
 	return DomainResult{Host: host, Provider: p.Name}, nil
+}
+
+// resolveDNSProvider picks the DNS provider for a domain operation. With an explicit name it
+// loads that provider; with none it auto-selects when exactly one DNS provider is configured,
+// so the common single-provider setup needs no --provider. Zero or several configured providers
+// is an actionable error rather than a guess. (Auto-selecting by which provider owns the host's
+// zone, when several are configured, is the later refinement noted in ADR-0023.)
+func (e *Engine) resolveDNSProvider(ctx context.Context, name string) (Provider, error) {
+	if strings.TrimSpace(name) != "" {
+		return e.loadDNSProvider(ctx, name)
+	}
+	all, err := e.db.Providers(ctx)
+	if err != nil {
+		return Provider{}, fmt.Errorf("reading providers: %w", err)
+	}
+	var dns []Provider
+	for _, p := range all {
+		if p.Serves(CapabilityDNS) {
+			dns = append(dns, p)
+		}
+	}
+	switch len(dns) {
+	case 0:
+		return Provider{}, fmt.Errorf("no DNS provider is configured — add one with `burrow provider add`: %w", ErrInvalid)
+	case 1:
+		return dns[0], nil
+	default:
+		names := make([]string, len(dns))
+		for i, p := range dns {
+			names[i] = p.Name
+		}
+		return Provider{}, fmt.Errorf("multiple DNS providers are configured (%s) — pass --provider to choose: %w", strings.Join(names, ", "), ErrInvalid)
+	}
 }
 
 // loadDNSProvider fetches a configured provider by name and confirms it serves DNS.

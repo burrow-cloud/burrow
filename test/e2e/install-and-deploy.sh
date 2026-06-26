@@ -39,8 +39,10 @@ go build -o "$BURROW" ./cmd/burrow
 echo "=== build + import the burrowd image (ko) ==="
 # ko builds the Go binary on the host and assembles a minimal image — no Dockerfile, and
 # crucially it reuses the host Go build cache (already warm from the `go test` runs above),
-# instead of recompiling client-go from scratch inside a `docker build`.
-ko build --local --base-import-paths --tags e2e --push=false ./cmd/burrowd
+# instead of recompiling client-go from scratch inside a `docker build`. KO_DOCKER_REPO is set
+# to ko.local so ko loads the image into the local docker daemon under a deterministic name
+# (overriding any ambient KO_DOCKER_REPO, e.g. the one setup-ko exports in CI).
+KO_DOCKER_REPO=ko.local ko build --base-import-paths --tags e2e ./cmd/burrowd
 BURROWD_IMAGE=ko.local/burrowd:e2e
 k3d image import "$BURROWD_IMAGE" -c "$CLUSTER"
 

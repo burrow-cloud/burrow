@@ -62,6 +62,7 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/addons", s.installAddon)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
+	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", requireToken(cfg.Token, v1))
@@ -304,6 +305,28 @@ type addonInstallRequest struct {
 // addonsResponse wraps the add-on list so the shape can grow without breaking object decoders.
 type addonsResponse struct {
 	Addons []controlplane.AddonInfo `json:"addons"`
+}
+
+func (s *server) queryLogs(w http.ResponseWriter, r *http.Request) {
+	var req logsQueryRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	entries, err := s.engine.QueryLogs(r.Context(), req.Query, req.Limit)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, logsQueryResponse{Entries: entries})
+}
+
+type logsQueryRequest struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type logsQueryResponse struct {
+	Entries []controlplane.LogEntry `json:"entries"`
 }
 
 // guardResponse is the body of a guard list/set call: the full guardrail policy.

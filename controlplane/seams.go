@@ -29,6 +29,22 @@ type Resolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
+// LogEntry is one record returned by a logs query.
+type LogEntry struct {
+	Time    string `json:"time,omitempty"`
+	Message string `json:"message"`
+	Pod     string `json:"pod,omitempty"`
+}
+
+// LogsQuerier queries a logs backing service (an installed or connected add-on) for records
+// matching a query, so the agent can answer "what happened? / why is it slow?" (ADR-0026). It is
+// an optional seam — present only when logs querying is wired; the engine errors cleanly if not.
+type LogsQuerier interface {
+	// QueryLogs runs query against the logs store reachable at endpoint (an in-cluster
+	// host:port) and returns up to limit matching records, most recent first.
+	QueryLogs(ctx context.Context, endpoint, query string, limit int) ([]LogEntry, error)
+}
+
 // Kubernetes is the seam over the target cluster: the only path from the control plane
 // to the runtime. It is deliberately narrow — the v0.1 operations (deploy, status,
 // logs, scale, and the delete that supports teardown) and nothing more.

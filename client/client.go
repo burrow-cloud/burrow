@@ -246,6 +246,22 @@ func (c *Client) RemoveAddon(ctx context.Context, name string, confirm bool) err
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
+// LogEntry is one record from a logs query.
+type LogEntry struct {
+	Time    string `json:"time,omitempty"`
+	Message string `json:"message"`
+	Pod     string `json:"pod,omitempty"`
+}
+
+// QueryLogs queries the installed logs add-on with a LogsQL query (empty matches everything).
+func (c *Client) QueryLogs(ctx context.Context, query string, limit int) ([]LogEntry, error) {
+	var out struct {
+		Entries []LogEntry `json:"entries"`
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/logs/query", map[string]any{"query": query, "limit": limit}, &out)
+	return out.Entries, err
+}
+
 func (c *Client) Logs(ctx context.Context, app string, tail int) ([]LogLine, error) {
 	path := c.appPath(app, "logs")
 	if tail > 0 {

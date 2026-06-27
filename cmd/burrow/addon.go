@@ -21,7 +21,51 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonListCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonRemoveCmd())
+	return cmd
+}
+
+func newAddonLogsCmd() *cobra.Command {
+	o := &commonOpts{}
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "logs [query]",
+		Short: "Query the installed logs add-on (LogsQL; empty matches everything)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			query := ""
+			if len(args) == 1 {
+				query = args[0]
+			}
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			entries, err := c.QueryLogs(ctx, query, limit)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if o.json {
+				return emit(out, true, entries, "")
+			}
+			if len(entries) == 0 {
+				fmt.Fprintln(out, "no matching log records")
+				return nil
+			}
+			for _, e := range entries {
+				if e.Pod != "" {
+					fmt.Fprintf(out, "%s  %s  %s\n", e.Time, e.Pod, e.Message)
+				} else {
+					fmt.Fprintf(out, "%s  %s\n", e.Time, e.Message)
+				}
+			}
+			return nil
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum records to return (default 200)")
 	return cmd
 }
 

@@ -113,6 +113,23 @@ func TestAddonInstallAndList(t *testing.T) {
 	}
 }
 
+func TestAddonLogsQuery(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/v1/logs/query" {
+			t.Errorf("request = %s %s, want POST /v1/logs/query", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"entries": []map[string]any{
+			{"time": "2026-06-27T00:00:00Z", "message": "boom", "pod": "web-1"},
+		}})
+	}, "addon", "logs", "error")
+	if err != nil {
+		t.Fatalf("addon logs: %v", err)
+	}
+	if !strings.Contains(out, "boom") || !strings.Contains(out, "web-1") {
+		t.Errorf("output = %q", out)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

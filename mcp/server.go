@@ -45,6 +45,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, addonRemoveTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_logs_query",
+		Description: "Query the cluster's aggregated logs (the installed logs add-on) with a VictoriaLogs LogsQL query to investigate why an app is failing or slow — e.g. `error`, `level:error`, `panic AND web`. Returns recent matching records (most recent first). Needs a logs add-on installed first (burrow_addon_install with capability \"logs\").",
+	}, logsQueryTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_status",
 		Description: "Report an application's status: its most recent release and the live workload state (desired/ready replicas, availability).",
 	}, statusTool(c))
@@ -374,6 +379,35 @@ func addonRemoveTool(c *client.Client) sdk.ToolHandlerFor[addonRemoveInput, addo
 			return nil, addonRemoveOutput{}, err
 		}
 		return nil, addonRemoveOutput{Removed: in.Name}, nil
+	}
+}
+
+type logsQueryInput struct {
+	Query string `json:"query,omitempty" jsonschema:"a VictoriaLogs LogsQL query; empty matches everything, newest first"`
+	Limit int    `json:"limit,omitempty" jsonschema:"maximum records to return (default 200)"`
+}
+
+type logEntry struct {
+	Time    string `json:"time,omitempty"`
+	Message string `json:"message"`
+	Pod     string `json:"pod,omitempty"`
+}
+
+type logsQueryOutput struct {
+	Entries []logEntry `json:"entries"`
+}
+
+func logsQueryTool(c *client.Client) sdk.ToolHandlerFor[logsQueryInput, logsQueryOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in logsQueryInput) (*sdk.CallToolResult, logsQueryOutput, error) {
+		es, err := c.QueryLogs(ctx, in.Query, in.Limit)
+		if err != nil {
+			return nil, logsQueryOutput{}, err
+		}
+		out := logsQueryOutput{Entries: make([]logEntry, 0, len(es))}
+		for _, e := range es {
+			out.Entries = append(out.Entries, logEntry{Time: e.Time, Message: e.Message, Pod: e.Pod})
+		}
+		return nil, out, nil
 	}
 }
 

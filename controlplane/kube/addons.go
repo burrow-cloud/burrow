@@ -34,7 +34,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 	var mounts []corev1.VolumeMount
 	if spec.StorageGi > 0 {
 		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: labels},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: labels},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				Resources: corev1.VolumeResourceRequirements{
@@ -42,7 +42,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 				},
 			},
 		}
-		if _, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		if _, err := a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 			return controlplane.AddonInfo{}, fmt.Errorf("kube: creating addon volume %q: %w", name, err)
 		}
 		volumes = []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: name}}}}
@@ -51,7 +51,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 
 	replicas := int32(1)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: labels},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{nameLabel: name}},
@@ -73,18 +73,18 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 			},
 		},
 	}
-	if _, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, dep, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+	if _, err := a.client.AppsV1().Deployments(a.addonNamespace).Create(ctx, dep, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return controlplane.AddonInfo{}, fmt.Errorf("kube: creating addon %q: %w", name, err)
 	}
 
 	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: labels},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{nameLabel: name},
 			Ports:    []corev1.ServicePort{{Port: spec.Port, TargetPort: intstr.FromInt32(spec.Port), Protocol: corev1.ProtocolTCP}},
 		},
 	}
-	if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+	if _, err := a.client.CoreV1().Services(a.addonNamespace).Create(ctx, svc, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return controlplane.AddonInfo{}, fmt.Errorf("kube: creating addon service %q: %w", name, err)
 	}
 
@@ -103,7 +103,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		Type:         spec.Type,
 		Mode:         "installed",
 		Image:        spec.Image,
-		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.namespace, spec.Port),
+		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.addonNamespace, spec.Port),
 		Capabilities: spec.Capabilities,
 	}, nil
 }
@@ -142,16 +142,16 @@ func (a *Adapter) deployLogsCollector(ctx context.Context, store string, labels 
 	cmLabels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: labels[addonLabel]}
 
 	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: cmLabels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: cmLabels},
 		Data:       map[string]string{"fluent-bit.conf": fmt.Sprintf(fluentBitConfig, store)},
 	}
-	if _, err := a.client.CoreV1().ConfigMaps(a.namespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+	if _, err := a.client.CoreV1().ConfigMaps(a.addonNamespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("kube: creating collector config %q: %w", name, err)
 	}
 
 	hostPathDir := corev1.HostPathDirectory
 	ds := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: cmLabels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: cmLabels},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{nameLabel: name}},
 			Template: corev1.PodTemplateSpec{
@@ -175,14 +175,14 @@ func (a *Adapter) deployLogsCollector(ctx context.Context, store string, labels 
 			},
 		},
 	}
-	if _, err := a.client.AppsV1().DaemonSets(a.namespace).Create(ctx, ds, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+	if _, err := a.client.AppsV1().DaemonSets(a.addonNamespace).Create(ctx, ds, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("kube: creating collector %q: %w", name, err)
 	}
 	return nil
 }
 
 func (a *Adapter) ListAddons(ctx context.Context) ([]controlplane.AddonInfo, error) {
-	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: addonLabel})
+	deps, err := a.client.AppsV1().Deployments(a.addonNamespace).List(ctx, metav1.ListOptions{LabelSelector: addonLabel})
 	if err != nil {
 		return nil, fmt.Errorf("kube: listing addons: %w", err)
 	}
@@ -206,7 +206,7 @@ func (a *Adapter) ListAddons(ctx context.Context) ([]controlplane.AddonInfo, err
 			Type:         typ,
 			Mode:         "installed",
 			Image:        image,
-			Endpoint:     fmt.Sprintf("%s.%s.svc:%d", dep.Name, a.namespace, port),
+			Endpoint:     fmt.Sprintf("%s.%s.svc:%d", dep.Name, a.addonNamespace, port),
 			Capabilities: caps,
 			Ready:        deploymentAvailable(dep, 1),
 		})
@@ -216,7 +216,7 @@ func (a *Adapter) ListAddons(ctx context.Context) ([]controlplane.AddonInfo, err
 }
 
 func (a *Adapter) DeleteAddon(ctx context.Context, name string) error {
-	deps := a.client.AppsV1().Deployments(a.namespace)
+	deps := a.client.AppsV1().Deployments(a.addonNamespace)
 	if _, err := deps.Get(ctx, name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		return fmt.Errorf("kube: addon %q: %w", name, controlplane.ErrNotFound)
 	} else if err != nil {
@@ -226,12 +226,12 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string) error {
 	if err := deps.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("kube: deleting addon %q: %w", name, err)
 	}
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
-	_ = a.client.CoreV1().PersistentVolumeClaims(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	_ = a.client.CoreV1().Services(a.addonNamespace).Delete(ctx, name, metav1.DeleteOptions{})
+	_ = a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace).Delete(ctx, name, metav1.DeleteOptions{})
 	// And the logs collector, if this add-on had one (harmless no-op otherwise).
 	collector := name + "-collector"
-	_ = a.client.AppsV1().DaemonSets(a.namespace).Delete(ctx, collector, metav1.DeleteOptions{})
-	_ = a.client.CoreV1().ConfigMaps(a.namespace).Delete(ctx, collector, metav1.DeleteOptions{})
+	_ = a.client.AppsV1().DaemonSets(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
+	_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
 	return nil
 }
 

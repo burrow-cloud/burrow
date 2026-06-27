@@ -76,12 +76,13 @@ var installTemplate = template.Must(template.New("install").Parse(installManifes
 // control plane (burrowd, Postgres); AppNamespace is where deployed apps go — separate, so
 // app workloads aren't mixed in with the control-plane infrastructure.
 type installOptions struct {
-	Namespace    string
-	AppNamespace string
-	Image        string
-	Token        string
-	DBPassword   string
-	Port         int
+	Namespace      string
+	AppNamespace   string
+	AddonNamespace string
+	Image          string
+	Token          string
+	DBPassword     string
+	Port           int
 }
 
 func newInstallCmd() *cobra.Command {
@@ -116,12 +117,13 @@ func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig 
 	}
 
 	manifests, err := renderManifests(installOptions{
-		Namespace:    namespace,
-		AppNamespace: appNamespace,
-		Image:        image,
-		Token:        token,
-		DBPassword:   dbPassword,
-		Port:         connect.DefaultPort,
+		Namespace:      namespace,
+		AppNamespace:   appNamespace,
+		AddonNamespace: connect.DefaultAddonNamespace,
+		Image:          image,
+		Token:          token,
+		DBPassword:     dbPassword,
+		Port:           connect.DefaultPort,
 	})
 	if err != nil {
 		return err

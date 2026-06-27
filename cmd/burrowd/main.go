@@ -167,6 +167,8 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	if err != nil {
 		return err
 	}
+	// Add-ons live in their own namespace, set by the install manifest (ADR-0025).
+	k8s.WithAddonNamespace(os.Getenv("BURROW_ADDON_NAMESPACE"))
 
 	var regOpts []registry.Option
 	if os.Getenv("BURROW_REGISTRY_INSECURE") == "true" {

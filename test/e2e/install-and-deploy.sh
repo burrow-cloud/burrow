@@ -38,6 +38,8 @@ dump_diagnostics() {
   kubectl -n burrow-addons logs deploy/burrow-metrics --tail=40 || true
   echo "--- vmagent collector logs ---"
   kubectl -n burrow-addons logs deploy/burrow-metrics-collector --tail=40 || true
+  echo "--- metricsapp pods (app deployed with --metrics-port) ---"
+  kubectl -n default get pods -l app.kubernetes.io/name=metricsapp -o wide || true
   echo "--- burrow-e2e-loki namespace (connected Loki fixture) ---"
   kubectl -n burrow-e2e-loki get all || true
   echo "--- loki fixture logs ---"
@@ -197,6 +199,44 @@ if [ -z "$found" ]; then
 fi
 echo "--- vmagent self-scrape round-tripped through the metrics pipeline ---"
 printf '%s\n' "$last_out" | grep 'job="vmagent"' | head -n 3
+
+echo "=== deploy a real metrics-exposing app THROUGH Burrow (--metrics-port) ==="
+# The --metrics-port flag annotates the pod with prometheus.io/scrape=true, port, and
+# path=/metrics, so vmagent's pod-discovery scrape config picks it up automatically. We use
+# prom/prometheus only as a convenient app that serves its own /metrics on :9090 (its baked-in
+# default config) — NOT as Prometheus. The image is preloaded in CI.
+"$BURROW" app deploy metricsapp --image prom/prometheus:v3.1.0 --metrics-port 9090 --kubeconfig "$KCFG"
+kubectl --kubeconfig "$KCFG" -n default rollout status deploy/metricsapp --timeout=120s
+
+echo "=== query the app's OWN metrics back through burrow addon metrics (bounded poll) ==="
+# Proves the FULL LOOP: an app deployed with --metrics-port is auto-discovered and scraped by
+# vmagent — its own metrics are queryable through `burrow addon metrics`. vmagent's relabel
+# maps __meta_kubernetes_pod_name to a `pod` label, so the scraped target appears as
+# up{pod="metricsapp-...",...}. A value of 1 means the scrape of /metrics on :9090 succeeded.
+# The human output renders each sample as `{k="v",...}  <value>` (metricLabels in addon.go).
+app_found=
+app_out=
+for _ in $(seq 1 18); do
+  app_out=$("$BURROW" addon metrics 'up{pod=~"metricsapp.*"}' --kubeconfig "$KCFG" 2>&1 || true)
+  if printf '%s\n' "$app_out" | grep -q 'pod="metricsapp'; then
+    app_found=1
+    break
+  fi
+  sleep 5
+done
+
+if [ -z "$app_found" ]; then
+  echo "FAIL: up{pod=\"metricsapp...\"} never appeared via 'burrow addon metrics' — the app deployed with --metrics-port was not discovered/scraped"
+  echo "--- last query output ---"
+  printf '%s\n' "$app_out"
+  exit 1 # the ERR trap dumps diagnostics
+fi
+echo "--- the app's own metrics round-tripped: an app deployed with --metrics-port is auto-discovered and scraped, and its metrics are queryable ---"
+printf '%s\n' "$app_out" | grep 'pod="metricsapp' | head -n 3
+
+echo "=== tidy up the metrics-exposing app (best-effort) ==="
+# `app delete` may not exist on this branch, so tear the Deployment down with kubectl.
+kubectl --kubeconfig "$KCFG" -n default delete deploy/metricsapp --ignore-not-found || true
 
 echo "=== tidy up the metrics add-on (best-effort) ==="
 "$BURROW" addon remove burrow-metrics --confirm --kubeconfig "$KCFG" || true

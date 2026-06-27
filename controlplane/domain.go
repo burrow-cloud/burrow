@@ -141,6 +141,7 @@ func DefaultPolicy() Policy {
 			GuardrailDNSDelete:      DispositionConfirm,
 			GuardrailAddonInstall:   DispositionConfirm,
 			GuardrailAddonRemove:    DispositionConfirm,
+			GuardrailAppDelete:      DispositionConfirm,
 		},
 		MaxReplicas: 50,
 	}

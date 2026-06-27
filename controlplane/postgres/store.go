@@ -141,6 +141,16 @@ func (s *Store) Releases(ctx context.Context, app string) ([]controlplane.Releas
 	return out, nil
 }
 
+// DeleteReleases removes every release record for app. Deleting the releases of an app that
+// has none is a no-op (no RowsAffected check) — absence is fine.
+func (s *Store) DeleteReleases(ctx context.Context, app string) error {
+	const q = `DELETE FROM releases WHERE app = $1`
+	if _, err := s.db.ExecContext(ctx, q, app); err != nil {
+		return fmt.Errorf("postgres: delete releases for app %q: %w", app, err)
+	}
+	return nil
+}
+
 // Policy returns the current guardrail policy: the built-in defaults with any stored
 // guardrail dispositions overlaid (ADR-0020). An empty table yields DefaultPolicy.
 func (s *Store) Policy(ctx context.Context) (controlplane.Policy, error) {

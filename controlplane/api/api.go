@@ -45,6 +45,7 @@ func New(cfg Config) (http.Handler, error) {
 
 	v1 := http.NewServeMux()
 	v1.HandleFunc("GET /v1/apps", s.listApps)
+	v1.HandleFunc("DELETE /v1/apps/{app}", s.deleteApp)
 	v1.HandleFunc("POST /v1/apps/{app}/deploy", s.deploy)
 	v1.HandleFunc("GET /v1/apps/{app}/status", s.status)
 	v1.HandleFunc("GET /v1/apps/{app}/logs", s.logs)
@@ -74,6 +75,16 @@ func New(cfg Config) (http.Handler, error) {
 
 type server struct {
 	engine *controlplane.Engine
+}
+
+func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
+	app := r.PathValue("app")
+	confirm := r.URL.Query().Get("confirm") == "true"
+	if err := s.engine.DeleteApp(r.Context(), app, confirm); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"app": app})
 }
 
 func (s *server) deploy(w http.ResponseWriter, r *http.Request) {

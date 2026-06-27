@@ -53,6 +53,10 @@ const (
 	// GuardrailAddonRemove: the operation would remove an installed add-on — the destructive
 	// side, since dependent apps may rely on it (ADR-0025).
 	GuardrailAddonRemove GuardrailCode = "addon_remove"
+	// GuardrailAppDelete: the operation would delete an app entirely — its workload, routing,
+	// and release history — so it disappears from the apps listing. The destructive teardown
+	// of a deployed application.
+	GuardrailAppDelete GuardrailCode = "app_delete"
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through
@@ -74,6 +78,7 @@ var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailDNSDelete, Description: "delete a public DNS record at a configured provider"},
 	{Code: GuardrailAddonInstall, Description: "install a building-block add-on (backing service) onto the cluster"},
 	{Code: GuardrailAddonRemove, Description: "remove an installed add-on from the cluster"},
+	{Code: GuardrailAppDelete, Description: "delete an app entirely (its workload, routing, and release history)"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.

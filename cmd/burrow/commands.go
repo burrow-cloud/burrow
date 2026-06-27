@@ -239,6 +239,31 @@ func newScaleCmd() *cobra.Command {
 	return cmd
 }
 
+func newAppDeleteCmd() *cobra.Command {
+	o := &commonOpts{}
+	var confirm bool
+	cmd := &cobra.Command{
+		Use:   "delete <app>",
+		Short: "Delete an app entirely (its workload, routing, and release history)",
+		Args:  exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			if err := c.DeleteApp(ctx, args[0], confirm); err != nil {
+				return err
+			}
+			human := fmt.Sprintf("deleted app %s (workload, routing, and release history)", args[0])
+			return emit(cmd.OutOrStdout(), o.json, map[string]string{"app": args[0]}, human)
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	return cmd
+}
+
 func formatStatus(res client.StatusResult) string {
 	s := "app: " + res.App + "\n"
 	if res.HasRelease {

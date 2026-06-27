@@ -55,6 +55,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, metricsQueryTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_app_delete",
+		Description: "Delete an application entirely: its workload, its routing (Service and Ingress), and its recorded release history, so it disappears from the apps listing and from status. This is destructive and irreversible. Held for confirmation by a guardrail by default; set confirm=true ONLY after the user explicitly approves, never on your own.",
+	}, appDeleteTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_status",
 		Description: "Report an application's status: its most recent release and the live workload state (desired/ready replicas, availability).",
 	}, statusTool(c))
@@ -367,6 +372,24 @@ func addonInstallTool(c *client.Client) sdk.ToolHandlerFor[addonInstallInput, ad
 			return nil, addonItem{}, err
 		}
 		return nil, toAddonItem(a), nil
+	}
+}
+
+type appDeleteInput struct {
+	App     string `json:"app" jsonschema:"the application name to delete (a DNS-1123 label)"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed this destructive delete; do not self-confirm"`
+}
+
+type appDeleteOutput struct {
+	Deleted string `json:"deleted"`
+}
+
+func appDeleteTool(c *client.Client) sdk.ToolHandlerFor[appDeleteInput, appDeleteOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in appDeleteInput) (*sdk.CallToolResult, appDeleteOutput, error) {
+		if err := c.DeleteApp(ctx, in.App, in.Confirm); err != nil {
+			return nil, appDeleteOutput{}, err
+		}
+		return nil, appDeleteOutput{Deleted: in.App}, nil
 	}
 }
 

@@ -221,6 +221,24 @@ func TestScale(t *testing.T) {
 	}
 }
 
+func TestAppDelete(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" || r.URL.Path != "/v1/apps/web" {
+			t.Errorf("request = %s %s, want DELETE /v1/apps/web", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("confirm"); got != "true" {
+			t.Errorf("confirm query = %q, want true", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web"})
+	}, "app", "delete", "web", "--confirm")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "deleted app web") {
+		t.Errorf("output = %q", out)
+	}
+}
+
 func TestRollback(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

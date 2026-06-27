@@ -38,6 +38,7 @@ const (
 	OpRelease        Op = "Release"
 	OpLatestRelease  Op = "LatestRelease"
 	OpReleases       Op = "Releases"
+	OpDeleteReleases Op = "DeleteReleases"
 	OpPolicy         Op = "Policy"
 	OpSetGuardrail   Op = "SetGuardrail"
 	OpSaveProvider   Op = "SaveProvider"

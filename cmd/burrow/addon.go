@@ -21,7 +21,38 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonRemoveCmd())
+	return cmd
+}
+
+func newAddonConnectCmd() *cobra.Command {
+	o := &commonOpts{}
+	var endpoint string
+	cmd := &cobra.Command{
+		Use:   "connect <backend>",
+		Short: "Register an existing backend you already run (e.g. loki) as a queryable capability",
+		Long: "connect registers an adapter to an existing backend you already run (logs → Loki) so\n" +
+			"your agent can query it — Burrow deploys nothing and the license bar does not apply, since\n" +
+			"it connects rather than distributes. Pass the in-cluster endpoint with --endpoint.",
+		Args: exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			a, err := c.ConnectAddon(ctx, args[0], endpoint)
+			if err != nil {
+				return err
+			}
+			human := fmt.Sprintf("connected the %s add-on %q (mode: %s)\nin-cluster endpoint: %s — capabilities: %s",
+				a.Type, a.Name, a.Mode, a.Endpoint, strings.Join(a.Capabilities, ", "))
+			return emit(cmd.OutOrStdout(), o.json, a, human)
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	cmd.Flags().StringVar(&endpoint, "endpoint", "", "in-cluster host:port of the existing backend (required)")
+	_ = cmd.MarkFlagRequired("endpoint")
 	return cmd
 }
 

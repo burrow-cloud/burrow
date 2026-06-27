@@ -63,8 +63,10 @@ type Kubernetes interface {
 	// the instance's connection info (ADR-0025). Installing an already-installed add-on is
 	// idempotent.
 	DeployAddon(ctx context.Context, spec AddonSpec) (AddonInfo, error)
-	// ListAddons returns the installed add-on instances. None is an empty slice, not an error.
-	ListAddons(ctx context.Context) ([]AddonInfo, error)
+	// AddonReady reports whether the named add-on's backing Deployment is available. It is a
+	// cheap single-Deployment readiness probe — readiness is a live property, not stored in the
+	// registry. A missing Deployment is reported as not ready (false, nil), not an error.
+	AddonReady(ctx context.Context, name string) (bool, error)
 	// DeleteAddon removes the named add-on instance and its resources. Removing an add-on
 	// that is not installed returns ErrNotFound.
 	DeleteAddon(ctx context.Context, name string) error
@@ -135,6 +137,18 @@ type Database interface {
 	// Providers returns all configured providers, name order. None yields an empty slice
 	// and no error.
 	Providers(ctx context.Context) ([]Provider, error)
+
+	// SaveAddon upserts an add-on in the registry by name (ADR-0025). It stores the non-secret
+	// registry entry — type, mode, backend, endpoint, and capabilities — never the live
+	// readiness, which is probed from the cluster.
+	SaveAddon(ctx context.Context, a AddonInfo) error
+	// Addon returns the add-on with the given name, or ErrNotFound.
+	Addon(ctx context.Context, name string) (AddonInfo, error)
+	// Addons returns all registered add-ons, name order. None yields an empty slice and no
+	// error. The returned entries carry no live readiness.
+	Addons(ctx context.Context) ([]AddonInfo, error)
+	// DeleteAddon removes the named add-on from the registry, or ErrNotFound if absent.
+	DeleteAddon(ctx context.Context, name string) error
 }
 
 // Credentials is the seam over the one burrow-credentials Secret that holds every vendor

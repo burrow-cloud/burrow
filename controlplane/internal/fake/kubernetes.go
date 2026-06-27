@@ -52,6 +52,7 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 		Name:         name,
 		Type:         spec.Type,
 		Mode:         "installed",
+		Backend:      spec.Backend,
 		Image:        spec.Image,
 		Endpoint:     fmt.Sprintf("%s.default.svc:%d", name, spec.Port),
 		Capabilities: spec.Capabilities,
@@ -61,15 +62,16 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 	return info, nil
 }
 
-func (k *Kubernetes) ListAddons(ctx context.Context) ([]controlplane.AddonInfo, error) {
+// AddonReady reports whether the named add-on was deployed (and thus ready) in this fake
+// cluster. A deployed add-on is ready by default; an unknown one is not ready.
+func (k *Kubernetes) AddonReady(ctx context.Context, name string) (bool, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	out := make([]controlplane.AddonInfo, 0, len(k.addons))
-	for _, a := range k.addons {
-		out = append(out, a)
+	if err := k.errs[OpAddonReady]; err != nil {
+		return false, err
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	_, ok := k.addons[name]
+	return ok, nil
 }
 
 func (k *Kubernetes) DeleteAddon(ctx context.Context, name string) error {

@@ -3,7 +3,10 @@
 
 package controlplane
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // AddonType identifies a building-block backing service in the curated catalog (ADR-0025).
 type AddonType string
@@ -18,6 +21,9 @@ const (
 // copyleft friction (ADR-0025) — which is why logs is VictoriaLogs (Apache), not AGPL Loki.
 type AddonSpec struct {
 	Type AddonType
+	// Backend is the concrete adapter implementation that backs this add-on (e.g.
+	// "victorialogs"), recorded in the registry so the agent knows which adapter serves it.
+	Backend string
 	// Image is the pinned container image for the backing service.
 	Image string
 	// Port is the service port the app (or the agent, for an observability add-on) reaches it on.
@@ -37,6 +43,7 @@ type AddonSpec struct {
 var addonCatalog = map[AddonType]AddonSpec{
 	AddonLogs: {
 		Type:         AddonLogs,
+		Backend:      "victorialogs",
 		Image:        "victoriametrics/victoria-logs:v1.51.0", // VictoriaLogs, Apache-2.0
 		Port:         9428,
 		StorageGi:    10,
@@ -61,6 +68,45 @@ func LookupAddon(t AddonType) (AddonSpec, bool) {
 	return s, ok
 }
 
+// ConnectBackend is a catalog entry for an existing backend the user already runs that Burrow can
+// register and query (ADR-0026). Unlike an AddonSpec it carries no image or storage: connect is
+// registration-only — Burrow never deploys a connected backend, it queries the one already there.
+type ConnectBackend struct {
+	// Name is the backend identifier (e.g. "loki"), used as the add-on Backend and as the
+	// querier key the engine dispatches on.
+	Name string
+	// Capabilities are what the agent can query a connected instance of this backend for. They
+	// are derived from the backend, not declared by the user (ADR-0026): a single-capability
+	// backend like Loki implies "logs".
+	Capabilities []string
+	// Summary is a one-line description for the connectable-backend listing.
+	Summary string
+}
+
+// connectCatalog is the curated set of existing backends Burrow can connect to and query. The
+// license bar does not apply to connect — Burrow queries these, it does not distribute them
+// (ADR-0026) — so AGPL backends like Loki are fine here.
+var connectCatalog = map[string]ConnectBackend{
+	"loki": {Name: "loki", Capabilities: []string{"logs"}, Summary: "Grafana Loki (existing log store)"},
+}
+
+// ConnectCatalog returns the connectable backends in a stable name order.
+func ConnectCatalog() []ConnectBackend {
+	out := make([]ConnectBackend, 0, len(connectCatalog))
+	for _, b := range connectCatalog {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// LookupConnectBackend returns the catalog entry for name, or false if name is not a known
+// connectable backend.
+func LookupConnectBackend(name string) (ConnectBackend, bool) {
+	b, ok := connectCatalog[name]
+	return b, ok
+}
+
 // AddonInfo is one installed add-on instance, as seen by `addon list` and the agent. It carries
 // no secret — when an add-on needs a credential it lives in a cluster Secret, never here.
 type AddonInfo struct {
@@ -68,9 +114,15 @@ type AddonInfo struct {
 	Type AddonType `json:"type"`
 	// Mode is how the backend is provided: "installed" (Burrow deployed it) or "connected"
 	// (an existing backend the user runs). Installed-only for now; connect lands later (ADR-0026).
-	Mode         string   `json:"mode"`
+	Mode string `json:"mode"`
+	// Backend is the concrete adapter implementation backing this add-on (e.g. "victorialogs").
+	Backend      string   `json:"backend,omitempty"`
 	Image        string   `json:"image,omitempty"`
 	Endpoint     string   `json:"endpoint"` // in-cluster host:port the app or agent reaches it on
 	Capabilities []string `json:"capabilities"`
-	Ready        bool     `json:"ready"`
+	// CreatedAt is when the add-on was registered, read from the injected clock.
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	// Ready is a live property — whether the backing Deployment is available. It is probed
+	// from the cluster at list time and never persisted in the registry.
+	Ready bool `json:"ready"`
 }

@@ -28,7 +28,12 @@ const (
 	OpExpose         Op = "Expose"
 	OpUnexpose       Op = "Unexpose"
 	OpExposureStatus Op = "ExposureStatus"
+	OpAddonReady     Op = "AddonReady"
 	OpResolve        Op = "Resolve"
+	OpSaveAddon      Op = "SaveAddon"
+	OpAddon          Op = "Addon"
+	OpAddons         Op = "Addons"
+	OpDeleteAddon    Op = "DeleteAddon"
 	OpSaveRelease    Op = "SaveRelease"
 	OpRelease        Op = "Release"
 	OpLatestRelease  Op = "LatestRelease"
@@ -70,4 +75,15 @@ func cloneProvider(p controlplane.Provider) controlplane.Provider {
 		p.Capabilities = c
 	}
 	return p
+}
+
+// cloneAddon returns a deep copy of a so a fake never aliases a caller's Capabilities slice —
+// matching a real database, which serializes its records.
+func cloneAddon(a controlplane.AddonInfo) controlplane.AddonInfo {
+	if a.Capabilities != nil {
+		c := make([]string, len(a.Capabilities))
+		copy(c, a.Capabilities)
+		a.Capabilities = c
+	}
+	return a
 }

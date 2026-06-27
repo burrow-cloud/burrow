@@ -24,7 +24,10 @@ type Engine struct {
 	resolver    Resolver
 	credentials Credentials
 	dns         DNSFactory
-	logs        LogsQuerier // optional: present only when logs querying is wired
+	// logs maps a backend id (e.g. "victorialogs", "loki") to the querier that serves it.
+	// Optional: a logs query errors cleanly when the map is empty or has no querier for the
+	// add-on's backend (ADR-0026).
+	logs map[string]LogsQuerier
 }
 
 // Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
@@ -41,9 +44,10 @@ type Deps struct {
 	Credentials Credentials
 	// DNS builds a DNSProvider for a vendor type and token (ADR-0023).
 	DNS DNSFactory
-	// Logs queries an installed/connected logs add-on. Optional — the engine errors cleanly
-	// on a logs query when it is not wired (ADR-0026).
-	Logs LogsQuerier
+	// Logs maps a backend id (e.g. "victorialogs", "loki") to the querier serving an installed
+	// or connected logs add-on. Optional — an empty or nil map is allowed, and the engine errors
+	// cleanly on a logs query when no querier is wired for the add-on's backend (ADR-0026).
+	Logs map[string]LogsQuerier
 }
 
 // New constructs an Engine, validating that every seam is supplied and the policy is
@@ -194,14 +198,60 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (A
 	if err != nil {
 		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
 	}
+	// Record the add-on in the registry — the DB is the source of truth for what add-ons exist
+	// (ADR-0025), like the provider registry. Readiness is never stored; it is probed live.
+	info.CreatedAt = e.clock.Now()
+	if err := e.db.SaveAddon(ctx, info); err != nil {
+		return AddonInfo{}, fmt.Errorf("install addon %s: recording in the registry: %w", t, err)
+	}
 	return info, nil
 }
 
-// ListAddons returns the installed (and, later, connected) add-on instances.
+// ConnectAddon registers an existing backend the user already runs (e.g. an in-cluster Loki) as a
+// queryable add-on, recording its endpoint and derived capabilities in the registry (ADR-0026).
+// Unlike install it deploys nothing and is not guarded — connect is registration-only. Connecting
+// the same backend twice upserts, updating the endpoint. Credentials are a deferred follow-up; for
+// now this targets an unauthenticated backend.
+func (e *Engine) ConnectAddon(ctx context.Context, backend, endpoint string) (AddonInfo, error) {
+	b, ok := LookupConnectBackend(backend)
+	if !ok {
+		return AddonInfo{}, fmt.Errorf("connect addon: unknown backend %q: %w", backend, ErrInvalid)
+	}
+	if endpoint == "" {
+		return AddonInfo{}, fmt.Errorf("connect addon %s: endpoint is empty: %w", backend, ErrInvalid)
+	}
+	info := AddonInfo{
+		Name:         backend,
+		Type:         AddonType(backend),
+		Mode:         "connected",
+		Backend:      backend,
+		Endpoint:     endpoint,
+		Capabilities: b.Capabilities,
+		CreatedAt:    e.clock.Now(),
+	}
+	if err := e.db.SaveAddon(ctx, info); err != nil {
+		return AddonInfo{}, fmt.Errorf("connect addon %s: recording in the registry: %w", backend, err)
+	}
+	return info, nil
+}
+
+// ListAddons returns the registered add-on instances from the registry, with live readiness
+// probed from the cluster for installed ones (ADR-0025). A readiness probe failure leaves an
+// entry not-ready rather than failing the whole listing.
 func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
-	addons, err := e.k8s.ListAddons(ctx)
+	addons, err := e.db.Addons(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list addons: %w", err)
+		return nil, fmt.Errorf("list addons: reading the registry: %w", err)
+	}
+	for i := range addons {
+		if addons[i].Mode != "installed" {
+			continue
+		}
+		ready, err := e.k8s.AddonReady(ctx, addons[i].Name)
+		if err != nil {
+			continue // leave Ready=false; a probe failure must not fail the listing
+		}
+		addons[i].Ready = ready
 	}
 	return addons, nil
 }
@@ -216,7 +266,18 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) err
 	if err := pol.evaluateGuardrail("addon remove", GuardrailAddonRemove, confirm, fmt.Sprintf("removing the add-on %q", name)); err != nil {
 		return err
 	}
-	if err := e.k8s.DeleteAddon(ctx, name); err != nil {
+	// The registry is the source of truth for what add-ons exist (ADR-0025): load it first so an
+	// unknown add-on is ErrNotFound, and only tear down cluster resources for an installed one.
+	info, err := e.db.Addon(ctx, name)
+	if err != nil {
+		return fmt.Errorf("remove addon %s: %w", name, err)
+	}
+	if info.Mode == "installed" {
+		if err := e.k8s.DeleteAddon(ctx, name); err != nil {
+			return fmt.Errorf("remove addon %s: %w", name, err)
+		}
+	}
+	if err := e.db.DeleteAddon(ctx, name); err != nil {
 		return fmt.Errorf("remove addon %s: %w", name, err)
 	}
 	return nil
@@ -226,32 +287,38 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) err
 // the read path behind the agent's logs-query tool: it locates the add-on advertising the "logs"
 // capability and queries it through the LogsQuerier seam (ADR-0026).
 func (e *Engine) QueryLogs(ctx context.Context, query string, limit int) ([]LogEntry, error) {
-	if e.logs == nil {
+	if len(e.logs) == 0 {
 		return nil, fmt.Errorf("query logs: logs querying is not configured: %w", ErrNotImplemented)
 	}
-	addons, err := e.k8s.ListAddons(ctx)
+	addons, err := e.db.Addons(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("query logs: %w", err)
 	}
-	endpoint := ""
+	var addon AddonInfo
+	found := false
 	for _, a := range addons {
 		for _, c := range a.Capabilities {
 			if c == "logs" {
-				endpoint = a.Endpoint
+				addon = a
+				found = true
 				break
 			}
 		}
-		if endpoint != "" {
+		if found {
 			break
 		}
 	}
-	if endpoint == "" {
+	if !found {
 		return nil, fmt.Errorf("query logs: no logs add-on is installed — run `burrow addon install logs`: %w", ErrNotFound)
+	}
+	q := e.logs[addon.Backend]
+	if q == nil {
+		return nil, fmt.Errorf("query logs: no logs querier for backend %q: %w", addon.Backend, ErrNotImplemented)
 	}
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	entries, err := e.logs.QueryLogs(ctx, endpoint, query, limit)
+	entries, err := q.QueryLogs(ctx, addon.Endpoint, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query logs: %w", err)
 	}

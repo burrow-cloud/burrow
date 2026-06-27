@@ -60,6 +60,7 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/domains", s.addDomain)
 	v1.HandleFunc("DELETE /v1/domains/{host}", s.removeDomain)
 	v1.HandleFunc("POST /v1/addons", s.installAddon)
+	v1.HandleFunc("POST /v1/addons/connect", s.connectAddon)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
@@ -278,6 +279,19 @@ func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
+func (s *server) connectAddon(w http.ResponseWriter, r *http.Request) {
+	var req addonConnectRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	info, err := s.engine.ConnectAddon(r.Context(), req.Backend, req.Endpoint)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
 func (s *server) listAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	addons, err := s.engine.ListAddons(r.Context())
 	if err != nil {
@@ -300,6 +314,13 @@ func (s *server) removeAddon(w http.ResponseWriter, r *http.Request) {
 type addonInstallRequest struct {
 	Type    string `json:"type"`
 	Confirm bool   `json:"confirm,omitempty"`
+}
+
+// addonConnectRequest is the body of an addon connect (the backend names the catalog entry; the
+// endpoint is the in-cluster host:port of the existing backend).
+type addonConnectRequest struct {
+	Backend  string `json:"backend"`
+	Endpoint string `json:"endpoint"`
 }
 
 // addonsResponse wraps the add-on list so the shape can grow without breaking object decoders.

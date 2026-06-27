@@ -23,6 +23,7 @@ type Database struct {
 	byID      map[string]controlplane.Release
 	order     map[string][]string // app -> release IDs, save order, deduplicated
 	providers map[string]controlplane.Provider
+	addons    map[string]controlplane.AddonInfo
 	errs      map[Op]error
 	policy    controlplane.Policy
 }
@@ -33,6 +34,7 @@ func NewDatabase() *Database {
 		byID:      make(map[string]controlplane.Release),
 		order:     make(map[string][]string),
 		providers: make(map[string]controlplane.Provider),
+		addons:    make(map[string]controlplane.AddonInfo),
 		errs:      make(map[Op]error),
 		policy:    controlplane.DefaultPolicy(),
 	}
@@ -180,4 +182,64 @@ func (d *Database) Providers(ctx context.Context) ([]controlplane.Provider, erro
 		out = append(out, cloneProvider(d.providers[name]))
 	}
 	return out, nil
+}
+
+// SaveAddon upserts an add-on by name. It stores only the non-secret registry entry; Ready is
+// a live property and is not persisted here.
+func (d *Database) SaveAddon(ctx context.Context, a controlplane.AddonInfo) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpSaveAddon]; err != nil {
+		return err
+	}
+	if a.Name == "" {
+		return fmt.Errorf("database: save addon: empty name")
+	}
+	a.Ready = false // readiness is never stored
+	d.addons[a.Name] = cloneAddon(a)
+	return nil
+}
+
+func (d *Database) Addon(ctx context.Context, name string) (controlplane.AddonInfo, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAddon]; err != nil {
+		return controlplane.AddonInfo{}, err
+	}
+	a, ok := d.addons[name]
+	if !ok {
+		return controlplane.AddonInfo{}, fmt.Errorf("database: addon %q: %w", name, controlplane.ErrNotFound)
+	}
+	return cloneAddon(a), nil
+}
+
+func (d *Database) Addons(ctx context.Context) ([]controlplane.AddonInfo, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAddons]; err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(d.addons))
+	for name := range d.addons {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]controlplane.AddonInfo, 0, len(names))
+	for _, name := range names {
+		out = append(out, cloneAddon(d.addons[name]))
+	}
+	return out, nil
+}
+
+func (d *Database) DeleteAddon(ctx context.Context, name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpDeleteAddon]; err != nil {
+		return err
+	}
+	if _, ok := d.addons[name]; !ok {
+		return fmt.Errorf("database: addon %q: %w", name, controlplane.ErrNotFound)
+	}
+	delete(d.addons, name)
+	return nil
 }

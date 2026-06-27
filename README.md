@@ -17,10 +17,11 @@ What you can say today (✅), and where it is headed (🔭):
   ingress + TLS, and the DNS record, from one ask.
 - ✅ **"Roll back the last release."** · **"Scale web to 3."** · **"Show me the logs."** ·
   **"Is my app reachable? If not, what's broken?"**
-- 🔭 **"How is my app doing?"** · **"Why is it slow?"** → Burrow stands up logs
-  ([VictoriaLogs](https://docs.victoriametrics.com/victorialogs/)) and metrics
-  ([VictoriaMetrics](https://victoriametrics.com)) on your cluster, and your agent *queries*
-  them and tells you in plain language — answers, not dashboards.
+- ✅ **"How is my app doing?"** · **"Why is it slow?"** → Burrow installs logs
+  ([VictoriaLogs](https://docs.victoriametrics.com/victorialogs/)) on your cluster, *or connects*
+  to the logs and metrics you already run ([Loki](https://grafana.com/oss/loki/),
+  [Prometheus](https://prometheus.io)), and your agent *queries* them and answers in plain
+  language — answers, not dashboards.
 - 🔭 **"My site is slow — add a cache."** → your agent writes the [ValKey](https://valkey.io)
   integration; Burrow deploys ValKey to your cluster and wires it in.
 
@@ -42,8 +43,8 @@ second day is Burrow's job:
   issued yet."
 - **Operate by talking** — status, logs, rollback, scale — the agent does the work, the
   guardrails keep it on the rails.
-- **Soon: "how is my app doing?"** — the agent stands up logs and metrics on your cluster and
-  answers in plain language (v0.4).
+- **"How is my app doing?"** — the agent installs logs on your cluster, or connects to the logs
+  and metrics you already run, and answers in plain language (v0.4, landing now).
 
 And every change is gated: **the agent proposes, you approve, it executes** — with the deploy
 record as the audit trail. That human-in-the-loop step is what makes letting an agent operate
@@ -98,7 +99,7 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code
 | **v0.1** | Install into a cluster · connect an agent over MCP · deploy by image reference · status · logs · rollback · scale · in-place upgrade | ✅ shipped ([v0.1.1](https://github.com/burrow-cloud/burrow/tree/v0.1.1)) |
 | **v0.2** | Reach an app at a URL: shared-ingress routing · `publish` + cert-manager TLS · `reachability` surface · DNS automation (DigitalOcean / Cloudflare) · `ingress install` · configurable guardrails | ✅ shipped ([v0.2.1](https://github.com/burrow-cloud/burrow/tree/v0.2.1)) |
 | **v0.3** | Operability + agent-experience hardening: CLI grouped by task (`app`/`config`/`system`) · `app list` · account-scoped Cloudflare tokens · public-DNS reachability · request log | ✅ shipped ([v0.3.0](https://github.com/burrow-cloud/burrow/tree/v0.3.0)) |
-| v0.4 | Agent-provisioned building blocks on your cluster: observability first — logs (VictoriaLogs) + metrics (VictoriaMetrics) the agent queries to answer "how is my app doing?" · `app delete` · cache (ValKey) later | planned ([roadmap](docs/ROADMAP.md)) |
+| **v0.4** | Agent-provisioned building blocks: install logs (VictoriaLogs) or **connect** the logs/metrics you already run (Loki, Prometheus) and query them to answer "how is my app doing?" · next: install metrics (VictoriaMetrics) · `app delete` · cache (ValKey) | 🚧 in progress ([roadmap](docs/ROADMAP.md)) |
 | v1.0 | Production self-host: the deploy-and-operate core and common day-two building blocks, hardened | planned ([roadmap](docs/ROADMAP.md)) |
 
 ## Documentation

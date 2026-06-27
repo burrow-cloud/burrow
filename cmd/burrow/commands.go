@@ -55,12 +55,34 @@ func newDeployCmd() *cobra.Command {
 	var confirm bool
 	var env kvFlag
 	cmd := &cobra.Command{
-		Use:   "deploy <app>",
+		Use:   "deploy <app> [-- command args...]",
 		Short: "Deploy an app by image reference (optionally build & push first)",
-		Args:  exactArgs(1),
+		Long: "Deploy an app by image reference (optionally build & push first).\n\n" +
+			"To run something other than the image's default entrypoint, pass the command after a\n" +
+			"-- separator, like kubectl run:\n" +
+			"  burrow app deploy worker --image myrepo/app:1.2.3 -- ./worker --queue emails",
+		// Exactly one positional (the app name) before any --; everything after -- overrides the
+		// container command.
+		Args: func(cmd *cobra.Command, args []string) error {
+			n := len(args)
+			if d := cmd.ArgsLenAtDash(); d >= 0 {
+				n = d
+			}
+			if n != 1 {
+				return fmt.Errorf("expected exactly one app name, got %d", n)
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			app := args[0]
+			// Everything after the -- separator overrides the container's command. The engine,
+			// the deploy API, and the MCP deploy tool already carry Command; this surfaces it on
+			// the CLI so a human has the same reach the agent does.
+			var command []string
+			if d := cmd.ArgsLenAtDash(); d >= 0 {
+				command = args[d:]
+			}
 			if image == "" {
 				return errors.New("--image is required")
 			}
@@ -76,6 +98,7 @@ func newDeployCmd() *cobra.Command {
 			res, err := c.Deploy(ctx, app, client.DeployRequest{
 				Image:    image,
 				Env:      env.m,
+				Command:  command,
 				Replicas: int32(replicas),
 				Confirm:  confirm,
 			})

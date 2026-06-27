@@ -337,7 +337,7 @@ func (s *server) queryLogs(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	entries, err := s.engine.QueryLogs(r.Context(), req.Query, req.Limit)
+	entries, err := s.engine.QueryLogs(r.Context(), req.Query, req.Limit, req.Backend)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -348,6 +348,9 @@ func (s *server) queryLogs(w http.ResponseWriter, r *http.Request) {
 type logsQueryRequest struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit,omitempty"`
+	// Backend targets a specific logs add-on (by its concrete backend or registry name) when more
+	// than one serves the logs capability; empty picks the first.
+	Backend string `json:"backend,omitempty"`
 }
 
 type logsQueryResponse struct {
@@ -359,7 +362,7 @@ func (s *server) queryMetrics(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	samples, err := s.engine.QueryMetrics(r.Context(), req.Query)
+	samples, err := s.engine.QueryMetrics(r.Context(), req.Query, req.Backend)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -369,6 +372,9 @@ func (s *server) queryMetrics(w http.ResponseWriter, r *http.Request) {
 
 type metricsQueryRequest struct {
 	Query string `json:"query"`
+	// Backend targets a specific metrics add-on (by its concrete backend or registry name) when more
+	// than one serves the metrics capability; empty picks the first.
+	Backend string `json:"backend,omitempty"`
 }
 
 type metricsQueryResponse struct {

@@ -6,6 +6,7 @@ package controlplane_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func TestInstallListQueryRemoveAddon(t *testing.T) {
 
 	// Query resolves the logs endpoint from the registry, not the cluster. The installed default is
 	// unauthenticated (no SecretKey), so the querier is passed an empty token.
-	if _, err := e.QueryLogs(ctx, "*", 10); err != nil {
+	if _, err := e.QueryLogs(ctx, "*", 10, ""); err != nil {
 		t.Fatalf("QueryLogs: %v", err)
 	}
 	if logs.endpoint == "" {
@@ -150,7 +151,7 @@ func TestConnectAddon(t *testing.T) {
 	if got, err := d.Addon(ctx, "loki"); err != nil || got.Mode != "connected" {
 		t.Fatalf("registry Addon = %+v err=%v", got, err)
 	}
-	if _, err := e.QueryLogs(ctx, "{app=\"web\"}", 10); err != nil {
+	if _, err := e.QueryLogs(ctx, "{app=\"web\"}", 10, ""); err != nil {
 		t.Fatalf("QueryLogs: %v", err)
 	}
 	if logs.endpoint != "loki.observability.svc:3100" {
@@ -188,7 +189,7 @@ func TestConnectAddonAuthThreadsToken(t *testing.T) {
 		t.Errorf("registry SecretKey = %q, want addon-loki", got.SecretKey)
 	}
 
-	if _, err := e.QueryLogs(ctx, "*", 10); err != nil {
+	if _, err := e.QueryLogs(ctx, "*", 10, ""); err != nil {
 		t.Fatalf("QueryLogs: %v", err)
 	}
 	if logs.token != "s3cr3t" {
@@ -221,8 +222,96 @@ func TestRemoveAddonUnknown(t *testing.T) {
 func TestQueryLogsNoAddon(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _, _ := newAddonEngine(t)
-	if _, err := e.QueryLogs(ctx, "*", 10); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.QueryLogs(ctx, "*", 10, ""); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("QueryLogs with no add-on err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestQueryLogsBackendSelector registers two logs-capable add-ons — an installed VictoriaLogs
+// ("burrow-logs") and a connected Loki ("loki") — and asserts the backend selector targets the
+// right one: empty picks the first (the installed default), a concrete backend ("victorialogs") or
+// a registry name ("loki") picks that add-on, and an unknown backend is ErrNotFound naming it. The
+// recorded endpoint distinguishes which add-on the engine resolved.
+func TestQueryLogsBackendSelector(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, logs, _ := newAddonEngine(t)
+
+	if _, err := e.InstallAddon(ctx, cp.AddonLogs, true); err != nil {
+		t.Fatalf("InstallAddon: %v", err)
+	}
+	// Capture the installed default's resolved endpoint by querying it before a second add-on exists.
+	if _, err := e.QueryLogs(ctx, "*", 10, ""); err != nil {
+		t.Fatalf("QueryLogs (capture): %v", err)
+	}
+	installedEndpoint := logs.endpoint
+	if installedEndpoint == "" {
+		t.Fatalf("installed default did not resolve an endpoint")
+	}
+	if _, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100", ""); err != nil {
+		t.Fatalf("ConnectAddon: %v", err)
+	}
+
+	// Empty backend keeps the historical first-match behavior — the installed default.
+	logs.endpoint = ""
+	if _, err := e.QueryLogs(ctx, "*", 10, ""); err != nil {
+		t.Fatalf("QueryLogs empty backend: %v", err)
+	}
+	if logs.endpoint == "" || logs.endpoint == "loki.observability.svc:3100" {
+		t.Errorf("empty backend resolved %q, want the installed default %q", logs.endpoint, installedEndpoint)
+	}
+
+	// A registry name selects the connected Loki.
+	logs.endpoint = ""
+	if _, err := e.QueryLogs(ctx, "*", 10, "loki"); err != nil {
+		t.Fatalf("QueryLogs backend loki: %v", err)
+	}
+	if logs.endpoint != "loki.observability.svc:3100" {
+		t.Errorf("backend loki resolved %q, want the connected Loki endpoint", logs.endpoint)
+	}
+
+	// A concrete backend selects the installed VictoriaLogs.
+	logs.endpoint = ""
+	if _, err := e.QueryLogs(ctx, "*", 10, "victorialogs"); err != nil {
+		t.Fatalf("QueryLogs backend victorialogs: %v", err)
+	}
+	if logs.endpoint != installedEndpoint {
+		t.Errorf("backend victorialogs resolved %q, want the installed default %q", logs.endpoint, installedEndpoint)
+	}
+
+	// An unknown backend is ErrNotFound naming the requested backend.
+	_, err := e.QueryLogs(ctx, "*", 10, "nope")
+	if !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("QueryLogs unknown backend err = %v, want ErrNotFound", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Errorf("QueryLogs unknown backend err = %v, want it to name the requested backend", err)
+	}
+}
+
+// TestQueryMetricsBackendSelector mirrors the logs selector for metrics: with a connected Prometheus
+// registered, a registry-name backend selects it and an unknown backend is ErrNotFound naming it.
+func TestQueryMetricsBackendSelector(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _, mets, _ := newAddonEngineFull(t)
+
+	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", ""); err != nil {
+		t.Fatalf("ConnectAddon: %v", err)
+	}
+
+	mets.endpoint = ""
+	if _, err := e.QueryMetrics(ctx, "up", "prometheus"); err != nil {
+		t.Fatalf("QueryMetrics backend prometheus: %v", err)
+	}
+	if mets.endpoint != "prometheus.monitoring.svc:9090" {
+		t.Errorf("backend prometheus resolved %q, want the connected Prometheus endpoint", mets.endpoint)
+	}
+
+	_, err := e.QueryMetrics(ctx, "up", "nope")
+	if !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("QueryMetrics unknown backend err = %v, want ErrNotFound", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Errorf("QueryMetrics unknown backend err = %v, want it to name the requested backend", err)
 	}
 }
 
@@ -245,7 +334,7 @@ func TestConnectMetricsAndQuery(t *testing.T) {
 		t.Fatalf("registry Addon = %+v err=%v", got, err)
 	}
 
-	samples, err := e.QueryMetrics(ctx, `up{job="web"}`)
+	samples, err := e.QueryMetrics(ctx, `up{job="web"}`, "")
 	if err != nil {
 		t.Fatalf("QueryMetrics: %v", err)
 	}
@@ -271,7 +360,7 @@ func TestConnectMetricsAuthThreadsToken(t *testing.T) {
 	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "addon-prometheus"); err != nil {
 		t.Fatalf("ConnectAddon: %v", err)
 	}
-	if _, err := e.QueryMetrics(ctx, "up"); err != nil {
+	if _, err := e.QueryMetrics(ctx, "up", ""); err != nil {
 		t.Fatalf("QueryMetrics: %v", err)
 	}
 	if mets.token != "s3cr3t" {
@@ -283,7 +372,7 @@ func TestConnectMetricsAuthThreadsToken(t *testing.T) {
 func TestQueryMetricsNoAddon(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _, _, _ := newAddonEngineFull(t)
-	if _, err := e.QueryMetrics(ctx, "up"); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.QueryMetrics(ctx, "up", ""); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("QueryMetrics with no add-on err = %v, want ErrNotFound", err)
 	}
 }

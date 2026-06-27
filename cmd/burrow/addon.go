@@ -119,6 +119,7 @@ func connectHuman(a client.Addon, key string) string {
 func newAddonLogsCmd() *cobra.Command {
 	o := &commonOpts{}
 	var limit int
+	var backend string
 	cmd := &cobra.Command{
 		Use:   "logs [query]",
 		Short: "Query the installed logs add-on (LogsQL; empty matches everything)",
@@ -133,7 +134,7 @@ func newAddonLogsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, err := c.QueryLogs(ctx, query, limit)
+			entries, err := c.QueryLogs(ctx, query, limit, backend)
 			if err != nil {
 				return err
 			}
@@ -157,11 +158,13 @@ func newAddonLogsCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().IntVar(&limit, "limit", 0, "maximum records to return (default 200)")
+	cmd.Flags().StringVar(&backend, "backend", "", "query a specific backend when more than one serves this capability (e.g. loki, victorialogs, prometheus)")
 	return cmd
 }
 
 func newAddonMetricsCmd() *cobra.Command {
 	o := &commonOpts{}
+	var backend string
 	cmd := &cobra.Command{
 		Use:   "metrics <query>",
 		Short: "Query the connected metrics add-on with an instant PromQL query",
@@ -175,7 +178,7 @@ func newAddonMetricsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			samples, err := c.QueryMetrics(ctx, args[0])
+			samples, err := c.QueryMetrics(ctx, args[0], backend)
 			if err != nil {
 				return err
 			}
@@ -198,6 +201,7 @@ func newAddonMetricsCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	cmd.Flags().StringVar(&backend, "backend", "", "query a specific backend when more than one serves this capability (e.g. loki, victorialogs, prometheus)")
 	return cmd
 }
 

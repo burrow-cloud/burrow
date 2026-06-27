@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Engine is the control plane's deploy orchestrator: the product. It turns an agent's
@@ -295,10 +296,51 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) err
 	return nil
 }
 
+// hasCapability reports whether a carries the named capability.
+func hasCapability(a AddonInfo, capability string) bool {
+	for _, c := range a.Capabilities {
+		if c == capability {
+			return true
+		}
+	}
+	return false
+}
+
+// selectAddon picks the add-on to query for a capability. With an empty backend it returns the
+// first add-on advertising the capability (the historical first-match behavior). With a non-empty
+// backend it returns the add-on advertising the capability whose concrete Backend (e.g.
+// "victorialogs", "loki") OR registry Name matches — matching either is forgiving and intuitive
+// when more than one add-on serves the same capability. The bool is false when nothing matches.
+func selectAddon(addons []AddonInfo, capability, backend string) (AddonInfo, bool) {
+	for _, a := range addons {
+		if !hasCapability(a, capability) {
+			continue
+		}
+		if backend == "" || a.Backend == backend || a.Name == backend {
+			return a, true
+		}
+	}
+	return AddonInfo{}, false
+}
+
+// availableBackends lists, in registry order, the add-on names that serve a capability — used to
+// name the alternatives in a "no add-on with backend X" error.
+func availableBackends(addons []AddonInfo, capability string) []string {
+	var names []string
+	for _, a := range addons {
+		if hasCapability(a, capability) {
+			names = append(names, a.Name)
+		}
+	}
+	return names
+}
+
 // QueryLogs runs query against the installed logs add-on and returns up to limit records. It is
 // the read path behind the agent's logs-query tool: it locates the add-on advertising the "logs"
-// capability and queries it through the LogsQuerier seam (ADR-0026).
-func (e *Engine) QueryLogs(ctx context.Context, query string, limit int) ([]LogEntry, error) {
+// capability and queries it through the LogsQuerier seam (ADR-0026). An empty backend picks the
+// first logs add-on; a non-empty backend targets a specific one (by its concrete backend or its
+// registry name) when more than one serves logs.
+func (e *Engine) QueryLogs(ctx context.Context, query string, limit int, backend string) ([]LogEntry, error) {
 	if len(e.logs) == 0 {
 		return nil, fmt.Errorf("query logs: logs querying is not configured: %w", ErrNotImplemented)
 	}
@@ -306,21 +348,11 @@ func (e *Engine) QueryLogs(ctx context.Context, query string, limit int) ([]LogE
 	if err != nil {
 		return nil, fmt.Errorf("query logs: %w", err)
 	}
-	var addon AddonInfo
-	found := false
-	for _, a := range addons {
-		for _, c := range a.Capabilities {
-			if c == "logs" {
-				addon = a
-				found = true
-				break
-			}
-		}
-		if found {
-			break
-		}
-	}
+	addon, found := selectAddon(addons, "logs", backend)
 	if !found {
+		if backend != "" {
+			return nil, fmt.Errorf("query logs: no logs add-on with backend %q (have: %s): %w", backend, strings.Join(availableBackends(addons, "logs"), ", "), ErrNotFound)
+		}
 		return nil, fmt.Errorf("query logs: no logs add-on is installed — run `burrow addon install logs`: %w", ErrNotFound)
 	}
 	q := e.logs[addon.Backend]
@@ -349,8 +381,10 @@ func (e *Engine) QueryLogs(ctx context.Context, query string, limit int) ([]LogE
 
 // QueryMetrics runs an instant PromQL query against the connected metrics add-on and returns the
 // matching samples. It is the read path behind the agent's metrics-query tool: it locates the add-on
-// advertising the "metrics" capability and queries it through the MetricsQuerier seam (ADR-0026).
-func (e *Engine) QueryMetrics(ctx context.Context, query string) ([]MetricSample, error) {
+// advertising the "metrics" capability and queries it through the MetricsQuerier seam (ADR-0026). An
+// empty backend picks the first metrics add-on; a non-empty backend targets a specific one (by its
+// concrete backend or its registry name) when more than one serves metrics.
+func (e *Engine) QueryMetrics(ctx context.Context, query string, backend string) ([]MetricSample, error) {
 	if len(e.metrics) == 0 {
 		return nil, fmt.Errorf("query metrics: metrics querying is not configured: %w", ErrNotImplemented)
 	}
@@ -358,21 +392,11 @@ func (e *Engine) QueryMetrics(ctx context.Context, query string) ([]MetricSample
 	if err != nil {
 		return nil, fmt.Errorf("query metrics: %w", err)
 	}
-	var addon AddonInfo
-	found := false
-	for _, a := range addons {
-		for _, c := range a.Capabilities {
-			if c == "metrics" {
-				addon = a
-				found = true
-				break
-			}
-		}
-		if found {
-			break
-		}
-	}
+	addon, found := selectAddon(addons, "metrics", backend)
 	if !found {
+		if backend != "" {
+			return nil, fmt.Errorf("query metrics: no metrics add-on with backend %q (have: %s): %w", backend, strings.Join(availableBackends(addons, "metrics"), ", "), ErrNotFound)
+		}
 		return nil, fmt.Errorf("query metrics: no metrics add-on is connected — run `burrow addon connect prometheus`: %w", ErrNotFound)
 	}
 	q := e.metrics[addon.Backend]

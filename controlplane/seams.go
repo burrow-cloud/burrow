@@ -47,6 +47,27 @@ type LogsQuerier interface {
 	QueryLogs(ctx context.Context, endpoint, query string, limit int, token string) ([]LogEntry, error)
 }
 
+// MetricSample is one sample returned by a metrics query. Value is the metric's value as a string so
+// PromQL's exact numeric formatting (precision, NaN/Inf) is preserved rather than lost to a float
+// round-trip.
+type MetricSample struct {
+	Labels map[string]string `json:"labels,omitempty"`
+	Value  string            `json:"value"`
+	Time   string            `json:"time,omitempty"`
+}
+
+// MetricsQuerier runs an instant PromQL query against a Prometheus-API-compatible metrics store (an
+// installed or connected add-on) so the agent can answer "how is my app performing? / what's the CPU,
+// memory, or error rate?" (ADR-0026). It is an optional seam — present only when metrics querying is
+// wired; the engine errors cleanly if not.
+type MetricsQuerier interface {
+	// QueryMetrics runs an instant PromQL query against the Prometheus-API-compatible store reachable
+	// at endpoint (an in-cluster host:port) and returns the matching samples. token is a bearer
+	// credential for an authenticated backend; an empty token means unauthenticated and no
+	// Authorization header is sent.
+	QueryMetrics(ctx context.Context, endpoint, query string, token string) ([]MetricSample, error)
+}
+
 // Kubernetes is the seam over the target cluster: the only path from the control plane
 // to the runtime. It is deliberately narrow — the v0.1 operations (deploy, status,
 // logs, scale, and the delete that supports teardown) and nothing more.

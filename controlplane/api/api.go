@@ -64,6 +64,7 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
+	v1.HandleFunc("POST /v1/metrics/query", s.queryMetrics)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", requireToken(cfg.Token, v1))
@@ -351,6 +352,27 @@ type logsQueryRequest struct {
 
 type logsQueryResponse struct {
 	Entries []controlplane.LogEntry `json:"entries"`
+}
+
+func (s *server) queryMetrics(w http.ResponseWriter, r *http.Request) {
+	var req metricsQueryRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	samples, err := s.engine.QueryMetrics(r.Context(), req.Query)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, metricsQueryResponse{Samples: samples})
+}
+
+type metricsQueryRequest struct {
+	Query string `json:"query"`
+}
+
+type metricsQueryResponse struct {
+	Samples []controlplane.MetricSample `json:"samples"`
 }
 
 // guardResponse is the body of a guard list/set call: the full guardrail policy.

@@ -28,6 +28,7 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane/dns"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
 	"github.com/burrow-cloud/burrow/controlplane/logs"
+	"github.com/burrow-cloud/burrow/controlplane/metrics"
 	"github.com/burrow-cloud/burrow/controlplane/postgres"
 	"github.com/burrow-cloud/burrow/controlplane/registry"
 	"github.com/burrow-cloud/burrow/controlplane/sys"
@@ -183,8 +184,9 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		return err
 	}
 
-	// One HTTP client shared across the logs adapters — burrowd reaches each backend in-cluster.
-	logsHTTP := &http.Client{Timeout: 20 * time.Second}
+	// One HTTP client shared across the observability adapters — burrowd reaches each backend
+	// in-cluster.
+	obsHTTP := &http.Client{Timeout: 20 * time.Second}
 	engine, err := controlplane.New(controlplane.Deps{
 		Kubernetes:  k8s,
 		Registry:    registry.New(regOpts...),
@@ -195,8 +197,12 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		Credentials: creds,
 		DNS:         dns.NewFactory(),
 		Logs: map[string]controlplane.LogsQuerier{
-			"victorialogs": logs.NewVictoriaLogs(logsHTTP),
-			"loki":         logs.NewLoki(logsHTTP),
+			"victorialogs": logs.NewVictoriaLogs(obsHTTP),
+			"loki":         logs.NewLoki(obsHTTP),
+		},
+		Metrics: map[string]controlplane.MetricsQuerier{
+			"prometheus":      metrics.NewPromQL(obsHTTP),
+			"victoriametrics": metrics.NewPromQL(obsHTTP),
 		},
 	})
 	if err != nil {

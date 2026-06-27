@@ -28,6 +28,10 @@ type Engine struct {
 	// Optional: a logs query errors cleanly when the map is empty or has no querier for the
 	// add-on's backend (ADR-0026).
 	logs map[string]LogsQuerier
+	// metrics maps a backend id (e.g. "prometheus", "victoriametrics") to the querier that serves it.
+	// Optional: a metrics query errors cleanly when the map is empty or has no querier for the
+	// add-on's backend (ADR-0026).
+	metrics map[string]MetricsQuerier
 }
 
 // Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
@@ -48,6 +52,11 @@ type Deps struct {
 	// or connected logs add-on. Optional — an empty or nil map is allowed, and the engine errors
 	// cleanly on a logs query when no querier is wired for the add-on's backend (ADR-0026).
 	Logs map[string]LogsQuerier
+	// Metrics maps a backend id (e.g. "prometheus", "victoriametrics") to the querier serving an
+	// installed or connected metrics add-on. Optional — an empty or nil map is allowed, and the
+	// engine errors cleanly on a metrics query when no querier is wired for the add-on's backend
+	// (ADR-0026).
+	Metrics map[string]MetricsQuerier
 }
 
 // New constructs an Engine, validating that every seam is supplied and the policy is
@@ -82,6 +91,7 @@ func New(d Deps) (*Engine, error) {
 		credentials: d.Credentials,
 		dns:         d.DNS,
 		logs:        d.Logs,
+		metrics:     d.Metrics,
 	}, nil
 }
 
@@ -335,6 +345,55 @@ func (e *Engine) QueryLogs(ctx context.Context, query string, limit int) ([]LogE
 		return nil, fmt.Errorf("query logs: %w", err)
 	}
 	return entries, nil
+}
+
+// QueryMetrics runs an instant PromQL query against the connected metrics add-on and returns the
+// matching samples. It is the read path behind the agent's metrics-query tool: it locates the add-on
+// advertising the "metrics" capability and queries it through the MetricsQuerier seam (ADR-0026).
+func (e *Engine) QueryMetrics(ctx context.Context, query string) ([]MetricSample, error) {
+	if len(e.metrics) == 0 {
+		return nil, fmt.Errorf("query metrics: metrics querying is not configured: %w", ErrNotImplemented)
+	}
+	addons, err := e.db.Addons(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query metrics: %w", err)
+	}
+	var addon AddonInfo
+	found := false
+	for _, a := range addons {
+		for _, c := range a.Capabilities {
+			if c == "metrics" {
+				addon = a
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("query metrics: no metrics add-on is connected — run `burrow addon connect prometheus`: %w", ErrNotFound)
+	}
+	q := e.metrics[addon.Backend]
+	if q == nil {
+		return nil, fmt.Errorf("query metrics: no metrics querier for backend %q: %w", addon.Backend, ErrNotImplemented)
+	}
+	// An authenticated backend records the key under which its bearer token lives in the
+	// burrow-credentials Secret; read it at query time so a rotation is picked up with no restart
+	// (ADR-0023). An empty SecretKey means the backend is unauthenticated — pass no token.
+	token := ""
+	if addon.SecretKey != "" {
+		token, err = e.credentials.Token(ctx, addon.SecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("query metrics: reading token for add-on %q under key %q: %w", addon.Name, addon.SecretKey, err)
+		}
+	}
+	samples, err := q.QueryMetrics(ctx, addon.Endpoint, query, token)
+	if err != nil {
+		return nil, fmt.Errorf("query metrics: %w", err)
+	}
+	return samples, nil
 }
 
 // recorded release and the live workload state. It returns ErrNotFound only when the

@@ -273,6 +273,23 @@ func (c *Client) QueryLogs(ctx context.Context, query string, limit int) ([]LogE
 	return out.Entries, err
 }
 
+// MetricSample is one sample from a metrics query. Value is the metric's value as a string so
+// PromQL's exact numeric formatting is preserved.
+type MetricSample struct {
+	Labels map[string]string `json:"labels,omitempty"`
+	Value  string            `json:"value"`
+	Time   string            `json:"time,omitempty"`
+}
+
+// QueryMetrics runs an instant PromQL query against the connected metrics add-on (e.g. Prometheus).
+func (c *Client) QueryMetrics(ctx context.Context, query string) ([]MetricSample, error) {
+	var out struct {
+		Samples []MetricSample `json:"samples"`
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/metrics/query", map[string]any{"query": query}, &out)
+	return out.Samples, err
+}
+
 func (c *Client) Logs(ctx context.Context, app string, tail int) ([]LogLine, error) {
 	path := c.appPath(app, "logs")
 	if tail > 0 {

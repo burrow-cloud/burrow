@@ -388,8 +388,9 @@ func addonRemoveTool(c *client.Client) sdk.ToolHandlerFor[addonRemoveInput, addo
 }
 
 type logsQueryInput struct {
-	Query string `json:"query,omitempty" jsonschema:"a VictoriaLogs LogsQL query; empty matches everything, newest first"`
-	Limit int    `json:"limit,omitempty" jsonschema:"maximum records to return (default 200)"`
+	Query   string `json:"query,omitempty" jsonschema:"a VictoriaLogs LogsQL query; empty matches everything, newest first"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"maximum records to return (default 200)"`
+	Backend string `json:"backend,omitempty" jsonschema:"optional: which backend to query when more than one serves this capability, e.g. loki or victorialogs"`
 }
 
 type logEntry struct {
@@ -404,7 +405,7 @@ type logsQueryOutput struct {
 
 func logsQueryTool(c *client.Client) sdk.ToolHandlerFor[logsQueryInput, logsQueryOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in logsQueryInput) (*sdk.CallToolResult, logsQueryOutput, error) {
-		es, err := c.QueryLogs(ctx, in.Query, in.Limit)
+		es, err := c.QueryLogs(ctx, in.Query, in.Limit, in.Backend)
 		if err != nil {
 			return nil, logsQueryOutput{}, err
 		}
@@ -417,7 +418,8 @@ func logsQueryTool(c *client.Client) sdk.ToolHandlerFor[logsQueryInput, logsQuer
 }
 
 type metricsQueryInput struct {
-	Query string `json:"query" jsonschema:"an instant PromQL query, e.g. up or rate(http_requests_total[5m])"`
+	Query   string `json:"query" jsonschema:"an instant PromQL query, e.g. up or rate(http_requests_total[5m])"`
+	Backend string `json:"backend,omitempty" jsonschema:"optional: which backend to query when more than one serves this capability, e.g. prometheus or victoriametrics"`
 }
 
 type metricSample struct {
@@ -432,7 +434,7 @@ type metricsQueryOutput struct {
 
 func metricsQueryTool(c *client.Client) sdk.ToolHandlerFor[metricsQueryInput, metricsQueryOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in metricsQueryInput) (*sdk.CallToolResult, metricsQueryOutput, error) {
-		ss, err := c.QueryMetrics(ctx, in.Query)
+		ss, err := c.QueryMetrics(ctx, in.Query, in.Backend)
 		if err != nil {
 			return nil, metricsQueryOutput{}, err
 		}

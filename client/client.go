@@ -264,12 +264,14 @@ type LogEntry struct {
 	Pod     string `json:"pod,omitempty"`
 }
 
-// QueryLogs queries the installed logs add-on with a LogsQL query (empty matches everything).
-func (c *Client) QueryLogs(ctx context.Context, query string, limit int) ([]LogEntry, error) {
+// QueryLogs queries the installed logs add-on with a LogsQL query (empty matches everything). A
+// non-empty backend targets a specific logs add-on (by its concrete backend or registry name) when
+// more than one serves the logs capability; empty picks the first.
+func (c *Client) QueryLogs(ctx context.Context, query string, limit int, backend string) ([]LogEntry, error) {
 	var out struct {
 		Entries []LogEntry `json:"entries"`
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/logs/query", map[string]any{"query": query, "limit": limit}, &out)
+	err := c.do(ctx, http.MethodPost, "/v1/logs/query", map[string]any{"query": query, "limit": limit, "backend": backend}, &out)
 	return out.Entries, err
 }
 
@@ -281,12 +283,14 @@ type MetricSample struct {
 	Time   string            `json:"time,omitempty"`
 }
 
-// QueryMetrics runs an instant PromQL query against the connected metrics add-on (e.g. Prometheus).
-func (c *Client) QueryMetrics(ctx context.Context, query string) ([]MetricSample, error) {
+// QueryMetrics runs an instant PromQL query against the connected metrics add-on (e.g. Prometheus). A
+// non-empty backend targets a specific metrics add-on (by its concrete backend or registry name) when
+// more than one serves the metrics capability; empty picks the first.
+func (c *Client) QueryMetrics(ctx context.Context, query string, backend string) ([]MetricSample, error) {
 	var out struct {
 		Samples []MetricSample `json:"samples"`
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/metrics/query", map[string]any{"query": query}, &out)
+	err := c.do(ctx, http.MethodPost, "/v1/metrics/query", map[string]any{"query": query, "backend": backend}, &out)
 	return out.Samples, err
 }
 

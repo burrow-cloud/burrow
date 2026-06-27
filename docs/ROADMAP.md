@@ -46,26 +46,33 @@ request log. A breaking CLI change, taken while the surface is small.
 The differentiator: an agent that stands up and operates a whole stack on the user's own
 cluster, not just an app. The user asks a question or for a capability; the agent does the
 app-side work; **Burrow provisions a vetted, self-hostable backing service with sane defaults
-and operates it behind the guardrails**. The add-on model — a curated catalog plus a registry of
-installed instances, with the agent as the query layer for observability — is
-[ADR-0025](adr/0025-building-block-addons.md). Backing services must be **permissively licensed
-(Apache / MIT / BSD)** so Burrow can bundle them without copyleft friction; **Loki, Grafana, and
-Tempo are AGPL and Elasticsearch is SSPL — all excluded.** Research into what small operators
-actually struggle with (Day-2 ops, "how is my app doing?", a hard no on autonomous prod changes)
-puts **observability first, cache later**. Slices, each thin and green:
+and operates it behind the guardrails** — or **connects to one the user already runs**. The
+add-on model — a curated catalog plus a **DB-backed registry** of installed and connected
+instances, with the agent as the query layer for observability — is
+[ADR-0025](adr/0025-building-block-addons.md); the install-or-connect query seam is
+[ADR-0026](adr/0026-observability-query-adapters.md). The license bar (**Apache / MIT / BSD**)
+governs only what Burrow *installs* — **connecting** to an existing backend queries it without
+distributing it, so AGPL Loki and proprietary Datadog are fair game to connect. Research into
+what small operators actually struggle with (Day-2 ops, "how is my app doing?", a hard no on
+autonomous prod changes — and that most already run a cluster *with* logging) puts
+**observability first, cache later, and connect alongside install**. Slices:
 
-- **Logs** — [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) (Apache-2.0): a
-  single binary, high-cardinality-safe. Kubernetes has no native cluster-level logging and pod
-  logs vanish on eviction, so this is universal. The agent queries it (MCP) to answer "what
-  happened / what changed before it broke". **First slice.**
-- **Metrics** — [VictoriaMetrics](https://victoriametrics.com) / Prometheus (Apache-2.0): RED +
-  USE signals ("is it healthy / about to OOM / why slow"); the agent reads them to answer "how is
-  my app doing?".
-- **Observability answers, not dashboards** — no bundled Grafana (AGPL); the agent is the query
-  interface over the logs + metrics it set up.
+- **Logs** ✅ shipped — install [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/)
+  (Apache-2.0) with a Fluent Bit collector, or `connect` an existing Loki; the agent queries
+  either through `burrow_logs_query` to answer "what happened / what changed before it broke".
+- **Metrics** — `connect` an existing Prometheus / VictoriaMetrics and query it via PromQL
+  (`burrow_metrics_query`) ✅ shipped; **`addon install metrics`** (VictoriaMetrics + a vmagent
+  scraper, so metrics flow without a pre-existing Prometheus) is the next slice.
+- **Connected-backend auth** ✅ shipped — a bearer token in the `burrow-credentials` Secret,
+  read at query time; only the Secret key crosses the API, never the token.
+- **Observability answers, not dashboards** ✅ — no bundled Grafana (AGPL); the agent is the
+  query interface over the logs + metrics it set up or connected.
 - **Cache** — [ValKey](https://valkey.io) (BSD-3): later and conditional — a backing service only
   some apps need, orthogonal to the observability story.
 - **`app delete`** — remove an app and its routing, behind a delete guardrail.
+
+Each shipped slice has a deterministic k3d e2e (install-logs, connect-Loki, connect-Prometheus);
+a local headless-agent diagnosis test is held out of CI (it costs API tokens).
 
 ## Deferred until requested
 

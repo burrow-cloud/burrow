@@ -59,13 +59,17 @@ provisions a vetted, self-hostable, permissively-licensed (Apache / MIT / BSD) b
 with sane defaults and operates it behind the guardrails**, then hands the agent the connection
 details. The model — a curated catalog plus a registry of installed instances, reusing the
 provider-registry / guardrail / credential-Secret patterns — is
-[ADR-0025](adr/0025-building-block-addons.md). First slices: a **cache**
-([ValKey](https://valkey.io), BSD-3) and **metrics**
-([VictoriaMetrics](https://victoriametrics.com) / Prometheus, Apache-2.0), then
-observability-driven answers ("how is my app doing?" / "why is it slow?") over the logs and
-metrics the agent set up, plus **`app delete`** (with a delete guardrail). Log aggregation only
-if Kubernetes' built-in logs prove insufficient, and with a permissively-licensed store
-(VictoriaLogs, not AGPL Loki). See [ROADMAP.md](ROADMAP.md).
+[ADR-0025](adr/0025-building-block-addons.md). Research into what small operators actually
+struggle with (Day-2 ops; "how is my app doing?"; a hard no on autonomous prod changes) puts
+**observability first, cache later** — and the license bar steers the picks (Loki, Grafana,
+Tempo are AGPL; Elasticsearch is SSPL; the Victoria stack is Apache-2.0). First slices:
+**logs** ([VictoriaLogs](https://docs.victoriametrics.com/victorialogs/), Apache-2.0 — Kubernetes
+has no native cluster-level logging and pod logs vanish on eviction), then **metrics**
+([VictoriaMetrics](https://victoriametrics.com) / Prometheus, RED + USE). **The agent is the
+query layer** — no bundled Grafana (AGPL); it answers "how is my app doing? / why is it slow?"
+over the logs + metrics it set up, with query options ("answers, not dashboards"). Then
+**`app delete`** (with a delete guardrail); a **cache** (ValKey, BSD-3) is later and conditional.
+See [ROADMAP.md](ROADMAP.md).
 
 **Deferred until requested:** server-side build from a git reference
 ([ADR-0008](adr/0008-two-build-paths.md)) — client-side build plus deploy-by-image-reference

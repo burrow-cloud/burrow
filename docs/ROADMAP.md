@@ -44,22 +44,27 @@ request log. A breaking CLI change, taken while the surface is small.
 ## v0.4 — Agent-provisioned building blocks 🚧 next
 
 The differentiator: an agent that stands up and operates a whole stack on the user's own
-cluster, not just an app. The user asks for a capability ("add a cache", "set up metrics");
-the agent writes the integration code; **Burrow provisions a vetted, self-hostable backing
-service with sane defaults and operates it behind the guardrails**, then hands the agent the
-connection details to wire in. The add-on model — a curated catalog plus a registry of installed
-instances — is [ADR-0025](adr/0025-building-block-addons.md). The backing services must be **permissively licensed (Apache /
-MIT / BSD)** so Burrow can recommend and bundle them without copyleft friction — AGPL projects
-(Loki, recent Grafana) are out. Candidates, each a thin slice that lands green:
+cluster, not just an app. The user asks a question or for a capability; the agent does the
+app-side work; **Burrow provisions a vetted, self-hostable backing service with sane defaults
+and operates it behind the guardrails**. The add-on model — a curated catalog plus a registry of
+installed instances, with the agent as the query layer for observability — is
+[ADR-0025](adr/0025-building-block-addons.md). Backing services must be **permissively licensed
+(Apache / MIT / BSD)** so Burrow can bundle them without copyleft friction; **Loki, Grafana, and
+Tempo are AGPL and Elasticsearch is SSPL — all excluded.** Research into what small operators
+actually struggle with (Day-2 ops, "how is my app doing?", a hard no on autonomous prod changes)
+puts **observability first, cache later**. Slices, each thin and green:
 
-- **Cache** — [ValKey](https://valkey.io) (BSD-3): deploy it in-cluster and give the agent the
-  connection details; the agent writes the cache integration.
-- **Metrics** — [VictoriaMetrics](https://victoriametrics.com) or Prometheus (both
-  Apache-2.0): stand up the store and scrape config; the agent adds the exporters.
-- **Log aggregation** — only if Kubernetes' built-in pod logs prove insufficient; if so, a
-  permissively-licensed store (e.g. VictoriaLogs, Apache-2.0 — **not** Loki, which is AGPL).
-- **Observability-driven answers** — "how is my app doing?" / "why is it slow?": the agent
-  investigates the logs and metrics it set up and reports.
+- **Logs** — [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) (Apache-2.0): a
+  single binary, high-cardinality-safe. Kubernetes has no native cluster-level logging and pod
+  logs vanish on eviction, so this is universal. The agent queries it (MCP) to answer "what
+  happened / what changed before it broke". **First slice.**
+- **Metrics** — [VictoriaMetrics](https://victoriametrics.com) / Prometheus (Apache-2.0): RED +
+  USE signals ("is it healthy / about to OOM / why slow"); the agent reads them to answer "how is
+  my app doing?".
+- **Observability answers, not dashboards** — no bundled Grafana (AGPL); the agent is the query
+  interface over the logs + metrics it set up.
+- **Cache** — [ValKey](https://valkey.io) (BSD-3): later and conditional — a backing service only
+  some apps need, orthogonal to the observability story.
 - **`app delete`** — remove an app and its routing, behind a delete guardrail.
 
 ## Deferred until requested

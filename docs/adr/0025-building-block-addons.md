@@ -36,9 +36,10 @@ Two constraints shape the model:
 
 Model a backing service as an **add-on**, in two layers that mirror the provider registry:
 
-- **Catalog — compiled-in and curated.** A vetted set of add-on types — `cache`
-  ([ValKey](https://valkey.io), BSD-3), `metrics`
-  ([VictoriaMetrics](https://victoriametrics.com), Apache-2.0), … — each an `AddonSpec`: the
+- **Catalog — compiled-in and curated.** A vetted set of add-on types — `logs`
+  ([VictoriaLogs](https://docs.victoriametrics.com/victorialogs/), Apache-2.0), `metrics`
+  ([VictoriaMetrics](https://victoriametrics.com), Apache-2.0), `cache`
+  ([ValKey](https://valkey.io), BSD-3), … — each an `AddonSpec`: the
   workload to create (a Deployment or StatefulSet + a ClusterIP Service, a PVC when stateful, a
   generated-credential Secret when the service needs auth), a **pinned image**, sane defaults,
   and the **connection contract** (the host, port, and Secret keys an app uses). Only
@@ -67,11 +68,30 @@ the catalog and what is installed, then install or remove a block. (`addon` is t
 refinable.)
 
 **Guardrails.** Installing is `addon_install` (confirm by default); removing is `addon_remove`
-(confirm by default — removing a cache or metrics store can break dependent apps).
+(confirm by default — removing an observability store or a cache can break dependent apps). The
+confirm-by-default posture is also the *adoption* mechanism, not only a safety one: operators say
+plainly they will not let an agent change production without a human in the loop, so "the agent
+proposes, the human approves, the agent executes" — backed by the deploy record as an audit
+trail — is what makes an agent-operated cluster acceptable at all.
 
-First slices: **cache (ValKey)**, then **metrics (VictoriaMetrics)**. Log aggregation only if
-Kubernetes' built-in pod logs (already streamed by `app logs`) prove insufficient, and then with
-a permissively-licensed store (VictoriaLogs, Apache-2.0 — not AGPL Loki).
+An add-on is consumed in one of two ways, and the catalog entry says which:
+
+- **App-facing** (e.g. a cache): the app connects to it. Install returns the connection details +
+  Secret name; the agent writes the app integration, as above.
+- **Agent-facing** (observability): the *agent* queries it to answer questions. The add-on
+  exposes its store to the agent as **MCP query tools** (e.g. a logs/metrics query), so "how is my
+  app doing? / why is it slow?" is answered in plain language with query options. Burrow does
+  **not** bundle a dashboard UI — Grafana is AGPL, and the evidence is that users want *answers,
+  not dashboards*; the agent is the query layer.
+
+First slices target **observability** — the universal day-two need (Kubernetes has no native
+cluster-level logging; pod logs vanish when a pod is evicted) and the precondition for the agent
+to operate competently at all: **logs ([VictoriaLogs](https://docs.victoriametrics.com/victorialogs/),
+Apache-2.0)** first, then **metrics ([VictoriaMetrics](https://victoriametrics.com) /
+Prometheus, Apache-2.0)**. The license bar bites hardest here and steers the picks: **Loki,
+Grafana, and Tempo are all AGPL, and Elasticsearch is SSPL — excluded**; the Victoria stack is
+Apache-2.0 and bundle-safe. A **cache (ValKey, BSD-3)** is a later, conditional slice — useful,
+but a backing service only some apps need and orthogonal to "how is my app doing?".
 
 ## Consequences
 

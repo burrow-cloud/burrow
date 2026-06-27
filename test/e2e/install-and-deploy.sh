@@ -38,6 +38,10 @@ dump_diagnostics() {
   kubectl -n burrow-e2e-loki get all || true
   echo "--- loki fixture logs ---"
   kubectl -n burrow-e2e-loki logs deploy/loki --tail=60 || true
+  echo "--- burrow-e2e-prom namespace (connected Prometheus fixture) ---"
+  kubectl -n burrow-e2e-prom get all || true
+  echo "--- prometheus fixture logs ---"
+  kubectl -n burrow-e2e-prom logs deploy/prometheus --tail=60 || true
 }
 trap dump_diagnostics ERR
 
@@ -326,4 +330,124 @@ echo "=== tidy up the connected Loki (best-effort) ==="
 "$BURROW" addon remove loki --confirm --kubeconfig "$KCFG" || true
 kubectl --kubeconfig "$KCFG" delete ns burrow-e2e-loki --ignore-not-found || true
 
-echo "=== CAPSTONE E2E PASSED: install -> deploy -> status -> rollback -> logs pipeline -> connect Loki, all via the CLI over the proxy ==="
+# =============================================================================
+# ADDON: connect Prometheus
+# Exercise the metrics CONNECT path end-to-end against an existing store the user runs:
+#   burrow CLI -> control-plane API -> in-cluster burrowd -> Prometheus /api/v1/query.
+# Simpler than the Loki connect above: Prometheus self-scrapes, so there is nothing to
+# seed — the `up` series for its own target appears a couple of scrape intervals after the
+# pod is ready. The query MUST go through in-cluster burrowd (the test host cannot resolve
+# in-cluster Service DNS), so this is the only faithful way to verify the round trip.
+# =============================================================================
+
+echo "=== deploy a minimal self-scraping Prometheus fixture (burrow-e2e-prom namespace) ==="
+# Prometheus configured to scrape only itself (localhost:9090) every 5s. That single target
+# guarantees an `up{job="prometheus"}` series with value 1 once the first scrape lands.
+kubectl --kubeconfig "$KCFG" apply -f - <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: burrow-e2e-prom
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: burrow-e2e-prom
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: burrow-e2e-prom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.1.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: burrow-e2e-prom
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090
+YAML
+kubectl --kubeconfig "$KCFG" -n burrow-e2e-prom rollout status deploy/prometheus --timeout=120s
+
+echo "=== connect the existing Prometheus (unauthenticated; no --auth) ==="
+"$BURROW" addon connect prometheus --endpoint prometheus.burrow-e2e-prom.svc:9090 --kubeconfig "$KCFG"
+
+echo "--- registered add-ons (should show prometheus, mode connected) ---"
+"$BURROW" addon list --kubeconfig "$KCFG"
+
+echo "=== query the self-scrape target back through burrow addon metrics (bounded poll) ==="
+# `burrow addon metrics <query>` runs an instant PromQL query; `up` always exists for a
+# self-scraping target. The human output renders each sample as `{k="v",...}  <value>`
+# (metricLabels in cmd/burrow/addon.go), so the up series prints with job="prometheus" and a
+# trailing value of 1 once the first scrape lands (~2 scrape intervals after ready). Bounded
+# poll (~90s) to cover that initial scrape latency; assert on the job label.
+prom_found=
+prom_out=
+for _ in $(seq 1 18); do
+  prom_out=$("$BURROW" addon metrics 'up' --kubeconfig "$KCFG" 2>&1 || true)
+  if printf '%s\n' "$prom_out" | grep -q 'job="prometheus"'; then
+    prom_found=1
+    break
+  fi
+  sleep 5
+done
+
+if [ -z "$prom_found" ]; then
+  echo "FAIL: up{job=\"prometheus\"} never appeared via 'burrow addon metrics' against the connected Prometheus"
+  echo "--- last query output ---"
+  printf '%s\n' "$prom_out"
+  exit 1 # the ERR trap dumps diagnostics
+fi
+echo "--- up series round-tripped through the connected Prometheus ---"
+printf '%s\n' "$prom_out" | grep 'job="prometheus"' | head -n 3
+
+echo "=== tidy up the connected Prometheus (best-effort) ==="
+# Removing a connected add-on still goes through addon_remove, which is confirm-by-default,
+# so pass --confirm. Cleanup is non-fatal — the cluster is deleted after the run regardless.
+"$BURROW" addon remove prometheus --confirm --kubeconfig "$KCFG" || true
+kubectl --kubeconfig "$KCFG" delete ns burrow-e2e-prom --ignore-not-found || true
+
+echo "=== CAPSTONE E2E PASSED: install -> deploy -> status -> rollback -> logs pipeline -> connect Loki -> connect Prometheus, all via the CLI over the proxy ==="

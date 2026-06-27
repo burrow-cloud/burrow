@@ -15,6 +15,18 @@ metadata:
   name: {{.AppNamespace}}
   labels: { app.kubernetes.io/managed-by: burrow }
 {{- end }}
+{{- if and (ne .AddonNamespace .Namespace) (ne .AddonNamespace .AppNamespace) }}
+---
+# Add-ons (curated backing services like the logs store and their collectors) get their own
+# namespace: kept out of the app namespace so they don't clutter user workloads, and out of
+# the control-plane namespace so a log store's contents never share the credential blast
+# radius (ADR-0025).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{.AddonNamespace}}
+  labels: { app.kubernetes.io/managed-by: burrow }
+{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -56,6 +68,36 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: burrowd
+subjects:
+  - kind: ServiceAccount
+    name: burrowd
+    namespace: {{.Namespace}}
+---
+# Add-ons live in their own namespace (ADR-0025), so burrowd's permission to manage them is
+# scoped there: a logs store is a Deployment + Service + PVC, its collector a DaemonSet +
+# ConfigMap. None of these grants reach the app or control-plane namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burrowd-addons
+  namespace: {{.AddonNamespace}}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumeclaims", "configmaps"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burrowd-addons
+  namespace: {{.AddonNamespace}}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: burrowd-addons
 subjects:
   - kind: ServiceAccount
     name: burrowd
@@ -189,6 +231,7 @@ spec:
           args: ["-listen=:{{.Port}}"]
           env:
             - { name: BURROW_NAMESPACE, value: {{.AppNamespace}} }
+            - { name: BURROW_ADDON_NAMESPACE, value: {{.AddonNamespace}} }
             # POD_NAMESPACE is burrowd's own (control-plane) namespace, where it reads the
             # burrow-credentials Secret — distinct from BURROW_NAMESPACE, the app namespace.
             - name: POD_NAMESPACE

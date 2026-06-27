@@ -210,6 +210,58 @@ func (c *Client) Apps(ctx context.Context) ([]WorkloadStatus, error) {
 	return out.Apps, err
 }
 
+// Addon is one installed (and, later, connected) add-on instance.
+type Addon struct {
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	Mode         string   `json:"mode"`
+	Image        string   `json:"image,omitempty"`
+	Endpoint     string   `json:"endpoint"`
+	Capabilities []string `json:"capabilities"`
+	Ready        bool     `json:"ready"`
+}
+
+// InstallAddon installs the vetted backing service for an add-on type (e.g. "logs").
+func (c *Client) InstallAddon(ctx context.Context, addonType string, confirm bool) (Addon, error) {
+	var out Addon
+	err := c.do(ctx, http.MethodPost, "/v1/addons", map[string]any{"type": addonType, "confirm": confirm}, &out)
+	return out, err
+}
+
+// Addons lists the installed add-on instances.
+func (c *Client) Addons(ctx context.Context) ([]Addon, error) {
+	var out struct {
+		Addons []Addon `json:"addons"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/addons", nil, &out)
+	return out.Addons, err
+}
+
+// RemoveAddon removes the named add-on instance.
+func (c *Client) RemoveAddon(ctx context.Context, name string, confirm bool) error {
+	path := "/v1/addons/" + name
+	if confirm {
+		path += "?confirm=true"
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// LogEntry is one record from a logs query.
+type LogEntry struct {
+	Time    string `json:"time,omitempty"`
+	Message string `json:"message"`
+	Pod     string `json:"pod,omitempty"`
+}
+
+// QueryLogs queries the installed logs add-on with a LogsQL query (empty matches everything).
+func (c *Client) QueryLogs(ctx context.Context, query string, limit int) ([]LogEntry, error) {
+	var out struct {
+		Entries []LogEntry `json:"entries"`
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/logs/query", map[string]any{"query": query, "limit": limit}, &out)
+	return out.Entries, err
+}
+
 func (c *Client) Logs(ctx context.Context, app string, tail int) ([]LogLine, error) {
 	path := c.appPath(app, "logs")
 	if tail > 0 {

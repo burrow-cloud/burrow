@@ -47,6 +47,12 @@ const (
 	// GuardrailDNSDelete: the operation would delete a public DNS record at a configured
 	// provider — the destructive side of DNS management (ADR-0018).
 	GuardrailDNSDelete GuardrailCode = "dns_delete"
+	// GuardrailAddonInstall: the operation would install a building-block backing service
+	// (a vetted add-on like logs or metrics) onto the cluster (ADR-0025).
+	GuardrailAddonInstall GuardrailCode = "addon_install"
+	// GuardrailAddonRemove: the operation would remove an installed add-on — the destructive
+	// side, since dependent apps may rely on it (ADR-0025).
+	GuardrailAddonRemove GuardrailCode = "addon_remove"
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through
@@ -66,6 +72,8 @@ var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailExposePublic, Description: "expose an application to the public internet at a hostname"},
 	{Code: GuardrailDNSWrite, Description: "create or update a public DNS record at a configured provider"},
 	{Code: GuardrailDNSDelete, Description: "delete a public DNS record at a configured provider"},
+	{Code: GuardrailAddonInstall, Description: "install a building-block add-on (backing service) onto the cluster"},
+	{Code: GuardrailAddonRemove, Description: "remove an installed add-on from the cluster"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.

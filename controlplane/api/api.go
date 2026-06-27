@@ -59,6 +59,10 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/providers", s.listProviders)
 	v1.HandleFunc("POST /v1/domains", s.addDomain)
 	v1.HandleFunc("DELETE /v1/domains/{host}", s.removeDomain)
+	v1.HandleFunc("POST /v1/addons", s.installAddon)
+	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
+	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
+	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", requireToken(cfg.Token, v1))
@@ -259,6 +263,70 @@ func (s *server) removeDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
+	var req addonInstallRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), req.Confirm)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *server) listAddonsHandler(w http.ResponseWriter, r *http.Request) {
+	addons, err := s.engine.ListAddons(r.Context())
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, addonsResponse{Addons: addons})
+}
+
+func (s *server) removeAddon(w http.ResponseWriter, r *http.Request) {
+	confirm := r.URL.Query().Get("confirm") == "true"
+	if err := s.engine.RemoveAddon(r.Context(), r.PathValue("name"), confirm); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"name": r.PathValue("name")})
+}
+
+// addonInstallRequest is the body of an addon install (the type names the catalog entry).
+type addonInstallRequest struct {
+	Type    string `json:"type"`
+	Confirm bool   `json:"confirm,omitempty"`
+}
+
+// addonsResponse wraps the add-on list so the shape can grow without breaking object decoders.
+type addonsResponse struct {
+	Addons []controlplane.AddonInfo `json:"addons"`
+}
+
+func (s *server) queryLogs(w http.ResponseWriter, r *http.Request) {
+	var req logsQueryRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	entries, err := s.engine.QueryLogs(r.Context(), req.Query, req.Limit)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, logsQueryResponse{Entries: entries})
+}
+
+type logsQueryRequest struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type logsQueryResponse struct {
+	Entries []controlplane.LogEntry `json:"entries"`
 }
 
 // guardResponse is the body of a guard list/set call: the full guardrail policy.

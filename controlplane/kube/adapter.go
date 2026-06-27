@@ -42,10 +42,17 @@ const (
 	defaultIngressClass = "nginx"
 )
 
-// Adapter operates Burrow workloads in a single Kubernetes namespace.
+// defaultAddonNamespace is where add-ons land when none is configured (local/test). In a
+// real install it is always set explicitly via WithAddonNamespace from BURROW_ADDON_NAMESPACE;
+// connect.DefaultAddonNamespace is the authoritative value the install manifest renders.
+const defaultAddonNamespace = "burrow-addons"
+
+// Adapter operates Burrow workloads in a single app namespace, and provisions add-ons in a
+// separate add-on namespace (ADR-0025) so backing services don't mix with user workloads.
 type Adapter struct {
-	client    kubernetes.Interface
-	namespace string
+	client         kubernetes.Interface
+	namespace      string
+	addonNamespace string
 }
 
 // New returns an Adapter over the given clientset and namespace (defaulting to
@@ -55,7 +62,17 @@ func New(client kubernetes.Interface, namespace string) *Adapter {
 	if namespace == "" {
 		namespace = "default"
 	}
-	return &Adapter{client: client, namespace: namespace}
+	return &Adapter{client: client, namespace: namespace, addonNamespace: defaultAddonNamespace}
+}
+
+// WithAddonNamespace sets the namespace Burrow deploys add-ons (and their collectors) into,
+// kept separate from the app namespace and the credential-holding control-plane namespace
+// (ADR-0025). An empty value leaves the default. Returns the Adapter for chaining.
+func (a *Adapter) WithAddonNamespace(ns string) *Adapter {
+	if ns != "" {
+		a.addonNamespace = ns
+	}
+	return a
 }
 
 func (a *Adapter) ApplyWorkload(ctx context.Context, spec controlplane.WorkloadSpec) error {

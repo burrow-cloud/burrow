@@ -30,6 +30,11 @@ const (
 	DefaultPort        = 8080
 	DefaultTokenSecret = "burrowd-api-token"
 	DefaultTokenKey    = "token"
+	// DefaultAddonNamespace is where `install` provisions Burrow's curated backing services
+	// (logs, metrics) and their collectors — separate from both the control-plane namespace
+	// (which holds credentials) and the app namespace (user workloads), so add-ons don't
+	// clutter apps and stay out of the credential blast radius (ADR-0025).
+	DefaultAddonNamespace = "burrow-addons"
 )
 
 // Options configures how to find the control plane. The zero value uses the defaults and

@@ -27,6 +27,7 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane/api"
 	"github.com/burrow-cloud/burrow/controlplane/dns"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
+	"github.com/burrow-cloud/burrow/controlplane/logs"
 	"github.com/burrow-cloud/burrow/controlplane/postgres"
 	"github.com/burrow-cloud/burrow/controlplane/registry"
 	"github.com/burrow-cloud/burrow/controlplane/sys"
@@ -166,6 +167,8 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	if err != nil {
 		return err
 	}
+	// Add-ons live in their own namespace, set by the install manifest (ADR-0025).
+	k8s.WithAddonNamespace(os.Getenv("BURROW_ADDON_NAMESPACE"))
 
 	var regOpts []registry.Option
 	if os.Getenv("BURROW_REGISTRY_INSECURE") == "true" {
@@ -189,6 +192,7 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		Resolver:    sys.Resolver{},
 		Credentials: creds,
 		DNS:         dns.NewFactory(),
+		Logs:        logs.NewVictoriaLogs(&http.Client{Timeout: 20 * time.Second}),
 	})
 	if err != nil {
 		return err

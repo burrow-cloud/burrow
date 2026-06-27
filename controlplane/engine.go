@@ -24,6 +24,7 @@ type Engine struct {
 	resolver    Resolver
 	credentials Credentials
 	dns         DNSFactory
+	logs        LogsQuerier // optional: present only when logs querying is wired
 }
 
 // Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
@@ -40,6 +41,9 @@ type Deps struct {
 	Credentials Credentials
 	// DNS builds a DNSProvider for a vendor type and token (ADR-0023).
 	DNS DNSFactory
+	// Logs queries an installed/connected logs add-on. Optional — the engine errors cleanly
+	// on a logs query when it is not wired (ADR-0026).
+	Logs LogsQuerier
 }
 
 // New constructs an Engine, validating that every seam is supplied and the policy is
@@ -73,6 +77,7 @@ func New(d Deps) (*Engine, error) {
 		resolver:    d.Resolver,
 		credentials: d.Credentials,
 		dns:         d.DNS,
+		logs:        d.Logs,
 	}, nil
 }
 
@@ -169,6 +174,88 @@ func (e *Engine) ListApps(ctx context.Context) ([]WorkloadStatus, error) {
 		return nil, fmt.Errorf("list apps: reading cluster: %w", err)
 	}
 	return apps, nil
+}
+
+// InstallAddon deploys the vetted backing service for the named add-on type and registers it as
+// a queryable capability (ADR-0025/0026). It is guarded by addon_install.
+func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (AddonInfo, error) {
+	spec, ok := LookupAddon(t)
+	if !ok {
+		return AddonInfo{}, fmt.Errorf("install addon: unknown type %q: %w", t, ErrInvalid)
+	}
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return AddonInfo{}, fmt.Errorf("install addon %s: loading guardrail policy: %w", t, err)
+	}
+	if err := pol.evaluateGuardrail("addon install", GuardrailAddonInstall, confirm, fmt.Sprintf("installing the %s add-on (%s)", t, spec.Image)); err != nil {
+		return AddonInfo{}, err
+	}
+	info, err := e.k8s.DeployAddon(ctx, spec)
+	if err != nil {
+		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
+	}
+	return info, nil
+}
+
+// ListAddons returns the installed (and, later, connected) add-on instances.
+func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
+	addons, err := e.k8s.ListAddons(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list addons: %w", err)
+	}
+	return addons, nil
+}
+
+// RemoveAddon removes the named add-on instance. It is guarded by addon_remove (removing a
+// backing service can break dependent apps).
+func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) error {
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return fmt.Errorf("remove addon %s: loading guardrail policy: %w", name, err)
+	}
+	if err := pol.evaluateGuardrail("addon remove", GuardrailAddonRemove, confirm, fmt.Sprintf("removing the add-on %q", name)); err != nil {
+		return err
+	}
+	if err := e.k8s.DeleteAddon(ctx, name); err != nil {
+		return fmt.Errorf("remove addon %s: %w", name, err)
+	}
+	return nil
+}
+
+// QueryLogs runs query against the installed logs add-on and returns up to limit records. It is
+// the read path behind the agent's logs-query tool: it locates the add-on advertising the "logs"
+// capability and queries it through the LogsQuerier seam (ADR-0026).
+func (e *Engine) QueryLogs(ctx context.Context, query string, limit int) ([]LogEntry, error) {
+	if e.logs == nil {
+		return nil, fmt.Errorf("query logs: logs querying is not configured: %w", ErrNotImplemented)
+	}
+	addons, err := e.k8s.ListAddons(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query logs: %w", err)
+	}
+	endpoint := ""
+	for _, a := range addons {
+		for _, c := range a.Capabilities {
+			if c == "logs" {
+				endpoint = a.Endpoint
+				break
+			}
+		}
+		if endpoint != "" {
+			break
+		}
+	}
+	if endpoint == "" {
+		return nil, fmt.Errorf("query logs: no logs add-on is installed — run `burrow addon install logs`: %w", ErrNotFound)
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	entries, err := e.logs.QueryLogs(ctx, endpoint, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query logs: %w", err)
+	}
+	return entries, nil
 }
 
 // recorded release and the live workload state. It returns ErrNotFound only when the

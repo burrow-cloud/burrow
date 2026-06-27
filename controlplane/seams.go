@@ -29,6 +29,22 @@ type Resolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
+// LogEntry is one record returned by a logs query.
+type LogEntry struct {
+	Time    string `json:"time,omitempty"`
+	Message string `json:"message"`
+	Pod     string `json:"pod,omitempty"`
+}
+
+// LogsQuerier queries a logs backing service (an installed or connected add-on) for records
+// matching a query, so the agent can answer "what happened? / why is it slow?" (ADR-0026). It is
+// an optional seam — present only when logs querying is wired; the engine errors cleanly if not.
+type LogsQuerier interface {
+	// QueryLogs runs query against the logs store reachable at endpoint (an in-cluster
+	// host:port) and returns up to limit matching records, most recent first.
+	QueryLogs(ctx context.Context, endpoint, query string, limit int) ([]LogEntry, error)
+}
+
 // Kubernetes is the seam over the target cluster: the only path from the control plane
 // to the runtime. It is deliberately narrow — the v0.1 operations (deploy, status,
 // logs, scale, and the delete that supports teardown) and nothing more.
@@ -41,6 +57,17 @@ type Kubernetes interface {
 	// ListWorkloads returns the observed state of every Burrow-managed workload in the
 	// namespace (for an apps listing). No workloads is an empty slice, not an error.
 	ListWorkloads(ctx context.Context) ([]WorkloadStatus, error)
+
+	// DeployAddon installs a building-block backing service per spec — a workload, a
+	// ClusterIP Service, and a persistent volume when the spec asks for one — and returns
+	// the instance's connection info (ADR-0025). Installing an already-installed add-on is
+	// idempotent.
+	DeployAddon(ctx context.Context, spec AddonSpec) (AddonInfo, error)
+	// ListAddons returns the installed add-on instances. None is an empty slice, not an error.
+	ListAddons(ctx context.Context) ([]AddonInfo, error)
+	// DeleteAddon removes the named add-on instance and its resources. Removing an add-on
+	// that is not installed returns ErrNotFound.
+	DeleteAddon(ctx context.Context, name string) error
 	// ScaleWorkload sets the desired replica count for app's workload.
 	ScaleWorkload(ctx context.Context, app string, replicas int32) error
 	// Logs returns recent log lines for app's workload.

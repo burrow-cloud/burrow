@@ -51,3 +51,4 @@ alternatives that were rejected.
 | [0023](0023-provider-credentials.md) | Provider credentials — a registry of vendor tokens in one scoped Secret | Accepted |
 | [0024](0024-cli-command-taxonomy.md) | Noun-grouped CLI command taxonomy (`app` / `config` / `system`, `expose`→`publish`) | Accepted |
 | [0025](0025-building-block-addons.md) | Building-block add-ons — a curated catalog of vetted, self-hostable backing services (observability first; the agent is the query layer) | Accepted |
+| [0026](0026-observability-query-adapters.md) | Observability add-ons — query adapters over installed *or* existing backends (`install` vs `connect`, capabilities derived) | Accepted |

@@ -29,6 +29,26 @@ vetted, permissively-licensed building block, wires it in with sane defaults, an
 it** — every change gated by the control-plane guardrails. The ✅ items work now; the 🔭 items
 are the [roadmap](docs/ROADMAP.md). The [version table](#version-status) never lags the code.
 
+## Built for day two
+
+The hard part of Kubernetes isn't the first deploy — it's everything after. The recurring
+complaint from small teams is the **day-two tax**: upgrades that break prod, certs and ingress
+that drift, and "why is my app slow?" debugging across a stack nobody has time to master. That
+second day is Burrow's job:
+
+- **Upgrades in place** — `burrow upgrade` rolls the control plane forward without losing state.
+- **Reachability you can reason about** — `reachability` walks the whole chain (controller →
+  ingress → TLS → DNS) and names the *one* broken link, so "it's down" becomes "the cert hasn't
+  issued yet."
+- **Operate by talking** — status, logs, rollback, scale — the agent does the work, the
+  guardrails keep it on the rails.
+- **Soon: "how is my app doing?"** — the agent stands up logs and metrics on your cluster and
+  answers in plain language (v0.4).
+
+And every change is gated: **the agent proposes, you approve, it executes** — with the deploy
+record as the audit trail. That human-in-the-loop step is what makes letting an agent operate
+production actually acceptable.
+
 ## How it works
 
 Four layers ([architecture](docs/ARCHITECTURE.md)):

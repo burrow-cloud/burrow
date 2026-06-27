@@ -105,6 +105,7 @@ func newRootCmd() *cobra.Command {
 		newUpgradeCmd(),
 		// Task groups.
 		newAppCmd(),
+		newAddonCmd(),
 		newConfigCmd(),
 		newSystemCmd(),
 		// Cross-cutting policy + meta — top level.

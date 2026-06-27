@@ -88,6 +88,16 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		return controlplane.AddonInfo{}, fmt.Errorf("kube: creating addon service %q: %w", name, err)
 	}
 
+	// A logs store needs a collector shipping pod logs into it, or it stays empty. Deploy a
+	// Fluent Bit (Apache-2.0) DaemonSet that tails the node's container logs and forwards them
+	// to the store; it derives pod/namespace from the log filename, so it needs no API access
+	// (no RBAC). Other add-on types have no collector.
+	if spec.Type == controlplane.AddonLogs {
+		if err := a.deployLogsCollector(ctx, name, labels, spec.Port); err != nil {
+			return controlplane.AddonInfo{}, err
+		}
+	}
+
 	return controlplane.AddonInfo{
 		Name:         name,
 		Type:         spec.Type,
@@ -96,6 +106,79 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.namespace, spec.Port),
 		Capabilities: spec.Capabilities,
 	}, nil
+}
+
+// fluentBitImage is the pinned log collector (Apache-2.0). It ships pod logs to the store.
+const fluentBitImage = "fluent/fluent-bit:3.2.10"
+
+// fluentBitConfig tails the node's container logs (CRI format) and forwards each record to the
+// VictoriaLogs store at host:9428 over its JSON-lines ingestion API, keeping the source filename
+// (which encodes pod/namespace/container) as the stream field. %s is the store service name.
+const fluentBitConfig = `[SERVICE]
+    Flush        5
+    Log_Level    info
+    Daemon       Off
+[INPUT]
+    Name             tail
+    Path             /var/log/containers/*.log
+    Path_Key         filename
+    Tag              kube.*
+    multiline.parser cri
+    Skip_Long_Lines  On
+    Mem_Buf_Limit    16MB
+[OUTPUT]
+    Name    http
+    Match   *
+    Host    %s
+    Port    9428
+    URI     /insert/jsonline?_stream_fields=filename&_msg_field=message&_time_field=time
+    Format  json_lines
+    Json_date_key    time
+    Json_date_format iso8601
+`
+
+func (a *Adapter) deployLogsCollector(ctx context.Context, store string, labels map[string]string, _ int32) error {
+	name := store + "-collector"
+	cmLabels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: labels[addonLabel]}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: cmLabels},
+		Data:       map[string]string{"fluent-bit.conf": fmt.Sprintf(fluentBitConfig, store)},
+	}
+	if _, err := a.client.CoreV1().ConfigMaps(a.namespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("kube: creating collector config %q: %w", name, err)
+	}
+
+	hostPathDir := corev1.HostPathDirectory
+	ds := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: cmLabels},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{nameLabel: name}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: cmLabels},
+				Spec: corev1.PodSpec{
+					// Run on every node, including control-plane nodes (k3d's single node is one).
+					Tolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
+					Containers: []corev1.Container{{
+						Name:  "fluent-bit",
+						Image: fluentBitImage,
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "varlog", MountPath: "/var/log", ReadOnly: true},
+							{Name: "config", MountPath: "/fluent-bit/etc/fluent-bit.conf", SubPath: "fluent-bit.conf"},
+						},
+					}},
+					Volumes: []corev1.Volume{
+						{Name: "varlog", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/log", Type: &hostPathDir}}},
+						{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}},
+					},
+				},
+			},
+		},
+	}
+	if _, err := a.client.AppsV1().DaemonSets(a.namespace).Create(ctx, ds, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("kube: creating collector %q: %w", name, err)
+	}
+	return nil
 }
 
 func (a *Adapter) ListAddons(ctx context.Context) ([]controlplane.AddonInfo, error) {
@@ -145,6 +228,10 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string) error {
 	}
 	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	_ = a.client.CoreV1().PersistentVolumeClaims(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	// And the logs collector, if this add-on had one (harmless no-op otherwise).
+	collector := name + "-collector"
+	_ = a.client.AppsV1().DaemonSets(a.namespace).Delete(ctx, collector, metav1.DeleteOptions{})
+	_ = a.client.CoreV1().ConfigMaps(a.namespace).Delete(ctx, collector, metav1.DeleteOptions{})
 	return nil
 }
 

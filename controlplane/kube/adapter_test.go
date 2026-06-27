@@ -173,6 +173,13 @@ func TestAddonDeployListDelete(t *testing.T) {
 	if _, err := client.CoreV1().PersistentVolumeClaims(ns).Get(ctx, "burrow-logs", metav1.GetOptions{}); err != nil {
 		t.Errorf("pvc: %v", err)
 	}
+	// A logs add-on also gets a collector DaemonSet + ConfigMap.
+	if _, err := client.AppsV1().DaemonSets(ns).Get(ctx, "burrow-logs-collector", metav1.GetOptions{}); err != nil {
+		t.Errorf("collector daemonset: %v", err)
+	}
+	if _, err := client.CoreV1().ConfigMaps(ns).Get(ctx, "burrow-logs-collector", metav1.GetOptions{}); err != nil {
+		t.Errorf("collector config: %v", err)
+	}
 
 	// List finds it with capabilities resolved from the catalog.
 	list, err := a.ListAddons(ctx)
@@ -186,6 +193,9 @@ func TestAddonDeployListDelete(t *testing.T) {
 	}
 	if _, err := client.AppsV1().Deployments(ns).Get(ctx, "burrow-logs", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("deployment should be gone, got %v", err)
+	}
+	if _, err := client.AppsV1().DaemonSets(ns).Get(ctx, "burrow-logs-collector", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("collector should be gone, got %v", err)
 	}
 	if err := a.DeleteAddon(ctx, "nope"); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("delete missing = %v, want ErrNotFound", err)

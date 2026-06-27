@@ -41,8 +41,19 @@ func TestIntegration(t *testing.T) {
 	}
 
 	nsName := fmt.Sprintf("burrow-it-%d", time.Now().UnixNano())
-	if _, err := client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("create namespace: %v", err)
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}}
+	// A freshly created k3d cluster can EOF the first API call before its load-balancer is
+	// forwarding; retry briefly so a cold start doesn't fail the suite (CI gates on this too,
+	// but the local `task test:k3d` path has no such gate).
+	var createErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		if _, createErr = client.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); createErr == nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if createErr != nil {
+		t.Fatalf("create namespace after retries: %v", createErr)
 	}
 	t.Cleanup(func() {
 		_ = client.CoreV1().Namespaces().Delete(context.Background(), nsName, metav1.DeleteOptions{})

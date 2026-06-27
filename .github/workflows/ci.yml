@@ -125,18 +125,25 @@ jobs:
           KCFG=$(k3d kubeconfig write burrow-ci)
           export BURROW_TEST_KUBECONFIG="$KCFG"
           # `k3d cluster create --wait` reports the server up, but the k3d load-balancer
-          # port mapping the written kubeconfig points at can still EOF the first request
-          # before it is actually forwarding. Block until the API answers so a cold start
-          # does not fail the first test (the intermittent "create namespace: ... EOF").
-          for i in $(seq 1 30); do
-            if kubectl --kubeconfig "$KCFG" get --raw=/readyz >/dev/null 2>&1; then
-              echo "k3d API server is ready"
+          # port the written kubeconfig points at can still EOF the first real request before
+          # it is actually forwarding — and /readyz can pass while a namespaced call still
+          # drops (observed as the intermittent "create namespace: ... EOF" in the first test).
+          # So block until a REAL API call (listing namespaces, the path the tests use)
+          # succeeds, not just /readyz, with a generous budget for a cold runner.
+          ready=
+          for i in $(seq 1 45); do
+            if kubectl --kubeconfig "$KCFG" get namespaces >/dev/null 2>&1; then
+              echo "k3d API server is serving real requests"
+              ready=1
               break
             fi
-            echo "waiting for the k3d API server to answer ($i)..."
+            echo "waiting for the k3d API server to serve ($i)..."
             sleep 2
           done
-          kubectl --kubeconfig "$KCFG" get --raw=/readyz
+          if [ -z "$ready" ]; then
+            echo "k3d API server never served a real request within the budget" >&2
+            exit 1
+          fi
           go test ./controlplane/kube/ -run TestIntegration -v -timeout 280s
           go test ./controlplane/e2e/ -v -timeout 300s
           go test ./connect/ -run TestProxyForwardsCustomHeader -v -timeout 300s

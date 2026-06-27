@@ -63,6 +63,40 @@ func TestDeployJSON(t *testing.T) {
 	}
 }
 
+// deployBody runs `app deploy` against a mock control plane and returns the decoded request
+// body. It calls run() directly (not runCLI) so the connection flags sit before any --
+// separator — as they must on a real command line, since -- consumes everything after it.
+func deployBody(t *testing.T, args ...string) map[string]any {
+	t.Helper()
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"release": map[string]any{"id": "r1", "image": "img:1", "status": "deployed", "replicas": 1}})
+	}))
+	defer srv.Close()
+	full := append([]string{"app", "deploy", "web", "--image", "img:1", "--control-plane", srv.URL, "--token", "x"}, args...)
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), full, &out, &errb); err != nil {
+		t.Fatalf("run: %v\n%s", err, errb.String())
+	}
+	return gotBody
+}
+
+func TestDeployCommandOverride(t *testing.T) {
+	body := deployBody(t, "--", "sh", "-c", "echo hi")
+	cmd, ok := body["command"].([]any)
+	if !ok || len(cmd) != 3 || cmd[0] != "sh" || cmd[1] != "-c" || cmd[2] != "echo hi" {
+		t.Errorf("command in body = %#v, want [sh -c \"echo hi\"]", body["command"])
+	}
+}
+
+func TestDeployNoCommandOmitsIt(t *testing.T) {
+	body := deployBody(t) // no -- separator
+	if _, present := body["command"]; present {
+		t.Errorf("command should be omitted when no -- args given, got %#v", body["command"])
+	}
+}
+
 func TestAppList(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.URL.Path != "/v1/apps" {

@@ -109,35 +109,14 @@ kubectl --kubeconfig "$KCFG" -n burrow-addons rollout status deploy/burrow-logs 
 echo "--- installed add-ons ---"
 "$BURROW" addon list --kubeconfig "$KCFG"
 
-echo "=== deploy a logger fixture that continuously emits a unique marker ==="
-# `burrow app deploy` has no command/args flag, so the looped-echo fixture is applied
-# directly with kubectl into the app namespace (default). It emits an error-shaped line
-# carrying the BURROW_E2E_LOGLINE marker every 2s; Fluent Bit tails the node's container
-# logs and ships them into VictoriaLogs.
-kubectl --kubeconfig "$KCFG" apply -f - <<'YAML'
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: burrow-e2e-logger
-  namespace: default
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: burrow-e2e-logger
-  template:
-    metadata:
-      labels:
-        app: burrow-e2e-logger
-    spec:
-      containers:
-        - name: logger
-          image: busybox:1.36
-          command:
-            - sh
-            - -c
-            - 'i=0; while true; do echo "BURROW_E2E_LOGLINE level=error iteration=$i app failed to connect"; i=$((i+1)); sleep 2; done'
-YAML
+echo "=== deploy a logger fixture THROUGH Burrow (exercises the -- command override) ==="
+# Deploy a busybox app whose command is overridden via the new `--` passthrough, so it is a
+# real Burrow-managed workload rather than raw kubectl. It emits an error-shaped line carrying
+# the BURROW_E2E_LOGLINE marker every 2s; Fluent Bit tails the node's container logs and ships
+# them into VictoriaLogs. The single quotes keep the loop's $i from expanding in this shell so
+# busybox evaluates it at runtime.
+"$BURROW" app deploy burrow-e2e-logger --image busybox:1.36 --kubeconfig "$KCFG" -- \
+  sh -c 'i=0; while true; do echo "BURROW_E2E_LOGLINE level=error iteration=$i app failed to connect"; i=$((i+1)); sleep 2; done'
 kubectl --kubeconfig "$KCFG" -n default rollout status deploy/burrow-e2e-logger --timeout=60s
 
 echo "=== query the marker back through burrow addon logs (bounded poll) ==="

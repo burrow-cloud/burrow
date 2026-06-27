@@ -23,6 +23,7 @@ type Kubernetes struct {
 	deploys   map[string]*deployState
 	exposed   map[string]controlplane.ExposeSpec
 	addresses map[string]string // app -> ingress external address (controller-assigned)
+	addons    map[string]controlplane.AddonInfo
 	errs      map[Op]error
 }
 
@@ -38,8 +39,45 @@ func NewKubernetes() *Kubernetes {
 		deploys:   make(map[string]*deployState),
 		exposed:   make(map[string]controlplane.ExposeSpec),
 		addresses: make(map[string]string),
+		addons:    make(map[string]controlplane.AddonInfo),
 		errs:      make(map[Op]error),
 	}
+}
+
+func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) (controlplane.AddonInfo, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	name := "burrow-" + string(spec.Type)
+	info := controlplane.AddonInfo{
+		Name:     name,
+		Type:     spec.Type,
+		Image:    spec.Image,
+		Endpoint: fmt.Sprintf("%s.default.svc:%d", name, spec.Port),
+		Ready:    true,
+	}
+	k.addons[name] = info
+	return info, nil
+}
+
+func (k *Kubernetes) ListAddons(ctx context.Context) ([]controlplane.AddonInfo, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := make([]controlplane.AddonInfo, 0, len(k.addons))
+	for _, a := range k.addons {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (k *Kubernetes) DeleteAddon(ctx context.Context, name string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.addons[name]; !ok {
+		return fmt.Errorf("fake: addon %q: %w", name, controlplane.ErrNotFound)
+	}
+	delete(k.addons, name)
+	return nil
 }
 
 // Exposure returns the recorded exposure for app and whether one exists.

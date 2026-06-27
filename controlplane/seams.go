@@ -41,6 +41,17 @@ type Kubernetes interface {
 	// ListWorkloads returns the observed state of every Burrow-managed workload in the
 	// namespace (for an apps listing). No workloads is an empty slice, not an error.
 	ListWorkloads(ctx context.Context) ([]WorkloadStatus, error)
+
+	// DeployAddon installs a building-block backing service per spec — a workload, a
+	// ClusterIP Service, and a persistent volume when the spec asks for one — and returns
+	// the instance's connection info (ADR-0025). Installing an already-installed add-on is
+	// idempotent.
+	DeployAddon(ctx context.Context, spec AddonSpec) (AddonInfo, error)
+	// ListAddons returns the installed add-on instances. None is an empty slice, not an error.
+	ListAddons(ctx context.Context) ([]AddonInfo, error)
+	// DeleteAddon removes the named add-on instance and its resources. Removing an add-on
+	// that is not installed returns ErrNotFound.
+	DeleteAddon(ctx context.Context, name string) error
 	// ScaleWorkload sets the desired replica count for app's workload.
 	ScaleWorkload(ctx context.Context, app string, replicas int32) error
 	// Logs returns recent log lines for app's workload.

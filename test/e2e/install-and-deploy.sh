@@ -28,6 +28,12 @@ dump_diagnostics() {
   kubectl -n burrow logs deploy/burrowd --tail=80 || true
   echo "--- burrowd logs (previous, if it restarted) ---"
   kubectl -n burrow logs deploy/burrowd --previous --tail=80 || true
+  echo "--- burrow-addons namespace (logs add-on lives here) ---"
+  kubectl -n burrow-addons get all || true
+  echo "--- burrow-logs store logs ---"
+  kubectl -n burrow-addons logs deploy/burrow-logs --tail=40 || true
+  echo "--- fluent-bit collector logs ---"
+  kubectl -n burrow-addons logs ds/burrow-logs-collector --tail=40 || true
 }
 trap dump_diagnostics ERR
 
@@ -71,4 +77,87 @@ echo "=== rollback path: deploy a second image, then roll back ==="
 "$BURROW" app deploy web --image nginx:1.27-alpine --kubeconfig "$KCFG"
 "$BURROW" app rollback web --kubeconfig "$KCFG" | grep -q "nginx:alpine" || { echo "FAIL: rollback did not restore nginx:alpine"; exit 1; }
 
-echo "=== CAPSTONE E2E PASSED: install -> deploy -> status -> rollback, all via the CLI over the proxy ==="
+# =============================================================================
+# ADDON: logs pipeline
+# Exercise the REAL production logs path end-to-end, reusing the already-installed
+# control plane, $BURROW, and $KCFG above (no re-install):
+#   burrow CLI -> control-plane API -> in-cluster burrowd -> Fluent Bit collector
+#   -> VictoriaLogs store -> query back via `burrow addon logs`.
+# The query MUST go through the in-cluster burrowd (the test host cannot resolve
+# in-cluster Service DNS), so this is the only faithful way to verify the round trip.
+# =============================================================================
+
+echo "=== addon install logs (VictoriaLogs store + Fluent Bit collector) ==="
+# --confirm bypasses the addon_install guardrail (confirm-by-default) so the run is
+# non-interactive; the flag maps to the engine's confirm bool.
+"$BURROW" addon install logs --confirm --kubeconfig "$KCFG"
+
+echo "=== wait for the logs store to become ready ==="
+# Add-ons live in the burrow-addons namespace; the store Deployment is named burrow-logs.
+# rollout status blocks until the store is available (it is the readiness signal `addon
+# list` reports as Ready); on timeout it exits non-zero and the ERR trap dumps state.
+kubectl --kubeconfig "$KCFG" -n burrow-addons rollout status deploy/burrow-logs --timeout=120s
+
+echo "--- installed add-ons ---"
+"$BURROW" addon list --kubeconfig "$KCFG"
+
+echo "=== deploy a logger fixture that continuously emits a unique marker ==="
+# `burrow app deploy` has no command/args flag, so the looped-echo fixture is applied
+# directly with kubectl into the app namespace (default). It emits an error-shaped line
+# carrying the BURROW_E2E_LOGLINE marker every 2s; Fluent Bit tails the node's container
+# logs and ships them into VictoriaLogs.
+kubectl --kubeconfig "$KCFG" apply -f - <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: burrow-e2e-logger
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: burrow-e2e-logger
+  template:
+    metadata:
+      labels:
+        app: burrow-e2e-logger
+    spec:
+      containers:
+        - name: logger
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - 'i=0; while true; do echo "BURROW_E2E_LOGLINE level=error iteration=$i app failed to connect"; i=$((i+1)); sleep 2; done'
+YAML
+kubectl --kubeconfig "$KCFG" -n default rollout status deploy/burrow-e2e-logger --timeout=60s
+
+echo "=== query the marker back through burrow addon logs (bounded poll) ==="
+# Bounded poll (~90s) to cover Fluent Bit's tail+flush latency into VictoriaLogs. The
+# query is the marker itself; assert the round-tripped output contains it.
+found=
+last_out=
+for _ in $(seq 1 18); do
+  last_out=$("$BURROW" addon logs 'BURROW_E2E_LOGLINE' --kubeconfig "$KCFG" 2>&1 || true)
+  if printf '%s\n' "$last_out" | grep -q "BURROW_E2E_LOGLINE"; then
+    found=1
+    break
+  fi
+  sleep 5
+done
+
+if [ -z "$found" ]; then
+  echo "FAIL: marker BURROW_E2E_LOGLINE never appeared via 'burrow addon logs'"
+  echo "--- last query output ---"
+  printf '%s\n' "$last_out"
+  exit 1 # the ERR trap dumps diagnostics
+fi
+echo "--- marker round-tripped through the logs pipeline ---"
+printf '%s\n' "$last_out" | grep "BURROW_E2E_LOGLINE" | head -n 3
+
+echo "=== tidy up the logs add-on and the logger fixture (best-effort) ==="
+# Cleanup is non-fatal — the cluster is deleted after the run regardless.
+"$BURROW" addon remove burrow-logs --confirm --kubeconfig "$KCFG" || true
+kubectl --kubeconfig "$KCFG" -n default delete deploy/burrow-e2e-logger --ignore-not-found || true
+
+echo "=== CAPSTONE E2E PASSED: install -> deploy -> status -> rollback -> logs pipeline, all via the CLI over the proxy ==="

@@ -17,6 +17,9 @@ const (
 	// AddonMetrics is a metrics store (VictoriaMetrics single-node, Apache-2.0) paired with a
 	// vmagent scraper that collects app-pod metrics and remote-writes them into it.
 	AddonMetrics AddonType = "metrics"
+	// AddonCache is an in-memory cache (ValKey, BSD-3) the agent wires an app to — a backing
+	// service the app connects to, not one the agent queries, so it has no query seam.
+	AddonCache AddonType = "cache"
 )
 
 // AddonSpec is a catalog entry: how to deploy and reach one vetted backing service. The catalog
@@ -61,6 +64,18 @@ var addonCatalog = map[AddonType]AddonSpec{
 		StorageGi:    10,
 		Capabilities: []string{"metrics"},
 		Summary:      "metrics (VictoriaMetrics + a vmagent scraper)",
+	},
+	AddonCache: {
+		Type:    AddonCache,
+		Backend: "valkey",
+		Image:   "valkey/valkey:8.0", // ValKey, BSD-3
+		Port:    6379,
+		// Ephemeral: a cache is rebuildable, so it gets no persistent volume and no collector —
+		// the generic deploy path (Deployment + Service) is all it needs. The agent reads the
+		// endpoint from `addon list` and wires the app to it.
+		StorageGi:    0,
+		Capabilities: []string{"cache"},
+		Summary:      "in-memory cache (ValKey)",
 	},
 }
 

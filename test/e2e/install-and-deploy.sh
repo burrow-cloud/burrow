@@ -242,6 +242,33 @@ echo "=== tidy up the metrics add-on (best-effort) ==="
 "$BURROW" addon remove burrow-metrics --confirm --kubeconfig "$KCFG" || true
 
 # =============================================================================
+# ADDON: cache (ValKey)
+# A backing service the app connects to (not one the agent queries): install it and prove it
+# is reachable in-cluster with a valkey-cli PING. The generic add-on path handles it — no
+# collector, no persistent volume (a cache is rebuildable).
+# =============================================================================
+echo "=== addon install cache (ValKey) ==="
+"$BURROW" addon install cache --confirm --kubeconfig "$KCFG"
+kubectl --kubeconfig "$KCFG" -n burrow-addons rollout status deploy/burrow-cache --timeout=120s
+echo "--- installed add-ons (should show cache, mode installed) ---"
+"$BURROW" addon list --kubeconfig "$KCFG"
+
+echo "=== PING the cache from inside the cluster (proves it is reachable) ==="
+# The test host cannot resolve in-cluster Service DNS, so PING from a one-shot in-cluster pod.
+cache_out=$(kubectl --kubeconfig "$KCFG" -n burrow-addons run cache-ping \
+  --image=valkey/valkey:8.0 --restart=Never --attach --rm -q -- \
+  valkey-cli -h burrow-cache.burrow-addons.svc -p 6379 ping 2>&1 || true)
+echo "$cache_out"
+if ! printf '%s\n' "$cache_out" | grep -q "PONG"; then
+  echo "FAIL: the cache did not answer PING with PONG"
+  exit 1 # the ERR trap dumps diagnostics
+fi
+echo "--- cache answered PONG ---"
+
+echo "=== tidy up the cache add-on (best-effort) ==="
+"$BURROW" addon remove burrow-cache --confirm --kubeconfig "$KCFG" || true
+
+# =============================================================================
 # ADDON: connect Loki
 # Exercise the CONNECT path (an existing backend the user already runs) end-to-end:
 #   burrow CLI -> control-plane API -> in-cluster burrowd -> Loki query API.

@@ -47,7 +47,8 @@ The differentiator: an agent that stands up and operates a whole stack on the us
 cluster, not just an app. The user asks for a capability ("add a cache", "set up metrics");
 the agent writes the integration code; **Burrow provisions a vetted, self-hostable backing
 service with sane defaults and operates it behind the guardrails**, then hands the agent the
-connection details to wire in. The backing services must be **permissively licensed (Apache /
+connection details to wire in. The add-on model — a curated catalog plus a registry of installed
+instances — is [ADR-0025](adr/0025-building-block-addons.md). The backing services must be **permissively licensed (Apache /
 MIT / BSD)** so Burrow can recommend and bundle them without copyleft friction — AGPL projects
 (Loki, recent Grafana) are out. Candidates, each a thin slice that lands green:
 

@@ -50,3 +50,4 @@ alternatives that were rejected.
 | [0022](0022-routing-backend-and-supported-kubernetes.md) | HTTP routing via a shared ingress (Ingress now, Gateway-ready) and supported Kubernetes versions | Accepted |
 | [0023](0023-provider-credentials.md) | Provider credentials — a registry of vendor tokens in one scoped Secret | Accepted |
 | [0024](0024-cli-command-taxonomy.md) | Noun-grouped CLI command taxonomy (`app` / `config` / `system`, `expose`→`publish`) | Accepted |
+| [0025](0025-building-block-addons.md) | Building-block add-ons — a curated catalog of vetted, self-hostable backing services (cache, metrics) | Accepted |

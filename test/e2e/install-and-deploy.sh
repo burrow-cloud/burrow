@@ -34,6 +34,10 @@ dump_diagnostics() {
   kubectl -n burrow-addons logs deploy/burrow-logs --tail=40 || true
   echo "--- fluent-bit collector logs ---"
   kubectl -n burrow-addons logs ds/burrow-logs-collector --tail=40 || true
+  echo "--- burrow-e2e-loki namespace (connected Loki fixture) ---"
+  kubectl -n burrow-e2e-loki get all || true
+  echo "--- loki fixture logs ---"
+  kubectl -n burrow-e2e-loki logs deploy/loki --tail=60 || true
 }
 trap dump_diagnostics ERR
 
@@ -160,4 +164,166 @@ echo "=== tidy up the logs add-on and the logger fixture (best-effort) ==="
 "$BURROW" addon remove burrow-logs --confirm --kubeconfig "$KCFG" || true
 kubectl --kubeconfig "$KCFG" -n default delete deploy/burrow-e2e-logger --ignore-not-found || true
 
-echo "=== CAPSTONE E2E PASSED: install -> deploy -> status -> rollback -> logs pipeline, all via the CLI over the proxy ==="
+# =============================================================================
+# ADDON: connect Loki
+# Exercise the CONNECT path (an existing backend the user already runs) end-to-end:
+#   burrow CLI -> control-plane API -> in-cluster burrowd -> Loki query API.
+# This runs AFTER the logs-pipeline cleanup above: the installed burrow-logs add-on is
+# gone, so it no longer shadows the connected loki — `burrow addon logs` picks the first
+# logs-capable add-on by name, and a leftover burrow-logs would be queried instead.
+# The query MUST go through in-cluster burrowd (the test host cannot resolve in-cluster
+# Service DNS), and the seed is pushed from inside the cluster for the same reason.
+# =============================================================================
+
+echo "=== deploy a minimal single-binary Loki fixture (burrow-e2e-loki namespace) ==="
+# Monolithic Loki with filesystem storage and an in-memory ring (replication_factor 1) —
+# enough to accept a push and answer a query_range. The tsdb/filesystem schema uses v13
+# from an old date so any seeded line falls inside the active schema period.
+kubectl --kubeconfig "$KCFG" apply -f - <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: burrow-e2e-loki
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki
+  namespace: burrow-e2e-loki
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+    common:
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+    schema_config:
+      configs:
+        - from: 2020-01-01
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    limits_config:
+      allow_structured_metadata: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: burrow-e2e-loki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      containers:
+        - name: loki
+          image: grafana/loki:3.2.1
+          args:
+            - -config.file=/etc/loki/loki.yaml
+          ports:
+            - containerPort: 3100
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+            - name: data
+              mountPath: /loki
+      volumes:
+        - name: config
+          configMap:
+            name: loki
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: burrow-e2e-loki
+spec:
+  selector:
+    app: loki
+  ports:
+    - port: 3100
+      targetPort: 3100
+YAML
+kubectl --kubeconfig "$KCFG" -n burrow-e2e-loki rollout status deploy/loki --timeout=120s
+
+echo "=== seed a known log line into Loki from inside the cluster ==="
+# The test host cannot reach the Loki Service, so push from a one-shot in-cluster pod. The
+# nanosecond timestamp is computed INSIDE the pod (cluster-now), so the line falls within the
+# adapter's 1h lookback window. Loki may not accept pushes the instant it reports ready, so
+# retry until it returns HTTP 204. --restart=Never --attach --rm surfaces the pod's exit code.
+kubectl --kubeconfig "$KCFG" -n burrow-e2e-loki run loki-seed \
+  --image=curlimages/curl:8.11.1 --restart=Never --attach --rm -q -- \
+  sh -c '
+    for i in $(seq 1 20); do
+      # busybox `date` (the curl image) has no %N, so build nanoseconds as seconds * 1e9
+      # (append nine zeros). A seconds value sent where Loki expects nanoseconds lands in
+      # 1970 and is rejected as "timestamp too old"; recompute each attempt so it stays now.
+      ts="$(date +%s)000000000"
+      payload="{\"streams\":[{\"stream\":{\"app\":\"burrow-e2e\",\"job\":\"burrow-e2e\"},\"values\":[[\"$ts\",\"BURROW_E2E_LOKI_MARKER level=error checkout handler panicked\"]]}]}"
+      code=$(curl -s -o /dev/null -w "%{http_code}" -XPOST \
+        -H "Content-Type: application/json" \
+        "http://loki.burrow-e2e-loki.svc:3100/loki/api/v1/push" \
+        --data-raw "$payload")
+      echo "push attempt $i -> HTTP $code"
+      if [ "$code" = "204" ]; then echo "seed accepted"; exit 0; fi
+      sleep 3
+    done
+    echo "seed never accepted"; exit 1
+  '
+
+echo "=== connect the existing Loki (unauthenticated; no --auth) ==="
+"$BURROW" addon connect loki --endpoint loki.burrow-e2e-loki.svc:3100 --kubeconfig "$KCFG"
+
+echo "--- registered add-ons (should show loki, mode connected) ---"
+"$BURROW" addon list --kubeconfig "$KCFG"
+
+echo "=== query the marker back through burrow addon logs (bounded poll) ==="
+# `burrow addon logs <arg>` passes the arg straight through as the LogQL query to Loki's
+# query_range. A bare word is NOT a valid LogQL query (Loki requires a stream selector), so
+# use a selector + line filter that matches the seeded stream, and assert on the marker text.
+loki_found=
+loki_out=
+for _ in $(seq 1 18); do
+  loki_out=$("$BURROW" addon logs '{job="burrow-e2e"} |= "BURROW_E2E_LOKI_MARKER"' --kubeconfig "$KCFG" 2>&1 || true)
+  if printf '%s\n' "$loki_out" | grep -q "BURROW_E2E_LOKI_MARKER"; then
+    loki_found=1
+    break
+  fi
+  sleep 5
+done
+
+if [ -z "$loki_found" ]; then
+  echo "FAIL: marker BURROW_E2E_LOKI_MARKER never appeared via 'burrow addon logs' against the connected Loki"
+  echo "--- last query output ---"
+  printf '%s\n' "$loki_out"
+  exit 1 # the ERR trap dumps diagnostics
+fi
+echo "--- marker round-tripped through the connected Loki ---"
+printf '%s\n' "$loki_out" | grep "BURROW_E2E_LOKI_MARKER" | head -n 3
+
+echo "=== tidy up the connected Loki (best-effort) ==="
+# Removing a connected add-on still goes through addon_remove, which is confirm-by-default,
+# so pass --confirm. Cleanup is non-fatal — the cluster is deleted after the run regardless.
+"$BURROW" addon remove loki --confirm --kubeconfig "$KCFG" || true
+kubectl --kubeconfig "$KCFG" delete ns burrow-e2e-loki --ignore-not-found || true
+
+echo "=== CAPSTONE E2E PASSED: install -> deploy -> status -> rollback -> logs pipeline -> connect Loki, all via the CLI over the proxy ==="

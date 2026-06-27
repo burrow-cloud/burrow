@@ -19,6 +19,10 @@ import (
 
 var _ controlplane.LogsQuerier = Loki{}
 
+// defaultLokiLookback bounds the query_range time window. The agent queries recent logs; a
+// connected backend has no query-time window, so default to the last hour.
+const defaultLokiLookback = time.Hour
+
 // Loki queries a Grafana Loki store over its HTTP query API (AGPL-3.0). Burrow connects to an
 // existing Loki the user already runs and queries it — it never distributes Loki, so its license
 // does not constrain this adapter (ADR-0026). The store's in-cluster endpoint (host:port) is
@@ -57,10 +61,18 @@ func (l Loki) QueryLogs(ctx context.Context, endpoint, query string, limit int, 
 	if strings.TrimSpace(query) == "" {
 		query = `{job=~".+"}`
 	}
+	// Loki's query_range needs a bounded time window to reliably return recent lines, so default
+	// to the last hour ([now-lookback, now]). Using time.Now() here is fine: this is the I/O
+	// boundary adapter, not the engine core ("no ambient time" governs the core, not adapters).
+	// Loki accepts unix-nanosecond strings for start/end.
+	end := time.Now()
+	start := end.Add(-defaultLokiLookback)
 	form := url.Values{
 		"query":     {query},
 		"limit":     {strconv.Itoa(limit)},
 		"direction": {"backward"},
+		"start":     {strconv.FormatInt(start.UnixNano(), 10)},
+		"end":       {strconv.FormatInt(end.UnixNano(), 10)},
 	}
 	u := "http://" + endpoint + "/loki/api/v1/query_range?" + form.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

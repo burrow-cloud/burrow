@@ -116,7 +116,7 @@ jobs:
         run: k3d cluster create burrow-ci --wait --timeout 120s
       - name: preload test images
         run: |
-          for img in busybox:1.36 busybox:1.37 mendhak/http-https-echo:31 nginx:alpine nginx:1.27-alpine victoriametrics/victoria-logs:v1.51.0 fluent/fluent-bit:3.2.10; do
+          for img in busybox:1.36 busybox:1.37 mendhak/http-https-echo:31 nginx:alpine nginx:1.27-alpine victoriametrics/victoria-logs:v1.51.0 fluent/fluent-bit:3.2.10 grafana/loki:3.2.1 curlimages/curl:8.11.1; do
             docker pull "$img"
             k3d image import "$img" -c burrow-ci
           done

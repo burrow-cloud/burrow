@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,16 @@ func TestLokiQuery(t *testing.T) {
 		q := r.URL.Query()
 		if q.Get("query") != `{app="web"}` || q.Get("limit") != "10" || q.Get("direction") != "backward" {
 			t.Errorf("params = query=%q limit=%q direction=%q", q.Get("query"), q.Get("limit"), q.Get("direction"))
+		}
+		// query_range must carry a bounded time window so Loki returns recent lines: non-empty
+		// start/end (unix nanoseconds) with end >= start.
+		startNs, errStart := strconv.ParseInt(q.Get("start"), 10, 64)
+		endNs, errEnd := strconv.ParseInt(q.Get("end"), 10, 64)
+		if q.Get("start") == "" || q.Get("end") == "" || errStart != nil || errEnd != nil {
+			t.Errorf("missing/invalid time window: start=%q end=%q", q.Get("start"), q.Get("end"))
+		}
+		if endNs < startNs {
+			t.Errorf("end (%d) < start (%d), want end >= start", endNs, startNs)
 		}
 		_, _ = io.WriteString(w, `{"data":{"result":[
 			{"stream":{"pod":"web-1"},"values":[["1700000000000000000","boom"],["1700000001000000000","again"]]},

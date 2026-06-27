@@ -22,7 +22,7 @@ var _ controlplane.LogsQuerier = Loki{}
 // Loki queries a Grafana Loki store over its HTTP query API (AGPL-3.0). Burrow connects to an
 // existing Loki the user already runs and queries it — it never distributes Loki, so its license
 // does not constrain this adapter (ADR-0026). The store's in-cluster endpoint (host:port) is
-// passed per query; this adapter targets an unauthenticated in-cluster Loki (auth is deferred).
+// passed per query, along with an optional bearer token for an authenticated Loki.
 type Loki struct {
 	http *http.Client
 }
@@ -52,7 +52,8 @@ type lokiResponse struct {
 // flatten across streams and cap at limit. Ordering caveat: a simple concatenation across multiple
 // streams is not globally time-sorted — entries are newest-first within each stream but streams are
 // concatenated in Loki's response order, which is acceptable for the agent's troubleshooting use.
-func (l Loki) QueryLogs(ctx context.Context, endpoint, query string, limit int) ([]controlplane.LogEntry, error) {
+// A non-empty token is sent as an Authorization: Bearer header for an authenticated Loki.
+func (l Loki) QueryLogs(ctx context.Context, endpoint, query string, limit int, token string) ([]controlplane.LogEntry, error) {
 	if strings.TrimSpace(query) == "" {
 		query = `{job=~".+"}`
 	}
@@ -65,6 +66,9 @@ func (l Loki) QueryLogs(ctx context.Context, endpoint, query string, limit int) 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("loki: building request: %w", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	resp, err := l.http.Do(req)

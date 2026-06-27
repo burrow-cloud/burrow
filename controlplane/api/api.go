@@ -284,7 +284,7 @@ func (s *server) connectAddon(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	info, err := s.engine.ConnectAddon(r.Context(), req.Backend, req.Endpoint)
+	info, err := s.engine.ConnectAddon(r.Context(), req.Backend, req.Endpoint, req.SecretKey)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -317,10 +317,13 @@ type addonInstallRequest struct {
 }
 
 // addonConnectRequest is the body of an addon connect (the backend names the catalog entry; the
-// endpoint is the in-cluster host:port of the existing backend).
+// endpoint is the in-cluster host:port of the existing backend). SecretKey, when set, names the key
+// in the burrow-credentials Secret under which the backend's bearer token lives — the token itself
+// never travels here, only the key (ADR-0004/0023).
 type addonConnectRequest struct {
-	Backend  string `json:"backend"`
-	Endpoint string `json:"endpoint"`
+	Backend   string `json:"backend"`
+	Endpoint  string `json:"endpoint"`
+	SecretKey string `json:"secret_key"`
 }
 
 // addonsResponse wraps the add-on list so the shape can grow without breaking object decoders.

@@ -13,35 +13,39 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane/internal/fake"
 )
 
-// stubLogs is an inline LogsQuerier that records the endpoint it was queried at and returns a
-// fixed record, so a QueryLogs test can assert the engine resolved the add-on from the registry.
+// stubLogs is an inline LogsQuerier that records the endpoint and bearer token it was queried with
+// and returns a fixed record, so a QueryLogs test can assert the engine resolved the add-on from the
+// registry and threaded the token through.
 type stubLogs struct {
 	endpoint string
+	token    string
 }
 
-func (s *stubLogs) QueryLogs(_ context.Context, endpoint, _ string, _ int) ([]cp.LogEntry, error) {
+func (s *stubLogs) QueryLogs(_ context.Context, endpoint, _ string, _ int, token string) ([]cp.LogEntry, error) {
 	s.endpoint = endpoint
+	s.token = token
 	return []cp.LogEntry{{Message: "hello"}}, nil
 }
 
 // newAddonEngine builds an engine with a logs querier wired, returning the seams a test needs to
 // arrange and inspect the add-on registry.
-func newAddonEngine(t *testing.T) (*cp.Engine, *fake.Database, *fake.Clock, *stubLogs) {
+func newAddonEngine(t *testing.T) (*cp.Engine, *fake.Database, *fake.Clock, *stubLogs, *fake.Credentials) {
 	t.Helper()
 	d := fake.NewDatabase()
 	d.SetPolicy(permissive())
 	c := fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC))
 	logs := &stubLogs{}
+	creds := fake.NewCredentials()
 	e, err := cp.New(cp.Deps{
 		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
 		Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
-		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+		Credentials: creds, DNS: fake.NewDNSFactory(),
 		Logs: map[string]cp.LogsQuerier{"victorialogs": logs, "loki": logs},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return e, d, c, logs
+	return e, d, c, logs, creds
 }
 
 // TestInstallListQueryRemoveAddon exercises the full registry-backed lifecycle: install records
@@ -50,7 +54,7 @@ func newAddonEngine(t *testing.T) (*cp.Engine, *fake.Database, *fake.Clock, *stu
 // remove tears down the cluster resources and deletes the registry row.
 func TestInstallListQueryRemoveAddon(t *testing.T) {
 	ctx := context.Background()
-	e, d, c, logs := newAddonEngine(t)
+	e, d, c, logs, _ := newAddonEngine(t)
 
 	info, err := e.InstallAddon(ctx, cp.AddonLogs, true)
 	if err != nil {
@@ -74,12 +78,16 @@ func TestInstallListQueryRemoveAddon(t *testing.T) {
 		t.Fatalf("ListAddons = %+v err=%v, want one ready burrow-logs", list, err)
 	}
 
-	// Query resolves the logs endpoint from the registry, not the cluster.
+	// Query resolves the logs endpoint from the registry, not the cluster. The installed default is
+	// unauthenticated (no SecretKey), so the querier is passed an empty token.
 	if _, err := e.QueryLogs(ctx, "*", 10); err != nil {
 		t.Fatalf("QueryLogs: %v", err)
 	}
 	if logs.endpoint == "" {
 		t.Errorf("QueryLogs did not resolve an endpoint from the registry")
+	}
+	if logs.token != "" {
+		t.Errorf("QueryLogs token = %q, want empty for an unauthenticated add-on", logs.token)
 	}
 
 	// Remove tears down and deletes the registry row.
@@ -99,9 +107,9 @@ func TestInstallListQueryRemoveAddon(t *testing.T) {
 // logs query then dispatches to the querier keyed by that backend.
 func TestConnectAddon(t *testing.T) {
 	ctx := context.Background()
-	e, d, c, logs := newAddonEngine(t)
+	e, d, c, logs, _ := newAddonEngine(t)
 
-	info, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100")
+	info, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100", "")
 	if err != nil {
 		t.Fatalf("ConnectAddon: %v", err)
 	}
@@ -127,7 +135,7 @@ func TestConnectAddon(t *testing.T) {
 	}
 
 	// Connecting again upserts the endpoint.
-	if _, err := e.ConnectAddon(ctx, "loki", "loki.new.svc:3100"); err != nil {
+	if _, err := e.ConnectAddon(ctx, "loki", "loki.new.svc:3100", ""); err != nil {
 		t.Fatalf("re-ConnectAddon: %v", err)
 	}
 	if got, _ := d.Addon(ctx, "loki"); got.Endpoint != "loki.new.svc:3100" {
@@ -135,14 +143,44 @@ func TestConnectAddon(t *testing.T) {
 	}
 }
 
+// TestConnectAddonAuthThreadsToken connects an authenticated backend (a SecretKey), seeds the
+// Credentials fake with that key's token, and asserts a logs query reads the token through the
+// Credentials seam and threads it to the querier — the token lives only in the Secret, never in the
+// registry entry that crosses the API (ADR-0023).
+func TestConnectAddonAuthThreadsToken(t *testing.T) {
+	ctx := context.Background()
+	e, d, _, logs, creds := newAddonEngine(t)
+
+	creds.Set("addon-loki", "s3cr3t")
+
+	info, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100", "addon-loki")
+	if err != nil {
+		t.Fatalf("ConnectAddon: %v", err)
+	}
+	if info.SecretKey != "addon-loki" {
+		t.Errorf("info.SecretKey = %q, want addon-loki", info.SecretKey)
+	}
+	// The registry records only the key, never the token.
+	if got, _ := d.Addon(ctx, "loki"); got.SecretKey != "addon-loki" {
+		t.Errorf("registry SecretKey = %q, want addon-loki", got.SecretKey)
+	}
+
+	if _, err := e.QueryLogs(ctx, "*", 10); err != nil {
+		t.Fatalf("QueryLogs: %v", err)
+	}
+	if logs.token != "s3cr3t" {
+		t.Errorf("QueryLogs token = %q, want the token read from the Secret", logs.token)
+	}
+}
+
 // TestConnectAddonInvalid rejects an unknown backend and an empty endpoint as ErrInvalid.
 func TestConnectAddonInvalid(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _ := newAddonEngine(t)
-	if _, err := e.ConnectAddon(ctx, "nope", "x:1"); !errors.Is(err, cp.ErrInvalid) {
+	e, _, _, _, _ := newAddonEngine(t)
+	if _, err := e.ConnectAddon(ctx, "nope", "x:1", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("ConnectAddon unknown backend err = %v, want ErrInvalid", err)
 	}
-	if _, err := e.ConnectAddon(ctx, "loki", ""); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.ConnectAddon(ctx, "loki", "", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("ConnectAddon empty endpoint err = %v, want ErrInvalid", err)
 	}
 }
@@ -150,7 +188,7 @@ func TestConnectAddonInvalid(t *testing.T) {
 // TestRemoveAddonUnknown reports ErrNotFound when the add-on is not in the registry.
 func TestRemoveAddonUnknown(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _ := newAddonEngine(t)
+	e, _, _, _, _ := newAddonEngine(t)
 	if err := e.RemoveAddon(ctx, "burrow-logs", true); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("RemoveAddon unknown err = %v, want ErrNotFound", err)
 	}
@@ -159,7 +197,7 @@ func TestRemoveAddonUnknown(t *testing.T) {
 // TestQueryLogsNoAddon reports ErrNotFound when no logs add-on is registered.
 func TestQueryLogsNoAddon(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _ := newAddonEngine(t)
+	e, _, _, _, _ := newAddonEngine(t)
 	if _, err := e.QueryLogs(ctx, "*", 10); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("QueryLogs with no add-on err = %v, want ErrNotFound", err)
 	}

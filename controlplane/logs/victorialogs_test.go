@@ -17,6 +17,9 @@ func TestVictoriaLogsQuery(t *testing.T) {
 		if r.URL.Path != "/select/logsql/query" || r.Method != http.MethodPost {
 			t.Errorf("request = %s %s, want POST /select/logsql/query", r.Method, r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization = %q, want Bearer tok", got)
+		}
 		_ = r.ParseForm()
 		if r.FormValue("query") != "error" || r.FormValue("limit") != "10" {
 			t.Errorf("form = query=%q limit=%q", r.FormValue("query"), r.FormValue("limit"))
@@ -29,7 +32,7 @@ func TestVictoriaLogsQuery(t *testing.T) {
 
 	v := NewVictoriaLogs(srv.Client())
 	endpoint := strings.TrimPrefix(srv.URL, "http://")
-	entries, err := v.QueryLogs(context.Background(), endpoint, "error", 10)
+	entries, err := v.QueryLogs(context.Background(), endpoint, "error", 10, "tok")
 	if err != nil {
 		t.Fatalf("QueryLogs: %v", err)
 	}
@@ -43,16 +46,21 @@ func TestVictoriaLogsQuery(t *testing.T) {
 		t.Errorf("entry[1] = %+v", entries[1])
 	}
 
-	// An empty query defaults to "*".
+	// An empty query defaults to "*", and an empty token sends no Authorization header.
 	got := ""
+	gotAuth := "unset"
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		got = r.FormValue("query")
+		gotAuth = r.Header.Get("Authorization")
 	}))
 	defer srv2.Close()
-	_, _ = NewVictoriaLogs(srv2.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv2.URL, "http://"), "", 5)
+	_, _ = NewVictoriaLogs(srv2.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv2.URL, "http://"), "", 5, "")
 	if got != "*" {
 		t.Errorf("empty query sent %q, want *", got)
+	}
+	if gotAuth != "" {
+		t.Errorf("empty token sent Authorization %q, want none", gotAuth)
 	}
 
 	// A non-2xx is an error.
@@ -61,7 +69,7 @@ func TestVictoriaLogsQuery(t *testing.T) {
 		_, _ = io.WriteString(w, "bad logsql")
 	}))
 	defer srv3.Close()
-	if _, err := NewVictoriaLogs(srv3.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv3.URL, "http://"), "x", 5); err == nil {
+	if _, err := NewVictoriaLogs(srv3.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv3.URL, "http://"), "x", 5, ""); err == nil {
 		t.Error("want error on http 400")
 	}
 }

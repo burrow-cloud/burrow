@@ -229,10 +229,13 @@ func (c *Client) InstallAddon(ctx context.Context, addonType string, confirm boo
 }
 
 // ConnectAddon registers an existing backend the user already runs (e.g. an in-cluster Loki) as a
-// queryable add-on, recording its endpoint (ADR-0026). Unlike install it deploys nothing.
-func (c *Client) ConnectAddon(ctx context.Context, backend, endpoint string) (Addon, error) {
+// queryable add-on, recording its endpoint (ADR-0026). Unlike install it deploys nothing. secretKey,
+// when non-empty, names the key in the burrow-credentials Secret under which the backend's bearer
+// token lives; the token itself never travels over this API, only the key (ADR-0004/0023).
+func (c *Client) ConnectAddon(ctx context.Context, backend, endpoint, secretKey string) (Addon, error) {
 	var out Addon
-	err := c.do(ctx, http.MethodPost, "/v1/addons/connect", map[string]any{"backend": backend, "endpoint": endpoint}, &out)
+	body := map[string]any{"backend": backend, "endpoint": endpoint, "secret_key": secretKey}
+	err := c.do(ctx, http.MethodPost, "/v1/addons/connect", body, &out)
 	return out, err
 }
 

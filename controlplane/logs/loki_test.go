@@ -17,6 +17,9 @@ func TestLokiQuery(t *testing.T) {
 		if r.URL.Path != "/loki/api/v1/query_range" || r.Method != http.MethodGet {
 			t.Errorf("request = %s %s, want GET /loki/api/v1/query_range", r.Method, r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization = %q, want Bearer tok", got)
+		}
 		q := r.URL.Query()
 		if q.Get("query") != `{app="web"}` || q.Get("limit") != "10" || q.Get("direction") != "backward" {
 			t.Errorf("params = query=%q limit=%q direction=%q", q.Get("query"), q.Get("limit"), q.Get("direction"))
@@ -30,7 +33,7 @@ func TestLokiQuery(t *testing.T) {
 
 	l := NewLoki(srv.Client())
 	endpoint := strings.TrimPrefix(srv.URL, "http://")
-	entries, err := l.QueryLogs(context.Background(), endpoint, `{app="web"}`, 10)
+	entries, err := l.QueryLogs(context.Background(), endpoint, `{app="web"}`, 10, "tok")
 	if err != nil {
 		t.Fatalf("QueryLogs: %v", err)
 	}
@@ -44,16 +47,22 @@ func TestLokiQuery(t *testing.T) {
 		t.Errorf("entry[2] = %+v (want pod from pod_name)", entries[2])
 	}
 
-	// An empty query defaults to the match-everything selector.
+	// An empty query defaults to the match-everything selector, and an empty token sends no
+	// Authorization header.
 	got := ""
+	gotAuth := "unset"
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.URL.Query().Get("query")
+		gotAuth = r.Header.Get("Authorization")
 		_, _ = io.WriteString(w, `{"data":{"result":[]}}`)
 	}))
 	defer srv2.Close()
-	_, _ = NewLoki(srv2.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv2.URL, "http://"), "", 5)
+	_, _ = NewLoki(srv2.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv2.URL, "http://"), "", 5, "")
 	if got != `{job=~".+"}` {
 		t.Errorf("empty query sent %q, want {job=~\".+\"}", got)
+	}
+	if gotAuth != "" {
+		t.Errorf("empty token sent Authorization %q, want none", gotAuth)
 	}
 
 	// The limit caps the flattened result.
@@ -61,7 +70,7 @@ func TestLokiQuery(t *testing.T) {
 		_, _ = io.WriteString(w, `{"data":{"result":[{"stream":{},"values":[["1","a"],["2","b"],["3","c"]]}]}}`)
 	}))
 	defer srv3.Close()
-	capped, err := NewLoki(srv3.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv3.URL, "http://"), "x", 2)
+	capped, err := NewLoki(srv3.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv3.URL, "http://"), "x", 2, "")
 	if err != nil {
 		t.Fatalf("QueryLogs (cap): %v", err)
 	}
@@ -75,7 +84,7 @@ func TestLokiQuery(t *testing.T) {
 		_, _ = io.WriteString(w, "bad logql")
 	}))
 	defer srv4.Close()
-	if _, err := NewLoki(srv4.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv4.URL, "http://"), "x", 5); err == nil {
+	if _, err := NewLoki(srv4.Client()).QueryLogs(context.Background(), strings.TrimPrefix(srv4.URL, "http://"), "x", 5, ""); err == nil {
 		t.Error("want error on http 400")
 	}
 }

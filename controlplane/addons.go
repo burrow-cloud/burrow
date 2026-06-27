@@ -120,6 +120,10 @@ type AddonInfo struct {
 	Image        string   `json:"image,omitempty"`
 	Endpoint     string   `json:"endpoint"` // in-cluster host:port the app or agent reaches it on
 	Capabilities []string `json:"capabilities"`
+	// SecretKey is the non-secret key under which this add-on's bearer token lives in the
+	// burrow-credentials Secret (ADR-0023). Empty means the backend is unauthenticated; the
+	// token itself never travels here — only the key (ADR-0004).
+	SecretKey string `json:"secret_key,omitempty"`
 	// CreatedAt is when the add-on was registered, read from the injected clock.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// Ready is a live property — whether the backing Deployment is available. It is probed

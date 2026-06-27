@@ -42,7 +42,7 @@ ON CONFLICT (name) DO UPDATE SET
     capabilities = EXCLUDED.capabilities,
     secret_key = EXCLUDED.secret_key,
     created_at = EXCLUDED.created_at`
-	if _, err := s.db.ExecContext(ctx, q, a.Name, string(a.Type), a.Mode, a.Backend, a.Image, a.Endpoint, string(capsJSON), "", a.CreatedAt); err != nil {
+	if _, err := s.db.ExecContext(ctx, q, a.Name, string(a.Type), a.Mode, a.Backend, a.Image, a.Endpoint, string(capsJSON), a.SecretKey, a.CreatedAt); err != nil {
 		return fmt.Errorf("postgres: save addon %s: %w", a.Name, err)
 	}
 	return nil
@@ -103,12 +103,11 @@ func (s *Store) DeleteAddon(ctx context.Context, name string) error {
 
 func scanAddon(sc scanner) (controlplane.AddonInfo, error) {
 	var (
-		a         controlplane.AddonInfo
-		typ       string
-		secretKey string
-		capsJSON  []byte
+		a        controlplane.AddonInfo
+		typ      string
+		capsJSON []byte
 	)
-	if err := sc.Scan(&a.Name, &typ, &a.Mode, &a.Backend, &a.Image, &a.Endpoint, &capsJSON, &secretKey, &a.CreatedAt); err != nil {
+	if err := sc.Scan(&a.Name, &typ, &a.Mode, &a.Backend, &a.Image, &a.Endpoint, &capsJSON, &a.SecretKey, &a.CreatedAt); err != nil {
 		return controlplane.AddonInfo{}, err
 	}
 	a.Type = controlplane.AddonType(typ)

@@ -34,6 +34,10 @@ dump_diagnostics() {
   kubectl -n burrow-addons logs deploy/burrow-logs --tail=40 || true
   echo "--- fluent-bit collector logs ---"
   kubectl -n burrow-addons logs ds/burrow-logs-collector --tail=40 || true
+  echo "--- burrow-metrics store logs ---"
+  kubectl -n burrow-addons logs deploy/burrow-metrics --tail=40 || true
+  echo "--- vmagent collector logs ---"
+  kubectl -n burrow-addons logs deploy/burrow-metrics-collector --tail=40 || true
   echo "--- burrow-e2e-loki namespace (connected Loki fixture) ---"
   kubectl -n burrow-e2e-loki get all || true
   echo "--- loki fixture logs ---"
@@ -146,6 +150,56 @@ echo "=== tidy up the logs add-on and the logger fixture (best-effort) ==="
 # Cleanup is non-fatal — the cluster is deleted after the run regardless.
 "$BURROW" addon remove burrow-logs --confirm --kubeconfig "$KCFG" || true
 kubectl --kubeconfig "$KCFG" -n default delete deploy/burrow-e2e-logger --ignore-not-found || true
+
+# =============================================================================
+# ADDON: metrics pipeline
+# Exercise the REAL production metrics path end-to-end, reusing the already-installed
+# control plane, $BURROW, and $KCFG above (no re-install):
+#   burrow CLI -> control-plane API -> in-cluster burrowd -> vmagent collector
+#   -> VictoriaMetrics store -> query back via `burrow addon metrics`.
+# vmagent self-scrapes (job="vmagent"), so up{job="vmagent"} 1 is guaranteed once it runs,
+# with no app fixture required. The query MUST go through the in-cluster burrowd (the test
+# host cannot resolve in-cluster Service DNS), so this is the only faithful round trip.
+# =============================================================================
+
+echo "=== addon install metrics (VictoriaMetrics store + vmagent collector) ==="
+"$BURROW" addon install metrics --confirm --kubeconfig "$KCFG"
+
+echo "=== wait for the metrics store and the vmagent collector to become ready ==="
+# The store Deployment is burrow-metrics; the vmagent collector is burrow-metrics-collector.
+# Both must roll out before the self-scrape series can appear.
+kubectl --kubeconfig "$KCFG" -n burrow-addons rollout status deploy/burrow-metrics --timeout=120s
+kubectl --kubeconfig "$KCFG" -n burrow-addons rollout status deploy/burrow-metrics-collector --timeout=120s
+
+echo "--- installed add-ons ---"
+"$BURROW" addon list --kubeconfig "$KCFG"
+
+echo "=== query the vmagent self-scrape back through burrow addon metrics (bounded poll) ==="
+# Bounded poll (~90s) to cover vmagent's first scrape + remote-write into the store. `up` is
+# an instant PromQL query; vmagent self-scrapes localhost:8429, so up{job="vmagent"} 1 appears
+# once the sample lands. Assert the round-tripped output names the vmagent job.
+found=
+last_out=
+for _ in $(seq 1 18); do
+  last_out=$("$BURROW" addon metrics 'up' --kubeconfig "$KCFG" 2>&1 || true)
+  if printf '%s\n' "$last_out" | grep -q 'job="vmagent"'; then
+    found=1
+    break
+  fi
+  sleep 5
+done
+
+if [ -z "$found" ]; then
+  echo "FAIL: up{job=\"vmagent\"} never appeared via 'burrow addon metrics'"
+  echo "--- last query output ---"
+  printf '%s\n' "$last_out"
+  exit 1 # the ERR trap dumps diagnostics
+fi
+echo "--- vmagent self-scrape round-tripped through the metrics pipeline ---"
+printf '%s\n' "$last_out" | grep 'job="vmagent"' | head -n 3
+
+echo "=== tidy up the metrics add-on (best-effort) ==="
+"$BURROW" addon remove burrow-metrics --confirm --kubeconfig "$KCFG" || true
 
 # =============================================================================
 # ADDON: connect Loki

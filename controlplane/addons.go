@@ -14,6 +14,9 @@ type AddonType string
 const (
 	// AddonLogs is a log-aggregation store (VictoriaLogs, Apache-2.0).
 	AddonLogs AddonType = "logs"
+	// AddonMetrics is a metrics store (VictoriaMetrics single-node, Apache-2.0) paired with a
+	// vmagent scraper that collects app-pod metrics and remote-writes them into it.
+	AddonMetrics AddonType = "metrics"
 )
 
 // AddonSpec is a catalog entry: how to deploy and reach one vetted backing service. The catalog
@@ -49,6 +52,15 @@ var addonCatalog = map[AddonType]AddonSpec{
 		StorageGi:    10,
 		Capabilities: []string{"logs"},
 		Summary:      "log aggregation (VictoriaLogs)",
+	},
+	AddonMetrics: {
+		Type:         AddonMetrics,
+		Backend:      "victoriametrics",
+		Image:        "victoriametrics/victoria-metrics:v1.115.0", // VictoriaMetrics single-node, Apache-2.0
+		Port:         8428,
+		StorageGi:    10,
+		Capabilities: []string{"metrics"},
+		Summary:      "metrics (VictoriaMetrics + a vmagent scraper)",
 	},
 }
 

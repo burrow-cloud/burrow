@@ -297,6 +297,58 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) err
 	return nil
 }
 
+// DeleteApp removes an app entirely: its workload, its routing (Service/Ingress), and its
+// release history, so the app disappears from the apps listing and from status. It is guarded
+// by app_delete, which holds the destructive teardown for confirmation by default (ADR-0020).
+// The app must exist — it has either recorded releases or a live workload; an app unknown to
+// both is ErrNotFound. Teardown tolerates an already-absent piece: an ErrNotFound from the
+// workload or routing delete means that piece is already gone, not a failure.
+func (e *Engine) DeleteApp(ctx context.Context, app string, confirm bool) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("delete app: %w: %w", ErrInvalid, err)
+	}
+
+	// Existence: an app exists if it has releases OR a live workload. Determine this before
+	// evaluating the guardrail so an unknown app is ErrNotFound rather than a confirm prompt.
+	releases, err := e.db.Releases(ctx, app)
+	if err != nil {
+		return fmt.Errorf("delete app %s: reading release history: %w", app, err)
+	}
+	exists := len(releases) > 0
+	if !exists {
+		if _, err := e.k8s.WorkloadStatus(ctx, app); err != nil {
+			if !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("delete app %s: reading workload: %w", app, err)
+			}
+		} else {
+			exists = true
+		}
+	}
+	if !exists {
+		return fmt.Errorf("delete app %s: unknown app: %w", app, ErrNotFound)
+	}
+
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return fmt.Errorf("delete app %s: loading guardrail policy: %w", app, err)
+	}
+	if err := pol.evaluateGuardrail("app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app)); err != nil {
+		return err
+	}
+
+	// Tear down, tolerating already-absent pieces: workload, then routing, then release records.
+	if err := e.k8s.DeleteWorkload(ctx, app); err != nil && !errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("delete app %s: removing workload: %w", app, err)
+	}
+	if err := e.k8s.Unexpose(ctx, app); err != nil && !errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("delete app %s: removing routing: %w", app, err)
+	}
+	if err := e.db.DeleteReleases(ctx, app); err != nil {
+		return fmt.Errorf("delete app %s: removing release history: %w", app, err)
+	}
+	return nil
+}
+
 // hasCapability reports whether a carries the named capability.
 func hasCapability(a AddonInfo, capability string) bool {
 	for _, c := range a.Capabilities {

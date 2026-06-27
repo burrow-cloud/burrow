@@ -307,6 +307,16 @@ func (c *Client) Logs(ctx context.Context, app string, tail int) ([]LogLine, err
 	return out.Lines, err
 }
 
+// DeleteApp removes an app entirely — its workload, routing, and release history. The delete
+// is guarded and held for confirmation by default; pass confirm=true to proceed past the hold.
+func (c *Client) DeleteApp(ctx context.Context, app string, confirm bool) error {
+	path := "/v1/apps/" + url.PathEscape(app)
+	if confirm {
+		path += "?confirm=true"
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
 func (c *Client) Rollback(ctx context.Context, app string) (RollbackResult, error) {
 	var out RollbackResult
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "rollback"), nil, &out)

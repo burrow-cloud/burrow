@@ -128,6 +128,31 @@ func TestStoreOverwriteKeepsOrder(t *testing.T) {
 	}
 }
 
+// TestStoreDeleteReleases removes every release for an app and leaves no rows behind; deleting
+// an app that has no releases is a no-op, not an error.
+func TestStoreDeleteReleases(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-web"
+
+	for _, id := range []string{t.Name() + "-r1", t.Name() + "-r2"} {
+		if err := s.SaveRelease(ctx, cp.Release{ID: id, App: app, Image: "img:1", Status: cp.ReleaseDeployed}); err != nil {
+			t.Fatalf("SaveRelease(%s): %v", id, err)
+		}
+	}
+
+	if err := s.DeleteReleases(ctx, app); err != nil {
+		t.Fatalf("DeleteReleases: %v", err)
+	}
+	if all, err := s.Releases(ctx, app); err != nil || len(all) != 0 {
+		t.Fatalf("Releases after delete = %+v (err=%v), want empty", all, err)
+	}
+	// Deleting again (no releases) is a no-op.
+	if err := s.DeleteReleases(ctx, app); err != nil {
+		t.Errorf("DeleteReleases on empty: %v", err)
+	}
+}
+
 func TestStoreRoundTripsEnvCommandAndTime(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t)

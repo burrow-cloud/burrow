@@ -142,6 +142,9 @@ type Database interface {
 	// Releases returns all releases for app, oldest first. An app with no releases
 	// yields an empty slice and no error.
 	Releases(ctx context.Context, app string) ([]Release, error)
+	// DeleteReleases removes all release records for app — the durable side of an app
+	// teardown. Deleting the releases of an app that has none is a no-op, not an error.
+	DeleteReleases(ctx context.Context, app string) error
 
 	// Policy returns the current guardrail policy: the stored guardrail dispositions
 	// overlaid on the built-in defaults (DefaultPolicy), so a store with nothing set

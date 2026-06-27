@@ -139,6 +139,21 @@ func (d *Database) Releases(ctx context.Context, app string) ([]controlplane.Rel
 	return out, nil
 }
 
+// DeleteReleases removes every release record for app, including its save-order tracking.
+// Deleting the releases of an app that has none is a no-op, not an error.
+func (d *Database) DeleteReleases(ctx context.Context, app string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpDeleteReleases]; err != nil {
+		return err
+	}
+	for _, id := range d.order[app] {
+		delete(d.byID, id)
+	}
+	delete(d.order, app)
+	return nil
+}
+
 // SaveProvider upserts a provider by name. It stores only the non-secret registry entry.
 func (d *Database) SaveProvider(ctx context.Context, p controlplane.Provider) error {
 	d.mu.Lock()

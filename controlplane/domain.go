@@ -79,6 +79,10 @@ type Release struct {
 	Env map[string]string `json:"env,omitempty"`
 	// Command overrides the image's default command, when set.
 	Command []string `json:"command,omitempty"`
+	// MetricsPort, when positive, is the container port the app serves Prometheus metrics on.
+	// The deploy annotates the pod (prometheus.io/scrape, /port, /path) so the metrics add-on's
+	// scraper discovers and scrapes /metrics on it. Zero means no metrics annotations (ADR-0026).
+	MetricsPort int32 `json:"metrics_port,omitempty"`
 	// Replicas is the desired replica count.
 	Replicas int32 `json:"replicas"`
 	// Status is the lifecycle state of this release.

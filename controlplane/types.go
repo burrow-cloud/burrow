@@ -28,12 +28,16 @@ const (
 // code-free description a deploy turns into (ADR-0004): a kind, a pullable image, and
 // metadata.
 type WorkloadSpec struct {
-	App      string
-	Kind     WorkloadKind
-	Image    string
-	Env      map[string]string
-	Command  []string
-	Replicas int32
+	App     string
+	Kind    WorkloadKind
+	Image   string
+	Env     map[string]string
+	Command []string
+	// MetricsPort, when positive, is the container port the app serves Prometheus metrics on.
+	// buildDeployment annotates the pod template (prometheus.io/scrape, /port, /path) so the
+	// metrics add-on's scraper discovers and scrapes /metrics on it. Zero adds no annotations.
+	MetricsPort int32
+	Replicas    int32
 }
 
 // ExposeSpec describes how to make an app reachable at a hostname (ADR-0018). v0.2 routes

@@ -52,6 +52,7 @@ func newDeployCmd() *cobra.Command {
 	o := &commonOpts{}
 	var image, build string
 	var replicas int
+	var metricsPort int
 	var confirm bool
 	var env kvFlag
 	cmd := &cobra.Command{
@@ -96,11 +97,12 @@ func newDeployCmd() *cobra.Command {
 				}
 			}
 			res, err := c.Deploy(ctx, app, client.DeployRequest{
-				Image:    image,
-				Env:      env.m,
-				Command:  command,
-				Replicas: int32(replicas),
-				Confirm:  confirm,
+				Image:       image,
+				Env:         env.m,
+				Command:     command,
+				MetricsPort: int32(metricsPort),
+				Replicas:    int32(replicas),
+				Confirm:     confirm,
 			})
 			if err != nil {
 				return err
@@ -116,6 +118,7 @@ func newDeployCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().StringVar(&image, "image", "", "container image reference to deploy (required)")
 	cmd.Flags().IntVar(&replicas, "replicas", 1, "number of replicas")
+	cmd.Flags().IntVar(&metricsPort, "metrics-port", 0, "annotate the pod so the metrics add-on scrapes /metrics on this port")
 	cmd.Flags().StringVar(&build, "build", "", "build and push the image from this directory before deploying")
 	cmd.Flags().Var(&env, "env", "environment variable KEY=VALUE (repeatable)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")

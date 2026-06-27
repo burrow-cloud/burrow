@@ -133,15 +133,16 @@ func TestStoreRoundTripsEnvCommandAndTime(t *testing.T) {
 	s := openStore(t)
 	when := time.Date(2026, 6, 23, 15, 4, 5, 0, time.UTC)
 	in := cp.Release{
-		ID:        t.Name() + "-r1",
-		App:       t.Name() + "-web",
-		Image:     "registry.example.com/web@sha256:abc",
-		Digest:    "sha256:abc",
-		Env:       map[string]string{"A": "1", "B": "two"},
-		Command:   []string{"server", "--port", "8080"},
-		Replicas:  3,
-		Status:    cp.ReleaseDeployed,
-		CreatedAt: when,
+		ID:          t.Name() + "-r1",
+		App:         t.Name() + "-web",
+		Image:       "registry.example.com/web@sha256:abc",
+		Digest:      "sha256:abc",
+		Env:         map[string]string{"A": "1", "B": "two"},
+		Command:     []string{"server", "--port", "8080"},
+		MetricsPort: 8080,
+		Replicas:    3,
+		Status:      cp.ReleaseDeployed,
+		CreatedAt:   when,
 	}
 	if err := s.SaveRelease(ctx, in); err != nil {
 		t.Fatalf("SaveRelease: %v", err)
@@ -159,6 +160,9 @@ func TestStoreRoundTripsEnvCommandAndTime(t *testing.T) {
 	}
 	if got.Digest != "sha256:abc" {
 		t.Errorf("Digest = %q, want sha256:abc", got.Digest)
+	}
+	if got.MetricsPort != 8080 {
+		t.Errorf("MetricsPort = %d, want 8080", got.MetricsPort)
 	}
 	if !got.CreatedAt.Equal(when) {
 		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, when)

@@ -273,9 +273,12 @@ echo "=== seed a known log line into Loki from inside the cluster ==="
 kubectl --kubeconfig "$KCFG" -n burrow-e2e-loki run loki-seed \
   --image=curlimages/curl:8.11.1 --restart=Never --attach --rm -q -- \
   sh -c '
-    ts=$(date +%s%N)
-    payload="{\"streams\":[{\"stream\":{\"app\":\"burrow-e2e\",\"job\":\"burrow-e2e\"},\"values\":[[\"$ts\",\"BURROW_E2E_LOKI_MARKER level=error checkout handler panicked\"]]}]}"
     for i in $(seq 1 20); do
+      # busybox `date` (the curl image) has no %N, so build nanoseconds as seconds * 1e9
+      # (append nine zeros). A seconds value sent where Loki expects nanoseconds lands in
+      # 1970 and is rejected as "timestamp too old"; recompute each attempt so it stays now.
+      ts="$(date +%s)000000000"
+      payload="{\"streams\":[{\"stream\":{\"app\":\"burrow-e2e\",\"job\":\"burrow-e2e\"},\"values\":[[\"$ts\",\"BURROW_E2E_LOKI_MARKER level=error checkout handler panicked\"]]}]}"
       code=$(curl -s -o /dev/null -w "%{http_code}" -XPOST \
         -H "Content-Type: application/json" \
         "http://loki.burrow-e2e-loki.svc:3100/loki/api/v1/push" \

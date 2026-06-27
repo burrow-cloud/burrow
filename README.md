@@ -90,7 +90,7 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code
 | --- | --- | --- |
 | **v0.1** | Install into an existing cluster · connect an agent over MCP · deploy an image by reference · status · logs · rollback · scale · in-place upgrade | ✅ shipped ([v0.1.1](https://github.com/burrow-cloud/burrow/tree/v0.1.1)) |
 | **v0.2** | Reach a deployed app at a URL: shared-ingress routing · `expose` + TLS via cert-manager · `reachability` surface · DNS automation (DigitalOcean / Cloudflare providers, `domain add/remove`) · `ingress install` setup · configurable guardrail policy | ✅ shipped ([v0.2.1](https://github.com/burrow-cloud/burrow/tree/v0.2.1)) |
-| **v0.3** | Operability + agent-experience hardening: CLI grouped by task (`app`/`config`/`system`, `expose`→`publish`) · `app list` · account-scoped Cloudflare tokens · ingress-class binding · public-DNS reachability checks · burrowd request log | 🚧 in progress |
+| **v0.3** | Operability + agent-experience hardening: CLI grouped by task (`app`/`config`/`system`, `expose`→`publish`) · `app list` · account-scoped Cloudflare tokens · ingress-class binding · public-DNS reachability checks · burrowd request log | ✅ shipped ([v0.3.0](https://github.com/burrow-cloud/burrow/tree/v0.3.0)) |
 | v0.4 | Server-side build from a git reference · DNS-01 issuer · provider-record reachability · `app delete` · further day-two operations | planned ([roadmap](docs/ROADMAP.md)) |
 | v1.0 | Production self-host: hardened deploy-and-operate core with day-two operations | planned ([roadmap](docs/ROADMAP.md)) |
 

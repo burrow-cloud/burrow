@@ -156,7 +156,7 @@ func TestAddonDeployListDelete(t *testing.T) {
 	const addonNS = "burrow-addons"
 	a := kube.New(client, ns).WithAddonNamespace(addonNS)
 
-	spec := cp.AddonSpec{Type: cp.AddonLogs, Image: "victoria-logs:test", Port: 9428, StorageGi: 5, Capabilities: []string{"logs"}}
+	spec := cp.AddonSpec{Type: cp.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428, StorageGi: 5, Capabilities: []string{"logs"}}
 	info, err := a.DeployAddon(ctx, spec)
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
@@ -191,10 +191,20 @@ func TestAddonDeployListDelete(t *testing.T) {
 		t.Errorf("collector config: %v", err)
 	}
 
-	// List finds it with capabilities resolved from the catalog.
-	list, err := a.ListAddons(ctx)
-	if err != nil || len(list) != 1 || list[0].Name != "burrow-logs" || len(list[0].Capabilities) != 1 {
-		t.Fatalf("ListAddons = %+v err=%v", list, err)
+	// Backend is carried through from the spec onto the returned info.
+	if info.Backend != "victorialogs" {
+		t.Errorf("backend = %q, want victorialogs", info.Backend)
+	}
+
+	// AddonReady probes the live Deployment: the fake's Deployment has no available replicas,
+	// so it reports not-ready, and an unknown add-on is not-ready without error.
+	if ready, err := a.AddonReady(ctx, "burrow-logs"); err != nil {
+		t.Errorf("AddonReady(burrow-logs) err = %v", err)
+	} else if ready {
+		t.Errorf("AddonReady(burrow-logs) = true, want false (no available replicas in fake)")
+	}
+	if ready, err := a.AddonReady(ctx, "nope"); err != nil || ready {
+		t.Errorf("AddonReady(nope) = %v err=%v, want false nil", ready, err)
 	}
 
 	// Delete removes it; deleting a missing add-on is ErrNotFound.

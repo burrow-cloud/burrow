@@ -3,7 +3,10 @@
 
 package controlplane
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // AddonType identifies a building-block backing service in the curated catalog (ADR-0025).
 type AddonType string
@@ -18,6 +21,9 @@ const (
 // copyleft friction (ADR-0025) — which is why logs is VictoriaLogs (Apache), not AGPL Loki.
 type AddonSpec struct {
 	Type AddonType
+	// Backend is the concrete adapter implementation that backs this add-on (e.g.
+	// "victorialogs"), recorded in the registry so the agent knows which adapter serves it.
+	Backend string
 	// Image is the pinned container image for the backing service.
 	Image string
 	// Port is the service port the app (or the agent, for an observability add-on) reaches it on.
@@ -37,6 +43,7 @@ type AddonSpec struct {
 var addonCatalog = map[AddonType]AddonSpec{
 	AddonLogs: {
 		Type:         AddonLogs,
+		Backend:      "victorialogs",
 		Image:        "victoriametrics/victoria-logs:v1.51.0", // VictoriaLogs, Apache-2.0
 		Port:         9428,
 		StorageGi:    10,
@@ -68,9 +75,15 @@ type AddonInfo struct {
 	Type AddonType `json:"type"`
 	// Mode is how the backend is provided: "installed" (Burrow deployed it) or "connected"
 	// (an existing backend the user runs). Installed-only for now; connect lands later (ADR-0026).
-	Mode         string   `json:"mode"`
+	Mode string `json:"mode"`
+	// Backend is the concrete adapter implementation backing this add-on (e.g. "victorialogs").
+	Backend      string   `json:"backend,omitempty"`
 	Image        string   `json:"image,omitempty"`
 	Endpoint     string   `json:"endpoint"` // in-cluster host:port the app or agent reaches it on
 	Capabilities []string `json:"capabilities"`
-	Ready        bool     `json:"ready"`
+	// CreatedAt is when the add-on was registered, read from the injected clock.
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	// Ready is a live property — whether the backing Deployment is available. It is probed
+	// from the cluster at list time and never persisted in the registry.
+	Ready bool `json:"ready"`
 }

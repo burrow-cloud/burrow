@@ -6,7 +6,6 @@ package kube
 import (
 	"context"
 	"fmt"
-	"sort"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -102,6 +101,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		Name:         name,
 		Type:         spec.Type,
 		Mode:         "installed",
+		Backend:      spec.Backend,
 		Image:        spec.Image,
 		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.addonNamespace, spec.Port),
 		Capabilities: spec.Capabilities,
@@ -181,38 +181,19 @@ func (a *Adapter) deployLogsCollector(ctx context.Context, store string, labels 
 	return nil
 }
 
-func (a *Adapter) ListAddons(ctx context.Context) ([]controlplane.AddonInfo, error) {
-	deps, err := a.client.AppsV1().Deployments(a.addonNamespace).List(ctx, metav1.ListOptions{LabelSelector: addonLabel})
+// AddonReady reports whether the named add-on's backing Deployment is available (ADR-0025).
+// Readiness is a live property of the cluster — the registry of what add-ons exist lives in the
+// database — so this is a cheap single-Deployment probe. A missing Deployment is reported as not
+// ready (false, nil); only a real API error is returned.
+func (a *Adapter) AddonReady(ctx context.Context, name string) (bool, error) {
+	dep, err := a.client.AppsV1().Deployments(a.addonNamespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("kube: listing addons: %w", err)
+		return false, fmt.Errorf("kube: reading addon %q: %w", name, err)
 	}
-	out := make([]controlplane.AddonInfo, 0, len(deps.Items))
-	for i := range deps.Items {
-		dep := &deps.Items[i]
-		image, port := "", int32(0)
-		if c := dep.Spec.Template.Spec.Containers; len(c) > 0 {
-			image = c[0].Image
-			if len(c[0].Ports) > 0 {
-				port = c[0].Ports[0].ContainerPort
-			}
-		}
-		typ := controlplane.AddonType(dep.Labels[addonLabel])
-		var caps []string
-		if spec, ok := controlplane.LookupAddon(typ); ok {
-			caps = spec.Capabilities
-		}
-		out = append(out, controlplane.AddonInfo{
-			Name:         dep.Name,
-			Type:         typ,
-			Mode:         "installed",
-			Image:        image,
-			Endpoint:     fmt.Sprintf("%s.%s.svc:%d", dep.Name, a.addonNamespace, port),
-			Capabilities: caps,
-			Ready:        deploymentAvailable(dep, 1),
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return deploymentAvailable(dep, 1), nil
 }
 
 func (a *Adapter) DeleteAddon(ctx context.Context, name string) error {

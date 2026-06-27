@@ -194,14 +194,32 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (A
 	if err != nil {
 		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
 	}
+	// Record the add-on in the registry — the DB is the source of truth for what add-ons exist
+	// (ADR-0025), like the provider registry. Readiness is never stored; it is probed live.
+	info.CreatedAt = e.clock.Now()
+	if err := e.db.SaveAddon(ctx, info); err != nil {
+		return AddonInfo{}, fmt.Errorf("install addon %s: recording in the registry: %w", t, err)
+	}
 	return info, nil
 }
 
-// ListAddons returns the installed (and, later, connected) add-on instances.
+// ListAddons returns the registered add-on instances from the registry, with live readiness
+// probed from the cluster for installed ones (ADR-0025). A readiness probe failure leaves an
+// entry not-ready rather than failing the whole listing.
 func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
-	addons, err := e.k8s.ListAddons(ctx)
+	addons, err := e.db.Addons(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list addons: %w", err)
+		return nil, fmt.Errorf("list addons: reading the registry: %w", err)
+	}
+	for i := range addons {
+		if addons[i].Mode != "installed" {
+			continue
+		}
+		ready, err := e.k8s.AddonReady(ctx, addons[i].Name)
+		if err != nil {
+			continue // leave Ready=false; a probe failure must not fail the listing
+		}
+		addons[i].Ready = ready
 	}
 	return addons, nil
 }
@@ -216,7 +234,18 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) err
 	if err := pol.evaluateGuardrail("addon remove", GuardrailAddonRemove, confirm, fmt.Sprintf("removing the add-on %q", name)); err != nil {
 		return err
 	}
-	if err := e.k8s.DeleteAddon(ctx, name); err != nil {
+	// The registry is the source of truth for what add-ons exist (ADR-0025): load it first so an
+	// unknown add-on is ErrNotFound, and only tear down cluster resources for an installed one.
+	info, err := e.db.Addon(ctx, name)
+	if err != nil {
+		return fmt.Errorf("remove addon %s: %w", name, err)
+	}
+	if info.Mode == "installed" {
+		if err := e.k8s.DeleteAddon(ctx, name); err != nil {
+			return fmt.Errorf("remove addon %s: %w", name, err)
+		}
+	}
+	if err := e.db.DeleteAddon(ctx, name); err != nil {
 		return fmt.Errorf("remove addon %s: %w", name, err)
 	}
 	return nil
@@ -229,7 +258,7 @@ func (e *Engine) QueryLogs(ctx context.Context, query string, limit int) ([]LogE
 	if e.logs == nil {
 		return nil, fmt.Errorf("query logs: logs querying is not configured: %w", ErrNotImplemented)
 	}
-	addons, err := e.k8s.ListAddons(ctx)
+	addons, err := e.db.Addons(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("query logs: %w", err)
 	}

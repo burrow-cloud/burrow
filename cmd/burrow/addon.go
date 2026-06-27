@@ -4,10 +4,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/burrow-cloud/burrow/client"
 )
 
 // newAddonCmd groups the building-block backing services Burrow installs and operates — vetted,
@@ -28,32 +31,88 @@ func newAddonCmd() *cobra.Command {
 func newAddonConnectCmd() *cobra.Command {
 	o := &commonOpts{}
 	var endpoint string
+	var auth bool
 	cmd := &cobra.Command{
 		Use:   "connect <backend>",
 		Short: "Register an existing backend you already run (e.g. loki) as a queryable capability",
 		Long: "connect registers an adapter to an existing backend you already run (logs → Loki) so\n" +
 			"your agent can query it — Burrow deploys nothing and the license bar does not apply, since\n" +
-			"it connects rather than distributes. Pass the in-cluster endpoint with --endpoint.",
+			"it connects rather than distributes. Pass the in-cluster endpoint with --endpoint.\n\n" +
+			"For an authenticated backend, pass --auth: you are prompted for a bearer token with the\n" +
+			"input hidden, which is written into the burrow-credentials Secret with your kubeconfig and\n" +
+			"read by the control plane at query time. The token never travels over the control-plane API\n" +
+			"— only the Secret key does.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			backend := args[0]
+
+			// Without --auth the backend is unauthenticated: no Secret is written and only the
+			// (empty) key crosses the API.
+			if !auth {
+				c, err := o.client(ctx)
+				if err != nil {
+					return err
+				}
+				a, err := c.ConnectAddon(ctx, backend, endpoint, "")
+				if err != nil {
+					return err
+				}
+				return emit(cmd.OutOrStdout(), o.json, a, connectHuman(a, ""))
+			}
+
+			// --auth: prompt for the token, write it into burrow-credentials with the developer's
+			// kubeconfig (ADR-0017/0023), then record the registry entry naming only the key. If the
+			// API call fails after the write, roll the Secret back so a rejected token is not left.
+			token, err := readToken(cmd.InOrStdin(), cmd.OutOrStdout(), fmt.Sprintf("Enter the %s bearer token: ", backend))
+			if err != nil {
+				return err
+			}
+			if token == "" {
+				return errors.New("no token provided")
+			}
+			key := "addon-" + backend
+
+			cs, err := clientset(o.kubeconfig)
+			if err != nil {
+				return err
+			}
+			prior, existed, err := readCredential(ctx, cs, o.namespace, key)
+			if err != nil {
+				return err
+			}
+			if err := writeCredential(ctx, cs, o.namespace, key, token); err != nil {
+				return err
+			}
 			c, err := o.client(ctx)
 			if err != nil {
+				restoreCredential(ctx, cs, o.namespace, key, prior, existed)
 				return err
 			}
-			a, err := c.ConnectAddon(ctx, args[0], endpoint)
+			a, err := c.ConnectAddon(ctx, backend, endpoint, key)
 			if err != nil {
+				restoreCredential(ctx, cs, o.namespace, key, prior, existed)
 				return err
 			}
-			human := fmt.Sprintf("connected the %s add-on %q (mode: %s)\nin-cluster endpoint: %s — capabilities: %s",
-				a.Type, a.Name, a.Mode, a.Endpoint, strings.Join(a.Capabilities, ", "))
-			return emit(cmd.OutOrStdout(), o.json, a, human)
+			return emit(cmd.OutOrStdout(), o.json, a, connectHuman(a, key))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().StringVar(&endpoint, "endpoint", "", "in-cluster host:port of the existing backend (required)")
+	cmd.Flags().BoolVar(&auth, "auth", false, "the backend requires a bearer token; prompt for it and store it in the burrow-credentials Secret")
 	_ = cmd.MarkFlagRequired("endpoint")
 	return cmd
+}
+
+// connectHuman is the human-readable confirmation for a connected add-on, noting where an
+// authenticated backend's token was stored when a key was used.
+func connectHuman(a client.Addon, key string) string {
+	human := fmt.Sprintf("connected the %s add-on %q (mode: %s)\nin-cluster endpoint: %s — capabilities: %s",
+		a.Type, a.Name, a.Mode, a.Endpoint, strings.Join(a.Capabilities, ", "))
+	if key != "" {
+		human += fmt.Sprintf("\nbearer token stored in %s under key %q", credentialsSecretName, key)
+	}
+	return human
 }
 
 func newAddonLogsCmd() *cobra.Command {

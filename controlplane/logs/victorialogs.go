@@ -25,6 +25,8 @@ var _ controlplane.LogsQuerier = VictoriaLogs{}
 
 // VictoriaLogs queries a VictoriaLogs store over its HTTP LogsQL API (Apache-2.0). The store's
 // in-cluster endpoint (host:port) is passed per query — burrowd reaches it directly, in-cluster.
+// An optional bearer token is supported for an authenticated store; the in-cluster install passes
+// "" (unauthenticated).
 type VictoriaLogs struct {
 	http *http.Client
 }
@@ -39,8 +41,9 @@ func NewVictoriaLogs(hc *http.Client) VictoriaLogs {
 
 // QueryLogs runs a LogsQL query against the store at endpoint and returns up to limit records.
 // VictoriaLogs answers /select/logsql/query as newline-delimited JSON, one object per record
-// with _time and _msg fields; an empty query matches everything.
-func (v VictoriaLogs) QueryLogs(ctx context.Context, endpoint, query string, limit int) ([]controlplane.LogEntry, error) {
+// with _time and _msg fields; an empty query matches everything. A non-empty token is sent as an
+// Authorization: Bearer header for an authenticated store.
+func (v VictoriaLogs) QueryLogs(ctx context.Context, endpoint, query string, limit int, token string) ([]controlplane.LogEntry, error) {
 	if strings.TrimSpace(query) == "" {
 		query = "*"
 	}
@@ -51,6 +54,9 @@ func (v VictoriaLogs) QueryLogs(ctx context.Context, endpoint, query string, lim
 		return nil, fmt.Errorf("victorialogs: building request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := v.http.Do(req)
 	if err != nil {

@@ -41,8 +41,10 @@ type LogEntry struct {
 // an optional seam — present only when logs querying is wired; the engine errors cleanly if not.
 type LogsQuerier interface {
 	// QueryLogs runs query against the logs store reachable at endpoint (an in-cluster
-	// host:port) and returns up to limit matching records, most recent first.
-	QueryLogs(ctx context.Context, endpoint, query string, limit int) ([]LogEntry, error)
+	// host:port) and returns up to limit matching records, most recent first. token is a bearer
+	// credential for an authenticated backend; an empty token means unauthenticated and no
+	// Authorization header is sent.
+	QueryLogs(ctx context.Context, endpoint, query string, limit int, token string) ([]LogEntry, error)
 }
 
 // Kubernetes is the seam over the target cluster: the only path from the control plane

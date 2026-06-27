@@ -210,9 +210,10 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (A
 // ConnectAddon registers an existing backend the user already runs (e.g. an in-cluster Loki) as a
 // queryable add-on, recording its endpoint and derived capabilities in the registry (ADR-0026).
 // Unlike install it deploys nothing and is not guarded — connect is registration-only. Connecting
-// the same backend twice upserts, updating the endpoint. Credentials are a deferred follow-up; for
-// now this targets an unauthenticated backend.
-func (e *Engine) ConnectAddon(ctx context.Context, backend, endpoint string) (AddonInfo, error) {
+// the same backend twice upserts, updating the endpoint. secretKey is the (non-secret) key under
+// which a bearer token for an authenticated backend lives in the burrow-credentials Secret; "" means
+// the backend is unauthenticated. The token itself never crosses here — only the key (ADR-0004/0023).
+func (e *Engine) ConnectAddon(ctx context.Context, backend, endpoint, secretKey string) (AddonInfo, error) {
 	b, ok := LookupConnectBackend(backend)
 	if !ok {
 		return AddonInfo{}, fmt.Errorf("connect addon: unknown backend %q: %w", backend, ErrInvalid)
@@ -227,6 +228,7 @@ func (e *Engine) ConnectAddon(ctx context.Context, backend, endpoint string) (Ad
 		Backend:      backend,
 		Endpoint:     endpoint,
 		Capabilities: b.Capabilities,
+		SecretKey:    secretKey,
 		CreatedAt:    e.clock.Now(),
 	}
 	if err := e.db.SaveAddon(ctx, info); err != nil {
@@ -318,7 +320,17 @@ func (e *Engine) QueryLogs(ctx context.Context, query string, limit int) ([]LogE
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	entries, err := q.QueryLogs(ctx, addon.Endpoint, query, limit)
+	// An authenticated backend records the key under which its bearer token lives in the
+	// burrow-credentials Secret; read it at query time so a rotation is picked up with no restart
+	// (ADR-0023). An empty SecretKey means the backend is unauthenticated — pass no token.
+	token := ""
+	if addon.SecretKey != "" {
+		token, err = e.credentials.Token(ctx, addon.SecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("query logs: reading token for add-on %q under key %q: %w", addon.Name, addon.SecretKey, err)
+		}
+	}
+	entries, err := q.QueryLogs(ctx, addon.Endpoint, query, limit, token)
 	if err != nil {
 		return nil, fmt.Errorf("query logs: %w", err)
 	}

@@ -97,6 +97,15 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		}
 	}
 
+	// A metrics store stays empty without something feeding it: there is no pre-existing
+	// Prometheus to scrape the app. Deploy a vmagent (Apache-2.0) that discovers app pods via
+	// the Kubernetes API and remote-writes the samples it scrapes into the store.
+	if spec.Type == controlplane.AddonMetrics {
+		if err := a.deployMetricsCollector(ctx, name, labels); err != nil {
+			return controlplane.AddonInfo{}, err
+		}
+	}
+
 	return controlplane.AddonInfo{
 		Name:         name,
 		Type:         spec.Type,
@@ -181,6 +190,101 @@ func (a *Adapter) deployLogsCollector(ctx context.Context, store string, labels 
 	return nil
 }
 
+// vmagentImage is the pinned metrics collector (Apache-2.0). It scrapes app pods and
+// remote-writes to the store.
+const vmagentImage = "victoriametrics/vmagent:v1.115.0"
+
+// vmagentPort is vmagent's own HTTP listen port. Exposing it lets vmagent self-scrape (the
+// kubernetes-pods job below targets localhost:8429), so up{job="vmagent"} always exists.
+const vmagentPort = 8429
+
+// vmagentConfig is vmagent's Prometheus-style scrape config. It self-scrapes (so the metrics
+// pipeline has a guaranteed series) and discovers pods in the app namespace, keeping only those
+// annotated prometheus.io/scrape: "true" and scraping them on their prometheus.io/port. %s is the
+// app namespace.
+const vmagentConfig = `global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: vmagent
+    static_configs:
+      - targets: ['localhost:8429']
+  - job_name: kubernetes-pods
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [%s]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+`
+
+// deployMetricsCollector deploys vmagent alongside the metrics store: a ConfigMap holding the
+// scrape config and a single-replica Deployment (vmagent does API-based service discovery, so one
+// replica suffices — no DaemonSet) that remote-writes into the store. vmagent runs as the
+// burrow-vmagent ServiceAccount, whose read-only pod-discovery RBAC in the app namespace is
+// pre-provisioned at install time so burrowd never needs RBAC-creation powers.
+func (a *Adapter) deployMetricsCollector(ctx context.Context, store string, labels map[string]string) error {
+	name := store + "-collector"
+	cmLabels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: labels[addonLabel]}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: cmLabels},
+		Data:       map[string]string{"scrape.yml": fmt.Sprintf(vmagentConfig, a.namespace)},
+	}
+	if _, err := a.client.CoreV1().ConfigMaps(a.addonNamespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("kube: creating collector config %q: %w", name, err)
+	}
+
+	replicas := int32(1)
+	remoteWrite := fmt.Sprintf("http://%s.%s.svc:8428/api/v1/write", store, a.addonNamespace)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: cmLabels},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{nameLabel: name}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: cmLabels},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "burrow-vmagent",
+					Containers: []corev1.Container{{
+						Name:  "vmagent",
+						Image: vmagentImage,
+						Args: []string{
+							"-promscrape.config=/config/scrape.yml",
+							"-remoteWrite.url=" + remoteWrite,
+						},
+						Ports: []corev1.ContainerPort{{ContainerPort: vmagentPort}},
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "config", MountPath: "/config"},
+						},
+					}},
+					Volumes: []corev1.Volume{
+						{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}},
+					},
+				},
+			},
+		},
+	}
+	if _, err := a.client.AppsV1().Deployments(a.addonNamespace).Create(ctx, dep, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("kube: creating collector %q: %w", name, err)
+	}
+	return nil
+}
+
 // AddonReady reports whether the named add-on's backing Deployment is available (ADR-0025).
 // Readiness is a live property of the cluster — the registry of what add-ons exist lives in the
 // database — so this is a cheap single-Deployment probe. A missing Deployment is reported as not
@@ -209,9 +313,12 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string) error {
 	}
 	_ = a.client.CoreV1().Services(a.addonNamespace).Delete(ctx, name, metav1.DeleteOptions{})
 	_ = a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace).Delete(ctx, name, metav1.DeleteOptions{})
-	// And the logs collector, if this add-on had one (harmless no-op otherwise).
+	// And the collector, if this add-on had one (harmless no-op otherwise). The logs collector
+	// is a DaemonSet and the metrics collector (vmagent) a Deployment, both named
+	// <name>-collector; delete both, one of which will NotFound harmlessly.
 	collector := name + "-collector"
 	_ = a.client.AppsV1().DaemonSets(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
+	_ = a.client.AppsV1().Deployments(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
 	_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
 	return nil
 }
@@ -221,6 +328,8 @@ func addonDataPath(t controlplane.AddonType) string {
 	switch t {
 	case controlplane.AddonLogs:
 		return "/vlogs"
+	case controlplane.AddonMetrics:
+		return "/victoria-metrics-data"
 	default:
 		return "/data"
 	}
@@ -232,6 +341,9 @@ func addonArgs(spec controlplane.AddonSpec) []string {
 	switch spec.Type {
 	case controlplane.AddonLogs:
 		return []string{fmt.Sprintf("-httpListenAddr=:%d", spec.Port), "-storageDataPath=" + addonDataPath(spec.Type)}
+	case controlplane.AddonMetrics:
+		// -retentionPeriod=1 keeps one month of samples (VictoriaMetrics' default unit is months).
+		return []string{fmt.Sprintf("-httpListenAddr=:%d", spec.Port), "-storageDataPath=" + addonDataPath(spec.Type), "-retentionPeriod=1"}
 	default:
 		return nil
 	}

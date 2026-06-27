@@ -222,6 +222,61 @@ func TestAddonDeployListDelete(t *testing.T) {
 	}
 }
 
+func TestAddonMetricsDeployDelete(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	const addonNS = "burrow-addons"
+	a := kube.New(client, ns).WithAddonNamespace(addonNS)
+
+	spec := cp.AddonSpec{Type: cp.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428, StorageGi: 10, Capabilities: []string{"metrics"}}
+	info, err := a.DeployAddon(ctx, spec)
+	if err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+	if info.Name != "burrow-metrics" || info.Backend != "victoriametrics" || len(info.Capabilities) != 1 || info.Capabilities[0] != "metrics" {
+		t.Errorf("info = %+v, want burrow-metrics victoriametrics [metrics]", info)
+	}
+
+	// The store: Deployment, Service, and PVC in the add-on namespace.
+	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics", metav1.GetOptions{}); err != nil {
+		t.Errorf("store deployment: %v", err)
+	}
+	if _, err := client.CoreV1().Services(addonNS).Get(ctx, "burrow-metrics", metav1.GetOptions{}); err != nil {
+		t.Errorf("store service: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, "burrow-metrics", metav1.GetOptions{}); err != nil {
+		t.Errorf("store pvc: %v", err)
+	}
+	// The collector is a Deployment (vmagent) + ConfigMap, NOT a DaemonSet.
+	col, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("collector deployment: %v", err)
+	}
+	if col.Spec.Template.Spec.ServiceAccountName != "burrow-vmagent" {
+		t.Errorf("collector serviceAccount = %q, want burrow-vmagent", col.Spec.Template.Spec.ServiceAccountName)
+	}
+	if _, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{}); err != nil {
+		t.Errorf("collector config: %v", err)
+	}
+	if _, err := client.AppsV1().DaemonSets(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("metrics collector should be a Deployment, not a DaemonSet, got %v", err)
+	}
+
+	// Delete removes the store and the vmagent collector Deployment + ConfigMap.
+	if err := a.DeleteAddon(ctx, "burrow-metrics"); err != nil {
+		t.Fatalf("DeleteAddon: %v", err)
+	}
+	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("store deployment should be gone, got %v", err)
+	}
+	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("collector deployment should be gone, got %v", err)
+	}
+	if _, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("collector config should be gone, got %v", err)
+	}
+}
+
 func TestListWorkloads(t *testing.T) {
 	ctx := context.Background()
 	mk := func(name, image string, desired, ready int32, managed bool) *appsv1.Deployment {

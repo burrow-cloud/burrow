@@ -6,6 +6,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -24,7 +25,7 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
 	return cmd
 }
 
@@ -157,6 +158,61 @@ func newAddonLogsCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().IntVar(&limit, "limit", 0, "maximum records to return (default 200)")
 	return cmd
+}
+
+func newAddonMetricsCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "metrics <query>",
+		Short: "Query the connected metrics add-on with an instant PromQL query",
+		Long: "metrics runs an instant PromQL query against the connected metrics store (Prometheus or\n" +
+			"VictoriaMetrics) — e.g. `up`, `rate(http_requests_total[5m])`. Connect one first with\n" +
+			"`burrow addon connect prometheus --endpoint <host:port>`.",
+		Args: exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			samples, err := c.QueryMetrics(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if o.json {
+				return emit(out, true, samples, "")
+			}
+			if len(samples) == 0 {
+				fmt.Fprintln(out, "no matching samples")
+				return nil
+			}
+			for _, s := range samples {
+				if len(s.Labels) > 0 {
+					fmt.Fprintf(out, "%s  %s\n", metricLabels(s.Labels), s.Value)
+				} else {
+					fmt.Fprintln(out, s.Value)
+				}
+			}
+			return nil
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	return cmd
+}
+
+// metricLabels renders a sample's labels in a stable {k="v",...} form for the human-readable listing.
+func metricLabels(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%q", k, labels[k]))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 func newAddonInstallCmd() *cobra.Command {

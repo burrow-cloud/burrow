@@ -87,7 +87,8 @@ type ConnectBackend struct {
 // license bar does not apply to connect — Burrow queries these, it does not distribute them
 // (ADR-0026) — so AGPL backends like Loki are fine here.
 var connectCatalog = map[string]ConnectBackend{
-	"loki": {Name: "loki", Capabilities: []string{"logs"}, Summary: "Grafana Loki (existing log store)"},
+	"loki":       {Name: "loki", Capabilities: []string{"logs"}, Summary: "Grafana Loki (existing log store)"},
+	"prometheus": {Name: "prometheus", Capabilities: []string{"metrics"}, Summary: "Prometheus (existing metrics store)"},
 }
 
 // ConnectCatalog returns the connectable backends in a stable name order.

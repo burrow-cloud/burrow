@@ -50,6 +50,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, logsQueryTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_metrics_query",
+		Description: "Run an instant PromQL query against the cluster's connected metrics store (Prometheus or VictoriaMetrics) to answer how an app is performing — CPU, memory, request rate, error rate, latency. Examples: `up`, `rate(http_requests_total[5m])`, `sum(rate(http_requests_total{status=~\"5..\"}[5m]))`, `container_memory_usage_bytes`. Returns the matching samples (each with its labels and value). Needs a metrics add-on connected first (`burrow addon connect prometheus`).",
+	}, metricsQueryTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_status",
 		Description: "Report an application's status: its most recent release and the live workload state (desired/ready replicas, availability).",
 	}, statusTool(c))
@@ -406,6 +411,34 @@ func logsQueryTool(c *client.Client) sdk.ToolHandlerFor[logsQueryInput, logsQuer
 		out := logsQueryOutput{Entries: make([]logEntry, 0, len(es))}
 		for _, e := range es {
 			out.Entries = append(out.Entries, logEntry{Time: e.Time, Message: e.Message, Pod: e.Pod})
+		}
+		return nil, out, nil
+	}
+}
+
+type metricsQueryInput struct {
+	Query string `json:"query" jsonschema:"an instant PromQL query, e.g. up or rate(http_requests_total[5m])"`
+}
+
+type metricSample struct {
+	Labels map[string]string `json:"labels,omitempty"`
+	Value  string            `json:"value"`
+	Time   string            `json:"time,omitempty"`
+}
+
+type metricsQueryOutput struct {
+	Samples []metricSample `json:"samples"`
+}
+
+func metricsQueryTool(c *client.Client) sdk.ToolHandlerFor[metricsQueryInput, metricsQueryOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in metricsQueryInput) (*sdk.CallToolResult, metricsQueryOutput, error) {
+		ss, err := c.QueryMetrics(ctx, in.Query)
+		if err != nil {
+			return nil, metricsQueryOutput{}, err
+		}
+		out := metricsQueryOutput{Samples: make([]metricSample, 0, len(ss))}
+		for _, s := range ss {
+			out.Samples = append(out.Samples, metricSample{Labels: s.Labels, Value: s.Value, Time: s.Time})
 		}
 		return nil, out, nil
 	}

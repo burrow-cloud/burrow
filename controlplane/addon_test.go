@@ -27,25 +27,48 @@ func (s *stubLogs) QueryLogs(_ context.Context, endpoint, _ string, _ int, token
 	return []cp.LogEntry{{Message: "hello"}}, nil
 }
 
-// newAddonEngine builds an engine with a logs querier wired, returning the seams a test needs to
-// arrange and inspect the add-on registry.
+// stubMetrics is an inline MetricsQuerier that records the endpoint and bearer token it was queried
+// with and returns a fixed sample, so a QueryMetrics test can assert the engine resolved the add-on
+// from the registry and threaded the token through.
+type stubMetrics struct {
+	endpoint string
+	token    string
+}
+
+func (s *stubMetrics) QueryMetrics(_ context.Context, endpoint, _ string, token string) ([]cp.MetricSample, error) {
+	s.endpoint = endpoint
+	s.token = token
+	return []cp.MetricSample{{Value: "1"}}, nil
+}
+
+// newAddonEngine builds an engine with logs and metrics queriers wired, returning the seams a test
+// needs to arrange and inspect the add-on registry.
 func newAddonEngine(t *testing.T) (*cp.Engine, *fake.Database, *fake.Clock, *stubLogs, *fake.Credentials) {
+	t.Helper()
+	e, d, c, logs, _, creds := newAddonEngineFull(t)
+	return e, d, c, logs, creds
+}
+
+// newAddonEngineFull is like newAddonEngine but also returns the metrics stub, for the metrics tests.
+func newAddonEngineFull(t *testing.T) (*cp.Engine, *fake.Database, *fake.Clock, *stubLogs, *stubMetrics, *fake.Credentials) {
 	t.Helper()
 	d := fake.NewDatabase()
 	d.SetPolicy(permissive())
 	c := fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC))
 	logs := &stubLogs{}
+	mets := &stubMetrics{}
 	creds := fake.NewCredentials()
 	e, err := cp.New(cp.Deps{
 		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
 		Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: creds, DNS: fake.NewDNSFactory(),
-		Logs: map[string]cp.LogsQuerier{"victorialogs": logs, "loki": logs},
+		Logs:    map[string]cp.LogsQuerier{"victorialogs": logs, "loki": logs},
+		Metrics: map[string]cp.MetricsQuerier{"prometheus": mets, "victoriametrics": mets},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return e, d, c, logs, creds
+	return e, d, c, logs, mets, creds
 }
 
 // TestInstallListQueryRemoveAddon exercises the full registry-backed lifecycle: install records
@@ -200,5 +223,67 @@ func TestQueryLogsNoAddon(t *testing.T) {
 	e, _, _, _, _ := newAddonEngine(t)
 	if _, err := e.QueryLogs(ctx, "*", 10); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("QueryLogs with no add-on err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestConnectMetricsAndQuery connects an existing Prometheus and queries it: connect records a
+// connected add-on with the metrics capability, and a metrics query then dispatches to the querier
+// keyed by that backend, resolving its endpoint from the registry.
+func TestConnectMetricsAndQuery(t *testing.T) {
+	ctx := context.Background()
+	e, d, _, _, mets, _ := newAddonEngineFull(t)
+
+	info, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "")
+	if err != nil {
+		t.Fatalf("ConnectAddon: %v", err)
+	}
+	if info.Mode != "connected" || info.Backend != "prometheus" ||
+		len(info.Capabilities) != 1 || info.Capabilities[0] != "metrics" {
+		t.Errorf("info = %+v, want connected prometheus with metrics capability", info)
+	}
+	if got, err := d.Addon(ctx, "prometheus"); err != nil || got.Mode != "connected" {
+		t.Fatalf("registry Addon = %+v err=%v", got, err)
+	}
+
+	samples, err := e.QueryMetrics(ctx, `up{job="web"}`)
+	if err != nil {
+		t.Fatalf("QueryMetrics: %v", err)
+	}
+	if len(samples) != 1 || samples[0].Value != "1" {
+		t.Errorf("samples = %+v, want one sample with value 1", samples)
+	}
+	if mets.endpoint != "prometheus.monitoring.svc:9090" {
+		t.Errorf("QueryMetrics resolved endpoint %q, want the connected Prometheus endpoint", mets.endpoint)
+	}
+	if mets.token != "" {
+		t.Errorf("QueryMetrics token = %q, want empty for an unauthenticated add-on", mets.token)
+	}
+}
+
+// TestConnectMetricsAuthThreadsToken connects an authenticated Prometheus (a SecretKey), seeds the
+// Credentials fake with that key's token, and asserts a metrics query reads the token through the
+// Credentials seam and threads it to the querier — the token lives only in the Secret (ADR-0023).
+func TestConnectMetricsAuthThreadsToken(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _, mets, creds := newAddonEngineFull(t)
+
+	creds.Set("addon-prometheus", "s3cr3t")
+	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "addon-prometheus"); err != nil {
+		t.Fatalf("ConnectAddon: %v", err)
+	}
+	if _, err := e.QueryMetrics(ctx, "up"); err != nil {
+		t.Fatalf("QueryMetrics: %v", err)
+	}
+	if mets.token != "s3cr3t" {
+		t.Errorf("QueryMetrics token = %q, want the token read from the Secret", mets.token)
+	}
+}
+
+// TestQueryMetricsNoAddon reports ErrNotFound when no metrics add-on is registered.
+func TestQueryMetricsNoAddon(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _, _, _ := newAddonEngineFull(t)
+	if _, err := e.QueryMetrics(ctx, "up"); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("QueryMetrics with no add-on err = %v, want ErrNotFound", err)
 	}
 }

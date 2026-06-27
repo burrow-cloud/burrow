@@ -277,6 +277,44 @@ func TestAddonMetricsDeployDelete(t *testing.T) {
 	}
 }
 
+func TestAddonCacheDeployDelete(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	const addonNS = "burrow-addons"
+	a := kube.New(client, ns).WithAddonNamespace(addonNS)
+
+	// A cache is ephemeral (StorageGi 0) and has no collector — the generic deploy path.
+	spec := cp.AddonSpec{Type: cp.AddonCache, Backend: "valkey", Image: "valkey:test", Port: 6379, StorageGi: 0, Capabilities: []string{"cache"}}
+	info, err := a.DeployAddon(ctx, spec)
+	if err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+	if info.Name != "burrow-cache" || info.Backend != "valkey" {
+		t.Errorf("info = %+v, want burrow-cache valkey", info)
+	}
+	// Deployment and Service exist.
+	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-cache", metav1.GetOptions{}); err != nil {
+		t.Errorf("deployment: %v", err)
+	}
+	if _, err := client.CoreV1().Services(addonNS).Get(ctx, "burrow-cache", metav1.GetOptions{}); err != nil {
+		t.Errorf("service: %v", err)
+	}
+	// No PVC (ephemeral) and no collector of any kind.
+	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, "burrow-cache", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("cache should have no PVC, got %v", err)
+	}
+	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-cache-collector", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("cache should have no collector, got %v", err)
+	}
+
+	if err := a.DeleteAddon(ctx, "burrow-cache"); err != nil {
+		t.Fatalf("DeleteAddon: %v", err)
+	}
+	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-cache", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("deployment should be gone, got %v", err)
+	}
+}
+
 func TestListWorkloads(t *testing.T) {
 	ctx := context.Background()
 	mk := func(name, image string, desired, ready int32, managed bool) *appsv1.Deployment {

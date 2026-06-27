@@ -68,6 +68,45 @@ func LookupAddon(t AddonType) (AddonSpec, bool) {
 	return s, ok
 }
 
+// ConnectBackend is a catalog entry for an existing backend the user already runs that Burrow can
+// register and query (ADR-0026). Unlike an AddonSpec it carries no image or storage: connect is
+// registration-only — Burrow never deploys a connected backend, it queries the one already there.
+type ConnectBackend struct {
+	// Name is the backend identifier (e.g. "loki"), used as the add-on Backend and as the
+	// querier key the engine dispatches on.
+	Name string
+	// Capabilities are what the agent can query a connected instance of this backend for. They
+	// are derived from the backend, not declared by the user (ADR-0026): a single-capability
+	// backend like Loki implies "logs".
+	Capabilities []string
+	// Summary is a one-line description for the connectable-backend listing.
+	Summary string
+}
+
+// connectCatalog is the curated set of existing backends Burrow can connect to and query. The
+// license bar does not apply to connect — Burrow queries these, it does not distribute them
+// (ADR-0026) — so AGPL backends like Loki are fine here.
+var connectCatalog = map[string]ConnectBackend{
+	"loki": {Name: "loki", Capabilities: []string{"logs"}, Summary: "Grafana Loki (existing log store)"},
+}
+
+// ConnectCatalog returns the connectable backends in a stable name order.
+func ConnectCatalog() []ConnectBackend {
+	out := make([]ConnectBackend, 0, len(connectCatalog))
+	for _, b := range connectCatalog {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// LookupConnectBackend returns the catalog entry for name, or false if name is not a known
+// connectable backend.
+func LookupConnectBackend(name string) (ConnectBackend, bool) {
+	b, ok := connectCatalog[name]
+	return b, ok
+}
+
 // AddonInfo is one installed add-on instance, as seen by `addon list` and the agent. It carries
 // no secret — when an add-on needs a credential it lives in a cluster Secret, never here.
 type AddonInfo struct {

@@ -183,6 +183,8 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		return err
 	}
 
+	// One HTTP client shared across the logs adapters — burrowd reaches each backend in-cluster.
+	logsHTTP := &http.Client{Timeout: 20 * time.Second}
 	engine, err := controlplane.New(controlplane.Deps{
 		Kubernetes:  k8s,
 		Registry:    registry.New(regOpts...),
@@ -192,7 +194,10 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		Resolver:    sys.Resolver{},
 		Credentials: creds,
 		DNS:         dns.NewFactory(),
-		Logs:        logs.NewVictoriaLogs(&http.Client{Timeout: 20 * time.Second}),
+		Logs: map[string]controlplane.LogsQuerier{
+			"victorialogs": logs.NewVictoriaLogs(logsHTTP),
+			"loki":         logs.NewLoki(logsHTTP),
+		},
 	})
 	if err != nil {
 		return err

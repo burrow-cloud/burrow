@@ -52,6 +52,7 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 		Name:         name,
 		Type:         spec.Type,
 		Mode:         "installed",
+		Backend:      spec.Backend,
 		Image:        spec.Image,
 		Endpoint:     fmt.Sprintf("%s.default.svc:%d", name, spec.Port),
 		Capabilities: spec.Capabilities,

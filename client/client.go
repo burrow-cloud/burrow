@@ -228,6 +228,14 @@ func (c *Client) InstallAddon(ctx context.Context, addonType string, confirm boo
 	return out, err
 }
 
+// ConnectAddon registers an existing backend the user already runs (e.g. an in-cluster Loki) as a
+// queryable add-on, recording its endpoint (ADR-0026). Unlike install it deploys nothing.
+func (c *Client) ConnectAddon(ctx context.Context, backend, endpoint string) (Addon, error) {
+	var out Addon
+	err := c.do(ctx, http.MethodPost, "/v1/addons/connect", map[string]any{"backend": backend, "endpoint": endpoint}, &out)
+	return out, err
+}
+
 // Addons lists the installed add-on instances.
 func (c *Client) Addons(ctx context.Context) ([]Addon, error) {
 	var out struct {

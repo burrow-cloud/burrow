@@ -51,14 +51,23 @@ can reason about which link is broken and act on the gaps it owns. The full desi
 the human-setup vs. agent-operation split — is **[ADR-0018](adr/0018-reaching-an-app-at-a-url.md)
 (Accepted)**.
 
-## Next (v0.4)
+## Next (v0.4) — agent-provisioned building blocks
 
-**Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) leads —
-building the image in-cluster from a repo, the second build path toward the managed experience.
-Alongside it, TLS/DNS hardening: a **DNS-01 issuer solver** (issue certs before the host is
-public, using the provider token), folding the provider's record into the **reachability**
-surface ("the provider holds the record"), and **`app delete`** (with its own guardrail). See
-[ROADMAP.md](ROADMAP.md).
+The differentiator: the agent stands up and operates a whole stack on the user's cluster, not
+just an app. The user asks for a capability; the agent writes the integration code; **Burrow
+provisions a vetted, self-hostable, permissively-licensed (Apache / MIT / BSD) backing service
+with sane defaults and operates it behind the guardrails**, then hands the agent the connection
+details. First slices: a **cache** ([ValKey](https://valkey.io), BSD-3) and **metrics**
+([VictoriaMetrics](https://victoriametrics.com) / Prometheus, Apache-2.0), then
+observability-driven answers ("how is my app doing?" / "why is it slow?") over the logs and
+metrics the agent set up, plus **`app delete`** (with a delete guardrail). Log aggregation only
+if Kubernetes' built-in logs prove insufficient, and with a permissively-licensed store
+(VictoriaLogs, not AGPL Loki). See [ROADMAP.md](ROADMAP.md).
+
+**Deferred until requested:** server-side build from a git reference
+([ADR-0008](adr/0008-two-build-paths.md)) — client-side build plus deploy-by-image-reference
+covers the common case today. Smaller TLS/DNS follow-ons (a DNS-01 issuer, folding the
+provider's record into reachability) ride along when a building-block slice needs them.
 
 Shipped in **v0.3**: the CLI regrouped by task (`app`/`config`/`system`, `expose`→`publish` —
 [ADR-0024](adr/0024-cli-command-taxonomy.md)) with `app list`; the Cloudflare adapter verifying

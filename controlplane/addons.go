@@ -25,6 +25,9 @@ type AddonSpec struct {
 	// StorageGi requests a persistent volume of this size in GiB; 0 is ephemeral. Stateful
 	// stores (logs, metrics) persist so data survives a restart.
 	StorageGi int
+	// Capabilities are what the agent can query this add-on for (e.g. "logs"). For an
+	// installed default it is fixed; a connected backend may derive or probe its own (ADR-0026).
+	Capabilities []string
 	// Summary is a one-line description for the catalog listing.
 	Summary string
 }
@@ -33,11 +36,12 @@ type AddonSpec struct {
 // permissively-licensed backing services belong here (ADR-0025).
 var addonCatalog = map[AddonType]AddonSpec{
 	AddonLogs: {
-		Type:      AddonLogs,
-		Image:     "victoriametrics/victoria-logs:v1.0.0", // VictoriaLogs, Apache-2.0 (verify pin before release)
-		Port:      9428,
-		StorageGi: 10,
-		Summary:   "log aggregation (VictoriaLogs)",
+		Type:         AddonLogs,
+		Image:        "victoriametrics/victoria-logs:v1.0.0", // VictoriaLogs, Apache-2.0 (verify pin before release)
+		Port:         9428,
+		StorageGi:    10,
+		Capabilities: []string{"logs"},
+		Summary:      "log aggregation (VictoriaLogs)",
 	},
 }
 
@@ -60,9 +64,13 @@ func LookupAddon(t AddonType) (AddonSpec, bool) {
 // AddonInfo is one installed add-on instance, as seen by `addon list` and the agent. It carries
 // no secret — when an add-on needs a credential it lives in a cluster Secret, never here.
 type AddonInfo struct {
-	Name     string    `json:"name"`
-	Type     AddonType `json:"type"`
-	Image    string    `json:"image"`
-	Endpoint string    `json:"endpoint"` // in-cluster host:port the app or agent reaches it on
-	Ready    bool      `json:"ready"`
+	Name string    `json:"name"`
+	Type AddonType `json:"type"`
+	// Mode is how the backend is provided: "installed" (Burrow deployed it) or "connected"
+	// (an existing backend the user runs). Installed-only for now; connect lands later (ADR-0026).
+	Mode         string   `json:"mode"`
+	Image        string   `json:"image,omitempty"`
+	Endpoint     string   `json:"endpoint"` // in-cluster host:port the app or agent reaches it on
+	Capabilities []string `json:"capabilities"`
+	Ready        bool     `json:"ready"`
 }

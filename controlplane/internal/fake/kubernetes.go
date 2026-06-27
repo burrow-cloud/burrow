@@ -49,11 +49,13 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 	defer k.mu.Unlock()
 	name := "burrow-" + string(spec.Type)
 	info := controlplane.AddonInfo{
-		Name:     name,
-		Type:     spec.Type,
-		Image:    spec.Image,
-		Endpoint: fmt.Sprintf("%s.default.svc:%d", name, spec.Port),
-		Ready:    true,
+		Name:         name,
+		Type:         spec.Type,
+		Mode:         "installed",
+		Image:        spec.Image,
+		Endpoint:     fmt.Sprintf("%s.default.svc:%d", name, spec.Port),
+		Capabilities: spec.Capabilities,
+		Ready:        true,
 	}
 	k.addons[name] = info
 	return info, nil

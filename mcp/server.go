@@ -30,6 +30,21 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, appsTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_addons",
+		Description: "List the backing-service add-ons installed on the cluster (logs, …), their mode (installed/connected), in-cluster endpoint, and the capabilities you can query. Read-only.",
+	}, addonsTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_addon_install",
+		Description: "Install a vetted, self-hostable backing service for a capability (e.g. logs → VictoriaLogs) and register it as queryable, in one step. Held for confirmation by a guardrail; set confirm=true ONLY after the user approves, never on your own.",
+	}, addonInstallTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_addon_remove",
+		Description: "Remove an installed add-on by name. Held for confirmation by a guardrail (removing a backing service can break dependent apps); set confirm=true ONLY after the user approves.",
+	}, addonRemoveTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_status",
 		Description: "Report an application's status: its most recent release and the live workload state (desired/ready replicas, availability).",
 	}, statusTool(c))
@@ -292,6 +307,73 @@ func appsTool(c *client.Client) sdk.ToolHandlerFor[appsInput, appsOutput] {
 			})
 		}
 		return nil, out, nil
+	}
+}
+
+// addonItem is the agent's view of one installed add-on.
+type addonItem struct {
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	Mode         string   `json:"mode"`
+	Endpoint     string   `json:"endpoint"`
+	Capabilities []string `json:"capabilities"`
+	Ready        bool     `json:"ready"`
+}
+
+func toAddonItem(a client.Addon) addonItem {
+	return addonItem{Name: a.Name, Type: a.Type, Mode: a.Mode, Endpoint: a.Endpoint, Capabilities: a.Capabilities, Ready: a.Ready}
+}
+
+type addonsInput struct{}
+
+type addonsOutput struct {
+	Addons []addonItem `json:"addons"`
+}
+
+func addonsTool(c *client.Client) sdk.ToolHandlerFor[addonsInput, addonsOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, _ addonsInput) (*sdk.CallToolResult, addonsOutput, error) {
+		as, err := c.Addons(ctx)
+		if err != nil {
+			return nil, addonsOutput{}, err
+		}
+		out := addonsOutput{Addons: make([]addonItem, 0, len(as))}
+		for _, a := range as {
+			out.Addons = append(out.Addons, toAddonItem(a))
+		}
+		return nil, out, nil
+	}
+}
+
+type addonInstallInput struct {
+	Capability string `json:"capability" jsonschema:"the capability to install a vetted backing service for, e.g. logs"`
+	Confirm    bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an operation a guardrail held for confirmation; do not self-confirm"`
+}
+
+func addonInstallTool(c *client.Client) sdk.ToolHandlerFor[addonInstallInput, addonItem] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in addonInstallInput) (*sdk.CallToolResult, addonItem, error) {
+		a, err := c.InstallAddon(ctx, in.Capability, in.Confirm)
+		if err != nil {
+			return nil, addonItem{}, err
+		}
+		return nil, toAddonItem(a), nil
+	}
+}
+
+type addonRemoveInput struct {
+	Name    string `json:"name" jsonschema:"the add-on instance name to remove"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed; do not self-confirm"`
+}
+
+type addonRemoveOutput struct {
+	Removed string `json:"removed"`
+}
+
+func addonRemoveTool(c *client.Client) sdk.ToolHandlerFor[addonRemoveInput, addonRemoveOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in addonRemoveInput) (*sdk.CallToolResult, addonRemoveOutput, error) {
+		if err := c.RemoveAddon(ctx, in.Name, in.Confirm); err != nil {
+			return nil, addonRemoveOutput{}, err
+		}
+		return nil, addonRemoveOutput{Removed: in.Name}, nil
 	}
 }
 

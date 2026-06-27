@@ -149,6 +149,49 @@ func TestExposureStatus(t *testing.T) {
 	}
 }
 
+func TestAddonDeployListDelete(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	spec := cp.AddonSpec{Type: cp.AddonLogs, Image: "victoria-logs:test", Port: 9428, StorageGi: 5, Capabilities: []string{"logs"}}
+	info, err := a.DeployAddon(ctx, spec)
+	if err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+	if info.Name != "burrow-logs" || info.Mode != "installed" || len(info.Capabilities) != 1 || info.Capabilities[0] != "logs" {
+		t.Errorf("info = %+v, want burrow-logs installed [logs]", info)
+	}
+
+	// A Deployment, Service, and PVC were created.
+	if _, err := client.AppsV1().Deployments(ns).Get(ctx, "burrow-logs", metav1.GetOptions{}); err != nil {
+		t.Errorf("deployment: %v", err)
+	}
+	if _, err := client.CoreV1().Services(ns).Get(ctx, "burrow-logs", metav1.GetOptions{}); err != nil {
+		t.Errorf("service: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(ns).Get(ctx, "burrow-logs", metav1.GetOptions{}); err != nil {
+		t.Errorf("pvc: %v", err)
+	}
+
+	// List finds it with capabilities resolved from the catalog.
+	list, err := a.ListAddons(ctx)
+	if err != nil || len(list) != 1 || list[0].Name != "burrow-logs" || len(list[0].Capabilities) != 1 {
+		t.Fatalf("ListAddons = %+v err=%v", list, err)
+	}
+
+	// Delete removes it; deleting a missing add-on is ErrNotFound.
+	if err := a.DeleteAddon(ctx, "burrow-logs"); err != nil {
+		t.Fatalf("DeleteAddon: %v", err)
+	}
+	if _, err := client.AppsV1().Deployments(ns).Get(ctx, "burrow-logs", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("deployment should be gone, got %v", err)
+	}
+	if err := a.DeleteAddon(ctx, "nope"); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("delete missing = %v, want ErrNotFound", err)
+	}
+}
+
 func TestListWorkloads(t *testing.T) {
 	ctx := context.Background()
 	mk := func(name, image string, desired, ready int32, managed bool) *appsv1.Deployment {

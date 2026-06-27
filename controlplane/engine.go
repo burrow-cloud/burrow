@@ -171,6 +171,52 @@ func (e *Engine) ListApps(ctx context.Context) ([]WorkloadStatus, error) {
 	return apps, nil
 }
 
+// InstallAddon deploys the vetted backing service for the named add-on type and registers it as
+// a queryable capability (ADR-0025/0026). It is guarded by addon_install.
+func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (AddonInfo, error) {
+	spec, ok := LookupAddon(t)
+	if !ok {
+		return AddonInfo{}, fmt.Errorf("install addon: unknown type %q: %w", t, ErrInvalid)
+	}
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return AddonInfo{}, fmt.Errorf("install addon %s: loading guardrail policy: %w", t, err)
+	}
+	if err := pol.evaluateGuardrail("addon install", GuardrailAddonInstall, confirm, fmt.Sprintf("installing the %s add-on (%s)", t, spec.Image)); err != nil {
+		return AddonInfo{}, err
+	}
+	info, err := e.k8s.DeployAddon(ctx, spec)
+	if err != nil {
+		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
+	}
+	return info, nil
+}
+
+// ListAddons returns the installed (and, later, connected) add-on instances.
+func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
+	addons, err := e.k8s.ListAddons(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list addons: %w", err)
+	}
+	return addons, nil
+}
+
+// RemoveAddon removes the named add-on instance. It is guarded by addon_remove (removing a
+// backing service can break dependent apps).
+func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) error {
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return fmt.Errorf("remove addon %s: loading guardrail policy: %w", name, err)
+	}
+	if err := pol.evaluateGuardrail("addon remove", GuardrailAddonRemove, confirm, fmt.Sprintf("removing the add-on %q", name)); err != nil {
+		return err
+	}
+	if err := e.k8s.DeleteAddon(ctx, name); err != nil {
+		return fmt.Errorf("remove addon %s: %w", name, err)
+	}
+	return nil
+}
+
 // recorded release and the live workload state. It returns ErrNotFound only when the
 // app is unknown to both.
 func (e *Engine) Status(ctx context.Context, app string) (StatusResult, error) {

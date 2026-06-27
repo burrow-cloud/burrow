@@ -80,6 +80,39 @@ func TestAppList(t *testing.T) {
 	}
 }
 
+func TestAddonInstallAndList(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/v1/addons" {
+			t.Errorf("request = %s %s, want POST /v1/addons", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "burrow-logs", "type": "logs", "mode": "installed",
+			"image": "victoria-logs:1", "endpoint": "burrow-logs.burrow.svc:9428", "capabilities": []string{"logs"},
+		})
+	}, "addon", "install", "logs", "--confirm")
+	if err != nil {
+		t.Fatalf("addon install: %v", err)
+	}
+	if !strings.Contains(out, "burrow-logs") || !strings.Contains(out, "logs") {
+		t.Errorf("output = %q", out)
+	}
+
+	out, _, err = runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/v1/addons" {
+			t.Errorf("request = %s %s, want GET /v1/addons", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"addons": []map[string]any{
+			{"name": "burrow-logs", "type": "logs", "mode": "installed", "endpoint": "burrow-logs.burrow.svc:9428", "capabilities": []string{"logs"}},
+		}})
+	}, "addon", "list")
+	if err != nil {
+		t.Fatalf("addon list: %v", err)
+	}
+	if !strings.Contains(out, "NAME") || !strings.Contains(out, "burrow-logs") || !strings.Contains(out, "installed") {
+		t.Errorf("list output = %q", out)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

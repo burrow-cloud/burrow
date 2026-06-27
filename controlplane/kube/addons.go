@@ -89,10 +89,12 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 	}
 
 	return controlplane.AddonInfo{
-		Name:     name,
-		Type:     spec.Type,
-		Image:    spec.Image,
-		Endpoint: fmt.Sprintf("%s.%s.svc:%d", name, a.namespace, spec.Port),
+		Name:         name,
+		Type:         spec.Type,
+		Mode:         "installed",
+		Image:        spec.Image,
+		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.namespace, spec.Port),
+		Capabilities: spec.Capabilities,
 	}, nil
 }
 
@@ -111,12 +113,19 @@ func (a *Adapter) ListAddons(ctx context.Context) ([]controlplane.AddonInfo, err
 				port = c[0].Ports[0].ContainerPort
 			}
 		}
+		typ := controlplane.AddonType(dep.Labels[addonLabel])
+		var caps []string
+		if spec, ok := controlplane.LookupAddon(typ); ok {
+			caps = spec.Capabilities
+		}
 		out = append(out, controlplane.AddonInfo{
-			Name:     dep.Name,
-			Type:     controlplane.AddonType(dep.Labels[addonLabel]),
-			Image:    image,
-			Endpoint: fmt.Sprintf("%s.%s.svc:%d", dep.Name, a.namespace, port),
-			Ready:    deploymentAvailable(dep, 1),
+			Name:         dep.Name,
+			Type:         typ,
+			Mode:         "installed",
+			Image:        image,
+			Endpoint:     fmt.Sprintf("%s.%s.svc:%d", dep.Name, a.namespace, port),
+			Capabilities: caps,
+			Ready:        deploymentAvailable(dep, 1),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

@@ -73,11 +73,12 @@ func (e *APIError) Error() string {
 // The DTOs below mirror the control-plane API's JSON shapes (snake_case).
 
 type DeployRequest struct {
-	Image    string            `json:"image"`
-	Env      map[string]string `json:"env,omitempty"`
-	Command  []string          `json:"command,omitempty"`
-	Replicas int32             `json:"replicas"`
-	Confirm  bool              `json:"confirm,omitempty"`
+	Image       string            `json:"image"`
+	Env         map[string]string `json:"env,omitempty"`
+	Command     []string          `json:"command,omitempty"`
+	MetricsPort int32             `json:"metrics_port,omitempty"`
+	Replicas    int32             `json:"replicas"`
+	Confirm     bool              `json:"confirm,omitempty"`
 }
 
 type Release struct {

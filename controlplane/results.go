@@ -10,11 +10,14 @@ package controlplane
 // DeployRequest is the small, code-free description of a deploy: a pullable image plus
 // metadata (ADR-0004). No code travels here.
 type DeployRequest struct {
-	App      string            `json:"app"`
-	Image    string            `json:"image"`
-	Env      map[string]string `json:"env,omitempty"`
-	Command  []string          `json:"command,omitempty"`
-	Replicas int32             `json:"replicas"`
+	App     string            `json:"app"`
+	Image   string            `json:"image"`
+	Env     map[string]string `json:"env,omitempty"`
+	Command []string          `json:"command,omitempty"`
+	// MetricsPort, when positive, annotates the deployed pod so the metrics add-on scrapes
+	// /metrics on this container port (ADR-0026). Zero adds no annotations.
+	MetricsPort int32 `json:"metrics_port,omitempty"`
+	Replicas    int32 `json:"replicas"`
 	// Confirm acknowledges a guardrail whose disposition is confirm, letting the operation
 	// proceed past it (ADR-0020). It has no effect on a guardrail set to deny.
 	Confirm bool `json:"confirm,omitempty"`

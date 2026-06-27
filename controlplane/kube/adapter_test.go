@@ -356,6 +356,47 @@ func TestApplyCreatesDeployment(t *testing.T) {
 	}
 }
 
+func TestApplyMetricsPortAnnotatesPod(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1, MetricsPort: 8080}); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
+	}
+	dep, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	ann := dep.Spec.Template.Annotations
+	if ann["prometheus.io/scrape"] != "true" {
+		t.Errorf("prometheus.io/scrape = %q, want true", ann["prometheus.io/scrape"])
+	}
+	if ann["prometheus.io/port"] != "8080" {
+		t.Errorf("prometheus.io/port = %q, want 8080", ann["prometheus.io/port"])
+	}
+	if ann["prometheus.io/path"] != "/metrics" {
+		t.Errorf("prometheus.io/path = %q, want /metrics", ann["prometheus.io/path"])
+	}
+}
+
+func TestApplyNoMetricsPortAddsNoAnnotations(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
+	}
+	dep, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, ok := dep.Spec.Template.Annotations["prometheus.io/scrape"]; ok {
+		t.Errorf("prometheus.io/scrape present with MetricsPort=0, want none (annotations=%v)", dep.Spec.Template.Annotations)
+	}
+}
+
 func TestApplyUpdatesDeployment(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

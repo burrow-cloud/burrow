@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -382,6 +383,18 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		env = append(env, corev1.EnvVar{Name: k, Value: spec.Env[k]})
 	}
 
+	// A positive MetricsPort annotates the pod template so the metrics add-on's scraper (a
+	// vmagent with a Prometheus-style discovery rule) finds and scrapes /metrics on that port
+	// (ADR-0026). Zero adds no annotations, so a deploy without it is unchanged.
+	var podAnnotations map[string]string
+	if spec.MetricsPort > 0 {
+		podAnnotations = map[string]string{
+			"prometheus.io/scrape": "true",
+			"prometheus.io/port":   strconv.Itoa(int(spec.MetricsPort)),
+			"prometheus.io/path":   "/metrics",
+		}
+	}
+
 	replicas := spec.Replicas
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: spec.App, Namespace: a.namespace, Labels: labels},
@@ -389,7 +402,7 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: selector},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name:    spec.App,

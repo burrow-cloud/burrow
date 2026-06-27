@@ -29,7 +29,7 @@ import (
 
 var _ controlplane.Database = (*Store)(nil)
 
-const columns = `id, app, image, digest, env, command, replicas, status, supersedes, created_at`
+const columns = `id, app, image, digest, env, command, metrics_port, replicas, status, supersedes, created_at`
 
 // Store is a Postgres-backed controlplane.Database.
 type Store struct {
@@ -80,14 +80,15 @@ func (s *Store) SaveRelease(ctx context.Context, r controlplane.Release) error {
 	// stored as jsonb regardless of how the driver encodes a parameter.
 	const q = `
 INSERT INTO releases (` + columns + `)
-VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
+VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)
 ON CONFLICT (id) DO UPDATE SET
     app = EXCLUDED.app, image = EXCLUDED.image, digest = EXCLUDED.digest,
-    env = EXCLUDED.env, command = EXCLUDED.command, replicas = EXCLUDED.replicas,
-    status = EXCLUDED.status, supersedes = EXCLUDED.supersedes, created_at = EXCLUDED.created_at`
+    env = EXCLUDED.env, command = EXCLUDED.command, metrics_port = EXCLUDED.metrics_port,
+    replicas = EXCLUDED.replicas, status = EXCLUDED.status, supersedes = EXCLUDED.supersedes,
+    created_at = EXCLUDED.created_at`
 
 	_, err = s.db.ExecContext(ctx, q,
-		r.ID, r.App, r.Image, r.Digest, string(envJSON), string(cmdJSON), r.Replicas, string(r.Status), r.Supersedes, r.CreatedAt)
+		r.ID, r.App, r.Image, r.Digest, string(envJSON), string(cmdJSON), r.MetricsPort, r.Replicas, string(r.Status), r.Supersedes, r.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("postgres: save release %s: %w", r.ID, err)
 	}
@@ -191,7 +192,7 @@ func scanRelease(sc scanner) (controlplane.Release, error) {
 		status  string
 		created time.Time
 	)
-	if err := sc.Scan(&r.ID, &r.App, &r.Image, &r.Digest, &envJSON, &cmdJSON, &r.Replicas, &status, &r.Supersedes, &created); err != nil {
+	if err := sc.Scan(&r.ID, &r.App, &r.Image, &r.Digest, &envJSON, &cmdJSON, &r.MetricsPort, &r.Replicas, &status, &r.Supersedes, &created); err != nil {
 		return controlplane.Release{}, err
 	}
 	if err := json.Unmarshal(envJSON, &r.Env); err != nil {

@@ -97,6 +97,20 @@ func TestDeployNoCommandOmitsIt(t *testing.T) {
 	}
 }
 
+func TestDeployMetricsPort(t *testing.T) {
+	body := deployBody(t, "--metrics-port", "9090")
+	if got, ok := body["metrics_port"].(float64); !ok || int(got) != 9090 {
+		t.Errorf("metrics_port in body = %#v, want 9090", body["metrics_port"])
+	}
+}
+
+func TestDeployNoMetricsPortOmitsIt(t *testing.T) {
+	body := deployBody(t) // no --metrics-port flag
+	if _, present := body["metrics_port"]; present {
+		t.Errorf("metrics_port should be omitted when the flag is unset, got %#v", body["metrics_port"])
+	}
+}
+
 func TestAppList(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.URL.Path != "/v1/apps" {

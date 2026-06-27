@@ -134,15 +134,16 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	prev, hasPrev := lastDeployed(releases)
 
 	rel := Release{
-		ID:        e.ids.NewID(),
-		App:       req.App,
-		Image:     req.Image,
-		Digest:    info.Digest,
-		Env:       req.Env,
-		Command:   req.Command,
-		Replicas:  req.Replicas,
-		Status:    ReleasePending,
-		CreatedAt: e.clock.Now(),
+		ID:          e.ids.NewID(),
+		App:         req.App,
+		Image:       req.Image,
+		Digest:      info.Digest,
+		Env:         req.Env,
+		Command:     req.Command,
+		MetricsPort: req.MetricsPort,
+		Replicas:    req.Replicas,
+		Status:      ReleasePending,
+		CreatedAt:   e.clock.Now(),
 	}
 	if hasPrev {
 		rel.Supersedes = prev.ID
@@ -154,7 +155,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		return DeployResult{}, fmt.Errorf("deploy %s: recording release: %w", req.App, err)
 	}
 
-	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: req.Env, Command: req.Command, Replicas: req.Replicas}
+	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: req.Env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: req.Replicas}
 	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
@@ -664,22 +665,23 @@ func (e *Engine) Rollback(ctx context.Context, app string) (RollbackResult, erro
 	}
 
 	rel := Release{
-		ID:         e.ids.NewID(),
-		App:        app,
-		Image:      target.Image,
-		Digest:     target.Digest,
-		Env:        target.Env,
-		Command:    target.Command,
-		Replicas:   target.Replicas,
-		Status:     ReleasePending,
-		Supersedes: cur.ID,
-		CreatedAt:  e.clock.Now(),
+		ID:          e.ids.NewID(),
+		App:         app,
+		Image:       target.Image,
+		Digest:      target.Digest,
+		Env:         target.Env,
+		Command:     target.Command,
+		MetricsPort: target.MetricsPort,
+		Replicas:    target.Replicas,
+		Status:      ReleasePending,
+		Supersedes:  cur.ID,
+		CreatedAt:   e.clock.Now(),
 	}
 	if err := e.db.SaveRelease(ctx, rel); err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: recording release: %w", app, err)
 	}
 
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: target.Env, Command: target.Command, Replicas: target.Replicas}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: target.Env, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: target.Replicas}
 	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)

@@ -118,12 +118,13 @@ func Serve(ctx context.Context, c *client.Client, version string) error {
 }
 
 type deployInput struct {
-	App      string            `json:"app" jsonschema:"the application name (a DNS-1123 label)"`
-	Image    string            `json:"image" jsonschema:"the pullable container image reference to deploy, e.g. registry.example.com/app:1.2.3"`
-	Env      map[string]string `json:"env,omitempty" jsonschema:"environment variables to set on the workload"`
-	Command  []string          `json:"command,omitempty" jsonschema:"optional command override for the container"`
-	Replicas int32             `json:"replicas" jsonschema:"desired number of replicas"`
-	Confirm  bool              `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an operation a guardrail held for confirmation; do not self-confirm"`
+	App         string            `json:"app" jsonschema:"the application name (a DNS-1123 label)"`
+	Image       string            `json:"image" jsonschema:"the pullable container image reference to deploy, e.g. registry.example.com/app:1.2.3"`
+	Env         map[string]string `json:"env,omitempty" jsonschema:"environment variables to set on the workload"`
+	Command     []string          `json:"command,omitempty" jsonschema:"optional command override for the container"`
+	MetricsPort int32             `json:"metrics_port,omitempty" jsonschema:"optional: annotate the pod so the metrics add-on scrapes /metrics on this port"`
+	Replicas    int32             `json:"replicas" jsonschema:"desired number of replicas"`
+	Confirm     bool              `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an operation a guardrail held for confirmation; do not self-confirm"`
 }
 
 type appInput struct {
@@ -143,7 +144,7 @@ type scaleInput struct {
 
 func deployTool(c *client.Client) sdk.ToolHandlerFor[deployInput, client.DeployResult] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in deployInput) (*sdk.CallToolResult, client.DeployResult, error) {
-		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Image: in.Image, Env: in.Env, Command: in.Command, Replicas: in.Replicas, Confirm: in.Confirm})
+		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Image: in.Image, Env: in.Env, Command: in.Command, MetricsPort: in.MetricsPort, Replicas: in.Replicas, Confirm: in.Confirm})
 		if err != nil {
 			return nil, client.DeployResult{}, err
 		}

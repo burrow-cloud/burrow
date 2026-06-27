@@ -37,7 +37,7 @@ type AddonSpec struct {
 var addonCatalog = map[AddonType]AddonSpec{
 	AddonLogs: {
 		Type:         AddonLogs,
-		Image:        "victoriametrics/victoria-logs:v1.0.0", // VictoriaLogs, Apache-2.0 (verify pin before release)
+		Image:        "victoriametrics/victoria-logs:v1.51.0", // VictoriaLogs, Apache-2.0
 		Port:         9428,
 		StorageGi:    10,
 		Capabilities: []string{"logs"},

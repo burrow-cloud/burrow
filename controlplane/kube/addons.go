@@ -131,7 +131,7 @@ const fluentBitConfig = `[SERVICE]
     Match   *
     Host    %s
     Port    9428
-    URI     /insert/jsonline?_stream_fields=filename&_msg_field=message&_time_field=time
+    URI     /insert/jsonline?_stream_fields=filename&_msg_field=log,message,msg&_time_field=time
     Format  json_lines
     Json_date_key    time
     Json_date_format iso8601

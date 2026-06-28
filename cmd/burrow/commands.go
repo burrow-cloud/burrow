@@ -171,11 +171,19 @@ func newLogsCmd() *cobra.Command {
 			}
 			if len(lines) == 0 {
 				fmt.Fprintln(out, "(no logs)")
-				return nil
+			} else {
+				for _, l := range lines {
+					fmt.Fprintf(out, "%s  %s\n", l.Pod, l.Message)
+				}
 			}
-			for _, l := range lines {
-				fmt.Fprintf(out, "%s  %s\n", l.Pod, l.Message)
-			}
+			// Tell the user where these came from. `app logs` reads live Kubernetes pod logs
+			// (current pods only, lost on restart/reschedule), which is easy to mistake for a
+			// durable history — so point them at the logs add-on for retained, queryable logs.
+			// Stderr so it never pollutes a piped or redirected log stream.
+			fmt.Fprintln(cmd.ErrOrStderr(),
+				"\nSource: live Kubernetes pod logs — current pods only, not retained across restarts. "+
+					"For durable, queryable history across replicas, install the logs add-on "+
+					"(`burrow addon install logs`), then query with `burrow addon logs`.")
 			return nil
 		},
 	}

@@ -80,6 +80,27 @@ install-metrics + the full metrics loop, cache); a local headless-agent diagnosi
 blind-workspace examples library exercise the full agent loop by hand, held out of CI (they cost
 API tokens).
 
+## v0.5 — App config, secrets, credentials, and the audit log ✅ shipped
+
+The release that makes apps real to *run* and hardens how Burrow handles sensitive values — the
+groundwork the web UI and managed product depend on.
+
+- **App config & secrets** ([ADR-0028](adr/0028-app-config-and-secrets.md)) — an `app env` /
+  `app secret` lifecycle store (`set`/`list`/`unset`, `--no-restart`), managed independently of
+  deploy (`deploy` no longer takes env). Env renders inline and auto-rolls; secrets live only in a
+  per-app Kubernetes Secret and inject via `envFrom`. `secret list` shows keys only.
+- **Secrets & credentials through the control plane**
+  ([ADR-0029](adr/0029-secrets-through-the-control-plane.md),
+  [ADR-0030](adr/0030-credentials-through-the-control-plane.md)) — app secrets, vendor tokens, and
+  connected-backend auth all flow over burrowd's **authenticated API**, written to a Secret by
+  burrowd, **never over MCP** (the agent references keys; the human/UI sets values) and never
+  logged or stored in the database. RBAC stays namespace- or name-scoped; no `ClusterRole`.
+- **Audit log** ([ADR-0027](adr/0027-audit-log.md)) — an append-only Postgres record of every
+  guarded operation and its guardrail decision (allowed / held / denied / executed), read with
+  `burrow audit`. Args are redacted to key names; no secret value is ever recorded.
+- **Dedicated app namespace** — new installs deploy apps into **`burrow-apps`**, not the cluster's
+  shared `default` namespace, so the per-app secrets grant stays isolated.
+
 ## Deferred until requested
 
 - **Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) — a

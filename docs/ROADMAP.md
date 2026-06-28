@@ -83,6 +83,10 @@ a local headless-agent diagnosis test is held out of CI (it costs API tokens).
 ## Later — candidate themes (unsequenced)
 
 - **Richer guardrails / blast-radius limits** for destructive operations.
+- **Audit log** ([ADR-0027](adr/0027-audit-log.md)) — an append-only Postgres record of agent
+  operations and guardrail decisions (allowed / held / denied / executed), read via `burrow
+  audit`; the accountability surface for "what did the agent do," with per-principal identity
+  following a future auth model.
 - **Database provisioning** — managed Postgres (and friends) as a first-class deploy
   dependency (a heavier building block than the cache/metrics blocks above).
 - **Autoscaling** — horizontal/vertical scaling driven by load.

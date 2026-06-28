@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted. Builds on [ADR-0004](0004-code-never-over-mcp.md) (code and secrets never travel over
+Accepted. **Its secret-transport decision (`app secret set` is kubeconfig-direct; the value never
+crosses the control-plane API) is superseded by [ADR-0029](0029-secrets-through-the-control-plane.md)**
+— secret values may traverse burrowd's authenticated API (for the web UI and the managed product),
+still never over MCP. Everything else in this ADR stands. Builds on
+[ADR-0004](0004-code-never-over-mcp.md) (code and secrets never travel over
 MCP), [ADR-0023](0023-provider-credentials.md) (credentials live in a scoped Secret; only the key
 crosses the API), [ADR-0007](0007-explicit-deploy-by-image-reference.md) (deploy is an explicit
 call), [ADR-0020](0020-guardrails-as-configurable-policy.md) (guardrails), and

@@ -48,10 +48,11 @@ alternatives that were rejected.
 | [0020](0020-guardrails-as-configurable-policy.md) | Guardrails as inspectable, configurable policy with a confirm disposition | Accepted |
 | [0021](0021-guardrails-require-control-plane-only-agent-access.md) | Guardrails bound the control-plane path; the operator restricts the agent's other paths | Accepted |
 | [0022](0022-routing-backend-and-supported-kubernetes.md) | HTTP routing via a shared ingress (Ingress now, Gateway-ready) and supported Kubernetes versions | Accepted |
-| [0023](0023-provider-credentials.md) | Provider credentials — a registry of vendor tokens in one scoped Secret | Accepted |
+| [0023](0023-provider-credentials.md) | Provider credentials — a registry of vendor tokens in one scoped Secret | Accepted (credential transport superseded by ADR-0030) |
 | [0024](0024-cli-command-taxonomy.md) | Noun-grouped CLI command taxonomy (`app` / `config` / `system`, `expose`→`publish`) | Accepted |
 | [0025](0025-building-block-addons.md) | Building-block add-ons — a curated catalog of vetted, self-hostable backing services (observability first; the agent is the query layer) | Accepted |
 | [0026](0026-observability-query-adapters.md) | Observability add-ons — query adapters over installed *or* existing backends (`install` vs `connect`, capabilities derived) | Accepted |
 | [0027](0027-audit-log.md) | Audit log — an append-only Postgres record of agent operations and guardrail decisions (allowed / held / denied / executed) | Accepted |
 | [0028](0028-app-config-and-secrets.md) | App config and secrets — a lifecycle `app env` / `app secret` store (deploy takes no env); secret values stay off MCP, out of Postgres, in a per-app Secret | Accepted (secret transport superseded by ADR-0029) |
 | [0029](0029-secrets-through-the-control-plane.md) | Secrets traverse the control-plane API (CLI/UI/managed), never MCP; default app namespace → `burrow-apps` | Accepted |
+| [0030](0030-credentials-through-the-control-plane.md) | Provider and backend credentials traverse the control-plane API (CLI/UI/managed), never MCP; `burrowd-credentials` Role gains `update` (still name-scoped) | Accepted |

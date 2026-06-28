@@ -16,12 +16,11 @@ import (
 )
 
 // configuredDNSEngine returns an engine with a "digitalocean" DNS provider already registered
-// and its token seeded, ready for domain operations.
+// (its token sent through AddProvider), ready for domain operations.
 func configuredDNSEngine(t *testing.T) (*cp.Engine, *fake.DNSFactory, *fake.Database) {
 	t.Helper()
-	e, creds, dnsF, d, _ := newProviderEngine(t)
-	creds.Set("digitalocean", "tok")
-	if _, err := e.AddProvider(context.Background(), cp.AddProviderRequest{Type: cp.ProviderDigitalOcean}); err != nil {
+	e, _, dnsF, d, _ := newProviderEngine(t)
+	if _, err := e.AddProvider(context.Background(), cp.AddProviderRequest{Type: cp.ProviderDigitalOcean, Token: "tok"}); err != nil {
 		t.Fatalf("AddProvider: %v", err)
 	}
 	return e, dnsF, d
@@ -131,7 +130,6 @@ func TestRemoveDomainGuardrailHoldsWithoutConfirm(t *testing.T) {
 func TestAddDomainDerivesAddressFromExposedApp(t *testing.T) {
 	k := fake.NewKubernetes()
 	creds := fake.NewCredentials()
-	creds.Set("digitalocean", "tok")
 	dnsF := fake.NewDNSFactory()
 	d := fake.NewDatabase()
 	d.SetPolicy(permissive())
@@ -145,7 +143,7 @@ func TestAddDomainDerivesAddressFromExposedApp(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	ctx := context.Background()
-	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean}); err != nil {
+	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean, Token: "tok"}); err != nil {
 		t.Fatalf("AddProvider: %v", err)
 	}
 

@@ -335,6 +335,12 @@ func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, guardResponse{Guardrails: gs})
 }
 
+// addProvider decodes a provider registration — including the token VALUE — from the POST body and
+// hands it to the engine, which validates the token, writes it into burrow-credentials, and records
+// the registry entry (ADR-0030). The token travels only in the body (never the path or query), is
+// never logged (the access log carries method+path+status, no body), is never stored in Postgres,
+// and the response — the recorded Provider — carries the Secret key only, never the value. This is a
+// human/CLI operation; there is no MCP tool that adds a provider or carries a token.
 func (s *server) addProvider(w http.ResponseWriter, r *http.Request) {
 	var req controlplane.AddProviderRequest
 	if !decode(w, r, &req) {
@@ -403,12 +409,18 @@ func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
+// connectAddon decodes a connect request — including the bearer token VALUE for an authenticated
+// backend — from the POST body and hands it to the engine, which writes it into burrow-credentials
+// (ADR-0030). The token travels only in the body (never the path or query), is never logged, is
+// never stored in Postgres, and the response — the recorded AddonInfo — carries the Secret key only,
+// never the value. Connecting an authenticated backend is a human/CLI operation; no MCP tool carries
+// a token.
 func (s *server) connectAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonConnectRequest
 	if !decode(w, r, &req) {
 		return
 	}
-	info, err := s.engine.ConnectAddon(r.Context(), req.Backend, req.Endpoint, req.SecretKey)
+	info, err := s.engine.ConnectAddon(r.Context(), req.Backend, req.Endpoint, req.SecretKey, req.Token)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -442,12 +454,15 @@ type addonInstallRequest struct {
 
 // addonConnectRequest is the body of an addon connect (the backend names the catalog entry; the
 // endpoint is the in-cluster host:port of the existing backend). SecretKey, when set, names the key
-// in the burrow-credentials Secret under which the backend's bearer token lives — the token itself
-// never travels here, only the key (ADR-0004/0023).
+// in the burrow-credentials Secret under which the backend's bearer token lives. Token is the bearer
+// token VALUE for an authenticated backend: it travels over this authenticated, TLS-protected API
+// and is written to burrow-credentials (ADR-0030) — never logged, never stored in Postgres, never
+// echoed back, and never carried over MCP.
 type addonConnectRequest struct {
 	Backend   string `json:"backend"`
 	Endpoint  string `json:"endpoint"`
 	SecretKey string `json:"secret_key"`
+	Token     string `json:"token,omitempty"`
 }
 
 // addonsResponse wraps the add-on list so the shape can grow without breaking object decoders.

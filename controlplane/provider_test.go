@@ -37,9 +37,9 @@ func newProviderEngine(t *testing.T) (*cp.Engine, *fake.Credentials, *fake.DNSFa
 func TestAddProviderDefaultsCapabilitiesAndVerifies(t *testing.T) {
 	e, creds, dnsF, d, c := newProviderEngine(t)
 	ctx := context.Background()
-	creds.Set("digitalocean", "dop_v1_tok") // the CLI wrote this before calling AddProvider
 
-	p, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean})
+	// The token VALUE travels in the request (over burrowd's authenticated API in production).
+	p, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean, Token: "dop_v1_tok"})
 	if err != nil {
 		t.Fatalf("AddProvider: %v", err)
 	}
@@ -53,10 +53,12 @@ func TestAddProviderDefaultsCapabilitiesAndVerifies(t *testing.T) {
 	if !p.CreatedAt.Equal(c.Now()) {
 		t.Errorf("CreatedAt = %v, want injected clock %v", p.CreatedAt, c.Now())
 	}
-	// The engine read the token from the Secret and passed it to the vendor adapter — it is
-	// never sent over the API.
+	// The engine validated with the passed token and then wrote it into the credential store.
 	if tok, calls := dnsF.LastToken(); tok != "dop_v1_tok" || calls != 1 {
 		t.Errorf("verify used token=%q calls=%d, want dop_v1_tok / 1", tok, calls)
+	}
+	if tok, ok := creds.Get("digitalocean"); !ok || tok != "dop_v1_tok" {
+		t.Errorf("SetToken stored %q ok=%v, want dop_v1_tok true", tok, ok)
 	}
 	if _, err := d.Provider(ctx, "digitalocean"); err != nil {
 		t.Errorf("provider not persisted: %v", err)
@@ -65,9 +67,8 @@ func TestAddProviderDefaultsCapabilitiesAndVerifies(t *testing.T) {
 
 func TestAddProviderExplicitNameAndKey(t *testing.T) {
 	e, creds, dnsF, _, _ := newProviderEngine(t)
-	creds.Set("do_token", "tok")
 	p, err := e.AddProvider(context.Background(), cp.AddProviderRequest{
-		Name: "do-dns", Type: cp.ProviderDigitalOcean, SecretKey: "do_token",
+		Name: "do-dns", Type: cp.ProviderDigitalOcean, SecretKey: "do_token", Token: "tok",
 	})
 	if err != nil {
 		t.Fatalf("AddProvider: %v", err)
@@ -76,22 +77,25 @@ func TestAddProviderExplicitNameAndKey(t *testing.T) {
 		t.Errorf("name=%q key=%q, want do-dns / do_token", p.Name, p.SecretKey)
 	}
 	if tok, _ := dnsF.LastToken(); tok != "tok" {
-		t.Errorf("verify read the wrong key's token: %q", tok)
+		t.Errorf("verify used the wrong token: %q", tok)
+	}
+	// The token was written under the explicit key.
+	if tok, ok := creds.Get("do_token"); !ok || tok != "tok" {
+		t.Errorf("SetToken stored %q ok=%v under do_token, want tok true", tok, ok)
 	}
 }
 
 func TestAddProviderRejectsUnknownTypeAndBadName(t *testing.T) {
-	e, creds, _, _, _ := newProviderEngine(t)
+	e, _, _, _, _ := newProviderEngine(t)
 	ctx := context.Background()
-	creds.Set("digitalocean", "tok") // present, to prove rejection is about the request, not the token
 
-	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: "aws"}); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: "aws", Token: "tok"}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("unknown type err = %v, want ErrInvalid", err)
 	}
-	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Name: "Bad Name", Type: cp.ProviderDigitalOcean}); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Name: "Bad Name", Type: cp.ProviderDigitalOcean, Token: "tok"}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("bad name err = %v, want ErrInvalid", err)
 	}
-	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Name: "ok", Type: cp.ProviderDigitalOcean, SecretKey: "bad key"}); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Name: "ok", Type: cp.ProviderDigitalOcean, SecretKey: "bad key", Token: "tok"}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("bad secret key err = %v, want ErrInvalid", err)
 	}
 }
@@ -99,11 +103,14 @@ func TestAddProviderRejectsUnknownTypeAndBadName(t *testing.T) {
 func TestAddProviderRejectsBadTokenAndDoesNotSave(t *testing.T) {
 	e, creds, dnsF, d, _ := newProviderEngine(t)
 	ctx := context.Background()
-	creds.Set("digitalocean", "bad")
 	dnsF.SetVerifyError(fmt.Errorf("digitalocean rejected the token: %w", cp.ErrInvalid))
 
-	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean}); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean, Token: "bad"}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("rejected token err = %v, want ErrInvalid", err)
+	}
+	// Validation runs BEFORE any write: a rejected token leaves neither the Secret nor the registry.
+	if _, ok := creds.Get("digitalocean"); ok {
+		t.Errorf("a rejected token must not be written to the credential store")
 	}
 	if _, err := d.Provider(ctx, "digitalocean"); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("a provider with a rejected token must not be recorded (got %v)", err)
@@ -113,7 +120,7 @@ func TestAddProviderRejectsBadTokenAndDoesNotSave(t *testing.T) {
 func TestAddProviderMissingTokenIsInvalid(t *testing.T) {
 	e, _, _, d, _ := newProviderEngine(t)
 	ctx := context.Background()
-	// No token seeded — as if the Secret write never landed.
+	// No token in the request.
 	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("missing token err = %v, want ErrInvalid", err)
 	}
@@ -125,19 +132,19 @@ func TestAddProviderMissingTokenIsInvalid(t *testing.T) {
 func TestProvidersListedInNameOrderAndUpsert(t *testing.T) {
 	e, creds, _, _, _ := newProviderEngine(t)
 	ctx := context.Background()
-	creds.Set("digitalocean", "do-tok")
-	creds.Set("cloudflare", "cf-tok")
-	creds.Set("rotated", "do-tok2") // the rotation's new key
 
-	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean}); err != nil {
+	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean, Token: "do-tok"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderCloudflare}); err != nil {
+	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderCloudflare, Token: "cf-tok"}); err != nil {
 		t.Fatal(err)
 	}
-	// Re-adding the same name upserts rather than duplicating.
-	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean, SecretKey: "rotated"}); err != nil {
+	// Re-adding the same name upserts rather than duplicating; the rotation lands under a new key.
+	if _, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderDigitalOcean, SecretKey: "rotated", Token: "do-tok2"}); err != nil {
 		t.Fatal(err)
+	}
+	if tok, ok := creds.Get("rotated"); !ok || tok != "do-tok2" {
+		t.Errorf("rotation stored %q ok=%v, want do-tok2 true", tok, ok)
 	}
 
 	ps, err := e.Providers(ctx)
@@ -156,10 +163,9 @@ func TestProvidersListedInNameOrderAndUpsert(t *testing.T) {
 }
 
 func TestAddProviderSurfacesRegistryError(t *testing.T) {
-	e, creds, _, d, _ := newProviderEngine(t)
-	creds.Set("digitalocean", "tok")
+	e, _, _, d, _ := newProviderEngine(t)
 	d.SetError(fake.OpSaveProvider, errors.New("boom"))
-	if _, err := e.AddProvider(context.Background(), cp.AddProviderRequest{Type: cp.ProviderDigitalOcean}); err == nil {
+	if _, err := e.AddProvider(context.Background(), cp.AddProviderRequest{Type: cp.ProviderDigitalOcean, Token: "tok"}); err == nil {
 		t.Errorf("AddProvider should surface a registry write error")
 	}
 }

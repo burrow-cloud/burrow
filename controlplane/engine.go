@@ -397,14 +397,29 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (A
 // Unlike install it deploys nothing and is not guarded — connect is registration-only. Connecting
 // the same backend twice upserts, updating the endpoint. secretKey is the (non-secret) key under
 // which a bearer token for an authenticated backend lives in the burrow-credentials Secret; "" means
-// the backend is unauthenticated. The token itself never crosses here — only the key (ADR-0004/0023).
-func (e *Engine) ConnectAddon(ctx context.Context, backend, endpoint, secretKey string) (AddonInfo, error) {
+// the backend is unauthenticated. token is the bearer token VALUE for an authenticated backend: it
+// arrives over burrowd's authenticated control-plane API and is written into burrow-credentials under
+// secretKey (ADR-0030). The value is never logged, never stored in Postgres, never returned, and
+// never carried over MCP — only the key is recorded in the registry (ADR-0004/0023). A token without
+// a secretKey is invalid. The registry entry that crosses the API holds only the key.
+func (e *Engine) ConnectAddon(ctx context.Context, backend, endpoint, secretKey, token string) (AddonInfo, error) {
 	b, ok := LookupConnectBackend(backend)
 	if !ok {
 		return AddonInfo{}, fmt.Errorf("connect addon: unknown backend %q: %w", backend, ErrInvalid)
 	}
 	if endpoint == "" {
 		return AddonInfo{}, fmt.Errorf("connect addon %s: endpoint is empty: %w", backend, ErrInvalid)
+	}
+	if token != "" && secretKey == "" {
+		return AddonInfo{}, fmt.Errorf("connect addon %s: a token needs a secret key to store it under: %w", backend, ErrInvalid)
+	}
+	// Write the bearer token into burrow-credentials before recording the entry, so a connected
+	// authenticated backend has its credential available the first time it is queried. The value is
+	// used here and never logged or placed in an error.
+	if token != "" {
+		if err := e.credentials.SetToken(ctx, secretKey, token); err != nil {
+			return AddonInfo{}, fmt.Errorf("connect addon %s: storing the token: %w", backend, err)
+		}
 	}
 	info := AddonInfo{
 		Name:         backend,

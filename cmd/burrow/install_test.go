@@ -37,7 +37,8 @@ func TestRenderManifests(t *testing.T) {
 		`resources: ["services"]`,               // expose creates Services (ADR-0018)
 		`resources: ["ingresses"]`,              // ... and Ingresses
 		"name: burrow-credentials",              // the empty vendor-credential Secret (ADR-0023)
-		`resourceNames: ["burrow-credentials"]`, // burrowd's only secrets grant, scoped to it
+		`resourceNames: ["burrow-credentials"]`, // burrowd's credentials grant, scoped to it
+		`verbs: ["get", "update"]`,              // get + update on exactly that Secret (ADR-0030)
 		"fieldPath: metadata.namespace",         // POD_NAMESPACE: where burrowd reads credentials
 	} {
 		if !strings.Contains(out, want) {
@@ -46,8 +47,9 @@ func TestRenderManifests(t *testing.T) {
 	}
 
 	// Secrets grants are deliberately limited and documented. There are exactly two:
-	//   1. the resourceNames-scoped `get` on burrow-credentials in the control-plane namespace
-	//      (ADR-0023) — burrowd's only access to vendor-token contents; and
+	//   1. the resourceNames-scoped `get`/`update` on burrow-credentials in the control-plane
+	//      namespace (ADR-0023/0030) — burrowd's only access to vendor-token contents, now able to
+	//      write a token value it received over its authenticated control-plane API; and
 	//   2. an app-namespace-scoped grant on app env Secrets (ADR-0028/0029) so burrowd can
 	//      list/unset keys, write a secret value it received over the authenticated control-plane
 	//      API, and let a provisioned backend write a connection string. Secret values still never

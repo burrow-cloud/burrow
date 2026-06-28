@@ -40,31 +40,31 @@ func newAddonConnectCmd() *cobra.Command {
 			"your agent can query it — Burrow deploys nothing and the license bar does not apply, since\n" +
 			"it connects rather than distributes. Pass the in-cluster endpoint with --endpoint.\n\n" +
 			"For an authenticated backend, pass --auth: you are prompted for a bearer token with the\n" +
-			"input hidden, which is written into the burrow-credentials Secret with your kubeconfig and\n" +
-			"read by the control plane at query time. The token never travels over the control-plane API\n" +
-			"— only the Secret key does.",
+			"input hidden. The token travels over burrowd's authenticated control-plane API (TLS), which\n" +
+			"writes it into the burrow-credentials Secret (ADR-0030); it never travels over MCP and is\n" +
+			"never logged.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			backend := args[0]
 
-			// Without --auth the backend is unauthenticated: no Secret is written and only the
-			// (empty) key crosses the API.
+			// Without --auth the backend is unauthenticated: no token and no key cross the API.
 			if !auth {
 				c, err := o.client(ctx)
 				if err != nil {
 					return err
 				}
-				a, err := c.ConnectAddon(ctx, backend, endpoint, "")
+				a, err := c.ConnectAddon(ctx, backend, endpoint, "", "")
 				if err != nil {
 					return err
 				}
 				return emit(cmd.OutOrStdout(), o.json, a, connectHuman(a, ""))
 			}
 
-			// --auth: prompt for the token, write it into burrow-credentials with the developer's
-			// kubeconfig (ADR-0017/0023), then record the registry entry naming only the key. If the
-			// API call fails after the write, roll the Secret back so a rejected token is not left.
+			// --auth: prompt for the token and send it to burrowd over its authenticated
+			// control-plane API (TLS). burrowd writes it into burrow-credentials under the key and
+			// records the registry entry (ADR-0030). The token travels only in the request body; it
+			// never crosses MCP and is never logged.
 			token, err := readToken(cmd.InOrStdin(), cmd.OutOrStdout(), fmt.Sprintf("Enter the %s bearer token: ", backend))
 			if err != nil {
 				return err
@@ -74,25 +74,12 @@ func newAddonConnectCmd() *cobra.Command {
 			}
 			key := "addon-" + backend
 
-			cs, err := clientset(o.kubeconfig)
-			if err != nil {
-				return err
-			}
-			prior, existed, err := readCredential(ctx, cs, o.namespace, key)
-			if err != nil {
-				return err
-			}
-			if err := writeCredential(ctx, cs, o.namespace, key, token); err != nil {
-				return err
-			}
 			c, err := o.client(ctx)
 			if err != nil {
-				restoreCredential(ctx, cs, o.namespace, key, prior, existed)
 				return err
 			}
-			a, err := c.ConnectAddon(ctx, backend, endpoint, key)
+			a, err := c.ConnectAddon(ctx, backend, endpoint, key, token)
 			if err != nil {
-				restoreCredential(ctx, cs, o.namespace, key, prior, existed)
 				return err
 			}
 			return emit(cmd.OutOrStdout(), o.json, a, connectHuman(a, key))
@@ -100,7 +87,7 @@ func newAddonConnectCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().StringVar(&endpoint, "endpoint", "", "in-cluster host:port of the existing backend (required)")
-	cmd.Flags().BoolVar(&auth, "auth", false, "the backend requires a bearer token; prompt for it and store it in the burrow-credentials Secret")
+	cmd.Flags().BoolVar(&auth, "auth", false, "the backend requires a bearer token; prompt for it and send it over the control-plane API to be stored in the burrow-credentials Secret")
 	_ = cmd.MarkFlagRequired("endpoint")
 	return cmd
 }
@@ -111,7 +98,7 @@ func connectHuman(a client.Addon, key string) string {
 	human := fmt.Sprintf("connected the %s add-on %q (mode: %s)\nin-cluster endpoint: %s — capabilities: %s",
 		a.Type, a.Name, a.Mode, a.Endpoint, strings.Join(a.Capabilities, ", "))
 	if key != "" {
-		human += fmt.Sprintf("\nbearer token stored in %s under key %q", credentialsSecretName, key)
+		human += fmt.Sprintf("\nbearer token stored in burrow-credentials under key %q", key)
 	}
 	return human
 }

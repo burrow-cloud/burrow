@@ -52,6 +52,7 @@ const (
 	OpProvider        Op = "Provider"
 	OpProviders       Op = "Providers"
 	OpToken           Op = "Token"
+	OpSetToken        Op = "SetToken"
 	OpDNS             Op = "DNS"
 	OpVerifyAccess    Op = "VerifyAccess"
 	OpAppendAudit     Op = "AppendAudit"

@@ -4,7 +4,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,19 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 
 	"github.com/burrow-cloud/burrow/client"
 )
-
-// credentialsSecretName is the single Secret in the control-plane namespace that holds every
-// vendor token, one key per provider (ADR-0023). `burrow install` creates it empty; `provider
-// add` upserts a key into it with the developer's kubeconfig, and burrowd reads it via a
-// resourceNames-scoped get. The token never travels over MCP and burrowd never writes it.
-const credentialsSecretName = "burrow-credentials"
 
 // providerCatalog is the provider types this CLI knows about and the capabilities each serves,
 // mirroring controlplane's known provider types — the reference behind `provider types` and the
@@ -49,18 +38,19 @@ func supportedProviderTypes() []string {
 
 func providerTypesHint() string { return strings.Join(supportedProviderTypes(), ", ") }
 
-// newProviderCmd manages cloud-provider credentials. `provider add` is a setup command: it
-// writes the token into the burrow-credentials Secret with the developer's kubeconfig and
-// then records the (non-secret) registry entry through burrowd — the setup-vs-operation split
-// of ADR-0017. burrowd holds and reads the token; the agent never does.
+// newProviderCmd manages cloud-provider credentials. `provider add` is a setup command: the token
+// travels over burrowd's authenticated control-plane API (TLS), which validates it and writes it
+// into the burrow-credentials Secret (ADR-0030). burrowd holds the token; it never travels over MCP
+// and the agent never holds it.
 func newProviderCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "provider",
 		Short: "Configure cloud-provider credentials (add/list)",
 		Long: "provider registers the cloud-provider credentials Burrow uses on your behalf —\n" +
-			"e.g. a DigitalOcean or Cloudflare API token for DNS. The token is stored in a\n" +
-			"Kubernetes Secret in the control-plane namespace and read by the control plane; it\n" +
-			"never travels over MCP and the agent never holds it.",
+			"e.g. a DigitalOcean or Cloudflare API token for DNS. The token travels over burrowd's\n" +
+			"authenticated control-plane API (TLS), which validates it and stores it in a Kubernetes\n" +
+			"Secret in the control-plane namespace; it never travels over MCP and the agent never\n" +
+			"holds it.",
 	}
 	parent.AddCommand(newProviderTypesCmd(), newProviderAddCmd(), newProviderListCmd())
 	return parent
@@ -93,9 +83,10 @@ func newProviderAddCmd() *cobra.Command {
 		Long: "add registers a provider of the given type and stores its API token. You are\n" +
 			"prompted for the token with the input hidden, so it never lands in your shell\n" +
 			"history or the process table; for scripts, pipe it in instead\n" +
-			"(echo \"$TOKEN\" | burrow config provider add cloudflare). The token is written into the\n" +
-			"burrow-credentials Secret with your kubeconfig and recorded in the control-plane\n" +
-			"registry. Pass --name to register more than one provider of the same type.\n\n" +
+			"(echo \"$TOKEN\" | burrow config provider add cloudflare). The token travels over\n" +
+			"burrowd's authenticated control-plane API (TLS), which validates it against the vendor\n" +
+			"and writes it into the burrow-credentials Secret (ADR-0030); it never travels over MCP\n" +
+			"and is never logged. Pass --name to register more than one provider of the same type.\n\n" +
 			"Supported types: " + providerTypesHint() + " (see `burrow config provider types`).",
 		Example: "  burrow config provider add cloudflare\n" +
 			"  burrow config provider add digitalocean --name do-dns",
@@ -121,36 +112,22 @@ func newProviderAddCmd() *cobra.Command {
 				key = providerName
 			}
 
-			// Store the token first so burrowd can verify it: provider add writes the token
-			// into burrow-credentials with the developer's kubeconfig (ADR-0017), then asks
-			// burrowd to validate it against the vendor and record the registry entry. burrowd
-			// reads the token from the Secret — it never crosses the API. If validation fails,
-			// roll the Secret back so a rejected token is not left behind.
-			cs, err := clientset(o.kubeconfig)
-			if err != nil {
-				return err
-			}
-			prior, existed, err := readCredential(ctx, cs, o.namespace, key)
-			if err != nil {
-				return err
-			}
-			if err := writeCredential(ctx, cs, o.namespace, key, token); err != nil {
-				return err
-			}
+			// Send the token to burrowd over its authenticated control-plane API (TLS). burrowd
+			// validates it against the vendor, writes it into the burrow-credentials Secret, and
+			// records the registry entry — a rejected token writes nothing (ADR-0030). The token
+			// travels only in the request body; it never crosses MCP and is never logged.
 			c, err := o.client(ctx)
 			if err != nil {
-				restoreCredential(ctx, cs, o.namespace, key, prior, existed)
 				return err
 			}
-			p, err := c.AddProvider(ctx, client.AddProviderRequest{Name: providerName, Type: providerType, SecretKey: key})
+			p, err := c.AddProvider(ctx, client.AddProviderRequest{Name: providerName, Type: providerType, SecretKey: key, Token: token})
 			if err != nil {
-				restoreCredential(ctx, cs, o.namespace, key, prior, existed)
 				return err
 			}
 
 			human := fmt.Sprintf("registered provider %q (type %s, capabilities %s)\n"+
-				"token stored in %s/%s under key %q",
-				p.Name, p.Type, strings.Join(p.Capabilities, ", "), o.namespace, credentialsSecretName, p.SecretKey)
+				"token stored in burrow-credentials under key %q",
+				p.Name, p.Type, strings.Join(p.Capabilities, ", "), p.SecretKey)
 			return emit(cmd.OutOrStdout(), o.json, p, human)
 		},
 	}
@@ -215,79 +192,4 @@ func readToken(in io.Reader, out io.Writer, prompt string) (string, error) {
 		return "", fmt.Errorf("reading token from standard input: %w", err)
 	}
 	return strings.TrimSpace(string(b)), nil
-}
-
-// writeCredential upserts the token under key in the burrow-credentials Secret in the
-// control-plane namespace, creating the Secret if `burrow install` has not yet (so the
-// command works against an older install). It acts with the developer's kubeconfig; burrowd
-// only ever reads this Secret (ADR-0023).
-func writeCredential(ctx context.Context, cs kubernetes.Interface, namespace, key, token string) error {
-	secrets := cs.CoreV1().Secrets(namespace)
-	existing, err := secrets.Get(ctx, credentialsSecretName, metav1.GetOptions{})
-	switch {
-	case apierrors.IsNotFound(err):
-		_, err = secrets.Create(ctx, &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: credentialsSecretName, Namespace: namespace},
-			Type:       corev1.SecretTypeOpaque,
-			Data:       map[string][]byte{key: []byte(token)},
-		}, metav1.CreateOptions{})
-	case err != nil:
-		return fmt.Errorf("reading credentials secret: %w", err)
-	default:
-		if existing.Data == nil {
-			existing.Data = map[string][]byte{}
-		}
-		existing.Data[key] = []byte(token)
-		_, err = secrets.Update(ctx, existing, metav1.UpdateOptions{})
-	}
-	if err != nil {
-		return fmt.Errorf("writing credentials secret: %w", err)
-	}
-	return nil
-}
-
-// readCredential returns the token currently stored under key and whether it was present, so a
-// failed `provider add` can roll the Secret back to exactly its prior state. A missing Secret
-// reads as absent, not an error.
-func readCredential(ctx context.Context, cs kubernetes.Interface, namespace, key string) (string, bool, error) {
-	s, err := cs.CoreV1().Secrets(namespace).Get(ctx, credentialsSecretName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("reading credentials secret: %w", err)
-	}
-	v, ok := s.Data[key]
-	return string(v), ok, nil
-}
-
-// restoreCredential rolls key back to prior (or removes it if it was absent), best effort —
-// the caller is already returning the original failure, so a cleanup error must not mask it.
-func restoreCredential(ctx context.Context, cs kubernetes.Interface, namespace, key, prior string, existed bool) {
-	if existed {
-		_ = writeCredential(ctx, cs, namespace, key, prior)
-		return
-	}
-	_ = deleteCredential(ctx, cs, namespace, key)
-}
-
-// deleteCredential removes one key from the burrow-credentials Secret, leaving any other
-// providers' tokens in place.
-func deleteCredential(ctx context.Context, cs kubernetes.Interface, namespace, key string) error {
-	secrets := cs.CoreV1().Secrets(namespace)
-	s, err := secrets.Get(ctx, credentialsSecretName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("reading credentials secret: %w", err)
-	}
-	if _, ok := s.Data[key]; !ok {
-		return nil
-	}
-	delete(s.Data, key)
-	if _, err := secrets.Update(ctx, s, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("updating credentials secret: %w", err)
-	}
-	return nil
 }

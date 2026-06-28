@@ -175,13 +175,15 @@ type Provider struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// AddProviderRequest registers a vendor credential. The token is not part of this request:
-// the CLI writes it into the burrow-credentials Secret with the developer's kubeconfig, and
-// only the registry entry — naming the Secret key — flows through the control plane.
+// AddProviderRequest registers a vendor credential. The token VALUE travels in this request over
+// burrowd's authenticated, TLS-protected control-plane API; burrowd validates it and writes it into
+// the burrow-credentials Secret (ADR-0030). The value is never logged, never stored in Postgres,
+// never echoed back, and still never carried over MCP — provider add is a human/CLI operation.
 type AddProviderRequest struct {
 	Name      string `json:"name,omitempty"`
 	Type      string `json:"type"`
 	SecretKey string `json:"secret_key,omitempty"`
+	Token     string `json:"token,omitempty"`
 }
 
 // DomainResult mirrors the control plane's DNS-record outcome (ADR-0018).
@@ -285,10 +287,13 @@ func (c *Client) InstallAddon(ctx context.Context, addonType string, confirm boo
 // ConnectAddon registers an existing backend the user already runs (e.g. an in-cluster Loki) as a
 // queryable add-on, recording its endpoint (ADR-0026). Unlike install it deploys nothing. secretKey,
 // when non-empty, names the key in the burrow-credentials Secret under which the backend's bearer
-// token lives; the token itself never travels over this API, only the key (ADR-0004/0023).
-func (c *Client) ConnectAddon(ctx context.Context, backend, endpoint, secretKey string) (Addon, error) {
+// token lives; token is the bearer token VALUE for an authenticated backend, which travels over
+// burrowd's authenticated, TLS-protected API and is written to the Secret (ADR-0030) — never logged,
+// never stored in Postgres, never echoed back, never over MCP. Pass an empty token (and empty
+// secretKey) for an unauthenticated backend.
+func (c *Client) ConnectAddon(ctx context.Context, backend, endpoint, secretKey, token string) (Addon, error) {
 	var out Addon
-	body := map[string]any{"backend": backend, "endpoint": endpoint, "secret_key": secretKey}
+	body := map[string]any{"backend": backend, "endpoint": endpoint, "secret_key": secretKey, "token": token}
 	err := c.do(ctx, http.MethodPost, "/v1/addons/connect", body, &out)
 	return out, err
 }

@@ -103,17 +103,21 @@ type RollbackResult struct {
 	SupersededReleaseID string `json:"superseded_release_id"`
 }
 
-// AddProviderRequest registers a vendor credential (ADR-0023). The token is deliberately not
-// part of this request: the CLI writes it into the burrow-credentials Secret with the
-// developer's kubeconfig (the setup-vs-operation split, ADR-0017), and only the non-secret
-// registry entry — naming the Secret key — flows through the control plane.
+// AddProviderRequest registers a vendor credential (ADR-0023, ADR-0030). The token VALUE travels
+// in this request over burrowd's authenticated, TLS-protected control-plane API; burrowd validates
+// it and then writes it into the burrow-credentials Secret. The value is never logged, never stored
+// in Postgres, never returned in a response, and still never carried over MCP — provider add is a
+// human/CLI operation, not an agent one.
 type AddProviderRequest struct {
 	// Name identifies the provider; empty defaults to the type.
 	Name string `json:"name,omitempty"`
 	// Type is the vendor this provider talks to.
 	Type ProviderType `json:"type"`
-	// SecretKey is the key in burrow-credentials holding the token; empty defaults to Name.
+	// SecretKey is the key in burrow-credentials the token is written under; empty defaults to Name.
 	SecretKey string `json:"secret_key,omitempty"`
+	// Token is the vendor API token VALUE. It is written to burrow-credentials after validation and
+	// is never logged, stored in Postgres, or echoed back (ADR-0030).
+	Token string `json:"token,omitempty"`
 }
 
 // AddDomainRequest points a host at an address through a configured DNS provider (ADR-0018).

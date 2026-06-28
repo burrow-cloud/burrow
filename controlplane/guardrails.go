@@ -57,6 +57,11 @@ const (
 	// and release history — so it disappears from the apps listing. The destructive teardown
 	// of a deployed application.
 	GuardrailAppDelete GuardrailCode = "app_delete"
+	// GuardrailRollback: the operation would roll an app back to its previous release. A
+	// production mutation, but a recovery one — allowed by default so an agent can restore a
+	// broken app quickly; an operator can set it to confirm or deny to require sign-off for
+	// server-side, agent-independent enforcement (ADR-0020).
+	GuardrailRollback GuardrailCode = "rollback"
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through
@@ -79,6 +84,7 @@ var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailAddonInstall, Description: "install a building-block add-on (backing service) onto the cluster"},
 	{Code: GuardrailAddonRemove, Description: "remove an installed add-on from the cluster"},
 	{Code: GuardrailAppDelete, Description: "delete an app entirely (its workload, routing, and release history)"},
+	{Code: GuardrailRollback, Description: "roll an application back to its previous release"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.

@@ -317,9 +317,13 @@ func (c *Client) DeleteApp(ctx context.Context, app string, confirm bool) error 
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
-func (c *Client) Rollback(ctx context.Context, app string) (RollbackResult, error) {
+func (c *Client) Rollback(ctx context.Context, app string, confirm bool) (RollbackResult, error) {
 	var out RollbackResult
-	err := c.do(ctx, http.MethodPost, c.appPath(app, "rollback"), nil, &out)
+	path := c.appPath(app, "rollback")
+	if confirm {
+		path += "?confirm=true"
+	}
+	err := c.do(ctx, http.MethodPost, path, nil, &out)
 	return out, err
 }
 

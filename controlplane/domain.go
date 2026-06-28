@@ -43,9 +43,11 @@ const RestartedAtAnnotation = "burrow.cloud/restarted-at"
 
 // AppSecretName is the per-app Kubernetes Secret that holds an app's secret env (ADR-0028): one
 // object per app in the app namespace, keys = env-var names, values = secret values. The values
-// live only here — never in Postgres, the Deployment spec, or over MCP/the API (ADR-0004). The
-// name is derived from the app (a DNS-1123 label, so the result is always a valid Secret name),
-// so every layer computes it the same way rather than passing it around.
+// live only here — never inlined into the Deployment spec, never written to Postgres, and never
+// carried over MCP (ADR-0029/0004). A value may transit burrowd's authenticated control-plane API
+// on `secret set`, which writes it here. The name is derived from the app (a DNS-1123 label, so
+// the result is always a valid Secret name), so every layer computes it the same way rather than
+// passing it around.
 func AppSecretName(app string) string {
 	return "burrow-app-" + app + "-secrets"
 }

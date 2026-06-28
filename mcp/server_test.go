@@ -66,8 +66,9 @@ func TestListTools(t *testing.T) {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
 	}
-	// Security boundary (ADR-0028/0004): there must be NO secret-set tool — a secret value never
-	// crosses MCP. Setting a secret is a kubeconfig-only CLI operation.
+	// Security boundary (ADR-0029/0004): there must be NO secret-set tool — a secret value never
+	// crosses MCP. Setting a secret travels over burrowd's authenticated control-plane API (the
+	// CLI or the UI), never the agent surface.
 	if got["burrow_secret_set"] {
 		t.Error("burrow_secret_set must NOT exist: secret values never travel over MCP")
 	}

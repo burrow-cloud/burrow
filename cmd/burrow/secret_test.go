@@ -4,75 +4,59 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
-
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
-// TestSetAppSecretWritesValueWithKubeconfig proves the SET path writes the value straight into the
-// per-app Kubernetes Secret with the developer's clientset — never through burrowd/the API.
-func TestSetAppSecretWritesValueWithKubeconfig(t *testing.T) {
-	ctx := context.Background()
-	cs := fake.NewSimpleClientset()
-
-	if err := setAppSecret(ctx, cs, "apps", "web", "STRIPE_KEY", "sk_live_x"); err != nil {
-		t.Fatalf("setAppSecret: %v", err)
-	}
-	s, err := cs.CoreV1().Secrets("apps").Get(ctx, appSecretName("web"), metav1.GetOptions{})
+// TestSecretSet proves `secret set` carries the VALUE in the POST body to burrowd's
+// control-plane API (ADR-0029) — not in the path or query, where the access log would see it —
+// and that burrowd, not the CLI, writes the Secret.
+func TestSecretSet(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	var gotBody map[string]any
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		// The response carries the app and KEY only — never the value.
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "key": "STRIPE_KEY"})
+	}, "app", "secret", "set", "web", "STRIPE_KEY=sk_live_x")
 	if err != nil {
-		t.Fatalf("get secret: %v", err)
+		t.Fatalf("run: %v", err)
 	}
-	if s.Type != corev1.SecretTypeOpaque {
-		t.Errorf("secret type = %q, want Opaque", s.Type)
+	if gotMethod != "POST" || gotPath != "/v1/apps/web/secrets" {
+		t.Errorf("request = %s %s, want POST /v1/apps/web/secrets", gotMethod, gotPath)
 	}
-	if string(s.Data["STRIPE_KEY"]) != "sk_live_x" {
-		t.Errorf("stored value = %q, want sk_live_x", s.Data["STRIPE_KEY"])
+	// The value must be in the BODY, never the path or query (the access log records path+query).
+	if strings.Contains(gotPath, "sk_live_x") || strings.Contains(gotQuery, "sk_live_x") {
+		t.Errorf("value leaked into the request line: path=%q query=%q", gotPath, gotQuery)
 	}
-
-	// A second key upserts into the same Secret without dropping the first.
-	if err := setAppSecret(ctx, cs, "apps", "web", "DATABASE_URL", "postgres://y"); err != nil {
-		t.Fatalf("second setAppSecret: %v", err)
+	if gotBody["key"] != "STRIPE_KEY" || gotBody["value"] != "sk_live_x" {
+		t.Errorf("body = %#v, want key=STRIPE_KEY value=sk_live_x", gotBody)
 	}
-	s, _ = cs.CoreV1().Secrets("apps").Get(ctx, appSecretName("web"), metav1.GetOptions{})
-	if string(s.Data["STRIPE_KEY"]) != "sk_live_x" || string(s.Data["DATABASE_URL"]) != "postgres://y" {
-		t.Errorf("secret data = %v, want both keys", s.Data)
+	if nr, _ := gotBody["no_restart"].(bool); nr {
+		t.Errorf("no_restart = true, want false by default")
+	}
+	if !strings.Contains(out, "set secret STRIPE_KEY on web") {
+		t.Errorf("output = %q", out)
 	}
 }
 
-func TestRestartWorkloadBumpsAnnotation(t *testing.T) {
-	ctx := context.Background()
-	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "apps"}}
-	cs := fake.NewSimpleClientset(dep)
-
-	rolled, err := restartWorkload(ctx, cs, "apps", "web")
+func TestSecretSetNoRestart(t *testing.T) {
+	var gotBody map[string]any
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "key": "K"})
+	}, "app", "secret", "set", "web", "K=V", "--no-restart")
 	if err != nil {
-		t.Fatalf("restartWorkload: %v", err)
+		t.Fatalf("run: %v", err)
 	}
-	if !rolled {
-		t.Fatal("expected rolled=true for an existing Deployment")
+	if nr, _ := gotBody["no_restart"].(bool); !nr {
+		t.Errorf("no_restart = %#v, want true", gotBody["no_restart"])
 	}
-	got, _ := cs.AppsV1().Deployments("apps").Get(ctx, "web", metav1.GetOptions{})
-	if got.Spec.Template.Annotations[restartedAtAnnotation] == "" {
-		t.Error("restart annotation not set on the pod template")
-	}
-}
-
-func TestRestartWorkloadMissingDeploymentIsNoRoll(t *testing.T) {
-	// No Deployment yet: the Secret persists and the next deploy injects it via envFrom — not an
-	// error, just nothing to roll.
-	rolled, err := restartWorkload(context.Background(), fake.NewSimpleClientset(), "apps", "web")
-	if err != nil {
-		t.Fatalf("restartWorkload missing = %v, want nil", err)
-	}
-	if rolled {
-		t.Error("rolled should be false when the Deployment does not exist yet")
+	if !strings.Contains(out, "lands on next deploy") {
+		t.Errorf("output = %q, want a no-restart note", out)
 	}
 }
 

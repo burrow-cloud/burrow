@@ -59,10 +59,11 @@ rules:
     resources: ["ingresses"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
   # burrowd reads each app's per-app env Secret (burrow-app-<app>-secrets) to LIST its keys and
-  # UNSET a key (ADR-0028); create/update let a future provisioned backend (e.g. the Postgres
-  # add-on) write a connection string into the app's Secret. Secret VALUES still never cross the
-  # API or MCP — `secret set` writes them with the developer's kubeconfig (ADR-0004). This is a
-  # deliberate, documented broadening of the least-privilege posture (ADR-0023), scoped to the
+  # UNSET a key, and create/update let it WRITE a secret value it received over the authenticated
+  # control-plane API (ADR-0029) — and let a future provisioned backend (e.g. the Postgres add-on)
+  # write a connection string into the app's Secret. Secret values still never cross MCP (there is
+  # no secret-set MCP tool) and are never logged or stored in the database (ADR-0029/0004). This is
+  # a deliberate, documented broadening of the least-privilege posture (ADR-0023), scoped to the
   # app namespace ONLY: burrowd gets no secrets access in the control-plane or add-on namespaces.
   - apiGroups: [""]
     resources: ["secrets"]

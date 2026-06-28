@@ -333,6 +333,46 @@ func (a *Adapter) SecretKeys(ctx context.Context, app string) ([]string, error) 
 	return keys, nil
 }
 
+// SetSecretValue upserts key=value into app's per-app Secret (controlplane.AppSecretName(app)) in
+// the app namespace, creating the Secret (Opaque, Burrow labels) if absent (ADR-0029). The value
+// arrives here over burrowd's authenticated control-plane API and is written to the Kubernetes
+// Secret; it never reaches a log, the audit log, Postgres, or MCP (ADR-0029/0004). The returned
+// error names the app and key only, never the value. It retries on conflict since a concurrent
+// set/unset can race the resourceVersion.
+func (a *Adapter) SetSecretValue(ctx context.Context, app, key, value string) error {
+	secrets := a.client.CoreV1().Secrets(a.namespace)
+	name := controlplane.AppSecretName(app)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, err := secrets.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			_, err = secrets.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: a.namespace,
+					Labels:    map[string]string{nameLabel: app, managedByLabel: managedByValue},
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{key: []byte(value)},
+			}, metav1.CreateOptions{})
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		if existing.Data == nil {
+			existing.Data = map[string][]byte{}
+		}
+		existing.Data[key] = []byte(value)
+		_, err = secrets.Update(ctx, existing, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		// The error names the app and key only — never the value — so it is safe to log/return.
+		return fmt.Errorf("kube: writing secret %q for %q: %w", key, app, err)
+	}
+	return nil
+}
+
 // UnsetSecretKey removes one key from app's per-app Secret (get, delete the key, update). A
 // missing Secret or a missing key is a no-op, not an error. The value never crosses here — the
 // caller passes only the key name (ADR-0004).

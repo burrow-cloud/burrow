@@ -38,6 +38,58 @@ func TestListSecretsEmpty(t *testing.T) {
 	}
 }
 
+func TestSetSecretWritesValueAndRolls(t *testing.T) {
+	ctx := context.Background()
+	e, k, r, _, _ := newEngine(t, permissive())
+	r.Add("img:1", "sha256:1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	if err := e.SetSecret(ctx, "web", "STRIPE_KEY", "sk_live_x", false); err != nil {
+		t.Fatalf("SetSecret: %v", err)
+	}
+	// The value lands in the per-app Secret (the fake stores what burrowd wrote).
+	if v, ok := k.SecretValue("web", "STRIPE_KEY"); !ok || v != "sk_live_x" {
+		t.Errorf("secret STRIPE_KEY = %q, %v; want sk_live_x present", v, ok)
+	}
+	// A default set rolls the running workload (envFrom is read only at pod start).
+	if _, rolled := k.RestartedAt("web"); !rolled {
+		t.Error("default SetSecret should roll the running workload")
+	}
+}
+
+func TestSetSecretNoRestartDoesNotRoll(t *testing.T) {
+	ctx := context.Background()
+	e, k, r, _, _ := newEngine(t, permissive())
+	r.Add("img:1", "sha256:1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	if err := e.SetSecret(ctx, "web", "A", "1", true); err != nil {
+		t.Fatalf("SetSecret no-restart: %v", err)
+	}
+	if v, ok := k.SecretValue("web", "A"); !ok || v != "1" {
+		t.Errorf("secret A = %q, %v; want it written", v, ok)
+	}
+	if _, rolled := k.RestartedAt("web"); rolled {
+		t.Error("--no-restart SetSecret must not roll the workload")
+	}
+}
+
+func TestSetSecretNoRunningWorkloadIsNoOpRoll(t *testing.T) {
+	ctx := context.Background()
+	e, k, _, _, _ := newEngine(t, permissive())
+	// No deployed workload: the value persists, and the missing-workload roll is not an error.
+	if err := e.SetSecret(ctx, "web", "A", "1", false); err != nil {
+		t.Fatalf("SetSecret with no workload: %v", err)
+	}
+	if v, ok := k.SecretValue("web", "A"); !ok || v != "1" {
+		t.Errorf("secret A = %q, %v; want it written even with no running workload", v, ok)
+	}
+}
+
 func TestUnsetSecretRemovesAndRolls(t *testing.T) {
 	ctx := context.Background()
 	e, k, r, _, _ := newEngine(t, permissive())
@@ -102,6 +154,12 @@ func TestSecretInvalidInputs(t *testing.T) {
 
 	if _, err := e.ListSecrets(ctx, "Bad!"); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("ListSecrets bad app = %v, want ErrInvalid", err)
+	}
+	if err := e.SetSecret(ctx, "web", "1BAD", "x", true); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("SetSecret bad key = %v, want ErrInvalid", err)
+	}
+	if err := e.SetSecret(ctx, "Bad!", "A", "x", true); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("SetSecret bad app = %v, want ErrInvalid", err)
 	}
 	if err := e.UnsetSecret(ctx, "web", "1BAD", true); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("UnsetSecret bad key = %v, want ErrInvalid", err)

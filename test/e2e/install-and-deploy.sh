@@ -150,24 +150,26 @@ fi
 echo "--- env unset removed the variable from the store ---"
 
 # =============================================================================
-# SECRET: secret config lifecycle (ADR-0028 + ADR-0004)
-# The security model splits by whether a VALUE is involved:
-#   - `secret set` carries the value -> kubeconfig ONLY: the CLI writes it straight into the
-#     per-app Kubernetes Secret. The value never reaches burrowd/the API/MCP.
-#   - `secret list` (KEYS only) and `secret unset` (by KEY) carry no value -> through burrowd.
+# SECRET: secret config lifecycle (ADR-0029 + ADR-0004)
+# The whole group goes through burrowd's authenticated control-plane API; what differs is whether
+# a VALUE is carried:
+#   - `secret set` carries the value -> it travels over the authenticated control-plane API and
+#     burrowd writes it to the per-app Secret. The value is never carried over MCP, never logged,
+#     and never stored in the database (ADR-0029).
+#   - `secret list` (KEYS only) and `secret unset` (by KEY) carry no value -> also MCP-allowed.
 # Assertions, all deterministic and bounded, read straight off the live cluster:
 #   1. the value lands in the per-app Secret (kubectl reads burrow-app-web-secrets);
 #   2. the Deployment pod template carries the envFrom secretRef so the value is injected;
 #   3. `secret list` prints the KEY (APP_SECRET) but NEVER the value (s3cr3t);
 #   4. `secret unset` removes the key from the Secret.
 # =============================================================================
-echo "=== secret: set a secret on the running app (kubeconfig path, rolls the Deployment) ==="
+echo "=== secret: set a secret on the running app (via burrowd, rolls the Deployment) ==="
 "$BURROW" app secret set web APP_SECRET=s3cr3t --kubeconfig "$KCFG"
 
 echo "=== secret: assert the value landed in the per-app Kubernetes Secret ==="
-# The value lives ONLY in burrow-app-web-secrets in the app namespace — written with the
-# kubeconfig, never through burrowd. Read it back and base64-decode deterministically.
-secret_val=$(kubectl --kubeconfig "$KCFG" -n default get secret burrow-app-web-secrets \
+# The value lives ONLY in burrow-app-web-secrets in the app namespace — burrowd received it over
+# the control-plane API and wrote it here. Read it back and base64-decode deterministically.
+secret_val=$(kubectl --kubeconfig "$KCFG" -n burrow-apps get secret burrow-app-web-secrets \
   -o jsonpath='{.data.APP_SECRET}' | base64 -d)
 if [ "$secret_val" != "s3cr3t" ]; then
   echo "FAIL: APP_SECRET not stored in burrow-app-web-secrets (got: '$secret_val')"
@@ -179,7 +181,7 @@ echo "=== secret: assert the Deployment injects the Secret via envFrom ==="
 # Every workload sources the per-app Secret with an optional envFrom secretRef, so each key
 # becomes an env var. Assert the reference is present on the pod template (read off the live
 # Deployment — no log timing).
-env_from=$(kubectl --kubeconfig "$KCFG" -n default get deploy/web \
+env_from=$(kubectl --kubeconfig "$KCFG" -n burrow-apps get deploy/web \
   -o jsonpath='{.spec.template.spec.containers[0].envFrom[?(@.secretRef.name=="burrow-app-web-secrets")].secretRef.name}')
 if [ "$env_from" != "burrow-app-web-secrets" ]; then
   echo "FAIL: Deployment pod template missing envFrom secretRef burrow-app-web-secrets (got: '$env_from')"

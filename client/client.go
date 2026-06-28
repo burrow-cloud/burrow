@@ -432,9 +432,18 @@ func (c *Client) Env(ctx context.Context, app string) (map[string]string, error)
 	return out.Env, err
 }
 
+// SetSecret upserts one secret key=value for an app (ADR-0029). The value travels over burrowd's
+// authenticated, TLS-protected control-plane API, which writes it to the per-app Kubernetes
+// Secret; it is never logged, never stored in Postgres, and is still never carried over MCP (there
+// is no secret-set MCP tool). By default the running workload rolls so it picks the value up; with
+// noRestart the change only persists and lands on the next deploy.
+func (c *Client) SetSecret(ctx context.Context, app, key, value string, noRestart bool) error {
+	body := map[string]any{"key": key, "value": value, "no_restart": noRestart}
+	return c.do(ctx, http.MethodPost, c.appPath(app, "secrets"), body, nil)
+}
+
 // Secrets returns the KEYS in an app's per-app Secret, never the values (ADR-0028/0004). Secret
-// values live only in the Kubernetes Secret and never cross this API; there is deliberately no
-// SetSecret method here — setting a value is a kubeconfig-only CLI operation, off burrowd.
+// values live only in the Kubernetes Secret; a list reads keys only and never returns a value.
 func (c *Client) Secrets(ctx context.Context, app string) ([]string, error) {
 	var out struct {
 		Keys []string `json:"keys"`

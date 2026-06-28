@@ -316,6 +316,22 @@ func (k *Kubernetes) Unexpose(ctx context.Context, app string) error {
 	return nil
 }
 
+// SetSecretValue upserts key=value into app's per-app Secret map (ADR-0029), modelling burrowd
+// writing the value it received over the control-plane API. SecretKeys/SecretValue read the same
+// map. An OpSetSecretValue error can be injected to exercise the failure path.
+func (k *Kubernetes) SetSecretValue(ctx context.Context, app, key, value string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpSetSecretValue]; err != nil {
+		return err
+	}
+	if k.secrets[app] == nil {
+		k.secrets[app] = map[string]string{}
+	}
+	k.secrets[app][key] = value
+	return nil
+}
+
 func (k *Kubernetes) SecretKeys(ctx context.Context, app string) ([]string, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()

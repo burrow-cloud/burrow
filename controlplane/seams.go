@@ -119,6 +119,13 @@ type Kubernetes interface {
 	// (burrow-app-<app>-secrets), sorted, never the values (ADR-0028/0004). A missing
 	// Secret yields an empty slice and no error — an app with no secrets set.
 	SecretKeys(ctx context.Context, app string) ([]string, error)
+	// SetSecretValue upserts one key=value into app's per-app Secret, creating the
+	// Secret if absent (ADR-0029). The value arrives over burrowd's authenticated
+	// control-plane API and is written here to the Kubernetes Secret — it is NEVER
+	// logged, never audited (the audit log records the key name only), never stored in
+	// Postgres, and never carried over MCP. Any error this returns must name the app and
+	// key only, never the value.
+	SetSecretValue(ctx context.Context, app, key, value string) error
 	// UnsetSecretKey removes one key from app's per-app Secret. A missing Secret or a
 	// missing key is a no-op, not an error — unsetting what is already absent succeeds.
 	// The value never crosses this seam: only the key name does.

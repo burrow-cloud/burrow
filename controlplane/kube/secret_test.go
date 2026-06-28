@@ -55,6 +55,39 @@ func TestSecretKeysMissingSecretIsEmpty(t *testing.T) {
 	}
 }
 
+func TestSetSecretValueCreatesAndUpserts(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	a := kube.New(cs, ns)
+
+	// First set creates the Secret (Opaque, Burrow labels) with the value.
+	if err := a.SetSecretValue(ctx, "web", "STRIPE_KEY", "sk_live_x"); err != nil {
+		t.Fatalf("SetSecretValue: %v", err)
+	}
+	s, err := cs.CoreV1().Secrets(ns).Get(ctx, cp.AppSecretName("web"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get secret: %v", err)
+	}
+	if s.Type != corev1.SecretTypeOpaque {
+		t.Errorf("type = %q, want Opaque", s.Type)
+	}
+	if s.Labels["app.kubernetes.io/managed-by"] != "burrow" || s.Labels["app.kubernetes.io/name"] != "web" {
+		t.Errorf("labels = %v, want name=web managed-by=burrow", s.Labels)
+	}
+	if string(s.Data["STRIPE_KEY"]) != "sk_live_x" {
+		t.Errorf("value = %q, want sk_live_x", s.Data["STRIPE_KEY"])
+	}
+
+	// A second key upserts into the same Secret without dropping the first.
+	if err := a.SetSecretValue(ctx, "web", "DATABASE_URL", "postgres://y"); err != nil {
+		t.Fatalf("second SetSecretValue: %v", err)
+	}
+	s, _ = cs.CoreV1().Secrets(ns).Get(ctx, cp.AppSecretName("web"), metav1.GetOptions{})
+	if string(s.Data["STRIPE_KEY"]) != "sk_live_x" || string(s.Data["DATABASE_URL"]) != "postgres://y" {
+		t.Errorf("data = %v, want both keys retained", s.Data)
+	}
+}
+
 func TestUnsetSecretKeyRemovesKey(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewSimpleClientset(appSecret("web", map[string]string{"A": "1", "B": "2"}))

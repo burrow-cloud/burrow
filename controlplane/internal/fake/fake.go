@@ -29,6 +29,7 @@ const (
 	OpUnexpose        Op = "Unexpose"
 	OpExposureStatus  Op = "ExposureStatus"
 	OpSecretKeys      Op = "SecretKeys"
+	OpSetSecretValue  Op = "SetSecretValue"
 	OpUnsetSecretKey  Op = "UnsetSecretKey"
 	OpRestartWorkload Op = "RestartWorkload"
 	OpAddonReady      Op = "AddonReady"

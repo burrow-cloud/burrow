@@ -487,12 +487,43 @@ func TestSecretEndpoints(t *testing.T) {
 	r.Add("img:1", "sha256:1")
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
 
-	// `secret set` is kubeconfig-only, so seed the fake Secret directly (not via the API).
-	k.SetSecret("web", "STRIPE_KEY", "sk_live_x")
+	// `secret set` carries a VALUE over the authenticated API; burrowd writes it to the per-app
+	// Secret (ADR-0029). Set via the API and assert the value lands in the fake Secret, the
+	// response echoes the app+KEY only (never the value), and the running workload rolls.
+	rec := do(h, "POST", "/v1/apps/web/secrets", token, `{"key":"STRIPE_KEY","value":"sk_live_x"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("secret set = %d %s", rec.Code, rec.Body.String())
+	}
+	if b := rec.Body.String(); strings.Contains(b, "sk_live_x") {
+		t.Fatalf("secret set response leaked the value: %s", b)
+	}
+	if v, ok := k.SecretValue("web", "STRIPE_KEY"); !ok || v != "sk_live_x" {
+		t.Errorf("STRIPE_KEY in fake Secret = %q, %v; want sk_live_x written via the API", v, ok)
+	}
+	if _, rolled := k.RestartedAt("web"); !rolled {
+		t.Error("default secret set should roll the running workload")
+	}
+	// A no_restart set writes the value but does not roll. Use a fresh app to reset roll state.
+	do(h, "POST", "/v1/apps/noroll/deploy", token, `{"image":"img:1","replicas":1}`)
+	if rec := do(h, "POST", "/v1/apps/noroll/secrets", token, `{"key":"K","value":"v","no_restart":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("secret set no_restart = %d %s", rec.Code, rec.Body.String())
+	}
+	if v, ok := k.SecretValue("noroll", "K"); !ok || v != "v" {
+		t.Errorf("K in fake Secret = %q, %v; want v", v, ok)
+	}
+	if _, rolled := k.RestartedAt("noroll"); rolled {
+		t.Error("no_restart secret set must not roll the workload")
+	}
+	// An invalid key is a 400 — the value never makes it to the Secret.
+	if rec := do(h, "POST", "/v1/apps/web/secrets", token, `{"key":"1BAD","value":"x"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("set bad key = %d, want 400", rec.Code)
+	}
+
+	// Seed a second key directly for the list/unset assertions below.
 	k.SetSecret("web", "DATABASE_URL", "postgres://y")
 
 	// List returns KEYS only, sorted — never the values.
-	rec := do(h, "GET", "/v1/apps/web/secrets", token, "")
+	rec = do(h, "GET", "/v1/apps/web/secrets", token, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("secret list = %d %s", rec.Code, rec.Body.String())
 	}
@@ -530,7 +561,7 @@ func TestSecretEndpoints(t *testing.T) {
 		t.Error("no_restart unset must not roll the workload")
 	}
 
-	// An invalid key is a 400. There is deliberately no endpoint that carries a secret VALUE.
+	// An invalid key on unset is a 400 too.
 	if rec := do(h, "DELETE", "/v1/apps/web/secrets/1BAD", token, ""); rec.Code != http.StatusBadRequest {
 		t.Errorf("bad key = %d, want 400", rec.Code)
 	}

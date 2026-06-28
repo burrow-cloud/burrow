@@ -287,10 +287,43 @@ func (e *Engine) ListSecrets(ctx context.Context, app string) ([]string, error) 
 	return keys, nil
 }
 
+// SetSecret upserts one key=value into an app's per-app Secret and, unless noRestart, rolls the
+// running workload so it picks the value up (ADR-0029). The value arrives over burrowd's
+// authenticated control-plane API and is written here through the Kubernetes seam; it is NEVER
+// logged, never audited, never stored in Postgres, and never carried over MCP — only its KEY name
+// appears in any error (the value is never formatted into one). Setting a value still cannot be
+// done over MCP: there is no secret-set MCP tool. An app with no running workload just writes the
+// Secret; the change lands on the next deploy.
+func (e *Engine) SetSecret(ctx context.Context, app, key, value string, noRestart bool) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("set secret: %w: %w", ErrInvalid, err)
+	}
+	if err := validateEnvKey(key); err != nil {
+		return fmt.Errorf("set secret %s: %w: %w", app, ErrInvalid, err)
+	}
+	if err := e.k8s.SetSecretValue(ctx, app, key, value); err != nil {
+		// Wrap with the app and key NAME only — never the value (ADR-0029).
+		return fmt.Errorf("set secret %s: writing %s: %w", app, key, err)
+	}
+	if noRestart {
+		return nil
+	}
+	// envFrom is read only at pod start, so writing a value under an existing key does not roll
+	// the Deployment on its own — bump the restart annotation. A missing workload means nothing is
+	// running yet: not an error, the change lands on the next deploy.
+	if err := e.k8s.RestartWorkload(ctx, app, e.clock.Now()); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("set secret %s: rolling workload: %w", app, err)
+	}
+	return nil
+}
+
 // UnsetSecret removes one key from an app's per-app Secret and, unless noRestart, rolls the
-// running workload so it drops the value (ADR-0028). Removing a key carries no value, so this is
-// MCP-allowed (unlike `secret set`, which is kubeconfig-only). An app with no running workload
-// just updates the Secret; the change lands on the next deploy. Removing an absent key succeeds.
+// running workload so it drops the value (ADR-0028). Removing a key carries no value, and this is
+// MCP-allowed. An app with no running workload just updates the Secret; the change lands on the
+// next deploy. Removing an absent key succeeds.
 func (e *Engine) UnsetSecret(ctx context.Context, app, key string, noRestart bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("unset secret: %w: %w", ErrInvalid, err)

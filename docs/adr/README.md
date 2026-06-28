@@ -53,4 +53,5 @@ alternatives that were rejected.
 | [0025](0025-building-block-addons.md) | Building-block add-ons — a curated catalog of vetted, self-hostable backing services (observability first; the agent is the query layer) | Accepted |
 | [0026](0026-observability-query-adapters.md) | Observability add-ons — query adapters over installed *or* existing backends (`install` vs `connect`, capabilities derived) | Accepted |
 | [0027](0027-audit-log.md) | Audit log — an append-only Postgres record of agent operations and guardrail decisions (allowed / held / denied / executed) | Accepted |
-| [0028](0028-app-config-and-secrets.md) | App config and secrets — a lifecycle `app env` / `app secret` store (deploy takes no env); secret values stay off MCP, out of Postgres, in a per-app Secret | Accepted |
+| [0028](0028-app-config-and-secrets.md) | App config and secrets — a lifecycle `app env` / `app secret` store (deploy takes no env); secret values stay off MCP, out of Postgres, in a per-app Secret | Accepted (secret transport superseded by ADR-0029) |
+| [0029](0029-secrets-through-the-control-plane.md) | Secrets traverse the control-plane API (CLI/UI/managed), never MCP; default app namespace → `burrow-apps` | Accepted |

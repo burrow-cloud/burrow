@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -20,48 +19,87 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/burrow-cloud/burrow/connect"
 )
 
-// fallbackBurrowdVersion is the burrowd image tag used when the CLI carries no release version
-// — a local `go build` reports "(devel)". A CLI installed via `go install …@vX.Y.Z` (or a future
-// Homebrew build) carries its module version and installs the matching burrowd automatically, so
-// this only affects local source builds, which can override with --burrowd-image. It needs no
-// per-release bump; keep it roughly current as a convenience.
-const fallbackBurrowdVersion = "v0.2.1"
-
 // defaultBurrowdImage is the control-plane image `install`/`upgrade` deploy by default: the
-// burrowd release matching this CLI's own version, so the CLI and the control plane it installs
-// move in lockstep without a hand-maintained constant. Override with --burrowd-image to run a
-// specific build (the e2e builds one locally and imports it into k3d).
+// burrowd release matching this CLI's own build, derived from the module version so the CLI and
+// the control plane move in lockstep with no hand-maintained version in the code. It returns ""
+// when no published image matches this build (see burrowdTag), in which case install/upgrade
+// require an explicit --burrowd-image. Override with --burrowd-image to run a specific build (the
+// e2e builds one locally and imports it into k3d).
 func defaultBurrowdImage() string {
-	return "ghcr.io/burrow-cloud/burrowd:" + burrowdTag()
+	tag := burrowdTag()
+	if tag == "" {
+		return ""
+	}
+	return "ghcr.io/burrow-cloud/burrowd:" + tag
 }
 
-// pseudoVersionSuffix matches the tail of a Go module pseudo-version —
-// vX.Y.Z-0.<14-digit-timestamp>-<12-hex-commit> — which Go 1.24+ stamps into a plain
-// `go build`. No burrowd image is published at such a tag (only real release tags are), so it
-// must not be used as a default image.
-var pseudoVersionSuffix = regexp.MustCompile(`\d{14}-[0-9a-f]{12}$`)
-
-// isReleaseVersion reports whether v is a clean published release version with a matching
-// burrowd image — not empty, not the local-build "(devel)", and not a pseudo-version. A real
-// release tag (v0.2.1) or a release candidate (v0.2.2-rc1) qualifies; a pseudo-version does not.
-func isReleaseVersion(v string) bool {
-	return v != "" && v != "(devel)" && !pseudoVersionSuffix.MatchString(v)
-}
-
-// burrowdTag returns this CLI's release version from the build info (set when installed via
-// `go install …@version`), or the fallback for a local/unreleased build whose version has no
-// published image. The version `burrow version` reports is separate and may be a pseudo-version.
+// burrowdTag resolves the published burrowd release tag matching this CLI build, or "" if none
+// exists. It reads the build's module version and interprets it with the standard module/semver
+// semantics rather than a hand-maintained constant:
+//   - a real release version (vX.Y.Z, or a prerelease tag like vX.Y.Z-rc1) is an actual published
+//     tag, used as-is;
+//   - a Go pseudo-version — what Go 1.24+ stamps into a local `go build` past a tag — resolves to
+//     the release it sits on top of via the pseudo-version base, e.g.
+//     v0.3.1-0.<ts>-<commit> -> v0.3.0 (the newest published image);
+//   - "(devel)", an empty version, or a tag-less pseudo-version (v0.0.0-<ts>-<commit>, no prior
+//     release) have no matching published image and resolve to "".
+//
+// The version `burrow version` reports for the CLI is separate and may be a pseudo-version.
 func burrowdTag() string {
-	if bi, ok := debug.ReadBuildInfo(); ok && isReleaseVersion(bi.Main.Version) {
+	return burrowdTagFor(mainModuleVersion())
+}
+
+// burrowdTagFor is burrowdTag's pure core, taking the module version explicitly so it is unit
+// testable without a build-info dependency.
+func burrowdTagFor(v string) string {
+	// Drop build metadata (e.g. the "+dirty" Go appends for an uncommitted tree). It is not part
+	// of any release tag, and "+" is not even a valid image-tag character, so a "v0.3.0+dirty"
+	// tag would fail to pull.
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	if !semver.IsValid(v) {
+		return "" // "(devel)" or empty: not a version, no published image
+	}
+	if module.IsPseudoVersion(v) {
+		// The base is the tag the commit was built on top of — Go increments the patch and
+		// encodes it, so PseudoVersionBase("vX.Y.(Z+1)-0.<ts>-<commit>") is "vX.Y.Z", the last
+		// release. An empty base means there was no prior tag (v0.0.0-<ts>-<commit>).
+		base, err := module.PseudoVersionBase(v)
+		if err != nil || base == "" {
+			return ""
+		}
+		return base
+	}
+	return semver.Canonical(v)
+}
+
+// mainModuleVersion returns this build's main-module version from the build info: a release tag
+// when installed via `go install …@version`, a Go pseudo-version for a local source build past a
+// tag, or "(devel)"/"" when unavailable.
+func mainModuleVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok {
 		return bi.Main.Version
 	}
-	return fallbackBurrowdVersion
+	return ""
+}
+
+// errNoBurrowdImage is returned by install/upgrade when no --burrowd-image was given and this
+// CLI build has no matching published image to default to — an unreleased source build with no
+// release tag underneath. A released CLI always derives its image, so this only surfaces for a
+// from-scratch build, where deploying the right control plane means building it too.
+func errNoBurrowdImage() error {
+	return fmt.Errorf("this build of the burrow CLI (%s) has no matching published burrowd image, "+
+		"so there is no default to install; pass --burrowd-image (e.g. build one with `ko build "+
+		"./cmd/burrowd` and import it into the cluster), or use a released CLI", cliVersion())
 }
 
 // installManifests is the control-plane install manifest template, embedded from
@@ -107,6 +145,9 @@ func newInstallCmd() *cobra.Command {
 }
 
 func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig string, dryRun, wait, verbose bool, stdout, stderr io.Writer) error {
+	if image == "" {
+		return errNoBurrowdImage()
+	}
 	token, err := randHex(16)
 	if err != nil {
 		return err

@@ -110,25 +110,44 @@ func TestInstallDryRun(t *testing.T) {
 	}
 }
 
-func TestIsReleaseVersion(t *testing.T) {
-	release := []string{"v0.2.1", "v0.2.2-rc1", "v1.0.0"}
-	notRelease := []string{
-		"",
-		"(devel)",
-		"v0.2.2-0.20260626184728-3751fc89929b", // Go pseudo-version (go build on Go 1.24+)
+func TestBurrowdTagFor(t *testing.T) {
+	cases := []struct {
+		version string
+		want    string // the resolved burrowd image tag, "" = no published image
+	}{
+		// Real release tags are used as-is — they are actual published images.
+		{"v0.3.0", "v0.3.0"},
+		{"v1.0.0", "v1.0.0"},
+		{"v0.2.2-rc1", "v0.2.2-rc1"}, // a prerelease release tag is still a real tag
+		// A Go pseudo-version (a local `go build` past a tag, what Go 1.24+ stamps) resolves to the
+		// release it sits on top of — never to a pseudo tag, for which no image is published.
+		{"v0.3.1-0.20260628005014-4b3d4cca70f3", "v0.3.0"},         // built one commit past v0.3.0
+		{"v0.3.0-rc1.0.20260628005014-abcdef012345", "v0.3.0-rc1"}, // built past a prerelease tag
+		// Build metadata (Go's "+dirty" for an uncommitted tree) is dropped — "+" is invalid in an
+		// image tag, so the resolved tag must be clean.
+		{"v0.3.1-0.20260628005838-64338d5fade9+dirty", "v0.3.0"},
+		{"v0.3.0+dirty", "v0.3.0"},
+		// No matching published image: no prior tag, "(devel)", or empty.
+		{"v0.0.0-20260101000000-abcdefabcdef", ""},
+		{"(devel)", ""},
+		{"", ""},
 	}
-	for _, v := range release {
-		if !isReleaseVersion(v) {
-			t.Errorf("isReleaseVersion(%q) = false, want true", v)
+	for _, c := range cases {
+		if got := burrowdTagFor(c.version); got != c.want {
+			t.Errorf("burrowdTagFor(%q) = %q, want %q", c.version, got, c.want)
 		}
 	}
-	for _, v := range notRelease {
-		if isReleaseVersion(v) {
-			t.Errorf("isReleaseVersion(%q) = true, want false", v)
-		}
+}
+
+func TestInstallRequiresImageWhenNoDefault(t *testing.T) {
+	// With no --burrowd-image and an empty resolved default (an unreleased build with no published
+	// image), install must refuse with a clear error rather than deploy an empty/guessed image.
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"install", "--burrowd-image", "", "--dry-run"}, &out, &errb)
+	if err == nil {
+		t.Fatal("install with an empty burrowd image should error, got nil")
 	}
-	// A build with no release tag must default to a real, published image — never a pseudo tag.
-	if got := defaultBurrowdImage(); got != "ghcr.io/burrow-cloud/burrowd:"+fallbackBurrowdVersion {
-		t.Errorf("defaultBurrowdImage() in test = %q, want the fallback", got)
+	if !strings.Contains(err.Error(), "--burrowd-image") {
+		t.Errorf("error should tell the user to pass --burrowd-image, got: %v", err)
 	}
 }

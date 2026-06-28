@@ -110,6 +110,7 @@ func newRootCmd() *cobra.Command {
 		newSystemCmd(),
 		// Cross-cutting policy + meta — top level.
 		newGuardCmd(),
+		newAuditCmd(),
 		newVersionCmd(),
 	)
 	return root

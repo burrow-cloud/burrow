@@ -185,6 +185,13 @@ type Database interface {
 	Addons(ctx context.Context) ([]AddonInfo, error)
 	// DeleteAddon removes the named add-on from the registry, or ErrNotFound if absent.
 	DeleteAddon(ctx context.Context, name string) error
+
+	// AppendAudit appends one audit row (ADR-0027). The log is append-only: there is no
+	// update or delete path. The store assigns the row identity and orders rows by it.
+	AppendAudit(ctx context.Context, entry AuditEntry) error
+	// Audit returns audit rows matching filter, newest first, capped by filter.Limit (a
+	// store default when unset). No matches yields an empty slice and no error.
+	Audit(ctx context.Context, filter AuditFilter) ([]AuditEntry, error)
 }
 
 // Credentials is the seam over the one burrow-credentials Secret that holds every vendor

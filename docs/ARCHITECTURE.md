@@ -150,6 +150,14 @@ external managed service. This state is independent of Kubernetes cluster state;
 cluster is the source of truth for what is running, and the control plane's database is
 the source of truth for the deploy history and the rollback handles.
 
+The same database holds an **append-only audit log** (ADR-0027): one record per guarded,
+mutating operation and the guardrail decision that applied — allowed, held for confirmation,
+denied, executed, or failed — written at the control-plane boundary, the single choke point
+that holds both the credentials and the decision. Its arguments are redacted to safe metadata
+(names, image reference, replica count, env/secret key names — never a value), and it is
+read-only through the API: the operator and the agent can review it with `burrow audit`, but
+nothing can write to or alter it.
+
 ## What is in scope, and when
 
 The v0.1 vertical slice — install into an existing cluster, connect an agent over MCP,

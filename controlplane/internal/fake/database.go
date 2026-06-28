@@ -25,6 +25,7 @@ type Database struct {
 	providers map[string]controlplane.Provider
 	addons    map[string]controlplane.AddonInfo
 	appEnv    map[string]map[string]string // app -> key -> value
+	audit     []controlplane.AuditEntry    // append-only, in append order
 	errs      map[Op]error
 	policy    controlplane.Policy
 }
@@ -299,4 +300,74 @@ func (d *Database) DeleteAddon(ctx context.Context, name string) error {
 	}
 	delete(d.addons, name)
 	return nil
+}
+
+// AppendAudit appends one audit row in append order (the append-only log). It deep-copies the
+// args map so the store never aliases the caller's map, matching a real database.
+func (d *Database) AppendAudit(ctx context.Context, e controlplane.AuditEntry) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAppendAudit]; err != nil {
+		return err
+	}
+	e.ID = int64(len(d.audit) + 1)
+	e.Args = cloneStringMap(e.Args)
+	d.audit = append(d.audit, e)
+	return nil
+}
+
+// Audit returns the rows matching filter, newest first, capped by filter.Limit (a default when
+// unset). The filter clauses are ANDed.
+func (d *Database) Audit(ctx context.Context, filter controlplane.AuditFilter) ([]controlplane.AuditEntry, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAudit]; err != nil {
+		return nil, err
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	out := make([]controlplane.AuditEntry, 0)
+	// Walk newest-first (append order is oldest-first).
+	for i := len(d.audit) - 1; i >= 0 && len(out) < limit; i-- {
+		e := d.audit[i]
+		if filter.App != "" && e.Target != filter.App {
+			continue
+		}
+		if filter.Operation != "" && e.Operation != filter.Operation {
+			continue
+		}
+		if filter.Outcome != "" && e.Outcome != filter.Outcome {
+			continue
+		}
+		e.Args = cloneStringMap(e.Args)
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// AuditRows returns a copy of every appended audit row in append order, for tests asserting on
+// what the engine recorded.
+func (d *Database) AuditRows() []controlplane.AuditEntry {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]controlplane.AuditEntry, len(d.audit))
+	for i, e := range d.audit {
+		e.Args = cloneStringMap(e.Args)
+		out[i] = e
+	}
+	return out
+}
+
+// cloneStringMap deep-copies a string map (nil stays nil) so the fake never aliases a caller's map.
+func cloneStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }

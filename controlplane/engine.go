@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -115,7 +116,8 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: loading guardrail policy: %w", req.App, err)
 	}
-	if err := pol.evaluateReplicas("deploy", req.Replicas, req.Confirm); err != nil {
+	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(req.Replicas))}
+	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, "", pol.evaluateReplicas("deploy", req.Replicas, req.Confirm)); err != nil {
 		return DeployResult{}, err
 	}
 
@@ -163,10 +165,14 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		return DeployResult{}, fmt.Errorf("deploy %s: recording release: %w", req.App, err)
 	}
 
+	// The execution-row args carry the env KEY NAMES only — never values (ADR-0027).
+	args["env_keys"] = auditKeys(env)
+
 	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: req.Replicas}
 	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
+		e.recordExecution(ctx, auditOpDeploy, req.App, args, err)
 		return DeployResult{}, fmt.Errorf("deploy %s: applying to cluster: %w", req.App, err)
 	}
 
@@ -186,6 +192,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		}
 		superseded = prev.ID
 	}
+	e.recordExecution(ctx, auditOpDeploy, req.App, args, nil)
 	return DeployResult{Release: rel, SupersededReleaseID: superseded}, nil
 }
 
@@ -288,19 +295,24 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (A
 	if err != nil {
 		return AddonInfo{}, fmt.Errorf("install addon %s: loading guardrail policy: %w", t, err)
 	}
-	if err := pol.evaluateGuardrail("addon install", GuardrailAddonInstall, confirm, fmt.Sprintf("installing the %s add-on (%s)", t, spec.Image)); err != nil {
+	args := map[string]string{"type": string(t), "image": spec.Image}
+	if err := e.recordDecision(ctx, auditOpAddonInstall, string(t), args, GuardrailAddonInstall,
+		pol.evaluateGuardrail("addon install", GuardrailAddonInstall, confirm, fmt.Sprintf("installing the %s add-on (%s)", t, spec.Image))); err != nil {
 		return AddonInfo{}, err
 	}
 	info, err := e.k8s.DeployAddon(ctx, spec)
 	if err != nil {
+		e.recordExecution(ctx, auditOpAddonInstall, string(t), args, err)
 		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
 	}
 	// Record the add-on in the registry — the DB is the source of truth for what add-ons exist
 	// (ADR-0025), like the provider registry. Readiness is never stored; it is probed live.
 	info.CreatedAt = e.clock.Now()
 	if err := e.db.SaveAddon(ctx, info); err != nil {
+		e.recordExecution(ctx, auditOpAddonInstall, string(t), args, err)
 		return AddonInfo{}, fmt.Errorf("install addon %s: recording in the registry: %w", t, err)
 	}
+	e.recordExecution(ctx, auditOpAddonInstall, string(t), args, nil)
 	return info, nil
 }
 
@@ -362,23 +374,28 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) err
 	if err != nil {
 		return fmt.Errorf("remove addon %s: loading guardrail policy: %w", name, err)
 	}
-	if err := pol.evaluateGuardrail("addon remove", GuardrailAddonRemove, confirm, fmt.Sprintf("removing the add-on %q", name)); err != nil {
+	if err := e.recordDecision(ctx, auditOpAddonRemove, name, nil, GuardrailAddonRemove,
+		pol.evaluateGuardrail("addon remove", GuardrailAddonRemove, confirm, fmt.Sprintf("removing the add-on %q", name))); err != nil {
 		return err
 	}
 	// The registry is the source of truth for what add-ons exist (ADR-0025): load it first so an
 	// unknown add-on is ErrNotFound, and only tear down cluster resources for an installed one.
 	info, err := e.db.Addon(ctx, name)
 	if err != nil {
+		e.recordExecution(ctx, auditOpAddonRemove, name, nil, err)
 		return fmt.Errorf("remove addon %s: %w", name, err)
 	}
 	if info.Mode == "installed" {
 		if err := e.k8s.DeleteAddon(ctx, name); err != nil {
+			e.recordExecution(ctx, auditOpAddonRemove, name, nil, err)
 			return fmt.Errorf("remove addon %s: %w", name, err)
 		}
 	}
 	if err := e.db.DeleteAddon(ctx, name); err != nil {
+		e.recordExecution(ctx, auditOpAddonRemove, name, nil, err)
 		return fmt.Errorf("remove addon %s: %w", name, err)
 	}
+	e.recordExecution(ctx, auditOpAddonRemove, name, nil, nil)
 	return nil
 }
 
@@ -417,20 +434,25 @@ func (e *Engine) DeleteApp(ctx context.Context, app string, confirm bool) error 
 	if err != nil {
 		return fmt.Errorf("delete app %s: loading guardrail policy: %w", app, err)
 	}
-	if err := pol.evaluateGuardrail("app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app)); err != nil {
+	if err := e.recordDecision(ctx, auditOpAppDelete, app, nil, GuardrailAppDelete,
+		pol.evaluateGuardrail("app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app))); err != nil {
 		return err
 	}
 
 	// Tear down, tolerating already-absent pieces: workload, then routing, then release records.
 	if err := e.k8s.DeleteWorkload(ctx, app); err != nil && !errors.Is(err, ErrNotFound) {
+		e.recordExecution(ctx, auditOpAppDelete, app, nil, err)
 		return fmt.Errorf("delete app %s: removing workload: %w", app, err)
 	}
 	if err := e.k8s.Unexpose(ctx, app); err != nil && !errors.Is(err, ErrNotFound) {
+		e.recordExecution(ctx, auditOpAppDelete, app, nil, err)
 		return fmt.Errorf("delete app %s: removing routing: %w", app, err)
 	}
 	if err := e.db.DeleteReleases(ctx, app); err != nil {
+		e.recordExecution(ctx, auditOpAppDelete, app, nil, err)
 		return fmt.Errorf("delete app %s: removing release history: %w", app, err)
 	}
+	e.recordExecution(ctx, auditOpAppDelete, app, nil, nil)
 	return nil
 }
 
@@ -613,7 +635,8 @@ func (e *Engine) Scale(ctx context.Context, app string, replicas int32, confirm 
 	if err != nil {
 		return ScaleResult{}, fmt.Errorf("scale %s: loading guardrail policy: %w", app, err)
 	}
-	if err := pol.evaluateReplicas("scale", replicas, confirm); err != nil {
+	args := map[string]string{"replicas": strconv.Itoa(int(replicas))}
+	if err := e.recordDecision(ctx, auditOpScale, app, args, "", pol.evaluateReplicas("scale", replicas, confirm)); err != nil {
 		return ScaleResult{}, err
 	}
 
@@ -627,8 +650,10 @@ func (e *Engine) Scale(ctx context.Context, app string, replicas int32, confirm 
 	prev := st.DesiredReplicas
 
 	if err := e.k8s.ScaleWorkload(ctx, app, replicas); err != nil {
+		e.recordExecution(ctx, auditOpScale, app, args, err)
 		return ScaleResult{}, fmt.Errorf("scale %s: %w", app, err)
 	}
+	e.recordExecution(ctx, auditOpScale, app, args, nil)
 	return ScaleResult{App: app, PreviousReplicas: prev, Replicas: replicas}, nil
 }
 
@@ -653,7 +678,9 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 	if err != nil {
 		return ExposeResult{}, fmt.Errorf("expose %s: loading guardrail policy: %w", req.App, err)
 	}
-	if err := pol.evaluateGuardrail("expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host)); err != nil {
+	args := map[string]string{"host": req.Host, "port": strconv.Itoa(int(req.Port)), "tls": strconv.FormatBool(req.TLS)}
+	if err := e.recordDecision(ctx, auditOpExpose, req.App, args, GuardrailExposePublic,
+		pol.evaluateGuardrail("expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host))); err != nil {
 		return ExposeResult{}, err
 	}
 
@@ -667,8 +694,10 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 	}
 
 	if err := e.k8s.Expose(ctx, ExposeSpec{App: req.App, Host: req.Host, Port: req.Port, TLS: req.TLS, Issuer: req.Issuer}); err != nil {
+		e.recordExecution(ctx, auditOpExpose, req.App, args, err)
 		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
 	}
+	e.recordExecution(ctx, auditOpExpose, req.App, args, nil)
 	scheme := "http"
 	if req.TLS {
 		scheme = "https"
@@ -809,8 +838,10 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: loading guardrail policy: %w", app, err)
 	}
-	if err := pol.evaluateGuardrail("rollback", GuardrailRollback, confirm,
-		fmt.Sprintf("rolling %q back to its previous release %s (image %s)", app, target.ID, target.Image)); err != nil {
+	args := map[string]string{"image": target.Image, "to_release": target.ID}
+	if err := e.recordDecision(ctx, auditOpRollback, app, args, GuardrailRollback,
+		pol.evaluateGuardrail("rollback", GuardrailRollback, confirm,
+			fmt.Sprintf("rolling %q back to its previous release %s (image %s)", app, target.ID, target.Image))); err != nil {
 		return RollbackResult{}, err
 	}
 
@@ -839,10 +870,13 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 		return RollbackResult{}, fmt.Errorf("rollback %s: recording release: %w", app, err)
 	}
 
+	args["env_keys"] = auditKeys(env) // KEY NAMES only — never values (ADR-0027)
+
 	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: env, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: target.Replicas}
 	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)
+		e.recordExecution(ctx, auditOpRollback, app, args, err)
 		return RollbackResult{}, fmt.Errorf("rollback %s: applying to cluster: %w", app, err)
 	}
 
@@ -854,6 +888,7 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 	if err := e.db.SaveRelease(ctx, cur); err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: superseding release %s: %w", app, cur.ID, err)
 	}
+	e.recordExecution(ctx, auditOpRollback, app, args, nil)
 	return RollbackResult{Release: rel, RolledBackToReleaseID: target.ID, SupersededReleaseID: cur.ID}, nil
 }
 

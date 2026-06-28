@@ -154,6 +154,46 @@ func TestDomainEndpoints(t *testing.T) {
 	}
 }
 
+// TestAuditEndpoint exercises the read path: a deploy records audit rows, and GET /v1/audit
+// returns them newest-first, with the app/operation/outcome filters applied.
+func TestAuditEndpoint(t *testing.T) {
+	h, _, r, _ := newAPI(t)
+	r.Add("registry.example.com/web:1", "sha256:web1")
+	if rr := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"registry.example.com/web:1","replicas":2}`); rr.Code != 200 {
+		t.Fatalf("deploy = %d %s", rr.Code, rr.Body.String())
+	}
+
+	rec := do(h, "GET", "/v1/audit?app=web", token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("audit = %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Entries []cp.AuditEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Entries) != 2 {
+		t.Fatalf("audit entries = %d, want 2 (allowed + executed)", len(out.Entries))
+	}
+	// Newest first: the executed row precedes the allowed decision.
+	if out.Entries[0].Outcome != cp.AuditExecuted || out.Entries[1].Outcome != cp.AuditAllowed {
+		t.Errorf("outcomes = %s,%s, want executed,allowed (newest first)", out.Entries[0].Outcome, out.Entries[1].Outcome)
+	}
+
+	// Outcome filter narrows to one.
+	rec = do(h, "GET", "/v1/audit?app=web&outcome=executed", token, "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Entries) != 1 || out.Entries[0].Outcome != cp.AuditExecuted {
+		t.Errorf("outcome filter returned %d rows, want 1 executed", len(out.Entries))
+	}
+
+	// A bad limit is a 400.
+	if rr := do(h, "GET", "/v1/audit?limit=nope", token, ""); rr.Code != http.StatusBadRequest {
+		t.Errorf("bad limit = %d, want 400", rr.Code)
+	}
+}
+
 func do(h http.Handler, method, path, tok, body string) *httptest.ResponseRecorder {
 	var br io.Reader
 	if body != "" {

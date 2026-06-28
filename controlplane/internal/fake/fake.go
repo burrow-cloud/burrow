@@ -50,6 +50,8 @@ const (
 	OpToken          Op = "Token"
 	OpDNS            Op = "DNS"
 	OpVerifyAccess   Op = "VerifyAccess"
+	OpAppendAudit    Op = "AppendAudit"
+	OpAudit          Op = "Audit"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

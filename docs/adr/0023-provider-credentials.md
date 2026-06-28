@@ -4,7 +4,11 @@
 
 Accepted. Refines the credential-storage detail of
 [ADR-0018](0018-reaching-an-app-at-a-url.md) (which described the DNS token as "injected into
-burrowd via the pod spec"). This ADR replaces that mechanism for all vendor credentials.
+burrowd via the pod spec"). This ADR replaces that mechanism for all vendor credentials. **Its
+credential-write transport (kubeconfig-direct, value never through burrowd) is superseded by
+[ADR-0030](0030-credentials-through-the-control-plane.md)** — credential values may traverse
+burrowd's authenticated API (for the web UI and managed product), still never over MCP. The
+registry-of-tokens model and the scoped `burrow-credentials` Secret stand.
 
 ## Context
 

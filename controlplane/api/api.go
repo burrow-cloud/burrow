@@ -144,7 +144,8 @@ func (s *server) logs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) rollback(w http.ResponseWriter, r *http.Request) {
-	res, err := s.engine.Rollback(r.Context(), r.PathValue("app"))
+	confirm := r.URL.Query().Get("confirm") == "true"
+	res, err := s.engine.Rollback(r.Context(), r.PathValue("app"), confirm)
 	if err != nil {
 		writeEngineError(w, err)
 		return

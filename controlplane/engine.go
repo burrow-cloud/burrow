@@ -698,7 +698,7 @@ func (e *Engine) SetGuardrail(ctx context.Context, code GuardrailCode, d Disposi
 // (ADR-0007). It finds the current running release, re-applies the release that one
 // superseded, and records the rollback as a new release. It returns ErrNotFound when
 // there is nothing to roll back from or to.
-func (e *Engine) Rollback(ctx context.Context, app string) (RollbackResult, error) {
+func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (RollbackResult, error) {
 	releases, err := e.db.Releases(ctx, app)
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: reading release history: %w", app, err)
@@ -714,6 +714,19 @@ func (e *Engine) Rollback(ctx context.Context, app string) (RollbackResult, erro
 	target, err := e.db.Release(ctx, cur.Supersedes)
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: reading prior release %s: %w", app, cur.Supersedes, err)
+	}
+
+	// Guardrail check only after the rollback is known to be valid, so "nothing to roll back to"
+	// reads as ErrNotFound rather than a spurious confirmation prompt (mirrors DeleteApp). The
+	// rollback guardrail defaults to allow — a recovery action — but an operator may set it to
+	// confirm or deny (ADR-0020).
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return RollbackResult{}, fmt.Errorf("rollback %s: loading guardrail policy: %w", app, err)
+	}
+	if err := pol.evaluateGuardrail("rollback", GuardrailRollback, confirm,
+		fmt.Sprintf("rolling %q back to its previous release %s (image %s)", app, target.ID, target.Image)); err != nil {
+		return RollbackResult{}, err
 	}
 
 	rel := Release{

@@ -71,7 +71,7 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_rollback",
-		Description: "Roll an application back to its previously running release by redeploying that release's image reference. Returns the new release and which release it restored.",
+		Description: "Roll an application back to its previously running release by redeploying that release's image reference. Returns the new release and which release it restored. Allowed by default (rollback is a recovery action), but an operator may configure a guardrail to hold it for confirmation; when held, the error says so — ask the user, then retry with confirm set to true.",
 	}, rollbackTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
@@ -182,9 +182,14 @@ func logsTool(c *client.Client) sdk.ToolHandlerFor[logsInput, logsOutput] {
 	}
 }
 
-func rollbackTool(c *client.Client) sdk.ToolHandlerFor[appInput, client.RollbackResult] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, client.RollbackResult, error) {
-		res, err := c.Rollback(ctx, in.App)
+type rollbackInput struct {
+	App     string `json:"app" jsonschema:"the application name"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed a rollback that an operator's guardrail held for confirmation; do not self-confirm"`
+}
+
+func rollbackTool(c *client.Client) sdk.ToolHandlerFor[rollbackInput, client.RollbackResult] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in rollbackInput) (*sdk.CallToolResult, client.RollbackResult, error) {
+		res, err := c.Rollback(ctx, in.App, in.Confirm)
 		if err != nil {
 			return nil, client.RollbackResult{}, err
 		}

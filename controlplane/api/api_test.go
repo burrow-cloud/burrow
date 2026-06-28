@@ -23,7 +23,9 @@ const token = "secret-token"
 func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake.Database) {
 	t.Helper()
 	k, r, d := fake.NewKubernetes(), fake.NewRegistry(), fake.NewDatabase()
-	d.SetPolicy(cp.Policy{MaxReplicas: 5})
+	// A restrictive baseline (empty dispositions → deny) so guardrail tests opt in explicitly,
+	// but rollback's product default is allow, so seed that to match production.
+	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailRollback, cp.DispositionAllow))
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Registry: r, Database: d,
 		Clock:       fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),

@@ -186,6 +186,7 @@ func newLogsCmd() *cobra.Command {
 
 func newRollbackCmd() *cobra.Command {
 	o := &commonOpts{}
+	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "rollback <app>",
 		Short: "Roll an app back to its previous release",
@@ -196,7 +197,7 @@ func newRollbackCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Rollback(ctx, args[0])
+			res, err := c.Rollback(ctx, args[0], confirm)
 			if err != nil {
 				return err
 			}
@@ -206,6 +207,7 @@ func newRollbackCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a rollback a guardrail holds for confirmation")
 	return cmd
 }
 

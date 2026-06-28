@@ -430,7 +430,7 @@ func TestRollback(t *testing.T) {
 	v1, _ := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
 	v2, _ := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1})
 
-	res, err := e.Rollback(ctx, "web")
+	res, err := e.Rollback(ctx, "web", false)
 	if err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -459,13 +459,61 @@ func TestRollbackNothingToRollBack(t *testing.T) {
 	e, _, r, _, _ := newEngine(t, permissive())
 
 	// No releases at all.
-	if _, err := e.Rollback(ctx, "web"); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.Rollback(ctx, "web", false); !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("rollback with no releases err = %v, want ErrNotFound", err)
 	}
 	// A single deploy has no prior to roll back to.
 	r.Add("img:1", "sha256:1")
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
-	if _, err := e.Rollback(ctx, "web"); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.Rollback(ctx, "web", false); !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("rollback with one release err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRollbackGuardrailHolds(t *testing.T) {
+	ctx := context.Background()
+	// Rollback defaults to allow, but an operator can raise it to confirm for sign-off.
+	e, k, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailRollback, cp.DispositionConfirm))
+	r.Add("img:1", "sha256:1")
+	r.Add("img:2", "sha256:2")
+	v1, _ := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
+	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1})
+
+	// Held for confirmation: the rollback does not happen, and the cluster keeps img:2.
+	_, err := e.Rollback(ctx, "web", false)
+	mustGuardrail(t, err, cp.GuardrailRollback)
+	if g, _ := cp.AsGuardrail(err); !g.NeedsConfirmation {
+		t.Errorf("NeedsConfirmation = false, want true")
+	}
+	if spec, _ := k.Spec("web"); spec.Image != "img:2" {
+		t.Errorf("cluster image = %q, want img:2 (held rollback must not change it)", spec.Image)
+	}
+
+	// With confirmation it proceeds and restores img:1.
+	res, err := e.Rollback(ctx, "web", true)
+	if err != nil {
+		t.Fatalf("confirmed rollback: %v", err)
+	}
+	if res.RolledBackToReleaseID != v1.Release.ID {
+		t.Errorf("rolled back to %q, want %q", res.RolledBackToReleaseID, v1.Release.ID)
+	}
+	if spec, _ := k.Spec("web"); spec.Image != "img:1" {
+		t.Errorf("cluster image = %q, want img:1", spec.Image)
+	}
+}
+
+func TestRollbackGuardrailDenies(t *testing.T) {
+	ctx := context.Background()
+	e, _, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailRollback, cp.DispositionDeny))
+	r.Add("img:1", "sha256:1")
+	r.Add("img:2", "sha256:2")
+	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
+	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1})
+
+	// A deny refuses outright — even with confirm, it does not proceed.
+	_, err := e.Rollback(ctx, "web", true)
+	mustGuardrail(t, err, cp.GuardrailRollback)
+	if g, _ := cp.AsGuardrail(err); g.NeedsConfirmation {
+		t.Errorf("NeedsConfirmation = true, want false for a deny")
 	}
 }

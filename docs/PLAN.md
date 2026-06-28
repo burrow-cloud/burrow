@@ -68,30 +68,46 @@ What shipped:
   pod for scraping. One adapter serves Prometheus and VictoriaMetrics.
 - **Backend selector** — `addon logs` / `addon metrics` can target a specific backend when an
   installed and a connected one both serve a capability.
-- **Connected-backend auth** — a bearer token in `burrow-credentials`, read at query time; only
-  the Secret key crosses the API, never the token.
+- **Connected-backend auth** — a bearer token in `burrow-credentials`, read at query time (its
+  write transport moved through burrowd in v0.5 — [ADR-0030](adr/0030-credentials-through-the-control-plane.md)).
 - **Cache** — `addon install cache` (ValKey, BSD-3), a backing service the agent wires an app to.
 - **`app delete`** — remove an app, its routing, and release history behind a confirm guardrail;
   **`app deploy -- <cmd>`** — container command override at parity with the MCP deploy tool.
-- **Audit log, first slice** ([ADR-0027](adr/0027-audit-log.md)) — an append-only Postgres
-  record of guarded, mutating operations and their guardrail decisions (allowed / held / denied
-  / executed / failed), with redacted args (names, image, replica count, env/secret key NAMES —
-  never a value), read newest-first via `burrow audit [--app --operation --outcome --limit]`.
-  Scoped to the guarded operations (deploy, scale, rollback, app delete, publish, domain
-  add/remove, addon install/remove); env/secret and other ungated ops are a later slice.
 - **e2e** — deterministic k3d gates for install-logs, connect-Loki, connect-Prometheus,
   install-metrics + the full metrics loop, and cache; plus a local headless-agent diagnosis test
   and a blind-workspace **examples** library that exercise the full agent loop by hand.
 
+## Shipped: v0.5 — app config, secrets, credentials, and the audit log ✅
+
+Released as **v0.5.0**. Makes apps real to *run* and hardens how Burrow handles sensitive values —
+the groundwork the web UI and managed product depend on.
+
+- **App config & secrets** ([ADR-0028](adr/0028-app-config-and-secrets.md)) — an `app env` /
+  `app secret` lifecycle store (`set`/`list`/`unset`, `--no-restart`), managed independently of
+  deploy (`deploy` no longer takes env). Env renders inline and auto-rolls; secrets live only in a
+  per-app Secret, inject via `envFrom`, and `secret list` shows keys only.
+- **Secrets & credentials through the control plane**
+  ([ADR-0029](adr/0029-secrets-through-the-control-plane.md),
+  [ADR-0030](adr/0030-credentials-through-the-control-plane.md)) — app secrets, vendor tokens, and
+  connected-backend auth all flow over burrowd's **authenticated API**, written to a Secret by
+  burrowd, **never over MCP**, never logged, never in Postgres. RBAC namespace- or name-scoped; no
+  `ClusterRole`.
+- **Audit log** ([ADR-0027](adr/0027-audit-log.md)) — an append-only Postgres record of guarded
+  operations and their guardrail decision (allowed / held / denied / executed / failed), redacted
+  to key names (never a value), read via `burrow audit [--app --operation --outcome --limit]`.
+- **Dedicated app namespace** — new installs deploy apps into **`burrow-apps`**, not the shared
+  `default` namespace, isolating the per-app secrets grant.
+
 **Next:**
 
-- **Audit log, later slices** ([ADR-0027](adr/0027-audit-log.md)) — extend the writer to
-  env/secret and other ungated operations; a read-only MCP tool; configurable retention; richer
-  per-principal identity with the authentication ADR.
-- Unsequenced themes — richer guardrails (the tunable `rollback` guardrail is a down payment),
-  database provisioning, autoscaling, cost controls, a self-host dashboard — live in
-  [ROADMAP.md](ROADMAP.md). **Deferred until requested:** server-side build from a git reference
-  ([ADR-0008](adr/0008-two-build-paths.md)).
+- **Postgres add-on** — the first *backend* building block: `addon install postgres`, with the
+  generated `DATABASE_URL` written into the app's per-app Secret (the secrets fabric above). The
+  North-Star down payment — BYO Neon/Supabase and a provisioned DB reach the app the same way.
+- **Credentials follow-on** — the registry pull secret ([ADR-0017](adr/0017-private-registry-authentication.md))
+  through burrowd too; a read-only audit MCP tool; richer per-principal identity with an auth ADR.
+- Unsequenced themes — database provisioning depth, autoscaling, cost controls, a self-host
+  dashboard, a frictionless cluster on-ramp — live in [ROADMAP.md](ROADMAP.md). **Deferred until
+  requested:** server-side build from a git reference ([ADR-0008](adr/0008-two-build-paths.md)).
 
 Shipped in **v0.3**: the CLI regrouped by task (`app`/`config`/`system`, `expose`→`publish` —
 [ADR-0024](adr/0024-cli-command-taxonomy.md)) with `app list`; the Cloudflare adapter verifying

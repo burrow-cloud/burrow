@@ -54,14 +54,16 @@ func newDeployCmd() *cobra.Command {
 	var replicas int
 	var metricsPort int
 	var confirm bool
-	var env kvFlag
 	cmd := &cobra.Command{
 		Use:   "deploy <app> [-- command args...]",
 		Short: "Deploy an app by image reference (optionally build & push first)",
 		Long: "Deploy an app by image reference (optionally build & push first).\n\n" +
 			"To run something other than the image's default entrypoint, pass the command after a\n" +
 			"-- separator, like kubectl run:\n" +
-			"  burrow app deploy worker --image myrepo/app:1.2.3 -- ./worker --queue emails",
+			"  burrow app deploy worker --image myrepo/app:1.2.3 -- ./worker --queue emails\n\n" +
+			"Environment configuration is set separately and is the single source of truth, sourced\n" +
+			"at deploy time — set it with `burrow app env set <app> KEY=VALUE` before deploying a\n" +
+			"release that needs it, so the new release boots with it on first start.",
 		// Exactly one positional (the app name) before any --; everything after -- overrides the
 		// container command.
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -98,7 +100,6 @@ func newDeployCmd() *cobra.Command {
 			}
 			res, err := c.Deploy(ctx, app, client.DeployRequest{
 				Image:       image,
-				Env:         env.m,
 				Command:     command,
 				MetricsPort: int32(metricsPort),
 				Replicas:    int32(replicas),
@@ -120,7 +121,6 @@ func newDeployCmd() *cobra.Command {
 	cmd.Flags().IntVar(&replicas, "replicas", 1, "number of replicas")
 	cmd.Flags().IntVar(&metricsPort, "metrics-port", 0, "annotate the pod so the metrics add-on scrapes /metrics on this port")
 	cmd.Flags().StringVar(&build, "build", "", "build and push the image from this directory before deploying")
-	cmd.Flags().Var(&env, "env", "environment variable KEY=VALUE (repeatable)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }

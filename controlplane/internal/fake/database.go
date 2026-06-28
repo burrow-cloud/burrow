@@ -24,6 +24,7 @@ type Database struct {
 	order     map[string][]string // app -> release IDs, save order, deduplicated
 	providers map[string]controlplane.Provider
 	addons    map[string]controlplane.AddonInfo
+	appEnv    map[string]map[string]string // app -> key -> value
 	errs      map[Op]error
 	policy    controlplane.Policy
 }
@@ -35,6 +36,7 @@ func NewDatabase() *Database {
 		order:     make(map[string][]string),
 		providers: make(map[string]controlplane.Provider),
 		addons:    make(map[string]controlplane.AddonInfo),
+		appEnv:    make(map[string]map[string]string),
 		errs:      make(map[Op]error),
 		policy:    controlplane.DefaultPolicy(),
 	}
@@ -151,6 +153,46 @@ func (d *Database) DeleteReleases(ctx context.Context, app string) error {
 		delete(d.byID, id)
 	}
 	delete(d.order, app)
+	return nil
+}
+
+// AppEnv returns a copy of the non-secret env store for app. An app with no env yields an
+// empty map and no error.
+func (d *Database) AppEnv(ctx context.Context, app string) (map[string]string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAppEnv]; err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(d.appEnv[app]))
+	for k, v := range d.appEnv[app] {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// SetAppEnv upserts one env key for app.
+func (d *Database) SetAppEnv(ctx context.Context, app, key, value string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpSetAppEnv]; err != nil {
+		return err
+	}
+	if d.appEnv[app] == nil {
+		d.appEnv[app] = make(map[string]string)
+	}
+	d.appEnv[app][key] = value
+	return nil
+}
+
+// UnsetAppEnv removes one env key for app. Removing a key that is not set is a no-op.
+func (d *Database) UnsetAppEnv(ctx context.Context, app, key string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpUnsetAppEnv]; err != nil {
+		return err
+	}
+	delete(d.appEnv[app], key)
 	return nil
 }
 

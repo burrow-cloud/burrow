@@ -54,6 +54,9 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/apps/{app}/expose", s.expose)
 	v1.HandleFunc("POST /v1/apps/{app}/unexpose", s.unexpose)
 	v1.HandleFunc("GET /v1/apps/{app}/reachability", s.reachability)
+	v1.HandleFunc("GET /v1/apps/{app}/env", s.listEnv)
+	v1.HandleFunc("POST /v1/apps/{app}/env", s.setEnv)
+	v1.HandleFunc("DELETE /v1/apps/{app}/env/{key}", s.unsetEnv)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
 	v1.HandleFunc("POST /v1/providers", s.addProvider)
@@ -195,6 +198,50 @@ func (s *server) reachability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) listEnv(w http.ResponseWriter, r *http.Request) {
+	env, err := s.engine.ListEnv(r.Context(), r.PathValue("app"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, envResponse{Env: env})
+}
+
+func (s *server) setEnv(w http.ResponseWriter, r *http.Request) {
+	var req envSetRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.engine.SetEnv(r.Context(), r.PathValue("app"), req.Key, req.Value, req.NoRestart); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app"), "key": req.Key})
+}
+
+func (s *server) unsetEnv(w http.ResponseWriter, r *http.Request) {
+	noRestart := r.URL.Query().Get("no_restart") == "true"
+	key := r.PathValue("key")
+	if err := s.engine.UnsetEnv(r.Context(), r.PathValue("app"), key, noRestart); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app"), "key": key})
+}
+
+// envResponse wraps the env map so the shape can grow without breaking object decoders.
+type envResponse struct {
+	Env map[string]string `json:"env"`
+}
+
+// envSetRequest is the body of an env set (the app comes from the path). NoRestart persists the
+// change without rolling the running workload; the change lands on the next deploy (ADR-0028).
+type envSetRequest struct {
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	NoRestart bool   `json:"no_restart,omitempty"`
 }
 
 func (s *server) guardList(w http.ResponseWriter, r *http.Request) {

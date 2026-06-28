@@ -35,7 +35,7 @@ func TestDeploy(t *testing.T) {
 			"release":               map[string]any{"id": "r1", "app": "web", "image": "img:1", "status": "deployed", "replicas": 2},
 			"superseded_release_id": "r0",
 		})
-	}, "app", "deploy", "web", "--image", "img:1", "--replicas", "2", "--env", "K=V")
+	}, "app", "deploy", "web", "--image", "img:1", "--replicas", "2")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -217,6 +217,84 @@ func TestScale(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	if !strings.Contains(out, "scaled web from 2 to 4") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+func TestEnvSet(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "key": "LOG_LEVEL"})
+	}, "app", "env", "set", "web", "LOG_LEVEL=debug")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "POST" || gotPath != "/v1/apps/web/env" {
+		t.Errorf("request = %s %s, want POST /v1/apps/web/env", gotMethod, gotPath)
+	}
+	if gotBody["key"] != "LOG_LEVEL" || gotBody["value"] != "debug" {
+		t.Errorf("body = %#v, want key=LOG_LEVEL value=debug", gotBody)
+	}
+	if nr, _ := gotBody["no_restart"].(bool); nr {
+		t.Errorf("no_restart = true, want false by default")
+	}
+	if !strings.Contains(out, "set LOG_LEVEL on web") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+func TestEnvSetNoRestart(t *testing.T) {
+	var gotBody map[string]any
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "key": "K"})
+	}, "app", "env", "set", "web", "K=V", "--no-restart")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if nr, _ := gotBody["no_restart"].(bool); !nr {
+		t.Errorf("no_restart = %#v, want true", gotBody["no_restart"])
+	}
+	if !strings.Contains(out, "lands on next deploy") {
+		t.Errorf("output = %q, want a no-restart note", out)
+	}
+}
+
+func TestEnvList(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/v1/apps/web/env" {
+			t.Errorf("request = %s %s, want GET /v1/apps/web/env", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"env": map[string]string{"B": "2", "A": "1"}})
+	}, "app", "env", "list", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// Keys are printed sorted, one KEY=VALUE per line.
+	if out != "A=1\nB=2\n" {
+		t.Errorf("output = %q, want sorted A=1\\nB=2\\n", out)
+	}
+}
+
+func TestEnvUnset(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "key": "K"})
+	}, "app", "env", "unset", "web", "K", "--no-restart")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "DELETE" || gotPath != "/v1/apps/web/env/K" {
+		t.Errorf("request = %s %s, want DELETE /v1/apps/web/env/K", gotMethod, gotPath)
+	}
+	if !strings.Contains(gotQuery, "no_restart=true") {
+		t.Errorf("query = %q, want no_restart=true", gotQuery)
+	}
+	if !strings.Contains(out, "unset K on web") {
 		t.Errorf("output = %q", out)
 	}
 }

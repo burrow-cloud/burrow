@@ -21,8 +21,23 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_deploy",
-		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Returns the new release and the release it superseded (the rollback handle).",
+		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Environment configuration is NOT passed here: an app's env is a separate, app-global store sourced at deploy time, so set any env the release needs with burrow_env_set BEFORE deploying — the new release then boots with it on first start. (burrow_env_set with no_restart=true followed by burrow_deploy is a single restart.) Returns the new release and the release it superseded (the rollback handle).",
 	}, deployTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_env_set",
+		Description: "Set (upsert) a non-secret environment variable for an app. The env store is the single source of truth, sourced into the workload at deploy time. By default the running app is rolled so it picks the change up; set no_restart=true to only persist it and let it land on the next deploy (so setting env then deploying is a single restart). For secrets, do not use env — env values are non-secret config.",
+	}, envSetTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_env_list",
+		Description: "List an app's non-secret environment variables (the env store). Read-only.",
+	}, envListTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_env_unset",
+		Description: "Remove a non-secret environment variable from an app. By default the running app is rolled so it drops the value; set no_restart=true to only persist the removal and let it land on the next deploy.",
+	}, envUnsetTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_apps",
@@ -123,13 +138,12 @@ func Serve(ctx context.Context, c *client.Client, version string) error {
 }
 
 type deployInput struct {
-	App         string            `json:"app" jsonschema:"the application name (a DNS-1123 label)"`
-	Image       string            `json:"image" jsonschema:"the pullable container image reference to deploy, e.g. registry.example.com/app:1.2.3"`
-	Env         map[string]string `json:"env,omitempty" jsonschema:"environment variables to set on the workload"`
-	Command     []string          `json:"command,omitempty" jsonschema:"optional command override for the container"`
-	MetricsPort int32             `json:"metrics_port,omitempty" jsonschema:"optional: annotate the pod so the metrics add-on scrapes /metrics on this port"`
-	Replicas    int32             `json:"replicas" jsonschema:"desired number of replicas"`
-	Confirm     bool              `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an operation a guardrail held for confirmation; do not self-confirm"`
+	App         string   `json:"app" jsonschema:"the application name (a DNS-1123 label)"`
+	Image       string   `json:"image" jsonschema:"the pullable container image reference to deploy, e.g. registry.example.com/app:1.2.3"`
+	Command     []string `json:"command,omitempty" jsonschema:"optional command override for the container"`
+	MetricsPort int32    `json:"metrics_port,omitempty" jsonschema:"optional: annotate the pod so the metrics add-on scrapes /metrics on this port"`
+	Replicas    int32    `json:"replicas" jsonschema:"desired number of replicas"`
+	Confirm     bool     `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an operation a guardrail held for confirmation; do not self-confirm"`
 }
 
 type appInput struct {
@@ -149,11 +163,62 @@ type scaleInput struct {
 
 func deployTool(c *client.Client) sdk.ToolHandlerFor[deployInput, client.DeployResult] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in deployInput) (*sdk.CallToolResult, client.DeployResult, error) {
-		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Image: in.Image, Env: in.Env, Command: in.Command, MetricsPort: in.MetricsPort, Replicas: in.Replicas, Confirm: in.Confirm})
+		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Image: in.Image, Command: in.Command, MetricsPort: in.MetricsPort, Replicas: in.Replicas, Confirm: in.Confirm})
 		if err != nil {
 			return nil, client.DeployResult{}, err
 		}
 		return nil, res, nil
+	}
+}
+
+type envSetInput struct {
+	App       string `json:"app" jsonschema:"the application name"`
+	Key       string `json:"key" jsonschema:"the environment variable name (e.g. LOG_LEVEL)"`
+	Value     string `json:"value" jsonschema:"the value to set"`
+	NoRestart bool   `json:"no_restart,omitempty" jsonschema:"true to persist without rolling the running app; the change lands on the next deploy"`
+}
+
+type envUnsetInput struct {
+	App       string `json:"app" jsonschema:"the application name"`
+	Key       string `json:"key" jsonschema:"the environment variable name to remove"`
+	NoRestart bool   `json:"no_restart,omitempty" jsonschema:"true to persist the removal without rolling the running app; the change lands on the next deploy"`
+}
+
+// envAck is a small structured ack for an env mutation.
+type envAck struct {
+	App string `json:"app"`
+	Key string `json:"key"`
+}
+
+type envOutput struct {
+	Env map[string]string `json:"env"`
+}
+
+func envSetTool(c *client.Client) sdk.ToolHandlerFor[envSetInput, envAck] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in envSetInput) (*sdk.CallToolResult, envAck, error) {
+		if err := c.SetEnv(ctx, in.App, in.Key, in.Value, in.NoRestart); err != nil {
+			return nil, envAck{}, err
+		}
+		return nil, envAck{App: in.App, Key: in.Key}, nil
+	}
+}
+
+func envUnsetTool(c *client.Client) sdk.ToolHandlerFor[envUnsetInput, envAck] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in envUnsetInput) (*sdk.CallToolResult, envAck, error) {
+		if err := c.UnsetEnv(ctx, in.App, in.Key, in.NoRestart); err != nil {
+			return nil, envAck{}, err
+		}
+		return nil, envAck{App: in.App, Key: in.Key}, nil
+	}
+}
+
+func envListTool(c *client.Client) sdk.ToolHandlerFor[appInput, envOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, envOutput, error) {
+		env, err := c.Env(ctx, in.App)
+		if err != nil {
+			return nil, envOutput{}, err
+		}
+		return nil, envOutput{Env: env}, nil
 	}
 }
 

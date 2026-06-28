@@ -8,12 +8,13 @@ package controlplane
 // relevant, the handle to undo it (ADR-0006) — rather than prose.
 
 // DeployRequest is the small, code-free description of a deploy: a pullable image plus
-// metadata (ADR-0004). No code travels here.
+// metadata (ADR-0004). No code travels here. Env is deliberately absent: an app's
+// non-secret config is an independently-managed, app-global store, sourced at apply time
+// rather than passed per deploy (ADR-0028) — set it with SetEnv before deploying.
 type DeployRequest struct {
-	App     string            `json:"app"`
-	Image   string            `json:"image"`
-	Env     map[string]string `json:"env,omitempty"`
-	Command []string          `json:"command,omitempty"`
+	App     string   `json:"app"`
+	Image   string   `json:"image"`
+	Command []string `json:"command,omitempty"`
 	// MetricsPort, when positive, annotates the deployed pod so the metrics add-on scrapes
 	// /metrics on this container port (ADR-0026). Zero adds no annotations.
 	MetricsPort int32 `json:"metrics_port,omitempty"`

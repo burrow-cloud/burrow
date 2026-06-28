@@ -94,7 +94,12 @@ func TestDeployHappyPath(t *testing.T) {
 	e, k, r, d, _ := newEngine(t, permissive())
 	r.Add("registry.example.com/web:1", "sha256:web1")
 
-	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/web:1", Replicas: 2, Env: map[string]string{"K": "V"}})
+	// Env is sourced from the app's config store at deploy time, not from the request (ADR-0028).
+	if err := d.SetAppEnv(ctx, "web", "K", "V"); err != nil {
+		t.Fatalf("SetAppEnv: %v", err)
+	}
+
+	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/web:1", Replicas: 2})
 	if err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -108,10 +113,13 @@ func TestDeployHappyPath(t *testing.T) {
 		t.Errorf("first deploy should supersede nothing, got %q", res.SupersededReleaseID)
 	}
 
-	// Applied to the cluster.
+	// Applied to the cluster, with the env from the store rendered into the spec.
 	spec, ok := k.Spec("web")
 	if !ok || spec.Image != "registry.example.com/web:1" || spec.Replicas != 2 {
 		t.Errorf("cluster spec = %+v ok=%v, want web:1 x2", spec, ok)
+	}
+	if spec.Env["K"] != "V" {
+		t.Errorf("cluster spec env = %+v, want K=V from the store", spec.Env)
 	}
 	// Recorded in the database.
 	saved, err := d.LatestRelease(ctx, "web")

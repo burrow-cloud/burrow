@@ -432,6 +432,37 @@ func (c *Client) Env(ctx context.Context, app string) (map[string]string, error)
 	return out.Env, err
 }
 
+// SetSecret upserts one secret key=value for an app (ADR-0029). The value travels over burrowd's
+// authenticated, TLS-protected control-plane API, which writes it to the per-app Kubernetes
+// Secret; it is never logged, never stored in Postgres, and is still never carried over MCP (there
+// is no secret-set MCP tool). By default the running workload rolls so it picks the value up; with
+// noRestart the change only persists and lands on the next deploy.
+func (c *Client) SetSecret(ctx context.Context, app, key, value string, noRestart bool) error {
+	body := map[string]any{"key": key, "value": value, "no_restart": noRestart}
+	return c.do(ctx, http.MethodPost, c.appPath(app, "secrets"), body, nil)
+}
+
+// Secrets returns the KEYS in an app's per-app Secret, never the values (ADR-0028/0004). Secret
+// values live only in the Kubernetes Secret; a list reads keys only and never returns a value.
+func (c *Client) Secrets(ctx context.Context, app string) ([]string, error) {
+	var out struct {
+		Keys []string `json:"keys"`
+	}
+	err := c.do(ctx, http.MethodGet, c.appPath(app, "secrets"), nil, &out)
+	return out.Keys, err
+}
+
+// UnsetSecret removes one key from an app's per-app Secret (ADR-0028). Removing a key carries no
+// value, so it is allowed over the API/MCP. By default the running workload rolls so it drops the
+// value; with noRestart the change only persists and lands on the next deploy.
+func (c *Client) UnsetSecret(ctx context.Context, app, key string, noRestart bool) error {
+	path := "/v1/apps/" + url.PathEscape(app) + "/secrets/" + url.PathEscape(key)
+	if noRestart {
+		path += "?no_restart=true"
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
 func (c *Client) appPath(app, verb string) string {
 	return "/v1/apps/" + url.PathEscape(app) + "/" + verb
 }

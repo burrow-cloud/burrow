@@ -21,7 +21,7 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_deploy",
-		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Environment configuration is NOT passed here: an app's env is a separate, app-global store sourced at deploy time, so set any env the release needs with burrow_env_set BEFORE deploying — the new release then boots with it on first start. (burrow_env_set with no_restart=true followed by burrow_deploy is a single restart.) Returns the new release and the release it superseded (the rollback handle).",
+		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Environment configuration is NOT passed here: an app's env is a separate, app-global store sourced at deploy time, so set any env the release needs with burrow_env_set BEFORE deploying — the new release then boots with it on first start. (burrow_env_set with no_restart=true followed by burrow_deploy is a single restart.) For SECRETS (DB URLs, API keys), do not put values in env and do not paste secret values into this conversation: ask the user to run `burrow app secret set <app> KEY=VALUE` themselves BEFORE deploying, then confirm the key with burrow_secret_list. Returns the new release and the release it superseded (the rollback handle).",
 	}, deployTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
@@ -38,6 +38,16 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 		Name:        "burrow_env_unset",
 		Description: "Remove a non-secret environment variable from an app. By default the running app is rolled so it drops the value; set no_restart=true to only persist the removal and let it land on the next deploy.",
 	}, envUnsetTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_secret_list",
+		Description: "List the KEYS of an app's secret environment variables — never the values (secret values never travel over MCP; ADR-0029). Read-only. Use this to confirm a secret the app needs is present before deploying. To SET a secret value, there is no tool: NEVER ask the user to paste a secret value into this conversation (anything in the prompt is retained in context and re-sent on later tool calls). Instead, ask the user to run `burrow app secret set <app> KEY=VALUE` themselves at their terminal, then confirm with this list tool.",
+	}, secretListTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_secret_unset",
+		Description: "Remove a secret environment variable from an app by KEY (no value crosses MCP). By default the running app is rolled so it drops the value; set no_restart=true to only persist the removal and let it land on the next deploy. To SET a secret, ask the user to run `burrow app secret set <app> KEY=VALUE` themselves — never have them paste a secret value into this conversation.",
+	}, secretUnsetTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_apps",
@@ -219,6 +229,36 @@ func envListTool(c *client.Client) sdk.ToolHandlerFor[appInput, envOutput] {
 			return nil, envOutput{}, err
 		}
 		return nil, envOutput{Env: env}, nil
+	}
+}
+
+type secretUnsetInput struct {
+	App       string `json:"app" jsonschema:"the application name"`
+	Key       string `json:"key" jsonschema:"the secret environment variable name to remove (the KEY, not a value)"`
+	NoRestart bool   `json:"no_restart,omitempty" jsonschema:"true to persist the removal without rolling the running app; the change lands on the next deploy"`
+}
+
+// secretsOutput is an app's secret KEYS only — never the values (ADR-0028/0004).
+type secretsOutput struct {
+	Keys []string `json:"keys"`
+}
+
+func secretListTool(c *client.Client) sdk.ToolHandlerFor[appInput, secretsOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, secretsOutput, error) {
+		keys, err := c.Secrets(ctx, in.App)
+		if err != nil {
+			return nil, secretsOutput{}, err
+		}
+		return nil, secretsOutput{Keys: keys}, nil
+	}
+}
+
+func secretUnsetTool(c *client.Client) sdk.ToolHandlerFor[secretUnsetInput, envAck] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in secretUnsetInput) (*sdk.CallToolResult, envAck, error) {
+		if err := c.UnsetSecret(ctx, in.App, in.Key, in.NoRestart); err != nil {
+			return nil, envAck{}, err
+		}
+		return nil, envAck{App: in.App, Key: in.Key}, nil
 	}
 }
 

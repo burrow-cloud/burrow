@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/burrow-cloud/burrow/controlplane"
 )
@@ -24,13 +25,15 @@ type Kubernetes struct {
 	exposed   map[string]controlplane.ExposeSpec
 	addresses map[string]string // app -> ingress external address (controller-assigned)
 	addons    map[string]controlplane.AddonInfo
+	secrets   map[string]map[string]string // app -> per-app Secret (key -> value)
 	errs      map[Op]error
 }
 
 type deployState struct {
-	spec  controlplane.WorkloadSpec
-	ready int32
-	logs  []controlplane.LogLine
+	spec        controlplane.WorkloadSpec
+	ready       int32
+	logs        []controlplane.LogLine
+	restartedAt time.Time // last RestartWorkload timestamp; zero until rolled
 }
 
 // NewKubernetes returns an empty fake cluster.
@@ -40,8 +43,41 @@ func NewKubernetes() *Kubernetes {
 		exposed:   make(map[string]controlplane.ExposeSpec),
 		addresses: make(map[string]string),
 		addons:    make(map[string]controlplane.AddonInfo),
+		secrets:   make(map[string]map[string]string),
 		errs:      make(map[Op]error),
 	}
+}
+
+// SetSecret seeds app's per-app Secret with key=value, modelling a `secret set` done over the
+// kubeconfig path (which never goes through this engine seam). Tests use it to set up list/unset.
+func (k *Kubernetes) SetSecret(app, key, value string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.secrets[app] == nil {
+		k.secrets[app] = map[string]string{}
+	}
+	k.secrets[app][key] = value
+}
+
+// SecretValue returns the stored value under key for app and whether it is present — test-only
+// introspection (the real seam never exposes values).
+func (k *Kubernetes) SecretValue(app, key string) (string, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	v, ok := k.secrets[app][key]
+	return v, ok
+}
+
+// RestartedAt returns the last RestartWorkload timestamp for app and whether the workload was
+// ever rolled by a restart bump.
+func (k *Kubernetes) RestartedAt(app string) (time.Time, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	d := k.deploys[app]
+	if d == nil || d.restartedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return d.restartedAt, true
 }
 
 func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) (controlplane.AddonInfo, error) {
@@ -277,5 +313,59 @@ func (k *Kubernetes) Unexpose(ctx context.Context, app string) error {
 		return fmt.Errorf("kubernetes: exposure %q: %w", app, controlplane.ErrNotFound)
 	}
 	delete(k.exposed, app)
+	return nil
+}
+
+// SetSecretValue upserts key=value into app's per-app Secret map (ADR-0029), modelling burrowd
+// writing the value it received over the control-plane API. SecretKeys/SecretValue read the same
+// map. An OpSetSecretValue error can be injected to exercise the failure path.
+func (k *Kubernetes) SetSecretValue(ctx context.Context, app, key, value string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpSetSecretValue]; err != nil {
+		return err
+	}
+	if k.secrets[app] == nil {
+		k.secrets[app] = map[string]string{}
+	}
+	k.secrets[app][key] = value
+	return nil
+}
+
+func (k *Kubernetes) SecretKeys(ctx context.Context, app string) ([]string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpSecretKeys]; err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(k.secrets[app]))
+	for key := range k.secrets[app] {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+func (k *Kubernetes) UnsetSecretKey(ctx context.Context, app, key string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpUnsetSecretKey]; err != nil {
+		return err
+	}
+	delete(k.secrets[app], key) // missing Secret/key is a no-op
+	return nil
+}
+
+func (k *Kubernetes) RestartWorkload(ctx context.Context, app string, at time.Time) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpRestartWorkload]; err != nil {
+		return err
+	}
+	d := k.deploys[app]
+	if d == nil {
+		return fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
+	}
+	d.restartedAt = at
 	return nil
 }

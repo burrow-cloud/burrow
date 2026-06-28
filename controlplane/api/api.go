@@ -57,6 +57,15 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/env", s.listEnv)
 	v1.HandleFunc("POST /v1/apps/{app}/env", s.setEnv)
 	v1.HandleFunc("DELETE /v1/apps/{app}/env/{key}", s.unsetEnv)
+	// Secrets: set carries a VALUE in its POST body, list returns KEYS only, unset removes a key.
+	// set is the ONE secret endpoint that carries a value — it travels over this authenticated,
+	// TLS-protected API and burrowd writes it to the per-app Kubernetes Secret (ADR-0029). The
+	// value is never logged (the access log records method+path+status only; the path holds no
+	// value), never audited, never stored in Postgres, and never exposed over MCP — there is no
+	// burrow_secret_set tool (ADR-0029/0004). list and unset carry no value.
+	v1.HandleFunc("POST /v1/apps/{app}/secrets", s.setSecret)
+	v1.HandleFunc("GET /v1/apps/{app}/secrets", s.listSecrets)
+	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/{key}", s.unsetSecret)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
 	v1.HandleFunc("POST /v1/providers", s.addProvider)
@@ -235,6 +244,60 @@ func (s *server) unsetEnv(w http.ResponseWriter, r *http.Request) {
 // envResponse wraps the env map so the shape can grow without breaking object decoders.
 type envResponse struct {
 	Env map[string]string `json:"env"`
+}
+
+// setSecret is the ONE secret endpoint that carries a value: it decodes {key, value, no_restart}
+// from the POST body and hands the value to the engine, which writes it to the per-app Kubernetes
+// Secret (ADR-0029). The value is never logged, never audited, never stored in Postgres, and the
+// response carries the app and KEY only — never the value. This endpoint is deliberately not
+// exposed over MCP (there is no burrow_secret_set tool; ADR-0029/0004): the agent references a
+// secret key and asks the human to set the value, who does so through the CLI or the UI.
+func (s *server) setSecret(w http.ResponseWriter, r *http.Request) {
+	var req secretSetRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.engine.SetSecret(r.Context(), r.PathValue("app"), req.Key, req.Value, req.NoRestart); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	// Respond with the app and KEY only — never echo the value back.
+	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app"), "key": req.Key})
+}
+
+func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
+	keys, err := s.engine.ListSecrets(r.Context(), r.PathValue("app"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, secretsResponse{Keys: keys})
+}
+
+func (s *server) unsetSecret(w http.ResponseWriter, r *http.Request) {
+	noRestart := r.URL.Query().Get("no_restart") == "true"
+	key := r.PathValue("key")
+	if err := s.engine.UnsetSecret(r.Context(), r.PathValue("app"), key, noRestart); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app"), "key": key})
+}
+
+// secretsResponse carries an app's secret KEYS only — never the values, which live only in the
+// per-app Kubernetes Secret (ADR-0028/0004).
+type secretsResponse struct {
+	Keys []string `json:"keys"`
+}
+
+// secretSetRequest is the body of a secret set (the app comes from the path). Value is the secret
+// value: it travels over this authenticated, TLS-protected API and is written to the per-app
+// Kubernetes Secret (ADR-0029) — it is never logged, never audited, and never stored in Postgres.
+// NoRestart persists it without rolling the running workload; the change lands on the next deploy.
+type secretSetRequest struct {
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	NoRestart bool   `json:"no_restart,omitempty"`
 }
 
 // envSetRequest is the body of an env set (the app comes from the path). NoRestart persists the

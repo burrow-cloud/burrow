@@ -61,10 +61,41 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
+	}
+	// Security boundary (ADR-0029/0004): there must be NO secret-set tool — a secret value never
+	// crosses MCP. Setting a secret travels over burrowd's authenticated control-plane API (the
+	// CLI or the UI), never the agent surface.
+	if got["burrow_secret_set"] {
+		t.Error("burrow_secret_set must NOT exist: secret values never travel over MCP")
+	}
+}
+
+func TestSecretListToolReturnsKeysOnly(t *testing.T) {
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/apps/web/secrets" {
+			t.Errorf("path = %q, want /v1/apps/web/secrets", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []string{"DATABASE_URL", "STRIPE_KEY"}})
+	})
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_secret_list",
+		Arguments: map[string]any{"app": "web"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	out := decodeStructured[struct {
+		Keys []string `json:"keys"`
+	}](t, res)
+	if len(out.Keys) != 2 || out.Keys[0] != "DATABASE_URL" {
+		t.Errorf("keys = %v, want [DATABASE_URL STRIPE_KEY]", out.Keys)
 	}
 }
 

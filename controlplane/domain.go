@@ -36,6 +36,22 @@ func (a App) Validate() error {
 	return nil
 }
 
+// RestartedAtAnnotation is the pod-template annotation Burrow bumps to a fresh timestamp to
+// force a rolling update when something the pod reads only at start changes — notably a secret
+// value under an existing key, which does not otherwise mutate the template (ADR-0028).
+const RestartedAtAnnotation = "burrow.cloud/restarted-at"
+
+// AppSecretName is the per-app Kubernetes Secret that holds an app's secret env (ADR-0028): one
+// object per app in the app namespace, keys = env-var names, values = secret values. The values
+// live only here — never inlined into the Deployment spec, never written to Postgres, and never
+// carried over MCP (ADR-0029/0004). A value may transit burrowd's authenticated control-plane API
+// on `secret set`, which writes it here. The name is derived from the app (a DNS-1123 label, so
+// the result is always a valid Secret name), so every layer computes it the same way rather than
+// passing it around.
+func AppSecretName(app string) string {
+	return "burrow-app-" + app + "-secrets"
+}
+
 // envKey matches a conventional environment variable name: a letter or underscore followed
 // by letters, digits, or underscores. It rejects names a shell or container runtime would
 // reject, keeping the non-secret config store (ADR-0028) to well-formed keys.

@@ -41,7 +41,7 @@ with `app list`; account-scoped Cloudflare tokens; the app Ingress bound to its 
 reachability resolving via public DNS so the chain converges for an agent; and a burrowd
 request log. A breaking CLI change, taken while the surface is small.
 
-## v0.4 — Agent-provisioned building blocks 🚧 next
+## v0.4 — Agent-provisioned building blocks ✅ shipped
 
 The differentiator: an agent that stands up and operates a whole stack on the user's own
 cluster, not just an app. The user asks a question or for a capability; the agent does the
@@ -60,19 +60,25 @@ autonomous prod changes — and that most already run a cluster *with* logging) 
 - **Logs** ✅ shipped — install [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/)
   (Apache-2.0) with a Fluent Bit collector, or `connect` an existing Loki; the agent queries
   either through `burrow_logs_query` to answer "what happened / what changed before it broke".
-- **Metrics** — `connect` an existing Prometheus / VictoriaMetrics and query it via PromQL
-  (`burrow_metrics_query`) ✅ shipped; **`addon install metrics`** (VictoriaMetrics + a vmagent
-  scraper, so metrics flow without a pre-existing Prometheus) is the next slice.
+- **Metrics** ✅ shipped — `addon install metrics` (VictoriaMetrics + a vmagent scraper, so
+  metrics flow without a pre-existing Prometheus) or `connect` an existing Prometheus /
+  VictoriaMetrics, queried via PromQL (`burrow_metrics_query`); `app deploy --metrics-port` marks
+  a pod for scraping.
+- **Backend selector** ✅ shipped — `addon logs` / `addon metrics` can target a specific backend
+  when an installed and a connected one both serve a capability.
 - **Connected-backend auth** ✅ shipped — a bearer token in the `burrow-credentials` Secret,
   read at query time; only the Secret key crosses the API, never the token.
 - **Observability answers, not dashboards** ✅ — no bundled Grafana (AGPL); the agent is the
   query interface over the logs + metrics it set up or connected.
-- **Cache** — [ValKey](https://valkey.io) (BSD-3): later and conditional — a backing service only
-  some apps need, orthogonal to the observability story.
-- **`app delete`** — remove an app and its routing, behind a delete guardrail.
+- **Cache** ✅ shipped — `addon install cache` ([ValKey](https://valkey.io), BSD-3), a backing
+  service the agent wires an app to (no query seam — apps connect to it directly).
+- **`app delete`** ✅ shipped — remove an app, its routing, and release history behind a confirm
+  guardrail.
 
-Each shipped slice has a deterministic k3d e2e (install-logs, connect-Loki, connect-Prometheus);
-a local headless-agent diagnosis test is held out of CI (it costs API tokens).
+Each shipped slice has a deterministic k3d e2e (install-logs, connect-Loki, connect-Prometheus,
+install-metrics + the full metrics loop, cache); a local headless-agent diagnosis test and a
+blind-workspace examples library exercise the full agent loop by hand, held out of CI (they cost
+API tokens).
 
 ## Deferred until requested
 

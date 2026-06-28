@@ -51,41 +51,41 @@ can reason about which link is broken and act on the gaps it owns. The full desi
 the human-setup vs. agent-operation split — is **[ADR-0018](adr/0018-reaching-an-app-at-a-url.md)
 (Accepted)**.
 
-## v0.4 — agent-provisioned building blocks 🚧 in progress
+## Shipped: v0.4 — agent-provisioned building blocks ✅
 
-The differentiator: the agent stands up and operates a whole stack on the user's cluster, not
-just an app — **or connects to one the user already runs**. The model is a curated catalog plus
-a **DB-backed registry** of installed and connected instances
-([ADR-0025](adr/0025-building-block-addons.md)), an install-or-connect query seam
-([ADR-0026](adr/0026-observability-query-adapters.md)), and the agent as the query layer. The
-license bar (Apache / MIT / BSD) governs only what Burrow *installs*; *connecting* to an existing
-backend queries it without distributing it (so AGPL Loki / proprietary Datadog are fair to
-connect). Research put **observability first, cache later, connect alongside install**.
+Released as **v0.4.0**. The agent stands up and operates backing services on the user's cluster —
+**or connects to ones they already run** — with the agent as the query layer. The model is a
+curated catalog plus a **DB-backed registry** of installed and connected instances
+([ADR-0025](adr/0025-building-block-addons.md)) and an install-or-connect query seam
+([ADR-0026](adr/0026-observability-query-adapters.md)); the license bar (Apache / MIT / BSD)
+governs only what Burrow *installs*, since *connecting* queries a backend without distributing it.
+What shipped:
 
-**Shipped:**
-
-- **Logs** — `addon install logs` (VictoriaLogs + a Fluent Bit collector) or `addon connect
-  loki`; the agent queries either through `burrow_logs_query`.
-- **Metrics (connect)** — `addon connect prometheus`, queried via PromQL
-  (`burrow_metrics_query`); one adapter serves Prometheus and VictoriaMetrics.
+- **Logs** — `addon install logs` (VictoriaLogs + a Fluent Bit collector) or `addon connect loki`;
+  queried through `burrow_logs_query`.
+- **Metrics** — `addon install metrics` (VictoriaMetrics + a vmagent scraper) or `addon connect
+  prometheus`, queried via PromQL (`burrow_metrics_query`); `app deploy --metrics-port` marks a
+  pod for scraping. One adapter serves Prometheus and VictoriaMetrics.
+- **Backend selector** — `addon logs` / `addon metrics` can target a specific backend when an
+  installed and a connected one both serve a capability.
 - **Connected-backend auth** — a bearer token in `burrow-credentials`, read at query time; only
   the Secret key crosses the API, never the token.
-- **`app deploy -- <cmd>`** — container command override on the CLI, at parity with the deploy
-  API and the agent's MCP deploy tool.
-- **e2e** — deterministic k3d gates for install-logs, connect-Loki, and connect-Prometheus, plus
-  a local headless-agent diagnosis test held out of CI (it costs API tokens).
+- **Cache** — `addon install cache` (ValKey, BSD-3), a backing service the agent wires an app to.
+- **`app delete`** — remove an app, its routing, and release history behind a confirm guardrail;
+  **`app deploy -- <cmd>`** — container command override at parity with the MCP deploy tool.
+- **e2e** — deterministic k3d gates for install-logs, connect-Loki, connect-Prometheus,
+  install-metrics + the full metrics loop, and cache; plus a local headless-agent diagnosis test
+  and a blind-workspace **examples** library that exercise the full agent loop by hand.
 
 **Next:**
 
-- **`addon install metrics`** — VictoriaMetrics + a vmagent scraper, so metrics flow without a
-  pre-existing Prometheus (the install counterpart to the connect path).
-- **Backend selector** — let `addon logs` / `addon metrics` target a specific backend when both
-  an installed and a connected one serve the same capability.
-- **`app delete`** (behind a delete guardrail); a **cache** (ValKey, BSD-3) is later and conditional.
-
-**Deferred until requested:** server-side build from a git reference
-([ADR-0008](adr/0008-two-build-paths.md)); smaller TLS/DNS follow-ons (a DNS-01 issuer, folding
-the provider's record into reachability) ride along when a slice needs them.
+- **Audit log** ([ADR-0027](adr/0027-audit-log.md)) — an append-only Postgres record of agent
+  operations and guardrail decisions (allowed / held / denied / executed), read via `burrow
+  audit`. First slice: the table + writer wired into mutating operations + the CLI.
+- Unsequenced themes — richer guardrails (the tunable `rollback` guardrail is a down payment),
+  database provisioning, autoscaling, cost controls, a self-host dashboard — live in
+  [ROADMAP.md](ROADMAP.md). **Deferred until requested:** server-side build from a git reference
+  ([ADR-0008](adr/0008-two-build-paths.md)).
 
 Shipped in **v0.3**: the CLI regrouped by task (`app`/`config`/`system`, `expose`→`publish` —
 [ADR-0024](adr/0024-cli-command-taxonomy.md)) with `app list`; the Cloudflare adapter verifying

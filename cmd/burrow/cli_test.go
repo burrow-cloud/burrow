@@ -47,6 +47,66 @@ func TestDeploy(t *testing.T) {
 	}
 }
 
+func TestAudit(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries": []map[string]any{
+				{"id": 2, "timestamp": "2026-06-23T12:00:01Z", "operation": "deploy", "target": "web", "outcome": "executed"},
+				{"id": 1, "timestamp": "2026-06-23T12:00:00Z", "operation": "deploy", "target": "web", "guardrail_code": "", "disposition": "allow", "outcome": "allowed"},
+			},
+		})
+	}, "audit", "--app", "web", "--operation", "deploy", "--outcome", "executed", "--limit", "10")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "GET" || gotPath != "/v1/audit" {
+		t.Errorf("request = %s %s", gotMethod, gotPath)
+	}
+	for _, want := range []string{"app=web", "operation=deploy", "outcome=executed", "limit=10"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Errorf("query %q missing %q", gotQuery, want)
+		}
+	}
+	// Tabular output names the columns and the rows.
+	for _, want := range []string{"TIME", "OP", "TARGET", "OUTCOME", "GUARDRAIL", "deploy", "web", "executed", "allowed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+}
+
+func TestAuditJSON(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries": []map[string]any{{"id": 1, "operation": "rollback", "target": "web", "outcome": "executed"}},
+		})
+	}, "audit", "--json")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		t.Fatalf("--json output is not JSON: %v\n%s", err, out)
+	}
+	if len(entries) != 1 || entries[0]["operation"] != "rollback" {
+		t.Errorf("json entries = %v", entries)
+	}
+}
+
+func TestAuditEmpty(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"entries": []any{}})
+	}, "audit")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "No audit records match.") {
+		t.Errorf("output = %q, want the empty message", out)
+	}
+}
+
 func TestDeployJSON(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"release": map[string]any{"id": "r1", "app": "web", "image": "img:1", "status": "deployed", "replicas": 1}})

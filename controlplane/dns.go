@@ -37,8 +37,10 @@ func (e *Engine) AddDomain(ctx context.Context, req AddDomainRequest) (DomainRes
 	if err != nil {
 		return DomainResult{}, fmt.Errorf("domain add %s: loading guardrail policy: %w", host, err)
 	}
-	if err := pol.evaluateGuardrail("domain add", GuardrailDNSWrite, req.Confirm,
-		fmt.Sprintf("pointing %s at %s via %s", host, address, p.Name)); err != nil {
+	args := map[string]string{"address": address, "provider": p.Name}
+	if err := e.recordDecision(ctx, auditOpDNSWrite, host, args, GuardrailDNSWrite,
+		pol.evaluateGuardrail("domain add", GuardrailDNSWrite, req.Confirm,
+			fmt.Sprintf("pointing %s at %s via %s", host, address, p.Name))); err != nil {
 		return DomainResult{}, err
 	}
 
@@ -48,11 +50,13 @@ func (e *Engine) AddDomain(ctx context.Context, req AddDomainRequest) (DomainRes
 	}
 	rec := DNSRecord{Type: recordTypeFor(address), Name: host, Value: address}
 	if err := dnsp.EnsureRecord(ctx, rec); err != nil {
+		e.recordExecution(ctx, auditOpDNSWrite, host, args, err)
 		if errors.Is(err, ErrNotFound) {
 			return DomainResult{}, fmt.Errorf("domain add %s: provider %q manages no zone covering %s — delegate the domain to %s first: %w", host, p.Name, host, p.Type, err)
 		}
 		return DomainResult{}, fmt.Errorf("domain add %s: %w", host, err)
 	}
+	e.recordExecution(ctx, auditOpDNSWrite, host, args, nil)
 	return DomainResult{Host: host, Provider: p.Name, Type: string(rec.Type), Address: address}, nil
 }
 
@@ -73,8 +77,10 @@ func (e *Engine) RemoveDomain(ctx context.Context, req RemoveDomainRequest) (Dom
 	if err != nil {
 		return DomainResult{}, fmt.Errorf("domain remove %s: loading guardrail policy: %w", host, err)
 	}
-	if err := pol.evaluateGuardrail("domain remove", GuardrailDNSDelete, req.Confirm,
-		fmt.Sprintf("removing the DNS record for %s via %s", host, p.Name)); err != nil {
+	args := map[string]string{"provider": p.Name}
+	if err := e.recordDecision(ctx, auditOpDNSDelete, host, args, GuardrailDNSDelete,
+		pol.evaluateGuardrail("domain remove", GuardrailDNSDelete, req.Confirm,
+			fmt.Sprintf("removing the DNS record for %s via %s", host, p.Name))); err != nil {
 		return DomainResult{}, err
 	}
 
@@ -83,11 +89,13 @@ func (e *Engine) RemoveDomain(ctx context.Context, req RemoveDomainRequest) (Dom
 		return DomainResult{}, fmt.Errorf("domain remove %s: %w", host, err)
 	}
 	if err := dnsp.DeleteRecord(ctx, host); err != nil {
+		e.recordExecution(ctx, auditOpDNSDelete, host, args, err)
 		if errors.Is(err, ErrNotFound) {
 			return DomainResult{}, fmt.Errorf("domain remove %s: provider %q holds no record for it: %w", host, p.Name, err)
 		}
 		return DomainResult{}, fmt.Errorf("domain remove %s: %w", host, err)
 	}
+	e.recordExecution(ctx, auditOpDNSDelete, host, args, nil)
 	return DomainResult{Host: host, Provider: p.Name}, nil
 }
 

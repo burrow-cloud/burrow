@@ -92,6 +92,27 @@ echo "=== rollback path: deploy a second image, then roll back ==="
 "$BURROW" app rollback web --kubeconfig "$KCFG" | grep -q "nginx:alpine" || { echo "FAIL: rollback did not restore nginx:alpine"; exit 1; }
 
 # =============================================================================
+# AUDIT: the append-only record of guarded operations (ADR-0027)
+# By now several guarded operations have run through the full stack (deploys and a
+# rollback). Assert `burrow audit` lists them through CLI -> API -> in-cluster burrowd ->
+# Postgres. Deterministic: the rows already exist (no async pipeline), so no polling.
+# =============================================================================
+echo "=== audit: the guarded operations above are recorded ==="
+audit_out=$("$BURROW" audit --app web --kubeconfig "$KCFG")
+printf '%s\n' "$audit_out"
+# A deploy that executed and the rollback that executed must both appear for app web.
+printf '%s\n' "$audit_out" | grep -q "deploy" \
+  || { echo "FAIL: 'burrow audit' did not list a deploy operation for web"; exit 1; }
+printf '%s\n' "$audit_out" | grep -q "rollback" \
+  || { echo "FAIL: 'burrow audit' did not list the rollback operation for web"; exit 1; }
+printf '%s\n' "$audit_out" | grep -q "executed" \
+  || { echo "FAIL: 'burrow audit' showed no executed outcome for web"; exit 1; }
+# The outcome filter narrows the read path server-side.
+"$BURROW" audit --app web --operation rollback --outcome executed --kubeconfig "$KCFG" \
+  | grep -q "rollback" || { echo "FAIL: filtered 'burrow audit' did not return the rollback row"; exit 1; }
+echo "--- audit trail lists the guarded operations through CLI -> API -> burrowd -> Postgres ---"
+
+# =============================================================================
 # ENV: non-secret config lifecycle (ADR-0028)
 # Exercise the real env path end-to-end through the full stack:
 #   burrow CLI -> control-plane API -> in-cluster burrowd -> Postgres store,

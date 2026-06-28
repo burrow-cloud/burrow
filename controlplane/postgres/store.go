@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
@@ -231,6 +232,102 @@ ON CONFLICT (code) DO UPDATE SET disposition = EXCLUDED.disposition`
 		return fmt.Errorf("postgres: set guardrail %q: %w", code, err)
 	}
 	return nil
+}
+
+// auditColumns is the audit_log projection in a stable order shared by the scanner.
+const auditColumns = `id, ts, operation, target, args, guardrail_code, disposition, outcome, result, caller`
+
+// defaultAuditLimit caps an unbounded audit query so a huge log never returns in one response.
+const defaultAuditLimit = 200
+
+// AppendAudit appends one audit row (ADR-0027). The log is append-only: there is only this
+// INSERT and the Audit SELECT — no update or delete path. The store assigns id.
+func (s *Store) AppendAudit(ctx context.Context, e controlplane.AuditEntry) error {
+	args := e.Args
+	if args == nil {
+		args = map[string]string{}
+	}
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Errorf("postgres: append audit: encoding args: %w", err)
+	}
+	const q = `
+INSERT INTO audit_log (ts, operation, target, args, guardrail_code, disposition, outcome, result, caller)
+VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`
+	_, err = s.db.ExecContext(ctx, q,
+		e.Timestamp, e.Operation, e.Target, string(argsJSON), e.GuardrailCode, e.Disposition, string(e.Outcome), e.Result, e.Caller)
+	if err != nil {
+		return fmt.Errorf("postgres: append audit: %w", err)
+	}
+	return nil
+}
+
+// Audit returns audit rows matching filter, newest first, capped by filter.Limit (a default
+// when unset). The filter clauses are optional and ANDed; an empty filter returns the latest
+// rows up to the cap.
+func (s *Store) Audit(ctx context.Context, filter controlplane.AuditFilter) ([]controlplane.AuditEntry, error) {
+	q := `SELECT ` + auditColumns + ` FROM audit_log`
+	var clauses []string
+	var args []any
+	add := func(col, val string) {
+		args = append(args, val)
+		clauses = append(clauses, fmt.Sprintf("%s = $%d", col, len(args)))
+	}
+	if filter.App != "" {
+		add("target", filter.App)
+	}
+	if filter.Operation != "" {
+		add("operation", filter.Operation)
+	}
+	if filter.Outcome != "" {
+		add("outcome", string(filter.Outcome))
+	}
+	if len(clauses) > 0 {
+		q += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = defaultAuditLimit
+	}
+	args = append(args, limit)
+	q += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", len(args))
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: audit: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]controlplane.AuditEntry, 0)
+	for rows.Next() {
+		e, err := scanAudit(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: audit: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: audit: %w", err)
+	}
+	return out, nil
+}
+
+func scanAudit(sc scanner) (controlplane.AuditEntry, error) {
+	var (
+		e        controlplane.AuditEntry
+		ts       time.Time
+		argsJSON []byte
+		outcome  string
+	)
+	if err := sc.Scan(&e.ID, &ts, &e.Operation, &e.Target, &argsJSON, &e.GuardrailCode, &e.Disposition, &outcome, &e.Result, &e.Caller); err != nil {
+		return controlplane.AuditEntry{}, err
+	}
+	if err := json.Unmarshal(argsJSON, &e.Args); err != nil {
+		return controlplane.AuditEntry{}, fmt.Errorf("decoding args: %w", err)
+	}
+	e.Timestamp = ts
+	e.Outcome = controlplane.AuditOutcome(outcome)
+	return e, nil
 }
 
 // scanner is the read side common to *sql.Row and *sql.Rows.

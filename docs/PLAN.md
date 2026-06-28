@@ -73,15 +73,21 @@ What shipped:
 - **Cache** — `addon install cache` (ValKey, BSD-3), a backing service the agent wires an app to.
 - **`app delete`** — remove an app, its routing, and release history behind a confirm guardrail;
   **`app deploy -- <cmd>`** — container command override at parity with the MCP deploy tool.
+- **Audit log, first slice** ([ADR-0027](adr/0027-audit-log.md)) — an append-only Postgres
+  record of guarded, mutating operations and their guardrail decisions (allowed / held / denied
+  / executed / failed), with redacted args (names, image, replica count, env/secret key NAMES —
+  never a value), read newest-first via `burrow audit [--app --operation --outcome --limit]`.
+  Scoped to the guarded operations (deploy, scale, rollback, app delete, publish, domain
+  add/remove, addon install/remove); env/secret and other ungated ops are a later slice.
 - **e2e** — deterministic k3d gates for install-logs, connect-Loki, connect-Prometheus,
   install-metrics + the full metrics loop, and cache; plus a local headless-agent diagnosis test
   and a blind-workspace **examples** library that exercise the full agent loop by hand.
 
 **Next:**
 
-- **Audit log** ([ADR-0027](adr/0027-audit-log.md)) — an append-only Postgres record of agent
-  operations and guardrail decisions (allowed / held / denied / executed), read via `burrow
-  audit`. First slice: the table + writer wired into mutating operations + the CLI.
+- **Audit log, later slices** ([ADR-0027](adr/0027-audit-log.md)) — extend the writer to
+  env/secret and other ungated operations; a read-only MCP tool; configurable retention; richer
+  per-principal identity with the authentication ADR.
 - Unsequenced themes — richer guardrails (the tunable `rollback` guardrail is a down payment),
   database provisioning, autoscaling, cost controls, a self-host dashboard — live in
   [ROADMAP.md](ROADMAP.md). **Deferred until requested:** server-side build from a git reference

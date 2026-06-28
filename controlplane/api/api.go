@@ -69,6 +69,7 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
 	v1.HandleFunc("POST /v1/metrics/query", s.queryMetrics)
+	v1.HandleFunc("GET /v1/audit", s.audit)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", requireToken(cfg.Token, v1))
@@ -438,6 +439,34 @@ type metricsQueryRequest struct {
 
 type metricsQueryResponse struct {
 	Samples []controlplane.MetricSample `json:"samples"`
+}
+
+func (s *server) audit(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	filter := controlplane.AuditFilter{
+		App:       q.Get("app"),
+		Operation: q.Get("operation"),
+		Outcome:   controlplane.AuditOutcome(q.Get("outcome")),
+	}
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid limit parameter %q", v), "invalid")
+			return
+		}
+		filter.Limit = n
+	}
+	entries, err := s.engine.Audit(r.Context(), filter)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, auditResponse{Entries: entries})
+}
+
+// auditResponse wraps the audit rows so the shape can grow without breaking object decoders.
+type auditResponse struct {
+	Entries []controlplane.AuditEntry `json:"entries"`
 }
 
 // guardResponse is the body of a guard list/set call: the full guardrail policy.

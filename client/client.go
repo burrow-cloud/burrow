@@ -192,6 +192,57 @@ type DomainResult struct {
 	Address  string `json:"address,omitempty"`
 }
 
+// AuditEntry mirrors a control-plane audit row (ADR-0027): a guarded mutating operation and the
+// guardrail decision and outcome that applied. Args is redacted at the source — it carries only
+// safe metadata (names, image reference, replica count, env/secret key NAMES), never a value.
+type AuditEntry struct {
+	ID            int64             `json:"id,omitempty"`
+	Timestamp     time.Time         `json:"timestamp"`
+	Operation     string            `json:"operation"`
+	Target        string            `json:"target,omitempty"`
+	Args          map[string]string `json:"args,omitempty"`
+	GuardrailCode string            `json:"guardrail_code,omitempty"`
+	Disposition   string            `json:"disposition,omitempty"`
+	Outcome       string            `json:"outcome"`
+	Result        string            `json:"result,omitempty"`
+	Caller        string            `json:"caller,omitempty"`
+}
+
+// AuditFilter narrows an audit query. A zero value lists the latest rows across all apps.
+type AuditFilter struct {
+	App       string
+	Operation string
+	Outcome   string
+	Limit     int
+}
+
+// Audit lists audit rows newest-first, optionally filtered by app, operation, and outcome
+// (ADR-0027). It is read-only — the audit log has no write or delete path through the API.
+func (c *Client) Audit(ctx context.Context, f AuditFilter) ([]AuditEntry, error) {
+	q := url.Values{}
+	if f.App != "" {
+		q.Set("app", f.App)
+	}
+	if f.Operation != "" {
+		q.Set("operation", f.Operation)
+	}
+	if f.Outcome != "" {
+		q.Set("outcome", f.Outcome)
+	}
+	if f.Limit > 0 {
+		q.Set("limit", strconv.Itoa(f.Limit))
+	}
+	path := "/v1/audit"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var out struct {
+		Entries []AuditEntry `json:"entries"`
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	return out.Entries, err
+}
+
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "deploy"), req, &out)

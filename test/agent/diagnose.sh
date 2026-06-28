@@ -52,11 +52,11 @@ MCP_CFG="$WORK/mcp-config.json"
 dump_diagnostics() {
   echo "=== DIAGNOSTICS: a step failed, dumping cluster state ==="
   kubectl --kubeconfig "$KCFG" get pods -A -o wide || true
-  echo "--- default namespace events ---"
-  kubectl --kubeconfig "$KCFG" -n default get events --sort-by=.lastTimestamp | tail -n 30 || true
+  echo "--- burrow-apps namespace events ---"
+  kubectl --kubeconfig "$KCFG" -n burrow-apps get events --sort-by=.lastTimestamp | tail -n 30 || true
   echo "--- checkout app pods + logs ---"
-  kubectl --kubeconfig "$KCFG" -n default get pods -l app.kubernetes.io/name=checkout -o wide || true
-  kubectl --kubeconfig "$KCFG" -n default logs -l app.kubernetes.io/name=checkout --tail=40 || true
+  kubectl --kubeconfig "$KCFG" -n burrow-apps get pods -l app.kubernetes.io/name=checkout -o wide || true
+  kubectl --kubeconfig "$KCFG" -n burrow-apps logs -l app.kubernetes.io/name=checkout --tail=40 || true
   echo "--- burrowd describe + logs ---"
   kubectl --kubeconfig "$KCFG" -n burrow describe deploy/burrowd || true
   kubectl --kubeconfig "$KCFG" -n burrow logs deploy/burrowd --tail=80 || true

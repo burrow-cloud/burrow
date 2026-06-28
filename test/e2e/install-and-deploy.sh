@@ -39,7 +39,7 @@ dump_diagnostics() {
   echo "--- vmagent collector logs ---"
   kubectl -n burrow-addons logs deploy/burrow-metrics-collector --tail=40 || true
   echo "--- metricsapp pods (app deployed with --metrics-port) ---"
-  kubectl -n default get pods -l app.kubernetes.io/name=metricsapp -o wide || true
+  kubectl -n burrow-apps get pods -l app.kubernetes.io/name=metricsapp -o wide || true
   echo "--- burrow-e2e-loki namespace (connected Loki fixture) ---"
   kubectl -n burrow-e2e-loki get all || true
   echo "--- loki fixture logs ---"
@@ -133,7 +133,7 @@ echo "=== env: assert the value reached the live Deployment pod template ==="
 # A default `env set` re-applies the workload, so the value is rendered inline into the
 # pod template's container env. Read it back off the Deployment deterministically (no log
 # scraping, no timing): the rollout having been requested is enough for the spec to carry it.
-env_in_template=$(kubectl --kubeconfig "$KCFG" -n default get deploy/web \
+env_in_template=$(kubectl --kubeconfig "$KCFG" -n burrow-apps get deploy/web \
   -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="BURROW_E2E_ENV")].value}')
 if [ "$env_in_template" != "hello-from-store" ]; then
   echo "FAIL: BURROW_E2E_ENV not rendered into the Deployment pod template (got: '$env_in_template')"
@@ -181,7 +181,7 @@ echo "=== deploy a logger fixture THROUGH Burrow (exercises the -- command overr
 # busybox evaluates it at runtime.
 "$BURROW" app deploy burrow-e2e-logger --image busybox:1.36 --kubeconfig "$KCFG" -- \
   sh -c 'i=0; while true; do echo "BURROW_E2E_LOGLINE level=error iteration=$i app failed to connect"; i=$((i+1)); sleep 2; done'
-kubectl --kubeconfig "$KCFG" -n default rollout status deploy/burrow-e2e-logger --timeout=60s
+kubectl --kubeconfig "$KCFG" -n burrow-apps rollout status deploy/burrow-e2e-logger --timeout=60s
 
 echo "=== query the marker back through burrow addon logs (bounded poll) ==="
 # Bounded poll (~90s) to cover Fluent Bit's tail+flush latency into VictoriaLogs. The
@@ -209,7 +209,7 @@ printf '%s\n' "$last_out" | grep "BURROW_E2E_LOGLINE" | head -n 3
 echo "=== tidy up the logs add-on and the logger fixture (best-effort) ==="
 # Cleanup is non-fatal — the cluster is deleted after the run regardless.
 "$BURROW" addon remove burrow-logs --confirm --kubeconfig "$KCFG" || true
-kubectl --kubeconfig "$KCFG" -n default delete deploy/burrow-e2e-logger --ignore-not-found || true
+kubectl --kubeconfig "$KCFG" -n burrow-apps delete deploy/burrow-e2e-logger --ignore-not-found || true
 
 # =============================================================================
 # ADDON: metrics pipeline
@@ -264,7 +264,7 @@ echo "=== deploy a real metrics-exposing app THROUGH Burrow (--metrics-port) ===
 # prom/prometheus only as a convenient app that serves its own /metrics on :9090 (its baked-in
 # default config) — NOT as Prometheus. The image is preloaded in CI.
 "$BURROW" app deploy metricsapp --image prom/prometheus:v3.1.0 --metrics-port 9090 --kubeconfig "$KCFG"
-kubectl --kubeconfig "$KCFG" -n default rollout status deploy/metricsapp --timeout=120s
+kubectl --kubeconfig "$KCFG" -n burrow-apps rollout status deploy/metricsapp --timeout=120s
 
 echo "=== query the app's OWN metrics back through burrow addon metrics (bounded poll) ==="
 # Proves the FULL LOOP: an app deployed with --metrics-port is auto-discovered and scraped by
@@ -294,7 +294,7 @@ printf '%s\n' "$app_out" | grep 'pod="metricsapp' | head -n 3
 
 echo "=== tidy up the metrics-exposing app (best-effort) ==="
 # `app delete` may not exist on this branch, so tear the Deployment down with kubectl.
-kubectl --kubeconfig "$KCFG" -n default delete deploy/metricsapp --ignore-not-found || true
+kubectl --kubeconfig "$KCFG" -n burrow-apps delete deploy/metricsapp --ignore-not-found || true
 
 echo "=== tidy up the metrics add-on (best-effort) ==="
 "$BURROW" addon remove burrow-metrics --confirm --kubeconfig "$KCFG" || true

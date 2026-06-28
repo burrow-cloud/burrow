@@ -135,7 +135,7 @@ func newInstallCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace to install the control plane into")
-	cmd.Flags().StringVar(&appNamespace, "app-namespace", "default", "namespace to deploy applications into")
+	cmd.Flags().StringVar(&appNamespace, "app-namespace", connect.DefaultAppNamespace, "namespace to deploy applications into")
 	cmd.Flags().StringVar(&image, "burrowd-image", defaultBurrowdImage(), "burrowd container image to deploy (must be pullable by the cluster)")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")

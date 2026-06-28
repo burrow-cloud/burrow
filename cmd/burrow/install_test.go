@@ -71,6 +71,37 @@ func TestRenderManifestsDefaultAppNamespace(t *testing.T) {
 	}
 }
 
+func TestRenderManifestsBurrowAppsNamespace(t *testing.T) {
+	out, err := renderManifests(installOptions{
+		Namespace: "burrow", AppNamespace: "burrow-apps", Image: "img:1",
+		Token: "t", DBPassword: "p", Port: 8080,
+	})
+	if err != nil {
+		t.Fatalf("renderManifests: %v", err)
+	}
+	// burrow-apps is neither the cluster's default namespace nor the control-plane namespace,
+	// so install creates it (and labels it Burrow-managed).
+	if !strings.Contains(out, "name: burrow-apps") {
+		t.Errorf("must create the burrow-apps app namespace")
+	}
+	if !strings.Contains(out, "{ name: BURROW_NAMESPACE, value: burrow-apps }") {
+		t.Errorf("burrowd should deploy apps into the burrow-apps namespace")
+	}
+}
+
+func TestInstallDefaultAppNamespace(t *testing.T) {
+	// Lock the install command's --app-namespace default to burrow-apps: defaulting to the
+	// cluster's shared `default` namespace would put burrowd's Secrets grant (ADR-0029) there.
+	cmd := newInstallCmd()
+	f := cmd.Flags().Lookup("app-namespace")
+	if f == nil {
+		t.Fatal("install has no --app-namespace flag")
+	}
+	if f.DefValue != "burrow-apps" {
+		t.Errorf("--app-namespace default = %q, want %q", f.DefValue, "burrow-apps")
+	}
+}
+
 func TestSummarizeApply(t *testing.T) {
 	out := `namespace/burrow created
 serviceaccount/burrowd unchanged

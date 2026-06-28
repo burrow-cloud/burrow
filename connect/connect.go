@@ -35,6 +35,11 @@ const (
 	// (which holds credentials) and the app namespace (user workloads), so add-ons don't
 	// clutter apps and stay out of the credential blast radius (ADR-0025).
 	DefaultAddonNamespace = "burrow-addons"
+	// DefaultAppNamespace is where `install` deploys apps by default: a dedicated namespace
+	// rather than the cluster's shared `default`, so burrowd's namespace-scoped Secrets grant
+	// (ADR-0029) stays isolated to Burrow's own app workloads. An operator may still choose
+	// `--app-namespace default` explicitly.
+	DefaultAppNamespace = "burrow-apps"
 )
 
 // Options configures how to find the control plane. The zero value uses the defaults and

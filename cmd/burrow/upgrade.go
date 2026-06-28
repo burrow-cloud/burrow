@@ -48,6 +48,9 @@ func newUpgradeCmd() *cobra.Command {
 }
 
 func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun, wait, verbose bool, stdout, stderr io.Writer) error {
+	if image == "" {
+		return errNoBurrowdImage()
+	}
 	cs, err := clientset(kubeconfig)
 	if err != nil {
 		return err

@@ -92,13 +92,20 @@ func newProviderAPI(t *testing.T) (http.Handler, *fake.Credentials, *fake.DNSFac
 
 func TestProviderEndpoints(t *testing.T) {
 	h, creds, dnsF := newProviderAPI(t)
-	creds.Set("digitalocean", "tok") // the CLI wrote the token before POSTing
 
-	// Add a provider: capabilities are derived from the type, and the token is not part of
-	// the request (it is stored in the Secret by the CLI, not via the API).
-	rr := do(h, "POST", "/v1/providers", token, `{"type":"digitalocean"}`)
+	// Add a provider: the token VALUE travels in the BODY (never the path or query), is validated,
+	// then written into the credential store. The response carries the Secret key, never the value.
+	rr := do(h, "POST", "/v1/providers", token, `{"type":"digitalocean","token":"dop_v1_tok"}`)
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"capabilities":["dns"]`) {
 		t.Fatalf("add provider = %d %s", rr.Code, rr.Body.String())
+	}
+	// The response must NOT echo the token value back.
+	if strings.Contains(rr.Body.String(), "dop_v1_tok") {
+		t.Errorf("provider-add response leaked the token value: %s", rr.Body.String())
+	}
+	// burrowd wrote the token into the credential store under the provider key.
+	if tok, ok := creds.Get("digitalocean"); !ok || tok != "dop_v1_tok" {
+		t.Errorf("credential store has %q ok=%v, want dop_v1_tok true", tok, ok)
 	}
 
 	// List shows it.
@@ -107,15 +114,17 @@ func TestProviderEndpoints(t *testing.T) {
 	}
 
 	// An unsupported type is a 400 (ErrInvalid).
-	if rr := do(h, "POST", "/v1/providers", token, `{"type":"aws"}`); rr.Code != 400 {
+	if rr := do(h, "POST", "/v1/providers", token, `{"type":"aws","token":"x"}`); rr.Code != 400 {
 		t.Errorf("unknown type code = %d, want 400", rr.Code)
 	}
 
 	// A token the vendor rejects is a 400, and nothing is recorded.
 	dnsF.SetVerifyError(fmt.Errorf("rejected: %w", cp.ErrInvalid))
-	creds.Set("cloudflare", "bad")
-	if rr := do(h, "POST", "/v1/providers", token, `{"type":"cloudflare"}`); rr.Code != 400 {
+	if rr := do(h, "POST", "/v1/providers", token, `{"type":"cloudflare","token":"bad"}`); rr.Code != 400 {
 		t.Errorf("rejected token code = %d, want 400", rr.Code)
+	}
+	if _, ok := creds.Get("cloudflare"); ok {
+		t.Errorf("a rejected token must not be written to the credential store")
 	}
 
 	// The endpoints require the token like every other /v1 route.
@@ -124,10 +133,33 @@ func TestProviderEndpoints(t *testing.T) {
 	}
 }
 
-func TestDomainEndpoints(t *testing.T) {
+// TestConnectAddonAuthEndpointTakesTokenInBody connects an authenticated backend and asserts the
+// bearer token VALUE travels in the BODY (never the path or query), is written into the credential
+// store, and is not echoed back in the response (ADR-0030).
+func TestConnectAddonAuthEndpointTakesTokenInBody(t *testing.T) {
 	h, creds, _ := newProviderAPI(t)
-	creds.Set("digitalocean", "tok")
-	if rr := do(h, "POST", "/v1/providers", token, `{"type":"digitalocean"}`); rr.Code != 200 {
+
+	rr := do(h, "POST", "/v1/addons/connect", token,
+		`{"backend":"loki","endpoint":"loki.svc:3100","secret_key":"addon-loki","token":"s3cr3t"}`)
+	if rr.Code != 200 {
+		t.Fatalf("connect addon = %d %s", rr.Code, rr.Body.String())
+	}
+	// The response (the recorded AddonInfo) carries the key, never the token value.
+	if strings.Contains(rr.Body.String(), "s3cr3t") {
+		t.Errorf("connect response leaked the token value: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"secret_key":"addon-loki"`) {
+		t.Errorf("connect response should record the secret key: %s", rr.Body.String())
+	}
+	// burrowd wrote the token into the credential store under the key.
+	if tok, ok := creds.Get("addon-loki"); !ok || tok != "s3cr3t" {
+		t.Errorf("credential store has %q ok=%v, want s3cr3t true", tok, ok)
+	}
+}
+
+func TestDomainEndpoints(t *testing.T) {
+	h, _, _ := newProviderAPI(t)
+	if rr := do(h, "POST", "/v1/providers", token, `{"type":"digitalocean","token":"tok"}`); rr.Code != 200 {
 		t.Fatalf("register provider = %d %s", rr.Code, rr.Body.String())
 	}
 

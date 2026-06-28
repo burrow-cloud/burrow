@@ -72,6 +72,36 @@ func TestListTools(t *testing.T) {
 	if got["burrow_secret_set"] {
 		t.Error("burrow_secret_set must NOT exist: secret values never travel over MCP")
 	}
+
+	// Security boundary (ADR-0030/0004): a credential VALUE never crosses MCP either. There must be
+	// no provider-add or authenticated-connect tool, and NO tool may accept a `token` (or `auth`)
+	// input — provider add and authenticated addon connect are human/CLI operations. The agent only
+	// connects unauthenticated backends or references an already-configured credential.
+	for _, banned := range []string{"burrow_provider_add", "burrow_addon_connect"} {
+		if got[banned] {
+			t.Errorf("tool %q must NOT exist: a credential value never travels over MCP", banned)
+		}
+	}
+	for _, tool := range res.Tools {
+		if tool.InputSchema == nil {
+			continue
+		}
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal %q input schema: %v", tool.Name, err)
+		}
+		var schema struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("decode %q input schema: %v", tool.Name, err)
+		}
+		for prop := range schema.Properties {
+			if prop == "token" || prop == "auth" {
+				t.Errorf("tool %q exposes a %q input: a credential value must never cross MCP", tool.Name, prop)
+			}
+		}
+	}
 }
 
 func TestSecretListToolReturnsKeysOnly(t *testing.T) {

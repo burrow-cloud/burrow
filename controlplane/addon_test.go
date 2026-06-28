@@ -133,7 +133,7 @@ func TestConnectAddon(t *testing.T) {
 	ctx := context.Background()
 	e, d, c, logs, _ := newAddonEngine(t)
 
-	info, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100", "")
+	info, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100", "", "")
 	if err != nil {
 		t.Fatalf("ConnectAddon: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestConnectAddon(t *testing.T) {
 	}
 
 	// Connecting again upserts the endpoint.
-	if _, err := e.ConnectAddon(ctx, "loki", "loki.new.svc:3100", ""); err != nil {
+	if _, err := e.ConnectAddon(ctx, "loki", "loki.new.svc:3100", "", ""); err != nil {
 		t.Fatalf("re-ConnectAddon: %v", err)
 	}
 	if got, _ := d.Addon(ctx, "loki"); got.Endpoint != "loki.new.svc:3100" {
@@ -167,22 +167,24 @@ func TestConnectAddon(t *testing.T) {
 	}
 }
 
-// TestConnectAddonAuthThreadsToken connects an authenticated backend (a SecretKey), seeds the
-// Credentials fake with that key's token, and asserts a logs query reads the token through the
-// Credentials seam and threads it to the querier — the token lives only in the Secret, never in the
-// registry entry that crosses the API (ADR-0023).
+// TestConnectAddonAuthThreadsToken connects an authenticated backend, passing the bearer token
+// VALUE (over what is, in production, burrowd's authenticated API). The engine writes it into the
+// credential store via SetToken under the key, the registry records only the key, and a logs query
+// reads the token back through the Credentials seam and threads it to the querier (ADR-0030/0023).
 func TestConnectAddonAuthThreadsToken(t *testing.T) {
 	ctx := context.Background()
 	e, d, _, logs, creds := newAddonEngine(t)
 
-	creds.Set("addon-loki", "s3cr3t")
-
-	info, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100", "addon-loki")
+	info, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100", "addon-loki", "s3cr3t")
 	if err != nil {
 		t.Fatalf("ConnectAddon: %v", err)
 	}
 	if info.SecretKey != "addon-loki" {
 		t.Errorf("info.SecretKey = %q, want addon-loki", info.SecretKey)
+	}
+	// The engine wrote the token VALUE into the credential store under the key.
+	if tok, ok := creds.Get("addon-loki"); !ok || tok != "s3cr3t" {
+		t.Errorf("SetToken stored %q ok=%v, want s3cr3t true", tok, ok)
 	}
 	// The registry records only the key, never the token.
 	if got, _ := d.Addon(ctx, "loki"); got.SecretKey != "addon-loki" {
@@ -197,14 +199,27 @@ func TestConnectAddonAuthThreadsToken(t *testing.T) {
 	}
 }
 
+// TestConnectAddonTokenWithoutKeyInvalid rejects a token with no key to store it under, and writes
+// nothing.
+func TestConnectAddonTokenWithoutKeyInvalid(t *testing.T) {
+	ctx := context.Background()
+	e, d, _, _, _ := newAddonEngine(t)
+	if _, err := e.ConnectAddon(ctx, "loki", "loki.svc:3100", "", "tok"); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("token without key err = %v, want ErrInvalid", err)
+	}
+	if _, err := d.Addon(ctx, "loki"); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("nothing should be recorded when the token has no key (got %v)", err)
+	}
+}
+
 // TestConnectAddonInvalid rejects an unknown backend and an empty endpoint as ErrInvalid.
 func TestConnectAddonInvalid(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _, _ := newAddonEngine(t)
-	if _, err := e.ConnectAddon(ctx, "nope", "x:1", ""); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.ConnectAddon(ctx, "nope", "x:1", "", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("ConnectAddon unknown backend err = %v, want ErrInvalid", err)
 	}
-	if _, err := e.ConnectAddon(ctx, "loki", "", ""); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.ConnectAddon(ctx, "loki", "", "", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("ConnectAddon empty endpoint err = %v, want ErrInvalid", err)
 	}
 }
@@ -247,7 +262,7 @@ func TestQueryLogsBackendSelector(t *testing.T) {
 	if installedEndpoint == "" {
 		t.Fatalf("installed default did not resolve an endpoint")
 	}
-	if _, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100", ""); err != nil {
+	if _, err := e.ConnectAddon(ctx, "loki", "loki.observability.svc:3100", "", ""); err != nil {
 		t.Fatalf("ConnectAddon: %v", err)
 	}
 
@@ -294,7 +309,7 @@ func TestQueryMetricsBackendSelector(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _, mets, _ := newAddonEngineFull(t)
 
-	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", ""); err != nil {
+	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "", ""); err != nil {
 		t.Fatalf("ConnectAddon: %v", err)
 	}
 
@@ -322,7 +337,7 @@ func TestConnectMetricsAndQuery(t *testing.T) {
 	ctx := context.Background()
 	e, d, _, _, mets, _ := newAddonEngineFull(t)
 
-	info, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "")
+	info, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "", "")
 	if err != nil {
 		t.Fatalf("ConnectAddon: %v", err)
 	}
@@ -349,16 +364,18 @@ func TestConnectMetricsAndQuery(t *testing.T) {
 	}
 }
 
-// TestConnectMetricsAuthThreadsToken connects an authenticated Prometheus (a SecretKey), seeds the
-// Credentials fake with that key's token, and asserts a metrics query reads the token through the
-// Credentials seam and threads it to the querier — the token lives only in the Secret (ADR-0023).
+// TestConnectMetricsAuthThreadsToken connects an authenticated Prometheus, passing the bearer token
+// VALUE. The engine writes it into the credential store via SetToken under the key, and a metrics
+// query reads it back through the Credentials seam and threads it to the querier (ADR-0030/0023).
 func TestConnectMetricsAuthThreadsToken(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _, mets, creds := newAddonEngineFull(t)
 
-	creds.Set("addon-prometheus", "s3cr3t")
-	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "addon-prometheus"); err != nil {
+	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "addon-prometheus", "s3cr3t"); err != nil {
 		t.Fatalf("ConnectAddon: %v", err)
+	}
+	if tok, ok := creds.Get("addon-prometheus"); !ok || tok != "s3cr3t" {
+		t.Errorf("SetToken stored %q ok=%v, want s3cr3t true", tok, ok)
 	}
 	if _, err := e.QueryMetrics(ctx, "up", ""); err != nil {
 		t.Fatalf("QueryMetrics: %v", err)

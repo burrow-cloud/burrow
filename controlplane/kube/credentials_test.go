@@ -47,3 +47,47 @@ func TestCredentialsTokenSecretMissing(t *testing.T) {
 		t.Errorf("missing secret err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestCredentialsSetToken(t *testing.T) {
+	ctx := context.Background()
+	// install creates the Secret empty; SetToken upserts into it (ADR-0030).
+	cs := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: kube.DefaultCredentialsSecret, Namespace: "burrow"},
+		Type:       corev1.SecretTypeOpaque,
+	})
+	creds := kube.NewCredentials(cs, "burrow", "")
+
+	if err := creds.SetToken(ctx, "digitalocean", "dop_tok"); err != nil {
+		t.Fatalf("SetToken: %v", err)
+	}
+	// Round-trips through Token.
+	if got, err := creds.Token(ctx, "digitalocean"); err != nil || got != "dop_tok" {
+		t.Fatalf("Token after SetToken = %q %v, want dop_tok nil", got, err)
+	}
+	// A second key upserts without disturbing the first.
+	if err := creds.SetToken(ctx, "cloudflare", "cf_tok"); err != nil {
+		t.Fatalf("SetToken second key: %v", err)
+	}
+	if got, _ := creds.Token(ctx, "digitalocean"); got != "dop_tok" {
+		t.Errorf("first key disturbed: %q", got)
+	}
+	// Rotating a key replaces it in place.
+	if err := creds.SetToken(ctx, "digitalocean", "rotated"); err != nil {
+		t.Fatalf("SetToken rotate: %v", err)
+	}
+	if got, _ := creds.Token(ctx, "digitalocean"); got != "rotated" {
+		t.Errorf("rotate = %q, want rotated", got)
+	}
+}
+
+func TestCredentialsSetTokenCreatesSecret(t *testing.T) {
+	// No Secret yet (an older install): SetToken creates it as Opaque.
+	ctx := context.Background()
+	creds := kube.NewCredentials(fake.NewSimpleClientset(), "burrow", "")
+	if err := creds.SetToken(ctx, "digitalocean", "dop_tok"); err != nil {
+		t.Fatalf("SetToken create: %v", err)
+	}
+	if got, err := creds.Token(ctx, "digitalocean"); err != nil || got != "dop_tok" {
+		t.Errorf("Token = %q %v, want dop_tok nil", got, err)
+	}
+}

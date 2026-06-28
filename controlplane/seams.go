@@ -216,14 +216,22 @@ type Database interface {
 }
 
 // Credentials is the seam over the one burrow-credentials Secret that holds every vendor
-// token (ADR-0023). The control plane reads a provider's token through it at call time, so a
-// rotation is picked up with no restart. It is the only path by which the control plane reads
-// a Secret's contents, and the production adapter is scoped to that single object — burrowd's
-// least-privilege Role grants `get` on exactly burrow-credentials and nothing else.
+// token (ADR-0023, ADR-0030). The control plane reads a provider's token through it at call
+// time, so a rotation is picked up with no restart, and writes a token value it received over
+// its authenticated control-plane API. It is the only path by which the control plane reads or
+// writes a Secret's contents, and the production adapter is scoped to that single object —
+// burrowd's least-privilege Role grants `get` and `update` on exactly burrow-credentials and
+// nothing else.
 type Credentials interface {
 	// Token returns the token stored under key in burrow-credentials, or ErrNotFound when
 	// the Secret or the key is absent.
 	Token(ctx context.Context, key string) (string, error)
+	// SetToken upserts key=value into burrow-credentials, creating the Secret if absent
+	// (ADR-0030). The value arrives over burrowd's authenticated, TLS-protected control-plane
+	// API — never over MCP — and is written straight to the Secret: it is NEVER logged, never
+	// stored in Postgres, and never returned in a response. Any error names the key only, never
+	// the value.
+	SetToken(ctx context.Context, key, value string) error
 }
 
 // DNSProvider is the seam over a single vendor's DNS API, holding one provider's token

@@ -6,13 +6,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestProviderAddWithoutTypeListsSupportedTypes(t *testing.T) {
@@ -28,105 +27,50 @@ func TestProviderAddWithoutTypeListsSupportedTypes(t *testing.T) {
 	}
 }
 
-func credentialValue(t *testing.T, cs *fake.Clientset, ns, key string) (string, bool) {
-	t.Helper()
-	s, err := cs.CoreV1().Secrets(ns).Get(context.Background(), credentialsSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("getting credentials secret: %v", err)
-	}
-	if s.Type != corev1.SecretTypeOpaque {
-		t.Errorf("credentials secret type = %q, want %q", s.Type, corev1.SecretTypeOpaque)
-	}
-	v, ok := s.Data[key]
-	return string(v), ok
-}
+// TestProviderAddSendsTokenInBody asserts `provider add` issues the control-plane API call with the
+// token VALUE in the POST body — not a kubeconfig-direct Secret write, and not in the path or query
+// (ADR-0030). The token is piped in (a script path), so the test drives the real RunE.
+func TestProviderAddSendsTokenInBody(t *testing.T) {
+	var gotPath, gotQuery, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		// Respond with a recorded provider (no token echoed).
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "digitalocean", "type": "digitalocean",
+			"capabilities": []string{"dns"}, "secret_key": "digitalocean",
+		})
+	}))
+	defer srv.Close()
 
-func TestWriteCredentialCreatesThenUpserts(t *testing.T) {
-	cs := fake.NewSimpleClientset()
-	ctx := context.Background()
-
-	// First write creates the Secret (install may not have, e.g. an older install).
-	if err := writeCredential(ctx, cs, "burrow", "digitalocean", "tok-1"); err != nil {
-		t.Fatalf("writeCredential create: %v", err)
-	}
-	if v, ok := credentialValue(t, cs, "burrow", "digitalocean"); !ok || v != "tok-1" {
-		t.Fatalf("after create: %q ok=%v, want tok-1", v, ok)
-	}
-
-	// A second provider adds a key without disturbing the first.
-	if err := writeCredential(ctx, cs, "burrow", "cloudflare", "tok-2"); err != nil {
-		t.Fatalf("writeCredential second key: %v", err)
-	}
-	if v, _ := credentialValue(t, cs, "burrow", "digitalocean"); v != "tok-1" {
-		t.Errorf("first key disturbed: %q", v)
-	}
-	if v, _ := credentialValue(t, cs, "burrow", "cloudflare"); v != "tok-2" {
-		t.Errorf("second key = %q, want tok-2", v)
-	}
-
-	// Re-writing a key rotates it in place.
-	if err := writeCredential(ctx, cs, "burrow", "digitalocean", "tok-rotated"); err != nil {
-		t.Fatalf("writeCredential rotate: %v", err)
-	}
-	if v, _ := credentialValue(t, cs, "burrow", "digitalocean"); v != "tok-rotated" {
-		t.Errorf("rotate = %q, want tok-rotated", v)
-	}
-}
-
-func TestWriteCredentialUpsertsIntoExistingEmptySecret(t *testing.T) {
-	// install creates the Secret empty; provider add must upsert into it, not fail.
-	cs := fake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: credentialsSecretName, Namespace: "burrow"},
-		Type:       corev1.SecretTypeOpaque,
+	var out, errb bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetIn(strings.NewReader("dop_v1_secret\n")) // piped token (non-terminal)
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	cmd.SetArgs([]string{
+		"config", "provider", "add", "digitalocean",
+		"--control-plane", srv.URL, "--token", "api-tok",
 	})
-	if err := writeCredential(context.Background(), cs, "burrow", "digitalocean", "tok"); err != nil {
-		t.Fatalf("writeCredential into empty secret: %v", err)
-	}
-	if v, ok := credentialValue(t, cs, "burrow", "digitalocean"); !ok || v != "tok" {
-		t.Errorf("value = %q ok=%v, want tok", v, ok)
-	}
-}
-
-func TestReadAndDeleteCredential(t *testing.T) {
-	ctx := context.Background()
-	cs := fake.NewSimpleClientset()
-	if err := writeCredential(ctx, cs, "burrow", "digitalocean", "tok"); err != nil {
-		t.Fatal(err)
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("provider add: %v (stderr: %s)", err, errb.String())
 	}
 
-	if v, existed, err := readCredential(ctx, cs, "burrow", "digitalocean"); err != nil || !existed || v != "tok" {
-		t.Fatalf("readCredential = %q %v %v, want tok true nil", v, existed, err)
+	if gotPath != "/v1/providers" {
+		t.Errorf("path = %q, want /v1/providers", gotPath)
 	}
-	if _, existed, _ := readCredential(ctx, cs, "burrow", "absent"); existed {
-		t.Errorf("absent key reported as existing")
+	// The token must never appear in the path or query — only the body.
+	if strings.Contains(gotPath, "dop_v1_secret") || strings.Contains(gotQuery, "dop_v1_secret") {
+		t.Errorf("token leaked into the request path/query: path=%q query=%q", gotPath, gotQuery)
 	}
-
-	if err := deleteCredential(ctx, cs, "burrow", "digitalocean"); err != nil {
-		t.Fatalf("deleteCredential: %v", err)
+	if !strings.Contains(gotBody, `"token":"dop_v1_secret"`) {
+		t.Errorf("request body missing the token: %s", gotBody)
 	}
-	if _, existed, _ := readCredential(ctx, cs, "burrow", "digitalocean"); existed {
-		t.Errorf("key still present after delete")
-	}
-}
-
-func TestRestoreCredentialRollsBack(t *testing.T) {
-	ctx := context.Background()
-	cs := fake.NewSimpleClientset()
-
-	// A new key that fails validation is removed entirely.
-	_ = writeCredential(ctx, cs, "burrow", "cloudflare", "bad")
-	restoreCredential(ctx, cs, "burrow", "cloudflare", "", false)
-	if _, existed, _ := readCredential(ctx, cs, "burrow", "cloudflare"); existed {
-		t.Errorf("a never-existed key should be deleted on rollback")
-	}
-
-	// Rotating an existing key to a bad token rolls back to the prior value.
-	_ = writeCredential(ctx, cs, "burrow", "digitalocean", "good")
-	prior, existed, _ := readCredential(ctx, cs, "burrow", "digitalocean")
-	_ = writeCredential(ctx, cs, "burrow", "digitalocean", "bad-rotation")
-	restoreCredential(ctx, cs, "burrow", "digitalocean", prior, existed)
-	if v, _, _ := readCredential(ctx, cs, "burrow", "digitalocean"); v != "good" {
-		t.Errorf("rollback left %q, want the prior good token", v)
+	// The human output names the key, never the token value.
+	if strings.Contains(out.String(), "dop_v1_secret") {
+		t.Errorf("CLI output leaked the token value:\n%s", out.String())
 	}
 }
 

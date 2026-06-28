@@ -5,7 +5,6 @@ package controlplane
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -124,12 +123,14 @@ func (p Provider) Validate() error {
 	return nil
 }
 
-// AddProvider records a vendor credential in the registry, after verifying the token works
-// (ADR-0023). It does not write the burrow-credentials Secret — the CLI writes the token there
-// with the developer's kubeconfig before calling this, and burrowd only ever reads it: it
-// reads the token back through the Credentials seam and makes a cheap authenticated call to
-// the vendor, so a bad token fails here rather than at first use. The provider's capabilities
-// are derived from its type.
+// AddProvider records a vendor credential in the registry, after validating the token and writing
+// it into the burrow-credentials Secret (ADR-0023, ADR-0030). The token VALUE arrives in req over
+// burrowd's authenticated control-plane API; burrowd is the only thing that holds it. The order is
+// validate-then-write: build the vendor adapter with the passed token and make a cheap
+// authenticated call, and only on success write the token to the Secret and record the registry
+// entry. A rejected token returns an error and writes NOTHING — no rollback needed, since nothing
+// is written until validation passes. The token is never logged, never stored in Postgres, and
+// never returned. The provider's capabilities are derived from its type.
 func (e *Engine) AddProvider(ctx context.Context, req AddProviderRequest) (Provider, error) {
 	name := req.Name
 	if name == "" {
@@ -149,34 +150,33 @@ func (e *Engine) AddProvider(ctx context.Context, req AddProviderRequest) (Provi
 	if err := p.Validate(); err != nil {
 		return Provider{}, fmt.Errorf("add provider: %w: %w", ErrInvalid, err)
 	}
+	if req.Token == "" {
+		return Provider{}, fmt.Errorf("add provider %s: a token is required: %w", name, ErrInvalid)
+	}
 
-	// Verify the token before recording it, so the registry never holds a provider whose
-	// credential does not work. The token is read from the Secret (written by the CLI), never
-	// passed over the API.
+	// Validate the token BEFORE writing anything, so the registry never holds a provider whose
+	// credential does not work and the Secret never holds a rejected token. The value is used here
+	// in memory and never logged or placed in an error.
 	if p.Serves(CapabilityDNS) {
-		if err := e.verifyDNSToken(ctx, p); err != nil {
+		if err := e.verifyDNSToken(ctx, p, req.Token); err != nil {
 			return Provider{}, err
 		}
 	}
 
+	// Validation passed: write the token into burrow-credentials, then record the entry.
+	if err := e.credentials.SetToken(ctx, p.SecretKey, req.Token); err != nil {
+		return Provider{}, fmt.Errorf("add provider %s: storing the token: %w", name, err)
+	}
 	if err := e.db.SaveProvider(ctx, p); err != nil {
 		return Provider{}, fmt.Errorf("add provider %s: recording in the registry: %w", name, err)
 	}
 	return p, nil
 }
 
-// verifyDNSToken reads the provider's token from burrow-credentials and confirms it
-// authenticates against the vendor's DNS API. A missing key or a rejected token is reported as
-// ErrInvalid — the caller (the CLI) wrote the token immediately before, so either is a usable,
-// actionable failure rather than a server fault.
-func (e *Engine) verifyDNSToken(ctx context.Context, p Provider) error {
-	token, err := e.credentials.Token(ctx, p.SecretKey)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return fmt.Errorf("add provider %s: no token found in burrow-credentials under key %q: %w", p.Name, p.SecretKey, ErrInvalid)
-		}
-		return fmt.Errorf("add provider %s: reading token: %w", p.Name, err)
-	}
+// verifyDNSToken confirms token authenticates against the vendor's DNS API by building the adapter
+// and making a cheap read call. A rejected token is reported as ErrInvalid — a usable, actionable
+// failure rather than a server fault. The token value is never logged or formatted into the error.
+func (e *Engine) verifyDNSToken(ctx context.Context, p Provider, token string) error {
 	dnsp, err := e.dns.DNS(p.Type, token)
 	if err != nil {
 		return fmt.Errorf("add provider %s: %w", p.Name, err)

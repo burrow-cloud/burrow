@@ -193,3 +193,63 @@ func TestStoreRoundTripsEnvCommandAndTime(t *testing.T) {
 		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, when)
 	}
 }
+
+// TestStoreAppEnvRoundTrip exercises the per-app non-secret env store (ADR-0028) against a
+// real database: set upserts, list returns the current map, and unset removes a key.
+func TestStoreAppEnvRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-web"
+	other := t.Name() + "-api"
+
+	// An app with no env yields an empty map, not an error.
+	got, err := s.AppEnv(ctx, app)
+	if err != nil {
+		t.Fatalf("AppEnv (empty): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("AppEnv (empty) = %v, want empty", got)
+	}
+
+	if err := s.SetAppEnv(ctx, app, "LOG_LEVEL", "debug"); err != nil {
+		t.Fatalf("SetAppEnv: %v", err)
+	}
+	if err := s.SetAppEnv(ctx, app, "FEATURE", "on"); err != nil {
+		t.Fatalf("SetAppEnv: %v", err)
+	}
+	// Upsert overwrites in place.
+	if err := s.SetAppEnv(ctx, app, "LOG_LEVEL", "info"); err != nil {
+		t.Fatalf("SetAppEnv (upsert): %v", err)
+	}
+	// A different app's env is isolated.
+	if err := s.SetAppEnv(ctx, other, "LOG_LEVEL", "trace"); err != nil {
+		t.Fatalf("SetAppEnv (other): %v", err)
+	}
+
+	got, err = s.AppEnv(ctx, app)
+	if err != nil {
+		t.Fatalf("AppEnv: %v", err)
+	}
+	if got["LOG_LEVEL"] != "info" || got["FEATURE"] != "on" || len(got) != 2 {
+		t.Errorf("AppEnv = %v, want {LOG_LEVEL:info FEATURE:on}", got)
+	}
+
+	// Unset removes a key; removing a missing key is a no-op.
+	if err := s.UnsetAppEnv(ctx, app, "FEATURE"); err != nil {
+		t.Fatalf("UnsetAppEnv: %v", err)
+	}
+	if err := s.UnsetAppEnv(ctx, app, "NOPE"); err != nil {
+		t.Fatalf("UnsetAppEnv (absent): %v", err)
+	}
+	got, err = s.AppEnv(ctx, app)
+	if err != nil {
+		t.Fatalf("AppEnv after unset: %v", err)
+	}
+	if _, present := got["FEATURE"]; present || got["LOG_LEVEL"] != "info" {
+		t.Errorf("AppEnv after unset = %v, want only LOG_LEVEL:info", got)
+	}
+
+	// Cleanup so the shared database stays tidy across re-runs.
+	_ = s.UnsetAppEnv(ctx, app, "LOG_LEVEL")
+	_ = s.UnsetAppEnv(ctx, other, "LOG_LEVEL")
+}

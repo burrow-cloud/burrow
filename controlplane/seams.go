@@ -146,6 +146,16 @@ type Database interface {
 	// teardown. Deleting the releases of an app that has none is a no-op, not an error.
 	DeleteReleases(ctx context.Context, app string) error
 
+	// AppEnv returns the non-secret environment store for app: the app-global current
+	// config rendered into the workload at apply time (ADR-0028). An app with no env yields
+	// an empty map and no error.
+	AppEnv(ctx context.Context, app string) (map[string]string, error)
+	// SetAppEnv upserts one env key for app in the store.
+	SetAppEnv(ctx context.Context, app, key, value string) error
+	// UnsetAppEnv removes one env key for app from the store. Removing a key that is not set
+	// is a no-op, not an error.
+	UnsetAppEnv(ctx context.Context, app, key string) error
+
 	// Policy returns the current guardrail policy: the stored guardrail dispositions
 	// overlaid on the built-in defaults (DefaultPolicy), so a store with nothing set
 	// returns DefaultPolicy and newly-added guardrails get a sensible default (ADR-0020).

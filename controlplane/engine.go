@@ -133,12 +133,20 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	}
 	prev, hasPrev := lastDeployed(releases)
 
+	// Env is app-global current state held in the store, the single source of truth (ADR-0028):
+	// load it here and render it into the workload rather than taking it from the request, so a
+	// release boots with whatever env the app currently has set.
+	env, err := e.db.AppEnv(ctx, req.App)
+	if err != nil {
+		return DeployResult{}, fmt.Errorf("deploy %s: reading env: %w", req.App, err)
+	}
+
 	rel := Release{
 		ID:          e.ids.NewID(),
 		App:         req.App,
 		Image:       req.Image,
 		Digest:      info.Digest,
-		Env:         req.Env,
+		Env:         env,
 		Command:     req.Command,
 		MetricsPort: req.MetricsPort,
 		Replicas:    req.Replicas,
@@ -155,7 +163,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		return DeployResult{}, fmt.Errorf("deploy %s: recording release: %w", req.App, err)
 	}
 
-	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: req.Env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: req.Replicas}
+	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: req.Replicas}
 	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
@@ -179,6 +187,83 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		superseded = prev.ID
 	}
 	return DeployResult{Release: rel, SupersededReleaseID: superseded}, nil
+}
+
+// SetEnv upserts one non-secret env key for an app in the config store (ADR-0028). The store
+// is the single source of truth for the app's env. By default the change re-applies the running
+// workload so it rolls and the running app picks the value up; with noRestart the value is only
+// persisted and lands on the next deploy. An app with no running release simply persists and
+// skips the apply — not an error. Env is non-secret config, so there is no guardrail.
+func (e *Engine) SetEnv(ctx context.Context, app, key, value string, noRestart bool) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("set env: %w: %w", ErrInvalid, err)
+	}
+	if err := validateEnvKey(key); err != nil {
+		return fmt.Errorf("set env %s: %w: %w", app, ErrInvalid, err)
+	}
+	if err := e.db.SetAppEnv(ctx, app, key, value); err != nil {
+		return fmt.Errorf("set env %s: persisting %s: %w", app, key, err)
+	}
+	if noRestart {
+		return nil
+	}
+	return e.reapplyEnv(ctx, app)
+}
+
+// UnsetEnv removes one env key for an app from the config store (ADR-0028). Like SetEnv it
+// re-applies the running workload by default so the running app drops the value, or only
+// persists with noRestart. An app with no running release simply persists and skips the apply.
+func (e *Engine) UnsetEnv(ctx context.Context, app, key string, noRestart bool) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("unset env: %w: %w", ErrInvalid, err)
+	}
+	if err := validateEnvKey(key); err != nil {
+		return fmt.Errorf("unset env %s: %w: %w", app, ErrInvalid, err)
+	}
+	if err := e.db.UnsetAppEnv(ctx, app, key); err != nil {
+		return fmt.Errorf("unset env %s: removing %s: %w", app, key, err)
+	}
+	if noRestart {
+		return nil
+	}
+	return e.reapplyEnv(ctx, app)
+}
+
+// ListEnv returns the app's non-secret env store (ADR-0028). An app with no env yields an
+// empty map and no error.
+func (e *Engine) ListEnv(ctx context.Context, app string) (map[string]string, error) {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return nil, fmt.Errorf("list env: %w: %w", ErrInvalid, err)
+	}
+	env, err := e.db.AppEnv(ctx, app)
+	if err != nil {
+		return nil, fmt.Errorf("list env %s: %w", app, err)
+	}
+	return env, nil
+}
+
+// reapplyEnv re-renders the running workload with the current store env so a mutation rolls the
+// Deployment (ADR-0028). It reconstructs the WorkloadSpec from the app's currently running release
+// and the store. With no running release there is nothing to roll: the change is persisted and
+// will land on the next deploy, so this is a no-op, not an error.
+func (e *Engine) reapplyEnv(ctx context.Context, app string) error {
+	releases, err := e.db.Releases(ctx, app)
+	if err != nil {
+		return fmt.Errorf("set env %s: reading release history: %w", app, err)
+	}
+	cur, ok := lastDeployed(releases)
+	if !ok {
+		return nil // no running workload yet; the change lands on the next deploy
+	}
+	env, err := e.db.AppEnv(ctx, app)
+	if err != nil {
+		return fmt.Errorf("set env %s: reading env: %w", app, err)
+	}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: env, Command: cur.Command, MetricsPort: cur.MetricsPort, Replicas: cur.Replicas}
+	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
+		return fmt.Errorf("set env %s: applying to cluster: %w", app, err)
+	}
+	return nil
 }
 
 // Status returns the combined control-plane and cluster view of an app: the most recent
@@ -729,12 +814,20 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 		return RollbackResult{}, err
 	}
 
+	// Env is app-global current state, not snapshotted per release (ADR-0028): a rollback
+	// restores the prior image and command but renders the env the app currently has set, not
+	// whatever was in effect when the target was first deployed.
+	env, err := e.db.AppEnv(ctx, app)
+	if err != nil {
+		return RollbackResult{}, fmt.Errorf("rollback %s: reading env: %w", app, err)
+	}
+
 	rel := Release{
 		ID:          e.ids.NewID(),
 		App:         app,
 		Image:       target.Image,
 		Digest:      target.Digest,
-		Env:         target.Env,
+		Env:         env,
 		Command:     target.Command,
 		MetricsPort: target.MetricsPort,
 		Replicas:    target.Replicas,
@@ -746,7 +839,7 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 		return RollbackResult{}, fmt.Errorf("rollback %s: recording release: %w", app, err)
 	}
 
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: target.Env, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: target.Replicas}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: env, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: target.Replicas}
 	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)

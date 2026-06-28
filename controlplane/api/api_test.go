@@ -210,7 +210,7 @@ func TestDeployHappyPath(t *testing.T) {
 	h, k, r, _ := newAPI(t)
 	r.Add("registry.example.com/web:1", "sha256:web1")
 
-	rec := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"registry.example.com/web:1","replicas":2,"env":{"K":"V"}}`)
+	rec := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"registry.example.com/web:1","replicas":2}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deploy status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -389,6 +389,56 @@ func TestLogs(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &res)
 	if len(res.Lines) != 1 || res.Lines[0].Message != "b" {
 		t.Errorf("lines = %+v, want last line b", res.Lines)
+	}
+}
+
+func TestEnvEndpoints(t *testing.T) {
+	h, k, r, _ := newAPI(t)
+	r.Add("img:1", "sha256:1")
+	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
+
+	// Set rolls the workload by default: the value reaches the live spec.
+	if rec := do(h, "POST", "/v1/apps/web/env", token, `{"key":"LOG_LEVEL","value":"debug"}`); rec.Code != http.StatusOK {
+		t.Fatalf("env set = %d %s", rec.Code, rec.Body.String())
+	}
+	if spec, _ := k.Spec("web"); spec.Env["LOG_LEVEL"] != "debug" {
+		t.Errorf("spec env = %+v, want LOG_LEVEL=debug after set", spec.Env)
+	}
+
+	// no_restart persists without rolling.
+	if rec := do(h, "POST", "/v1/apps/web/env", token, `{"key":"FEATURE","value":"on","no_restart":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("env set no_restart = %d %s", rec.Code, rec.Body.String())
+	}
+	if _, present := func() (string, bool) { s, _ := k.Spec("web"); v, ok := s.Env["FEATURE"]; return v, ok }(); present {
+		t.Errorf("FEATURE should not be in the live spec until the next deploy")
+	}
+
+	// List round-trips both keys.
+	rec := do(h, "GET", "/v1/apps/web/env", token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("env list = %d %s", rec.Code, rec.Body.String())
+	}
+	var listed struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if listed.Env["LOG_LEVEL"] != "debug" || listed.Env["FEATURE"] != "on" {
+		t.Errorf("listed env = %+v, want LOG_LEVEL=debug and FEATURE=on", listed.Env)
+	}
+
+	// Unset removes a key and rolls.
+	if rec := do(h, "DELETE", "/v1/apps/web/env/LOG_LEVEL", token, ""); rec.Code != http.StatusOK {
+		t.Fatalf("env unset = %d %s", rec.Code, rec.Body.String())
+	}
+	if spec, _ := k.Spec("web"); spec.Env["LOG_LEVEL"] != "" {
+		t.Errorf("spec env = %+v, want LOG_LEVEL removed", spec.Env)
+	}
+
+	// An invalid env key is a 400.
+	if rec := do(h, "POST", "/v1/apps/web/env", token, `{"key":"1BAD","value":"x"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad key = %d, want 400", rec.Code)
 	}
 }
 

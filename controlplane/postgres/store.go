@@ -151,6 +151,50 @@ func (s *Store) DeleteReleases(ctx context.Context, app string) error {
 	return nil
 }
 
+// AppEnv returns the non-secret environment store for app (ADR-0028). An app with no env
+// yields an empty map and no error.
+func (s *Store) AppEnv(ctx context.Context, app string) (map[string]string, error) {
+	const q = `SELECT key, value FROM app_env WHERE app = $1`
+	rows, err := s.db.QueryContext(ctx, q, app)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: app env for %q: %w", app, err)
+	}
+	defer rows.Close()
+
+	env := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("postgres: app env for %q: %w", app, err)
+		}
+		env[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: app env for %q: %w", app, err)
+	}
+	return env, nil
+}
+
+// SetAppEnv upserts one env key for app.
+func (s *Store) SetAppEnv(ctx context.Context, app, key, value string) error {
+	const q = `
+INSERT INTO app_env (app, key, value) VALUES ($1, $2, $3)
+ON CONFLICT (app, key) DO UPDATE SET value = EXCLUDED.value`
+	if _, err := s.db.ExecContext(ctx, q, app, key, value); err != nil {
+		return fmt.Errorf("postgres: set app env %q for %q: %w", key, app, err)
+	}
+	return nil
+}
+
+// UnsetAppEnv removes one env key for app. Removing a key that is not set is a no-op.
+func (s *Store) UnsetAppEnv(ctx context.Context, app, key string) error {
+	const q = `DELETE FROM app_env WHERE app = $1 AND key = $2`
+	if _, err := s.db.ExecContext(ctx, q, app, key); err != nil {
+		return fmt.Errorf("postgres: unset app env %q for %q: %w", key, app, err)
+	}
+	return nil
+}
+
 // Policy returns the current guardrail policy: the built-in defaults with any stored
 // guardrail dispositions overlaid (ADR-0020). An empty table yields DefaultPolicy.
 func (s *Store) Policy(ctx context.Context) (controlplane.Policy, error) {

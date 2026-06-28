@@ -36,6 +36,22 @@ func (a App) Validate() error {
 	return nil
 }
 
+// envKey matches a conventional environment variable name: a letter or underscore followed
+// by letters, digits, or underscores. It rejects names a shell or container runtime would
+// reject, keeping the non-secret config store (ADR-0028) to well-formed keys.
+var envKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateEnvKey reports whether key is a usable environment variable name.
+func validateEnvKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("env key is empty")
+	}
+	if !envKey.MatchString(key) {
+		return fmt.Errorf("env key %q is not a valid environment variable name", key)
+	}
+	return nil
+}
+
 // ReleaseStatus is the lifecycle state of a Release.
 type ReleaseStatus string
 

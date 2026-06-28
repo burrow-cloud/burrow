@@ -72,13 +72,15 @@ func (e *APIError) Error() string {
 
 // The DTOs below mirror the control-plane API's JSON shapes (snake_case).
 
+// DeployRequest carries a deploy's code-free metadata. Env is deliberately absent: an app's
+// non-secret config is an independently-managed store, set with SetEnv and sourced at apply
+// time rather than passed per deploy (ADR-0028).
 type DeployRequest struct {
-	Image       string            `json:"image"`
-	Env         map[string]string `json:"env,omitempty"`
-	Command     []string          `json:"command,omitempty"`
-	MetricsPort int32             `json:"metrics_port,omitempty"`
-	Replicas    int32             `json:"replicas"`
-	Confirm     bool              `json:"confirm,omitempty"`
+	Image       string   `json:"image"`
+	Command     []string `json:"command,omitempty"`
+	MetricsPort int32    `json:"metrics_port,omitempty"`
+	Replicas    int32    `json:"replicas"`
+	Confirm     bool     `json:"confirm,omitempty"`
 }
 
 type Release struct {
@@ -350,6 +352,33 @@ func (c *Client) Reachability(ctx context.Context, app string) (ReachabilityResu
 	var out ReachabilityResult
 	err := c.do(ctx, http.MethodGet, c.appPath(app, "reachability"), nil, &out)
 	return out, err
+}
+
+// SetEnv upserts one non-secret env key for an app (ADR-0028). By default the running workload
+// rolls so the app picks the value up; noRestart only persists, landing the change on the next
+// deploy.
+func (c *Client) SetEnv(ctx context.Context, app, key, value string, noRestart bool) error {
+	body := map[string]any{"key": key, "value": value, "no_restart": noRestart}
+	return c.do(ctx, http.MethodPost, c.appPath(app, "env"), body, nil)
+}
+
+// UnsetEnv removes one env key for an app (ADR-0028). By default the running workload rolls; with
+// noRestart the removal only persists and lands on the next deploy.
+func (c *Client) UnsetEnv(ctx context.Context, app, key string, noRestart bool) error {
+	path := "/v1/apps/" + url.PathEscape(app) + "/env/" + url.PathEscape(key)
+	if noRestart {
+		path += "?no_restart=true"
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// Env returns the app's non-secret env store (ADR-0028).
+func (c *Client) Env(ctx context.Context, app string) (map[string]string, error) {
+	var out struct {
+		Env map[string]string `json:"env"`
+	}
+	err := c.do(ctx, http.MethodGet, c.appPath(app, "env"), nil, &out)
+	return out.Env, err
 }
 
 func (c *Client) appPath(app, verb string) string {

@@ -432,6 +432,28 @@ func (c *Client) Env(ctx context.Context, app string) (map[string]string, error)
 	return out.Env, err
 }
 
+// Secrets returns the KEYS in an app's per-app Secret, never the values (ADR-0028/0004). Secret
+// values live only in the Kubernetes Secret and never cross this API; there is deliberately no
+// SetSecret method here — setting a value is a kubeconfig-only CLI operation, off burrowd.
+func (c *Client) Secrets(ctx context.Context, app string) ([]string, error) {
+	var out struct {
+		Keys []string `json:"keys"`
+	}
+	err := c.do(ctx, http.MethodGet, c.appPath(app, "secrets"), nil, &out)
+	return out.Keys, err
+}
+
+// UnsetSecret removes one key from an app's per-app Secret (ADR-0028). Removing a key carries no
+// value, so it is allowed over the API/MCP. By default the running workload rolls so it drops the
+// value; with noRestart the change only persists and lands on the next deploy.
+func (c *Client) UnsetSecret(ctx context.Context, app, key string, noRestart bool) error {
+	path := "/v1/apps/" + url.PathEscape(app) + "/secrets/" + url.PathEscape(key)
+	if noRestart {
+		path += "?no_restart=true"
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
 func (c *Client) appPath(app, verb string) string {
 	return "/v1/apps/" + url.PathEscape(app) + "/" + verb
 }

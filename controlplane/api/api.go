@@ -57,6 +57,11 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/env", s.listEnv)
 	v1.HandleFunc("POST /v1/apps/{app}/env", s.setEnv)
 	v1.HandleFunc("DELETE /v1/apps/{app}/env/{key}", s.unsetEnv)
+	// Secrets: list returns KEYS only and unset removes a key — neither carries a value, so both
+	// are safe over the API/MCP. There is deliberately NO endpoint that accepts a secret value:
+	// `secret set` is a kubeconfig-only operation, off burrowd entirely (ADR-0028/0004).
+	v1.HandleFunc("GET /v1/apps/{app}/secrets", s.listSecrets)
+	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/{key}", s.unsetSecret)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
 	v1.HandleFunc("POST /v1/providers", s.addProvider)
@@ -235,6 +240,31 @@ func (s *server) unsetEnv(w http.ResponseWriter, r *http.Request) {
 // envResponse wraps the env map so the shape can grow without breaking object decoders.
 type envResponse struct {
 	Env map[string]string `json:"env"`
+}
+
+func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
+	keys, err := s.engine.ListSecrets(r.Context(), r.PathValue("app"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, secretsResponse{Keys: keys})
+}
+
+func (s *server) unsetSecret(w http.ResponseWriter, r *http.Request) {
+	noRestart := r.URL.Query().Get("no_restart") == "true"
+	key := r.PathValue("key")
+	if err := s.engine.UnsetSecret(r.Context(), r.PathValue("app"), key, noRestart); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app"), "key": key})
+}
+
+// secretsResponse carries an app's secret KEYS only — never the values, which live only in the
+// per-app Kubernetes Secret and never cross this API (ADR-0028/0004).
+type secretsResponse struct {
+	Keys []string `json:"keys"`
 }
 
 // envSetRequest is the body of an env set (the app comes from the path). NoRestart persists the

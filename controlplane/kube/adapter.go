@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -314,6 +315,64 @@ func (a *Adapter) ExposureStatus(ctx context.Context, app string) (controlplane.
 	return out, nil
 }
 
+// SecretKeys returns the env-var names in app's per-app Secret, sorted, never the values
+// (ADR-0028/0004). A missing Secret is an app with no secrets set: empty slice, no error.
+func (a *Adapter) SecretKeys(ctx context.Context, app string) ([]string, error) {
+	s, err := a.client.CoreV1().Secrets(a.namespace).Get(ctx, controlplane.AppSecretName(app), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("kube: reading secret for %q: %w", app, err)
+	}
+	keys := make([]string, 0, len(s.Data))
+	for k := range s.Data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// UnsetSecretKey removes one key from app's per-app Secret (get, delete the key, update). A
+// missing Secret or a missing key is a no-op, not an error. The value never crosses here — the
+// caller passes only the key name (ADR-0004).
+func (a *Adapter) UnsetSecretKey(ctx context.Context, app, key string) error {
+	secrets := a.client.CoreV1().Secrets(a.namespace)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		s, err := secrets.Get(ctx, controlplane.AppSecretName(app), metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil // no Secret: nothing to unset
+		}
+		if err != nil {
+			return err
+		}
+		if _, ok := s.Data[key]; !ok {
+			return nil // key already absent
+		}
+		delete(s.Data, key)
+		_, err = secrets.Update(ctx, s, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// RestartWorkload bumps app's pod-template restarted-at annotation to at, triggering a rolling
+// update so a running app picks up a secret change that envFrom reads only at pod start
+// (ADR-0028). A missing Deployment is ErrNotFound — nothing running to roll.
+func (a *Adapter) RestartWorkload(ctx context.Context, app string, at time.Time) error {
+	patch := []byte(fmt.Sprintf(
+		`{"spec":{"template":{"metadata":{"annotations":{%q:%q}}}}}`,
+		controlplane.RestartedAtAnnotation, at.UTC().Format(time.RFC3339Nano),
+	))
+	_, err := a.client.AppsV1().Deployments(a.namespace).Patch(ctx, app, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	if apierrors.IsNotFound(err) {
+		return fmt.Errorf("kube: deployment %q: %w", app, controlplane.ErrNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("kube: restarting deployment %q: %w", app, err)
+	}
+	return nil
+}
+
 // buildService is a ClusterIP Service fronting the app's Pods, forwarding port 80 to the
 // app's container port.
 func (a *Adapter) buildService(spec controlplane.ExposeSpec) *corev1.Service {
@@ -395,6 +454,17 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		}
 	}
 
+	// Source every key in the app's per-app Secret as an env var (ADR-0028). optional: true so a
+	// workload with no secrets set still applies (the Secret may not exist yet) — the values live
+	// only in the Secret, never inlined here. The name is derived from the app, so a deploy,
+	// rollback, or env reapply all inject the same Secret without it crossing the API.
+	envFrom := []corev1.EnvFromSource{{
+		SecretRef: &corev1.SecretEnvSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: controlplane.AppSecretName(spec.App)},
+			Optional:             boolPtr(true),
+		},
+	}}
+
 	replicas := spec.Replicas
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: spec.App, Namespace: a.namespace, Labels: labels},
@@ -409,12 +479,15 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 						Image:   spec.Image,
 						Command: spec.Command,
 						Env:     env,
+						EnvFrom: envFrom,
 					}},
 				},
 			},
 		},
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 func deploymentAvailable(dep *appsv1.Deployment, desired int32) bool {
 	for _, c := range dep.Status.Conditions {

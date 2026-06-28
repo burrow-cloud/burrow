@@ -482,6 +482,60 @@ func TestEnvEndpoints(t *testing.T) {
 	}
 }
 
+func TestSecretEndpoints(t *testing.T) {
+	h, k, r, _ := newAPI(t)
+	r.Add("img:1", "sha256:1")
+	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
+
+	// `secret set` is kubeconfig-only, so seed the fake Secret directly (not via the API).
+	k.SetSecret("web", "STRIPE_KEY", "sk_live_x")
+	k.SetSecret("web", "DATABASE_URL", "postgres://y")
+
+	// List returns KEYS only, sorted — never the values.
+	rec := do(h, "GET", "/v1/apps/web/secrets", token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("secret list = %d %s", rec.Code, rec.Body.String())
+	}
+	if b := rec.Body.String(); strings.Contains(b, "sk_live_x") || strings.Contains(b, "postgres://y") {
+		t.Fatalf("secret list leaked a value: %s", b)
+	}
+	var listed struct {
+		Keys []string `json:"keys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(listed.Keys) != 2 || listed.Keys[0] != "DATABASE_URL" || listed.Keys[1] != "STRIPE_KEY" {
+		t.Errorf("keys = %v, want [DATABASE_URL STRIPE_KEY]", listed.Keys)
+	}
+
+	// Unset removes a key and rolls the running workload by default.
+	if rec := do(h, "DELETE", "/v1/apps/web/secrets/STRIPE_KEY", token, ""); rec.Code != http.StatusOK {
+		t.Fatalf("secret unset = %d %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := k.SecretValue("web", "STRIPE_KEY"); ok {
+		t.Error("STRIPE_KEY should be removed")
+	}
+	if _, rolled := k.RestartedAt("web"); !rolled {
+		t.Error("default unset should roll the workload")
+	}
+
+	// no_restart=true removes without rolling. Reset roll state by re-deploying a fresh app.
+	do(h, "POST", "/v1/apps/api/deploy", token, `{"image":"img:1","replicas":1}`)
+	k.SetSecret("api", "TOKEN", "t")
+	if rec := do(h, "DELETE", "/v1/apps/api/secrets/TOKEN?no_restart=true", token, ""); rec.Code != http.StatusOK {
+		t.Fatalf("secret unset no_restart = %d %s", rec.Code, rec.Body.String())
+	}
+	if _, rolled := k.RestartedAt("api"); rolled {
+		t.Error("no_restart unset must not roll the workload")
+	}
+
+	// An invalid key is a 400. There is deliberately no endpoint that carries a secret VALUE.
+	if rec := do(h, "DELETE", "/v1/apps/web/secrets/1BAD", token, ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad key = %d, want 400", rec.Code)
+	}
+}
+
 func TestNotImplementedMapsTo501(t *testing.T) {
 	h, k, r, _ := newAPI(t)
 	r.Add("img:1", "sha256:1")

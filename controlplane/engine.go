@@ -273,6 +273,49 @@ func (e *Engine) reapplyEnv(ctx context.Context, app string) error {
 	return nil
 }
 
+// ListSecrets returns the env-var KEYS in an app's per-app Secret, sorted, never the values
+// (ADR-0028/0004). Secret values live only in the Kubernetes Secret and never cross the API or
+// MCP, so this read returns keys only. An app with no secrets yields an empty slice.
+func (e *Engine) ListSecrets(ctx context.Context, app string) ([]string, error) {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return nil, fmt.Errorf("list secrets: %w: %w", ErrInvalid, err)
+	}
+	keys, err := e.k8s.SecretKeys(ctx, app)
+	if err != nil {
+		return nil, fmt.Errorf("list secrets %s: %w", app, err)
+	}
+	return keys, nil
+}
+
+// UnsetSecret removes one key from an app's per-app Secret and, unless noRestart, rolls the
+// running workload so it drops the value (ADR-0028). Removing a key carries no value, so this is
+// MCP-allowed (unlike `secret set`, which is kubeconfig-only). An app with no running workload
+// just updates the Secret; the change lands on the next deploy. Removing an absent key succeeds.
+func (e *Engine) UnsetSecret(ctx context.Context, app, key string, noRestart bool) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("unset secret: %w: %w", ErrInvalid, err)
+	}
+	if err := validateEnvKey(key); err != nil {
+		return fmt.Errorf("unset secret %s: %w: %w", app, ErrInvalid, err)
+	}
+	if err := e.k8s.UnsetSecretKey(ctx, app, key); err != nil {
+		return fmt.Errorf("unset secret %s: removing %s: %w", app, key, err)
+	}
+	if noRestart {
+		return nil
+	}
+	// envFrom is read only at pod start, so removing a key from the Secret does not roll the
+	// Deployment on its own — bump the restart annotation. A missing workload means nothing is
+	// running yet: not an error, the change lands on the next deploy.
+	if err := e.k8s.RestartWorkload(ctx, app, e.clock.Now()); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("unset secret %s: rolling workload: %w", app, err)
+	}
+	return nil
+}
+
 // Status returns the combined control-plane and cluster view of an app: the most recent
 // ListApps returns the workload status of every Burrow-managed app, for an apps listing. It
 // reads the cluster — the source of truth for what is running.

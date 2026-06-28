@@ -45,11 +45,17 @@ func TestRenderManifests(t *testing.T) {
 		}
 	}
 
-	// Least privilege on Secrets (ADR-0023): burrowd's only access to a Secret's contents is
-	// `get` on the single burrow-credentials object. There must be exactly one secrets grant,
-	// and it must be the resourceNames-scoped one — no second, broader grant.
-	if c := strings.Count(out, `resources: ["secrets"]`); c != 1 {
-		t.Errorf("expected exactly one (scoped) secrets grant, found %d", c)
+	// Secrets grants are deliberately limited and documented. There are exactly two:
+	//   1. the resourceNames-scoped `get` on burrow-credentials in the control-plane namespace
+	//      (ADR-0023) — burrowd's only access to vendor-token contents; and
+	//   2. an app-namespace-scoped grant on app env Secrets (ADR-0028) so burrowd can list/unset
+	//      keys and a provisioned backend can write a connection string. Secret VALUES still never
+	//      cross the API (ADR-0004); `secret set` writes them with the developer's kubeconfig.
+	if c := strings.Count(out, `resources: ["secrets"]`); c != 2 {
+		t.Errorf("expected exactly two secrets grants (scoped credentials + app-namespace env secrets), found %d", c)
+	}
+	if !strings.Contains(out, `verbs: ["get", "list", "create", "update"]`) {
+		t.Errorf("missing the app-namespace env-secrets grant (ADR-0028)")
 	}
 }
 

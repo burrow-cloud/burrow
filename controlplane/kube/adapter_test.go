@@ -392,6 +392,18 @@ func TestApplyCreatesDeployment(t *testing.T) {
 	if dep.Spec.Selector.MatchLabels["app.kubernetes.io/name"] != "web" {
 		t.Errorf("selector = %v", dep.Spec.Selector.MatchLabels)
 	}
+	// Every workload sources the per-app secret env via an optional envFrom (ADR-0028), so a
+	// running app picks up keys from burrow-app-<app>-secrets without the values being inlined.
+	if len(c.EnvFrom) != 1 || c.EnvFrom[0].SecretRef == nil {
+		t.Fatalf("envFrom = %+v, want one secretRef", c.EnvFrom)
+	}
+	ref := c.EnvFrom[0].SecretRef
+	if ref.Name != "burrow-app-web-secrets" {
+		t.Errorf("envFrom secret name = %q, want burrow-app-web-secrets", ref.Name)
+	}
+	if ref.Optional == nil || !*ref.Optional {
+		t.Errorf("envFrom secretRef must be optional so a workload with no secrets still applies")
+	}
 }
 
 func TestApplyMetricsPortAnnotatesPod(t *testing.T) {

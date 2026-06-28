@@ -114,6 +114,20 @@ type Kubernetes interface {
 	// status.loadBalancer — empty until a controller processes it). A never-exposed app
 	// returns a zero ExposureStatus and no error.
 	ExposureStatus(ctx context.Context, app string) (ExposureStatus, error)
+
+	// SecretKeys returns the env-var names held in app's per-app Secret
+	// (burrow-app-<app>-secrets), sorted, never the values (ADR-0028/0004). A missing
+	// Secret yields an empty slice and no error — an app with no secrets set.
+	SecretKeys(ctx context.Context, app string) ([]string, error)
+	// UnsetSecretKey removes one key from app's per-app Secret. A missing Secret or a
+	// missing key is a no-op, not an error — unsetting what is already absent succeeds.
+	// The value never crosses this seam: only the key name does.
+	UnsetSecretKey(ctx context.Context, app, key string) error
+	// RestartWorkload triggers a rolling update of app's Deployment by bumping the
+	// pod-template annotation burrow.cloud/restarted-at to at. It is how a secret change
+	// (read only at pod start via envFrom) forces the running app to pick it up. A missing
+	// Deployment returns ErrNotFound; the caller treats that as "nothing running to roll".
+	RestartWorkload(ctx context.Context, app string, at time.Time) error
 }
 
 // Registry is the seam over the container registry — the conveyor belt that carries

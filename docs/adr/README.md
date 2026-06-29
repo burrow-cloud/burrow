@@ -59,3 +59,4 @@ alternatives that were rejected.
 | [0031](0031-postgres-addon.md) | The Postgres add-on — one shared instance, a database and role per app; the generated `DATABASE_URL` lands in the app's per-app Secret | Accepted |
 | [0032](0032-postgres-backups.md) | Postgres backups — logical `pg_dump`/`pg_restore` via Jobs to a backup PVC, recorded in the control-plane database; restore is confirm-gated | Accepted |
 | [0033](0033-relicense-to-apache.md) | Relicense the whole repository to Apache-2.0; monetize via managed cloud + a proprietary enterprise tier + risk transfer | Accepted |
+| [0034](0034-agent-native-onboarding.md) | Agent-native onboarding — detect cluster capabilities (no cluster-type picker), provision missing substrate on cost-aware consent, prove the first URL | Accepted |

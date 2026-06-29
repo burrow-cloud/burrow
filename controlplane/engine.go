@@ -37,6 +37,9 @@ type Engine struct {
 	// dbProvisioner provisions a per-app database and role on the installed Postgres add-on
 	// (ADR-0031). Optional: an attach errors cleanly (ErrNotImplemented) when it is nil.
 	dbProvisioner DatabaseProvisioner
+	// prober detects the cluster's read-only capabilities (ADR-0034). Optional: a capabilities
+	// read errors cleanly (ErrNotImplemented) when it is nil.
+	prober ClusterProber
 }
 
 // Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
@@ -66,6 +69,10 @@ type Deps struct {
 	// (ADR-0031). Optional — nil is allowed, and the engine errors cleanly (ErrNotImplemented) on a
 	// Postgres attach when it is not wired.
 	DatabaseProvisioner DatabaseProvisioner
+	// ClusterProber detects the cluster's read-only capabilities (ADR-0034). Optional — nil is
+	// allowed, and the engine errors cleanly (ErrNotImplemented) on a capabilities read when it is
+	// not wired.
+	ClusterProber ClusterProber
 }
 
 // New constructs an Engine, validating that every seam is supplied and the policy is
@@ -102,6 +109,7 @@ func New(d Deps) (*Engine, error) {
 		logs:          d.Logs,
 		metrics:       d.Metrics,
 		dbProvisioner: d.DatabaseProvisioner,
+		prober:        d.ClusterProber,
 	}, nil
 }
 

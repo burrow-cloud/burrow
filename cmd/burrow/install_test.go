@@ -42,10 +42,41 @@ func TestRenderManifests(t *testing.T) {
 		`resourceNames: ["burrow-credentials"]`,      // burrowd's credentials grant, scoped to it
 		`verbs: ["get", "update"]`,                   // get + update on exactly that Secret (ADR-0030)
 		"fieldPath: metadata.namespace",              // POD_NAMESPACE: where burrowd reads credentials
+		"kind: ClusterRole",                          // the one read-only capability ClusterRole (ADR-0034)
+		"kind: ClusterRoleBinding",                   // ... bound to the burrowd ServiceAccount
+		"name: burrowd-cluster-capabilities",         // ... its name
+		`resources: ["nodes"]`,                       // capability reads: nodes (provider inference)
+		`resources: ["storageclasses"]`,              // ... storageclasses (default StorageClass)
+		`resources: ["ingressclasses"]`,              // ... ingressclasses (ingress controller)
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered manifests missing %q", want)
 		}
+	}
+
+	// The capability ClusterRole is the ONLY cluster-scoped grant and it is strictly read-only
+	// (ADR-0034): exactly one ClusterRole/ClusterRoleBinding, get/list only, on exactly the three
+	// non-sensitive capability resources — no secrets, no writes, no other resources.
+	// Anchor to a line start so the ClusterRoleBinding's roleRef (an indented `kind: ClusterRole`)
+	// is not miscounted as a second ClusterRole.
+	if c := strings.Count(out, "\nkind: ClusterRole\n"); c != 1 {
+		t.Errorf("expected exactly one ClusterRole (the read-only capability grant), found %d", c)
+	}
+	if c := strings.Count(out, "kind: ClusterRoleBinding"); c != 1 {
+		t.Errorf("expected exactly one ClusterRoleBinding, found %d", c)
+	}
+	clusterRole := out[strings.Index(out, "kind: ClusterRole\n"):]
+	clusterRole = clusterRole[:strings.Index(clusterRole, "kind: ClusterRoleBinding")]
+	if c := strings.Count(clusterRole, `verbs: ["get", "list"]`); c != 3 {
+		t.Errorf("the capability ClusterRole must be get/list-only on all three resources, found %d such rules", c)
+	}
+	for _, banned := range []string{"create", "update", "patch", "delete", "watch"} {
+		if strings.Contains(clusterRole, banned) {
+			t.Errorf("the capability ClusterRole must be read-only but mentions %q", banned)
+		}
+	}
+	if strings.Contains(clusterRole, "secrets") {
+		t.Errorf("the capability ClusterRole must not grant any access to secrets")
 	}
 
 	// Secrets grants are deliberately limited and documented. There are exactly three:

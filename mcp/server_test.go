@@ -61,7 +61,7 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
@@ -196,6 +196,39 @@ func TestAuditToolReturnsRecords(t *testing.T) {
 		if !strings.Contains(gotQuery, want) {
 			t.Errorf("query %q missing %q", gotQuery, want)
 		}
+	}
+}
+
+func TestClusterToolReturnsCapabilities(t *testing.T) {
+	var gotPath string
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ingress":       map[string]any{"present": true, "classes": []string{"nginx"}},
+			"storage":       map[string]any{"default_present": true, "default_class": "do-block-storage"},
+			"load_balancer": map[string]any{"supported": true, "inferred": true},
+			"cert_manager":  map[string]any{"present": false},
+			"provider":      map[string]any{"cloud": "digitalocean", "name": "DigitalOcean"},
+			"dns":           map[string]any{"configured": false},
+		})
+	})
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "burrow_cluster"})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	out := decodeStructured[client.ClusterCapabilities](t, res)
+	if !out.Ingress.Present || out.Ingress.Classes[0] != "nginx" {
+		t.Errorf("ingress = %+v", out.Ingress)
+	}
+	if out.Storage.DefaultClass != "do-block-storage" || out.Provider.Name != "DigitalOcean" {
+		t.Errorf("report = %+v", out)
+	}
+	if gotPath != "/v1/cluster" {
+		t.Errorf("API path = %q, want /v1/cluster", gotPath)
 	}
 }
 

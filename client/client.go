@@ -245,6 +245,64 @@ func (c *Client) Audit(ctx context.Context, f AuditFilter) ([]AuditEntry, error)
 	return out.Entries, err
 }
 
+// ClusterCapabilities mirrors the control plane's neutral, read-only report of what the cluster
+// can do (ADR-0034): an ingress controller and its IngressClass, a default StorageClass,
+// LoadBalancer support, cert-manager, the cloud provider, and whether a DNS provider is configured.
+// It carries no secret value.
+type ClusterCapabilities struct {
+	Ingress      IngressCapability      `json:"ingress"`
+	Storage      StorageCapability      `json:"storage"`
+	LoadBalancer LoadBalancerCapability `json:"load_balancer"`
+	CertManager  CertManagerCapability  `json:"cert_manager"`
+	Provider     ProviderCapability     `json:"provider"`
+	DNS          DNSCapability          `json:"dns"`
+}
+
+// IngressCapability reports the ingress-controller situation: present, and which IngressClass(es).
+type IngressCapability struct {
+	Present bool     `json:"present"`
+	Classes []string `json:"classes,omitempty"`
+}
+
+// StorageCapability reports the default-StorageClass situation.
+type StorageCapability struct {
+	DefaultPresent bool     `json:"default_present"`
+	DefaultClass   string   `json:"default_class,omitempty"`
+	Classes        []string `json:"classes,omitempty"`
+}
+
+// LoadBalancerCapability reports whether Service type=LoadBalancer is likely supported (inferred
+// from the detected provider).
+type LoadBalancerCapability struct {
+	Supported bool `json:"supported"`
+	Inferred  bool `json:"inferred"`
+}
+
+// CertManagerCapability reports whether cert-manager is installed (detected via its API group).
+type CertManagerCapability struct {
+	Present bool `json:"present"`
+}
+
+// ProviderCapability reports the detected cloud provider.
+type ProviderCapability struct {
+	Cloud string `json:"cloud,omitempty"`
+	Name  string `json:"name,omitempty"`
+}
+
+// DNSCapability reports whether a DNS provider is configured in the registry (ADR-0023).
+type DNSCapability struct {
+	Configured bool     `json:"configured"`
+	Providers  []string `json:"providers,omitempty"`
+}
+
+// Cluster reports the cluster's capabilities, read live (ADR-0034). It is read-only — it changes
+// nothing and carries no secret value.
+func (c *Client) Cluster(ctx context.Context) (ClusterCapabilities, error) {
+	var out ClusterCapabilities
+	err := c.do(ctx, http.MethodGet, "/v1/cluster", nil, &out)
+	return out, err
+}
+
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "deploy"), req, &out)

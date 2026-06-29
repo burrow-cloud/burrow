@@ -1,9 +1,11 @@
 name: Release
 
-# A release is a single git push of a v* tag. This workflow stamps the version into the burrowd
-# binary, builds and pushes the image with ko, and creates the GitHub release with auto-generated
-# notes — no release PR, no hand-edited version constants. workflow_dispatch publishes an image
-# only (no GitHub release), to test a tag before cutting it.
+# A release is a single git push of a v* tag. GoReleaser builds the CLIs (burrow, burrow-mcp),
+# creates the GitHub release with their archives and auto-generated notes, and publishes the
+# Homebrew formula to burrow-cloud/homebrew-tap. ko then builds the burrowd control-plane image
+# and pushes it to GHCR — it does not touch the release, so the release is created exactly once.
+# No release PR, no hand-edited version constants. workflow_dispatch publishes an image only (no
+# GitHub release, no Homebrew formula), to test a tag before cutting it.
 on:
   workflow_dispatch:
     inputs:
@@ -24,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # GoReleaser needs full history and tags for the changelog
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
@@ -38,6 +42,25 @@ jobs:
             echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # GoReleaser runs first, on the clean checkout — it builds the CLIs, creates the GitHub
+      # release, and publishes the Homebrew formula. The burrowd sed-stamp below dirties the tree,
+      # so it must come after (GoReleaser refuses to release from a dirty git state). Only on a tag
+      # push: a workflow_dispatch run publishes an image to test a tag and creates no release.
+      - name: release CLIs and Homebrew formula
+        if: github.event_name == 'push'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          # Pinned to the 2.15 line: it is the last that ships the `brews` formula builder.
+          # GoReleaser 2.16 removed `brews` in favour of `homebrew_casks`, but Homebrew casks
+          # do not install on Linuxbrew, and the CLIs ship for linux as well as darwin — so a
+          # formula is the right artifact. Migrate to homebrew_casks only if the Linux install
+          # path is dropped.
+          version: "~> v2.15"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
       - name: stamp burrowd version
         # The released burrowd reports the release version (logs + the upgrade gate). This rewrites
         # the source default (v0.0.0) in the CI checkout only — it is never committed.
@@ -48,13 +71,10 @@ jobs:
         env:
           KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/burrowd
 
-      - name: create GitHub release
-        if: github.event_name == 'push'
-        run: gh release create "${{ steps.meta.outputs.tag }}" --generate-notes --latest --verify-tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       - name: summary
         run: |
           echo "Published ghcr.io/${{ github.repository_owner }}/burrowd:${{ steps.meta.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
           echo "If this is the first publish, make the package public in GitHub > Packages so clusters can pull it anonymously." >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "GoReleaser created the GitHub release and published the burrow Homebrew formula to burrow-cloud/homebrew-tap." >> "$GITHUB_STEP_SUMMARY"
+          fi

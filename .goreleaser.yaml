@@ -1,0 +1,76 @@
+# GoReleaser builds the Burrow CLIs (burrow, burrow-mcp) for macOS and Linux, creates the
+# GitHub release with the archives and auto-generated notes, and publishes the `burrow`
+# Homebrew formula to burrow-cloud/homebrew-tap so `brew install burrow-cloud/tap/burrow`
+# works after each tagged release. The burrowd image is built separately with ko in the
+# release workflow — GoReleaser owns the CLI release, not the control-plane image.
+version: 2
+
+project_name: burrow
+
+builds:
+  - id: burrow
+    main: ./cmd/burrow
+    binary: burrow
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # Stamp the release tag into the CLI's version variable (cmd/burrow, package main) so
+    # `burrow version` reports the release rather than the "dev" fallback.
+    ldflags:
+      - -X main.version={{ .Tag }}
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+
+  - id: burrow-mcp
+    main: ./cmd/burrow-mcp
+    binary: burrow-mcp
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # burrow-mcp's package main also carries a `version` var (reported to MCP clients).
+    ldflags:
+      - -X main.version={{ .Tag }}
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: burrow
+    # Bundle both CLIs into a single tar.gz per platform.
+    ids:
+      - burrow
+      - burrow-mcp
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+# A Homebrew formula (not a cask): casks do not install on Linuxbrew, and the CLIs ship for
+# linux as well as darwin. `brews` is the formula builder; it exists through the GoReleaser 2.15
+# line (removed in 2.16), so the release workflow pins goreleaser-action to `~> v2.15`.
+brews:
+  - name: burrow
+    repository:
+      owner: burrow-cloud
+      name: homebrew-tap
+      # The default GITHUB_TOKEN cannot push to the separate tap repo; a PAT with write
+      # access to burrow-cloud/homebrew-tap is supplied as HOMEBREW_TAP_GITHUB_TOKEN.
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/burrow-cloud/burrow"
+    description: "Agent-native cloud CLI: deploy and operate apps on your own Kubernetes cluster through the Burrow control plane."
+    license: "Apache-2.0"
+    install: |
+      bin.install "burrow"
+      bin.install "burrow-mcp"
+
+release:
+  github:
+    owner: burrow-cloud
+    name: burrow
+
+changelog:
+  use: github

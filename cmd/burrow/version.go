@@ -55,9 +55,21 @@ func newVersionCmd() *cobra.Command {
 	return cmd
 }
 
-// cliVersion returns this CLI's release version from the build info — set when it is installed
-// with `go install …@version` — or "dev" for an unversioned local build.
+// version is the CLI release version, stamped at build time with
+// `-ldflags "-X main.version=<tag>"` (goreleaser injects the release tag on a tagged build).
+// It is empty for a local `go build`, a `go install …@version`, or a test binary, in which
+// case cliVersion falls back to the build info — keeping the Go pseudo-version for a local
+// source build rather than overwriting it with a stale constant.
+var version string
+
+// cliVersion returns this CLI's release version: the ldflags-stamped tag for a release build,
+// otherwise the main-module version from the build info — set when it is installed with
+// `go install …@version` or a Go pseudo-version for a local source build — or "dev" for an
+// unversioned build.
 func cliVersion() string {
+	if version != "" {
+		return version
+	}
 	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		return bi.Main.Version
 	}

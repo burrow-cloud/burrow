@@ -34,6 +34,9 @@ type Engine struct {
 	// Optional: a metrics query errors cleanly when the map is empty or has no querier for the
 	// add-on's backend (ADR-0026).
 	metrics map[string]MetricsQuerier
+	// dbProvisioner provisions a per-app database and role on the installed Postgres add-on
+	// (ADR-0031). Optional: an attach errors cleanly (ErrNotImplemented) when it is nil.
+	dbProvisioner DatabaseProvisioner
 }
 
 // Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
@@ -59,6 +62,10 @@ type Deps struct {
 	// engine errors cleanly on a metrics query when no querier is wired for the add-on's backend
 	// (ADR-0026).
 	Metrics map[string]MetricsQuerier
+	// DatabaseProvisioner provisions a per-app database and role on the installed Postgres add-on
+	// (ADR-0031). Optional — nil is allowed, and the engine errors cleanly (ErrNotImplemented) on a
+	// Postgres attach when it is not wired.
+	DatabaseProvisioner DatabaseProvisioner
 }
 
 // New constructs an Engine, validating that every seam is supplied and the policy is
@@ -84,16 +91,17 @@ func New(d Deps) (*Engine, error) {
 		return nil, fmt.Errorf("controlplane: New: DNS seam is required")
 	}
 	return &Engine{
-		k8s:         d.Kubernetes,
-		registry:    d.Registry,
-		db:          d.Database,
-		clock:       d.Clock,
-		ids:         d.IDs,
-		resolver:    d.Resolver,
-		credentials: d.Credentials,
-		dns:         d.DNS,
-		logs:        d.Logs,
-		metrics:     d.Metrics,
+		k8s:           d.Kubernetes,
+		registry:      d.Registry,
+		db:            d.Database,
+		clock:         d.Clock,
+		ids:           d.IDs,
+		resolver:      d.Resolver,
+		credentials:   d.Credentials,
+		dns:           d.DNS,
+		logs:          d.Logs,
+		metrics:       d.Metrics,
+		dbProvisioner: d.DatabaseProvisioner,
 	}, nil
 }
 
@@ -487,6 +495,106 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) err
 		return fmt.Errorf("remove addon %s: %w", name, err)
 	}
 	e.recordExecution(ctx, auditOpAddonRemove, name, nil, nil)
+	return nil
+}
+
+// AttachResult is the outcome of attaching an app to an add-on (ADR-0031). It carries the KEY
+// NAME the connection string was written under (e.g. "DATABASE_URL") — never the value, which
+// lives only in the app's Kubernetes Secret.
+type AttachResult struct {
+	App   string    `json:"app"`
+	Addon AddonType `json:"addon"`
+	// SecretKey is the env-var name under which the generated connection string was written into
+	// the app's per-app Secret. The value is never returned (ADR-0029/0031).
+	SecretKey string `json:"secret_key"`
+}
+
+// AttachAddon gives app its own database on the installed Postgres add-on and wires it into the
+// app (ADR-0031). burrowd provisions an isolated database + login role on the shared instance,
+// generates the DATABASE_URL server-side, writes it into the app's per-app Secret via the
+// SetSecretValue path (ADR-0029), and restarts the app so envFrom picks it up. Attach provisions
+// and destroys nothing, so it is allowed by default (no guardrail) and is safe over MCP: no secret
+// value crosses MCP — the agent supplies only the app name; burrowd generates the value and never
+// returns it. The audit row records {addon, app} only — never the URL.
+func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app string) (AttachResult, error) {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return AttachResult{}, fmt.Errorf("attach addon: %w: %w", ErrInvalid, err)
+	}
+	if t != AddonPostgres {
+		return AttachResult{}, fmt.Errorf("attach addon %s: only the postgres add-on supports attach: %w", t, ErrInvalid)
+	}
+	if e.dbProvisioner == nil {
+		return AttachResult{}, fmt.Errorf("attach addon %s: database provisioning is not configured: %w", t, ErrNotImplemented)
+	}
+	// The redacted audit args carry the add-on and app NAMES only — never the generated URL (ADR-0031).
+	args := map[string]string{"addon": string(t), "app": app}
+
+	// Provision the database/role and compose the connection string. The returned url is a SECRET
+	// value: from here it is handed only to SetSecretValue and never logged, audited, or returned.
+	url, err := e.dbProvisioner.EnsureAppDatabase(ctx, app)
+	if err != nil {
+		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
+		// EnsureAppDatabase's error names the app/identifier only, never the URL.
+		return AttachResult{}, fmt.Errorf("attach addon %s for %s: %w", t, app, err)
+	}
+
+	// Write the connection string into the app's per-app Secret and roll the app to pick it up —
+	// the ADR-0029 secret path, the same one `secret set` uses. The value never crosses the audit
+	// log, MCP, or Postgres.
+	const key = "DATABASE_URL"
+	if err := e.k8s.SetSecretValue(ctx, app, key, url); err != nil {
+		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
+		// SetSecretValue's error names the app and key only — never the value.
+		return AttachResult{}, fmt.Errorf("attach addon %s for %s: writing %s: %w", t, app, key, err)
+	}
+	if err := e.k8s.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
+		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
+		return AttachResult{}, fmt.Errorf("attach addon %s for %s: rolling workload: %w", t, app, err)
+	}
+	e.recordExecution(ctx, auditOpAddonAttach, app, args, nil)
+	return AttachResult{App: app, Addon: t, SecretKey: key}, nil
+}
+
+// DetachAddon removes app's DATABASE_URL and, behind the addon_detach confirm guardrail (it
+// destroys data), drops app's database and role from the shared Postgres instance (ADR-0031). The
+// audit row records {addon, app} only.
+func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app string, confirm bool) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("detach addon: %w: %w", ErrInvalid, err)
+	}
+	if t != AddonPostgres {
+		return fmt.Errorf("detach addon %s: only the postgres add-on supports detach: %w", t, ErrInvalid)
+	}
+	if e.dbProvisioner == nil {
+		return fmt.Errorf("detach addon %s: database provisioning is not configured: %w", t, ErrNotImplemented)
+	}
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return fmt.Errorf("detach addon %s: loading guardrail policy: %w", t, err)
+	}
+	args := map[string]string{"addon": string(t), "app": app}
+	if err := e.recordDecision(ctx, auditOpAddonDetach, app, args, GuardrailAddonDetach,
+		pol.evaluateGuardrail("addon detach", GuardrailAddonDetach, confirm,
+			fmt.Sprintf("detaching %q from the %s add-on (drops its database and role)", app, t))); err != nil {
+		return err
+	}
+
+	// Remove the DATABASE_URL key first (the app stops seeing the credential), then drop the
+	// database/role. A missing key is a no-op.
+	if err := e.k8s.UnsetSecretKey(ctx, app, "DATABASE_URL"); err != nil {
+		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
+		return fmt.Errorf("detach addon %s for %s: removing DATABASE_URL: %w", t, app, err)
+	}
+	if err := e.dbProvisioner.DropAppDatabase(ctx, app); err != nil {
+		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
+		return fmt.Errorf("detach addon %s for %s: %w", t, app, err)
+	}
+	// Roll the app so it drops the removed credential. A missing workload is not an error.
+	if err := e.k8s.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
+		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
+		return fmt.Errorf("detach addon %s for %s: rolling workload: %w", t, app, err)
+	}
+	e.recordExecution(ctx, auditOpAddonDetach, app, args, nil)
 	return nil
 }
 

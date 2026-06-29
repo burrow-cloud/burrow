@@ -61,7 +61,7 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
@@ -99,6 +99,14 @@ func TestListTools(t *testing.T) {
 		for prop := range schema.Properties {
 			if prop == "token" || prop == "auth" {
 				t.Errorf("tool %q exposes a %q input: a credential value must never cross MCP", tool.Name, prop)
+			}
+			// The Postgres attach tool (and every tool) must never accept a database password or
+			// connection string: burrowd generates the DATABASE_URL server-side (ADR-0031). No tool
+			// input names a connection-string-shaped secret. (`value` is allowed: env set carries a
+			// non-secret env value, and there is no secret-set tool.)
+			switch prop {
+			case "password", "url", "database_url", "connection_string", "dsn":
+				t.Errorf("tool %q exposes a %q input: a database secret value must never cross MCP", tool.Name, prop)
 			}
 		}
 	}

@@ -68,6 +68,27 @@ type MetricsQuerier interface {
 	QueryMetrics(ctx context.Context, endpoint, query string, token string) ([]MetricSample, error)
 }
 
+// DatabaseProvisioner is the seam over the installed Postgres add-on's admin surface (ADR-0031).
+// burrowd connects to the shared instance as the superuser and gives each app its own database and
+// login role inside it; the engine calls this on attach/detach. It is an optional seam — present
+// only when the Postgres add-on path is wired; the engine errors cleanly (ErrNotImplemented) on an
+// attach when it is nil. The connection string it returns is a secret VALUE: it is handed only to
+// SetSecretValue and never logged, audited, returned, or carried over MCP (ADR-0029/0031).
+type DatabaseProvisioner interface {
+	// EnsureAppDatabase idempotently provisions an isolated database and login role for app on the
+	// shared instance and returns the app's DATABASE_URL (a postgres:// connection string carrying
+	// a freshly generated role password). It rotates the role password on every call, so a re-attach
+	// returns a fresh, working URL with no orphaned state. The app name is validated against a strict
+	// identifier pattern and every SQL identifier is quoted BEFORE any SQL runs, so a name can never
+	// carry SQL. The returned string is a secret value — the caller writes it straight into the app's
+	// Secret and never logs, audits, or returns it.
+	EnsureAppDatabase(ctx context.Context, app string) (databaseURL string, err error)
+	// DropAppDatabase removes app's database and login role from the shared instance — the
+	// destructive side of detach. Dropping a database/role that is already absent is a no-op, not an
+	// error. The app name is validated before any SQL, exactly as in EnsureAppDatabase.
+	DropAppDatabase(ctx context.Context, app string) error
+}
+
 // Kubernetes is the seam over the target cluster: the only path from the control plane
 // to the runtime. It is deliberately narrow — the v0.1 operations (deploy, status,
 // logs, scale, and the delete that supports teardown) and nothing more.

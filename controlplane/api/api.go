@@ -74,6 +74,12 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("DELETE /v1/domains/{host}", s.removeDomain)
 	v1.HandleFunc("POST /v1/addons", s.installAddon)
 	v1.HandleFunc("POST /v1/addons/connect", s.connectAddon)
+	// attach/detach give an app its own database on the installed Postgres add-on (ADR-0031).
+	// attach carries NO secret value — burrowd generates the DATABASE_URL server-side and writes it
+	// to the app's Secret; the response carries the key name only. detach is held by a confirm
+	// guardrail (it drops data).
+	v1.HandleFunc("POST /v1/addons/attach", s.attachAddon)
+	v1.HandleFunc("POST /v1/addons/detach", s.detachAddon)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
@@ -444,6 +450,52 @@ func (s *server) removeAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"name": r.PathValue("name")})
+}
+
+// attachAddon gives an app its own database on the installed Postgres add-on and wires it in
+// (ADR-0031). The request carries only the add-on type and app name — NO secret value. burrowd
+// generates the DATABASE_URL server-side and writes it into the app's Secret; the response is the
+// key name only (AttachResult), never the value. The value is never logged, never audited, never
+// stored in Postgres, and never returned — so attach is safe to expose over MCP.
+func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
+	var req addonAttachRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.engine.AttachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// detachAddon detaches an app from an add-on, dropping its data (e.g. its Postgres database). It is
+// held by a confirm guardrail by default (ADR-0031).
+func (s *server) detachAddon(w http.ResponseWriter, r *http.Request) {
+	var req addonDetachRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.engine.DetachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Confirm); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"addon": req.Addon, "app": req.App})
+}
+
+// addonAttachRequest is the body of an addon attach: the add-on type and the app name. It carries
+// no secret — burrowd generates the connection string server-side (ADR-0031).
+type addonAttachRequest struct {
+	Addon string `json:"addon"`
+	App   string `json:"app"`
+}
+
+// addonDetachRequest is the body of an addon detach: the add-on type, the app, and confirm.
+type addonDetachRequest struct {
+	Addon   string `json:"addon"`
+	App     string `json:"app"`
+	Confirm bool   `json:"confirm,omitempty"`
 }
 
 // addonInstallRequest is the body of an addon install (the type names the catalog entry).

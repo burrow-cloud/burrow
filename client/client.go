@@ -316,6 +316,32 @@ func (c *Client) RemoveAddon(ctx context.Context, name string, confirm bool) err
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
+// AttachResult is the non-secret outcome of attaching an app to an add-on (ADR-0031): the KEY NAME
+// the generated connection string was written under in the app's Secret — never the value.
+type AttachResult struct {
+	App       string `json:"app"`
+	Addon     string `json:"addon"`
+	SecretKey string `json:"secret_key"`
+}
+
+// AttachAddon gives an app its own database on the installed Postgres add-on and wires it in
+// (ADR-0031). The agent supplies only the add-on type and app name; burrowd generates the
+// DATABASE_URL server-side and writes it into the app's Secret — no secret value crosses this API
+// or MCP. The result carries the KEY name only, never the value.
+func (c *Client) AttachAddon(ctx context.Context, addonType, app string) (AttachResult, error) {
+	var out AttachResult
+	body := map[string]any{"addon": addonType, "app": app}
+	err := c.do(ctx, http.MethodPost, "/v1/addons/attach", body, &out)
+	return out, err
+}
+
+// DetachAddon detaches an app from an add-on, dropping its data (e.g. its Postgres database). It is
+// held for confirmation by a guardrail by default; pass confirm=true to proceed past the hold.
+func (c *Client) DetachAddon(ctx context.Context, addonType, app string, confirm bool) error {
+	body := map[string]any{"addon": addonType, "app": app, "confirm": confirm}
+	return c.do(ctx, http.MethodPost, "/v1/addons/detach", body, nil)
+}
+
 // LogEntry is one record from a logs query.
 type LogEntry struct {
 	Time    string `json:"time,omitempty"`

@@ -85,7 +85,10 @@ subjects:
 ---
 # Add-ons live in their own namespace (ADR-0025), so burrowd's permission to manage them is
 # scoped there: a logs store is a Deployment + Service + PVC, its collector a DaemonSet +
-# ConfigMap. None of these grants reach the app or control-plane namespaces.
+# ConfigMap; the Postgres add-on (ADR-0031) adds a Secret, burrow-postgres, holding the generated
+# superuser password — burrowd creates it before the pod and reads it back to run admin SQL. The
+# secrets grant is namespace-scoped to the add-on namespace ONLY (not name-scoped, not a
+# ClusterRole): none of these grants reach the app or control-plane namespaces.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -98,6 +101,12 @@ rules:
   - apiGroups: [""]
     resources: ["services", "persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # The Postgres add-on's superuser Secret (burrow-postgres) lives in this namespace because a pod
+  # can only mount a Secret in its own namespace (ADR-0031). burrowd creates it, reads it to run
+  # admin SQL, and deletes it on uninstall — scoped to this add-on namespace only.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

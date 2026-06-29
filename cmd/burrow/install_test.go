@@ -46,19 +46,24 @@ func TestRenderManifests(t *testing.T) {
 		}
 	}
 
-	// Secrets grants are deliberately limited and documented. There are exactly two:
+	// Secrets grants are deliberately limited and documented. There are exactly three:
 	//   1. the resourceNames-scoped `get`/`update` on burrow-credentials in the control-plane
 	//      namespace (ADR-0023/0030) — burrowd's only access to vendor-token contents, now able to
-	//      write a token value it received over its authenticated control-plane API; and
+	//      write a token value it received over its authenticated control-plane API;
 	//   2. an app-namespace-scoped grant on app env Secrets (ADR-0028/0029) so burrowd can
 	//      list/unset keys, write a secret value it received over the authenticated control-plane
-	//      API, and let a provisioned backend write a connection string. Secret values still never
-	//      cross MCP (no secret-set tool) and are never logged or stored in the DB (ADR-0029/0004).
-	if c := strings.Count(out, `resources: ["secrets"]`); c != 2 {
-		t.Errorf("expected exactly two secrets grants (scoped credentials + app-namespace env secrets), found %d", c)
+	//      API, and let a provisioned backend write a connection string; and
+	//   3. an add-on-namespace-scoped grant (ADR-0031) so burrowd can create/read/delete the
+	//      Postgres add-on's burrow-postgres superuser Secret. Secret values still never cross MCP
+	//      (no secret-set tool) and are never logged or stored in the DB (ADR-0029/0004).
+	if c := strings.Count(out, `resources: ["secrets"]`); c != 3 {
+		t.Errorf("expected exactly three secrets grants (scoped credentials + app-namespace env secrets + add-on-namespace postgres secret), found %d", c)
 	}
 	if !strings.Contains(out, `verbs: ["get", "list", "create", "update"]`) {
 		t.Errorf("missing the app-namespace env-secrets grant (ADR-0028/0029)")
+	}
+	if !strings.Contains(out, `verbs: ["get", "create", "update", "delete"]`) {
+		t.Errorf("missing the add-on-namespace postgres-secret grant (ADR-0031)")
 	}
 }
 

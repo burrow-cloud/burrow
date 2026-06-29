@@ -25,7 +25,69 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
+	return cmd
+}
+
+// newAddonAttachCmd is `burrow addon attach postgres <app>`: give an app its own database on the
+// installed Postgres add-on (ADR-0031). The agent supplies only the add-on type and app name;
+// burrowd generates the DATABASE_URL server-side and writes it into the app's Secret — no secret
+// value is printed, returned, or carried over MCP. Attach provisions and destroys nothing, so it is
+// allowed by default.
+func newAddonAttachCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "attach <addon> <app>",
+		Short: "Attach an app to an add-on (e.g. give it a Postgres database)",
+		Long: "attach gives an app its own database on the installed Postgres add-on: burrowd provisions\n" +
+			"an isolated database and login role, generates the connection string server-side, writes it\n" +
+			"into the app's Secret as DATABASE_URL, and restarts the app. No secret value is printed or\n" +
+			"sent over MCP — only the key name is reported. Re-attaching rotates the password.",
+		Args: exactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			res, err := c.AttachAddon(ctx, args[0], args[1])
+			if err != nil {
+				return err
+			}
+			human := fmt.Sprintf("attached %q to the %s add-on\nwrote the connection string into %s's Secret under key %q (the value is never shown)",
+				res.App, res.Addon, res.App, res.SecretKey)
+			return emit(cmd.OutOrStdout(), o.json, res, human)
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	return cmd
+}
+
+// newAddonDetachCmd is `burrow addon detach postgres <app>`: drop an app's database and role and
+// remove its DATABASE_URL. It is destructive (it destroys the app's data), so it is held for
+// confirmation by the addon_detach guardrail by default.
+func newAddonDetachCmd() *cobra.Command {
+	o := &commonOpts{}
+	var confirm bool
+	cmd := &cobra.Command{
+		Use:   "detach <addon> <app>",
+		Short: "Detach an app from an add-on, destroying its data (e.g. drop its Postgres database)",
+		Args:  exactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			if err := c.DetachAddon(ctx, args[0], args[1], confirm); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "detached %q from the %s add-on\n", args[1], args[0])
+			return nil
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }
 

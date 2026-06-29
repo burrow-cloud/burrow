@@ -5,6 +5,8 @@ package kube
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -48,6 +50,19 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		mounts = []corev1.VolumeMount{{Name: "data", MountPath: addonDataPath(spec.Type)}}
 	}
 
+	// Postgres needs a fixed superuser role and a generated superuser password before its pod
+	// starts: burrowd creates the burrow-postgres Secret (the generated password) BEFORE the
+	// Deployment and points the pod's POSTGRES_PASSWORD at it via secretKeyRef, so the password is
+	// never inlined in the pod spec, never logged, and never returned (ADR-0031). Other add-ons
+	// add no env.
+	var env []corev1.EnvVar
+	if spec.Type == controlplane.AddonPostgres {
+		var err error
+		if env, err = a.ensurePostgresSuperuserEnv(ctx, labels); err != nil {
+			return controlplane.AddonInfo{}, err
+		}
+	}
+
 	replicas := int32(1)
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: labels},
@@ -64,6 +79,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 						Name:         string(spec.Type),
 						Image:        spec.Image,
 						Args:         addonArgs(spec),
+						Env:          env,
 						Ports:        []corev1.ContainerPort{{ContainerPort: spec.Port}},
 						VolumeMounts: mounts,
 					}},
@@ -114,6 +130,71 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		Image:        spec.Image,
 		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.addonNamespace, spec.Port),
 		Capabilities: spec.Capabilities,
+	}, nil
+}
+
+// PostgresSuperuser is the fixed superuser role burrowd provisions the add-on Postgres instance
+// with and connects as to run admin SQL (ADR-0031). It is deliberately not the built-in "postgres"
+// role: a distinct, Burrow-owned admin role keeps the boundary clear.
+const PostgresSuperuser = "burrow_admin"
+
+// PostgresSecretName is the Secret in the add-on namespace that holds the generated superuser
+// password (ADR-0031). It lives in the add-on namespace — not the control-plane credentials Secret
+// — because a pod can only mount a Secret in its own namespace.
+const PostgresSecretName = "burrow-postgres"
+
+// PostgresPasswordKey is the key under which the superuser password is stored in PostgresSecretName.
+const PostgresPasswordKey = "password"
+
+// generatePassword returns a strong random password: 32 bytes of crypto/rand, base64url-encoded
+// (no padding) so it is shell- and URL-safe. It is used for both the superuser password and each
+// app role's password; the value is never logged or returned (ADR-0031).
+func generatePassword() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("kube: generating password: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// ensurePostgresSuperuserEnv creates the burrow-postgres Secret holding a freshly generated
+// superuser password (idempotently — an already-present Secret is left untouched, so a re-install
+// keeps the existing password and the running database) and returns the pod env that wires the
+// Postgres container to it: POSTGRES_USER=burrow_admin (a literal, not a secret), POSTGRES_PASSWORD
+// from a secretKeyRef into that Secret, and PGDATA under a subdirectory of the mounted volume. The
+// generated password is written ONLY into the Secret — it is never inlined into the pod spec,
+// returned, or logged (ADR-0031).
+func (a *Adapter) ensurePostgresSuperuserEnv(ctx context.Context, labels map[string]string) ([]corev1.EnvVar, error) {
+	secrets := a.client.CoreV1().Secrets(a.addonNamespace)
+	if _, err := secrets.Get(ctx, PostgresSecretName, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+		pw, gerr := generatePassword()
+		if gerr != nil {
+			return nil, gerr
+		}
+		sec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: a.addonNamespace, Labels: labels},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{PostgresPasswordKey: []byte(pw)},
+		}
+		if _, cerr := secrets.Create(ctx, sec, metav1.CreateOptions{}); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
+			// The error names the Secret only — never the generated value.
+			return nil, fmt.Errorf("kube: creating postgres superuser secret %q: %w", PostgresSecretName, cerr)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("kube: reading postgres superuser secret %q: %w", PostgresSecretName, err)
+	}
+
+	return []corev1.EnvVar{
+		{Name: "POSTGRES_USER", Value: PostgresSuperuser},
+		{Name: "POSTGRES_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: PostgresSecretName},
+				Key:                  PostgresPasswordKey,
+			},
+		}},
+		// The official image refuses to initialize a non-empty data directory (a mounted PVC has a
+		// lost+found), so put PGDATA in a subdirectory of the mount.
+		{Name: "PGDATA", Value: addonDataPath(controlplane.AddonPostgres) + "/pgdata"},
 	}, nil
 }
 
@@ -320,6 +401,11 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string) error {
 	_ = a.client.AppsV1().DaemonSets(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
 	_ = a.client.AppsV1().Deployments(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
 	_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
+	// The Postgres add-on owns the burrow-postgres superuser Secret (ADR-0031); remove it on
+	// uninstall. The name is fixed, so this is a harmless no-op for any other add-on type.
+	if name == addonName(controlplane.AddonPostgres) {
+		_ = a.client.CoreV1().Secrets(a.addonNamespace).Delete(ctx, PostgresSecretName, metav1.DeleteOptions{})
+	}
 	return nil
 }
 
@@ -330,6 +416,10 @@ func addonDataPath(t controlplane.AddonType) string {
 		return "/vlogs"
 	case controlplane.AddonMetrics:
 		return "/victoria-metrics-data"
+	case controlplane.AddonPostgres:
+		// The official postgres image's conventional data mount. PGDATA is set to a subdirectory
+		// of this (see ensurePostgresSuperuserEnv) so the image can initialize over a mounted PVC.
+		return "/var/lib/postgresql/data"
 	default:
 		return "/data"
 	}

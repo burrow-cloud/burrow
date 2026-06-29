@@ -20,6 +20,10 @@ const (
 	// AddonCache is an in-memory cache (ValKey, BSD-3) the agent wires an app to — a backing
 	// service the app connects to, not one the agent queries, so it has no query seam.
 	AddonCache AddonType = "cache"
+	// AddonPostgres is a shared PostgreSQL instance (the official postgres image, PostgreSQL
+	// License) the agent attaches an app to — Burrow provisions a database and login role per app
+	// inside the one instance and writes the app's DATABASE_URL into its per-app Secret (ADR-0031).
+	AddonPostgres AddonType = "postgres"
 )
 
 // AddonSpec is a catalog entry: how to deploy and reach one vetted backing service. The catalog
@@ -76,6 +80,18 @@ var addonCatalog = map[AddonType]AddonSpec{
 		StorageGi:    0,
 		Capabilities: []string{"cache"},
 		Summary:      "in-memory cache (ValKey)",
+	},
+	AddonPostgres: {
+		Type:    AddonPostgres,
+		Backend: "postgres",
+		Image:   "postgres:17.4", // official PostgreSQL image, PostgreSQL License (BSD-style)
+		Port:    5432,
+		// Persistent: a database is durable state, so it gets a volume; the generic stateful path
+		// gives it a Recreate Deployment + a PVC. The superuser password Secret and per-app
+		// database provisioning are handled by the install/attach special-cases (ADR-0031).
+		StorageGi:    10,
+		Capabilities: []string{"database"},
+		Summary:      "PostgreSQL database (one shared instance, a database and role per app)",
 	},
 }
 

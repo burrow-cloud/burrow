@@ -184,6 +184,14 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		return err
 	}
 
+	// The Postgres add-on provisioner connects to the installed instance as the superuser to give
+	// each app its own database and role (ADR-0031). It reads the superuser password from the
+	// burrow-postgres Secret in the add-on namespace, so it is scoped there.
+	dbProvisioner, err := kube.NewPostgresProvisionerFromConfig(kubeCfg, os.Getenv("BURROW_ADDON_NAMESPACE"))
+	if err != nil {
+		return err
+	}
+
 	// One HTTP client shared across the observability adapters — burrowd reaches each backend
 	// in-cluster.
 	obsHTTP := &http.Client{Timeout: 20 * time.Second}
@@ -204,6 +212,7 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 			"prometheus":      metrics.NewPromQL(obsHTTP),
 			"victoriametrics": metrics.NewPromQL(obsHTTP),
 		},
+		DatabaseProvisioner: dbProvisioner,
 	})
 	if err != nil {
 		return err

@@ -70,6 +70,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, addonRemoveTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_addon_attach",
+		Description: "Give an application its own database on the installed Postgres add-on and wire it in. You supply only the add-on type (\"postgres\") and the app name — NO secret. Burrow generates the database, role, and connection string server-side and writes it into the app's Secret as DATABASE_URL; the value is never returned to you or shown in this conversation. After attaching, write integration code that reads the DATABASE_URL environment variable. Re-attaching rotates the password. Returns only the app, the add-on, and the key name (DATABASE_URL) — never a connection string. Install the postgres add-on first with burrow_addon_install if it is not yet installed.",
+	}, addonAttachTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_logs_query",
 		Description: "Query the cluster's aggregated logs (the installed logs add-on) with a VictoriaLogs LogsQL query to investigate why an app is failing or slow — e.g. `error`, `level:error`, `panic AND web`. Returns recent matching records (most recent first). Needs a logs add-on installed first (burrow_addon_install with capability \"logs\").",
 	}, logsQueryTool(c))
@@ -510,6 +515,30 @@ type addonRemoveInput struct {
 
 type addonRemoveOutput struct {
 	Removed string `json:"removed"`
+}
+
+// addonAttachInput carries only the add-on type and app name — never a secret (ADR-0031).
+type addonAttachInput struct {
+	Addon string `json:"addon" jsonschema:"the add-on type to attach, e.g. postgres"`
+	App   string `json:"app" jsonschema:"the application name to give a database (a DNS-1123 label)"`
+}
+
+// addonAttachOutput is the non-secret ack: the app, the add-on, and the KEY the connection string
+// was written under — never the value (ADR-0031).
+type addonAttachOutput struct {
+	App       string `json:"app"`
+	Addon     string `json:"addon"`
+	SecretKey string `json:"secret_key"`
+}
+
+func addonAttachTool(c *client.Client) sdk.ToolHandlerFor[addonAttachInput, addonAttachOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in addonAttachInput) (*sdk.CallToolResult, addonAttachOutput, error) {
+		res, err := c.AttachAddon(ctx, in.Addon, in.App)
+		if err != nil {
+			return nil, addonAttachOutput{}, err
+		}
+		return nil, addonAttachOutput{App: res.App, Addon: res.Addon, SecretKey: res.SecretKey}, nil
+	}
 }
 
 func addonRemoveTool(c *client.Client) sdk.ToolHandlerFor[addonRemoveInput, addonRemoveOutput] {

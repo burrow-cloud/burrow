@@ -53,6 +53,10 @@ const (
 	// GuardrailAddonRemove: the operation would remove an installed add-on — the destructive
 	// side, since dependent apps may rely on it (ADR-0025).
 	GuardrailAddonRemove GuardrailCode = "addon_remove"
+	// GuardrailAddonDetach: the operation would detach an app from an add-on — for Postgres,
+	// dropping the app's database and role and destroying its data (ADR-0031). Held for
+	// confirmation by default. (Attach is not guarded: it provisions, it destroys nothing.)
+	GuardrailAddonDetach GuardrailCode = "addon_detach"
 	// GuardrailAppDelete: the operation would delete an app entirely — its workload, routing,
 	// and release history — so it disappears from the apps listing. The destructive teardown
 	// of a deployed application.
@@ -83,6 +87,7 @@ var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailDNSDelete, Description: "delete a public DNS record at a configured provider"},
 	{Code: GuardrailAddonInstall, Description: "install a building-block add-on (backing service) onto the cluster"},
 	{Code: GuardrailAddonRemove, Description: "remove an installed add-on from the cluster"},
+	{Code: GuardrailAddonDetach, Description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)"},
 	{Code: GuardrailAppDelete, Description: "delete an app entirely (its workload, routing, and release history)"},
 	{Code: GuardrailRollback, Description: "roll an application back to its previous release"},
 }

@@ -26,6 +26,8 @@ type Database struct {
 	addons    map[string]controlplane.AddonInfo
 	appEnv    map[string]map[string]string // app -> key -> value
 	audit     []controlplane.AuditEntry    // append-only, in append order
+	backups   map[string]controlplane.Backup
+	backupSeq []string // backup IDs in record order, for deterministic newest-first listing
 	errs      map[Op]error
 	policy    controlplane.Policy
 }
@@ -38,6 +40,7 @@ func NewDatabase() *Database {
 		providers: make(map[string]controlplane.Provider),
 		addons:    make(map[string]controlplane.AddonInfo),
 		appEnv:    make(map[string]map[string]string),
+		backups:   make(map[string]controlplane.Backup),
 		errs:      make(map[Op]error),
 		policy:    controlplane.DefaultPolicy(),
 	}
@@ -358,6 +361,73 @@ func (d *Database) AuditRows() []controlplane.AuditEntry {
 		out[i] = e
 	}
 	return out
+}
+
+// RecordBackup persists a new backup row, tracking record order for deterministic listing. An
+// existing row with the same ID is overwritten in place.
+func (d *Database) RecordBackup(ctx context.Context, b controlplane.Backup) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpRecordBackup]; err != nil {
+		return err
+	}
+	if b.ID == "" {
+		return fmt.Errorf("database: record backup: empty ID")
+	}
+	if _, exists := d.backups[b.ID]; !exists {
+		d.backupSeq = append(d.backupSeq, b.ID)
+	}
+	d.backups[b.ID] = b
+	return nil
+}
+
+// SetBackupStatus updates a recorded backup's status and size. An unknown id is ErrNotFound.
+func (d *Database) SetBackupStatus(ctx context.Context, id string, status controlplane.BackupStatus, sizeBytes int64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpSetBackupStatus]; err != nil {
+		return err
+	}
+	b, ok := d.backups[id]
+	if !ok {
+		return fmt.Errorf("database: backup %q: %w", id, controlplane.ErrNotFound)
+	}
+	b.Status = status
+	b.SizeBytes = sizeBytes
+	d.backups[id] = b
+	return nil
+}
+
+// ListBackups returns recorded backups newest first (reverse record order). An empty app lists all.
+func (d *Database) ListBackups(ctx context.Context, app string) ([]controlplane.Backup, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpListBackups]; err != nil {
+		return nil, err
+	}
+	out := make([]controlplane.Backup, 0)
+	for i := len(d.backupSeq) - 1; i >= 0; i-- {
+		b := d.backups[d.backupSeq[i]]
+		if app != "" && b.App != app {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// GetBackup returns the backup with the given id, or ErrNotFound.
+func (d *Database) GetBackup(ctx context.Context, id string) (controlplane.Backup, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpGetBackup]; err != nil {
+		return controlplane.Backup{}, err
+	}
+	b, ok := d.backups[id]
+	if !ok {
+		return controlplane.Backup{}, fmt.Errorf("database: backup %q: %w", id, controlplane.ErrNotFound)
+	}
+	return b, nil
 }
 
 // cloneStringMap deep-copies a string map (nil stays nil) so the fake never aliases a caller's map.

@@ -100,9 +100,19 @@ the groundwork the web UI and managed product depend on.
 
 **Next:**
 
-- **Postgres add-on** — the first *backend* building block: `addon install postgres`, with the
-  generated `DATABASE_URL` written into the app's per-app Secret (the secrets fabric above). The
-  North-Star down payment — BYO Neon/Supabase and a provisioned DB reach the app the same way.
+- **Postgres add-on** ([ADR-0031](adr/0031-postgres-addon.md)) ✅ shipped (#109) — the first
+  *backend* building block: `addon install postgres` stands up **one shared instance** in
+  `burrow-addons`; `addon attach postgres <app>` gives each app its **own database + login role**
+  (isolation without per-app pods) and writes the generated `DATABASE_URL` into the app's per-app
+  Secret, restarting the app to pick it up. burrowd generates the superuser and per-app passwords
+  server-side, so attach is agent-drivable yet **no secret value crosses MCP**. The North-Star down
+  payment — BYO Neon/Supabase and a provisioned DB reach the app the same way. Per-app *instances*
+  are a later opt-in.
+- **Postgres backups** ([ADR-0032](adr/0032-postgres-backups.md), in progress) — a database isn't
+  trustworthy without them: `addon backup postgres <app>` runs a `pg_dump` Job to a backup PVC and
+  records the backup in the control-plane DB; `addon backups` lists them; `addon restore postgres
+  <app> --backup <id>` runs a `pg_restore` Job behind a confirm guardrail. Scheduled backups +
+  retention (a CronJob) follow in a second slice.
 - **Credentials follow-on** — the registry pull secret ([ADR-0017](adr/0017-private-registry-authentication.md))
   through burrowd too; a read-only audit MCP tool; richer per-principal identity with an auth ADR.
 - Unsequenced themes — database provisioning depth, autoscaling, cost controls, a self-host

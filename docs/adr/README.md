@@ -56,3 +56,5 @@ alternatives that were rejected.
 | [0028](0028-app-config-and-secrets.md) | App config and secrets — a lifecycle `app env` / `app secret` store (deploy takes no env); secret values stay off MCP, out of Postgres, in a per-app Secret | Accepted (secret transport superseded by ADR-0029) |
 | [0029](0029-secrets-through-the-control-plane.md) | Secrets traverse the control-plane API (CLI/UI/managed), never MCP; default app namespace → `burrow-apps` | Accepted |
 | [0030](0030-credentials-through-the-control-plane.md) | Burrow-owned credentials (provider + connected-backend tokens) traverse the control-plane API, never MCP; burrowd gains name-scoped `update` on `burrow-credentials` | Accepted |
+| [0031](0031-postgres-addon.md) | The Postgres add-on — one shared instance, a database and role per app; the generated `DATABASE_URL` lands in the app's per-app Secret | Accepted |
+| [0032](0032-postgres-backups.md) | Postgres backups — logical `pg_dump`/`pg_restore` via Jobs to a backup PVC, recorded in the control-plane database; restore is confirm-gated | Accepted |

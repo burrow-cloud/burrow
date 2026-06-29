@@ -61,9 +61,18 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
+		}
+	}
+
+	// Security boundary (ADR-0032): restore overwrites an app's live database, so it is CLI-only —
+	// there must be NO restore (or detach) MCP tool. Backup and the backups listing are allowed:
+	// they move no secret value (an in-cluster Job does the dump).
+	for _, banned := range []string{"burrow_addon_restore", "burrow_addon_detach"} {
+		if got[banned] {
+			t.Errorf("tool %q must NOT exist: a destructive overwrite is CLI-only", banned)
 		}
 	}
 	// Security boundary (ADR-0029/0004): there must be NO secret-set tool — a secret value never

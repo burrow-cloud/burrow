@@ -75,6 +75,16 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, addonAttachTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_addon_backup",
+		Description: "Back up an application's database on the installed Postgres add-on. You supply only the add-on type (\"postgres\") and the app name — NO secret. Burrow runs an in-cluster Job that dumps the database to a backup volume and records the backup; the database superuser password never crosses this tool or appears in the result. Returns the recorded backup (its id, the app, the on-volume path, the size, and the status) — never a connection string. Backup destroys nothing, so it is allowed. To RESTORE a backup (which overwrites live data) there is no tool: ask the user to run `burrow addon restore postgres <app> --backup <id>` themselves.",
+	}, addonBackupTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_addon_backups",
+		Description: "List the recorded database backups for the Postgres add-on (id, app, time, size, status), so you can see what restore points exist. Pass the add-on type (\"postgres\") and optionally an app to restrict the listing; omit the app to list every app's backups. Read-only — restoring is CLI-only.",
+	}, addonBackupsTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_logs_query",
 		Description: "Query the cluster's aggregated logs (the installed logs add-on) with a VictoriaLogs LogsQL query to investigate why an app is failing or slow — e.g. `error`, `level:error`, `panic AND web`. Returns recent matching records (most recent first). Needs a logs add-on installed first (burrow_addon_install with capability \"logs\").",
 	}, logsQueryTool(c))
@@ -538,6 +548,61 @@ func addonAttachTool(c *client.Client) sdk.ToolHandlerFor[addonAttachInput, addo
 			return nil, addonAttachOutput{}, err
 		}
 		return nil, addonAttachOutput{App: res.App, Addon: res.Addon, SecretKey: res.SecretKey}, nil
+	}
+}
+
+// addonBackupInput carries only the add-on type and app name — never a secret (ADR-0032).
+type addonBackupInput struct {
+	Addon string `json:"addon" jsonschema:"the add-on type to back up, e.g. postgres"`
+	App   string `json:"app" jsonschema:"the application whose database to back up (a DNS-1123 label)"`
+}
+
+// backupItem is the agent's view of one recorded backup — id, app, time, size, status, and the
+// on-volume path. Never a credential (ADR-0032).
+type backupItem struct {
+	ID        string `json:"id"`
+	App       string `json:"app"`
+	CreatedAt string `json:"created_at"`
+	Path      string `json:"path,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	Status    string `json:"status"`
+}
+
+func toBackupItem(b client.Backup) backupItem {
+	return backupItem{ID: b.ID, App: b.App, CreatedAt: b.CreatedAt, Path: b.Path, SizeBytes: b.SizeBytes, Status: b.Status}
+}
+
+func addonBackupTool(c *client.Client) sdk.ToolHandlerFor[addonBackupInput, backupItem] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in addonBackupInput) (*sdk.CallToolResult, backupItem, error) {
+		res, err := c.BackupAddon(ctx, in.Addon, in.App)
+		if err != nil {
+			return nil, backupItem{}, err
+		}
+		return nil, toBackupItem(res.Backup), nil
+	}
+}
+
+// addonBackupsInput carries the add-on type and an optional app filter — never a secret.
+type addonBackupsInput struct {
+	Addon string `json:"addon" jsonschema:"the add-on type to list backups for, e.g. postgres"`
+	App   string `json:"app,omitempty" jsonschema:"optional: restrict to one app; omit to list every app's backups"`
+}
+
+type addonBackupsOutput struct {
+	Backups []backupItem `json:"backups"`
+}
+
+func addonBackupsTool(c *client.Client) sdk.ToolHandlerFor[addonBackupsInput, addonBackupsOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in addonBackupsInput) (*sdk.CallToolResult, addonBackupsOutput, error) {
+		bs, err := c.Backups(ctx, in.Addon, in.App)
+		if err != nil {
+			return nil, addonBackupsOutput{}, err
+		}
+		out := addonBackupsOutput{Backups: make([]backupItem, 0, len(bs))}
+		for _, b := range bs {
+			out.Backups = append(out.Backups, toBackupItem(b))
+		}
+		return nil, out, nil
 	}
 }
 

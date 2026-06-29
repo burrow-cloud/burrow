@@ -174,6 +174,7 @@ func DefaultPolicy() Policy {
 			GuardrailAddonInstall:   DispositionConfirm,
 			GuardrailAddonRemove:    DispositionConfirm,
 			GuardrailAddonDetach:    DispositionConfirm,
+			GuardrailAddonRestore:   DispositionConfirm,
 			GuardrailAppDelete:      DispositionConfirm,
 			// Rollback is a recovery action, so it is allowed by default — an agent should be
 			// able to restore a broken app without friction. An operator who wants sign-off can

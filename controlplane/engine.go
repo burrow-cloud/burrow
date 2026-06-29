@@ -598,6 +598,117 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app string, confi
 	return nil
 }
 
+// BackupAddon backs up app's database on the installed Postgres add-on (ADR-0032): burrowd records a
+// pending backup, runs an in-cluster Job that pg_dumps the database to the backup PVC, and marks the
+// backup completed (or failed). The backup is recorded in the control-plane database — burrowd is not
+// mounted to the backup PVC, so the database, not the volume, is the index of backups. It moves no
+// secret value: the Job reads the superuser password only via secretKeyRef, and the audit row and the
+// returned result name the add-on, app, backup id, path, and size — never a credential. Backup is
+// allowed by default (it destroys nothing) and safe over MCP.
+func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app string) (BackupResult, error) {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return BackupResult{}, fmt.Errorf("backup addon: %w: %w", ErrInvalid, err)
+	}
+	if t != AddonPostgres {
+		return BackupResult{}, fmt.Errorf("backup addon %s: only the postgres add-on supports backup: %w", t, ErrInvalid)
+	}
+
+	backupID := e.ids.NewID()
+	// The redacted audit args carry the add-on, app, and backup NAMES only — never a credential (ADR-0032).
+	args := map[string]string{"addon": string(t), "app": app, "backup": backupID}
+
+	backup := Backup{
+		ID:        backupID,
+		App:       app,
+		CreatedAt: e.clock.Now(),
+		Path:      BackupPath(app, backupID),
+		Status:    BackupPending,
+	}
+	if err := e.db.RecordBackup(ctx, backup); err != nil {
+		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
+		return BackupResult{}, fmt.Errorf("backup addon %s for %s: recording backup: %w", t, app, err)
+	}
+
+	size, err := e.k8s.RunBackupJob(ctx, app, backupID)
+	if err != nil {
+		_ = e.db.SetBackupStatus(ctx, backupID, BackupFailed, 0)
+		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
+		return BackupResult{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
+	}
+	if err := e.db.SetBackupStatus(ctx, backupID, BackupCompleted, size); err != nil {
+		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
+		return BackupResult{}, fmt.Errorf("backup addon %s for %s: recording completion: %w", t, app, err)
+	}
+	backup.Status = BackupCompleted
+	backup.SizeBytes = size
+	e.recordExecution(ctx, auditOpAddonBackup, app, args, nil)
+	return BackupResult{Backup: backup}, nil
+}
+
+// ListBackups returns recorded backups, newest first, from the control-plane database (ADR-0032).
+// An empty app lists every app's backups; a non-empty app restricts to that app. Read-only and safe
+// over MCP — it names the app, size, time, and on-PVC path, never a credential.
+func (e *Engine) ListBackups(ctx context.Context, t AddonType, app string) ([]Backup, error) {
+	if t != AddonPostgres {
+		return nil, fmt.Errorf("list backups %s: only the postgres add-on supports backups: %w", t, ErrInvalid)
+	}
+	if app != "" {
+		if err := (App{Name: app}).Validate(); err != nil {
+			return nil, fmt.Errorf("list backups: %w: %w", ErrInvalid, err)
+		}
+	}
+	backups, err := e.db.ListBackups(ctx, app)
+	if err != nil {
+		return nil, fmt.Errorf("list backups: %w", err)
+	}
+	return backups, nil
+}
+
+// RestoreAddon restores app's database from a recorded backup, overwriting its live contents
+// (ADR-0032). It is behind the addon_restore confirm guardrail (it destroys live data), runs an
+// in-cluster Job that pg_restores the named dump, and records the restore in the audit log. The Job
+// reads the superuser password only via secretKeyRef; the audit row records {addon, app, backup}
+// only — never a credential.
+func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID string, confirm bool) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("restore addon: %w: %w", ErrInvalid, err)
+	}
+	if t != AddonPostgres {
+		return fmt.Errorf("restore addon %s: only the postgres add-on supports restore: %w", t, ErrInvalid)
+	}
+	if backupID == "" {
+		return fmt.Errorf("restore addon %s: a backup id is required: %w", t, ErrInvalid)
+	}
+
+	// The backup must exist and belong to the app — resolve it before evaluating the guardrail so a
+	// bad id reads as ErrNotFound rather than a spurious confirmation prompt (mirrors Rollback).
+	backup, err := e.db.GetBackup(ctx, backupID)
+	if err != nil {
+		return fmt.Errorf("restore addon %s for %s: backup %q: %w", t, app, backupID, err)
+	}
+	if backup.App != app {
+		return fmt.Errorf("restore addon %s for %s: backup %q belongs to app %q: %w", t, app, backupID, backup.App, ErrInvalid)
+	}
+
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return fmt.Errorf("restore addon %s: loading guardrail policy: %w", t, err)
+	}
+	args := map[string]string{"addon": string(t), "app": app, "backup": backupID}
+	if err := e.recordDecision(ctx, auditOpAddonRestore, app, args, GuardrailAddonRestore,
+		pol.evaluateGuardrail("addon restore", GuardrailAddonRestore, confirm,
+			fmt.Sprintf("restoring %q from backup %s (overwrites its live database)", app, backupID))); err != nil {
+		return err
+	}
+
+	if err := e.k8s.RunRestoreJob(ctx, app, backupID); err != nil {
+		e.recordExecution(ctx, auditOpAddonRestore, app, args, err)
+		return fmt.Errorf("restore addon %s for %s: %w", t, app, err)
+	}
+	e.recordExecution(ctx, auditOpAddonRestore, app, args, nil)
+	return nil
+}
+
 // DeleteApp removes an app entirely: its workload, its routing (Service/Ingress), and its
 // release history, so the app disappears from the apps listing and from status. It is guarded
 // by app_delete, which holds the destructive teardown for confirmation by default (ADR-0020).

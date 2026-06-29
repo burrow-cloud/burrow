@@ -14,6 +14,5 @@
 // controlplane/internal, and in-memory fakes of the seams live in
 // controlplane/internal/fake for tests.
 //
-// This package is source-available under FSL-1.1-ALv2, which converts to Apache-2.0
-// two years after each release ships (see LICENSING.md and ADR-0001).
+// This package is licensed Apache-2.0 (see LICENSING.md and ADR-0033).
 package controlplane

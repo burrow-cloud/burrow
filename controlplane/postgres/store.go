@@ -10,8 +10,8 @@
 // It uses the pgx driver through the standard database/sql interface (not pgxpool, not
 // the maintenance-mode lib/pq), so one *sql.DB serves both the migrations and the app.
 // It lives under controlplane/ (not controlplane/internal) so cmd/burrowd and the
-// managed module can wire it; it is source-available under FSL-1.1-ALv2 (LICENSING.md,
-// ADR-0001).
+// managed module can wire it; it is licensed Apache-2.0 (LICENSING.md,
+// ADR-0033).
 package postgres
 
 import (

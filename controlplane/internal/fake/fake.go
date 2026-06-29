@@ -8,8 +8,8 @@
 // failure without a real cluster, registry, or database (ADR-0010).
 //
 // The fakes are concurrency-safe so later fault-injection tests can drive them from
-// multiple goroutines under the race detector. This package is source-available under
-// FSL-1.1-ALv2 (see LICENSING.md and ADR-0001); it lives under controlplane/internal
+// multiple goroutines under the race detector. This package is licensed
+// Apache-2.0 (see LICENSING.md and ADR-0033); it lives under controlplane/internal
 // so it is importable only by the control plane it supports.
 package fake
 

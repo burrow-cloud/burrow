@@ -19,8 +19,8 @@ import (
 // Client is a thin HTTP client for the control-plane API (ADR-0005). The MCP server
 // holds the API bearer token to authenticate to the control plane, but never any
 // cluster credentials — those live only in the control plane. These DTOs mirror the
-// API's JSON contract; the MCP layer (Apache-2.0) deliberately does not import the
-// control-plane packages (FSL), so it stays a decoupled client across the license
+// API's JSON contract; the MCP layer deliberately does not import the
+// control-plane packages, so it stays a decoupled client across the module
 // boundary (LICENSING.md).
 type Client struct {
 	baseURL string

@@ -7,7 +7,7 @@
 // a developer with kubectl access configures nothing else.
 //
 // It is Apache-2.0 (the client surface): it imports client-go to talk to the API server
-// but not the FSL controlplane packages — it reaches Burrow over HTTP, like any client.
+// but not the controlplane packages — it reaches Burrow over HTTP, like any client.
 package connect
 
 import (

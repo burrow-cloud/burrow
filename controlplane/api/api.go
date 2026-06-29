@@ -8,7 +8,7 @@
 // in the engine (ADR-0006). The MCP server and the CLI are both clients of this API.
 //
 // It lives under controlplane/ (not controlplane/internal) so cmd/burrowd and the
-// managed module can wire it; it is source-available under FSL-1.1-ALv2.
+// managed module can wire it; it is licensed Apache-2.0.
 package api
 
 import (

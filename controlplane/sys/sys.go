@@ -5,7 +5,7 @@
 // wall Clock, a crypto/rand ID source, and the DNS Resolver — the concrete values cmd/burrowd
 // injects in place of the test fakes (ADR-0010). It lives under controlplane/ (not
 // controlplane/internal) so cmd/burrowd and the managed module can wire it; it is
-// source-available under FSL-1.1-ALv2.
+// licensed Apache-2.0.
 package sys
 
 import (

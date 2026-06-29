@@ -6,7 +6,7 @@
 // that carry no license restriction.
 //
 // The licensed product code does NOT live here: the control plane lives under
-// controlplane/ and the operator under operator/ (both FSL-1.1-ALv2), kept out of
+// controlplane/ and the operator under operator/, kept out of
 // this top-level internal/ precisely so the separate private managed module can
 // import them. See LICENSING.md, ADR-0001, and CLAUDE.md for the package layout, and
 // docs/PLAN.md for what the v0.1 slice adds.

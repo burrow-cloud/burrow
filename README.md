@@ -1,34 +1,53 @@
 # Burrow
 
-**Burrow is an agent-native cloud platform.** Tell your AI coding agent — [Claude
-Code](https://claude.com/claude-code), Cursor, Codex, anything that speaks
-[MCP](https://modelcontextprotocol.io) — what you want, and Burrow carries it out on **your
-own** Kubernetes cluster, safely behind guardrails.
+**Production grade self hosting for your apps, operated by your AI agent, with guardrails.**
+Point [Claude Code](https://claude.com/claude-code), Cursor, Codex, or bring your own at your
+Kubernetes cluster. It deploys, scales, debugs, and ships your apps to a URL over
+[MCP](https://modelcontextprotocol.io). You own the infrastructure and the control plane that
+drives it, and every change the agent makes is gated by a guardrail, so it can't break prod.
 
-It is not another git-deploy host. Vercel and friends run your app on *their* platform;
-Burrow operates *your* cluster — and it goes past the app to the whole stack. Your agent
-writes the integration code; Burrow stands up and runs the backing service.
+It is not another git deploy host. Vercel and friends run your app on *their* platform; Burrow
+operates *your* cluster (real Kubernetes, done right), and goes past the app to the whole
+stack. The agent writes the integration code, and Burrow stands up and runs the backing
+service behind the same guardrails.
+
+## Why Burrow
+
+- **Own your infrastructure, no lock-in.** The control plane is yours. It self hosts in your
+  own cluster, holds the cluster credentials, and is open source (Apache-2.0). No vendor
+  platform sits in the path, and there is nothing to migrate off of later.
+- **Production grade by default.** It is real Kubernetes done right: self-healing workloads,
+  rolling deploys, ingress and TLS, in-place upgrades, with sane defaults, so the hard parts
+  are handled rather than left as homework.
+- **A guardrailed agent, safe enough for prod.** The agent is a tool you drive, not an
+  autonomous operator turned loose on a cluster. It proposes, you approve, and every mutating
+  operation passes the control-plane guardrails and lands in an audit trail. Secrets never
+  travel over MCP. That control model is what makes letting an agent operate production
+  acceptable.
 
 ## Talk to your agent
 
 What you can say today (✅), and where it is headed (🔭):
 
-- ✅ **"Deploy `ghcr.io/me/app:1.4` and serve it at example.com over HTTPS."** — the image,
-  ingress + TLS, and the DNS record, from one ask.
+- ✅ **"Deploy `ghcr.io/me/app:1.4` and serve it at example.com over HTTPS."** The image,
+  ingress and TLS, and the DNS record, from one ask.
 - ✅ **"Roll back the last release."** · **"Scale web to 3."** · **"Show me the logs."** ·
   **"Is my app reachable? If not, what's broken?"**
 - ✅ **"How is my app doing?"** · **"Why is it slow?"** → Burrow installs logs
   ([VictoriaLogs](https://docs.victoriametrics.com/victorialogs/)) on your cluster, *or connects*
   to the logs and metrics you already run ([Loki](https://grafana.com/oss/loki/),
   [Prometheus](https://prometheus.io)), and your agent *queries* them and answers in plain
-  language — answers, not dashboards.
-- 🔭 **"My site is slow — add a cache."** → your agent writes the [ValKey](https://valkey.io)
+  language: answers, not dashboards.
+- ✅ **"My site is slow, add a cache."** → your agent writes the [ValKey](https://valkey.io)
   integration; Burrow deploys ValKey to your cluster and wires it in.
+- 🔭 **"Autoscale web on load."** · **"Show me this month's cluster spend."** → autoscaling and
+  cost controls are on the [roadmap](docs/ROADMAP.md).
 
 The pattern is the same every time: the agent writes the code; **Burrow provisions the
 vetted, permissively-licensed building block, wires it in with sane defaults, and operates
-it** — every change gated by the control-plane guardrails. The ✅ items work now; the 🔭 items
-are the [roadmap](docs/ROADMAP.md). The [version table](#version-status) never lags the code.
+it**, with every change gated by the control-plane guardrails. The ✅ items work now, and the
+🔭 items are the [roadmap](docs/ROADMAP.md). The [version table](#version-status) never lags
+the code.
 
 ## Built for day two
 

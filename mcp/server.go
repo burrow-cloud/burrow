@@ -154,6 +154,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 		Description: "List the control-plane guardrails and their current dispositions (allow, confirm, or deny), so you can tell in advance whether an operation will be allowed, held for the user's confirmation, or denied. Read-only: guardrail policy is changed only by the operator via the CLI, never by an agent.",
 	}, guardTool(c))
 
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_audit",
+		Description: "Review the control plane's append-only audit log (ADR-0027): the durable record of the guarded, mutating operations that ran and the guardrail outcome of each — allowed, held (confirmation required, not executed), denied, executed (allowed, or confirmed and carried out), or failed. Use it to answer \"what did the agent do,\" \"what was held or denied,\" and to show that a dangerous action asked first. Newest first; optionally filter by app/host/add-on target, operation (e.g. deploy, rollback, app_delete), outcome, and limit. Read-only — the log has no write or alter path. Args are redacted at the source to KEY NAMES and safe metadata (image reference, replica count, env/secret key names) — never an env value, token, or secret.",
+	}, auditTool(c))
+
 	return s
 }
 
@@ -702,5 +707,28 @@ func guardTool(c *client.Client) sdk.ToolHandlerFor[guardInput, guardOutput] {
 			return nil, guardOutput{}, err
 		}
 		return nil, guardOutput{Guardrails: gs}, nil
+	}
+}
+
+// auditInput narrows an audit query. A zero value lists the latest rows across every app. The
+// filters mirror the `burrow audit` CLI (ADR-0027).
+type auditInput struct {
+	App       string `json:"app,omitempty" jsonschema:"optional: filter to one app/host/add-on target"`
+	Operation string `json:"operation,omitempty" jsonschema:"optional: filter to one operation, e.g. deploy, rollback, app_delete"`
+	Outcome   string `json:"outcome,omitempty" jsonschema:"optional: filter to one outcome — allowed, held, denied, executed, or failed"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"optional: maximum rows to return (default 200), newest first"`
+}
+
+type auditOutput struct {
+	Entries []client.AuditEntry `json:"entries"`
+}
+
+func auditTool(c *client.Client) sdk.ToolHandlerFor[auditInput, auditOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in auditInput) (*sdk.CallToolResult, auditOutput, error) {
+		entries, err := c.Audit(ctx, client.AuditFilter{App: in.App, Operation: in.Operation, Outcome: in.Outcome, Limit: in.Limit})
+		if err != nil {
+			return nil, auditOutput{}, err
+		}
+		return nil, auditOutput{Entries: entries}, nil
 	}
 }

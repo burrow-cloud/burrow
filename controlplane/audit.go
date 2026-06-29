@@ -104,6 +104,8 @@ const (
 	auditOpAddonRemove  = "addon_remove"
 	auditOpAddonAttach  = "addon_attach"
 	auditOpAddonDetach  = "addon_detach"
+	auditOpAddonBackup  = "addon_backup"
+	auditOpAddonRestore = "addon_restore"
 )
 
 // Audit returns audit rows matching filter, newest first (ADR-0027). It is a read-only,

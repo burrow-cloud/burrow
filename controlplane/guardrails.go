@@ -57,6 +57,10 @@ const (
 	// dropping the app's database and role and destroying its data (ADR-0031). Held for
 	// confirmation by default. (Attach is not guarded: it provisions, it destroys nothing.)
 	GuardrailAddonDetach GuardrailCode = "addon_detach"
+	// GuardrailAddonRestore: the operation would restore an app's database from a backup,
+	// overwriting its live contents (ADR-0032). Held for confirmation by default, like detach and
+	// app delete. (Backup and list are not guarded: they destroy nothing.)
+	GuardrailAddonRestore GuardrailCode = "addon_restore"
 	// GuardrailAppDelete: the operation would delete an app entirely — its workload, routing,
 	// and release history — so it disappears from the apps listing. The destructive teardown
 	// of a deployed application.
@@ -88,6 +92,7 @@ var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailAddonInstall, Description: "install a building-block add-on (backing service) onto the cluster"},
 	{Code: GuardrailAddonRemove, Description: "remove an installed add-on from the cluster"},
 	{Code: GuardrailAddonDetach, Description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)"},
+	{Code: GuardrailAddonRestore, Description: "restore an app's database from a backup, overwriting its live contents"},
 	{Code: GuardrailAppDelete, Description: "delete an app entirely (its workload, routing, and release history)"},
 	{Code: GuardrailRollback, Description: "roll an application back to its previous release"},
 }

@@ -26,7 +26,17 @@ type Kubernetes struct {
 	addresses map[string]string // app -> ingress external address (controller-assigned)
 	addons    map[string]controlplane.AddonInfo
 	secrets   map[string]map[string]string // app -> per-app Secret (key -> value)
+	backups   []backupCall                 // RunBackupJob calls, in order
+	restores  []backupCall                 // RunRestoreJob calls, in order
+	backupSiz int64                        // size RunBackupJob reports
 	errs      map[Op]error
+}
+
+// backupCall records one RunBackupJob/RunRestoreJob invocation so a test can assert the engine
+// drove the in-cluster Job with the right app and backup id.
+type backupCall struct {
+	App      string
+	BackupID string
 }
 
 type deployState struct {
@@ -367,5 +377,46 @@ func (k *Kubernetes) RestartWorkload(ctx context.Context, app string, at time.Ti
 		return fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
 	d.restartedAt = at
+	return nil
+}
+
+// SetBackupSize sets the byte size RunBackupJob reports, modelling the dump container reporting it.
+func (k *Kubernetes) SetBackupSize(n int64) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.backupSiz = n
+}
+
+// BackupJobs returns the (app, backupID) pairs RunBackupJob was called with, in order.
+func (k *Kubernetes) BackupJobs() []backupCall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]backupCall(nil), k.backups...)
+}
+
+// RestoreJobs returns the (app, backupID) pairs RunRestoreJob was called with, in order.
+func (k *Kubernetes) RestoreJobs() []backupCall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]backupCall(nil), k.restores...)
+}
+
+func (k *Kubernetes) RunBackupJob(ctx context.Context, app, backupID string) (int64, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpRunBackupJob]; err != nil {
+		return 0, err
+	}
+	k.backups = append(k.backups, backupCall{App: app, BackupID: backupID})
+	return k.backupSiz, nil
+}
+
+func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, backupID string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpRunRestoreJob]; err != nil {
+		return err
+	}
+	k.restores = append(k.restores, backupCall{App: app, BackupID: backupID})
 	return nil
 }

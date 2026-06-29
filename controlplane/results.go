@@ -3,6 +3,8 @@
 
 package controlplane
 
+import "time"
+
 // The types below are the structured inputs and outputs of the engine's operations.
 // Every operation returns a result an agent can reason over — what changed and, where
 // relevant, the handle to undo it (ADR-0006) — rather than prose.
@@ -151,3 +153,64 @@ type DomainResult struct {
 	Type     string `json:"type,omitempty"`
 	Address  string `json:"address,omitempty"`
 }
+
+// BackupStatus is the lifecycle state of a recorded Postgres backup (ADR-0032). A backup is
+// recorded pending when its Job is started and moves to completed on the Job's success or failed
+// on its failure.
+type BackupStatus string
+
+const (
+	// BackupPending is a backup whose Job has been started but has not yet completed.
+	BackupPending BackupStatus = "pending"
+	// BackupCompleted is a backup whose Job finished successfully; the dump is on the PVC.
+	BackupCompleted BackupStatus = "completed"
+	// BackupFailed is a backup whose Job did not complete successfully.
+	BackupFailed BackupStatus = "failed"
+)
+
+// Valid reports whether s is a known BackupStatus.
+func (s BackupStatus) Valid() bool {
+	switch s {
+	case BackupPending, BackupCompleted, BackupFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Backup is one recorded per-app database backup (ADR-0032): the control-plane index row for a
+// logical dump written to the backup PVC. It names the app, the on-PVC path, the byte size (0 when
+// unknown), and the lifecycle status — never a credential or a connection string. burrowd is not
+// mounted to the backup PVC, so this row, not the volume, is what `addon backups` lists.
+type Backup struct {
+	// ID is the backup identifier, minted from the IDs seam — also the dump filename stem.
+	ID string `json:"id"`
+	// App is the application whose database was dumped.
+	App string `json:"app"`
+	// CreatedAt is when the backup was recorded, read from the injected clock.
+	CreatedAt time.Time `json:"created_at"`
+	// Path is the on-PVC location of the dump (e.g. /backups/<app>/<id>.dump). It is a path on a
+	// volume burrowd does not mount — never a credential.
+	Path string `json:"path,omitempty"`
+	// SizeBytes is the dump's size in bytes, or 0 when unknown.
+	SizeBytes int64 `json:"size_bytes,omitempty"`
+	// Status is the lifecycle state of this backup.
+	Status BackupStatus `json:"status"`
+}
+
+// BackupResult reports the outcome of an on-demand backup (ADR-0032): the recorded backup row. It
+// carries the backup id, the app, the path, the size, and the status — never a secret value.
+type BackupResult struct {
+	Backup Backup `json:"backup"`
+}
+
+// BackupPath is the on-PVC path of app's dump for id, recorded in the backup row and used by the
+// kube Job builder so both sides agree on the layout without the engine importing the kube package
+// (ADR-0032). It is a path on a volume burrowd does not mount — never a credential.
+func BackupPath(app, id string) string {
+	return backupMountPath + "/" + app + "/" + id + ".dump"
+}
+
+// backupMountPath is where the backup PVC is mounted inside the backup/restore Job container; it
+// prefixes every recorded backup path so the engine and the kube Job builder agree on the layout.
+const backupMountPath = "/backups"

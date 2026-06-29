@@ -57,6 +57,12 @@ const (
 	OpVerifyAccess    Op = "VerifyAccess"
 	OpAppendAudit     Op = "AppendAudit"
 	OpAudit           Op = "Audit"
+	OpRecordBackup    Op = "RecordBackup"
+	OpSetBackupStatus Op = "SetBackupStatus"
+	OpListBackups     Op = "ListBackups"
+	OpGetBackup       Op = "GetBackup"
+	OpRunBackupJob    Op = "RunBackupJob"
+	OpRunRestoreJob   Op = "RunRestoreJob"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

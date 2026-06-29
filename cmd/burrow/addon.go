@@ -25,7 +25,118 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupsCmd(), newAddonRestoreCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
+	return cmd
+}
+
+// newAddonBackupCmd is `burrow addon backup postgres <app>`: back up an app's database on the
+// installed Postgres add-on (ADR-0032). burrowd runs an in-cluster Job that pg_dumps the database to
+// the backup PVC and records the backup; no secret value crosses the API. Backup destroys nothing,
+// so it is allowed by default.
+func newAddonBackupCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "backup <addon> <app>",
+		Short: "Back up an app's database (e.g. on the Postgres add-on)",
+		Long: "backup runs an in-cluster Job that pg_dumps an app's database on the installed Postgres\n" +
+			"add-on to a backup volume and records the backup in the control plane. No secret value crosses\n" +
+			"the API — the Job reads the superuser password from the add-on's Secret in-cluster.",
+		Args: exactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			res, err := c.BackupAddon(ctx, args[0], args[1])
+			if err != nil {
+				return err
+			}
+			b := res.Backup
+			human := fmt.Sprintf("backed up %q (backup %s, status %s)\nstored at %s", b.App, b.ID, b.Status, b.Path)
+			return emit(cmd.OutOrStdout(), o.json, res, human)
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	return cmd
+}
+
+// newAddonBackupsCmd is `burrow addon backups postgres [<app>]`: list recorded backups, newest
+// first. With no app it lists every app's backups. Read-only.
+func newAddonBackupsCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "backups <addon> [<app>]",
+		Short: "List recorded database backups (id, app, time, size)",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			app := ""
+			if len(args) == 2 {
+				app = args[1]
+			}
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			backups, err := c.Backups(ctx, args[0], app)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if o.json {
+				return emit(out, true, backups, "")
+			}
+			if len(backups) == 0 {
+				fmt.Fprintln(out, "No backups recorded. Create one with `burrow addon backup postgres <app>`.")
+				return nil
+			}
+			fmt.Fprintf(out, "%-26s%-16s%-24s%-12s%s\n", "ID", "APP", "CREATED", "STATUS", "SIZE")
+			for _, b := range backups {
+				fmt.Fprintf(out, "%-26s%-16s%-24s%-12s%d\n", b.ID, b.App, b.CreatedAt, b.Status, b.SizeBytes)
+			}
+			return nil
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	return cmd
+}
+
+// newAddonRestoreCmd is `burrow addon restore postgres <app> --backup <id>`: restore an app's
+// database from a recorded backup, overwriting its live contents (ADR-0032). It is destructive, so it
+// is held for confirmation by the addon_restore guardrail by default. Restore is CLI-only — there is
+// no MCP tool for it.
+func newAddonRestoreCmd() *cobra.Command {
+	o := &commonOpts{}
+	var backup string
+	var confirm bool
+	cmd := &cobra.Command{
+		Use:   "restore <addon> <app> --backup <id>",
+		Short: "Restore an app's database from a backup, overwriting its live contents",
+		Long: "restore runs an in-cluster Job that pg_restores a recorded backup into an app's database,\n" +
+			"replacing its current contents. It is destructive, so it is held for confirmation by the\n" +
+			"addon_restore guardrail by default; pass --confirm to proceed.",
+		Args: exactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			if backup == "" {
+				return errors.New("a backup id is required (--backup <id>)")
+			}
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			if err := c.RestoreAddon(ctx, args[0], args[1], backup, confirm); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "restored %q from backup %s\n", args[1], backup)
+			return nil
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	cmd.Flags().StringVar(&backup, "backup", "", "the backup id to restore (from `burrow addon backups postgres <app>`)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	_ = cmd.MarkFlagRequired("backup")
 	return cmd
 }
 

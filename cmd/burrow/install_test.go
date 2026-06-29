@@ -34,12 +34,14 @@ func TestRenderManifests(t *testing.T) {
 		"-listen=:8080",
 		"path: /healthz",
 		`verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]`,
-		`resources: ["services"]`,               // expose creates Services (ADR-0018)
-		`resources: ["ingresses"]`,              // ... and Ingresses
-		"name: burrow-credentials",              // the empty vendor-credential Secret (ADR-0023)
-		`resourceNames: ["burrow-credentials"]`, // burrowd's credentials grant, scoped to it
-		`verbs: ["get", "update"]`,              // get + update on exactly that Secret (ADR-0030)
-		"fieldPath: metadata.namespace",         // POD_NAMESPACE: where burrowd reads credentials
+		`resources: ["services"]`,                    // expose creates Services (ADR-0018)
+		`resources: ["ingresses"]`,                   // ... and Ingresses
+		`resources: ["jobs"]`,                        // Postgres backup/restore run as Jobs (ADR-0032)
+		`verbs: ["get", "list", "create", "delete"]`, // ... created and reaped by burrowd, namespace-scoped
+		"name: burrow-credentials",                   // the empty vendor-credential Secret (ADR-0023)
+		`resourceNames: ["burrow-credentials"]`,      // burrowd's credentials grant, scoped to it
+		`verbs: ["get", "update"]`,                   // get + update on exactly that Secret (ADR-0030)
+		"fieldPath: metadata.namespace",              // POD_NAMESPACE: where burrowd reads credentials
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered manifests missing %q", want)

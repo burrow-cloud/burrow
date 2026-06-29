@@ -342,6 +342,53 @@ func (c *Client) DetachAddon(ctx context.Context, addonType, app string, confirm
 	return c.do(ctx, http.MethodPost, "/v1/addons/detach", body, nil)
 }
 
+// Backup is one recorded per-app database backup (ADR-0032): the control-plane index row for a dump
+// on the backup PVC. It names the app, the on-PVC path, the size, and the status — never a credential.
+type Backup struct {
+	ID        string `json:"id"`
+	App       string `json:"app"`
+	CreatedAt string `json:"created_at"`
+	Path      string `json:"path,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	Status    string `json:"status"`
+}
+
+// BackupResult is the outcome of an on-demand backup (ADR-0032): the recorded backup row.
+type BackupResult struct {
+	Backup Backup `json:"backup"`
+}
+
+// BackupAddon backs up an app's database on the installed Postgres add-on (ADR-0032). burrowd runs
+// an in-cluster Job that pg_dumps to the backup PVC and records the backup; no secret value crosses
+// this API. The result is the recorded backup (id, app, path, size, status), never a credential.
+func (c *Client) BackupAddon(ctx context.Context, addonType, app string) (BackupResult, error) {
+	var out BackupResult
+	body := map[string]any{"addon": addonType, "app": app}
+	err := c.do(ctx, http.MethodPost, "/v1/addons/backup", body, &out)
+	return out, err
+}
+
+// Backups lists recorded backups from the control-plane database (ADR-0032). An empty app lists
+// every app's backups; a non-empty app restricts to that app. Read-only; no secret value.
+func (c *Client) Backups(ctx context.Context, addonType, app string) ([]Backup, error) {
+	var out struct {
+		Backups []Backup `json:"backups"`
+	}
+	path := "/v1/addons/backups?addon=" + url.QueryEscape(addonType)
+	if app != "" {
+		path += "&app=" + url.QueryEscape(app)
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	return out.Backups, err
+}
+
+// RestoreAddon restores an app's database from a recorded backup, overwriting its live contents
+// (ADR-0032). It is held for confirmation by a guardrail by default; pass confirm=true to proceed.
+func (c *Client) RestoreAddon(ctx context.Context, addonType, app, backupID string, confirm bool) error {
+	body := map[string]any{"addon": addonType, "app": app, "backup": backupID, "confirm": confirm}
+	return c.do(ctx, http.MethodPost, "/v1/addons/restore", body, nil)
+}
+
 // LogEntry is one record from a logs query.
 type LogEntry struct {
 	Time    string `json:"time,omitempty"`

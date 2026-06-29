@@ -107,6 +107,17 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "update", "delete"]
+  # Postgres backup/restore run as short-lived Jobs in this namespace that pg_dump/pg_restore an
+  # app's database to the backup PVC (ADR-0032). burrowd creates and reaps them and reads their
+  # status; the Jobs read the superuser password from burrow-postgres via secretKeyRef.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "delete"]
+  # ... and reads the backup Job's pod to recover the dump's byte size from the terminated
+  # container's termination-message (ADR-0032). Read-only on pods, scoped to this namespace.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

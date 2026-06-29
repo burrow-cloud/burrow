@@ -80,6 +80,12 @@ func New(cfg Config) (http.Handler, error) {
 	// guardrail (it drops data).
 	v1.HandleFunc("POST /v1/addons/attach", s.attachAddon)
 	v1.HandleFunc("POST /v1/addons/detach", s.detachAddon)
+	// backup/backups/restore manage per-app Postgres backups (ADR-0032). backup and the backups
+	// listing move no secret value (an in-cluster Job does the dump). restore is held by a confirm
+	// guardrail (it overwrites the live database).
+	v1.HandleFunc("POST /v1/addons/backup", s.backupAddon)
+	v1.HandleFunc("GET /v1/addons/backups", s.listBackupsHandler)
+	v1.HandleFunc("POST /v1/addons/restore", s.restoreAddon)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
@@ -482,6 +488,74 @@ func (s *server) detachAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"addon": req.Addon, "app": req.App})
+}
+
+// backupAddon backs up an app's database on the installed Postgres add-on (ADR-0032). burrowd runs
+// an in-cluster Job that pg_dumps to the backup PVC and records the backup in the control-plane
+// database; the response is the recorded backup (id, app, path, size, status) — no secret value. The
+// backup Job reads the superuser password only via secretKeyRef, never logged or returned.
+func (s *server) backupAddon(w http.ResponseWriter, r *http.Request) {
+	var req addonBackupRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.engine.BackupAddon(r.Context(), controlplane.AddonType(req.Addon), req.App)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// listBackupsHandler lists recorded backups from the control-plane database (ADR-0032). An app query
+// param restricts to one app; absent, it lists every app's backups. Read-only; no secret value.
+func (s *server) listBackupsHandler(w http.ResponseWriter, r *http.Request) {
+	addon := r.URL.Query().Get("addon")
+	if addon == "" {
+		addon = string(controlplane.AddonPostgres)
+	}
+	backups, err := s.engine.ListBackups(r.Context(), controlplane.AddonType(addon), r.URL.Query().Get("app"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, backupsResponse{Backups: backups})
+}
+
+// restoreAddon restores an app's database from a recorded backup, overwriting its live contents
+// (ADR-0032). It is held by the addon_restore confirm guardrail by default. burrowd runs an
+// in-cluster Job that pg_restores the named dump; the Job reads the superuser password only via
+// secretKeyRef.
+func (s *server) restoreAddon(w http.ResponseWriter, r *http.Request) {
+	var req addonRestoreRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.engine.RestoreAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Backup, req.Confirm); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"addon": req.Addon, "app": req.App, "backup": req.Backup})
+}
+
+// addonBackupRequest is the body of an addon backup: the add-on type and the app. No secret.
+type addonBackupRequest struct {
+	Addon string `json:"addon"`
+	App   string `json:"app"`
+}
+
+// addonRestoreRequest is the body of an addon restore: the add-on type, the app, the backup id, and
+// confirm (restore is held by a confirm guardrail).
+type addonRestoreRequest struct {
+	Addon   string `json:"addon"`
+	App     string `json:"app"`
+	Backup  string `json:"backup"`
+	Confirm bool   `json:"confirm,omitempty"`
+}
+
+// backupsResponse wraps the backup list so the shape can grow without breaking object decoders.
+type backupsResponse struct {
+	Backups []controlplane.Backup `json:"backups"`
 }
 
 // addonAttachRequest is the body of an addon attach: the add-on type and the app name. It carries

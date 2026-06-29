@@ -156,6 +156,21 @@ type Kubernetes interface {
 	// (read only at pod start via envFrom) forces the running app to pick it up. A missing
 	// Deployment returns ErrNotFound; the caller treats that as "nothing running to roll".
 	RestartWorkload(ctx context.Context, app string, at time.Time) error
+
+	// RunBackupJob runs a one-shot Job in the add-on namespace that pg_dumps app's database on the
+	// installed Postgres instance to /<backup-pvc>/<app>/<backupID>.dump (custom format), ensuring
+	// the backup PVC first (ADR-0032). The Job connects as the superuser, reading the password from
+	// the burrow-postgres Secret via secretKeyRef env — never a CLI argument, never logged. It
+	// blocks until the Job completes, returns an error if the Job fails or times out, and reaps the
+	// Job on success. It returns the dump's size in bytes when the dump container reported it (the
+	// pod's terminated-state message), or 0 when unknown. app is validated before any Job is built.
+	RunBackupJob(ctx context.Context, app, backupID string) (sizeBytes int64, err error)
+	// RunRestoreJob runs a one-shot Job in the add-on namespace that pg_restores
+	// /<backup-pvc>/<app>/<backupID>.dump into app's database (--clean --if-exists, so it replaces
+	// current contents). Like RunBackupJob it reads the superuser password only via secretKeyRef,
+	// blocks until the Job completes, errors on failure or timeout, and reaps the Job on success.
+	// app is validated before any Job is built.
+	RunRestoreJob(ctx context.Context, app, backupID string) error
 }
 
 // Registry is the seam over the container registry — the conveyor belt that carries
@@ -234,6 +249,20 @@ type Database interface {
 	// Audit returns audit rows matching filter, newest first, capped by filter.Limit (a
 	// store default when unset). No matches yields an empty slice and no error.
 	Audit(ctx context.Context, filter AuditFilter) ([]AuditEntry, error)
+
+	// RecordBackup persists a new backup row (ADR-0032). burrowd records it pending before
+	// starting the backup Job. The row names the app, the on-PVC path, and the status — never a
+	// credential. An existing row with the same ID is overwritten.
+	RecordBackup(ctx context.Context, b Backup) error
+	// SetBackupStatus updates a recorded backup's status (and, when known, its size) — the
+	// completed/failed transition burrowd writes when the Job finishes. Setting the status of an
+	// unknown backup id returns ErrNotFound.
+	SetBackupStatus(ctx context.Context, id string, status BackupStatus, sizeBytes int64) error
+	// ListBackups returns recorded backups, newest first. An empty app lists every app's backups;
+	// a non-empty app restricts to that app. No matches yields an empty slice and no error.
+	ListBackups(ctx context.Context, app string) ([]Backup, error)
+	// GetBackup returns the backup with the given id, or ErrNotFound.
+	GetBackup(ctx context.Context, id string) (Backup, error)
 }
 
 // Credentials is the seam over the one burrow-credentials Secret that holds every vendor

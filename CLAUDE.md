@@ -110,21 +110,21 @@ no correctness surface to test here. Three layers instead:
 
 ## Code layout
 
-The layout is shaped by the license boundary ([ADR-0001](docs/adr/0001-license-and-dco.md),
-[LICENSING.md](LICENSING.md)): the **license follows the package boundary**, and the
-FSL-licensed product packages are kept **out of the top-level `internal/`** so a separate
-private module (the managed product) can import their public API. Every `.go` file carries an
-SPDX header matching its directory.
+All code is licensed **Apache-2.0** ([ADR-0033](docs/adr/0033-relicense-to-apache.md),
+[LICENSING.md](LICENSING.md)); every `.go` file carries an `SPDX-License-Identifier: Apache-2.0`
+header. The control plane and operator are kept **out of the top-level `internal/`** so a
+separate private module (the managed product) can import their public API — a module boundary,
+not a license boundary.
 
-**Apache-2.0 (client surface):**
+**Client surface:**
 
 - [`cmd/burrow`](cmd/burrow/) — the **CLI**. Installs Burrow into a cluster, builds and
   pushes images (client-side build path), and calls the control-plane API directly.
 - [`mcp`](mcp/) — the **MCP server** package: thin, agent-neutral, credential-free; translates
   MCP tool calls into control-plane API calls. Its binary is [`cmd/burrow-mcp`](cmd/burrow-mcp/).
-- [`internal`](internal/) — module-private **shared helpers** only (no licensed product code).
+- [`internal`](internal/) — module-private **shared helpers** only.
 
-**FSL-1.1-ALv2 (the product):**
+**The product:**
 
 - [`controlplane`](controlplane/) — the **control plane** (the product): public API
   (interfaces, the App/Release/Policy domain types, the constructor). Holds cluster
@@ -173,12 +173,11 @@ the v0.1 slice ([docs/PLAN.md](docs/PLAN.md)).
   "your" decision/point/request (e.g. "Built around your point that…", "Records your call",
   "Closes the gap you hit"). State the thing itself ("Adopt Cobra because…", "Fix the 401 by…").
   The same outward voice applies to the README and other repo prose.
-- **Licensing follows the package boundary** ([LICENSING.md](LICENSING.md),
-  [ADR-0001](docs/adr/0001-license-and-dco.md)): Apache-2.0 on the client surface
-  (`cmd/burrow`, `mcp`, `internal`), FSL-1.1-ALv2 on the product (`controlplane`, `operator`,
-  `cmd/burrowd`). Each new `.go` file gets the SPDX header for its directory; the CI check
-  (`scripts/check-spdx.sh`) enforces it. Burrow is described as **"open core,"** never
-  unqualified "open source" ([ADR-0009](docs/adr/0009-honest-status.md)).
+- **All code is Apache-2.0** ([LICENSING.md](LICENSING.md),
+  [ADR-0033](docs/adr/0033-relicense-to-apache.md)). Each new `.go` file gets an
+  `SPDX-License-Identifier: Apache-2.0` header; the CI check (`scripts/check-spdx.sh`) enforces
+  it. The *code* in this repo is open source; **Burrow the product is "open core"** — the managed
+  cloud and enterprise tier are proprietary and separate ([ADR-0009](docs/adr/0009-honest-status.md)).
 - **Outside code is not merged under the DCO alone** — the maintainer keeps sole copyright
   for commercial licensing, so outside-code PRs are declined or CLA-gated; issues and
   discussions are the open way to contribute ([CONTRIBUTING.md](CONTRIBUTING.md)).

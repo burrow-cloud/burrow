@@ -1,10 +1,10 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Nicholas Phillips
 
 // Package logs holds the production controlplane.LogsQuerier adapters — the seam burrowd uses to
 // query an installed or connected logs backing service (ADR-0026). VictoriaLogs is the first.
 // It lives under controlplane/ (not controlplane/internal) so cmd/burrowd can wire it; it is
-// source-available under FSL-1.1-ALv2.
+// licensed Apache-2.0.
 package logs
 
 import (

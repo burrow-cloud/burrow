@@ -122,15 +122,15 @@ first-class, supported operation, not guesswork.
 
 ## Components and code layout
 
-The package layout is shaped by the license boundary — the license follows the package
-boundary, and the FSL-licensed product packages sit outside the top-level `internal/` so the
-separate private managed module can import their public API (see
-[ADR-0001](adr/0001-license-and-dco.md) and [LICENSING.md](../LICENSING.md)).
+All code is licensed Apache-2.0 ([ADR-0033](adr/0033-relicense-to-apache.md),
+[LICENSING.md](../LICENSING.md)). The control plane and operator sit outside the top-level
+`internal/` so the separate private managed module can import their public API — a module
+boundary, not a license boundary.
 
-- **Apache-2.0 (client surface):** `cmd/burrow` — the **CLI**; `mcp` (with binary
+- **Client surface:** `cmd/burrow` — the **CLI**; `mcp` (with binary
   `cmd/burrow-mcp`) — the thin, agent-neutral, credential-free **MCP server** that translates
   tool calls into control-plane API calls; `internal` — module-private shared helpers only.
-- **FSL-1.1-ALv2 (the product):** `controlplane` (public API) with `controlplane/internal`
+- **The product:** `controlplane` (public API) with `controlplane/internal`
   (guts) and binary `cmd/burrowd` — the **control plane** that holds cluster credentials, runs
   orchestration and guardrails, and owns the deploy record and its database state; `operator`
   with `operator/internal` — the Kubernetes **operator** (CRD types and reconcilers).

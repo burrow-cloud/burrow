@@ -26,7 +26,7 @@ alternatives that were rejected.
 
 | ADR | Title | Status |
 | --- | --- | --- |
-| [0001](0001-license-and-dco.md) | License, contribution policy, and DCO | Accepted |
+| [0001](0001-license-and-dco.md) | License, contribution policy, and DCO | Accepted (license decision superseded by ADR-0033; DCO/CLA stance stands) |
 | [0002](0002-four-layer-architecture.md) | Four-layer architecture; the control plane is the product | Accepted |
 | [0003](0003-agent-neutral-mcp-control-surface.md) | An agent-neutral MCP control surface | Accepted |
 | [0004](0004-code-never-over-mcp.md) | Code never travels over MCP; the registry is the conveyor belt | Accepted |
@@ -58,3 +58,4 @@ alternatives that were rejected.
 | [0030](0030-credentials-through-the-control-plane.md) | Burrow-owned credentials (provider + connected-backend tokens) traverse the control-plane API, never MCP; burrowd gains name-scoped `update` on `burrow-credentials` | Accepted |
 | [0031](0031-postgres-addon.md) | The Postgres add-on — one shared instance, a database and role per app; the generated `DATABASE_URL` lands in the app's per-app Secret | Accepted |
 | [0032](0032-postgres-backups.md) | Postgres backups — logical `pg_dump`/`pg_restore` via Jobs to a backup PVC, recorded in the control-plane database; restore is confirm-gated | Accepted |
+| [0033](0033-relicense-to-apache.md) | Relicense the whole repository to Apache-2.0; monetize via managed cloud + a proprietary enterprise tier + risk transfer | Accepted |

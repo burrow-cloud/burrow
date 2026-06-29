@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Nicholas Phillips
 
 // Package dns is the production controlplane.DNSFactory and the per-vendor DNS adapters
@@ -8,7 +8,7 @@
 // so they are tested against an httptest server rather than the live API.
 //
 // It lives under controlplane/ (not controlplane/internal) so cmd/burrowd and the managed
-// module can wire it; it is source-available under FSL-1.1-ALv2.
+// module can wire it; it is licensed Apache-2.0.
 package dns
 
 import (

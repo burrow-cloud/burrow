@@ -2,7 +2,10 @@
 
 ## Status
 
-**Accepted.**
+**Accepted.** **The license decision (the per-package Apache/FSL split) is superseded by
+[ADR-0033](0033-relicense-to-apache.md), which relicenses the whole repository to Apache-2.0.**
+The contribution policy below — sole copyright ownership, dual-licensing (sell-exceptions),
+outside *code* CLA-gated, DCO sign-off on all commits — **remains in force.**
 
 The maintainer's decision is recorded below: a split license (Option B) on a per-package
 boundary, paired with sole copyright ownership, a dual-licensing (sell-exceptions)

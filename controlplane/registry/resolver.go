@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Nicholas Phillips
 
 // Package registry is the production controlplane.Registry adapter. It resolves an image
@@ -8,7 +8,7 @@
 // digest it returns is what makes a deploy (and its rollback) deterministic (ADR-0007).
 //
 // It lives under controlplane/ (not controlplane/internal) so cmd/burrowd and the
-// managed module can wire it; it is source-available under FSL-1.1-ALv2.
+// managed module can wire it; it is licensed Apache-2.0.
 package registry
 
 import (

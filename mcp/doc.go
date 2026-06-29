@@ -9,7 +9,7 @@
 // it over stdio. The binary is cmd/burrow-mcp.
 //
 // This package is Apache-2.0 licensed (the client surface; see LICENSING.md and
-// ADR-0001). It deliberately does not import the FSL-licensed controlplane/ packages —
+// ADR-0033). It deliberately does not import the controlplane/ packages —
 // it talks to the control plane only over the HTTP API, with its own request/response
-// types, so the license boundary stays clean.
+// types, so the module boundary stays clean.
 package mcp

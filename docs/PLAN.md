@@ -114,7 +114,7 @@ the groundwork the web UI and managed product depend on.
   <app> --backup <id>` runs a `pg_restore` Job behind a confirm guardrail. Scheduled backups +
   retention (a CronJob) follow in a second slice.
 - **Credentials follow-on** — the registry pull secret ([ADR-0017](adr/0017-private-registry-authentication.md))
-  through burrowd too; a read-only audit MCP tool; richer per-principal identity with an auth ADR.
+  through burrowd too; richer per-principal identity with an auth ADR.
 - Unsequenced themes — database provisioning depth, autoscaling, cost controls, a self-host
   dashboard, a frictionless cluster on-ramp — live in [ROADMAP.md](ROADMAP.md). **Deferred until
   requested:** server-side build from a git reference ([ADR-0008](adr/0008-two-build-paths.md)).

@@ -61,7 +61,7 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
@@ -143,6 +143,59 @@ func TestSecretListToolReturnsKeysOnly(t *testing.T) {
 	}](t, res)
 	if len(out.Keys) != 2 || out.Keys[0] != "DATABASE_URL" {
 		t.Errorf("keys = %v, want [DATABASE_URL STRIPE_KEY]", out.Keys)
+	}
+}
+
+func TestAuditToolReturnsRecords(t *testing.T) {
+	var gotPath, gotQuery string
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries": []map[string]any{
+				{
+					"timestamp": "2026-06-23T02:00:00Z",
+					"operation": "app_delete",
+					"target":    "web",
+					"args":      map[string]string{"confirm": "false"},
+					"outcome":   "held",
+				},
+			},
+		})
+	})
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_audit",
+		Arguments: map[string]any{"app": "web", "operation": "app_delete", "outcome": "held", "limit": 50},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	out := decodeStructured[struct {
+		Entries []client.AuditEntry `json:"entries"`
+	}](t, res)
+	if len(out.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(out.Entries))
+	}
+	e := out.Entries[0]
+	if e.Operation != "app_delete" || e.Outcome != "held" || e.Target != "web" {
+		t.Errorf("entry = %+v, want app_delete/held/web", e)
+	}
+	// Redaction (ADR-0027): args carry KEY NAMES and safe metadata only — never a secret value.
+	if _, hasValue := e.Args["DATABASE_URL"]; hasValue {
+		t.Errorf("audit args leaked a secret value: %v", e.Args)
+	}
+	if gotPath != "/v1/audit" {
+		t.Errorf("API path = %q, want /v1/audit", gotPath)
+	}
+	// The MCP tool reuses the same read path/filters as the `burrow audit` CLI.
+	for _, want := range []string{"app=web", "operation=app_delete", "outcome=held", "limit=50"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Errorf("query %q missing %q", gotQuery, want)
+		}
 	}
 }
 

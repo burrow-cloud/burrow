@@ -56,10 +56,24 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 	// never inlined in the pod spec, never logged, and never returned (ADR-0031). Other add-ons
 	// add no env.
 	var env []corev1.EnvVar
+	// readiness gates the Service (and AddonReady) on the backing service actually accepting
+	// connections, not merely on the container running. Postgres needs it: on first boot the
+	// official image runs initdb and a temporary socket-only server before binding TCP 5432, so a
+	// pod can be "running" for several seconds before it serves — a TCP probe on its port becomes
+	// ready only when the real server is up.
+	var readiness *corev1.Probe
 	if spec.Type == controlplane.AddonPostgres {
 		var err error
 		if env, err = a.ensurePostgresSuperuserEnv(ctx, labels); err != nil {
 			return controlplane.AddonInfo{}, err
+		}
+		readiness = &corev1.Probe{
+			ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(spec.Port)}},
+			InitialDelaySeconds: 3,
+			PeriodSeconds:       3,
+			TimeoutSeconds:      2,
+			// ~90s of grace for initdb on a cold first boot before the pod is marked unready.
+			FailureThreshold: 30,
 		}
 	}
 
@@ -76,12 +90,13 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
-						Name:         string(spec.Type),
-						Image:        spec.Image,
-						Args:         addonArgs(spec),
-						Env:          env,
-						Ports:        []corev1.ContainerPort{{ContainerPort: spec.Port}},
-						VolumeMounts: mounts,
+						Name:           string(spec.Type),
+						Image:          spec.Image,
+						Args:           addonArgs(spec),
+						Env:            env,
+						Ports:          []corev1.ContainerPort{{ContainerPort: spec.Port}},
+						VolumeMounts:   mounts,
+						ReadinessProbe: readiness,
 					}},
 					Volumes: volumes,
 				},

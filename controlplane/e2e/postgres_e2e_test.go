@@ -90,16 +90,17 @@ func TestPostgresAddonE2E(t *testing.T) {
 	})
 
 	// This test process runs OUT of the cluster, so it cannot resolve the instance's in-cluster
-	// Service DNS name (burrow-postgres.<ns>.svc) that burrowd uses in production. Port-forward the
-	// Postgres pod to a local port and point the provisioner's ADMIN connection at it; the app's
-	// DATABASE_URL still gets the in-cluster Service name, which the round-trip Job (a pod) resolves.
-	localPort := portForwardPod(t, cfg, client, addonNS, "burrow.cloud/addon=postgres", 5432)
-	prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
+	// Service DNS name (burrow-postgres.<ns>.svc) that burrowd uses in production. For each admin
+	// operation, port-forward the Postgres pod to a local port and point the provisioner's ADMIN
+	// connection at it; the app's DATABASE_URL still gets the in-cluster Service name, which the
+	// round-trip Job (a pod) resolves. A fresh forward per operation keeps the test robust against
+	// a single forward dropping mid-run.
+	pgSelector := "burrow.cloud/addon=postgres"
 
 	// Attach the app: provisions the database/role and writes DATABASE_URL into the app's Secret.
-	// Retry briefly — the forward and Postgres accepting connections can lag the pod going Ready.
 	var res cp.AttachResult
-	retry(t, 60*time.Second, "attach addon", func() error {
+	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "attach addon", func(localPort int) error {
+		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
 		var aerr error
 		res, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app)
 		return aerr
@@ -112,10 +113,12 @@ func TestPostgresAddonE2E(t *testing.T) {
 	// per-app Secret), proving the credential and the database both work.
 	runRoundTripJob(t, ctx, client, appNS, app)
 
-	// Detach: drops the database and role and removes the DATABASE_URL key.
-	if err := engine.DetachAddon(ctx, cp.AddonPostgres, app, true); err != nil {
-		t.Fatalf("DetachAddon: %v", err)
-	}
+	// Detach: drops the database and role and removes the DATABASE_URL key (also an admin
+	// operation, so it runs through a fresh port-forward).
+	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "detach addon", func(localPort int) error {
+		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
+		return engine.DetachAddon(ctx, cp.AddonPostgres, app, true)
+	})
 	keys, err := k8s.SecretKeys(ctx, app)
 	if err != nil {
 		t.Fatalf("SecretKeys after detach: %v", err)
@@ -174,24 +177,51 @@ psql "$DATABASE_URL" -tAc "SELECT id FROM t WHERE id = 42;" | grep -q 42`
 	})
 }
 
-// portForwardPod forwards a local ephemeral port to containerPort on the first pod matching
-// labelSelector in ns, returning the chosen local port. The forward is torn down via t.Cleanup.
-// This lets the out-of-cluster test reach an in-cluster Service that only resolves inside the
-// cluster — the same trick `kubectl port-forward` uses.
-func portForwardPod(t *testing.T, cfg *rest.Config, client kubernetes.Interface, ns, labelSelector string, containerPort int) int {
+// withPortForward retries fn under a freshly-established port-forward each attempt, until fn
+// returns nil or the timeout elapses. Re-establishing the forward per attempt keeps the test
+// robust if a single forward drops; the wrapped admin operation is idempotent, so re-running it is
+// safe. desc names the operation in the failure message.
+func withPortForward(t *testing.T, cfg *rest.Config, client kubernetes.Interface, ns, labelSelector string, containerPort int, desc string, fn func(localPort int) error) {
 	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	var last error
+	for {
+		last = func() error {
+			localPort, stop, err := openPortForward(cfg, client, ns, labelSelector, containerPort)
+			if err != nil {
+				return err
+			}
+			defer stop()
+			return fn(localPort)
+		}()
+		if last == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after 90s on %s: %v", desc, last)
+		}
+		time.Sleep(3 * time.Second)
+	}
+}
+
+// openPortForward forwards a local ephemeral port to containerPort on the first pod matching
+// labelSelector in ns, returning the chosen local port and a stop function. This lets the
+// out-of-cluster test reach an in-cluster Service that only resolves inside the cluster — the same
+// trick `kubectl port-forward` uses. It returns an error (rather than failing the test) so the
+// caller can retry.
+func openPortForward(cfg *rest.Config, client kubernetes.Interface, ns, labelSelector string, containerPort int) (int, func(), error) {
 	pods, err := client.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
-		t.Fatalf("list pods %q in %s: %v", labelSelector, ns, err)
+		return 0, nil, fmt.Errorf("list pods %q in %s: %w", labelSelector, ns, err)
 	}
 	if len(pods.Items) == 0 {
-		t.Fatalf("no pod matching %q in %s to port-forward", labelSelector, ns)
+		return 0, nil, fmt.Errorf("no pod matching %q in %s to port-forward", labelSelector, ns)
 	}
 	pod := pods.Items[0].Name
 
 	transport, upgrader, err := spdy.RoundTripperFor(cfg)
 	if err != nil {
-		t.Fatalf("spdy round tripper: %v", err)
+		return 0, nil, fmt.Errorf("spdy round tripper: %w", err)
 	}
 	reqURL := client.CoreV1().RESTClient().Post().
 		Resource("pods").Namespace(ns).Name(pod).SubResource("portforward").URL()
@@ -201,44 +231,21 @@ func portForwardPod(t *testing.T, cfg *rest.Config, client kubernetes.Interface,
 	readyCh := make(chan struct{})
 	fw, err := portforward.New(dialer, []string{fmt.Sprintf("0:%d", containerPort)}, stopCh, readyCh, io.Discard, io.Discard)
 	if err != nil {
-		t.Fatalf("new port forward: %v", err)
+		return 0, nil, fmt.Errorf("new port forward: %w", err)
 	}
-	go func() {
-		if err := fw.ForwardPorts(); err != nil {
-			t.Logf("port-forward to %s/%s ended: %v", ns, pod, err)
-		}
-	}()
+	go func() { _ = fw.ForwardPorts() }()
 	select {
 	case <-readyCh:
-	case <-time.After(30 * time.Second):
+	case <-time.After(15 * time.Second):
 		close(stopCh)
-		t.Fatalf("port-forward to %s/%s not ready within 30s", ns, pod)
+		return 0, nil, fmt.Errorf("port-forward to %s/%s not ready within 15s", ns, pod)
 	}
-	t.Cleanup(func() { close(stopCh) })
-
 	ports, err := fw.GetPorts()
 	if err != nil || len(ports) == 0 {
-		t.Fatalf("get forwarded ports: %v", err)
+		close(stopCh)
+		return 0, nil, fmt.Errorf("get forwarded ports: %w", err)
 	}
-	return int(ports[0].Local)
-}
-
-// retry runs fn until it returns nil or the timeout elapses, failing the test on timeout. Used for
-// operations that may briefly fail while a freshly-ready pod or a new port-forward settles; the
-// wrapped operation (AttachAddon) is idempotent, so re-running it is safe.
-func retry(t *testing.T, timeout time.Duration, desc string, fn func() error) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var last error
-	for {
-		if last = fn(); last == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s on %s: %v", timeout, desc, last)
-		}
-		time.Sleep(2 * time.Second)
-	}
+	return int(ports[0].Local), func() { close(stopCh) }, nil
 }
 
 // waitForCond polls cond until it is true, erroring on a hard error or timeout.

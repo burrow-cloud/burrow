@@ -88,6 +88,38 @@ reason over ([ADR-0006](docs/adr/0006-guardrails-in-the-control-plane.md)). It i
 self-hostable: the single-tenant control plane, the MCP server, and the CLI run entirely on
 your own cluster.
 
+## What "guardrails" mean
+
+Letting an agent operate a cluster is only acceptable if it cannot do something you did not
+approve. In Burrow, guardrails are policy that lives in the **control plane, not in the
+agent**, so the agent can't bypass them or change its own limits. Every mutating operation
+passes through them and gets one of three dispositions:
+
+- **allow**: the operation runs.
+- **confirm**: it is held until you approve. The agent gets back a structured "needs
+  confirmation" result, not a success, so it has to ask first.
+- **deny**: it is blocked outright.
+
+You set the policy from the CLI. There is deliberately **no MCP tool for it**, so an agent can
+never loosen its own guardrails:
+
+```sh
+burrow guard list                       # every guardrail and its current disposition
+burrow guard set app_delete deny        # never let the agent delete an app
+burrow guard set scale_to_zero confirm  # scaling to zero needs your sign-off
+burrow guard set expose_public confirm  # putting something on the public internet needs approval
+```
+
+Guardrails cover the operations that carry risk: deleting an app, scaling to zero, exposing a
+service publicly, DNS changes, installing or removing add-ons, restoring a database, rolling
+back. Every attempt and its outcome (allowed, held, denied, executed) lands in an append-only
+audit log you read with `burrow audit`. And secrets never travel over MCP at all: the agent
+references them by key, you set the values, and they are written straight into a Kubernetes
+Secret.
+
+*Per-environment guardrails, so prod can be locked down while staging stays permissive, are on
+the [roadmap](docs/ROADMAP.md).*
+
 ## Try it
 
 You need a cluster you can reach with `kubectl` (DigitalOcean is the reference target) and Go

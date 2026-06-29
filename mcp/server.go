@@ -155,6 +155,11 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 	}, guardTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_cluster",
+		Description: "See what this cluster can do before you change anything (ADR-0034): a neutral, read-only report of its capabilities, read live. Tells you whether an ingress controller is installed and which IngressClass to use, whether there is a default StorageClass (and its name) for persistent volumes, whether Service type=LoadBalancer is likely supported (inferred from the detected cloud provider) or the cluster is NodePort-only, whether cert-manager is installed (for TLS), the cloud provider, and whether a DNS provider is configured. Use it to survey a cluster and explain its state — and to know whether an operation like exposing an app or requesting a certificate will work — before doing anything. Read-only: it changes nothing and returns no secret.",
+	}, clusterTool(c))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_audit",
 		Description: "Review the control plane's append-only audit log (ADR-0027): the durable record of the guarded, mutating operations that ran and the guardrail outcome of each — allowed, held (confirmation required, not executed), denied, executed (allowed, or confirmed and carried out), or failed. Use it to answer \"what did the agent do,\" \"what was held or denied,\" and to show that a dangerous action asked first. Newest first; optionally filter by app/host/add-on target, operation (e.g. deploy, rollback, app_delete), outcome, and limit. Read-only — the log has no write or alter path. Args are redacted at the source to KEY NAMES and safe metadata (image reference, replica count, env/secret key names) — never an env value, token, or secret.",
 	}, auditTool(c))
@@ -707,6 +712,19 @@ func guardTool(c *client.Client) sdk.ToolHandlerFor[guardInput, guardOutput] {
 			return nil, guardOutput{}, err
 		}
 		return nil, guardOutput{Guardrails: gs}, nil
+	}
+}
+
+// clusterInput has no fields: reading cluster capabilities takes no arguments.
+type clusterInput struct{}
+
+func clusterTool(c *client.Client) sdk.ToolHandlerFor[clusterInput, client.ClusterCapabilities] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, _ clusterInput) (*sdk.CallToolResult, client.ClusterCapabilities, error) {
+		caps, err := c.Cluster(ctx)
+		if err != nil {
+			return nil, client.ClusterCapabilities{}, err
+		}
+		return nil, caps, nil
 	}
 }
 

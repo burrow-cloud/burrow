@@ -91,6 +91,10 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
 	v1.HandleFunc("POST /v1/metrics/query", s.queryMetrics)
 	v1.HandleFunc("GET /v1/audit", s.audit)
+	// The cluster capabilities are read live (ADR-0034): a neutral, read-only report of what the
+	// cluster can do — ingress, storage, LoadBalancer support, cert-manager, provider, DNS. It moves
+	// no secret value.
+	v1.HandleFunc("GET /v1/cluster", s.cluster)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", requireToken(cfg.Token, v1))
@@ -671,6 +675,18 @@ func (s *server) audit(w http.ResponseWriter, r *http.Request) {
 // auditResponse wraps the audit rows so the shape can grow without breaking object decoders.
 type auditResponse struct {
 	Entries []controlplane.AuditEntry `json:"entries"`
+}
+
+// cluster reports the cluster's capabilities live (ADR-0034): a read-only probe of ingress,
+// storage, LoadBalancer support, cert-manager, provider, and configured DNS. It changes nothing
+// and moves no secret value.
+func (s *server) cluster(w http.ResponseWriter, r *http.Request) {
+	caps, err := s.engine.ClusterCapabilities(r.Context())
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, caps)
 }
 
 // guardResponse is the body of a guard list/set call: the full guardrail policy.

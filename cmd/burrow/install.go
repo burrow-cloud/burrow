@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/controlplane/kube"
 )
 
 // defaultBurrowdImage is the control-plane image `install`/`upgrade` deploy by default: the
@@ -194,13 +195,30 @@ func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig 
 		if err := waitForReady(ctx, kubeconfig, namespace, stdout); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "\nBurrow is installed and ready in namespace %q.\n"+
-			"Deploy an app:\n"+
-			"  burrow app deploy <app> --image <ref>\n", namespace)
-		return nil
+		fmt.Fprintf(stdout, "\nBurrow is installed and ready in namespace %q.\n", namespace)
+	} else {
+		fmt.Fprintf(stdout, "\nBurrow installed into namespace %q (not waiting for readiness).\n", namespace)
 	}
-	fmt.Fprintf(stdout, "\nBurrow installed into namespace %q (not waiting for readiness).\n", namespace)
+
+	// Installing tells you what your cluster can do (ADR-0034): probe the cluster's capabilities
+	// kubeconfig-side and print a one-line summary. The probe is read-only and best-effort — a
+	// failure here never fails a successful install, since the agent reads capabilities live anyway.
+	printCapabilitySummary(ctx, cs, stdout)
+
+	if wait {
+		fmt.Fprint(stdout, "Deploy an app:\n  burrow app deploy <app> --image <ref>\n")
+	}
 	return nil
+}
+
+// printCapabilitySummary probes the cluster's capabilities with the kubeconfig client and prints a
+// one-line summary (ADR-0034). It is best-effort: a probe failure prints nothing and is not fatal.
+func printCapabilitySummary(ctx context.Context, cs kubernetes.Interface, stdout io.Writer) {
+	caps, err := kube.DetectCapabilities(ctx, cs)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(stdout, "Detected: %s\n", capabilitySummary(toClientCaps(caps)))
 }
 
 // waitForReady blocks until the in-cluster Postgres and burrowd are ready, printing

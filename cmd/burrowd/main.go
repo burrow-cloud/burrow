@@ -192,6 +192,14 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		return err
 	}
 
+	// The capability prober reads the cluster's read-only capabilities live (ADR-0034). It uses
+	// burrowd's in-cluster client, so it needs only the narrow read-only ClusterRole the install
+	// grants (get/list on nodes, storageclasses, ingressclasses) plus API-group discovery.
+	prober, err := kube.NewProberFromConfig(kubeCfg)
+	if err != nil {
+		return err
+	}
+
 	// One HTTP client shared across the observability adapters — burrowd reaches each backend
 	// in-cluster.
 	obsHTTP := &http.Client{Timeout: 20 * time.Second}
@@ -213,6 +221,7 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 			"victoriametrics": metrics.NewPromQL(obsHTTP),
 		},
 		DatabaseProvisioner: dbProvisioner,
+		ClusterProber:       prober,
 	})
 	if err != nil {
 		return err

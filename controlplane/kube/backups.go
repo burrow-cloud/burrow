@@ -132,8 +132,13 @@ func (a *Adapter) RunRestoreJob(ctx context.Context, app, backupID string) error
 		return err
 	}
 	dump := backupDumpPath(app, backupID)
+	// No --no-owner: the dump records the app role as the owner of the app's objects, and the Job
+	// connects as the burrow_admin superuser, so pg_restore reassigns ownership back to the app role
+	// (app_<app>). That matters because the app connects as that role — were the restored objects
+	// left owned by burrow_admin, the app would lose access to its own tables after a restore.
+	// --clean --if-exists replaces current contents idempotently.
 	script := fmt.Sprintf(`set -e
-pg_restore --clean --if-exists --no-owner -d %q %q`, app, dump)
+pg_restore --clean --if-exists -d %q %q`, app, dump)
 
 	name := fmt.Sprintf("burrow-pg-restore-%s", backupID)
 	job := a.backupJob(name, app, script)

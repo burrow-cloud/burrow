@@ -64,6 +64,12 @@ func quoteLiteral(s string) string {
 type PostgresProvisioner struct {
 	client         kubernetes.Interface
 	addonNamespace string
+	// adminEndpoint, when non-empty, overrides the host:port the provisioner DIALS to run admin
+	// SQL. In production it is empty: burrowd is an in-cluster pod and reaches the instance at its
+	// Service DNS name (instanceHost). It exists only so an out-of-cluster test (which cannot
+	// resolve a .svc name) can point the admin connection at a port-forwarded local address. It
+	// never affects the app's DATABASE_URL, which is always the in-cluster Service name.
+	adminEndpoint string
 }
 
 // NewPostgresProvisioner returns a provisioner over the given clientset and add-on namespace.
@@ -72,6 +78,13 @@ func NewPostgresProvisioner(client kubernetes.Interface, addonNamespace string) 
 		addonNamespace = defaultAddonNamespace
 	}
 	return &PostgresProvisioner{client: client, addonNamespace: addonNamespace}
+}
+
+// WithAdminEndpoint overrides the host:port the provisioner dials for admin SQL (see adminEndpoint).
+// It is for tests that reach the instance through a port-forward; production leaves it unset.
+func (p *PostgresProvisioner) WithAdminEndpoint(hostPort string) *PostgresProvisioner {
+	p.adminEndpoint = hostPort
+	return p
 }
 
 // NewPostgresProvisionerFromConfig builds a provisioner from a REST config.
@@ -83,9 +96,20 @@ func NewPostgresProvisionerFromConfig(cfg *rest.Config, addonNamespace string) (
 	return NewPostgresProvisioner(client, addonNamespace), nil
 }
 
-// instanceHost is the in-cluster host the add-on Postgres instance is reached at.
+// instanceHost is the in-cluster host the add-on Postgres instance is reached at. This is what
+// goes into every app's DATABASE_URL — apps are pods and resolve it through cluster DNS.
 func (p *PostgresProvisioner) instanceHost() string {
 	return fmt.Sprintf("%s.%s.svc", PostgresSecretName, p.addonNamespace)
+}
+
+// adminHostPort is the host:port the provisioner DIALS to run admin SQL: the test override if set,
+// otherwise the in-cluster Service address. Distinct from instanceHost so the override never leaks
+// into an app's DATABASE_URL.
+func (p *PostgresProvisioner) adminHostPort() string {
+	if p.adminEndpoint != "" {
+		return p.adminEndpoint
+	}
+	return p.instanceHost() + ":5432"
 }
 
 // superuserPassword reads the generated superuser password from the burrow-postgres Secret. The
@@ -111,7 +135,7 @@ func (p *PostgresProvisioner) adminDSN(password, database string) string {
 	u := &url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(PostgresSuperuser, password),
-		Host:     p.instanceHost() + ":5432",
+		Host:     p.adminHostPort(),
 		Path:     "/" + database,
 		RawQuery: "sslmode=disable",
 	}

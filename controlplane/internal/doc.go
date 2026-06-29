@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Nicholas Phillips
 
 // Package internal holds the control plane's implementation guts: the deploy state

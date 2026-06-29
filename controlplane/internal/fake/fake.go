@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Nicholas Phillips
 
 // Package fake provides in-memory implementations of the control-plane seams

@@ -1,22 +1,13 @@
 #!/usr/bin/env bash
-# Enforce the per-directory license boundary (ADR-0001, LICENSING.md): every Go file
-# must carry an SPDX-License-Identifier header matching the license for its directory,
-# above a Copyright line.
-#
-#   controlplane/ , operator/ , cmd/burrowd/   -> FSL-1.1-ALv2   (the product)
-#   everything else (cmd/burrow, cmd/burrow-mcp, mcp/, internal/) -> Apache-2.0 (client surface)
+# Enforce SPDX headers (ADR-0033, LICENSING.md): every Go file must carry an
+# "SPDX-License-Identifier: Apache-2.0" header above a Copyright line.
 #
 # Run from the repo root. Exits non-zero on any violation.
 set -euo pipefail
 
 fail=0
 
-expected_license() {
-  case "$1" in
-    controlplane/* | operator/* | cmd/burrowd/*) echo "FSL-1.1-ALv2" ;;
-    *) echo "Apache-2.0" ;;
-  esac
-}
+expected_license() { echo "Apache-2.0"; }
 
 # All tracked-or-untracked .go files, excluding generated/vendored trees.
 while IFS= read -r -d '' file; do

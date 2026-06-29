@@ -1,55 +1,31 @@
 # Licensing
 
-Burrow is **open core**, not "open source" without qualification. The license follows the
-package boundary: the client surface is permissively licensed for maximum adoption, and the
-control plane — the substantial part and the basis of the managed product — is
-source-available under a license that converts to Apache-2.0 over time. See
-[ADR-0001](docs/adr/0001-license-and-dco.md) for the decision and reasoning.
+All of Burrow's code in this repository is licensed under **Apache-2.0** — the CLI
+(`cmd/burrow/`), the MCP server (`mcp/`), the control plane (`controlplane/`, `cmd/burrowd/`),
+the operator (`operator/`), and the shared helpers (`internal/`). Read, modify, self-host, and
+integrate against any of it freely. See
+[ADR-0033](docs/adr/0033-relicense-to-apache.md) for the decision and reasoning.
 
-**The rule, in one paragraph:** the CLI (`cmd/burrow/`), the MCP server (`mcp/`), and the
-module-private shared helpers (`internal/`) are licensed **Apache-2.0**; the control plane
-(`controlplane/`, including its binary `cmd/burrowd/`) and the operator (`operator/`) are
-licensed **FSL-1.1-ALv2** (Functional Source License 1.1, Apache-2.0 future), which permits
-any use except offering a competing product or service and **converts each release to
-Apache-2.0 two years after that release ships**. Every `.go` file carries an
-`SPDX-License-Identifier` header stating its license, enforced in CI
-(`scripts/check-spdx.sh`); when in doubt, the SPDX header on the file is authoritative.
+Burrow is **open core**: the code here is open source under Apache-2.0 and fully
+self-hostable, while the multi-tenant **managed cloud** and the **enterprise tier** (SSO/SAML,
+teams and organizations, advanced RBAC, compliance, support with an SLA) are separate,
+proprietary products that do **not** live in this repository — see
+[COMMERCIAL.md](COMMERCIAL.md).
 
-## Per-directory map
+Every `.go` file carries an `SPDX-License-Identifier: Apache-2.0` header above its copyright
+line, enforced in CI (`scripts/check-spdx.sh`); the SPDX header on the file is authoritative.
 
-| Path | License | What it is |
-| --- | --- | --- |
-| `cmd/burrow/` | Apache-2.0 | CLI |
-| `mcp/` | Apache-2.0 | MCP server (thin, importable translator) |
-| `cmd/burrow-mcp/` | Apache-2.0 | MCP server binary |
-| `internal/` | Apache-2.0 | module-private shared helpers |
-| `controlplane/` | FSL-1.1-ALv2 | control plane: public API (interfaces, App/Release/Policy, constructor) |
-| `controlplane/internal/` | FSL-1.1-ALv2 | control plane implementation guts |
-| `cmd/burrowd/` | FSL-1.1-ALv2 | control plane binary |
-| `operator/` | FSL-1.1-ALv2 | operator: CRD types, reconciler entry |
-| `operator/internal/` | FSL-1.1-ALv2 | operator implementation guts |
+## License file
 
-The FSL packages are deliberately **not** placed under the top-level `internal/`, so a
-separate private module (the managed product) can import their public API.
+- Root [`LICENSE`](LICENSE) — Apache-2.0, governing the entire repository.
 
-## License files
+## Layout note
 
-- Root [`LICENSE`](LICENSE) — Apache-2.0 (the repository default and the license of the
-  client surface).
-- Root [`LICENSE.FSL`](LICENSE.FSL) — the FSL-1.1-ALv2 text.
-- [`controlplane/LICENSE`](controlplane/LICENSE) and [`operator/LICENSE`](operator/LICENSE)
-  — the FSL-1.1-ALv2 text governing those trees.
+The control plane and operator are kept **out of the top-level `internal/`** so a separate
+private module (the managed product) can import their public API — a module boundary, not a
+license boundary.
 
-## Direction of travel
+## Contributions
 
-This is a deliberate **starting** posture, not a permanent stance. FSL is the reversible
-direction: each release opens to Apache-2.0 on its second anniversary automatically, and as
-the sole copyright holder the maintainer can relicense more permissively at any time.
-Starting protected and opening later is easy; the reverse is not.
-
-## Commercial licenses
-
-Organizations that need terms without the FSL competing-use restriction can obtain a
-commercial license — see [COMMERCIAL.md](COMMERCIAL.md). Selling these grants is only
-possible while the maintainer holds 100% of the copyright, which is why outside code is
-handled the way [CONTRIBUTING.md](CONTRIBUTING.md) describes.
+Burrow is authored under sole copyright ownership; outside code contributions are CLA-gated and
+every commit carries a DCO sign-off, as described in [CONTRIBUTING.md](CONTRIBUTING.md).

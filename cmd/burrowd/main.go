@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: FSL-1.1-ALv2
+// SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Nicholas Phillips
 
 // Command burrowd is the Burrow control plane: the component that holds the cluster

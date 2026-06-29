@@ -140,6 +140,7 @@ targeted deterministic fault injection for the reconcile/deploy paths; and ephem
 
 ## Status of the blocking decisions
 
-- **License: settled.** [ADR-0001](adr/0001-license-and-dco.md) is **Accepted** — Apache-2.0
-  client surface, FSL-1.1-ALv2 control plane and operator, sole ownership with CLA-gated
-  outside code.
+- **License: settled.** The whole repository is **Apache-2.0**
+  ([ADR-0033](adr/0033-relicense-to-apache.md), superseding ADR-0001's split); sole copyright
+  ownership with CLA-gated outside code. Burrow is open core — managed cloud and the enterprise
+  tier are separate proprietary products.

@@ -61,3 +61,4 @@ alternatives that were rejected.
 | [0033](0033-relicense-to-apache.md) | Relicense the whole repository to Apache-2.0; monetize via managed cloud + a proprietary enterprise tier + risk transfer | Accepted |
 | [0034](0034-agent-native-onboarding.md) | Agent-native onboarding — detect cluster capabilities (no cluster-type picker), provision missing substrate on cost-aware consent, prove the first URL | Accepted |
 | [0035](0035-environments.md) | Environments — context-routed clusters (cluster-per-env) then namespace-scoped environments, each with its own guardrail policy ("free in staging, gated in prod") | Accepted |
+| [0036](0036-environment-selection.md) | Environment selection — one `burrow env` surface that follows the kube context, named local handles (`~/.burrow/config`), `burrow scan`; retires the `burrow context` command | Accepted |

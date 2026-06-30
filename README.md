@@ -105,9 +105,9 @@ never loosen its own guardrails:
 
 ```sh
 burrow guard list                       # every guardrail and its current disposition
-burrow guard set app_delete deny        # never let the agent delete an app
-burrow guard set scale_to_zero confirm  # scaling to zero needs your sign-off
-burrow guard set expose_public confirm  # putting something on the public internet needs approval
+burrow guard set app.delete deny            # never let the agent delete an app
+burrow guard set app.scale_to_zero confirm  # scaling to zero needs your sign-off
+burrow guard set app.expose_public confirm  # putting something on the public internet needs approval
 ```
 
 Guardrails cover the operations that carry risk: deleting an app, scaling to zero, exposing a

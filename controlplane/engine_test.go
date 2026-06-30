@@ -291,7 +291,7 @@ func TestGuardrailsListAndSet(t *testing.T) {
 		got[g.Code] = g.Disposition
 	}
 	if got[cp.GuardrailReplicaCeiling] != cp.DispositionDeny || got[cp.GuardrailScaleToZero] != cp.DispositionConfirm {
-		t.Errorf("default dispositions = %v, want ceiling=deny scale_to_zero=confirm", got)
+		t.Errorf("default dispositions = %v, want ceiling=deny app.scale_to_zero=confirm", got)
 	}
 
 	// A valid set is reflected on the next list.
@@ -301,7 +301,7 @@ func TestGuardrailsListAndSet(t *testing.T) {
 	gs, _ = e.Guardrails(ctx)
 	for _, g := range gs {
 		if g.Code == cp.GuardrailScaleToZero && g.Disposition != cp.DispositionAllow {
-			t.Errorf("after set, scale_to_zero = %q, want allow", g.Disposition)
+			t.Errorf("after set, app.scale_to_zero = %q, want allow", g.Disposition)
 		}
 	}
 
@@ -327,10 +327,10 @@ func TestExpose(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 
-	// Without confirm, the expose_public guardrail holds it for confirmation (the default).
+	// Without confirm, the app.expose_public guardrail holds it for confirmation (the default).
 	_, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080})
 	if g, ok := cp.AsGuardrail(err); !ok || g.Code != cp.GuardrailExposePublic || !g.NeedsConfirmation {
-		t.Fatalf("expose without confirm = %v, want expose_public needs-confirmation", err)
+		t.Fatalf("expose without confirm = %v, want app.expose_public needs-confirmation", err)
 	}
 
 	// With confirm it proceeds and records the exposure.

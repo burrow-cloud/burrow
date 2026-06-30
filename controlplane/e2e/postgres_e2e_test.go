@@ -81,7 +81,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 	const app = "shop"
 
 	// Install the Postgres instance and wait for it to become ready. confirm=true clears the
-	// addon_install guardrail (the fake DB's default policy holds it for confirmation).
+	// addon.install guardrail (the fake DB's default policy holds it for confirmation).
 	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, true); err != nil {
 		t.Fatalf("InstallAddon postgres: %v", err)
 	}

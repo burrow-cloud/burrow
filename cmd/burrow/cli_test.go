@@ -428,13 +428,13 @@ func TestGuardList(t *testing.T) {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"guardrails": []map[string]any{
-			{"code": "scale_to_zero", "disposition": "confirm", "description": "scale an app to zero"},
+			{"code": "app.scale_to_zero", "disposition": "confirm", "description": "scale an app to zero"},
 		}})
 	}, "guard", "list")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(out, "scale_to_zero") || !strings.Contains(out, "confirm") {
+	if !strings.Contains(out, "app.scale_to_zero") || !strings.Contains(out, "confirm") {
 		t.Errorf("output = %q", out)
 	}
 }
@@ -442,9 +442,9 @@ func TestGuardList(t *testing.T) {
 func TestDeployGuardrailErrorSurfaces(t *testing.T) {
 	_, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": "exceeds the replica ceiling", "code": "replica_ceiling"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "exceeds the replica ceiling", "code": "app.replica_ceiling"})
 	}, "app", "deploy", "web", "--image", "img:1", "--replicas", "99")
-	if err == nil || !strings.Contains(err.Error(), "replica_ceiling") {
+	if err == nil || !strings.Contains(err.Error(), "app.replica_ceiling") {
 		t.Fatalf("err = %v, want it to surface the guardrail code", err)
 	}
 }

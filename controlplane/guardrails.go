@@ -35,41 +35,41 @@ type GuardrailCode string
 
 const (
 	// GuardrailReplicaCeiling: the requested replica count exceeds Policy.MaxReplicas.
-	GuardrailReplicaCeiling GuardrailCode = "replica_ceiling"
+	GuardrailReplicaCeiling GuardrailCode = "app.replica_ceiling"
 	// GuardrailScaleToZero: the operation would scale to zero replicas.
-	GuardrailScaleToZero GuardrailCode = "scale_to_zero"
+	GuardrailScaleToZero GuardrailCode = "app.scale_to_zero"
 	// GuardrailExposePublic: the operation would make an app reachable from outside the
 	// cluster (expose it at a hostname).
-	GuardrailExposePublic GuardrailCode = "expose_public"
+	GuardrailExposePublic GuardrailCode = "app.expose_public"
 	// GuardrailDNSWrite: the operation would create or update a public DNS record at a
 	// configured provider (ADR-0018).
-	GuardrailDNSWrite GuardrailCode = "dns_write"
+	GuardrailDNSWrite GuardrailCode = "dns.write"
 	// GuardrailDNSDelete: the operation would delete a public DNS record at a configured
 	// provider — the destructive side of DNS management (ADR-0018).
-	GuardrailDNSDelete GuardrailCode = "dns_delete"
+	GuardrailDNSDelete GuardrailCode = "dns.delete"
 	// GuardrailAddonInstall: the operation would install a building-block backing service
 	// (a vetted add-on like logs or metrics) onto the cluster (ADR-0025).
-	GuardrailAddonInstall GuardrailCode = "addon_install"
+	GuardrailAddonInstall GuardrailCode = "addon.install"
 	// GuardrailAddonRemove: the operation would remove an installed add-on — the destructive
 	// side, since dependent apps may rely on it (ADR-0025).
-	GuardrailAddonRemove GuardrailCode = "addon_remove"
+	GuardrailAddonRemove GuardrailCode = "addon.remove"
 	// GuardrailAddonDetach: the operation would detach an app from an add-on — for Postgres,
 	// dropping the app's database and role and destroying its data (ADR-0031). Held for
 	// confirmation by default. (Attach is not guarded: it provisions, it destroys nothing.)
-	GuardrailAddonDetach GuardrailCode = "addon_detach"
+	GuardrailAddonDetach GuardrailCode = "addon.detach"
 	// GuardrailAddonRestore: the operation would restore an app's database from a backup,
 	// overwriting its live contents (ADR-0032). Held for confirmation by default, like detach and
 	// app delete. (Backup and list are not guarded: they destroy nothing.)
-	GuardrailAddonRestore GuardrailCode = "addon_restore"
+	GuardrailAddonRestore GuardrailCode = "addon.restore"
 	// GuardrailAppDelete: the operation would delete an app entirely — its workload, routing,
 	// and release history — so it disappears from the apps listing. The destructive teardown
 	// of a deployed application.
-	GuardrailAppDelete GuardrailCode = "app_delete"
+	GuardrailAppDelete GuardrailCode = "app.delete"
 	// GuardrailRollback: the operation would roll an app back to its previous release. A
 	// production mutation, but a recovery one — allowed by default so an agent can restore a
 	// broken app quickly; an operator can set it to confirm or deny to require sign-off for
 	// server-side, agent-independent enforcement (ADR-0020).
-	GuardrailRollback GuardrailCode = "rollback"
+	GuardrailRollback GuardrailCode = "app.rollback"
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through

@@ -13,7 +13,7 @@ import (
 // newDomainCmd manages the DNS records that point a hostname at the cluster, through a
 // configured provider (ADR-0018). These are guarded operations through burrowd: the agent
 // initiates them, but burrowd holds the provider token and is the only thing that calls the
-// vendor, and a public DNS change is gated by the dns_write / dns_delete guardrails.
+// vendor, and a public DNS change is gated by the dns.write / dns.delete guardrails.
 func newDomainCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "domain",

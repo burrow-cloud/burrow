@@ -527,7 +527,7 @@ func (s *server) listBackupsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // restoreAddon restores an app's database from a recorded backup, overwriting its live contents
-// (ADR-0032). It is held by the addon_restore confirm guardrail by default. burrowd runs an
+// (ADR-0032). It is held by the addon.restore confirm guardrail by default. burrowd runs an
 // in-cluster Job that pg_restores the named dump; the Job reads the superuser password only via
 // secretKeyRef.
 func (s *server) restoreAddon(w http.ResponseWriter, r *http.Request) {

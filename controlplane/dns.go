@@ -14,7 +14,7 @@ import (
 // AddDomain creates or updates a DNS record pointing Host at an address, through the named
 // provider (ADR-0018). The address is given explicitly (req.Address) or derived from an exposed
 // app's ingress (req.App) so the agent need not look it up. It is a guarded operation: pointing
-// a public hostname at the cluster is a blast-radius change, so it trips the dns_write guardrail
+// a public hostname at the cluster is a blast-radius change, so it trips the dns.write guardrail
 // (confirm by default). The record is an A record when the address is an IPv4 address, a CNAME
 // otherwise. The provider must be configured and serve DNS; burrowd holds the token and is the
 // only thing that calls the vendor.
@@ -61,7 +61,7 @@ func (e *Engine) AddDomain(ctx context.Context, req AddDomainRequest) (DomainRes
 }
 
 // RemoveDomain deletes the DNS record the provider holds for Host (ADR-0018). It trips the
-// dns_delete guardrail (confirm by default) — it is the destructive side of DNS management.
+// dns.delete guardrail (confirm by default) — it is the destructive side of DNS management.
 func (e *Engine) RemoveDomain(ctx context.Context, req RemoveDomainRequest) (DomainResult, error) {
 	host := strings.TrimSpace(req.Host)
 	if host == "" {

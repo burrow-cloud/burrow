@@ -57,7 +57,7 @@ type AuditEntry struct {
 	Target string `json:"target,omitempty"`
 	// Args is the redacted, per-operation allowlist of salient parameters. Never secret values.
 	Args map[string]string `json:"args,omitempty"`
-	// GuardrailCode is the guardrail that applied (e.g. expose_public). Empty on an execution
+	// GuardrailCode is the guardrail that applied (e.g. app.expose_public). Empty on an execution
 	// row, which is the second half of a trail whose decision row already named the guardrail.
 	GuardrailCode string `json:"guardrail_code,omitempty"`
 	// Disposition is the guardrail's effective disposition (allow/confirm/deny) at decision time.

@@ -1,0 +1,41 @@
+# Burrow metrics add-on RBAC, rendered and applied by `burrow addon install metrics` (text/template).
+# This is the metrics scraper's least-privilege grant, staged per-add-on by the CLI instead of in the
+# base install: burrowd holds only namespaced Roles and is forbidden from creating RBAC, so the CLI
+# (which has the kubeconfig) applies this before calling the install API. Server-side apply is
+# idempotent, so re-running install re-applies it harmlessly.
+#
+# vmagent (the metrics add-on's scraper) needs read-only pod discovery in the app namespace. The
+# ServiceAccount lives in the add-on namespace (vmagent runs there), the Role grants nothing but
+# get/list/watch on pods, and the RoleBinding in the app namespace binds that Role to the
+# add-on-namespace ServiceAccount.
+#
+# .AddonNamespace is where add-ons (and vmagent) run; .AppNamespace is where app pods are discovered.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: burrow-vmagent
+  namespace: {{.AddonNamespace}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burrow-vmagent
+  namespace: {{.AppNamespace}}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burrow-vmagent
+  namespace: {{.AppNamespace}}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: burrow-vmagent
+subjects:
+  - kind: ServiceAccount
+    name: burrow-vmagent
+    namespace: {{.AddonNamespace}}

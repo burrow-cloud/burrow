@@ -146,6 +146,9 @@ environment, with prod gated while staging stays permissive.
 
 **Next:**
 
+- Add-on RBAC is now staged per-add-on by the CLI at install time (least privilege): the base install
+  no longer carries the metrics vmagent grant, `burrow addon install metrics` applies it kubeconfig-side
+  before the API call, and burrowd verifies it (read-only) and fails cleanly on the agent path if absent.
 - **Scheduled backups + retention** — the [ADR-0032](adr/0032-postgres-backups.md) follow-on (a CronJob
   or a burrowd in-process scheduler).
 - **Credentials follow-on** — the registry pull secret ([ADR-0017](adr/0017-private-registry-authentication.md))

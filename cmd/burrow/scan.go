@@ -64,6 +64,22 @@ type scanRow struct {
 	installed bool
 }
 
+// classifyProbe maps a burrowd probe result to the three-way status that both `burrow env scan` and
+// the `burrow install` context listing report, the same way `burrow version` classifies a cluster
+// (ADR-0036): a clean read is an installed control plane (version carries its image tag), an
+// IsNotFound means none is installed, and any other error is an unreachable cluster (version carries
+// the failure reason). Factoring it here keeps the two call sites from drifting.
+func classifyProbe(img string, perr error) (status, version string, installed bool) {
+	switch {
+	case perr == nil:
+		return "installed", imageTag(img), true
+	case apierrors.IsNotFound(perr):
+		return "not installed", "-", false
+	default:
+		return "unreachable", connect.FailureReason(perr), false
+	}
+}
+
 func runEnvScan(ctx context.Context, kubeconfig, namespace string, w io.Writer) error {
 	contexts, err := connect.Contexts(kubeconfig)
 	if err != nil {
@@ -80,16 +96,7 @@ func runEnvScan(ctx context.Context, kubeconfig, namespace string, w io.Writer) 
 		img, perr := scanProbeFn(probeCtx, kubeconfig, c.Name, namespace)
 		cancel()
 		row := scanRow{context: c.Name, cluster: c.Cluster}
-		// Classify the same three ways `burrow version` does: a clean read is installed, an
-		// IsNotFound means no control plane, anything else is an unreachable cluster (ADR-0036).
-		switch {
-		case perr == nil:
-			row.status, row.version, row.installed = "installed", imageTag(img), true
-		case apierrors.IsNotFound(perr):
-			row.status, row.version = "not installed", "-"
-		default:
-			row.status, row.version = "unreachable", connect.FailureReason(perr)
-		}
+		row.status, row.version, row.installed = classifyProbe(img, perr)
 		rows = append(rows, row)
 	}
 	writeScanTable(w, rows)
@@ -99,6 +106,12 @@ func runEnvScan(ctx context.Context, kubeconfig, namespace string, w io.Writer) 
 	cfg, err := localconfig.Load()
 	if err != nil {
 		return err
+	}
+	installed := 0
+	for _, row := range rows {
+		if row.installed {
+			installed++
+		}
 	}
 	var added []string
 	for _, row := range rows {
@@ -115,15 +128,23 @@ func runEnvScan(ctx context.Context, kubeconfig, namespace string, w io.Writer) 
 		}
 		added = append(added, name)
 	}
-	if len(added) == 0 {
-		fmt.Fprintln(w, "\nNo new environments to register.")
-		return nil
+
+	// Close with an outcome-aware message rather than a flat "nothing to register", which reads as a
+	// non-sequitur when every context simply has no Burrow installed yet.
+	switch {
+	case len(added) > 0:
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "\nRegistered %d environment handle(s): %s\n", len(added), strings.Join(added, ", "))
+		fmt.Fprintln(w, "See `burrow env list`.")
+	case installed > 0:
+		fmt.Fprintln(w, "\nAll installed environments are already registered. See `burrow env list`.")
+	default:
+		fmt.Fprintf(w, "\nNo Burrow control plane found in any context. Install one with `burrow install <context>`,\n"+
+			"then re-run scan.\n")
+		fmt.Fprintf(w, "(scan probed the %q control-plane namespace; pass --namespace if yours differs.)\n", namespace)
 	}
-	if err := cfg.Save(); err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "\nRegistered %d environment handle(s): %s\n", len(added), strings.Join(added, ", "))
-	fmt.Fprintln(w, "See `burrow env list`.")
 	return nil
 }
 

@@ -424,6 +424,10 @@ func TestWriteEnvList(t *testing.T) {
 	if !strings.Contains(pinned.String(), "<--- current (pinned)") {
 		t.Errorf("pinned marker missing\n%s", pinned.String())
 	}
+	// The populated list closes with the help footer too.
+	if !strings.Contains(pinned.String(), "Run `burrow env -h` for all environment commands.") {
+		t.Errorf("populated list missing the env footer\n%s", pinned.String())
+	}
 
 	var unreg bytes.Buffer
 	writeEnvList(&unreg, envs, localconfig.Resolved{Context: "ctx-orphan", Mode: localconfig.ModeFollowing})
@@ -431,9 +435,19 @@ func TestWriteEnvList(t *testing.T) {
 		t.Errorf("unregistered follow line missing\n%s", unreg.String())
 	}
 
+	// The zero-handle empty-state is a structured block: the followed context, the three ways to
+	// register an environment, and the help footer.
 	var empty bytes.Buffer
 	writeEnvList(&empty, nil, localconfig.Resolved{Context: "ctx-dev", Mode: localconfig.ModeFollowing})
-	if !strings.Contains(empty.String(), "No environments.") {
-		t.Errorf("empty list message missing\n%s", empty.String())
+	es := empty.String()
+	for _, want := range []string{
+		"No environments registered yet:",
+		"following kubectl context: ctx-dev", "(no handle registered)",
+		"burrow env scan", "burrow install <context>", "burrow env add <name>",
+		"Run `burrow env -h` for all environment commands.",
+	} {
+		if !strings.Contains(es, want) {
+			t.Errorf("empty-state missing %q\n%s", want, es)
+		}
 	}
 }

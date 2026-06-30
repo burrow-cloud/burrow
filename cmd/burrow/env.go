@@ -146,33 +146,55 @@ func runEnvList(w io.Writer, o *envListOpts) error {
 	return nil
 }
 
+// envFooter points to the full environment command list, printed after both the populated table
+// and the empty-state block so the surface is discoverable from either.
+const envFooter = "Run `burrow env -h` for all environment commands."
+
 // writeEnvList prints the handles kubectx-style. The active row gets a trailing
 // "<--- current (pinned)" or "<--- current (following kubectl)"; when following an unregistered
 // context (no handle matches), a trailing line names it so the next command's target is never
-// ambiguous (ADR-0036).
+// ambiguous (ADR-0036). With no handles at all it prints a structured empty-state instead, routing
+// a new user to the ways to register one. Both forms close with the help footer.
 func writeEnvList(w io.Writer, envs []localconfig.Environment, resolved localconfig.Resolved) {
 	if len(envs) == 0 {
-		fmt.Fprintln(w, "No environments. Add one with `burrow env add <name>`.")
-	} else {
-		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tCONTEXT\tNAMESPACE")
-		for _, e := range envs {
-			row := fmt.Sprintf("%s\t%s\t%s", e.Name, e.Context, e.AppNamespace)
-			if resolved.Name != "" && e.Name == resolved.Name {
-				switch resolved.Mode {
-				case localconfig.ModePinned:
-					row += "\t<--- current (pinned)"
-				case localconfig.ModeFollowing:
-					row += "\t<--- current (following kubectl)"
-				}
-			}
-			fmt.Fprintln(tw, row)
-		}
-		_ = tw.Flush()
+		writeEnvEmptyState(w, resolved)
+		return
 	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tCONTEXT\tNAMESPACE")
+	for _, e := range envs {
+		row := fmt.Sprintf("%s\t%s\t%s", e.Name, e.Context, e.AppNamespace)
+		if resolved.Name != "" && e.Name == resolved.Name {
+			switch resolved.Mode {
+			case localconfig.ModePinned:
+				row += "\t<--- current (pinned)"
+			case localconfig.ModeFollowing:
+				row += "\t<--- current (following kubectl)"
+			}
+		}
+		fmt.Fprintln(tw, row)
+	}
+	_ = tw.Flush()
 	if resolved.Mode == localconfig.ModeFollowing && resolved.Name == "" && resolved.Context != "" {
 		fmt.Fprintf(w, "following kubectl: %s (unregistered)\n", resolved.Context)
 	}
+	fmt.Fprintf(w, "\n%s\n", envFooter)
+}
+
+// writeEnvEmptyState renders the zero-handle block: the active kube context (always following, since
+// nothing can be pinned with no handles), the three ways to register an environment with their
+// commands and descriptions column-aligned, and the help footer. It replaces the prior bare
+// one-liner so a brand-new user sees the affordances and usage, not a dead end.
+func writeEnvEmptyState(w io.Writer, resolved localconfig.Resolved) {
+	fmt.Fprintln(w, "Active environment")
+	fmt.Fprintf(w, "  following kubectl context: %s   (no handle registered)\n\n", resolved.Context)
+	fmt.Fprintln(w, "No environments registered yet:")
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "  burrow env scan\tdiscover and register an existing Burrow")
+	fmt.Fprintln(tw, "  burrow install <context>\tinstall Burrow into a cluster")
+	fmt.Fprintln(tw, "  burrow env add <name>\tcreate a namespace-scoped environment")
+	_ = tw.Flush()
+	fmt.Fprintf(w, "\n%s\n", envFooter)
 }
 
 // newEnvUseCmd pins a handle so commands target it regardless of kube context switches (ADR-0036).

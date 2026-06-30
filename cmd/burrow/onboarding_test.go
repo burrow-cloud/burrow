@@ -59,19 +59,59 @@ func TestRootHelpShowsGroups(t *testing.T) {
 	}
 }
 
-// TestFirstRunBannerWhenNoConfig confirms a first-time user (no config) gets the install banner
-// ahead of both bare `burrow` and `burrow --help` (ADR-0037).
-func TestFirstRunBannerWhenNoConfig(t *testing.T) {
-	for _, args := range [][]string{{}, {"--help"}} {
-		noConfig(t)
-		var out, errb bytes.Buffer
-		if err := run(context.Background(), args, &out, &errb); err != nil {
-			t.Fatalf("burrow %v: %v\n%s", args, err, errb.String())
+// TestBareBurrowFirstRunShowsBanner confirms a first-time user (no config) running bare `burrow`
+// gets only the install banner, not the full grouped command wall (ADR-0037).
+func TestBareBurrowFirstRunShowsBanner(t *testing.T) {
+	noConfig(t)
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{}, &out, &errb); err != nil {
+		t.Fatalf("bare burrow: %v\n%s", err, errb.String())
+	}
+	s := out.String() + errb.String()
+	if !strings.Contains(s, "Burrow is not set up yet") || !strings.Contains(s, "burrow install") {
+		t.Errorf("bare first-run output missing the install banner\n%s", s)
+	}
+	// The banner stands alone: the full grouped command wall must not print underneath it.
+	for _, unwanted := range []string{"Get started:", "Operate:", "Available Commands"} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("bare first-run output should not include the full help (%q)\n%s", unwanted, s)
 		}
-		s := out.String() + errb.String()
-		if !strings.Contains(s, "Burrow is not set up yet") || !strings.Contains(s, "burrow install") {
-			t.Errorf("burrow %v: first-run banner missing\n%s", args, s)
+	}
+}
+
+// TestBareBurrowWhenConfigExistsShowsHelp confirms that once set up, bare `burrow` falls through to
+// the full grouped help rather than the first-run banner.
+func TestBareBurrowWhenConfigExistsShowsHelp(t *testing.T) {
+	configWithEnv(t)
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{}, &out, &errb); err != nil {
+		t.Fatalf("bare burrow: %v\n%s", err, errb.String())
+	}
+	s := out.String() + errb.String()
+	if strings.Contains(s, "Burrow is not set up yet") {
+		t.Errorf("a set-up user should not see the first-run banner\n%s", s)
+	}
+	for _, want := range []string{"Get started:", "Operate:"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("bare burrow (set up) should print the grouped help, missing %q\n%s", want, s)
 		}
+	}
+}
+
+// TestHelpFlagNoFirstRunBanner confirms `burrow -h` never shows the install banner, even for a
+// first-run user: the banner is reserved for the bare-invocation path (ADR-0037).
+func TestHelpFlagNoFirstRunBanner(t *testing.T) {
+	noConfig(t)
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"-h"}, &out, &errb); err != nil {
+		t.Fatalf("burrow -h: %v\n%s", err, errb.String())
+	}
+	s := out.String() + errb.String()
+	if strings.Contains(s, "Burrow is not set up yet") {
+		t.Errorf("burrow -h should not show the first-run banner\n%s", s)
+	}
+	if !strings.Contains(s, "Get started:") {
+		t.Errorf("burrow -h should still print the grouped help\n%s", s)
 	}
 }
 

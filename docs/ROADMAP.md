@@ -1,6 +1,6 @@
 # Burrow Roadmap
 
-> **Status: v0.1–v0.3 shipped; v0.4 next.** These are version milestones; each unshipped one is
+> **Status: v0.1 through v0.7 shipped.** These are version milestones; each unshipped one is
 > a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
 > [README](../README.md) status table is the authoritative shipped/in-progress/planned
 > surface. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the current
@@ -127,6 +127,30 @@ source-available friction from the license.
   Apache-2.0; the managed cloud and the enterprise tier remain separate proprietary products.
 - **Homebrew distribution** ([ADR-0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md)) — the
   `burrow` and `burrow-mcp` CLIs publish to a Homebrew tap on each release.
+
+## v0.7 — Environments and a self-contained, kubectl-free CLI ✅ shipped
+
+The release that makes one Burrow operate many environments safely, and turns `burrow` into a
+single self-contained binary. The same agent and CLI now drive dev, staging, and prod through an
+active environment, with prod gated while staging stays permissive.
+
+- **Environments** ([ADR-0035](adr/0035-environments.md)): two shapes of environment under one
+  model. **Cluster-per-env** via kubeconfig-context routing (`--context`, with per-call routing for
+  the agent so one MCP server spans contexts) and **namespace-per-env** via a burrowd registry
+  (`burrow env add`), each carrying its own RBAC. **Per-environment guardrails** are the answer to
+  "don't let AI touch prod": `burrow guard set --env prod app.delete deny` locks prod while staging
+  and the rest inherit the permissive global policy.
+- **Environment selection** ([ADR-0036](adr/0036-environment-selection.md)): one `burrow env`
+  surface over named local handles in `~/.burrow/config` that **follows the kube context by
+  default**, with `use`, `follow`, `list`, `rename`, and `scan`. The CLI and the agent both resolve
+  every operation through the active environment. Retires `burrow context`.
+- **CLI onboarding and organization** ([ADR-0037](adr/0037-cli-onboarding-and-organization.md)):
+  intent-based `--help` groups, an explicit positional `burrow install <context>` that names and
+  records the environment, a first-run banner, shell completion, and `system` folded into `cluster`.
+  **`burrow` no longer needs `kubectl`**: manifests apply through client-go server-side apply, so the
+  binary is self-contained.
+- **Surface cleanups**: the `app env`→`app config` rename, plus a cleaner `burrow version` and
+  connection errors that name the targeted context.
 
 ## Deferred until requested
 

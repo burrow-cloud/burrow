@@ -123,11 +123,29 @@ relicenses the whole repository to Apache-2.0.
 - **Homebrew distribution** ([ADR-0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md)) — the
   `burrow` and `burrow-mcp` CLIs publish to a Homebrew tap on release.
 
+## Shipped: v0.7 — environments and a self-contained, kubectl-free CLI ✅
+
+Released as **v0.7.0**. One Burrow operates many environments safely, and `burrow` is now a single
+self-contained binary. The CLI and the agent both resolve every operation through an active
+environment, with prod gated while staging stays permissive.
+
+- **Environments** ([ADR-0035](adr/0035-environments.md)): **cluster-per-env** via kubeconfig-context
+  routing (`--context`, plus per-call routing so one MCP server spans contexts) and **namespace-per-env**
+  via a burrowd registry (`burrow env add`), each with its own RBAC. **Per-environment guardrails**
+  (`burrow guard set --env prod app.delete deny`) gate prod while staging and the rest inherit the
+  global policy.
+- **Environment selection** ([ADR-0036](adr/0036-environment-selection.md)): one `burrow env` surface
+  over named local handles in `~/.burrow/config` that **follows the kube context by default**
+  (`use`/`follow`/`list`/`rename`/`scan`); retires `burrow context`.
+- **CLI onboarding and organization** ([ADR-0037](adr/0037-cli-onboarding-and-organization.md)):
+  intent-based `--help` groups, an explicit positional `burrow install <context>` that names and records
+  the environment, a first-run banner, shell completion, and `system` folded into `cluster`. **`burrow`
+  no longer needs `kubectl`** (client-go server-side apply).
+- **Surface cleanups**: the `app env`→`app config` rename, a cleaner `burrow version`, and connection
+  errors that name the targeted context.
+
 **Next:**
 
-- **Environments & multi-cluster** (ADR-0035, to be written) — per-environment guardrails (the answer
-  to "don't let AI touch prod"), supporting both namespace-per-env and cluster-per-env (each a
-  kubeconfig context with its own burrowd); the dotted guardrail keys gain a `prod.`/`staging.` prefix.
 - **Scheduled backups + retention** — the [ADR-0032](adr/0032-postgres-backups.md) follow-on (a CronJob
   or a burrowd in-process scheduler).
 - **Credentials follow-on** — the registry pull secret ([ADR-0017](adr/0017-private-registry-authentication.md))

@@ -48,10 +48,11 @@ func renderEnvManifests(o envOptions) (string, error) {
 	return sb.String(), nil
 }
 
-// applyFn applies rendered manifests to the cluster with kubectl. It is a package var so a test can
-// substitute a fake for the privileged kubeconfig-side apply, the way `burrow env add` does the
-// namespace + RBAC setup (like install) before registering the environment with burrowd.
-var applyFn = kubectlApply
+// applyFn applies rendered manifests to the cluster with client-go server-side apply (ADR-0037), so
+// no kubectl binary is required. It is a package var so a test can substitute a fake for the
+// privileged kubeconfig-side apply, the way `burrow env add` does the namespace + RBAC setup (like
+// install) before registering the environment with burrowd.
+var applyFn = serverSideApply
 
 // newEnvCmd is the single environment surface (ADR-0036). An environment is a user-named handle
 // resolving to {context, control-plane-namespace, app-namespace}, stored client-side in
@@ -297,7 +298,7 @@ func newEnvAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.namespace, "control-plane-namespace", connect.DefaultNamespace, "control-plane namespace Burrow is installed in (where burrowd's ServiceAccount lives)")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "namespace for the environment's apps (default: <app-namespace>-<name>)")
 	cmd.Flags().StringVar(&appNamespace, "app-namespace", connect.DefaultAppNamespace, "the installed app namespace, used to derive the default environment namespace")
-	cmd.Flags().BoolVar(&verbose, "verbose", false, "show every resource kubectl applies instead of a summary")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "show every resource burrow applies instead of a summary")
 	return cmd
 }
 

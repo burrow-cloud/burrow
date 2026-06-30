@@ -143,7 +143,7 @@ func newIngressCmd() *cobra.Command {
 	install.Flags().BoolVarP(&o.yes, "yes", "y", false, "do not prompt for confirmation (non-interactive)")
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the plan (including the cost notice) instead of applying it")
 	install.Flags().BoolVar(&o.wait, "wait", true, "wait for cert-manager to become ready before creating the issuer")
-	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource kubectl applies instead of a summary")
+	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
 
 	parent.AddCommand(install)
 	return parent
@@ -209,7 +209,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 		fmt.Fprintln(stdout, "ingress-nginx already present, using it.")
 	} else {
 		fmt.Fprintf(stdout, "Installing ingress-nginx (%s)...\n", manifestVariantLabel(expose))
-		if err := kubectlApplyURL(ctx, o.kubeconfig, manifest, o.verbose, stdout, stderr); err != nil {
+		if err := serverSideApplyURL(ctx, o.kubeconfig, manifest, o.verbose, stdout, stderr); err != nil {
 			return err
 		}
 		if o.wait {
@@ -224,7 +224,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 		fmt.Fprintln(stdout, "cert-manager already present, using it.")
 	} else {
 		fmt.Fprintln(stdout, "Installing cert-manager...")
-		if err := kubectlApplyURL(ctx, o.kubeconfig, certManagerManifest, o.verbose, stdout, stderr); err != nil {
+		if err := serverSideApplyURL(ctx, o.kubeconfig, certManagerManifest, o.verbose, stdout, stderr); err != nil {
 			return err
 		}
 	}
@@ -316,12 +316,12 @@ func writeIngressPlan(w io.Writer, o ingressOptions, expose, manifest string, ha
 	if hasNginx {
 		fmt.Fprintln(w, "  - ingress-nginx: already present, skip.")
 	} else {
-		fmt.Fprintf(w, "  - install ingress-nginx (%s): kubectl apply -f %s\n", manifestVariantLabel(expose), manifest)
+		fmt.Fprintf(w, "  - install ingress-nginx (%s): apply %s\n", manifestVariantLabel(expose), manifest)
 	}
 	if hasCertManager {
 		fmt.Fprintln(w, "  - cert-manager: already present, skip.")
 	} else {
-		fmt.Fprintf(w, "  - install cert-manager: kubectl apply -f %s\n", certManagerManifest)
+		fmt.Fprintf(w, "  - install cert-manager: apply %s\n", certManagerManifest)
 	}
 	fmt.Fprintf(w, "  - apply a Let's Encrypt ClusterIssuer %q (%s).\n\n", o.issuerName, o.acmeServer())
 	if expose == exposeLoadBalancer {
@@ -344,13 +344,13 @@ func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
 	fmt.Fprintf(w, "Plan (expose: %s, dry run). Against your current cluster, ingress install would:\n", expose)
 	switch expose {
 	case exposeNodePort:
-		fmt.Fprintf(w, "  - install ingress-nginx if absent (baremetal, NodePort Service): kubectl apply -f %s\n", ingressNginxBaremetalManifest)
+		fmt.Fprintf(w, "  - install ingress-nginx if absent (baremetal, NodePort Service): apply %s\n", ingressNginxBaremetalManifest)
 	case exposeLoadBalancer:
-		fmt.Fprintf(w, "  - install ingress-nginx if absent (cloud, LoadBalancer Service): kubectl apply -f %s\n", ingressNginxManifest)
+		fmt.Fprintf(w, "  - install ingress-nginx if absent (cloud, LoadBalancer Service): apply %s\n", ingressNginxManifest)
 	default: // auto
-		fmt.Fprintf(w, "  - install ingress-nginx if absent (auto: cloud/LoadBalancer on a known provider, else baremetal/NodePort): kubectl apply -f %s\n", ingressNginxManifest)
+		fmt.Fprintf(w, "  - install ingress-nginx if absent (auto: cloud/LoadBalancer on a known provider, else baremetal/NodePort): apply %s\n", ingressNginxManifest)
 	}
-	fmt.Fprintf(w, "  - install cert-manager if absent: kubectl apply -f %s\n", certManagerManifest)
+	fmt.Fprintf(w, "  - install cert-manager if absent: apply %s\n", certManagerManifest)
 	fmt.Fprintf(w, "  - apply this ClusterIssuer (%s):\n\n%s\n\n", o.acmeServer(), indent(issuer))
 	switch expose {
 	case exposeNodePort:
@@ -429,12 +429,6 @@ func certManagerPresent(ctx context.Context, cs kubernetes.Interface) (bool, err
 	return true, nil
 }
 
-// kubectlApplyURL applies a manifest from a URL, summarizing what changed (or streaming it
-// with verbose), like the in-cluster install manifests.
-func kubectlApplyURL(ctx context.Context, kubeconfig, url string, verbose bool, stdout, stderr io.Writer) error {
-	return applyAndSummarize(ctx, applyArgs(kubeconfig, "", url), "", verbose, stdout, stderr)
-}
-
 // applyIssuer applies the ClusterIssuer, retrying briefly: just after cert-manager reports
 // ready its validating webhook can still reject the call ("failed calling webhook") for a few
 // seconds, and the CRD may take a moment to register. Those rejections are expected, so each
@@ -448,7 +442,7 @@ func applyIssuer(ctx context.Context, kubeconfig, issuer string, verbose bool, s
 			lastStderr.Reset()
 			attemptStderr = &lastStderr
 		}
-		if err := kubectlApply(ctx, kubeconfig, "", issuer, verbose, stdout, attemptStderr); err == nil {
+		if err := applyFn(ctx, kubeconfig, "", issuer, verbose, stdout, attemptStderr); err == nil {
 			return nil
 		} else {
 			lastErr = err

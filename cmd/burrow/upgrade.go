@@ -43,7 +43,7 @@ func newUpgradeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")
 	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the control plane to become ready")
-	cmd.Flags().BoolVar(&verbose, "verbose", false, "show every resource kubectl applies instead of a summary")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "show every resource burrow applies instead of a summary")
 	return cmd
 }
 
@@ -70,7 +70,7 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	}
 
 	fmt.Fprintf(stdout, "Upgrading Burrow in namespace %q to image %q...\n", namespace, image)
-	if err := kubectlApply(ctx, kubeconfig, "", manifests, verbose, stdout, stderr); err != nil {
+	if err := applyFn(ctx, kubeconfig, "", manifests, verbose, stdout, stderr); err != nil {
 		return err
 	}
 	if !wait {

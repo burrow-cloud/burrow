@@ -63,6 +63,10 @@ const (
 	OpGetBackup       Op = "GetBackup"
 	OpRunBackupJob    Op = "RunBackupJob"
 	OpRunRestoreJob   Op = "RunRestoreJob"
+
+	OpCreateEnvironment Op = "CreateEnvironment"
+	OpListEnvironments  Op = "ListEnvironments"
+	OpGetEnvironment    Op = "GetEnvironment"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

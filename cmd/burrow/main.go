@@ -111,6 +111,7 @@ func newRootCmd() *cobra.Command {
 		// Cross-cutting policy + meta — top level.
 		newClusterCmd(),
 		newContextCmd(),
+		newEnvCmd(),
 		newGuardCmd(),
 		newAuditCmd(),
 		newVersionCmd(),
@@ -130,11 +131,18 @@ type commonOpts struct {
 
 // bindCommon registers the shared flags on the flag set, defaulting from the environment.
 func bindCommon(flags *pflag.FlagSet, o *commonOpts) {
+	bindClientFlags(flags, o)
+	flags.StringVar(&o.namespace, "namespace", connect.DefaultNamespace, "namespace Burrow is installed in")
+}
+
+// bindClientFlags registers the control-plane connection flags without --namespace, so a command
+// that needs --namespace for a different meaning (e.g. `env add`, where it is the environment's
+// namespace) can bind the control-plane namespace under its own flag name.
+func bindClientFlags(flags *pflag.FlagSet, o *commonOpts) {
 	flags.StringVar(&o.controlPlane, "control-plane", os.Getenv("BURROW_CONTROL_PLANE_URL"), "control-plane API base URL (default: auto-connect via kubeconfig)")
 	flags.StringVar(&o.token, "token", os.Getenv("BURROW_API_TOKEN"), "control-plane API token (default: read from the install Secret)")
 	flags.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig for auto-connect (default: ambient)")
 	flags.StringVar(&o.context, "context", "", "kubeconfig context to target (default: current context); selects which cluster's burrowd to operate")
-	flags.StringVar(&o.namespace, "namespace", connect.DefaultNamespace, "namespace Burrow is installed in")
 	flags.BoolVar(&o.json, "json", false, "print the raw JSON result")
 }
 

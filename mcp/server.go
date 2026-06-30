@@ -21,10 +21,11 @@ import (
 // cache a client per context.
 type ClientForContext func(kubeContext string) (*client.Client, error)
 
-// EnvironmentLister lists the environments (kubeconfig contexts) the agent can target, marking
-// the current one, so the burrow_environments tool can tell the agent what it may name in any
-// tool's context argument (ADR-0035 phase 1).
-type EnvironmentLister func() ([]connect.Context, error)
+// ContextLister lists the kubeconfig contexts (clusters) the agent can target, marking the current
+// one, so the burrow_contexts tool can tell the agent what it may name in any tool's context
+// argument (ADR-0035 phase 1). It backs `burrow_contexts`, the read-only context listing — distinct
+// from burrow_environments, which lists the namespace-environments registered in a cluster (phase 2).
+type ContextLister func() ([]connect.Context, error)
 
 // contextArg is embedded in every tool's input so each call can target a specific environment.
 // Its single field is promoted into the tool's generated input schema as an optional "context"
@@ -39,9 +40,10 @@ type contextArg struct {
 // control-plane API call via the client and returns the structured result; a control
 // plane error becomes a tool error the agent can read. The server holds no cluster
 // credentials (ADR-0005). It targets one environment per call (ADR-0035): every tool takes
-// an optional context, resolved to that cluster's client through clientFor, and
-// burrow_environments lists the contexts the agent can name.
-func NewServer(clientFor ClientForContext, environments EnvironmentLister, version string) *sdk.Server {
+// an optional context, resolved to that cluster's client through clientFor, burrow_contexts
+// lists the kubeconfig contexts (clusters) the agent can name, and burrow_environments lists the
+// namespace-environments registered in a cluster.
+func NewServer(clientFor ClientForContext, contexts ContextLister, version string) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{Name: "burrow", Title: "Burrow", Version: version}, nil)
 
 	sdk.AddTool(s, &sdk.Tool{
@@ -190,18 +192,23 @@ func NewServer(clientFor ClientForContext, environments EnvironmentLister, versi
 	}, auditTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_contexts",
+		Description: "List the kubeconfig contexts you can target: each is a separate cluster running its own burrowd with its own guardrail policy (ADR-0035). Marks the current context, which any tool uses when you omit its context argument. Pass one of these names as the context argument on another tool to operate that cluster, so you can deploy to a staging cluster and gate a prod cluster by naming the context. Read-only: it reads the local kubeconfig and contacts no cluster.",
+	}, contextsTool(contexts))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_environments",
-		Description: "List the environments you can target: the kubeconfig contexts, each a separate cluster running its own burrowd with its own guardrail policy (ADR-0035). Marks the current context, which any tool uses when you omit its context argument. Pass one of these names as the context argument on another tool to operate that environment, so you can deploy to staging and gate prod by naming the context. Read-only: it reads the local kubeconfig and contacts no cluster.",
-	}, environmentsTool(environments))
+		Description: "List the environments registered in a cluster: namespace-per-environment (ADR-0035 phase 2), where one cluster has a separate app namespace per environment (e.g. staging, prod). Each entry is an environment name and the namespace its apps deploy into; the implicit `default` environment (the namespace burrowd already runs against) is listed first and marked default. Pass context to read a specific cluster (default the current one). Read-only.",
+	}, environmentsTool(clientFor))
 
 	return s
 }
 
 // Serve runs the Burrow MCP server over stdio until the client disconnects. It targets one
-// environment per call through clientFor (ADR-0035), and lists the available environments via
-// environments.
-func Serve(ctx context.Context, clientFor ClientForContext, environments EnvironmentLister, version string) error {
-	return NewServer(clientFor, environments, version).Run(ctx, &sdk.StdioTransport{})
+// environment per call through clientFor (ADR-0035), and lists the available kubeconfig contexts
+// via contexts.
+func Serve(ctx context.Context, clientFor ClientForContext, contexts ContextLister, version string) error {
+	return NewServer(clientFor, contexts, version).Run(ctx, &sdk.StdioTransport{})
 }
 
 type deployInput struct {
@@ -948,30 +955,66 @@ func auditTool(clientFor ClientForContext) sdk.ToolHandlerFor[auditInput, auditO
 	}
 }
 
-// environmentsInput has no fields: listing environments reads the local kubeconfig and takes no
+// contextsInput has no fields: listing contexts reads the local kubeconfig and takes no
 // arguments, not even a context (it lists the contexts the agent can target).
-type environmentsInput struct{}
+type contextsInput struct{}
 
-// environmentInfo is the agent's view of one environment (a kubeconfig context).
-type environmentInfo struct {
+// contextInfo is the agent's view of one kubeconfig context (a cluster).
+type contextInfo struct {
 	Name    string `json:"name"`
 	Cluster string `json:"cluster"`
 	Current bool   `json:"current"`
+}
+
+type contextsOutput struct {
+	Contexts []contextInfo `json:"contexts"`
+}
+
+func contextsTool(contexts ContextLister) sdk.ToolHandlerFor[contextsInput, contextsOutput] {
+	return func(_ context.Context, _ *sdk.CallToolRequest, _ contextsInput) (*sdk.CallToolResult, contextsOutput, error) {
+		ctxs, err := contexts()
+		if err != nil {
+			return nil, contextsOutput{}, err
+		}
+		out := contextsOutput{Contexts: make([]contextInfo, 0, len(ctxs))}
+		for _, c := range ctxs {
+			out.Contexts = append(out.Contexts, contextInfo{Name: c.Name, Cluster: c.Cluster, Current: c.Current})
+		}
+		return nil, out, nil
+	}
+}
+
+// environmentsInput carries only the optional context: listing a cluster's registered environments
+// takes no other arguments.
+type environmentsInput struct {
+	contextArg
+}
+
+// environmentInfo is the agent's view of one registered environment (ADR-0035 phase 2): the
+// environment name, the namespace its apps deploy into, and whether it is the implicit default.
+type environmentInfo struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Default   bool   `json:"default"`
 }
 
 type environmentsOutput struct {
 	Environments []environmentInfo `json:"environments"`
 }
 
-func environmentsTool(environments EnvironmentLister) sdk.ToolHandlerFor[environmentsInput, environmentsOutput] {
-	return func(_ context.Context, _ *sdk.CallToolRequest, _ environmentsInput) (*sdk.CallToolResult, environmentsOutput, error) {
-		ctxs, err := environments()
+func environmentsTool(clientFor ClientForContext) sdk.ToolHandlerFor[environmentsInput, environmentsOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in environmentsInput) (*sdk.CallToolResult, environmentsOutput, error) {
+		c, err := clientFor(in.Context)
 		if err != nil {
 			return nil, environmentsOutput{}, err
 		}
-		out := environmentsOutput{Environments: make([]environmentInfo, 0, len(ctxs))}
-		for _, c := range ctxs {
-			out.Environments = append(out.Environments, environmentInfo{Name: c.Name, Cluster: c.Cluster, Current: c.Current})
+		envs, err := c.ListEnvironments(ctx)
+		if err != nil {
+			return nil, environmentsOutput{}, err
+		}
+		out := environmentsOutput{Environments: make([]environmentInfo, 0, len(envs))}
+		for _, e := range envs {
+			out.Environments = append(out.Environments, environmentInfo{Name: e.Name, Namespace: e.Namespace, Default: e.Default})
 		}
 		return nil, out, nil
 	}

@@ -263,6 +263,17 @@ type Database interface {
 	ListBackups(ctx context.Context, app string) ([]Backup, error)
 	// GetBackup returns the backup with the given id, or ErrNotFound.
 	GetBackup(ctx context.Context, id string) (Backup, error)
+
+	// CreateEnvironment registers a named environment mapping name to namespace (ADR-0035 phase 2).
+	// It rejects a duplicate name (the name is the primary key) with an ErrInvalid-wrapped error.
+	// The reserved `default` environment is never stored here — it is synthesized by the engine.
+	CreateEnvironment(ctx context.Context, name, namespace string) error
+	// ListEnvironments returns the registered environments ordered by name. None yields an empty
+	// slice and no error. The synthesized `default` environment is not included; the engine
+	// prepends it.
+	ListEnvironments(ctx context.Context) ([]Environment, error)
+	// GetEnvironment returns the registered environment with the given name, or ErrNotFound.
+	GetEnvironment(ctx context.Context, name string) (Environment, error)
 }
 
 // Credentials is the seam over the one burrow-credentials Secret that holds every vendor

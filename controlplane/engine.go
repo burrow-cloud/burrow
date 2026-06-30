@@ -40,6 +40,10 @@ type Engine struct {
 	// prober detects the cluster's read-only capabilities (ADR-0034). Optional: a capabilities
 	// read errors cleanly (ErrNotImplemented) when it is nil.
 	prober ClusterProber
+	// appNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace
+	// of the implicit `default` environment (ADR-0035 phase 2). It mirrors the kube Adapter's
+	// namespace so the engine can synthesize the default environment in ListEnvironments.
+	appNamespace string
 }
 
 // Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
@@ -73,6 +77,10 @@ type Deps struct {
 	// allowed, and the engine errors cleanly (ErrNotImplemented) on a capabilities read when it is
 	// not wired.
 	ClusterProber ClusterProber
+	// AppNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace of
+	// the implicit `default` environment (ADR-0035 phase 2). Optional — an empty value defaults to
+	// "default", matching the kube Adapter.
+	AppNamespace string
 }
 
 // New constructs an Engine, validating that every seam is supplied and the policy is
@@ -97,6 +105,10 @@ func New(d Deps) (*Engine, error) {
 	case d.DNS == nil:
 		return nil, fmt.Errorf("controlplane: New: DNS seam is required")
 	}
+	appNamespace := d.AppNamespace
+	if appNamespace == "" {
+		appNamespace = "default"
+	}
 	return &Engine{
 		k8s:           d.Kubernetes,
 		registry:      d.Registry,
@@ -110,6 +122,7 @@ func New(d Deps) (*Engine, error) {
 		metrics:       d.Metrics,
 		dbProvisioner: d.DatabaseProvisioner,
 		prober:        d.ClusterProber,
+		appNamespace:  appNamespace,
 	}, nil
 }
 
@@ -1243,6 +1256,40 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 	}
 	e.recordExecution(ctx, auditOpRollback, app, args, nil)
 	return RollbackResult{Release: rel, RolledBackToReleaseID: target.ID, SupersededReleaseID: cur.ID}, nil
+}
+
+// AddEnvironment registers a named environment mapping name to namespace (ADR-0035 phase 2). It
+// validates name as a DNS-1123-label-safe lowercase token and rejects the reserved `default`
+// (which is implicit), then records it. The namespace and burrowd's Role there are created
+// kubeconfig-side by `burrow env add` before this call — burrowd holds only namespaced Roles and
+// cannot create namespaces or RBAC itself (least privilege), so the engine only records the
+// registry entry. A duplicate name is rejected by the store.
+func (e *Engine) AddEnvironment(ctx context.Context, name, namespace string) (Environment, error) {
+	if err := validateEnvironmentName(name); err != nil {
+		return Environment{}, fmt.Errorf("add environment: %w: %w", ErrInvalid, err)
+	}
+	if namespace == "" {
+		return Environment{}, fmt.Errorf("add environment %s: namespace is empty: %w", name, ErrInvalid)
+	}
+	if err := e.db.CreateEnvironment(ctx, name, namespace); err != nil {
+		return Environment{}, fmt.Errorf("add environment %s: %w", name, err)
+	}
+	return Environment{Name: name, Namespace: namespace, CreatedAt: e.clock.Now()}, nil
+}
+
+// ListEnvironments returns the environments the cluster's burrowd knows about (ADR-0035 phase 2):
+// the implicit `default` environment first (the app namespace burrowd runs against, behaving like
+// today), followed by the registered environments in name order. The default is synthesized rather
+// than stored, so multi-environment is opt-in with no regression.
+func (e *Engine) ListEnvironments(ctx context.Context) ([]Environment, error) {
+	registered, err := e.db.ListEnvironments(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list environments: %w", err)
+	}
+	out := make([]Environment, 0, len(registered)+1)
+	out = append(out, Environment{Name: DefaultEnvironment, Namespace: e.appNamespace, Default: true})
+	out = append(out, registered...)
+	return out, nil
 }
 
 // lastDeployed returns the most recent release in deployed state — the one currently

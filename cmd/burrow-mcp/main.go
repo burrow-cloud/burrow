@@ -37,7 +37,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	return burrowmcp.Serve(ctx, clientFor, environmentLister(), version)
+	return burrowmcp.Serve(ctx, clientFor, contextLister(), version)
 }
 
 // clientFactory builds the per-context control-plane client factory the MCP server uses to target
@@ -81,10 +81,10 @@ func clientFactory(ctx context.Context) (burrowmcp.ClientForContext, error) {
 	}, nil
 }
 
-// environmentLister lists the kubeconfig contexts the agent can target (ADR-0035), reusing the
-// same helper as `burrow context list`. It reads the ambient kubeconfig (or BURROW_KUBECONFIG)
-// and contacts no cluster.
-func environmentLister() burrowmcp.EnvironmentLister {
+// contextLister lists the kubeconfig contexts the agent can target (ADR-0035), reusing the same
+// helper as `burrow context list` and backing the burrow_contexts tool. It reads the ambient
+// kubeconfig (or BURROW_KUBECONFIG) and contacts no cluster.
+func contextLister() burrowmcp.ContextLister {
 	kubeconfig := os.Getenv("BURROW_KUBECONFIG")
 	return func() ([]connect.Context, error) {
 		return connect.Contexts(kubeconfig)

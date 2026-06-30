@@ -27,7 +27,8 @@ type Database struct {
 	appEnv    map[string]map[string]string // app -> key -> value
 	audit     []controlplane.AuditEntry    // append-only, in append order
 	backups   map[string]controlplane.Backup
-	backupSeq []string // backup IDs in record order, for deterministic newest-first listing
+	backupSeq []string                            // backup IDs in record order, for deterministic newest-first listing
+	envs      map[string]controlplane.Environment // registered environments by name
 	errs      map[Op]error
 	policy    controlplane.Policy
 }
@@ -41,6 +42,7 @@ func NewDatabase() *Database {
 		addons:    make(map[string]controlplane.AddonInfo),
 		appEnv:    make(map[string]map[string]string),
 		backups:   make(map[string]controlplane.Backup),
+		envs:      make(map[string]controlplane.Environment),
 		errs:      make(map[Op]error),
 		policy:    controlplane.DefaultPolicy(),
 	}
@@ -428,6 +430,55 @@ func (d *Database) GetBackup(ctx context.Context, id string) (controlplane.Backu
 		return controlplane.Backup{}, fmt.Errorf("database: backup %q: %w", id, controlplane.ErrNotFound)
 	}
 	return b, nil
+}
+
+// CreateEnvironment registers a named environment, rejecting a duplicate name with an
+// ErrInvalid-wrapped error (the name is the primary key), matching the store.
+func (d *Database) CreateEnvironment(ctx context.Context, name, namespace string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpCreateEnvironment]; err != nil {
+		return err
+	}
+	if _, exists := d.envs[name]; exists {
+		return fmt.Errorf("database: environment %q already exists: %w", name, controlplane.ErrInvalid)
+	}
+	d.envs[name] = controlplane.Environment{Name: name, Namespace: namespace}
+	return nil
+}
+
+// ListEnvironments returns the registered environments ordered by name. The synthesized `default`
+// environment is not stored here; the engine prepends it.
+func (d *Database) ListEnvironments(ctx context.Context) ([]controlplane.Environment, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpListEnvironments]; err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(d.envs))
+	for name := range d.envs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]controlplane.Environment, 0, len(names))
+	for _, name := range names {
+		out = append(out, d.envs[name])
+	}
+	return out, nil
+}
+
+// GetEnvironment returns the registered environment with the given name, or ErrNotFound.
+func (d *Database) GetEnvironment(ctx context.Context, name string) (controlplane.Environment, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpGetEnvironment]; err != nil {
+		return controlplane.Environment{}, err
+	}
+	e, ok := d.envs[name]
+	if !ok {
+		return controlplane.Environment{}, fmt.Errorf("database: environment %q: %w", name, controlplane.ErrNotFound)
+	}
+	return e, nil
 }
 
 // cloneStringMap deep-copies a string map (nil stays nil) so the fake never aliases a caller's map.

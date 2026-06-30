@@ -81,9 +81,9 @@ func newEnvAddCmd() *cobra.Command {
 		Use:   "add <name>",
 		Short: "Create an environment: its namespace, burrowd's Role there, and the registry entry",
 		Long: "add creates an environment for namespace-per-environment (ADR-0035). It applies the\n" +
-			"environment's namespace and a burrowd Role/RoleBinding in it with your kubeconfig — the\n" +
+			"environment's namespace and a burrowd Role/RoleBinding in it with your kubeconfig (the\n" +
 			"same privileged setup install does, because burrowd holds only namespaced Roles and cannot\n" +
-			"create namespaces or RBAC itself — then registers the environment with the control plane.\n\n" +
+			"create namespaces or RBAC itself), then registers the environment with the control plane.\n\n" +
 			"The namespace defaults to <app-namespace>-<name> (e.g. burrow-apps-staging); override it\n" +
 			"with --namespace.",
 		Args: exactArgs(1),

@@ -107,7 +107,6 @@ func newRootCmd() *cobra.Command {
 		newAppCmd(),
 		newAddonCmd(),
 		newConfigCmd(),
-		newSystemCmd(),
 		// Cross-cutting policy + meta — top level.
 		newClusterCmd(),
 		newContextCmd(),

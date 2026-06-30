@@ -141,7 +141,7 @@ the CLIs with Homebrew:
 ```sh
 brew install burrow-cloud/tap/burrow     # installs burrow and burrow-mcp
 
-burrow install                           # control plane to your cluster (uses your kubeconfig)
+burrow install <context>                 # control plane into the named kube context (run `burrow install` to list them)
 claude mcp add burrow burrow-mcp         # point your agent at it (auto-connects via kubeconfig)
 
 # then just talk to your agent, or drive it directly:

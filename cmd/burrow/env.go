@@ -114,7 +114,7 @@ func runEnvAdd(ctx context.Context, o *commonOpts, name, envNamespace string, ve
 	if err != nil {
 		return err
 	}
-	if err := applyFn(ctx, o.kubeconfig, manifests, verbose, stdout, stderr); err != nil {
+	if err := applyFn(ctx, o.kubeconfig, o.context, manifests, verbose, stdout, stderr); err != nil {
 		return err
 	}
 

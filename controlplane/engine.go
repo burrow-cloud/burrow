@@ -212,20 +212,20 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	return DeployResult{Release: rel, SupersededReleaseID: superseded}, nil
 }
 
-// SetEnv upserts one non-secret env key for an app in the config store (ADR-0028). The store
-// is the single source of truth for the app's env. By default the change re-applies the running
+// SetConfig upserts one non-secret config var for an app in the config store (ADR-0028). The store
+// is the single source of truth for the app's config. By default the change re-applies the running
 // workload so it rolls and the running app picks the value up; with noRestart the value is only
 // persisted and lands on the next deploy. An app with no running release simply persists and
-// skips the apply — not an error. Env is non-secret config, so there is no guardrail.
-func (e *Engine) SetEnv(ctx context.Context, app, key, value string, noRestart bool) error {
+// skips the apply — not an error. Config vars are non-secret, so there is no guardrail.
+func (e *Engine) SetConfig(ctx context.Context, app, key, value string, noRestart bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
-		return fmt.Errorf("set env: %w: %w", ErrInvalid, err)
+		return fmt.Errorf("set config: %w: %w", ErrInvalid, err)
 	}
 	if err := validateEnvKey(key); err != nil {
-		return fmt.Errorf("set env %s: %w: %w", app, ErrInvalid, err)
+		return fmt.Errorf("set config %s: %w: %w", app, ErrInvalid, err)
 	}
 	if err := e.db.SetAppEnv(ctx, app, key, value); err != nil {
-		return fmt.Errorf("set env %s: persisting %s: %w", app, key, err)
+		return fmt.Errorf("set config %s: persisting %s: %w", app, key, err)
 	}
 	if noRestart {
 		return nil
@@ -233,18 +233,18 @@ func (e *Engine) SetEnv(ctx context.Context, app, key, value string, noRestart b
 	return e.reapplyEnv(ctx, app)
 }
 
-// UnsetEnv removes one env key for an app from the config store (ADR-0028). Like SetEnv it
+// UnsetConfig removes one config var for an app from the config store (ADR-0028). Like SetConfig it
 // re-applies the running workload by default so the running app drops the value, or only
 // persists with noRestart. An app with no running release simply persists and skips the apply.
-func (e *Engine) UnsetEnv(ctx context.Context, app, key string, noRestart bool) error {
+func (e *Engine) UnsetConfig(ctx context.Context, app, key string, noRestart bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
-		return fmt.Errorf("unset env: %w: %w", ErrInvalid, err)
+		return fmt.Errorf("unset config: %w: %w", ErrInvalid, err)
 	}
 	if err := validateEnvKey(key); err != nil {
-		return fmt.Errorf("unset env %s: %w: %w", app, ErrInvalid, err)
+		return fmt.Errorf("unset config %s: %w: %w", app, ErrInvalid, err)
 	}
 	if err := e.db.UnsetAppEnv(ctx, app, key); err != nil {
-		return fmt.Errorf("unset env %s: removing %s: %w", app, key, err)
+		return fmt.Errorf("unset config %s: removing %s: %w", app, key, err)
 	}
 	if noRestart {
 		return nil
@@ -252,15 +252,15 @@ func (e *Engine) UnsetEnv(ctx context.Context, app, key string, noRestart bool) 
 	return e.reapplyEnv(ctx, app)
 }
 
-// ListEnv returns the app's non-secret env store (ADR-0028). An app with no env yields an
+// ListConfig returns the app's non-secret config store (ADR-0028). An app with no config yields an
 // empty map and no error.
-func (e *Engine) ListEnv(ctx context.Context, app string) (map[string]string, error) {
+func (e *Engine) ListConfig(ctx context.Context, app string) (map[string]string, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
-		return nil, fmt.Errorf("list env: %w: %w", ErrInvalid, err)
+		return nil, fmt.Errorf("list config: %w: %w", ErrInvalid, err)
 	}
 	env, err := e.db.AppEnv(ctx, app)
 	if err != nil {
-		return nil, fmt.Errorf("list env %s: %w", app, err)
+		return nil, fmt.Errorf("list config %s: %w", app, err)
 	}
 	return env, nil
 }

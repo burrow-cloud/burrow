@@ -12,7 +12,7 @@ import "time"
 // DeployRequest is the small, code-free description of a deploy: a pullable image plus
 // metadata (ADR-0004). No code travels here. Env is deliberately absent: an app's
 // non-secret config is an independently-managed, app-global store, sourced at apply time
-// rather than passed per deploy (ADR-0028) — set it with SetEnv before deploying.
+// rather than passed per deploy (ADR-0028) — set it with SetConfig before deploying.
 type DeployRequest struct {
 	App     string   `json:"app"`
 	Image   string   `json:"image"`

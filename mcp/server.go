@@ -46,23 +46,23 @@ func NewServer(clientFor ClientForContext, environments EnvironmentLister, versi
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_deploy",
-		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Environment configuration is NOT passed here: an app's env is a separate, app-global store sourced at deploy time, so set any env the release needs with burrow_env_set BEFORE deploying — the new release then boots with it on first start. (burrow_env_set with no_restart=true followed by burrow_deploy is a single restart.) For SECRETS (DB URLs, API keys), do not put values in env and do not paste secret values into this conversation: ask the user to run `burrow app secret set <app> KEY=VALUE` themselves BEFORE deploying, then confirm the key with burrow_secret_list. Returns the new release and the release it superseded (the rollback handle). Pass context to target a specific cluster/environment (default the current one); this is how you deploy to staging versus prod, and each environment enforces its own guardrails.",
+		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Config is NOT passed here: an app's config is a separate, app-global store sourced at deploy time, so set any config vars the release needs with burrow_config_set BEFORE deploying — the new release then boots with it on first start. (burrow_config_set with no_restart=true followed by burrow_deploy is a single restart.) For SECRETS (DB URLs, API keys), do not put values in config and do not paste secret values into this conversation: ask the user to run `burrow app secret set <app> KEY=VALUE` themselves BEFORE deploying, then confirm the key with burrow_secret_list. Returns the new release and the release it superseded (the rollback handle). Pass context to target a specific cluster/environment (default the current one); this is how you deploy to staging versus prod, and each environment enforces its own guardrails.",
 	}, deployTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
-		Name:        "burrow_env_set",
-		Description: "Set (upsert) a non-secret environment variable for an app. The env store is the single source of truth, sourced into the workload at deploy time. By default the running app is rolled so it picks the change up; set no_restart=true to only persist it and let it land on the next deploy (so setting env then deploying is a single restart). For secrets, do not use env — env values are non-secret config.",
-	}, envSetTool(clientFor))
+		Name:        "burrow_config_set",
+		Description: "Set (upsert) a non-secret config var for an app (configuration set as an environment variable). The config store is the single source of truth, sourced into the workload at deploy time. By default the running app is rolled so it picks the change up; set no_restart=true to only persist it and let it land on the next deploy (so setting config then deploying is a single restart). For secrets, do not use config: config vars are non-secret.",
+	}, configSetTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
-		Name:        "burrow_env_list",
-		Description: "List an app's non-secret environment variables (the env store). Read-only.",
-	}, envListTool(clientFor))
+		Name:        "burrow_config_list",
+		Description: "List an app's non-secret config vars (the config store). Read-only.",
+	}, configListTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
-		Name:        "burrow_env_unset",
-		Description: "Remove a non-secret environment variable from an app. By default the running app is rolled so it drops the value; set no_restart=true to only persist the removal and let it land on the next deploy.",
-	}, envUnsetTool(clientFor))
+		Name:        "burrow_config_unset",
+		Description: "Remove a non-secret config var from an app. By default the running app is rolled so it drops the value; set no_restart=true to only persist the removal and let it land on the next deploy.",
+	}, configUnsetTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_secret_list",
@@ -246,68 +246,68 @@ func deployTool(clientFor ClientForContext) sdk.ToolHandlerFor[deployInput, clie
 	}
 }
 
-type envSetInput struct {
+type configSetInput struct {
 	contextArg
 	App       string `json:"app" jsonschema:"the application name"`
-	Key       string `json:"key" jsonschema:"the environment variable name (e.g. LOG_LEVEL)"`
+	Key       string `json:"key" jsonschema:"the config var name (e.g. LOG_LEVEL)"`
 	Value     string `json:"value" jsonschema:"the value to set"`
 	NoRestart bool   `json:"no_restart,omitempty" jsonschema:"true to persist without rolling the running app; the change lands on the next deploy"`
 }
 
-type envUnsetInput struct {
+type configUnsetInput struct {
 	contextArg
 	App       string `json:"app" jsonschema:"the application name"`
-	Key       string `json:"key" jsonschema:"the environment variable name to remove"`
+	Key       string `json:"key" jsonschema:"the config var name to remove"`
 	NoRestart bool   `json:"no_restart,omitempty" jsonschema:"true to persist the removal without rolling the running app; the change lands on the next deploy"`
 }
 
-// envAck is a small structured ack for an env mutation.
-type envAck struct {
+// keyAck is a small structured ack for a config or secret key mutation.
+type keyAck struct {
 	App string `json:"app"`
 	Key string `json:"key"`
 }
 
-type envOutput struct {
-	Env map[string]string `json:"env"`
+type configOutput struct {
+	Config map[string]string `json:"config"`
 }
 
-func envSetTool(clientFor ClientForContext) sdk.ToolHandlerFor[envSetInput, envAck] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in envSetInput) (*sdk.CallToolResult, envAck, error) {
+func configSetTool(clientFor ClientForContext) sdk.ToolHandlerFor[configSetInput, keyAck] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in configSetInput) (*sdk.CallToolResult, keyAck, error) {
 		c, err := clientFor(in.Context)
 		if err != nil {
-			return nil, envAck{}, err
+			return nil, keyAck{}, err
 		}
-		if err := c.SetEnv(ctx, in.App, in.Key, in.Value, in.NoRestart); err != nil {
-			return nil, envAck{}, err
+		if err := c.SetConfig(ctx, in.App, in.Key, in.Value, in.NoRestart); err != nil {
+			return nil, keyAck{}, err
 		}
-		return nil, envAck{App: in.App, Key: in.Key}, nil
+		return nil, keyAck{App: in.App, Key: in.Key}, nil
 	}
 }
 
-func envUnsetTool(clientFor ClientForContext) sdk.ToolHandlerFor[envUnsetInput, envAck] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in envUnsetInput) (*sdk.CallToolResult, envAck, error) {
+func configUnsetTool(clientFor ClientForContext) sdk.ToolHandlerFor[configUnsetInput, keyAck] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in configUnsetInput) (*sdk.CallToolResult, keyAck, error) {
 		c, err := clientFor(in.Context)
 		if err != nil {
-			return nil, envAck{}, err
+			return nil, keyAck{}, err
 		}
-		if err := c.UnsetEnv(ctx, in.App, in.Key, in.NoRestart); err != nil {
-			return nil, envAck{}, err
+		if err := c.UnsetConfig(ctx, in.App, in.Key, in.NoRestart); err != nil {
+			return nil, keyAck{}, err
 		}
-		return nil, envAck{App: in.App, Key: in.Key}, nil
+		return nil, keyAck{App: in.App, Key: in.Key}, nil
 	}
 }
 
-func envListTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, envOutput] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, envOutput, error) {
+func configListTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, configOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, configOutput, error) {
 		c, err := clientFor(in.Context)
 		if err != nil {
-			return nil, envOutput{}, err
+			return nil, configOutput{}, err
 		}
-		env, err := c.Env(ctx, in.App)
+		cfg, err := c.Config(ctx, in.App)
 		if err != nil {
-			return nil, envOutput{}, err
+			return nil, configOutput{}, err
 		}
-		return nil, envOutput{Env: env}, nil
+		return nil, configOutput{Config: cfg}, nil
 	}
 }
 
@@ -337,16 +337,16 @@ func secretListTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, sec
 	}
 }
 
-func secretUnsetTool(clientFor ClientForContext) sdk.ToolHandlerFor[secretUnsetInput, envAck] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in secretUnsetInput) (*sdk.CallToolResult, envAck, error) {
+func secretUnsetTool(clientFor ClientForContext) sdk.ToolHandlerFor[secretUnsetInput, keyAck] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in secretUnsetInput) (*sdk.CallToolResult, keyAck, error) {
 		c, err := clientFor(in.Context)
 		if err != nil {
-			return nil, envAck{}, err
+			return nil, keyAck{}, err
 		}
 		if err := c.UnsetSecret(ctx, in.App, in.Key, in.NoRestart); err != nil {
-			return nil, envAck{}, err
+			return nil, keyAck{}, err
 		}
-		return nil, envAck{App: in.App, Key: in.Key}, nil
+		return nil, keyAck{App: in.App, Key: in.Key}, nil
 	}
 }
 

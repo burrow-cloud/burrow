@@ -73,7 +73,7 @@ func (e *APIError) Error() string {
 // The DTOs below mirror the control-plane API's JSON shapes (snake_case).
 
 // DeployRequest carries a deploy's code-free metadata. Env is deliberately absent: an app's
-// non-secret config is an independently-managed store, set with SetEnv and sourced at apply
+// non-secret config is an independently-managed store, set with SetConfig and sourced at apply
 // time rather than passed per deploy (ADR-0028).
 type DeployRequest struct {
 	Image       string   `json:"image"`
@@ -589,31 +589,31 @@ func (c *Client) WaitReachable(ctx context.Context, app string, timeout time.Dur
 	return res, nil
 }
 
-// SetEnv upserts one non-secret env key for an app (ADR-0028). By default the running workload
+// SetConfig upserts one non-secret config var for an app (ADR-0028). By default the running workload
 // rolls so the app picks the value up; noRestart only persists, landing the change on the next
 // deploy.
-func (c *Client) SetEnv(ctx context.Context, app, key, value string, noRestart bool) error {
+func (c *Client) SetConfig(ctx context.Context, app, key, value string, noRestart bool) error {
 	body := map[string]any{"key": key, "value": value, "no_restart": noRestart}
-	return c.do(ctx, http.MethodPost, c.appPath(app, "env"), body, nil)
+	return c.do(ctx, http.MethodPost, c.appPath(app, "config"), body, nil)
 }
 
-// UnsetEnv removes one env key for an app (ADR-0028). By default the running workload rolls; with
+// UnsetConfig removes one config var for an app (ADR-0028). By default the running workload rolls; with
 // noRestart the removal only persists and lands on the next deploy.
-func (c *Client) UnsetEnv(ctx context.Context, app, key string, noRestart bool) error {
-	path := "/v1/apps/" + url.PathEscape(app) + "/env/" + url.PathEscape(key)
+func (c *Client) UnsetConfig(ctx context.Context, app, key string, noRestart bool) error {
+	path := "/v1/apps/" + url.PathEscape(app) + "/config/" + url.PathEscape(key)
 	if noRestart {
 		path += "?no_restart=true"
 	}
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
-// Env returns the app's non-secret env store (ADR-0028).
-func (c *Client) Env(ctx context.Context, app string) (map[string]string, error) {
+// Config returns the app's non-secret config store (ADR-0028).
+func (c *Client) Config(ctx context.Context, app string) (map[string]string, error) {
 	var out struct {
-		Env map[string]string `json:"env"`
+		Config map[string]string `json:"config"`
 	}
-	err := c.do(ctx, http.MethodGet, c.appPath(app, "env"), nil, &out)
-	return out.Env, err
+	err := c.do(ctx, http.MethodGet, c.appPath(app, "config"), nil, &out)
+	return out.Config, err
 }
 
 // SetSecret upserts one secret key=value for an app (ADR-0029). The value travels over burrowd's

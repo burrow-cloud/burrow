@@ -129,8 +129,8 @@ func TestListTools(t *testing.T) {
 			}
 			// The Postgres attach tool (and every tool) must never accept a database password or
 			// connection string: burrowd generates the DATABASE_URL server-side (ADR-0031). No tool
-			// input names a connection-string-shaped secret. (`value` is allowed: env set carries a
-			// non-secret env value, and there is no secret-set tool.)
+			// input names a connection-string-shaped secret. (`value` is allowed: config set carries a
+			// non-secret config value, and there is no secret-set tool.)
 			switch prop {
 			case "password", "url", "database_url", "connection_string", "dsn":
 				t.Errorf("tool %q exposes a %q input: a database secret value must never cross MCP", tool.Name, prop)

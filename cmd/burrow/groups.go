@@ -26,7 +26,7 @@ func newAppCmd() *cobra.Command {
 		newLogsCmd(),
 		newRollbackCmd(),
 		newScaleCmd(),
-		newEnvCmd(),
+		newAppConfigCmd(),
 		newSecretCmd(),
 		newReachabilityCmd(),
 		newPublishCmd(),

@@ -54,9 +54,9 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/apps/{app}/expose", s.expose)
 	v1.HandleFunc("POST /v1/apps/{app}/unexpose", s.unexpose)
 	v1.HandleFunc("GET /v1/apps/{app}/reachability", s.reachability)
-	v1.HandleFunc("GET /v1/apps/{app}/env", s.listEnv)
-	v1.HandleFunc("POST /v1/apps/{app}/env", s.setEnv)
-	v1.HandleFunc("DELETE /v1/apps/{app}/env/{key}", s.unsetEnv)
+	v1.HandleFunc("GET /v1/apps/{app}/config", s.listConfig)
+	v1.HandleFunc("POST /v1/apps/{app}/config", s.setConfig)
+	v1.HandleFunc("DELETE /v1/apps/{app}/config/{key}", s.unsetConfig)
 	// Secrets: set carries a VALUE in its POST body, list returns KEYS only, unset removes a key.
 	// set is the ONE secret endpoint that carries a value — it travels over this authenticated,
 	// TLS-protected API and burrowd writes it to the per-app Kubernetes Secret (ADR-0029). The
@@ -226,40 +226,40 @@ func (s *server) reachability(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-func (s *server) listEnv(w http.ResponseWriter, r *http.Request) {
-	env, err := s.engine.ListEnv(r.Context(), r.PathValue("app"))
+func (s *server) listConfig(w http.ResponseWriter, r *http.Request) {
+	env, err := s.engine.ListConfig(r.Context(), r.PathValue("app"))
 	if err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, envResponse{Env: env})
+	writeJSON(w, http.StatusOK, configResponse{Config: env})
 }
 
-func (s *server) setEnv(w http.ResponseWriter, r *http.Request) {
-	var req envSetRequest
+func (s *server) setConfig(w http.ResponseWriter, r *http.Request) {
+	var req configSetRequest
 	if !decode(w, r, &req) {
 		return
 	}
-	if err := s.engine.SetEnv(r.Context(), r.PathValue("app"), req.Key, req.Value, req.NoRestart); err != nil {
+	if err := s.engine.SetConfig(r.Context(), r.PathValue("app"), req.Key, req.Value, req.NoRestart); err != nil {
 		writeEngineError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app"), "key": req.Key})
 }
 
-func (s *server) unsetEnv(w http.ResponseWriter, r *http.Request) {
+func (s *server) unsetConfig(w http.ResponseWriter, r *http.Request) {
 	noRestart := r.URL.Query().Get("no_restart") == "true"
 	key := r.PathValue("key")
-	if err := s.engine.UnsetEnv(r.Context(), r.PathValue("app"), key, noRestart); err != nil {
+	if err := s.engine.UnsetConfig(r.Context(), r.PathValue("app"), key, noRestart); err != nil {
 		writeEngineError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app"), "key": key})
 }
 
-// envResponse wraps the env map so the shape can grow without breaking object decoders.
-type envResponse struct {
-	Env map[string]string `json:"env"`
+// configResponse wraps the config map so the shape can grow without breaking object decoders.
+type configResponse struct {
+	Config map[string]string `json:"config"`
 }
 
 // setSecret is the ONE secret endpoint that carries a value: it decodes {key, value, no_restart}
@@ -316,9 +316,9 @@ type secretSetRequest struct {
 	NoRestart bool   `json:"no_restart,omitempty"`
 }
 
-// envSetRequest is the body of an env set (the app comes from the path). NoRestart persists the
+// configSetRequest is the body of a config set (the app comes from the path). NoRestart persists the
 // change without rolling the running workload; the change lands on the next deploy (ADR-0028).
-type envSetRequest struct {
+type configSetRequest struct {
 	Key       string `json:"key"`
 	Value     string `json:"value"`
 	NoRestart bool   `json:"no_restart,omitempty"`

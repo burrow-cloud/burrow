@@ -98,26 +98,42 @@ the groundwork the web UI and managed product depend on.
 - **Dedicated app namespace** — new installs deploy apps into **`burrow-apps`**, not the shared
   `default` namespace, isolating the per-app secrets grant.
 
+## Shipped: v0.6 — first backend block, agent-native onboarding, and the Apache relicense ✅
+
+Released as **v0.6.0**. Opens the backend tier, makes first-touch onboarding agent-native, and
+relicenses the whole repository to Apache-2.0.
+
+- **Postgres add-on** ([ADR-0031](adr/0031-postgres-addon.md)) — `addon install postgres` (one shared
+  instance in `burrow-addons`) + `addon attach postgres <app>` (a per-app database + login role, the
+  generated `DATABASE_URL` written into the app's per-app Secret). Passwords generated server-side,
+  so attach is agent-drivable with no secret value over MCP.
+- **Postgres backups** ([ADR-0032](adr/0032-postgres-backups.md)) — `addon backup` / `backups` /
+  `restore postgres` via `pg_dump`/`pg_restore` Jobs to a backup PVC, recorded in the control-plane
+  database; restore is confirm-gated.
+- **Read-only audit MCP tool** — `burrow_audit` over the guarded-operation log.
+- **Agent-native onboarding** ([ADR-0034](adr/0034-agent-native-onboarding.md)) — cluster-capability
+  detection (live, over one narrow read-only grant), cost-aware ingress/TLS provisioning
+  (LoadBalancer vs NodePort), and a converged "live at https://…" reachability verdict with a wait.
+  All agent-driven; no new command.
+- **Dotted guardrail codes** — `resource.operation` form (`app.delete`), forward-compatible with
+  per-environment scoping.
+- **Apache-2.0 relicense** ([ADR-0033](adr/0033-relicense-to-apache.md)) — the whole repository is now
+  Apache-2.0; managed cloud and the enterprise tier stay separate proprietary products.
+- **Homebrew distribution** ([ADR-0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md)) — the
+  `burrow` and `burrow-mcp` CLIs publish to a Homebrew tap on release.
+
 **Next:**
 
-- **Postgres add-on** ([ADR-0031](adr/0031-postgres-addon.md)) ✅ shipped (#109) — the first
-  *backend* building block: `addon install postgres` stands up **one shared instance** in
-  `burrow-addons`; `addon attach postgres <app>` gives each app its **own database + login role**
-  (isolation without per-app pods) and writes the generated `DATABASE_URL` into the app's per-app
-  Secret, restarting the app to pick it up. burrowd generates the superuser and per-app passwords
-  server-side, so attach is agent-drivable yet **no secret value crosses MCP**. The North-Star down
-  payment — BYO Neon/Supabase and a provisioned DB reach the app the same way. Per-app *instances*
-  are a later opt-in.
-- **Postgres backups** ([ADR-0032](adr/0032-postgres-backups.md), in progress) — a database isn't
-  trustworthy without them: `addon backup postgres <app>` runs a `pg_dump` Job to a backup PVC and
-  records the backup in the control-plane DB; `addon backups` lists them; `addon restore postgres
-  <app> --backup <id>` runs a `pg_restore` Job behind a confirm guardrail. Scheduled backups +
-  retention (a CronJob) follow in a second slice.
+- **Environments & multi-cluster** (ADR-0035, to be written) — per-environment guardrails (the answer
+  to "don't let AI touch prod"), supporting both namespace-per-env and cluster-per-env (each a
+  kubeconfig context with its own burrowd); the dotted guardrail keys gain a `prod.`/`staging.` prefix.
+- **Scheduled backups + retention** — the [ADR-0032](adr/0032-postgres-backups.md) follow-on (a CronJob
+  or a burrowd in-process scheduler).
 - **Credentials follow-on** — the registry pull secret ([ADR-0017](adr/0017-private-registry-authentication.md))
   through burrowd too; richer per-principal identity with an auth ADR.
-- Unsequenced themes — database provisioning depth, autoscaling, cost controls, a self-host
-  dashboard, a frictionless cluster on-ramp — live in [ROADMAP.md](ROADMAP.md). **Deferred until
-  requested:** server-side build from a git reference ([ADR-0008](adr/0008-two-build-paths.md)).
+- Unsequenced themes — reliability legibility, database-provisioning depth, autoscaling, cost controls,
+  a frictionless cluster on-ramp — live in [ROADMAP.md](ROADMAP.md). **Deferred until requested:**
+  server-side build from a git reference ([ADR-0008](adr/0008-two-build-paths.md)).
 
 Shipped in **v0.3**: the CLI regrouped by task (`app`/`config`/`system`, `expose`→`publish` —
 [ADR-0024](adr/0024-cli-command-taxonomy.md)) with `app list`; the Cloudflare adapter verifying

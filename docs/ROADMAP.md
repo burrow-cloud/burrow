@@ -101,6 +101,33 @@ groundwork the web UI and managed product depend on.
 - **Dedicated app namespace** — new installs deploy apps into **`burrow-apps`**, not the cluster's
   shared `default` namespace, so the per-app secrets grant stays isolated.
 
+## v0.6 — First backend block, agent-native onboarding, and the Apache relicense ✅ shipped
+
+The release that opens the backend tier, makes first-touch onboarding agent-native, and removes the
+source-available friction from the license.
+
+- **Postgres add-on** ([ADR-0031](adr/0031-postgres-addon.md)) — `addon install postgres` stands up
+  one shared instance in `burrow-addons`; `addon attach postgres <app>` gives each app its own
+  database and login role and writes the generated `DATABASE_URL` into the app's per-app Secret.
+  burrowd generates the passwords server-side, so attach is agent-drivable yet no secret value
+  crosses MCP. BYO Neon/Supabase and a provisioned database reach the app the same way.
+- **Postgres backups** ([ADR-0032](adr/0032-postgres-backups.md)) — `addon backup` / `backups` /
+  `restore postgres` run `pg_dump`/`pg_restore` as Jobs to a backup PVC, recorded in the control-plane
+  database; restore is confirm-gated. Scheduled backups and retention are a later slice.
+- **Read-only audit MCP tool** — `burrow_audit` lets the agent query the guarded-operation log
+  (allowed / held / denied / executed) with the same key-only redaction as `burrow audit`.
+- **Agent-native onboarding** ([ADR-0034](adr/0034-agent-native-onboarding.md)) — `burrow install`
+  detects the cluster's capabilities and burrowd reads them live over one narrow read-only grant;
+  `system ingress install` provisions the substrate (ingress-nginx, cert-manager, an issuer) on a
+  cost-aware confirmation with a LoadBalancer-vs-NodePort choice; and `reachability` converges to a
+  verified "live at https://…" URL. All agent-driven, no new command.
+- **Dotted guardrail codes** — guardrail codes moved to a hierarchical `resource.operation` form
+  (`app.delete`, `dns.write`, `addon.install`), forward-compatible with per-environment scoping.
+- **Apache-2.0 relicense** ([ADR-0033](adr/0033-relicense-to-apache.md)) — the whole repository is now
+  Apache-2.0; the managed cloud and the enterprise tier remain separate proprietary products.
+- **Homebrew distribution** ([ADR-0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md)) — the
+  `burrow` and `burrow-mcp` CLIs publish to a Homebrew tap on each release.
+
 ## Deferred until requested
 
 - **Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) — a

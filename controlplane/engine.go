@@ -141,11 +141,18 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	if req.Replicas < 0 {
 		return DeployResult{}, fmt.Errorf("deploy %s: replicas %d is negative: %w", req.App, req.Replicas, ErrInvalid)
 	}
+	// Resolve the target environment to its namespace up front so an unknown environment fails fast,
+	// before the guardrail decision or any cluster write (ADR-0035 phase 2b).
+	ns, err := e.resolveNamespace(ctx, req.Env)
+	if err != nil {
+		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
+	}
+	k := e.k8s.WithNamespace(ns)
 	pol, err := e.db.Policy(ctx)
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: loading guardrail policy: %w", req.App, err)
 	}
-	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(req.Replicas))}
+	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(req.Replicas)), "env": envName(req.Env)}
 	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, "", pol.evaluateReplicas("deploy", req.Replicas, req.Confirm)); err != nil {
 		return DeployResult{}, err
 	}
@@ -198,7 +205,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	args["env_keys"] = auditKeys(env)
 
 	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: req.Replicas}
-	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
+	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
 		e.recordExecution(ctx, auditOpDeploy, req.App, args, err)
@@ -230,12 +237,16 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 // workload so it rolls and the running app picks the value up; with noRestart the value is only
 // persisted and lands on the next deploy. An app with no running release simply persists and
 // skips the apply — not an error. Config vars are non-secret, so there is no guardrail.
-func (e *Engine) SetConfig(ctx context.Context, app, key, value string, noRestart bool) error {
+func (e *Engine) SetConfig(ctx context.Context, app, env, key, value string, noRestart bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("set config: %w: %w", ErrInvalid, err)
 	}
 	if err := validateEnvKey(key); err != nil {
 		return fmt.Errorf("set config %s: %w: %w", app, ErrInvalid, err)
+	}
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return fmt.Errorf("set config %s: %w", app, err)
 	}
 	if err := e.db.SetAppEnv(ctx, app, key, value); err != nil {
 		return fmt.Errorf("set config %s: persisting %s: %w", app, key, err)
@@ -243,18 +254,22 @@ func (e *Engine) SetConfig(ctx context.Context, app, key, value string, noRestar
 	if noRestart {
 		return nil
 	}
-	return e.reapplyEnv(ctx, app)
+	return e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app)
 }
 
 // UnsetConfig removes one config var for an app from the config store (ADR-0028). Like SetConfig it
 // re-applies the running workload by default so the running app drops the value, or only
 // persists with noRestart. An app with no running release simply persists and skips the apply.
-func (e *Engine) UnsetConfig(ctx context.Context, app, key string, noRestart bool) error {
+func (e *Engine) UnsetConfig(ctx context.Context, app, env, key string, noRestart bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("unset config: %w: %w", ErrInvalid, err)
 	}
 	if err := validateEnvKey(key); err != nil {
 		return fmt.Errorf("unset config %s: %w: %w", app, ErrInvalid, err)
+	}
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return fmt.Errorf("unset config %s: %w", app, err)
 	}
 	if err := e.db.UnsetAppEnv(ctx, app, key); err != nil {
 		return fmt.Errorf("unset config %s: removing %s: %w", app, key, err)
@@ -262,27 +277,33 @@ func (e *Engine) UnsetConfig(ctx context.Context, app, key string, noRestart boo
 	if noRestart {
 		return nil
 	}
-	return e.reapplyEnv(ctx, app)
+	return e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app)
 }
 
 // ListConfig returns the app's non-secret config store (ADR-0028). An app with no config yields an
 // empty map and no error.
-func (e *Engine) ListConfig(ctx context.Context, app string) (map[string]string, error) {
+func (e *Engine) ListConfig(ctx context.Context, app, env string) (map[string]string, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return nil, fmt.Errorf("list config: %w: %w", ErrInvalid, err)
 	}
-	env, err := e.db.AppEnv(ctx, app)
+	// Resolve the environment so an unknown name is a clear error, even though the config store is
+	// app-global today: its values are sourced into whichever environment's namespace a deploy
+	// targets (ADR-0035 phase 2b).
+	if _, err := e.resolveNamespace(ctx, env); err != nil {
+		return nil, fmt.Errorf("list config %s: %w", app, err)
+	}
+	cfg, err := e.db.AppEnv(ctx, app)
 	if err != nil {
 		return nil, fmt.Errorf("list config %s: %w", app, err)
 	}
-	return env, nil
+	return cfg, nil
 }
 
 // reapplyEnv re-renders the running workload with the current store env so a mutation rolls the
 // Deployment (ADR-0028). It reconstructs the WorkloadSpec from the app's currently running release
 // and the store. With no running release there is nothing to roll: the change is persisted and
 // will land on the next deploy, so this is a no-op, not an error.
-func (e *Engine) reapplyEnv(ctx context.Context, app string) error {
+func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app string) error {
 	releases, err := e.db.Releases(ctx, app)
 	if err != nil {
 		return fmt.Errorf("set env %s: reading release history: %w", app, err)
@@ -296,7 +317,7 @@ func (e *Engine) reapplyEnv(ctx context.Context, app string) error {
 		return fmt.Errorf("set env %s: reading env: %w", app, err)
 	}
 	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: env, Command: cur.Command, MetricsPort: cur.MetricsPort, Replicas: cur.Replicas}
-	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
+	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		return fmt.Errorf("set env %s: applying to cluster: %w", app, err)
 	}
 	return nil
@@ -305,11 +326,15 @@ func (e *Engine) reapplyEnv(ctx context.Context, app string) error {
 // ListSecrets returns the env-var KEYS in an app's per-app Secret, sorted, never the values
 // (ADR-0028/0004). Secret values live only in the Kubernetes Secret and never cross the API or
 // MCP, so this read returns keys only. An app with no secrets yields an empty slice.
-func (e *Engine) ListSecrets(ctx context.Context, app string) ([]string, error) {
+func (e *Engine) ListSecrets(ctx context.Context, app, env string) ([]string, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return nil, fmt.Errorf("list secrets: %w: %w", ErrInvalid, err)
 	}
-	keys, err := e.k8s.SecretKeys(ctx, app)
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return nil, fmt.Errorf("list secrets %s: %w", app, err)
+	}
+	keys, err := e.k8s.WithNamespace(ns).SecretKeys(ctx, app)
 	if err != nil {
 		return nil, fmt.Errorf("list secrets %s: %w", app, err)
 	}
@@ -323,14 +348,19 @@ func (e *Engine) ListSecrets(ctx context.Context, app string) ([]string, error) 
 // appears in any error (the value is never formatted into one). Setting a value still cannot be
 // done over MCP: there is no secret-set MCP tool. An app with no running workload just writes the
 // Secret; the change lands on the next deploy.
-func (e *Engine) SetSecret(ctx context.Context, app, key, value string, noRestart bool) error {
+func (e *Engine) SetSecret(ctx context.Context, app, env, key, value string, noRestart bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("set secret: %w: %w", ErrInvalid, err)
 	}
 	if err := validateEnvKey(key); err != nil {
 		return fmt.Errorf("set secret %s: %w: %w", app, ErrInvalid, err)
 	}
-	if err := e.k8s.SetSecretValue(ctx, app, key, value); err != nil {
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return fmt.Errorf("set secret %s: %w", app, err)
+	}
+	k := e.k8s.WithNamespace(ns)
+	if err := k.SetSecretValue(ctx, app, key, value); err != nil {
 		// Wrap with the app and key NAME only — never the value (ADR-0029).
 		return fmt.Errorf("set secret %s: writing %s: %w", app, key, err)
 	}
@@ -340,7 +370,7 @@ func (e *Engine) SetSecret(ctx context.Context, app, key, value string, noRestar
 	// envFrom is read only at pod start, so writing a value under an existing key does not roll
 	// the Deployment on its own — bump the restart annotation. A missing workload means nothing is
 	// running yet: not an error, the change lands on the next deploy.
-	if err := e.k8s.RestartWorkload(ctx, app, e.clock.Now()); err != nil {
+	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil
 		}
@@ -353,14 +383,19 @@ func (e *Engine) SetSecret(ctx context.Context, app, key, value string, noRestar
 // running workload so it drops the value (ADR-0028). Removing a key carries no value, and this is
 // MCP-allowed. An app with no running workload just updates the Secret; the change lands on the
 // next deploy. Removing an absent key succeeds.
-func (e *Engine) UnsetSecret(ctx context.Context, app, key string, noRestart bool) error {
+func (e *Engine) UnsetSecret(ctx context.Context, app, env, key string, noRestart bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("unset secret: %w: %w", ErrInvalid, err)
 	}
 	if err := validateEnvKey(key); err != nil {
 		return fmt.Errorf("unset secret %s: %w: %w", app, ErrInvalid, err)
 	}
-	if err := e.k8s.UnsetSecretKey(ctx, app, key); err != nil {
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return fmt.Errorf("unset secret %s: %w", app, err)
+	}
+	k := e.k8s.WithNamespace(ns)
+	if err := k.UnsetSecretKey(ctx, app, key); err != nil {
 		return fmt.Errorf("unset secret %s: removing %s: %w", app, key, err)
 	}
 	if noRestart {
@@ -369,7 +404,7 @@ func (e *Engine) UnsetSecret(ctx context.Context, app, key string, noRestart boo
 	// envFrom is read only at pod start, so removing a key from the Secret does not roll the
 	// Deployment on its own — bump the restart annotation. A missing workload means nothing is
 	// running yet: not an error, the change lands on the next deploy.
-	if err := e.k8s.RestartWorkload(ctx, app, e.clock.Now()); err != nil {
+	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil
 		}
@@ -381,8 +416,12 @@ func (e *Engine) UnsetSecret(ctx context.Context, app, key string, noRestart boo
 // Status returns the combined control-plane and cluster view of an app: the most recent
 // ListApps returns the workload status of every Burrow-managed app, for an apps listing. It
 // reads the cluster — the source of truth for what is running.
-func (e *Engine) ListApps(ctx context.Context) ([]WorkloadStatus, error) {
-	apps, err := e.k8s.ListWorkloads(ctx)
+func (e *Engine) ListApps(ctx context.Context, env string) ([]WorkloadStatus, error) {
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return nil, fmt.Errorf("list apps: %w", err)
+	}
+	apps, err := e.k8s.WithNamespace(ns).ListWorkloads(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list apps: reading cluster: %w", err)
 	}
@@ -736,10 +775,15 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID st
 // The app must exist — it has either recorded releases or a live workload; an app unknown to
 // both is ErrNotFound. Teardown tolerates an already-absent piece: an ErrNotFound from the
 // workload or routing delete means that piece is already gone, not a failure.
-func (e *Engine) DeleteApp(ctx context.Context, app string, confirm bool) error {
+func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("delete app: %w: %w", ErrInvalid, err)
 	}
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return fmt.Errorf("delete app %s: %w", app, err)
+	}
+	k := e.k8s.WithNamespace(ns)
 
 	// Existence: an app exists if it has releases OR a live workload. Determine this before
 	// evaluating the guardrail so an unknown app is ErrNotFound rather than a confirm prompt.
@@ -749,7 +793,7 @@ func (e *Engine) DeleteApp(ctx context.Context, app string, confirm bool) error 
 	}
 	exists := len(releases) > 0
 	if !exists {
-		if _, err := e.k8s.WorkloadStatus(ctx, app); err != nil {
+		if _, err := k.WorkloadStatus(ctx, app); err != nil {
 			if !errors.Is(err, ErrNotFound) {
 				return fmt.Errorf("delete app %s: reading workload: %w", app, err)
 			}
@@ -765,25 +809,26 @@ func (e *Engine) DeleteApp(ctx context.Context, app string, confirm bool) error 
 	if err != nil {
 		return fmt.Errorf("delete app %s: loading guardrail policy: %w", app, err)
 	}
-	if err := e.recordDecision(ctx, auditOpAppDelete, app, nil, GuardrailAppDelete,
+	args := map[string]string{"env": envName(env)}
+	if err := e.recordDecision(ctx, auditOpAppDelete, app, args, GuardrailAppDelete,
 		pol.evaluateGuardrail("app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app))); err != nil {
 		return err
 	}
 
 	// Tear down, tolerating already-absent pieces: workload, then routing, then release records.
-	if err := e.k8s.DeleteWorkload(ctx, app); err != nil && !errors.Is(err, ErrNotFound) {
-		e.recordExecution(ctx, auditOpAppDelete, app, nil, err)
+	if err := k.DeleteWorkload(ctx, app); err != nil && !errors.Is(err, ErrNotFound) {
+		e.recordExecution(ctx, auditOpAppDelete, app, args, err)
 		return fmt.Errorf("delete app %s: removing workload: %w", app, err)
 	}
-	if err := e.k8s.Unexpose(ctx, app); err != nil && !errors.Is(err, ErrNotFound) {
-		e.recordExecution(ctx, auditOpAppDelete, app, nil, err)
+	if err := k.Unexpose(ctx, app); err != nil && !errors.Is(err, ErrNotFound) {
+		e.recordExecution(ctx, auditOpAppDelete, app, args, err)
 		return fmt.Errorf("delete app %s: removing routing: %w", app, err)
 	}
 	if err := e.db.DeleteReleases(ctx, app); err != nil {
-		e.recordExecution(ctx, auditOpAppDelete, app, nil, err)
+		e.recordExecution(ctx, auditOpAppDelete, app, args, err)
 		return fmt.Errorf("delete app %s: removing release history: %w", app, err)
 	}
-	e.recordExecution(ctx, auditOpAppDelete, app, nil, nil)
+	e.recordExecution(ctx, auditOpAppDelete, app, args, nil)
 	return nil
 }
 
@@ -913,8 +958,13 @@ func (e *Engine) QueryMetrics(ctx context.Context, query string, backend string)
 
 // recorded release and the live workload state. It returns ErrNotFound only when the
 // app is unknown to both.
-func (e *Engine) Status(ctx context.Context, app string) (StatusResult, error) {
+func (e *Engine) Status(ctx context.Context, app, env string) (StatusResult, error) {
 	res := StatusResult{App: app}
+
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return StatusResult{}, fmt.Errorf("status %s: %w", app, err)
+	}
 
 	latest, errL := e.db.LatestRelease(ctx, app)
 	if errL != nil && !errors.Is(errL, ErrNotFound) {
@@ -925,7 +975,7 @@ func (e *Engine) Status(ctx context.Context, app string) (StatusResult, error) {
 		res.Release = latest
 	}
 
-	st, errK := e.k8s.WorkloadStatus(ctx, app)
+	st, errK := e.k8s.WithNamespace(ns).WorkloadStatus(ctx, app)
 	if errK != nil && !errors.Is(errK, ErrNotFound) {
 		return StatusResult{}, fmt.Errorf("status %s: reading cluster: %w", app, errK)
 	}
@@ -941,8 +991,12 @@ func (e *Engine) Status(ctx context.Context, app string) (StatusResult, error) {
 }
 
 // Logs returns recent log lines for an app's workload.
-func (e *Engine) Logs(ctx context.Context, app string, opts LogOptions) ([]LogLine, error) {
-	lines, err := e.k8s.Logs(ctx, app, opts)
+func (e *Engine) Logs(ctx context.Context, app, env string, opts LogOptions) ([]LogLine, error) {
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return nil, fmt.Errorf("logs %s: %w", app, err)
+	}
+	lines, err := e.k8s.WithNamespace(ns).Logs(ctx, app, opts)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, fmt.Errorf("logs %s: no running workload: %w", app, err)
@@ -955,23 +1009,28 @@ func (e *Engine) Logs(ctx context.Context, app string, opts LogOptions) ([]LogLi
 // Scale changes an app's replica count, guarded against scale-to-zero and the policy
 // ceiling (ADR-0006). It does not create a new release: scaling adjusts the running
 // workload, while a release records a deploy.
-func (e *Engine) Scale(ctx context.Context, app string, replicas int32, confirm bool) (ScaleResult, error) {
+func (e *Engine) Scale(ctx context.Context, app, env string, replicas int32, confirm bool) (ScaleResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return ScaleResult{}, fmt.Errorf("scale: %w: %w", ErrInvalid, err)
 	}
 	if replicas < 0 {
 		return ScaleResult{}, fmt.Errorf("scale %s: replicas %d is negative: %w", app, replicas, ErrInvalid)
 	}
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return ScaleResult{}, fmt.Errorf("scale %s: %w", app, err)
+	}
+	k := e.k8s.WithNamespace(ns)
 	pol, err := e.db.Policy(ctx)
 	if err != nil {
 		return ScaleResult{}, fmt.Errorf("scale %s: loading guardrail policy: %w", app, err)
 	}
-	args := map[string]string{"replicas": strconv.Itoa(int(replicas))}
+	args := map[string]string{"replicas": strconv.Itoa(int(replicas)), "env": envName(env)}
 	if err := e.recordDecision(ctx, auditOpScale, app, args, "", pol.evaluateReplicas("scale", replicas, confirm)); err != nil {
 		return ScaleResult{}, err
 	}
 
-	st, err := e.k8s.WorkloadStatus(ctx, app)
+	st, err := k.WorkloadStatus(ctx, app)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return ScaleResult{}, fmt.Errorf("scale %s: no running workload: %w", app, err)
@@ -980,7 +1039,7 @@ func (e *Engine) Scale(ctx context.Context, app string, replicas int32, confirm 
 	}
 	prev := st.DesiredReplicas
 
-	if err := e.k8s.ScaleWorkload(ctx, app, replicas); err != nil {
+	if err := k.ScaleWorkload(ctx, app, replicas); err != nil {
 		e.recordExecution(ctx, auditOpScale, app, args, err)
 		return ScaleResult{}, fmt.Errorf("scale %s: %w", app, err)
 	}
@@ -1005,11 +1064,16 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 		return ExposeResult{}, fmt.Errorf("expose %s: TLS requires an issuer: %w", req.App, ErrInvalid)
 	}
 
+	ns, err := e.resolveNamespace(ctx, req.Env)
+	if err != nil {
+		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
+	}
+	k := e.k8s.WithNamespace(ns)
 	pol, err := e.db.Policy(ctx)
 	if err != nil {
 		return ExposeResult{}, fmt.Errorf("expose %s: loading guardrail policy: %w", req.App, err)
 	}
-	args := map[string]string{"host": req.Host, "port": strconv.Itoa(int(req.Port)), "tls": strconv.FormatBool(req.TLS)}
+	args := map[string]string{"host": req.Host, "port": strconv.Itoa(int(req.Port)), "tls": strconv.FormatBool(req.TLS), "env": envName(req.Env)}
 	if err := e.recordDecision(ctx, auditOpExpose, req.App, args, GuardrailExposePublic,
 		pol.evaluateGuardrail("expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host))); err != nil {
 		return ExposeResult{}, err
@@ -1017,14 +1081,14 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 
 	// The app must be deployed: exposing a workload that does not exist would create a
 	// Service with no backends.
-	if _, err := e.k8s.WorkloadStatus(ctx, req.App); err != nil {
+	if _, err := k.WorkloadStatus(ctx, req.App); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return ExposeResult{}, fmt.Errorf("expose %s: no running workload — deploy it first: %w", req.App, err)
 		}
 		return ExposeResult{}, fmt.Errorf("expose %s: reading workload: %w", req.App, err)
 	}
 
-	if err := e.k8s.Expose(ctx, ExposeSpec{App: req.App, Host: req.Host, Port: req.Port, TLS: req.TLS, Issuer: req.Issuer}); err != nil {
+	if err := k.Expose(ctx, ExposeSpec{App: req.App, Host: req.Host, Port: req.Port, TLS: req.TLS, Issuer: req.Issuer}); err != nil {
 		e.recordExecution(ctx, auditOpExpose, req.App, args, err)
 		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
 	}
@@ -1040,13 +1104,18 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 // deployed and ready, exposed, given an external address by an ingress controller, and DNS
 // pointing the host at that address. It returns a structured chain plus a one-line plain
 // summary for a non-expert; it never errors on a missing link — that is the answer.
-func (e *Engine) Reachability(ctx context.Context, app string) (ReachabilityResult, error) {
+func (e *Engine) Reachability(ctx context.Context, app, env string) (ReachabilityResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return ReachabilityResult{}, fmt.Errorf("reachability: %w: %w", ErrInvalid, err)
 	}
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return ReachabilityResult{}, fmt.Errorf("reachability %s: %w", app, err)
+	}
+	k := e.k8s.WithNamespace(ns)
 	res := ReachabilityResult{App: app}
 
-	ws, err := e.k8s.WorkloadStatus(ctx, app)
+	ws, err := k.WorkloadStatus(ctx, app)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			res.BlockedOn = "deployment"
@@ -1058,7 +1127,7 @@ func (e *Engine) Reachability(ctx context.Context, app string) (ReachabilityResu
 	res.Deployed = true
 	res.Ready = ws.Available
 
-	exp, err := e.k8s.ExposureStatus(ctx, app)
+	exp, err := k.ExposureStatus(ctx, app)
 	if err != nil {
 		return ReachabilityResult{}, fmt.Errorf("reachability %s: reading exposure: %w", app, err)
 	}
@@ -1139,11 +1208,15 @@ func reachabilitySummary(r ReachabilityResult) string {
 
 // Unexpose removes an app's exposure (its Service and Ingress). It does not affect the
 // workload. Unexposing an app that was never exposed returns ErrNotFound.
-func (e *Engine) Unexpose(ctx context.Context, app string) error {
+func (e *Engine) Unexpose(ctx context.Context, app, env string) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("unexpose: %w: %w", ErrInvalid, err)
 	}
-	if err := e.k8s.Unexpose(ctx, app); err != nil {
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return fmt.Errorf("unexpose %s: %w", app, err)
+	}
+	if err := e.k8s.WithNamespace(ns).Unexpose(ctx, app); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return fmt.Errorf("unexpose %s: not exposed: %w", app, err)
 		}
@@ -1178,7 +1251,11 @@ func (e *Engine) SetGuardrail(ctx context.Context, code GuardrailCode, d Disposi
 // (ADR-0007). It finds the current running release, re-applies the release that one
 // superseded, and records the rollback as a new release. It returns ErrNotFound when
 // there is nothing to roll back from or to.
-func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (RollbackResult, error) {
+func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (RollbackResult, error) {
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
+	}
 	releases, err := e.db.Releases(ctx, app)
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: reading release history: %w", app, err)
@@ -1204,7 +1281,7 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: loading guardrail policy: %w", app, err)
 	}
-	args := map[string]string{"image": target.Image, "to_release": target.ID}
+	args := map[string]string{"image": target.Image, "to_release": target.ID, "env": envName(env)}
 	if err := e.recordDecision(ctx, auditOpRollback, app, args, GuardrailRollback,
 		pol.evaluateGuardrail("rollback", GuardrailRollback, confirm,
 			fmt.Sprintf("rolling %q back to its previous release %s (image %s)", app, target.ID, target.Image))); err != nil {
@@ -1214,7 +1291,7 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 	// Env is app-global current state, not snapshotted per release (ADR-0028): a rollback
 	// restores the prior image and command but renders the env the app currently has set, not
 	// whatever was in effect when the target was first deployed.
-	env, err := e.db.AppEnv(ctx, app)
+	cfg, err := e.db.AppEnv(ctx, app)
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: reading env: %w", app, err)
 	}
@@ -1224,7 +1301,7 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 		App:         app,
 		Image:       target.Image,
 		Digest:      target.Digest,
-		Env:         env,
+		Env:         cfg,
 		Command:     target.Command,
 		MetricsPort: target.MetricsPort,
 		Replicas:    target.Replicas,
@@ -1236,10 +1313,10 @@ func (e *Engine) Rollback(ctx context.Context, app string, confirm bool) (Rollba
 		return RollbackResult{}, fmt.Errorf("rollback %s: recording release: %w", app, err)
 	}
 
-	args["env_keys"] = auditKeys(env) // KEY NAMES only — never values (ADR-0027)
+	args["env_keys"] = auditKeys(cfg) // KEY NAMES only — never values (ADR-0027)
 
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: env, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: target.Replicas}
-	if err := e.k8s.ApplyWorkload(ctx, spec); err != nil {
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: target.Replicas}
+	if err := e.k8s.WithNamespace(ns).ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)
 		e.recordExecution(ctx, auditOpRollback, app, args, err)
@@ -1290,6 +1367,37 @@ func (e *Engine) ListEnvironments(ctx context.Context) ([]Environment, error) {
 	out = append(out, Environment{Name: DefaultEnvironment, Namespace: e.appNamespace, Default: true})
 	out = append(out, registered...)
 	return out, nil
+}
+
+// resolveNamespace maps an environment name to the namespace its apps operate in (ADR-0035 phase
+// 2b). An empty name or the reserved "default" resolves to the engine's app namespace — the
+// implicit default environment, behaving exactly like before environments existed. Any other name
+// must be a registered environment; an unregistered name is a clear ErrNotFound. Guardrail policy is
+// not consulted here: it stays global until phase 2c, so resolution only routes the namespace.
+func (e *Engine) resolveNamespace(ctx context.Context, env string) (string, error) {
+	if env == "" || env == DefaultEnvironment {
+		return e.appNamespace, nil
+	}
+	got, err := e.db.GetEnvironment(ctx, env)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return "", fmt.Errorf("unknown environment %q: %w", env, ErrNotFound)
+		}
+		return "", fmt.Errorf("resolving environment %q: %w", env, err)
+	}
+	return got.Namespace, nil
+}
+
+// envName canonicalizes an environment name for the audit trail: an empty name reads as the
+// reserved "default" environment, any other name passes through. The environment is salient,
+// non-secret metadata, so it is recorded in the redacted audit args of a guarded operation
+// (ADR-0027). A dedicated audit column can follow when phase 2c makes the environment a
+// guardrail-code prefix.
+func envName(env string) string {
+	if env == "" {
+		return DefaultEnvironment
+	}
+	return env
 }
 
 // lastDeployed returns the most recent release in deployed state — the one currently

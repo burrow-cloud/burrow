@@ -77,7 +77,7 @@ func TestAuditScaleHeldDoesNotExecute(t *testing.T) {
 	}
 
 	// 5 exceeds the ceiling of 3, so app.replica_ceiling holds it for confirmation.
-	if _, err := e.Scale(ctx, "web", 5, false); err == nil {
+	if _, err := e.Scale(ctx, "web", "", 5, false); err == nil {
 		t.Fatalf("Scale without confirm should be held")
 	}
 
@@ -115,7 +115,7 @@ func TestAuditScaleConfirmedExecutes(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	if _, err := e.Scale(ctx, "web", 5, true); err != nil {
+	if _, err := e.Scale(ctx, "web", "", 5, true); err != nil {
 		t.Fatalf("Scale with confirm: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestAuditAppDeleteDeniedDoesNotExecute(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	if err := e.DeleteApp(ctx, "web", true); err == nil {
+	if err := e.DeleteApp(ctx, "web", "", true); err == nil {
 		t.Fatalf("DeleteApp under deny should be refused")
 	}
 

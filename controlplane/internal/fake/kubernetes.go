@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,18 +20,68 @@ var _ controlplane.Kubernetes = (*Kubernetes)(nil)
 // inspectable; by default a workload is healthy (ready == desired) immediately, and
 // tests can override readiness (SetReady) and seed logs (SetLogs) to model partial or
 // failed rollouts. Errors can be injected per operation with SetError.
+//
+// Per-app resources (workloads, exposures, per-app Secrets) are keyed by namespace so the fake can
+// model namespace-per-environment (ADR-0035 phase 2): WithNamespace returns a view whose app
+// operations land under a different namespace, sharing the same backing maps and lock. The
+// introspection helpers (Spec, SecretValue, …) read the receiver view's namespace; the
+// namespace-qualified variants (SpecInNamespace, SecretValueInNamespace) read a named one.
 type Kubernetes struct {
-	mu        sync.Mutex
+	mu        *sync.Mutex
+	ns        string // the namespace this view's per-app operations act in
+	base      string // the namespace treated as the default (unprefixed) one
 	deploys   map[string]*deployState
 	exposed   map[string]controlplane.ExposeSpec
 	addresses map[string]string // app -> ingress external address (controller-assigned)
 	certReady map[string]bool   // app -> whether the requested TLS certificate has been issued
 	addons    map[string]controlplane.AddonInfo
 	secrets   map[string]map[string]string // app -> per-app Secret (key -> value)
-	backups   []backupCall                 // RunBackupJob calls, in order
-	restores  []backupCall                 // RunRestoreJob calls, in order
-	backupSiz int64                        // size RunBackupJob reports
+	backups   *[]backupCall                // RunBackupJob calls, in order
+	restores  *[]backupCall                // RunRestoreJob calls, in order
+	backupSiz *int64                       // size RunBackupJob reports
 	errs      map[Op]error
+}
+
+// fakeBaseNamespace is the namespace the fake treats as the default: app resources in it are keyed
+// by the bare app name, so a fake driven through the default environment behaves exactly as it did
+// before namespace-per-environment, and existing tests that introspect by app name keep working. It
+// matches the engine and adapter default app namespace ("default").
+const fakeBaseNamespace = "default"
+
+// key namespace-qualifies app for this view: the base (default) namespace keys by the bare app name,
+// any other namespace prefixes it, so a named environment's resources are stored separately.
+func (k *Kubernetes) key(app string) string { return nsKey(k.ns, k.base, app) }
+
+func nsKey(ns, base, app string) string {
+	if ns == "" || ns == base {
+		return app
+	}
+	return ns + "/" + app
+}
+
+// appInNamespace reports whether the stored key nk belongs to this view's namespace and, if so, the
+// bare app name. It is the inverse of key, used by the per-namespace ListWorkloads.
+func (k *Kubernetes) appInNamespace(nk string) (string, bool) {
+	if k.ns == "" || k.ns == k.base {
+		// The default namespace keys by the bare app name (no "/"); a "ns/app" key is elsewhere.
+		if strings.Contains(nk, "/") {
+			return "", false
+		}
+		return nk, true
+	}
+	prefix := k.ns + "/"
+	if !strings.HasPrefix(nk, prefix) {
+		return "", false
+	}
+	return nk[len(prefix):], true
+}
+
+// WithNamespace returns a view of the fake whose per-app operations act in ns, sharing the same
+// backing state and lock (ADR-0035 phase 2). Add-on operations are unaffected.
+func (k *Kubernetes) WithNamespace(ns string) controlplane.Kubernetes {
+	v := *k
+	v.ns = ns
+	return &v
 }
 
 // backupCall records one RunBackupJob/RunRestoreJob invocation so a test can assert the engine
@@ -50,12 +101,18 @@ type deployState struct {
 // NewKubernetes returns an empty fake cluster.
 func NewKubernetes() *Kubernetes {
 	return &Kubernetes{
+		mu:        &sync.Mutex{},
+		ns:        fakeBaseNamespace,
+		base:      fakeBaseNamespace,
 		deploys:   make(map[string]*deployState),
 		exposed:   make(map[string]controlplane.ExposeSpec),
 		addresses: make(map[string]string),
 		certReady: make(map[string]bool),
 		addons:    make(map[string]controlplane.AddonInfo),
 		secrets:   make(map[string]map[string]string),
+		backups:   &[]backupCall{},
+		restores:  &[]backupCall{},
+		backupSiz: new(int64),
 		errs:      make(map[Op]error),
 	}
 }
@@ -65,18 +122,28 @@ func NewKubernetes() *Kubernetes {
 func (k *Kubernetes) SetSecret(app, key, value string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if k.secrets[app] == nil {
-		k.secrets[app] = map[string]string{}
+	nk := k.key(app)
+	if k.secrets[nk] == nil {
+		k.secrets[nk] = map[string]string{}
 	}
-	k.secrets[app][key] = value
+	k.secrets[nk][key] = value
 }
 
-// SecretValue returns the stored value under key for app and whether it is present — test-only
-// introspection (the real seam never exposes values).
+// SecretValue returns the stored value under key for app in this view's namespace and whether it is
+// present — test-only introspection (the real seam never exposes values).
 func (k *Kubernetes) SecretValue(app, key string) (string, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	v, ok := k.secrets[app][key]
+	v, ok := k.secrets[k.key(app)][key]
+	return v, ok
+}
+
+// SecretValueInNamespace is SecretValue scoped to a named namespace, so a test can assert a per-env
+// secret landed in the environment's namespace (ADR-0035 phase 2).
+func (k *Kubernetes) SecretValueInNamespace(ns, app, key string) (string, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	v, ok := k.secrets[nsKey(ns, k.base, app)][key]
 	return v, ok
 }
 
@@ -85,7 +152,7 @@ func (k *Kubernetes) SecretValue(app, key string) (string, bool) {
 func (k *Kubernetes) RestartedAt(app string) (time.Time, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	d := k.deploys[app]
+	d := k.deploys[k.key(app)]
 	if d == nil || d.restartedAt.IsZero() {
 		return time.Time{}, false
 	}
@@ -136,7 +203,7 @@ func (k *Kubernetes) DeleteAddon(ctx context.Context, name string) error {
 func (k *Kubernetes) Exposure(app string) (controlplane.ExposeSpec, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	s, ok := k.exposed[app]
+	s, ok := k.exposed[k.key(app)]
 	return s, ok
 }
 
@@ -145,7 +212,7 @@ func (k *Kubernetes) Exposure(app string) (controlplane.ExposeSpec, bool) {
 func (k *Kubernetes) SetIngressAddress(app, addr string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.addresses[app] = addr
+	k.addresses[k.key(app)] = addr
 }
 
 // SetCertReady sets whether the requested TLS certificate reported for app's exposure has been
@@ -153,7 +220,7 @@ func (k *Kubernetes) SetIngressAddress(app, addr string) {
 func (k *Kubernetes) SetCertReady(app string, ready bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.certReady[app] = ready
+	k.certReady[k.key(app)] = ready
 }
 
 func (k *Kubernetes) ExposureStatus(ctx context.Context, app string) (controlplane.ExposureStatus, error) {
@@ -162,11 +229,12 @@ func (k *Kubernetes) ExposureStatus(ctx context.Context, app string) (controlpla
 	if err := k.errs[OpExposureStatus]; err != nil {
 		return controlplane.ExposureStatus{}, err
 	}
-	spec, ok := k.exposed[app]
+	nk := k.key(app)
+	spec, ok := k.exposed[nk]
 	if !ok {
 		return controlplane.ExposureStatus{}, nil
 	}
-	return controlplane.ExposureStatus{Exposed: true, Host: spec.Host, Address: k.addresses[app], TLS: spec.TLS, CertReady: k.certReady[app]}, nil
+	return controlplane.ExposureStatus{Exposed: true, Host: spec.Host, Address: k.addresses[nk], TLS: spec.TLS, CertReady: k.certReady[nk]}, nil
 }
 
 // SetError makes op return err until cleared with SetError(op, nil).
@@ -185,7 +253,7 @@ func (k *Kubernetes) SetError(op Op, err error) {
 func (k *Kubernetes) SetReady(app string, ready int32) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if d := k.deploys[app]; d != nil {
+	if d := k.deploys[k.key(app)]; d != nil {
 		d.ready = ready
 	}
 }
@@ -194,16 +262,28 @@ func (k *Kubernetes) SetReady(app string, ready int32) {
 func (k *Kubernetes) SetLogs(app string, lines []controlplane.LogLine) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if d := k.deploys[app]; d != nil {
+	if d := k.deploys[k.key(app)]; d != nil {
 		d.logs = append([]controlplane.LogLine(nil), lines...)
 	}
 }
 
-// Spec returns the currently applied spec for app and whether a workload exists.
+// Spec returns the currently applied spec for app in this view's namespace and whether a workload
+// exists.
 func (k *Kubernetes) Spec(app string) (controlplane.WorkloadSpec, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if d := k.deploys[app]; d != nil {
+	if d := k.deploys[k.key(app)]; d != nil {
+		return d.spec, true
+	}
+	return controlplane.WorkloadSpec{}, false
+}
+
+// SpecInNamespace is Spec scoped to a named namespace, so a test can assert a deploy routed to an
+// environment's namespace (ADR-0035 phase 2).
+func (k *Kubernetes) SpecInNamespace(ns, app string) (controlplane.WorkloadSpec, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if d := k.deploys[nsKey(ns, k.base, app)]; d != nil {
 		return d.spec, true
 	}
 	return controlplane.WorkloadSpec{}, false
@@ -215,10 +295,11 @@ func (k *Kubernetes) ApplyWorkload(ctx context.Context, spec controlplane.Worklo
 	if err := k.errs[OpApply]; err != nil {
 		return err
 	}
-	d := k.deploys[spec.App]
+	nk := k.key(spec.App)
+	d := k.deploys[nk]
 	if d == nil {
 		d = &deployState{}
-		k.deploys[spec.App] = d
+		k.deploys[nk] = d
 	}
 	d.spec = spec
 	d.ready = spec.Replicas // healthy by default
@@ -231,7 +312,7 @@ func (k *Kubernetes) WorkloadStatus(ctx context.Context, app string) (controlpla
 	if err := k.errs[OpStatus]; err != nil {
 		return controlplane.WorkloadStatus{}, err
 	}
-	d := k.deploys[app]
+	d := k.deploys[k.key(app)]
 	if d == nil {
 		return controlplane.WorkloadStatus{}, fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
@@ -253,7 +334,11 @@ func (k *Kubernetes) ListWorkloads(ctx context.Context) ([]controlplane.Workload
 		return nil, err
 	}
 	out := make([]controlplane.WorkloadStatus, 0, len(k.deploys))
-	for app, d := range k.deploys {
+	for nk, d := range k.deploys {
+		app, ok := k.appInNamespace(nk)
+		if !ok {
+			continue // a workload in a different namespace; listing is per-namespace
+		}
 		out = append(out, controlplane.WorkloadStatus{
 			App:             app,
 			Kind:            d.spec.Kind,
@@ -274,7 +359,7 @@ func (k *Kubernetes) ScaleWorkload(ctx context.Context, app string, replicas int
 	if err := k.errs[OpScale]; err != nil {
 		return err
 	}
-	d := k.deploys[app]
+	d := k.deploys[k.key(app)]
 	if d == nil {
 		return fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
@@ -289,7 +374,7 @@ func (k *Kubernetes) Logs(ctx context.Context, app string, opts controlplane.Log
 	if err := k.errs[OpLogs]; err != nil {
 		return nil, err
 	}
-	d := k.deploys[app]
+	d := k.deploys[k.key(app)]
 	if d == nil {
 		return nil, fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
@@ -306,10 +391,11 @@ func (k *Kubernetes) DeleteWorkload(ctx context.Context, app string) error {
 	if err := k.errs[OpDelete]; err != nil {
 		return err
 	}
-	if _, ok := k.deploys[app]; !ok {
+	nk := k.key(app)
+	if _, ok := k.deploys[nk]; !ok {
 		return fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
-	delete(k.deploys, app)
+	delete(k.deploys, nk)
 	return nil
 }
 
@@ -319,7 +405,7 @@ func (k *Kubernetes) Expose(ctx context.Context, spec controlplane.ExposeSpec) e
 	if err := k.errs[OpExpose]; err != nil {
 		return err
 	}
-	k.exposed[spec.App] = spec
+	k.exposed[k.key(spec.App)] = spec
 	return nil
 }
 
@@ -329,10 +415,11 @@ func (k *Kubernetes) Unexpose(ctx context.Context, app string) error {
 	if err := k.errs[OpUnexpose]; err != nil {
 		return err
 	}
-	if _, ok := k.exposed[app]; !ok {
+	nk := k.key(app)
+	if _, ok := k.exposed[nk]; !ok {
 		return fmt.Errorf("kubernetes: exposure %q: %w", app, controlplane.ErrNotFound)
 	}
-	delete(k.exposed, app)
+	delete(k.exposed, nk)
 	return nil
 }
 
@@ -345,10 +432,11 @@ func (k *Kubernetes) SetSecretValue(ctx context.Context, app, key, value string)
 	if err := k.errs[OpSetSecretValue]; err != nil {
 		return err
 	}
-	if k.secrets[app] == nil {
-		k.secrets[app] = map[string]string{}
+	nk := k.key(app)
+	if k.secrets[nk] == nil {
+		k.secrets[nk] = map[string]string{}
 	}
-	k.secrets[app][key] = value
+	k.secrets[nk][key] = value
 	return nil
 }
 
@@ -358,8 +446,9 @@ func (k *Kubernetes) SecretKeys(ctx context.Context, app string) ([]string, erro
 	if err := k.errs[OpSecretKeys]; err != nil {
 		return nil, err
 	}
-	keys := make([]string, 0, len(k.secrets[app]))
-	for key := range k.secrets[app] {
+	sec := k.secrets[k.key(app)]
+	keys := make([]string, 0, len(sec))
+	for key := range sec {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -372,7 +461,7 @@ func (k *Kubernetes) UnsetSecretKey(ctx context.Context, app, key string) error 
 	if err := k.errs[OpUnsetSecretKey]; err != nil {
 		return err
 	}
-	delete(k.secrets[app], key) // missing Secret/key is a no-op
+	delete(k.secrets[k.key(app)], key) // missing Secret/key is a no-op
 	return nil
 }
 
@@ -382,7 +471,7 @@ func (k *Kubernetes) RestartWorkload(ctx context.Context, app string, at time.Ti
 	if err := k.errs[OpRestartWorkload]; err != nil {
 		return err
 	}
-	d := k.deploys[app]
+	d := k.deploys[k.key(app)]
 	if d == nil {
 		return fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
@@ -394,21 +483,21 @@ func (k *Kubernetes) RestartWorkload(ctx context.Context, app string, at time.Ti
 func (k *Kubernetes) SetBackupSize(n int64) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.backupSiz = n
+	*k.backupSiz = n
 }
 
 // BackupJobs returns the (app, backupID) pairs RunBackupJob was called with, in order.
 func (k *Kubernetes) BackupJobs() []backupCall {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return append([]backupCall(nil), k.backups...)
+	return append([]backupCall(nil), *k.backups...)
 }
 
 // RestoreJobs returns the (app, backupID) pairs RunRestoreJob was called with, in order.
 func (k *Kubernetes) RestoreJobs() []backupCall {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return append([]backupCall(nil), k.restores...)
+	return append([]backupCall(nil), *k.restores...)
 }
 
 func (k *Kubernetes) RunBackupJob(ctx context.Context, app, backupID string) (int64, error) {
@@ -417,8 +506,8 @@ func (k *Kubernetes) RunBackupJob(ctx context.Context, app, backupID string) (in
 	if err := k.errs[OpRunBackupJob]; err != nil {
 		return 0, err
 	}
-	k.backups = append(k.backups, backupCall{App: app, BackupID: backupID})
-	return k.backupSiz, nil
+	*k.backups = append(*k.backups, backupCall{App: app, BackupID: backupID})
+	return *k.backupSiz, nil
 }
 
 func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, backupID string) error {
@@ -427,6 +516,6 @@ func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, backupID string) er
 	if err := k.errs[OpRunRestoreJob]; err != nil {
 		return err
 	}
-	k.restores = append(k.restores, backupCall{App: app, BackupID: backupID})
+	*k.restores = append(*k.restores, backupCall{App: app, BackupID: backupID})
 	return nil
 }

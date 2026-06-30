@@ -144,9 +144,9 @@ func TestSeededSchedule(t *testing.T) {
 				expectedImage = res.Release.Image
 			}
 		case 2:
-			_, _ = e.Scale(ctx, app, int32(1+rng.Intn(5)), false)
+			_, _ = e.Scale(ctx, app, "", int32(1+rng.Intn(5)), false)
 		case 3:
-			res, err := e.Rollback(ctx, app, false)
+			res, err := e.Rollback(ctx, app, "", false)
 			if err == nil {
 				expectedImage = res.Release.Image
 			}

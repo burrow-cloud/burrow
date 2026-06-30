@@ -47,7 +47,7 @@ func newAppConfigSetCmd() *cobra.Command {
 				return err
 			}
 			for k, v := range kv.m {
-				if err := c.SetConfig(ctx, app, k, v, noRestart); err != nil {
+				if err := c.SetConfig(ctx, app, o.env, k, v, noRestart); err != nil {
 					return err
 				}
 				human := fmt.Sprintf("set %s on %s", k, app)
@@ -62,6 +62,7 @@ func newAppConfigSetCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "persist the change without rolling the running workload; it lands on the next deploy")
 	return cmd
 }
@@ -80,7 +81,7 @@ func newAppConfigUnsetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.UnsetConfig(ctx, app, key, noRestart); err != nil {
+			if err := c.UnsetConfig(ctx, app, o.env, key, noRestart); err != nil {
 				return err
 			}
 			human := fmt.Sprintf("unset %s on %s", key, app)
@@ -91,6 +92,7 @@ func newAppConfigUnsetCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "persist the change without rolling the running workload; it lands on the next deploy")
 	return cmd
 }
@@ -107,7 +109,7 @@ func newAppConfigListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cfg, err := c.Config(ctx, args[0])
+			cfg, err := c.Config(ctx, args[0], o.env)
 			if err != nil {
 				return err
 			}
@@ -127,5 +129,6 @@ func newAppConfigListCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }

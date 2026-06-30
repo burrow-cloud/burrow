@@ -25,7 +25,7 @@ func TestDeleteApp(t *testing.T) {
 		t.Fatalf("Expose: %v", err)
 	}
 
-	if err := e.DeleteApp(ctx, "web", true); err != nil {
+	if err := e.DeleteApp(ctx, "web", "", true); err != nil {
 		t.Fatalf("DeleteApp: %v", err)
 	}
 
@@ -49,7 +49,7 @@ func TestDeleteAppWorkloadOnly(t *testing.T) {
 	if err := k.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Kind: cp.WorkloadDeployment, Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("ApplyWorkload: %v", err)
 	}
-	if err := e.DeleteApp(ctx, "web", true); err != nil {
+	if err := e.DeleteApp(ctx, "web", "", true); err != nil {
 		t.Fatalf("DeleteApp: %v", err)
 	}
 	if _, err := k.WorkloadStatus(ctx, "web"); !errors.Is(err, cp.ErrNotFound) {
@@ -60,7 +60,7 @@ func TestDeleteAppWorkloadOnly(t *testing.T) {
 // TestDeleteAppUnknown reports ErrNotFound when the app has neither releases nor a live workload.
 func TestDeleteAppUnknown(t *testing.T) {
 	e, _, _, _, _ := newEngine(t, permissive())
-	if err := e.DeleteApp(context.Background(), "web", true); !errors.Is(err, cp.ErrNotFound) {
+	if err := e.DeleteApp(context.Background(), "web", "", true); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("DeleteApp unknown err = %v, want ErrNotFound", err)
 	}
 }
@@ -76,7 +76,7 @@ func TestDeleteAppGuardrailHolds(t *testing.T) {
 		t.Fatalf("ApplyWorkload: %v", err)
 	}
 
-	err := e.DeleteApp(ctx, "web", false)
+	err := e.DeleteApp(ctx, "web", "", false)
 	mustGuardrail(t, err, cp.GuardrailAppDelete)
 	g, _ := cp.AsGuardrail(err)
 	if !g.NeedsConfirmation {
@@ -87,7 +87,7 @@ func TestDeleteAppGuardrailHolds(t *testing.T) {
 		t.Errorf("workload should survive a held delete: %v", err)
 	}
 
-	if err := e.DeleteApp(ctx, "web", true); err != nil {
+	if err := e.DeleteApp(ctx, "web", "", true); err != nil {
 		t.Fatalf("DeleteApp confirmed: %v", err)
 	}
 }

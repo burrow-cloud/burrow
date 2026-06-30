@@ -25,7 +25,7 @@ func newAppListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			apps, err := c.Apps(ctx)
+			apps, err := c.Apps(ctx, o.env)
 			if err != nil {
 				return err
 			}
@@ -45,6 +45,7 @@ func newAppListCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 
@@ -99,6 +100,7 @@ func newDeployCmd() *cobra.Command {
 				}
 			}
 			res, err := c.Deploy(ctx, app, client.DeployRequest{
+				Env:         o.env,
 				Image:       image,
 				Command:     command,
 				MetricsPort: int32(metricsPort),
@@ -117,6 +119,7 @@ func newDeployCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&image, "image", "", "container image reference to deploy (required)")
 	cmd.Flags().IntVar(&replicas, "replicas", 1, "number of replicas")
 	cmd.Flags().IntVar(&metricsPort, "metrics-port", 0, "annotate the pod so the metrics add-on scrapes /metrics on this port")
@@ -137,7 +140,7 @@ func newStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Status(ctx, args[0])
+			res, err := c.Status(ctx, args[0], o.env)
 			if err != nil {
 				return err
 			}
@@ -145,6 +148,7 @@ func newStatusCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 
@@ -161,7 +165,7 @@ func newLogsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			lines, err := c.Logs(ctx, args[0], tail)
+			lines, err := c.Logs(ctx, args[0], o.env, tail)
 			if err != nil {
 				return err
 			}
@@ -188,6 +192,7 @@ func newLogsCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().IntVar(&tail, "tail", 0, "maximum number of recent log lines (0 = adapter default)")
 	return cmd
 }
@@ -205,7 +210,7 @@ func newRollbackCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Rollback(ctx, args[0], confirm)
+			res, err := c.Rollback(ctx, args[0], o.env, confirm)
 			if err != nil {
 				return err
 			}
@@ -215,6 +220,7 @@ func newRollbackCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a rollback a guardrail holds for confirmation")
 	return cmd
 }
@@ -236,7 +242,7 @@ func newScaleCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Scale(ctx, args[0], int32(n), confirm)
+			res, err := c.Scale(ctx, args[0], o.env, int32(n), confirm)
 			if err != nil {
 				return err
 			}
@@ -245,6 +251,7 @@ func newScaleCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }
@@ -262,7 +269,7 @@ func newAppDeleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.DeleteApp(ctx, args[0], confirm); err != nil {
+			if err := c.DeleteApp(ctx, args[0], o.env, confirm); err != nil {
 				return err
 			}
 			human := fmt.Sprintf("deleted app %s (workload, routing, and release history)", args[0])
@@ -270,6 +277,7 @@ func newAppDeleteCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }

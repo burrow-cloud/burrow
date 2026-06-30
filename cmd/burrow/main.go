@@ -126,6 +126,7 @@ type commonOpts struct {
 	kubeconfig   string
 	context      string
 	namespace    string
+	env          string
 	json         bool
 }
 
@@ -133,6 +134,14 @@ type commonOpts struct {
 func bindCommon(flags *pflag.FlagSet, o *commonOpts) {
 	bindClientFlags(flags, o)
 	flags.StringVar(&o.namespace, "namespace", connect.DefaultNamespace, "namespace Burrow is installed in")
+}
+
+// bindEnv registers the --env flag selecting which namespace-per-environment to operate in (ADR-0035
+// phase 2b). It is added only to the per-app operation commands; an empty value means the default
+// environment. The flag is distinct from --context (which selects the cluster) and from `burrow app
+// config` (an app's environment variables).
+func bindEnv(flags *pflag.FlagSet, o *commonOpts) {
+	flags.StringVar(&o.env, "env", "", "environment to operate in (default: the default environment)")
 }
 
 // bindClientFlags registers the control-plane connection flags without --namespace, so a command

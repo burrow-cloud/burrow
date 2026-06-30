@@ -85,7 +85,7 @@ func TestClientLogsTail(t *testing.T) {
 	defer srv.Close()
 
 	c := client.NewClient(srv.URL, "tok")
-	lines, err := c.Logs(context.Background(), "web", 5)
+	lines, err := c.Logs(context.Background(), "web", "", 5)
 	if err != nil {
 		t.Fatalf("Logs: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestClientNeedsConfirmation(t *testing.T) {
 	defer srv.Close()
 
 	c := client.NewClient(srv.URL, "tok")
-	_, err := c.Scale(context.Background(), "web", 0, false)
+	_, err := c.Scale(context.Background(), "web", "", 0, false)
 	var ae *client.APIError
 	if !errors.As(err, &ae) {
 		t.Fatalf("err = %v, want *client.APIError", err)
@@ -132,7 +132,7 @@ func TestClientScaleBody(t *testing.T) {
 	defer srv.Close()
 
 	c := client.NewClient(srv.URL, "tok")
-	res, err := c.Scale(context.Background(), "web", 4, false)
+	res, err := c.Scale(context.Background(), "web", "", 4, false)
 	if err != nil {
 		t.Fatalf("Scale: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestClientStatus(t *testing.T) {
 	defer srv.Close()
 
 	c := client.NewClient(srv.URL, "tok")
-	res, err := c.Status(context.Background(), "web")
+	res, err := c.Status(context.Background(), "web", "")
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestWaitReachableConverges(t *testing.T) {
 	defer srv.Close()
 
 	c := client.NewClient(srv.URL, "tok")
-	res, err := c.WaitReachable(context.Background(), "web", time.Minute, immediateAfter)
+	res, err := c.WaitReachable(context.Background(), "web", "", time.Minute, immediateAfter)
 	if err != nil {
 		t.Fatalf("WaitReachable: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestWaitReachableTimesOut(t *testing.T) {
 
 	c := client.NewClient(srv.URL, "tok")
 	// 9s timeout at a 3s poll interval is one immediate check plus three interval polls.
-	res, err := c.WaitReachable(context.Background(), "web", 9*time.Second, immediateAfter)
+	res, err := c.WaitReachable(context.Background(), "web", "", 9*time.Second, immediateAfter)
 	if err != nil {
 		t.Fatalf("WaitReachable: %v", err)
 	}

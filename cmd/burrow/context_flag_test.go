@@ -17,8 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
-
-	"github.com/burrow-cloud/burrow/connect"
 )
 
 // writeKubeconfig writes cfg to a temp file and returns its path.
@@ -41,50 +39,6 @@ func twoContextConfig(serverStaging, serverProd string) *api.Config {
 	cfg.Contexts["prod"] = &api.Context{Cluster: "c-prod", AuthInfo: "user"}
 	cfg.CurrentContext = "staging"
 	return cfg
-}
-
-func TestWriteContextList(t *testing.T) {
-	var b bytes.Buffer
-	writeContextList(&b, []connect.Context{
-		{Name: "prod", Cluster: "c-prod", Current: false},
-		{Name: "staging", Cluster: "c-staging", Current: true},
-	})
-	out := b.String()
-
-	for _, want := range []string{"CURRENT", "NAME", "CLUSTER", "staging", "prod", "c-staging", "c-prod"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q\n%s", want, out)
-		}
-	}
-	// The current context (staging) is marked with a *, the other (prod) is not.
-	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "staging") && !strings.Contains(line, "*") {
-			t.Errorf("current context line not marked with *: %q", line)
-		}
-		if strings.Contains(line, "prod") && strings.Contains(line, "*") {
-			t.Errorf("non-current context line wrongly marked current: %q", line)
-		}
-	}
-}
-
-func TestContextListCommand(t *testing.T) {
-	path := writeKubeconfig(t, twoContextConfig("https://staging:6443", "https://prod:6443"))
-
-	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"context", "list", "--kubeconfig", path}, &out, &errb); err != nil {
-		t.Fatalf("run: %v\n%s", err, errb.String())
-	}
-	s := out.String()
-	for _, want := range []string{"staging", "prod"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("context list output missing %q\n%s", want, s)
-		}
-	}
-	for _, line := range strings.Split(s, "\n") {
-		if strings.Contains(line, "staging") && !strings.Contains(line, "*") {
-			t.Errorf("current context (staging) not marked: %q", line)
-		}
-	}
 }
 
 // fakeBurrowdCluster is a fake API server standing in for one cluster: it serves the install token
@@ -110,7 +64,8 @@ func fakeBurrowdCluster(hit *bool) *httptest.Server {
 }
 
 // TestContextFlagWired confirms the global --context flag reaches connect.Options: a command run
-// with --context targets that context's cluster, not the kubeconfig's current context (ADR-0035).
+// with --context targets that context's cluster, not the kubeconfig's current context. The flag
+// survives the retirement of the `burrow context` command (ADR-0036).
 func TestContextFlagWired(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
@@ -136,5 +91,20 @@ func TestContextFlagWired(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "workload: 3/3 replicas ready, available") {
 		t.Errorf("status output = %q", out.String())
+	}
+}
+
+// TestContextCommandRetired confirms the `burrow context` command is gone (ADR-0036): only the
+// low-level --context flag survives, so invoking `context` as a subcommand is an unknown command.
+func TestContextCommandRetired(t *testing.T) {
+	for _, c := range newRootCmd().Commands() {
+		if c.Name() == "context" {
+			t.Fatalf("the `burrow context` command should be retired, but it is still registered")
+		}
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"context", "list"}, &out, &errb); err == nil {
+		t.Errorf("`burrow context list` should error now that the command is retired; got nil")
 	}
 }

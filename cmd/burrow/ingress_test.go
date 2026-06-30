@@ -102,8 +102,8 @@ func TestIngressInstallDryRun(t *testing.T) {
 }
 
 // costNoticeMarker is the distinctive phrase the LoadBalancer cost notice carries; the nodeport
-// path must never print it.
-const costNoticeMarker = "billable cloud load balancer"
+// path must never print it. The notice is provider-agnostic (it never names the detected cloud).
+const costNoticeMarker = "LoadBalancers normally cost money"
 
 func TestIngressInstallDryRunExpose(t *testing.T) {
 	// loadbalancer: the plan names the cloud (LoadBalancer) manifest and carries the cost notice.
@@ -142,15 +142,12 @@ func TestResolveExposeAuto(t *testing.T) {
 	cloud := fake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Spec: corev1.NodeSpec{ProviderID: "digitalocean://123"}},
 	)
-	expose, provider, err := resolveExpose(ctx, exposeAuto, cloud)
+	expose, err := resolveExpose(ctx, exposeAuto, cloud)
 	if err != nil {
 		t.Fatalf("resolveExpose cloud: %v", err)
 	}
 	if expose != exposeLoadBalancer {
 		t.Errorf("auto on a cloud provider should pick loadbalancer, got %q", expose)
-	}
-	if provider != "DigitalOcean" {
-		t.Errorf("expected provider DigitalOcean, got %q", provider)
 	}
 	if got := ingressManifestFor(expose); got != ingressNginxManifest {
 		t.Errorf("loadbalancer should use the cloud manifest, got %q", got)
@@ -161,7 +158,7 @@ func TestResolveExposeAuto(t *testing.T) {
 	bare := fake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}},
 	)
-	expose, _, err = resolveExpose(ctx, exposeAuto, bare)
+	expose, err = resolveExpose(ctx, exposeAuto, bare)
 	if err != nil {
 		t.Fatalf("resolveExpose bare-metal: %v", err)
 	}

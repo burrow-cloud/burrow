@@ -177,7 +177,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 
 	// Resolve --expose (auto runs the slice-1 capability probe), then read what is already present
 	// so the plan only lists the missing pieces (detect-and-skip).
-	expose, providerName, err := resolveExpose(ctx, o.expose, cs)
+	expose, err := resolveExpose(ctx, o.expose, cs)
 	if err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 
 	// Print the plan with the cost notice, then confirm before any write (ADR-0034 slice 2:
 	// nothing cluster-wide is installed without an explicit yes). -y skips the prompt.
-	writeIngressPlan(stdout, o, expose, providerName, manifest, hasNginx, hasCertManager)
+	writeIngressPlan(stdout, o, expose, manifest, hasNginx, hasCertManager)
 	ok, err := confirmInstall(o, stdin, stdout)
 	if err != nil {
 		return err
@@ -251,29 +251,26 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 	return nil
 }
 
-// resolveExpose turns the --expose value into a concrete mode and the detected provider name
-// for the cost notice. auto runs the slice-1 capability probe and picks loadbalancer on a known
-// cloud provider (LoadBalancer support inferred) or nodeport otherwise. loadbalancer also probes
-// best-effort, only to name the provider in the cost notice; a probe failure there is non-fatal.
-// nodeport needs no probe.
-func resolveExpose(ctx context.Context, mode string, cs kubernetes.Interface) (expose, providerName string, err error) {
+// resolveExpose turns the --expose value into a concrete mode. auto runs the slice-1 capability
+// probe and picks loadbalancer when LoadBalancer support is inferred (a known cloud provider) or
+// nodeport otherwise. The explicit modes need no probe. The cost notice is provider-agnostic, so
+// resolveExpose does not surface the detected provider name (provider detection from node labels
+// is best-effort and a confidently-wrong name would be worse than a general note).
+func resolveExpose(ctx context.Context, mode string, cs kubernetes.Interface) (string, error) {
 	switch mode {
 	case exposeNodePort:
-		return exposeNodePort, "", nil
+		return exposeNodePort, nil
 	case exposeLoadBalancer:
-		if caps, derr := detectCapabilities(ctx, cs); derr == nil {
-			return exposeLoadBalancer, caps.Provider.Name, nil
-		}
-		return exposeLoadBalancer, "", nil
+		return exposeLoadBalancer, nil
 	default: // auto (or empty)
-		caps, derr := detectCapabilities(ctx, cs)
-		if derr != nil {
-			return "", "", fmt.Errorf("detecting capabilities to pick an expose mode (pass --expose loadbalancer or --expose nodeport to skip detection): %w", derr)
+		caps, err := detectCapabilities(ctx, cs)
+		if err != nil {
+			return "", fmt.Errorf("detecting capabilities to pick an expose mode (pass --expose loadbalancer or --expose nodeport to skip detection): %w", err)
 		}
 		if caps.LoadBalancer.Supported {
-			return exposeLoadBalancer, caps.Provider.Name, nil
+			return exposeLoadBalancer, nil
 		}
-		return exposeNodePort, caps.Provider.Name, nil
+		return exposeNodePort, nil
 	}
 }
 
@@ -294,18 +291,15 @@ func manifestVariantLabel(expose string) string {
 	return "cloud, LoadBalancer Service"
 }
 
-// costNotice names the LoadBalancer as a billable cloud resource on the detected provider and
-// points to the free nodeport alternative. It never hardcodes a price (they drift); it flags the
-// class of cost and the provider and says to check current pricing (ADR-0034 slice 2).
-func costNotice(providerName string) string {
-	provider := providerName
-	if provider == "" {
-		provider = "your cloud provider"
-	}
-	return fmt.Sprintf("Cost: the loadbalancer path provisions a billable cloud load balancer on %s, "+
-		"a recurring cloud charge. Check %s's current pricing before proceeding. For a free "+
-		"alternative, rerun with --expose nodeport (a NodePort Service, no cloud load balancer; "+
-		"you then point DNS at a node's external IP).", provider, provider)
+// costNotice flags that the LoadBalancer path creates a billable cloud resource and points to the
+// free nodeport alternative. It is deliberately provider-agnostic: it never hardcodes a price
+// (they drift) and never names the detected provider (node-label detection is best-effort, and a
+// confidently-wrong provider name would be worse than a general note). It says to check with the
+// cloud provider for current pricing (ADR-0034 slice 2).
+func costNotice() string {
+	return "Note: ingress-nginx creates a LoadBalancer Service. LoadBalancers normally cost money; " +
+		"check with your cloud provider for current pricing. Free alternative: --expose nodeport " +
+		"(you point DNS at a node IP instead)."
 }
 
 // nodePortNotice explains the nodeport path: no billable load balancer, but the operator points
@@ -317,7 +311,7 @@ func nodePortNotice() string {
 
 // writeIngressPlan prints the live install plan: only the missing pieces (detect-and-skip), and
 // the cost notice (loadbalancer) or the node-IP note (nodeport).
-func writeIngressPlan(w io.Writer, o ingressOptions, expose, providerName, manifest string, hasNginx, hasCertManager bool) {
+func writeIngressPlan(w io.Writer, o ingressOptions, expose, manifest string, hasNginx, hasCertManager bool) {
 	fmt.Fprintf(w, "Plan (expose: %s). Against your current cluster, ingress install will:\n", expose)
 	if hasNginx {
 		fmt.Fprintln(w, "  - ingress-nginx: already present, skip.")
@@ -331,7 +325,7 @@ func writeIngressPlan(w io.Writer, o ingressOptions, expose, providerName, manif
 	}
 	fmt.Fprintf(w, "  - apply a Let's Encrypt ClusterIssuer %q (%s).\n\n", o.issuerName, o.acmeServer())
 	if expose == exposeLoadBalancer {
-		fmt.Fprintln(w, costNotice(providerName))
+		fmt.Fprintln(w, costNotice())
 	} else {
 		fmt.Fprintln(w, nodePortNotice())
 	}
@@ -361,13 +355,8 @@ func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
 	switch expose {
 	case exposeNodePort:
 		fmt.Fprintln(w, nodePortNotice())
-	case exposeLoadBalancer:
-		fmt.Fprintln(w, costNotice(""))
-	default: // auto
-		fmt.Fprintln(w, "Cost: in auto mode a known cloud provider resolves to the loadbalancer path, which "+
-			"provisions a billable cloud load balancer (a recurring cloud charge). Check your cloud "+
-			"provider's current pricing. For a free alternative, use --expose nodeport (a NodePort "+
-			"Service, no cloud load balancer; you then point DNS at a node's external IP).")
+	default: // loadbalancer, or auto (which may resolve to loadbalancer at apply time)
+		fmt.Fprintln(w, costNotice())
 	}
 }
 

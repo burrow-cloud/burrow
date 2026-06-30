@@ -110,6 +110,7 @@ func newRootCmd() *cobra.Command {
 		newSystemCmd(),
 		// Cross-cutting policy + meta — top level.
 		newClusterCmd(),
+		newContextCmd(),
 		newGuardCmd(),
 		newAuditCmd(),
 		newVersionCmd(),
@@ -122,6 +123,7 @@ type commonOpts struct {
 	controlPlane string
 	token        string
 	kubeconfig   string
+	context      string
 	namespace    string
 	json         bool
 }
@@ -131,6 +133,7 @@ func bindCommon(flags *pflag.FlagSet, o *commonOpts) {
 	flags.StringVar(&o.controlPlane, "control-plane", os.Getenv("BURROW_CONTROL_PLANE_URL"), "control-plane API base URL (default: auto-connect via kubeconfig)")
 	flags.StringVar(&o.token, "token", os.Getenv("BURROW_API_TOKEN"), "control-plane API token (default: read from the install Secret)")
 	flags.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig for auto-connect (default: ambient)")
+	flags.StringVar(&o.context, "context", "", "kubeconfig context to target (default: current context); selects which cluster's burrowd to operate")
 	flags.StringVar(&o.namespace, "namespace", connect.DefaultNamespace, "namespace Burrow is installed in")
 	flags.BoolVar(&o.json, "json", false, "print the raw JSON result")
 }
@@ -146,7 +149,7 @@ func (o *commonOpts) client(ctx context.Context) (*client.Client, error) {
 		}
 		return client.NewClient(o.controlPlane, o.token), nil
 	}
-	return connect.Client(ctx, connect.Options{Kubeconfig: o.kubeconfig, Namespace: o.namespace})
+	return connect.Client(ctx, connect.Options{Kubeconfig: o.kubeconfig, Context: o.context, Namespace: o.namespace})
 }
 
 // emit prints v as indented JSON when asJSON, otherwise the human-readable line.

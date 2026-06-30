@@ -45,7 +45,11 @@ const (
 // Options configures how to find the control plane. The zero value uses the defaults and
 // the ambient kubeconfig.
 type Options struct {
-	Kubeconfig  string // explicit kubeconfig path; empty = in-cluster, else ambient
+	Kubeconfig string // explicit kubeconfig path; empty = in-cluster, else ambient
+	// Context selects which kubeconfig context (cluster) to target. Empty = the current
+	// context (today's behavior). Each context's cluster runs its own burrowd, so this is
+	// how a developer points an operation at a specific environment's control plane (ADR-0035).
+	Context     string
 	Namespace   string
 	Service     string
 	Port        int
@@ -76,7 +80,7 @@ func (o *Options) setDefaults() {
 // Secret.
 func Client(ctx context.Context, o Options) (*client.Client, error) {
 	o.setDefaults()
-	cfg, err := RESTConfig(o.Kubeconfig)
+	cfg, err := RESTConfig(o.Kubeconfig, o.Context)
 	if err != nil {
 		return nil, err
 	}
@@ -116,9 +120,13 @@ func readToken(ctx context.Context, cs kubernetes.Interface, namespace, secret, 
 
 // RESTConfig prefers in-cluster config (when burrow runs inside Kubernetes) and otherwise
 // loads the kubeconfig at path, or the ambient KUBECONFIG / ~/.kube/config when path is
-// empty. It is exported so the CLI can build a clientset from the same config logic.
-func RESTConfig(path string) (*rest.Config, error) {
-	if path == "" {
+// empty. When kubeContext is non-empty it overrides the current context, selecting that
+// context's cluster (ADR-0035); empty keeps the kubeconfig's current context (no regression).
+// It is exported so the CLI can build a clientset from the same config logic.
+func RESTConfig(path, kubeContext string) (*rest.Config, error) {
+	// A selected context implies a kubeconfig, so only fall back to in-cluster config when
+	// neither a path nor a context is given.
+	if path == "" && kubeContext == "" {
 		if cfg, err := rest.InClusterConfig(); err == nil {
 			return cfg, nil
 		}
@@ -127,7 +135,11 @@ func RESTConfig(path string) (*rest.Config, error) {
 	if path != "" {
 		rules.ExplicitPath = path
 	}
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	overrides := &clientcmd.ConfigOverrides{}
+	if kubeContext != "" {
+		overrides.CurrentContext = kubeContext
+	}
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("connect: loading kubeconfig: %w", err)
 	}

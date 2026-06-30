@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,7 +21,94 @@ import (
 	"k8s.io/client-go/kubernetes"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/clientcmd/api"
 )
+
+// writeKubeconfig writes cfg to a temp file and returns its path.
+func writeKubeconfig(t *testing.T, cfg *api.Config) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := clientcmd.WriteToFile(*cfg, path); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+	return path
+}
+
+// twoContextConfig builds a kubeconfig with two contexts (ctx-one current, ctx-two not) whose
+// clusters point at serverOne and serverTwo.
+func twoContextConfig(serverOne, serverTwo string) *api.Config {
+	cfg := api.NewConfig()
+	cfg.Clusters["cluster-one"] = &api.Cluster{Server: serverOne, InsecureSkipTLSVerify: true}
+	cfg.Clusters["cluster-two"] = &api.Cluster{Server: serverTwo, InsecureSkipTLSVerify: true}
+	cfg.AuthInfos["user"] = &api.AuthInfo{Token: "t"}
+	cfg.Contexts["ctx-one"] = &api.Context{Cluster: "cluster-one", AuthInfo: "user"}
+	cfg.Contexts["ctx-two"] = &api.Context{Cluster: "cluster-two", AuthInfo: "user"}
+	cfg.CurrentContext = "ctx-one"
+	return cfg
+}
+
+// TestRESTConfigContextSelectsCluster confirms the Context override picks that context's cluster,
+// and that an empty Context keeps the kubeconfig's current context (no regression) — ADR-0035.
+func TestRESTConfigContextSelectsCluster(t *testing.T) {
+	path := writeKubeconfig(t, twoContextConfig("https://one.example:6443", "https://two.example:6443"))
+
+	current, err := RESTConfig(path, "")
+	if err != nil {
+		t.Fatalf("RESTConfig (current context): %v", err)
+	}
+	if current.Host != "https://one.example:6443" {
+		t.Errorf("empty context host = %q, want the current context's cluster", current.Host)
+	}
+
+	selected, err := RESTConfig(path, "ctx-two")
+	if err != nil {
+		t.Fatalf("RESTConfig (selected context): %v", err)
+	}
+	if selected.Host != "https://two.example:6443" {
+		t.Errorf("selected context host = %q, want ctx-two's cluster", selected.Host)
+	}
+}
+
+// TestClientContextSelectsCluster confirms Client reads its token from — and so targets — the
+// cluster of the selected context, not the current one.
+func TestClientContextSelectsCluster(t *testing.T) {
+	var oneHit, twoHit bool
+	one := tokenServer(&oneHit)
+	two := tokenServer(&twoHit)
+	defer one.Close()
+	defer two.Close()
+
+	path := writeKubeconfig(t, twoContextConfig(one.URL, two.URL))
+
+	c, err := Client(context.Background(), Options{Kubeconfig: path, Context: "ctx-two", Namespace: "burrow"})
+	if err != nil {
+		t.Fatalf("Client: %v", err)
+	}
+	if c == nil {
+		t.Fatal("Client returned a nil client")
+	}
+	if !twoHit {
+		t.Errorf("selected context's cluster (ctx-two) was not contacted")
+	}
+	if oneHit {
+		t.Errorf("current context's cluster (ctx-one) was contacted; --context should redirect to ctx-two")
+	}
+}
+
+// tokenServer is a fake API server that records that it was hit and serves the install token
+// Secret for any namespace, so Client.readToken succeeds against it.
+func tokenServer(hit *bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*hit = true
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&corev1.Secret{
+			TypeMeta:   metav1.TypeMeta{Kind: "Secret", APIVersion: "v1"},
+			ObjectMeta: metav1.ObjectMeta{Name: "burrowd-api-token", Namespace: "burrow"},
+			Data:       map[string][]byte{"token": []byte("s3cr3t")},
+		})
+	}))
+}
 
 func TestProxyBaseURL(t *testing.T) {
 	got := proxyBaseURL("https://api.example.com:6443", "burrow", "burrowd", 8080)
@@ -63,7 +152,7 @@ func TestProxyForwardsCustomHeader(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	cfg, err := RESTConfig(kubeconfig)
+	cfg, err := RESTConfig(kubeconfig, "")
 	if err != nil {
 		t.Fatalf("RESTConfig: %v", err)
 	}

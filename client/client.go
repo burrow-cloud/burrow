@@ -168,6 +168,10 @@ type Guardrail struct {
 	Code        string `json:"code"`
 	Disposition string `json:"disposition"`
 	Description string `json:"description"`
+	// Source reports where a guardrail's effective disposition came from when listed for a named
+	// environment (ADR-0035 phase 2c): "env" (an environment-specific override), "global" (the global
+	// policy), or "default" (the built-in default). It is empty in the global listing.
+	Source string `json:"source,omitempty"`
 }
 
 // Provider mirrors a control-plane provider registry entry (ADR-0023). It carries no
@@ -675,22 +679,27 @@ func withEnv(path, env string) string {
 	return path + sep + "env=" + url.QueryEscape(env)
 }
 
-// Guardrails lists the control-plane guardrails and their current dispositions.
-func (c *Client) Guardrails(ctx context.Context) ([]Guardrail, error) {
+// Guardrails lists the control-plane guardrails and their current dispositions. An empty env lists
+// the global policy; a named environment lists its effective policy under the env to global to
+// default fallback, each entry marking whether its disposition is env-specific or inherited
+// (ADR-0035 phase 2c).
+func (c *Client) Guardrails(ctx context.Context, env string) ([]Guardrail, error) {
 	var out struct {
 		Guardrails []Guardrail `json:"guardrails"`
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/guard", nil, &out)
+	err := c.do(ctx, http.MethodGet, withEnv("/v1/guard", env), nil, &out)
 	return out.Guardrails, err
 }
 
-// SetGuardrail sets a guardrail's disposition and returns the updated policy.
-func (c *Client) SetGuardrail(ctx context.Context, code, disposition string) ([]Guardrail, error) {
+// SetGuardrail sets a guardrail's disposition and returns the updated policy. An empty env sets the
+// global disposition; a named environment scopes it to that environment, storing the env-prefixed
+// code (ADR-0035 phase 2c).
+func (c *Client) SetGuardrail(ctx context.Context, env, code, disposition string) ([]Guardrail, error) {
 	var out struct {
 		Guardrails []Guardrail `json:"guardrails"`
 	}
 	body := map[string]string{"disposition": disposition}
-	err := c.do(ctx, http.MethodPut, "/v1/guard/"+url.PathEscape(code), body, &out)
+	err := c.do(ctx, http.MethodPut, withEnv("/v1/guard/"+url.PathEscape(code), env), body, &out)
 	return out.Guardrails, err
 }
 

@@ -39,7 +39,7 @@ func (e *Engine) AddDomain(ctx context.Context, req AddDomainRequest) (DomainRes
 	}
 	args := map[string]string{"address": address, "provider": p.Name}
 	if err := e.recordDecision(ctx, auditOpDNSWrite, host, args, GuardrailDNSWrite,
-		pol.evaluateGuardrail("domain add", GuardrailDNSWrite, req.Confirm,
+		pol.evaluateGuardrail("", "domain add", GuardrailDNSWrite, req.Confirm,
 			fmt.Sprintf("pointing %s at %s via %s", host, address, p.Name))); err != nil {
 		return DomainResult{}, err
 	}
@@ -79,7 +79,7 @@ func (e *Engine) RemoveDomain(ctx context.Context, req RemoveDomainRequest) (Dom
 	}
 	args := map[string]string{"provider": p.Name}
 	if err := e.recordDecision(ctx, auditOpDNSDelete, host, args, GuardrailDNSDelete,
-		pol.evaluateGuardrail("domain remove", GuardrailDNSDelete, req.Confirm,
+		pol.evaluateGuardrail("", "domain remove", GuardrailDNSDelete, req.Confirm,
 			fmt.Sprintf("removing the DNS record for %s via %s", host, p.Name))); err != nil {
 		return DomainResult{}, err
 	}

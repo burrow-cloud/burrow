@@ -468,6 +468,75 @@ func TestGuardList(t *testing.T) {
 	}
 }
 
+// TestGuardSetEnv confirms `guard set --env prod` scopes the set to the environment: the env query
+// reaches the API and the confirmation names the environment (ADR-0035 phase 2c).
+func TestGuardSetEnv(t *testing.T) {
+	var gotMethod, gotPath, gotEnv string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotEnv = r.Method, r.URL.Path, r.URL.Query().Get("env")
+		_ = json.NewEncoder(w).Encode(map[string]any{"guardrails": []map[string]any{
+			{"code": "app.delete", "disposition": "deny", "description": "delete an app", "source": "env"},
+		}})
+	}, "guard", "set", "app.delete", "deny", "--env", "prod")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "PUT" || gotPath != "/v1/guard/app.delete" {
+		t.Errorf("request = %s %s, want PUT /v1/guard/app.delete", gotMethod, gotPath)
+	}
+	if gotEnv != "prod" {
+		t.Errorf("env query = %q, want prod", gotEnv)
+	}
+	if !strings.Contains(out, `set guardrail "app.delete" to "deny" in environment "prod"`) {
+		t.Errorf("output = %q, want it to name the environment", out)
+	}
+}
+
+// TestGuardSetNoEnvOmitsSelector confirms `guard set` without --env sends no env selector, so the
+// server sets the global disposition (ADR-0035 phase 2c).
+func TestGuardSetNoEnvOmitsSelector(t *testing.T) {
+	var gotEnv string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotEnv = r.URL.Query().Get("env")
+		_ = json.NewEncoder(w).Encode(map[string]any{"guardrails": []map[string]any{
+			{"code": "app.delete", "disposition": "deny", "description": "delete an app"},
+		}})
+	}, "guard", "set", "app.delete", "deny")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotEnv != "" {
+		t.Errorf("env query = %q, want empty (global)", gotEnv)
+	}
+	if strings.Contains(out, "environment") {
+		t.Errorf("output = %q, should not name an environment without --env", out)
+	}
+}
+
+// TestGuardListEnv confirms `guard list --env prod` requests the environment's policy and renders the
+// SOURCE column marking env-specific vs inherited dispositions (ADR-0035 phase 2c).
+func TestGuardListEnv(t *testing.T) {
+	var gotEnv string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotEnv = r.URL.Query().Get("env")
+		_ = json.NewEncoder(w).Encode(map[string]any{"guardrails": []map[string]any{
+			{"code": "app.delete", "disposition": "deny", "description": "delete an app", "source": "env"},
+			{"code": "app.rollback", "disposition": "allow", "description": "roll back", "source": "global"},
+		}})
+	}, "guard", "list", "--env", "prod")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotEnv != "prod" {
+		t.Errorf("env query = %q, want prod", gotEnv)
+	}
+	for _, want := range []string{"SOURCE", "app.delete", "environment", "inherited (global)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+}
+
 func TestDeployGuardrailErrorSurfaces(t *testing.T) {
 	_, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)

@@ -33,7 +33,7 @@ func TestEvaluateReplicas(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := c.policy.evaluateReplicas("test", c.replicas, c.confirmed)
+			err := c.policy.evaluateReplicas("", "test", c.replicas, c.confirmed)
 			if c.wantCode == "" {
 				if err != nil {
 					t.Fatalf("evaluateReplicas(%d, confirmed=%v) = %v, want allowed", c.replicas, c.confirmed, err)
@@ -54,6 +54,94 @@ func TestEvaluateReplicas(t *testing.T) {
 				t.Fatalf("operation = %q, want test", g.Operation)
 			}
 		})
+	}
+}
+
+// TestDispositionEnvFallback exercises the env to global to default lookup order (ADR-0035 phase 2c):
+// an env-specific override wins; absent one, a named env falls back to the global override; and the
+// empty and reserved "default" envs reproduce the global lookup exactly.
+func TestDispositionEnvFallback(t *testing.T) {
+	// Global app.delete = allow; prod overrides it to deny. Staging has no override.
+	p := Policy{MaxReplicas: 10}.
+		With(GuardrailAppDelete, DispositionAllow).
+		With(GuardrailCode("prod."+string(GuardrailAppDelete)), DispositionDeny)
+
+	cases := []struct {
+		name string
+		env  string
+		want Disposition
+	}{
+		{"prod env-specific override wins", "prod", DispositionDeny},
+		{"staging falls back to global", "staging", DispositionAllow},
+		{"empty env is the global lookup", "", DispositionAllow},
+		{"default env is the global lookup", DefaultEnvironment, DispositionAllow},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := p.disposition(c.env, GuardrailAppDelete); got != c.want {
+				t.Errorf("disposition(%q, app.delete) = %q, want %q", c.env, got, c.want)
+			}
+		})
+	}
+
+	// A guardrail with no override anywhere reads as the deny-when-unset default, in any env.
+	if got := p.disposition("prod", GuardrailRollback); got != DispositionDeny {
+		t.Errorf("unset guardrail in prod = %q, want deny (the safe default)", got)
+	}
+}
+
+// TestDispositionSource confirms the source label tracks where the effective disposition came from,
+// which drives the env-aware `guard list` (ADR-0035 phase 2c).
+func TestDispositionSource(t *testing.T) {
+	p := Policy{MaxReplicas: 10}.
+		With(GuardrailAppDelete, DispositionAllow).
+		With(GuardrailCode("prod."+string(GuardrailAppDelete)), DispositionDeny)
+
+	if d, src := p.dispositionSource("prod", GuardrailAppDelete); d != DispositionDeny || src != "env" {
+		t.Errorf("prod app.delete = (%q, %q), want (deny, env)", d, src)
+	}
+	if d, src := p.dispositionSource("staging", GuardrailAppDelete); d != DispositionAllow || src != "global" {
+		t.Errorf("staging app.delete = (%q, %q), want (allow, global)", d, src)
+	}
+	if d, src := p.dispositionSource("prod", GuardrailRollback); d != DispositionDeny || src != "default" {
+		t.Errorf("prod app.rollback (unset) = (%q, %q), want (deny, default)", d, src)
+	}
+}
+
+// TestGuardrailsForMarksSource confirms the env-scoped listing carries a Source per guardrail while
+// the global listing leaves it empty (ADR-0035 phase 2c).
+func TestGuardrailsForMarksSource(t *testing.T) {
+	p := DefaultPolicy().With(GuardrailCode("prod."+string(GuardrailAppDelete)), DispositionDeny)
+
+	for _, g := range p.GuardrailsFor("prod") {
+		if g.Source == "" {
+			t.Errorf("env listing left Source empty for %s", g.Code)
+		}
+		if g.Code == GuardrailAppDelete && (g.Disposition != DispositionDeny || g.Source != "env") {
+			t.Errorf("prod app.delete = (%q, %q), want (deny, env)", g.Disposition, g.Source)
+		}
+	}
+	for _, g := range p.Guardrails() {
+		if g.Source != "" {
+			t.Errorf("global listing should leave Source empty, got %q for %s", g.Source, g.Code)
+		}
+	}
+}
+
+// TestEnvScopable confirms only the app-level guardrails can be scoped to an environment; the
+// cluster-level ones (addon.*, dns.*) are global (ADR-0035 phase 2c).
+func TestEnvScopable(t *testing.T) {
+	scopable := []GuardrailCode{GuardrailAppDelete, GuardrailRollback, GuardrailExposePublic, GuardrailScaleToZero, GuardrailReplicaCeiling}
+	global := []GuardrailCode{GuardrailDNSWrite, GuardrailDNSDelete, GuardrailAddonInstall, GuardrailAddonRemove, GuardrailAddonDetach, GuardrailAddonRestore}
+	for _, c := range scopable {
+		if !EnvScopable(c) {
+			t.Errorf("EnvScopable(%q) = false, want true", c)
+		}
+	}
+	for _, c := range global {
+		if EnvScopable(c) {
+			t.Errorf("EnvScopable(%q) = true, want false (cluster-level)", c)
+		}
 	}
 }
 

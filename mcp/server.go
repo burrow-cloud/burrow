@@ -922,7 +922,7 @@ func guardTool(clientFor ClientForContext) sdk.ToolHandlerFor[guardInput, guardO
 		if err != nil {
 			return nil, guardOutput{}, err
 		}
-		gs, err := c.Guardrails(ctx)
+		gs, err := c.Guardrails(ctx, "")
 		if err != nil {
 			return nil, guardOutput{}, err
 		}

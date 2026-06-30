@@ -159,6 +159,118 @@ func TestDefaultEnvironmentResolvesToAppNamespace(t *testing.T) {
 	}
 }
 
+// TestPerEnvironmentGuardrailGatesOnlyThatEnv is the headline of ADR-0035 phase 2c: a prod-scoped
+// rule denies an operation in prod while the same operation runs in another environment under the
+// permissive global policy. It locks app.delete in prod, leaves it allowed globally, then deletes the
+// same app in staging (allowed) and prod (denied).
+func TestPerEnvironmentGuardrailGatesOnlyThatEnv(t *testing.T) {
+	ctx := context.Background()
+	e, _, r, _ := newRoutingEngine(t, "burrow-apps")
+	r.Add("registry.example.com/web:1", "sha256:web1")
+	for _, env := range []string{"prod", "staging"} {
+		if _, err := e.AddEnvironment(ctx, env, "burrow-apps-"+env); err != nil {
+			t.Fatalf("AddEnvironment(%s): %v", env, err)
+		}
+		if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Env: env, Image: "registry.example.com/web:1", Replicas: 1}); err != nil {
+			t.Fatalf("Deploy(%s): %v", env, err)
+		}
+	}
+
+	// Permissive globally, locked in prod.
+	if err := e.SetGuardrail(ctx, "", cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
+		t.Fatalf("SetGuardrail(global): %v", err)
+	}
+	if err := e.SetGuardrail(ctx, "prod", cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
+		t.Fatalf("SetGuardrail(prod): %v", err)
+	}
+
+	// staging inherits the permissive global rule: the delete runs.
+	if err := e.DeleteApp(ctx, "web", "staging", false); err != nil {
+		t.Errorf("DeleteApp(staging) = %v, want it to proceed under the global allow", err)
+	}
+	// prod has its own deny: the same delete is refused outright.
+	err := e.DeleteApp(ctx, "web", "prod", false)
+	g, ok := cp.AsGuardrail(err)
+	if !ok {
+		t.Fatalf("DeleteApp(prod) = %v, want a GuardrailError", err)
+	}
+	if g.Code != cp.GuardrailAppDelete || g.NeedsConfirmation {
+		t.Errorf("prod delete guardrail = %+v, want a plain deny on app.delete", g)
+	}
+}
+
+// TestSetGuardrailEnvValidation confirms env-scoping is validated: a valid app-level set against a
+// registered env stores the env-prefixed code, an unknown env is ErrNotFound, and a cluster-level
+// guardrail cannot be env-scoped (ADR-0035 phase 2c).
+func TestSetGuardrailEnvValidation(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _ := newRoutingEngine(t, "burrow-apps")
+	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
+		t.Fatalf("AddEnvironment: %v", err)
+	}
+
+	// A registered env + app-level code stores the env-prefixed disposition, visible in prod's listing.
+	if err := e.SetGuardrail(ctx, "prod", cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
+		t.Fatalf("SetGuardrail(prod, app.delete): %v", err)
+	}
+	gs, err := e.Guardrails(ctx, "prod")
+	if err != nil {
+		t.Fatalf("Guardrails(prod): %v", err)
+	}
+	var saw bool
+	for _, g := range gs {
+		if g.Code == cp.GuardrailAppDelete {
+			saw = true
+			if g.Disposition != cp.DispositionDeny || g.Source != "env" {
+				t.Errorf("prod app.delete = (%q, %q), want (deny, env)", g.Disposition, g.Source)
+			}
+		}
+	}
+	if !saw {
+		t.Errorf("prod listing missing app.delete")
+	}
+
+	// An unknown environment is a clear ErrNotFound (catches typos).
+	if err := e.SetGuardrail(ctx, "ghost", cp.GuardrailAppDelete, cp.DispositionDeny); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("SetGuardrail(ghost) = %v, want ErrNotFound", err)
+	}
+	// A cluster-level guardrail cannot be scoped to an environment.
+	if err := e.SetGuardrail(ctx, "prod", cp.GuardrailAddonInstall, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("SetGuardrail(prod, addon.install) = %v, want ErrInvalid (cluster-level)", err)
+	}
+	if err := e.SetGuardrail(ctx, "prod", cp.GuardrailDNSWrite, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("SetGuardrail(prod, dns.write) = %v, want ErrInvalid (cluster-level)", err)
+	}
+
+	// Listing an unknown environment is likewise a clear error.
+	if _, err := e.Guardrails(ctx, "ghost"); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("Guardrails(ghost) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestClusterLevelGuardrailIgnoresEnv confirms a cluster-level operation (an add-on install) is
+// gated by the global disposition regardless of any environment, since it is set without env and
+// evaluated with an empty env (ADR-0035 phase 2c).
+func TestClusterLevelGuardrailIgnoresEnv(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _ := newRoutingEngine(t, "burrow-apps")
+	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
+		t.Fatalf("AddEnvironment: %v", err)
+	}
+	// Deny add-on install globally; there is no way to make it depend on an environment.
+	if err := e.SetGuardrail(ctx, "", cp.GuardrailAddonInstall, cp.DispositionDeny); err != nil {
+		t.Fatalf("SetGuardrail(addon.install): %v", err)
+	}
+	_, err := e.InstallAddon(ctx, cp.AddonLogs, false)
+	g, ok := cp.AsGuardrail(err)
+	if !ok {
+		t.Fatalf("InstallAddon = %v, want a GuardrailError from the global deny", err)
+	}
+	if g.Code != cp.GuardrailAddonInstall {
+		t.Errorf("guardrail code = %q, want addon.install", g.Code)
+	}
+}
+
 // TestGuardedOpRecordsEnvironment confirms a guarded environment-scoped operation records the
 // environment in its redacted audit args, so the trail shows which environment was touched while
 // guardrail policy stays global until phase 2c (ADR-0035 phase 2b, ADR-0027).

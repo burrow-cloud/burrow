@@ -336,23 +336,25 @@ func TestInstallDefaultAppNamespace(t *testing.T) {
 }
 
 func TestSummarizeApply(t *testing.T) {
-	out := `namespace/burrow created
-serviceaccount/burrowd unchanged
-role.rbac.authorization.k8s.io/burrowd-credentials created
-rolebinding.rbac.authorization.k8s.io/burrowd-credentials created
-secret/burrow-credentials configured
-deployment.apps/burrowd configured`
+	results := []applyResult{
+		{"namespace/burrow", "created"},
+		{"serviceaccount/burrowd", "unchanged"},
+		{"role/burrowd-credentials", "created"},
+		{"rolebinding/burrowd-credentials", "created"},
+		{"secret/burrow-credentials", "configured"},
+		{"deployment/burrowd", "configured"},
+	}
 	var b bytes.Buffer
-	summarizeApply(out, &b)
+	summarizeApplyResults(results, &b)
 	got := b.String()
 	want := "Applied 6 resource(s): 3 created, 2 configured, 1 unchanged.\n"
 	if got != want {
 		t.Errorf("summary = %q, want %q", got, want)
 	}
 
-	// No output (e.g. a no-op) summarizes to nothing.
+	// No results (e.g. a no-op) summarizes to nothing.
 	var empty bytes.Buffer
-	summarizeApply("\n\n", &empty)
+	summarizeApplyResults(nil, &empty)
 	if empty.Len() != 0 {
 		t.Errorf("empty apply should print nothing, got %q", empty.String())
 	}

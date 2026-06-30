@@ -34,54 +34,7 @@ metadata:
   name: burrowd
   namespace: {{.Namespace}}
 ---
-# The control plane manages app workloads in the app namespace, so its Role and binding
-# live there (the ServiceAccount itself lives in the control-plane namespace).
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: burrowd
-  namespace: {{.AppNamespace}}
-rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get"]
-  # Exposing an app creates a Service and an Ingress routing a host to it (ADR-0018).
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "create", "update", "patch", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "create", "update", "patch", "delete"]
-  # burrowd reads each app's per-app env Secret (burrow-app-<app>-secrets) to LIST its keys and
-  # UNSET a key, and create/update let it WRITE a secret value it received over the authenticated
-  # control-plane API (ADR-0029) — and let a future provisioned backend (e.g. the Postgres add-on)
-  # write a connection string into the app's Secret. Secret values still never cross MCP (there is
-  # no secret-set MCP tool) and are never logged or stored in the database (ADR-0029/0004). This is
-  # a deliberate, documented broadening of the least-privilege posture (ADR-0023), scoped to the
-  # app namespace ONLY: burrowd gets no secrets access in the control-plane or add-on namespaces.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "create", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: burrowd
-  namespace: {{.AppNamespace}}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: burrowd
-subjects:
-  - kind: ServiceAccount
-    name: burrowd
-    namespace: {{.Namespace}}
+{{ template "appNamespaceRole" . }}
 ---
 # Add-ons live in their own namespace (ADR-0025), so burrowd's permission to manage them is
 # scoped there: a logs store is a Deployment + Service + PVC, its collector a DaemonSet +

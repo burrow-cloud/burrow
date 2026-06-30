@@ -707,6 +707,34 @@ func (c *Client) RemoveDomain(ctx context.Context, host, provider string, confir
 	return out, err
 }
 
+// Environment mirrors a control-plane environment (ADR-0035 phase 2): a namespace-per-environment
+// target. Name is the handle (a DNS-1123 label), Namespace the Kubernetes namespace its apps deploy
+// into, and Default marks the implicit `default` environment (the app namespace burrowd runs
+// against).
+type Environment struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Default   bool   `json:"default"`
+}
+
+// AddEnvironment registers a named environment mapping name to namespace (ADR-0035 phase 2). The
+// namespace and burrowd's Role there are created kubeconfig-side by `burrow env add` before this
+// call; this records the registry entry. A duplicate name is rejected.
+func (c *Client) AddEnvironment(ctx context.Context, name, namespace string) error {
+	body := map[string]any{"name": name, "namespace": namespace}
+	return c.do(ctx, http.MethodPost, "/v1/environments", body, nil)
+}
+
+// ListEnvironments lists the environments the cluster's burrowd knows about (ADR-0035 phase 2): the
+// implicit `default` environment first, then the registered ones in name order.
+func (c *Client) ListEnvironments(ctx context.Context) ([]Environment, error) {
+	var out struct {
+		Environments []Environment `json:"environments"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/environments", nil, &out)
+	return out.Environments, err
+}
+
 // do issues a request, decoding a 2xx body into out and a non-2xx body into an APIError.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var br io.Reader

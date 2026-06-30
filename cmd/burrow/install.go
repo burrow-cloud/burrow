@@ -109,15 +109,26 @@ func errNoBurrowdImage() error {
 //go:embed manifests/install.yaml.tmpl
 var installManifests string
 
-var installTemplate = template.Must(template.New("install").Parse(installManifests))
+// appRoleManifest is the shared app-namespace Role/RoleBinding template (ADR-0035): it defines the
+// "appNamespaceRole" named template that both install (the default app namespace) and `burrow env
+// add` (each per-environment namespace) render, so burrowd's app-namespace grant cannot drift
+// between the two paths.
+//
+//go:embed manifests/approle.yaml.tmpl
+var appRoleManifest string
+
+// installTemplate parses the shared appNamespaceRole define first so the install body can invoke it.
+var installTemplate = template.Must(template.Must(template.New("install").Parse(appRoleManifest)).Parse(installManifests))
 
 // installOptions are the values rendered into the install manifests. Namespace holds the
 // control plane (burrowd, Postgres); AppNamespace is where deployed apps go — separate, so
-// app workloads aren't mixed in with the control-plane infrastructure.
+// app workloads aren't mixed in with the control-plane infrastructure. ServiceAccount is burrowd's
+// ServiceAccount name, threaded into the shared app-namespace Role (defaults to "burrowd").
 type installOptions struct {
 	Namespace      string
 	AppNamespace   string
 	AddonNamespace string
+	ServiceAccount string
 	Image          string
 	Token          string
 	DBPassword     string
@@ -341,6 +352,9 @@ func randHex(n int) (string, error) {
 }
 
 func renderManifests(o installOptions) (string, error) {
+	if o.ServiceAccount == "" {
+		o.ServiceAccount = "burrowd"
+	}
 	var sb strings.Builder
 	if err := installTemplate.Execute(&sb, o); err != nil {
 		return "", fmt.Errorf("rendering manifests: %w", err)

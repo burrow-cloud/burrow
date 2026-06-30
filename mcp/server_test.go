@@ -75,7 +75,7 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_environments"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_contexts", "burrow_environments"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
@@ -140,15 +140,16 @@ func TestListTools(t *testing.T) {
 
 	// Per-call environment routing (ADR-0035): every operating tool, read or mutate, takes an
 	// optional `context`. `context` is a kubeconfig label, not a credential, so the secret scan
-	// above lets it through. burrow_environments is the exception: it lists the contexts the agent
-	// can target and so takes no context of its own.
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_apps", "burrow_scale", "burrow_cluster", "burrow_guard"} {
+	// above lets it through. burrow_environments lists a cluster's registered environments, so it
+	// is an operating tool and takes a context too. burrow_contexts is the exception: it lists the
+	// contexts the agent can target and so takes no context of its own.
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_apps", "burrow_scale", "burrow_cluster", "burrow_guard", "burrow_environments"} {
 		if !hasContext[want] {
 			t.Errorf("tool %q has no context input: every operating tool must be targetable per call", want)
 		}
 	}
-	if hasContext["burrow_environments"] {
-		t.Error("burrow_environments must NOT take a context: it lists the contexts to target")
+	if hasContext["burrow_contexts"] {
+		t.Error("burrow_contexts must NOT take a context: it lists the contexts to target")
 	}
 }
 
@@ -214,12 +215,12 @@ func TestPerCallContextRouting(t *testing.T) {
 	}
 }
 
-// TestEnvironmentsToolListsContexts confirms burrow_environments returns the available
-// environments (kubeconfig contexts) and marks the current one, so the agent knows what it can
-// name in another tool's context argument (ADR-0035 phase 1b).
-func TestEnvironmentsToolListsContexts(t *testing.T) {
+// TestContextsToolListsContexts confirms burrow_contexts returns the available kubeconfig contexts
+// (clusters) and marks the current one, so the agent knows what it can name in another tool's
+// context argument (ADR-0035 phase 1b; the tool was renamed from burrow_environments in phase 2a).
+func TestContextsToolListsContexts(t *testing.T) {
 	clientFor := func(string) (*client.Client, error) {
-		t.Error("burrow_environments must not build a control-plane client: it reads the local kubeconfig")
+		t.Error("burrow_contexts must not build a control-plane client: it reads the local kubeconfig")
 		return nil, nil
 	}
 	lister := func() ([]bconnect.Context, error) {
@@ -230,6 +231,52 @@ func TestEnvironmentsToolListsContexts(t *testing.T) {
 	}
 	cs := newSession(t, mcp.NewServer(clientFor, lister, "test"))
 
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "burrow_contexts"})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	out := decodeStructured[struct {
+		Contexts []struct {
+			Name    string `json:"name"`
+			Cluster string `json:"cluster"`
+			Current bool   `json:"current"`
+		} `json:"contexts"`
+	}](t, res)
+	if len(out.Contexts) != 2 {
+		t.Fatalf("contexts = %+v, want 2", out.Contexts)
+	}
+	current := map[string]bool{}
+	for _, c := range out.Contexts {
+		current[c.Name] = c.Current
+	}
+	if !current["staging"] {
+		t.Errorf("staging should be marked current: %+v", out.Contexts)
+	}
+	if current["prod-cluster"] {
+		t.Errorf("prod-cluster should not be marked current: %+v", out.Contexts)
+	}
+}
+
+// TestEnvironmentsToolListsRegisteredEnvs confirms burrow_environments lists a cluster's registered
+// namespace-environments via the control-plane client, including the implicit default (ADR-0035
+// phase 2a).
+func TestEnvironmentsToolListsRegisteredEnvs(t *testing.T) {
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/environments" {
+			t.Errorf("path = %q, want /v1/environments", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"environments": []map[string]any{
+				{"name": "default", "namespace": "burrow-apps", "default": true},
+				{"name": "staging", "namespace": "burrow-apps-staging"},
+			},
+		})
+	})
+
 	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "burrow_environments"})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -239,23 +286,19 @@ func TestEnvironmentsToolListsContexts(t *testing.T) {
 	}
 	out := decodeStructured[struct {
 		Environments []struct {
-			Name    string `json:"name"`
-			Cluster string `json:"cluster"`
-			Current bool   `json:"current"`
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+			Default   bool   `json:"default"`
 		} `json:"environments"`
 	}](t, res)
 	if len(out.Environments) != 2 {
 		t.Fatalf("environments = %+v, want 2", out.Environments)
 	}
-	current := map[string]bool{}
-	for _, e := range out.Environments {
-		current[e.Name] = e.Current
+	if out.Environments[0].Name != "default" || !out.Environments[0].Default {
+		t.Errorf("first environment should be the default: %+v", out.Environments)
 	}
-	if !current["staging"] {
-		t.Errorf("staging should be marked current: %+v", out.Environments)
-	}
-	if current["prod-cluster"] {
-		t.Errorf("prod-cluster should not be marked current: %+v", out.Environments)
+	if out.Environments[1].Name != "staging" || out.Environments[1].Namespace != "burrow-apps-staging" {
+		t.Errorf("staging environment wrong: %+v", out.Environments)
 	}
 }
 

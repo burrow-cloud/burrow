@@ -4,6 +4,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/burrow-cloud/burrow/client"
 	cp "github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/api"
 	"github.com/burrow-cloud/burrow/controlplane/internal/fake"
@@ -223,6 +225,53 @@ func TestAuditEndpoint(t *testing.T) {
 	// A bad limit is a 400.
 	if rr := do(h, "GET", "/v1/audit?limit=nope", token, ""); rr.Code != http.StatusBadRequest {
 		t.Errorf("bad limit = %d, want 400", rr.Code)
+	}
+}
+
+// TestEnvironmentEndpointsRoundTrip exercises POST/GET /v1/environments through the typed client
+// against a live httptest server (ADR-0035 phase 2a): registering an environment and listing it,
+// with the implicit default first.
+func TestEnvironmentEndpointsRoundTrip(t *testing.T) {
+	d := fake.NewDatabase()
+	e, err := cp.New(cp.Deps{
+		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
+		Clock: fake.NewClock(time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)),
+		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+		AppNamespace: "burrow-apps",
+	})
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	h, err := api.New(api.Config{Engine: e, Token: token})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	c := client.NewClient(srv.URL, token)
+	ctx := context.Background()
+
+	if err := c.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
+		t.Fatalf("AddEnvironment: %v", err)
+	}
+	// A duplicate is rejected (ErrInvalid -> 400).
+	if err := c.AddEnvironment(ctx, "staging", "other"); err == nil {
+		t.Errorf("duplicate AddEnvironment should error")
+	}
+
+	envs, err := c.ListEnvironments(ctx)
+	if err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if len(envs) != 2 {
+		t.Fatalf("environments = %+v, want 2 (default + staging)", envs)
+	}
+	if envs[0].Name != "default" || !envs[0].Default || envs[0].Namespace != "burrow-apps" {
+		t.Errorf("first environment should be the default in the app namespace: %+v", envs[0])
+	}
+	if envs[1].Name != "staging" || envs[1].Default || envs[1].Namespace != "burrow-apps-staging" {
+		t.Errorf("registered environment wrong: %+v", envs[1])
 	}
 }
 

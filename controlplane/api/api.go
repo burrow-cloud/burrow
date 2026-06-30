@@ -91,6 +91,11 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
 	v1.HandleFunc("POST /v1/metrics/query", s.queryMetrics)
 	v1.HandleFunc("GET /v1/audit", s.audit)
+	// Environments register namespace-per-environment targets (ADR-0035 phase 2). add records a
+	// name->namespace mapping (the namespace and burrowd's Role there are created kubeconfig-side by
+	// `burrow env add`); list returns them with the implicit `default` first. They move no secret.
+	v1.HandleFunc("POST /v1/environments", s.addEnvironment)
+	v1.HandleFunc("GET /v1/environments", s.listEnvironments)
 	// The cluster capabilities are read live (ADR-0034): a neutral, read-only report of what the
 	// cluster can do — ingress, storage, LoadBalancer support, cert-manager, provider, DNS. It moves
 	// no secret value.
@@ -687,6 +692,45 @@ func (s *server) cluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, caps)
+}
+
+// addEnvironment registers a namespace-per-environment target (ADR-0035 phase 2): it decodes
+// {name, namespace} and records the mapping. The privileged namespace + RBAC setup is done
+// kubeconfig-side by `burrow env add` before this call — burrowd holds only namespaced Roles and
+// cannot create namespaces or RBAC itself. It moves no secret value.
+func (s *server) addEnvironment(w http.ResponseWriter, r *http.Request) {
+	var req environmentAddRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	env, err := s.engine.AddEnvironment(r.Context(), req.Name, req.Namespace)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, env)
+}
+
+func (s *server) listEnvironments(w http.ResponseWriter, r *http.Request) {
+	envs, err := s.engine.ListEnvironments(r.Context())
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, environmentsResponse{Environments: envs})
+}
+
+// environmentAddRequest is the body of an environment add: the environment name and the namespace
+// its apps deploy into.
+type environmentAddRequest struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
+// environmentsResponse wraps the environment list so the shape can grow without breaking object
+// decoders.
+type environmentsResponse struct {
+	Environments []controlplane.Environment `json:"environments"`
 }
 
 // guardResponse is the body of a guard list/set call: the full guardrail policy.

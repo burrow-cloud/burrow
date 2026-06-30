@@ -222,6 +222,8 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		},
 		DatabaseProvisioner: dbProvisioner,
 		ClusterProber:       prober,
+		// The app namespace is the implicit `default` environment (ADR-0035 phase 2).
+		AppNamespace: namespace,
 	})
 	if err != nil {
 		return err

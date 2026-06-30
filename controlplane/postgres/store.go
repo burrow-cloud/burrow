@@ -330,6 +330,63 @@ func scanAudit(sc scanner) (controlplane.AuditEntry, error) {
 	return e, nil
 }
 
+// CreateEnvironment registers a named environment mapping name to namespace (ADR-0035 phase 2).
+// The name is the primary key, so a duplicate is rejected: the INSERT ... ON CONFLICT DO NOTHING
+// affects no rows, which is reported as an ErrInvalid-wrapped duplicate error.
+func (s *Store) CreateEnvironment(ctx context.Context, name, namespace string) error {
+	const q = `INSERT INTO environments (name, namespace) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING`
+	res, err := s.db.ExecContext(ctx, q, name, namespace)
+	if err != nil {
+		return fmt.Errorf("postgres: create environment %q: %w", name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("postgres: create environment %q: %w", name, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("postgres: environment %q already exists: %w", name, controlplane.ErrInvalid)
+	}
+	return nil
+}
+
+// ListEnvironments returns the registered environments ordered by name (ADR-0035 phase 2). The
+// synthesized `default` environment is not stored here; the engine prepends it.
+func (s *Store) ListEnvironments(ctx context.Context) ([]controlplane.Environment, error) {
+	const q = `SELECT name, namespace, created_at FROM environments ORDER BY name ASC`
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list environments: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]controlplane.Environment, 0)
+	for rows.Next() {
+		var e controlplane.Environment
+		if err := rows.Scan(&e.Name, &e.Namespace, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("postgres: list environments: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list environments: %w", err)
+	}
+	return out, nil
+}
+
+// GetEnvironment returns the registered environment with the given name, or ErrNotFound.
+func (s *Store) GetEnvironment(ctx context.Context, name string) (controlplane.Environment, error) {
+	const q = `SELECT name, namespace, created_at FROM environments WHERE name = $1`
+	var e controlplane.Environment
+	err := s.db.QueryRowContext(ctx, q, name).Scan(&e.Name, &e.Namespace, &e.CreatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return controlplane.Environment{}, fmt.Errorf("postgres: environment %q: %w", name, controlplane.ErrNotFound)
+		}
+		return controlplane.Environment{}, fmt.Errorf("postgres: environment %q: %w", name, err)
+	}
+	return e, nil
+}
+
 // scanner is the read side common to *sql.Row and *sql.Rows.
 type scanner interface {
 	Scan(dest ...any) error

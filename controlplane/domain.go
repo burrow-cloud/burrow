@@ -154,7 +154,7 @@ type Policy struct {
 	// (ADR-0020), keyed by GuardrailCode. A guardrail with no entry here defaults to deny:
 	// the safe default.
 	Dispositions map[GuardrailCode]Disposition
-	// MaxReplicas is the largest replica count permitted before the replica_ceiling
+	// MaxReplicas is the largest replica count permitted before the app.replica_ceiling
 	// guardrail's disposition applies. Must be positive.
 	MaxReplicas int32
 }
@@ -178,7 +178,7 @@ func DefaultPolicy() Policy {
 			GuardrailAppDelete:      DispositionConfirm,
 			// Rollback is a recovery action, so it is allowed by default — an agent should be
 			// able to restore a broken app without friction. An operator who wants sign-off can
-			// raise it to confirm or deny with `guard set rollback ...`.
+			// raise it to confirm or deny with `guard set app.rollback ...`.
 			GuardrailRollback: DispositionAllow,
 		},
 		MaxReplicas: 50,

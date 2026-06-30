@@ -58,7 +58,7 @@ type ExposeRequest struct {
 	// ClusterIssuer to use.
 	TLS    bool   `json:"tls,omitempty"`
 	Issuer string `json:"issuer,omitempty"`
-	// Confirm acknowledges the expose_public guardrail so the operation proceeds past it.
+	// Confirm acknowledges the app.expose_public guardrail so the operation proceeds past it.
 	Confirm bool `json:"confirm,omitempty"`
 }
 
@@ -134,7 +134,7 @@ type AddDomainRequest struct {
 	// App is an exposed application whose ingress external address Host should point at, used
 	// when Address is empty so the agent need not look the address up itself.
 	App string `json:"app,omitempty"`
-	// Confirm acknowledges the dns_write guardrail so the operation proceeds past it.
+	// Confirm acknowledges the dns.write guardrail so the operation proceeds past it.
 	Confirm bool `json:"confirm,omitempty"`
 }
 
@@ -142,7 +142,7 @@ type AddDomainRequest struct {
 type RemoveDomainRequest struct {
 	Host     string `json:"host"`
 	Provider string `json:"provider"`
-	// Confirm acknowledges the dns_delete guardrail so the operation proceeds past it.
+	// Confirm acknowledges the dns.delete guardrail so the operation proceeds past it.
 	Confirm bool `json:"confirm,omitempty"`
 }
 

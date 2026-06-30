@@ -57,7 +57,7 @@ func TestClientDeploy(t *testing.T) {
 func TestClientErrorMapping(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": "too many replicas", "code": "replica_ceiling"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "too many replicas", "code": "app.replica_ceiling"})
 	}))
 	defer srv.Close()
 
@@ -67,7 +67,7 @@ func TestClientErrorMapping(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("err = %v, want *APIError", err)
 	}
-	if apiErr.StatusCode != http.StatusUnprocessableEntity || apiErr.Code != "replica_ceiling" {
+	if apiErr.StatusCode != http.StatusUnprocessableEntity || apiErr.Code != "app.replica_ceiling" {
 		t.Errorf("apiErr = %+v", apiErr)
 	}
 	if !strings.Contains(apiErr.Error(), "too many replicas") {
@@ -101,7 +101,7 @@ func TestClientNeedsConfirmation(t *testing.T) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error":              "scaling to zero replicas requires confirmation to proceed",
-			"code":               "scale_to_zero",
+			"code":               "app.scale_to_zero",
 			"needs_confirmation": true,
 		})
 	}))

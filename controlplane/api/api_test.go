@@ -47,17 +47,17 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake
 func TestGuardEndpoints(t *testing.T) {
 	h, _, _, _ := newAPI(t)
 
-	if rr := do(h, "GET", "/v1/guard", token, ""); rr.Code != 200 || !strings.Contains(rr.Body.String(), "scale_to_zero") {
+	if rr := do(h, "GET", "/v1/guard", token, ""); rr.Code != 200 || !strings.Contains(rr.Body.String(), "app.scale_to_zero") {
 		t.Fatalf("guard list = %d %s", rr.Code, rr.Body.String())
 	}
 
-	rr := do(h, "PUT", "/v1/guard/scale_to_zero", token, `{"disposition":"allow"}`)
+	rr := do(h, "PUT", "/v1/guard/app.scale_to_zero", token, `{"disposition":"allow"}`)
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"disposition":"allow"`) {
 		t.Fatalf("guard set = %d %s", rr.Code, rr.Body.String())
 	}
 
 	// Invalid disposition and unknown guardrail are rejected (ErrInvalid -> 400).
-	if rr := do(h, "PUT", "/v1/guard/scale_to_zero", token, `{"disposition":"nope"}`); rr.Code != 400 {
+	if rr := do(h, "PUT", "/v1/guard/app.scale_to_zero", token, `{"disposition":"nope"}`); rr.Code != 400 {
 		t.Errorf("invalid disposition code = %d, want 400", rr.Code)
 	}
 	if rr := do(h, "PUT", "/v1/guard/bogus", token, `{"disposition":"allow"}`); rr.Code != 400 {
@@ -71,7 +71,7 @@ func TestGuardEndpoints(t *testing.T) {
 func newProviderAPI(t *testing.T) (http.Handler, *fake.Credentials, *fake.DNSFactory) {
 	t.Helper()
 	d := fake.NewDatabase()
-	d.SetPolicy(cp.DefaultPolicy()) // dns_write/dns_delete default to confirm
+	d.SetPolicy(cp.DefaultPolicy()) // dns.write/dns.delete default to confirm
 	creds := fake.NewCredentials()
 	dnsF := fake.NewDNSFactory()
 	e, err := cp.New(cp.Deps{
@@ -169,7 +169,7 @@ func TestDomainEndpoints(t *testing.T) {
 		t.Fatalf("add domain = %d %s", rr.Code, rr.Body.String())
 	}
 
-	// Without confirm the dns_write guardrail holds it (422, needs confirmation).
+	// Without confirm the dns.write guardrail holds it (422, needs confirmation).
 	rr = do(h, "POST", "/v1/domains", token, `{"host":"x.example.com","provider":"digitalocean","address":"203.0.113.6"}`)
 	if rr.Code != 422 || !strings.Contains(rr.Body.String(), `"needs_confirmation":true`) {
 		t.Errorf("unconfirmed add = %d %s, want 422 needs_confirmation", rr.Code, rr.Body.String())
@@ -418,7 +418,7 @@ func TestExposeGuardrailHolds(t *testing.T) {
 	h, _, r, _ := newAPI(t)
 	r.Add("img:1", "sha256:1")
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
-	// newAPI leaves expose_public unset → deny, so exposure is refused (422 guardrail).
+	// newAPI leaves app.expose_public unset → deny, so exposure is refused (422 guardrail).
 	if rec := do(h, "POST", "/v1/apps/web/expose", token, `{"host":"web.example.com","port":8080}`); rec.Code != http.StatusUnprocessableEntity {
 		t.Errorf("expose code = %d, want 422", rec.Code)
 	}

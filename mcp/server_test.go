@@ -263,7 +263,7 @@ func TestDeployToolRoundTrip(t *testing.T) {
 func TestToolSurfacesControlPlaneError(t *testing.T) {
 	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": "requested 9 exceeds the ceiling of 5", "code": "replica_ceiling"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "requested 9 exceeds the ceiling of 5", "code": "app.replica_ceiling"})
 	})
 
 	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
@@ -283,7 +283,7 @@ func TestToolSurfacesControlPlaneError(t *testing.T) {
 			text.WriteString(tc.Text)
 		}
 	}
-	if !strings.Contains(text.String(), "replica_ceiling") {
+	if !strings.Contains(text.String(), "app.replica_ceiling") {
 		t.Errorf("error content = %q, want it to mention the guardrail code", text.String())
 	}
 }

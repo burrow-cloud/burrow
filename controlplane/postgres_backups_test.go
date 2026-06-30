@@ -113,7 +113,7 @@ func TestListBackupsReadsRegistry(t *testing.T) {
 	}
 }
 
-// TestRestoreAddonConfirmGated asserts restore is held by the addon_restore confirm guardrail, runs
+// TestRestoreAddonConfirmGated asserts restore is held by the addon.restore confirm guardrail, runs
 // the restore Job only when confirmed, and rejects an unknown or mismatched backup.
 func TestRestoreAddonConfirmGated(t *testing.T) {
 	ctx := context.Background()

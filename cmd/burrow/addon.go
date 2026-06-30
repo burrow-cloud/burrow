@@ -104,7 +104,7 @@ func newAddonBackupsCmd() *cobra.Command {
 
 // newAddonRestoreCmd is `burrow addon restore postgres <app> --backup <id>`: restore an app's
 // database from a recorded backup, overwriting its live contents (ADR-0032). It is destructive, so it
-// is held for confirmation by the addon_restore guardrail by default. Restore is CLI-only — there is
+// is held for confirmation by the addon.restore guardrail by default. Restore is CLI-only — there is
 // no MCP tool for it.
 func newAddonRestoreCmd() *cobra.Command {
 	o := &commonOpts{}
@@ -115,7 +115,7 @@ func newAddonRestoreCmd() *cobra.Command {
 		Short: "Restore an app's database from a backup, overwriting its live contents",
 		Long: "restore runs an in-cluster Job that pg_restores a recorded backup into an app's database,\n" +
 			"replacing its current contents. It is destructive, so it is held for confirmation by the\n" +
-			"addon_restore guardrail by default; pass --confirm to proceed.",
+			"addon.restore guardrail by default; pass --confirm to proceed.",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -176,7 +176,7 @@ func newAddonAttachCmd() *cobra.Command {
 
 // newAddonDetachCmd is `burrow addon detach postgres <app>`: drop an app's database and role and
 // remove its DATABASE_URL. It is destructive (it destroys the app's data), so it is held for
-// confirmation by the addon_detach guardrail by default.
+// confirmation by the addon.detach guardrail by default.
 func newAddonDetachCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm bool
@@ -387,7 +387,7 @@ func newAddonInstallCmd() *cobra.Command {
 		Short: "Install a vetted backing service for a capability (e.g. logs)",
 		Long: "install deploys the vetted, permissively-licensed default for a capability (logs →\n" +
 			"VictoriaLogs) and registers it as a capability your agent can query — install and\n" +
-			"connect in one step. Held for confirmation by the addon_install guardrail.",
+			"connect in one step. Held for confirmation by the addon.install guardrail.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()

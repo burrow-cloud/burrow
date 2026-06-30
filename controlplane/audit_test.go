@@ -76,7 +76,7 @@ func TestAuditScaleHeldDoesNotExecute(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	// 5 exceeds the ceiling of 3, so replica_ceiling holds it for confirmation.
+	// 5 exceeds the ceiling of 3, so app.replica_ceiling holds it for confirmation.
 	if _, err := e.Scale(ctx, "web", 5, false); err == nil {
 		t.Fatalf("Scale without confirm should be held")
 	}
@@ -89,7 +89,7 @@ func TestAuditScaleHeldDoesNotExecute(t *testing.T) {
 		t.Errorf("outcome = %q, want held", rows[0].Outcome)
 	}
 	if rows[0].GuardrailCode != string(cp.GuardrailReplicaCeiling) {
-		t.Errorf("guardrail = %q, want replica_ceiling", rows[0].GuardrailCode)
+		t.Errorf("guardrail = %q, want app.replica_ceiling", rows[0].GuardrailCode)
 	}
 	if rows[0].Disposition != string(cp.DispositionConfirm) {
 		t.Errorf("disposition = %q, want confirm", rows[0].Disposition)

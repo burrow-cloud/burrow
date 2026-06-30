@@ -377,7 +377,7 @@ func (e *Engine) ListApps(ctx context.Context) ([]WorkloadStatus, error) {
 }
 
 // InstallAddon deploys the vetted backing service for the named add-on type and registers it as
-// a queryable capability (ADR-0025/0026). It is guarded by addon_install.
+// a queryable capability (ADR-0025/0026). It is guarded by addon.install.
 func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (AddonInfo, error) {
 	spec, ok := LookupAddon(t)
 	if !ok {
@@ -474,7 +474,7 @@ func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
 	return addons, nil
 }
 
-// RemoveAddon removes the named add-on instance. It is guarded by addon_remove (removing a
+// RemoveAddon removes the named add-on instance. It is guarded by addon.remove (removing a
 // backing service can break dependent apps).
 func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) error {
 	pol, err := e.db.Policy(ctx)
@@ -563,7 +563,7 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app string) (Atta
 	return AttachResult{App: app, Addon: t, SecretKey: key}, nil
 }
 
-// DetachAddon removes app's DATABASE_URL and, behind the addon_detach confirm guardrail (it
+// DetachAddon removes app's DATABASE_URL and, behind the addon.detach confirm guardrail (it
 // destroys data), drops app's database and role from the shared Postgres instance (ADR-0031). The
 // audit row records {addon, app} only.
 func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app string, confirm bool) error {
@@ -673,7 +673,7 @@ func (e *Engine) ListBackups(ctx context.Context, t AddonType, app string) ([]Ba
 }
 
 // RestoreAddon restores app's database from a recorded backup, overwriting its live contents
-// (ADR-0032). It is behind the addon_restore confirm guardrail (it destroys live data), runs an
+// (ADR-0032). It is behind the addon.restore confirm guardrail (it destroys live data), runs an
 // in-cluster Job that pg_restores the named dump, and records the restore in the audit log. The Job
 // reads the superuser password only via secretKeyRef; the audit row records {addon, app, backup}
 // only — never a credential.
@@ -719,7 +719,7 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID st
 
 // DeleteApp removes an app entirely: its workload, its routing (Service/Ingress), and its
 // release history, so the app disappears from the apps listing and from status. It is guarded
-// by app_delete, which holds the destructive teardown for confirmation by default (ADR-0020).
+// by app.delete, which holds the destructive teardown for confirmation by default (ADR-0020).
 // The app must exist — it has either recorded releases or a live workload; an app unknown to
 // both is ErrNotFound. Teardown tolerates an already-absent piece: an ErrNotFound from the
 // workload or routing delete means that piece is already gone, not a failure.
@@ -976,7 +976,7 @@ func (e *Engine) Scale(ctx context.Context, app string, replicas int32, confirm 
 }
 
 // Expose makes an app reachable at a hostname through an Ingress (ADR-0018). It is a guarded
-// operation: public exposure trips the expose_public guardrail, which holds for confirmation
+// operation: public exposure trips the app.expose_public guardrail, which holds for confirmation
 // by default. The app must already be deployed.
 func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, error) {
 	if err := (App{Name: req.App}).Validate(); err != nil {

@@ -65,7 +65,7 @@ func TestDeleteAppUnknown(t *testing.T) {
 	}
 }
 
-// TestDeleteAppGuardrailHolds confirms the app_delete guardrail holds the delete for
+// TestDeleteAppGuardrailHolds confirms the app.delete guardrail holds the delete for
 // confirmation when not confirmed, and proceeds once confirmed.
 func TestDeleteAppGuardrailHolds(t *testing.T) {
 	policy := cp.DefaultPolicy().With(cp.GuardrailAppDelete, cp.DispositionConfirm)

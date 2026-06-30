@@ -27,9 +27,29 @@ const addonLabel = "burrow.cloud/addon"
 // addonName is the deterministic resource name for an add-on of type t (one instance per type).
 func addonName(t controlplane.AddonType) string { return "burrow-" + string(t) }
 
+// vmagentServiceAccount is the ServiceAccount the metrics add-on's vmagent scraper runs as. It and
+// its pod-discovery Role/RoleBinding are NOT created by burrowd: burrowd holds only namespaced Roles
+// and is deliberately forbidden from creating RBAC (least privilege). The grant is staged by the CLI
+// at install time (`burrow addon install metrics` applies it kubeconfig-side; see
+// cmd/burrow/manifests/addon-metrics-rbac.yaml.tmpl), and burrowd only verifies it exists with a
+// read-only Get before deploying the scraper.
+const vmagentServiceAccount = "burrow-vmagent"
+
 func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) (controlplane.AddonInfo, error) {
 	name := addonName(spec.Type)
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(spec.Type)}
+
+	// The metrics add-on's vmagent scraper references a pre-provisioned ServiceAccount whose RBAC
+	// only a kubeconfig-holder can apply (burrowd cannot create RBAC). The CLI self-heals this
+	// before calling InstallAddon, but the agent (MCP) path has no kubeconfig and cannot. Verify the
+	// ServiceAccount exists with a read-only Get FIRST, so an agent-driven install over absent RBAC
+	// fails cleanly here instead of half-deploying a vmagent pod that can never schedule. No partial
+	// resources are created before this check.
+	if spec.Type == controlplane.AddonMetrics {
+		if err := a.requireAddonServiceAccount(ctx, vmagentServiceAccount); err != nil {
+			return controlplane.AddonInfo{}, err
+		}
+	}
 
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
@@ -146,6 +166,24 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.addonNamespace, spec.Port),
 		Capabilities: spec.Capabilities,
 	}, nil
+}
+
+// requireAddonServiceAccount confirms an add-on's pre-provisioned ServiceAccount exists in the
+// add-on namespace with a read-only Get (burrowd has serviceaccounts:get there, never create). A
+// missing one means the CLI never staged the add-on's RBAC, so it returns a clear, typed error
+// (wrapping ErrInvalid, which the API maps to a 4xx rather than a 500) telling the operator to run
+// the install from a machine with kubeconfig access. Any other API error is surfaced as-is.
+func (a *Adapter) requireAddonServiceAccount(ctx context.Context, name string) error {
+	_, err := a.client.CoreV1().ServiceAccounts(a.addonNamespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return fmt.Errorf("metrics requires a one-time RBAC grant that only your kubeconfig can apply; "+
+			"run `burrow addon install metrics` from a machine with kubeconfig access (the CLI applies it "+
+			"automatically), then retry: %w", controlplane.ErrInvalid)
+	}
+	if err != nil {
+		return fmt.Errorf("kube: verifying the %q service account: %w", name, err)
+	}
+	return nil
 }
 
 // PostgresSuperuser is the fixed superuser role burrowd provisions the add-on Postgres instance
@@ -355,7 +393,7 @@ func (a *Adapter) deployMetricsCollector(ctx context.Context, store string, labe
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: cmLabels},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: "burrow-vmagent",
+					ServiceAccountName: vmagentServiceAccount,
 					Containers: []corev1.Container{{
 						Name:  "vmagent",
 						Image: vmagentImage,

@@ -6,6 +6,7 @@ package kube_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -277,8 +278,12 @@ func TestAddonDeployListDelete(t *testing.T) {
 
 func TestAddonMetricsDeployDelete(t *testing.T) {
 	ctx := context.Background()
-	client := fake.NewSimpleClientset()
 	const addonNS = "burrow-addons"
+	// The metrics vmagent scraper's ServiceAccount is pre-provisioned by the CLI at install time
+	// (burrowd cannot create RBAC); with it present, the deploy proceeds.
+	client := fake.NewSimpleClientset(&corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "burrow-vmagent", Namespace: addonNS},
+	})
 	a := kube.New(client, ns).WithAddonNamespace(addonNS)
 
 	spec := cp.AddonSpec{Type: cp.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428, StorageGi: 10, Capabilities: []string{"metrics"}}
@@ -327,6 +332,43 @@ func TestAddonMetricsDeployDelete(t *testing.T) {
 	}
 	if _, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("collector config should be gone, got %v", err)
+	}
+}
+
+// TestAddonMetricsRequiresVmagentServiceAccount asserts the agent path fails cleanly when the metrics
+// vmagent ServiceAccount is absent (the CLI never staged its RBAC): burrowd cannot create RBAC, so it
+// returns a clear, typed ErrInvalid error WITHOUT half-deploying any vmagent resources, and the
+// message points at running `burrow addon install metrics` from a kubeconfig-holding machine.
+func TestAddonMetricsRequiresVmagentServiceAccount(t *testing.T) {
+	ctx := context.Background()
+	const addonNS = "burrow-addons"
+	// No burrow-vmagent ServiceAccount: the kubeconfig-side self-heal never ran.
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns).WithAddonNamespace(addonNS)
+
+	spec := cp.AddonSpec{Type: cp.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428, StorageGi: 10, Capabilities: []string{"metrics"}}
+	_, err := a.DeployAddon(ctx, spec)
+	if err == nil {
+		t.Fatal("DeployAddon should fail when the vmagent ServiceAccount is absent")
+	}
+	// Typed so the API maps it to a 4xx (not a 500) and the agent sees a normal error.
+	if !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("error should wrap ErrInvalid, got %v", err)
+	}
+	for _, want := range []string{"one-time RBAC grant", "burrow addon install metrics"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message missing %q, got: %v", want, err)
+		}
+	}
+	// No partial resources: the store Deployment, Service, PVC, and the collector must NOT exist.
+	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("store deployment must not be created on the failed precheck, got %v", err)
+	}
+	if _, err := client.CoreV1().Services(addonNS).Get(ctx, "burrow-metrics", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("store service must not be created on the failed precheck, got %v", err)
+	}
+	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("collector must not be created on the failed precheck, got %v", err)
 	}
 }
 

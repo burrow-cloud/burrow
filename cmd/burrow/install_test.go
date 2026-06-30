@@ -284,6 +284,17 @@ func TestRenderManifests(t *testing.T) {
 	if !strings.Contains(out, `verbs: ["get", "create", "update", "delete"]`) {
 		t.Errorf("missing the add-on-namespace postgres-secret grant (ADR-0031)")
 	}
+
+	// The metrics vmagent RBAC is no longer part of the base install: it is staged per-add-on by the
+	// CLI at `burrow addon install metrics` (least privilege), so a fresh install grants no metrics
+	// scraper RBAC. The base install only adds a read-only serviceaccounts:get so burrowd can verify
+	// the CLI staged that grant before deploying the scraper — never create one.
+	if strings.Contains(out, "burrow-vmagent") {
+		t.Errorf("the vmagent RBAC must be removed from the base install (staged per-add-on by the CLI)")
+	}
+	if !strings.Contains(out, `resources: ["serviceaccounts"]`) || !strings.Contains(out, `verbs: ["get"]`) {
+		t.Errorf("missing the read-only serviceaccounts:get grant on the burrowd-addons Role")
+	}
 }
 
 func TestRenderManifestsDefaultAppNamespace(t *testing.T) {

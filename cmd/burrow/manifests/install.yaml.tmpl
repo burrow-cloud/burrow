@@ -71,6 +71,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # Read-only check that an add-on's pre-provisioned ServiceAccount exists before burrowd deploys
+  # that add-on's workload (e.g. the metrics scraper's ServiceAccount, which the CLI applies
+  # kubeconfig-side at install time). Get ONLY — no create/update/delete on serviceaccounts, so this
+  # grants burrowd no RBAC-escalation power; it can verify the grant exists but never mint one.
+  # Scoped to the add-on namespace.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -85,40 +93,6 @@ subjects:
   - kind: ServiceAccount
     name: burrowd
     namespace: {{.Namespace}}
----
-# vmagent (the metrics add-on's scraper) needs read-only pod discovery in the app namespace;
-# pre-provisioned so burrowd never creates RBAC. The ServiceAccount lives in the add-on
-# namespace (vmagent runs there), the Role grants nothing but get/list/watch on pods, and the
-# RoleBinding in the app namespace binds that Role to the add-on-namespace ServiceAccount.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: burrow-vmagent
-  namespace: {{.AddonNamespace}}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: burrow-vmagent
-  namespace: {{.AppNamespace}}
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: burrow-vmagent
-  namespace: {{.AppNamespace}}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: burrow-vmagent
-subjects:
-  - kind: ServiceAccount
-    name: burrow-vmagent
-    namespace: {{.AddonNamespace}}
 ---
 apiVersion: v1
 kind: Secret

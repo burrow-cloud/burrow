@@ -118,19 +118,19 @@ echo "--- audit trail lists the guarded operations through CLI -> API -> burrowd
 #   burrow CLI -> control-plane API -> in-cluster burrowd -> Postgres store,
 #   then rendered inline into the Deployment pod template, which rolls the workload.
 # Two assertions, both deterministic and bounded:
-#   1. `app env list` round-trips the value through CLI -> API -> burrowd -> Postgres.
-#   2. a default (restarting) `app env set` mutates the live Deployment pod template, so
+#   1. `app config list` round-trips the value through CLI -> API -> burrowd -> Postgres.
+#   2. a default (restarting) `app config set` mutates the live Deployment pod template, so
 #      the var reaches the container — read straight off the Deployment, no log timing.
 # =============================================================================
 echo "=== env: set a variable on the running app (rolls the Deployment) ==="
-"$BURROW" app env set web BURROW_E2E_ENV=hello-from-store --kubeconfig "$KCFG"
+"$BURROW" app config set web BURROW_E2E_ENV=hello-from-store --kubeconfig "$KCFG"
 
-echo "=== env: assert the value round-trips through app env list ==="
-"$BURROW" app env list web --kubeconfig "$KCFG" | grep -qx "BURROW_E2E_ENV=hello-from-store" \
-  || { echo "FAIL: 'app env list' did not return the set variable"; exit 1; }
+echo "=== config: assert the value round-trips through app config list ==="
+"$BURROW" app config list web --kubeconfig "$KCFG" | grep -qx "BURROW_E2E_ENV=hello-from-store" \
+  || { echo "FAIL: 'app config list' did not return the set variable"; exit 1; }
 
 echo "=== env: assert the value reached the live Deployment pod template ==="
-# A default `env set` re-applies the workload, so the value is rendered inline into the
+# A default `config set` re-applies the workload, so the value is rendered inline into the
 # pod template's container env. Read it back off the Deployment deterministically (no log
 # scraping, no timing): the rollout having been requested is enough for the spec to carry it.
 env_in_template=$(kubectl --kubeconfig "$KCFG" -n burrow-apps get deploy/web \
@@ -142,8 +142,8 @@ fi
 echo "--- env rendered into the pod template: BURROW_E2E_ENV=$env_in_template ---"
 
 echo "=== env: unset removes the variable from the store ==="
-"$BURROW" app env unset web BURROW_E2E_ENV --no-restart --kubeconfig "$KCFG"
-if "$BURROW" app env list web --kubeconfig "$KCFG" | grep -q "BURROW_E2E_ENV"; then
+"$BURROW" app config unset web BURROW_E2E_ENV --no-restart --kubeconfig "$KCFG"
+if "$BURROW" app config list web --kubeconfig "$KCFG" | grep -q "BURROW_E2E_ENV"; then
   echo "FAIL: BURROW_E2E_ENV still present after unset"
   exit 1
 fi

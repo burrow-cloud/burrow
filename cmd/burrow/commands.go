@@ -62,7 +62,7 @@ func newDeployCmd() *cobra.Command {
 			"-- separator, like kubectl run:\n" +
 			"  burrow app deploy worker --image myrepo/app:1.2.3 -- ./worker --queue emails\n\n" +
 			"Environment configuration is set separately and is the single source of truth, sourced\n" +
-			"at deploy time — set it with `burrow app env set <app> KEY=VALUE` before deploying a\n" +
+			"at deploy time, set it with `burrow app config set <app> KEY=VALUE` before deploying a\n" +
 			"release that needs it, so the new release boots with it on first start.",
 		// Exactly one positional (the app name) before any --; everything after -- overrides the
 		// container command.

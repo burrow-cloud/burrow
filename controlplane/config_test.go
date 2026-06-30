@@ -11,24 +11,24 @@ import (
 	cp "github.com/burrow-cloud/burrow/controlplane"
 )
 
-func TestSetEnvPersistsAndLists(t *testing.T) {
+func TestSetConfigPersistsAndLists(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _, _ := newEngine(t, permissive())
 
 	// No running release yet: set still persists and is a no-op apply, not an error.
-	if err := e.SetEnv(ctx, "web", "LOG_LEVEL", "debug", false); err != nil {
-		t.Fatalf("SetEnv (no release): %v", err)
+	if err := e.SetConfig(ctx, "web", "LOG_LEVEL", "debug", false); err != nil {
+		t.Fatalf("SetConfig (no release): %v", err)
 	}
-	env, err := e.ListEnv(ctx, "web")
+	cfg, err := e.ListConfig(ctx, "web")
 	if err != nil {
-		t.Fatalf("ListEnv: %v", err)
+		t.Fatalf("ListConfig: %v", err)
 	}
-	if env["LOG_LEVEL"] != "debug" {
-		t.Errorf("env = %+v, want LOG_LEVEL=debug", env)
+	if cfg["LOG_LEVEL"] != "debug" {
+		t.Errorf("config = %+v, want LOG_LEVEL=debug", cfg)
 	}
 }
 
-func TestSetEnvRollsRunningWorkload(t *testing.T) {
+func TestSetConfigRollsRunningWorkload(t *testing.T) {
 	ctx := context.Background()
 	e, k, r, _, _ := newEngine(t, permissive())
 	r.Add("img:1", "sha256:1")
@@ -36,9 +36,9 @@ func TestSetEnvRollsRunningWorkload(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	// A default set re-applies the workload: the new env appears in the live spec.
-	if err := e.SetEnv(ctx, "web", "LOG_LEVEL", "debug", false); err != nil {
-		t.Fatalf("SetEnv: %v", err)
+	// A default set re-applies the workload: the new value appears in the live spec.
+	if err := e.SetConfig(ctx, "web", "LOG_LEVEL", "debug", false); err != nil {
+		t.Fatalf("SetConfig: %v", err)
 	}
 	spec, ok := k.Spec("web")
 	if !ok {
@@ -53,7 +53,7 @@ func TestSetEnvRollsRunningWorkload(t *testing.T) {
 	}
 }
 
-func TestSetEnvNoRestartDoesNotRoll(t *testing.T) {
+func TestSetConfigNoRestartDoesNotRoll(t *testing.T) {
 	ctx := context.Background()
 	e, k, r, _, _ := newEngine(t, permissive())
 	r.Add("img:1", "sha256:1")
@@ -62,17 +62,17 @@ func TestSetEnvNoRestartDoesNotRoll(t *testing.T) {
 	}
 
 	// --no-restart persists but does not re-apply: the live spec keeps the old (empty) env.
-	if err := e.SetEnv(ctx, "web", "LOG_LEVEL", "debug", true); err != nil {
-		t.Fatalf("SetEnv no-restart: %v", err)
+	if err := e.SetConfig(ctx, "web", "LOG_LEVEL", "debug", true); err != nil {
+		t.Fatalf("SetConfig no-restart: %v", err)
 	}
 	spec, _ := k.Spec("web")
 	if _, present := spec.Env["LOG_LEVEL"]; present {
 		t.Errorf("spec env = %+v, want LOG_LEVEL absent until the next deploy", spec.Env)
 	}
 	// But it is persisted in the store.
-	env, _ := e.ListEnv(ctx, "web")
-	if env["LOG_LEVEL"] != "debug" {
-		t.Errorf("store env = %+v, want LOG_LEVEL=debug persisted", env)
+	cfg, _ := e.ListConfig(ctx, "web")
+	if cfg["LOG_LEVEL"] != "debug" {
+		t.Errorf("store config = %+v, want LOG_LEVEL=debug persisted", cfg)
 	}
 
 	// The next deploy picks it up from the store.
@@ -86,29 +86,29 @@ func TestSetEnvNoRestartDoesNotRoll(t *testing.T) {
 	}
 }
 
-func TestUnsetEnvRemovesAndRolls(t *testing.T) {
+func TestUnsetConfigRemovesAndRolls(t *testing.T) {
 	ctx := context.Background()
 	e, k, r, _, _ := newEngine(t, permissive())
 	r.Add("img:1", "sha256:1")
-	if err := e.SetEnv(ctx, "web", "A", "1", true); err != nil {
-		t.Fatalf("SetEnv A: %v", err)
+	if err := e.SetConfig(ctx, "web", "A", "1", true); err != nil {
+		t.Fatalf("SetConfig A: %v", err)
 	}
-	if err := e.SetEnv(ctx, "web", "B", "2", true); err != nil {
-		t.Fatalf("SetEnv B: %v", err)
+	if err := e.SetConfig(ctx, "web", "B", "2", true); err != nil {
+		t.Fatalf("SetConfig B: %v", err)
 	}
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	if err := e.UnsetEnv(ctx, "web", "A", false); err != nil {
-		t.Fatalf("UnsetEnv: %v", err)
+	if err := e.UnsetConfig(ctx, "web", "A", false); err != nil {
+		t.Fatalf("UnsetConfig: %v", err)
 	}
-	env, _ := e.ListEnv(ctx, "web")
-	if _, present := env["A"]; present {
-		t.Errorf("store env = %+v, want A removed", env)
+	cfg, _ := e.ListConfig(ctx, "web")
+	if _, present := cfg["A"]; present {
+		t.Errorf("store config = %+v, want A removed", cfg)
 	}
-	if env["B"] != "2" {
-		t.Errorf("store env = %+v, want B=2 retained", env)
+	if cfg["B"] != "2" {
+		t.Errorf("store config = %+v, want B=2 retained", cfg)
 	}
 	// The running workload rolled with A gone.
 	spec, _ := k.Spec("web")
@@ -120,32 +120,32 @@ func TestUnsetEnvRemovesAndRolls(t *testing.T) {
 	}
 }
 
-func TestEnvInvalidKey(t *testing.T) {
+func TestConfigInvalidKey(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _, _ := newEngine(t, permissive())
 
-	if err := e.SetEnv(ctx, "web", "1BAD", "x", true); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("SetEnv bad key err = %v, want ErrInvalid", err)
+	if err := e.SetConfig(ctx, "web", "1BAD", "x", true); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("SetConfig bad key err = %v, want ErrInvalid", err)
 	}
-	if err := e.SetEnv(ctx, "web", "has-dash", "x", true); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("SetEnv dashed key err = %v, want ErrInvalid", err)
+	if err := e.SetConfig(ctx, "web", "has-dash", "x", true); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("SetConfig dashed key err = %v, want ErrInvalid", err)
 	}
-	if err := e.UnsetEnv(ctx, "web", "", true); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("UnsetEnv empty key err = %v, want ErrInvalid", err)
+	if err := e.UnsetConfig(ctx, "web", "", true); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("UnsetConfig empty key err = %v, want ErrInvalid", err)
 	}
-	if _, err := e.ListEnv(ctx, "BadApp!"); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("ListEnv bad app err = %v, want ErrInvalid", err)
+	if _, err := e.ListConfig(ctx, "BadApp!"); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("ListConfig bad app err = %v, want ErrInvalid", err)
 	}
 }
 
-func TestRollbackRendersCurrentStoreEnv(t *testing.T) {
+func TestRollbackRendersCurrentStoreConfig(t *testing.T) {
 	ctx := context.Background()
 	e, k, r, _, _ := newEngine(t, permissive())
 	r.Add("img:1", "sha256:1")
 	r.Add("img:2", "sha256:2")
 
-	if err := e.SetEnv(ctx, "web", "A", "1", true); err != nil {
-		t.Fatalf("SetEnv: %v", err)
+	if err := e.SetConfig(ctx, "web", "A", "1", true); err != nil {
+		t.Fatalf("SetConfig: %v", err)
 	}
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy v1: %v", err)
@@ -153,10 +153,10 @@ func TestRollbackRendersCurrentStoreEnv(t *testing.T) {
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy v2: %v", err)
 	}
-	// Change env after v2 but before rollback: the rollback must render the CURRENT store env,
-	// not whatever v1 had snapshotted.
-	if err := e.SetEnv(ctx, "web", "A", "2", true); err != nil {
-		t.Fatalf("SetEnv after v2: %v", err)
+	// Change config after v2 but before rollback: the rollback must render the CURRENT store
+	// config, not whatever v1 had snapshotted.
+	if err := e.SetConfig(ctx, "web", "A", "2", true); err != nil {
+		t.Fatalf("SetConfig after v2: %v", err)
 	}
 
 	res, err := e.Rollback(ctx, "web", false)

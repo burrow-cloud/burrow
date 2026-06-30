@@ -82,10 +82,11 @@ What shipped:
 Released as **v0.5.0**. Makes apps real to *run* and hardens how Burrow handles sensitive values —
 the groundwork the web UI and managed product depend on.
 
-- **App config & secrets** ([ADR-0028](adr/0028-app-config-and-secrets.md)) — an `app env` /
+- **App config & secrets** ([ADR-0028](adr/0028-app-config-and-secrets.md)) — an `app config` /
   `app secret` lifecycle store (`set`/`list`/`unset`, `--no-restart`), managed independently of
-  deploy (`deploy` no longer takes env). Env renders inline and auto-rolls; secrets live only in a
-  per-app Secret, inject via `envFrom`, and `secret list` shows keys only.
+  deploy (`deploy` no longer takes config). Config renders inline as environment variables and
+  auto-rolls; secrets live only in a per-app Secret, inject via `envFrom`, and `secret list` shows
+  keys only.
 - **Secrets & credentials through the control plane**
   ([ADR-0029](adr/0029-secrets-through-the-control-plane.md),
   [ADR-0030](adr/0030-credentials-through-the-control-plane.md)) — app secrets, vendor tokens, and

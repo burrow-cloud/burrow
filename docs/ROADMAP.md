@@ -85,9 +85,9 @@ API tokens).
 The release that makes apps real to *run* and hardens how Burrow handles sensitive values — the
 groundwork the web UI and managed product depend on.
 
-- **App config & secrets** ([ADR-0028](adr/0028-app-config-and-secrets.md)) — an `app env` /
+- **App config & secrets** ([ADR-0028](adr/0028-app-config-and-secrets.md)) — an `app config` /
   `app secret` lifecycle store (`set`/`list`/`unset`, `--no-restart`), managed independently of
-  deploy (`deploy` no longer takes env). Env renders inline and auto-rolls; secrets live only in a
+  deploy (`deploy` no longer takes config). Config renders inline and auto-rolls; secrets live only in a
   per-app Kubernetes Secret and inject via `envFrom`. `secret list` shows keys only.
 - **Secrets & credentials through the control plane**
   ([ADR-0029](adr/0029-secrets-through-the-control-plane.md),

@@ -30,21 +30,24 @@ func toClientCaps(c controlplane.ClusterCapabilities) client.ClusterCapabilities
 	}
 }
 
-// newClusterCmd is the read-only view of the cluster's capabilities (ADR-0034): what the cluster
-// can do — ingress, storage, LoadBalancer support, cert-manager, provider, DNS — read live. It is
-// top level (it describes the whole cluster, not one app) and read-only: it changes nothing. It
-// replaces the cluster-type picker — Burrow observes the cluster rather than asking the user to
-// classify it.
+// newClusterCmd is the single home for the cluster (ADR-0037): bare `burrow cluster` is the
+// read-only view of what the cluster can do (ADR-0034) — ingress, storage, LoadBalancer support,
+// cert-manager, provider, DNS, read live — and `burrow cluster ingress install` provisions the
+// shared ingress/TLS infrastructure (folded in from the retired `system` group). `cluster` is the
+// concrete, unambiguous noun for the Kubernetes cluster, covering both inspect and provision.
 func newClusterCmd() *cobra.Command {
 	o := &commonOpts{}
 	cmd := &cobra.Command{
 		Use:   "cluster",
-		Short: "Show what your cluster can do (ingress, storage, load balancer, cert-manager, provider)",
-		Long: "cluster reports your cluster's capabilities, read live: whether an ingress controller is\n" +
-			"installed and which IngressClass to use, whether there is a default StorageClass for\n" +
-			"persistent volumes, whether Service type=LoadBalancer is likely supported or the cluster\n" +
-			"is NodePort-only, whether cert-manager is installed for TLS, the cloud provider, and\n" +
-			"whether a DNS provider is configured. It is read-only and changes nothing.",
+		Short: "Inspect what your cluster can do, and set up its shared infrastructure (ingress, TLS)",
+		Long: "cluster is the home for the Kubernetes cluster Burrow runs on. With no subcommand it\n" +
+			"reports the cluster's capabilities, read live: whether an ingress controller is installed\n" +
+			"and which IngressClass to use, whether there is a default StorageClass for persistent\n" +
+			"volumes, whether Service type=LoadBalancer is likely supported or the cluster is\n" +
+			"NodePort-only, whether cert-manager is installed for TLS, the cloud provider, and whether\n" +
+			"a DNS provider is configured. That view is read-only and changes nothing.\n\n" +
+			"`burrow cluster ingress install` provisions the shared ingress/TLS infrastructure\n" +
+			"(ingress-nginx, cert-manager, a Let's Encrypt issuer); a one-time operator setup.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -65,6 +68,7 @@ func newClusterCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	cmd.AddCommand(newIngressCmd())
 	return cmd
 }
 

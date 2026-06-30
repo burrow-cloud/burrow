@@ -118,7 +118,7 @@ source-available friction from the license.
   (allowed / held / denied / executed) with the same key-only redaction as `burrow audit`.
 - **Agent-native onboarding** ([ADR-0034](adr/0034-agent-native-onboarding.md)) — `burrow install`
   detects the cluster's capabilities and burrowd reads them live over one narrow read-only grant;
-  `system ingress install` provisions the substrate (ingress-nginx, cert-manager, an issuer) on a
+  `cluster ingress install` provisions the substrate (ingress-nginx, cert-manager, an issuer) on a
   cost-aware confirmation with a LoadBalancer-vs-NodePort choice; and `reachability` converges to a
   verified "live at https://…" URL. All agent-driven, no new command.
 - **Dotted guardrail codes** — guardrail codes moved to a hierarchical `resource.operation` form

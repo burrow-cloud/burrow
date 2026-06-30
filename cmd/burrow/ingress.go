@@ -80,7 +80,7 @@ spec:
             class: nginx
 `))
 
-// ingressOptions are the inputs to `burrow system ingress install`.
+// ingressOptions are the inputs to `burrow cluster ingress install`.
 type ingressOptions struct {
 	email      string
 	issuerName string
@@ -432,7 +432,7 @@ func certManagerPresent(ctx context.Context, cs kubernetes.Interface) (bool, err
 // kubectlApplyURL applies a manifest from a URL, summarizing what changed (or streaming it
 // with verbose), like the in-cluster install manifests.
 func kubectlApplyURL(ctx context.Context, kubeconfig, url string, verbose bool, stdout, stderr io.Writer) error {
-	return applyAndSummarize(ctx, applyArgs(kubeconfig, url), "", verbose, stdout, stderr)
+	return applyAndSummarize(ctx, applyArgs(kubeconfig, "", url), "", verbose, stdout, stderr)
 }
 
 // applyIssuer applies the ClusterIssuer, retrying briefly: just after cert-manager reports
@@ -448,7 +448,7 @@ func applyIssuer(ctx context.Context, kubeconfig, issuer string, verbose bool, s
 			lastStderr.Reset()
 			attemptStderr = &lastStderr
 		}
-		if err := kubectlApply(ctx, kubeconfig, issuer, verbose, stdout, attemptStderr); err == nil {
+		if err := kubectlApply(ctx, kubeconfig, "", issuer, verbose, stdout, attemptStderr); err == nil {
 			return nil
 		} else {
 			lastErr = err

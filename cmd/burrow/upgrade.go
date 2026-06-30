@@ -70,14 +70,14 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	}
 
 	fmt.Fprintf(stdout, "Upgrading Burrow in namespace %q to image %q...\n", namespace, image)
-	if err := kubectlApply(ctx, kubeconfig, manifests, verbose, stdout, stderr); err != nil {
+	if err := kubectlApply(ctx, kubeconfig, "", manifests, verbose, stdout, stderr); err != nil {
 		return err
 	}
 	if !wait {
 		fmt.Fprintf(stdout, "\nBurrow upgrade applied in namespace %q (not waiting for readiness).\n", namespace)
 		return nil
 	}
-	if err := waitForReady(ctx, kubeconfig, namespace, stdout); err != nil {
+	if err := waitForReady(ctx, kubeconfig, "", namespace, stdout); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "\nBurrow is upgraded and ready in namespace %q.\n", namespace)

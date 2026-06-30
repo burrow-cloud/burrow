@@ -15,6 +15,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"text/tabwriter"
 	"text/template"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 
 	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 // defaultBurrowdImage is the control-plane image `install`/`upgrade` deploy by default: the
@@ -135,80 +137,142 @@ type installOptions struct {
 	Port           int
 }
 
+// installArgs are the resolved inputs to an install run: the target kube context (the required
+// positional, empty for the no-argument listing path), the namespaces, image, and flags.
+type installArgs struct {
+	kubeContext  string
+	environment  string
+	namespace    string
+	appNamespace string
+	image        string
+	kubeconfig   string
+	dryRun       bool
+	wait         bool
+	verbose      bool
+}
+
+// clientsetFn builds the readiness/probe clientset for a kube context. It is a package var so a
+// test can substitute a fake clientset for install's pre-apply checks, readiness wait, and
+// capability probe without a real cluster.
+var clientsetFn = func(kubeconfig, kubeContext string) (kubernetes.Interface, error) {
+	return clientsetForContext(kubeconfig, kubeContext)
+}
+
+// listContexts loads the kubeconfig contexts. It is a package var so a test can substitute a
+// fixed set (and the missing-kubeconfig error) without depending on the machine's real kubeconfig.
+var listContexts = connect.Contexts
+
 func newInstallCmd() *cobra.Command {
-	var namespace, appNamespace, image, kubeconfig string
-	var dryRun, wait, verbose bool
+	a := installArgs{}
 	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "Install the Burrow control plane into your cluster",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runInstall(cmd.Context(), namespace, appNamespace, image, kubeconfig, dryRun, wait, verbose, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		Use:   "install [context]",
+		Short: "Install the Burrow control plane into a cluster",
+		Long: "install deploys the Burrow control plane into the kube context you name.\n\n" +
+			"The context is a required argument: install targets exactly that cluster and never the\n" +
+			"ambient current context implicitly, so it cannot install into prod by accident. Run\n" +
+			"`burrow install` with no argument to list your kubeconfig contexts.\n\n" +
+			"On success it names the environment (a generated name, or --environment) and records it\n" +
+			"as your current environment in ~/.burrow/config.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				a.kubeContext = args[0]
+			}
+			return runInstall(cmd.Context(), a, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
-	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace to install the control plane into")
-	cmd.Flags().StringVar(&appNamespace, "app-namespace", connect.DefaultAppNamespace, "namespace to deploy applications into")
-	cmd.Flags().StringVar(&image, "burrowd-image", defaultBurrowdImage(), "burrowd container image to deploy (must be pullable by the cluster)")
-	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")
-	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the control plane to become ready")
-	cmd.Flags().BoolVar(&verbose, "verbose", false, "show every resource kubectl applies instead of a summary")
+	cmd.Flags().StringVar(&a.environment, "environment", "", "name for this environment (default: a generated adjective-animal name)")
+	cmd.Flags().StringVar(&a.namespace, "namespace", connect.DefaultNamespace, "namespace to install the control plane into")
+	cmd.Flags().StringVar(&a.appNamespace, "app-namespace", connect.DefaultAppNamespace, "namespace to deploy applications into")
+	cmd.Flags().StringVar(&a.image, "burrowd-image", defaultBurrowdImage(), "burrowd container image to deploy (must be pullable by the cluster)")
+	cmd.Flags().StringVar(&a.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
+	cmd.Flags().BoolVar(&a.dryRun, "dry-run", false, "print the manifests instead of applying them")
+	cmd.Flags().BoolVar(&a.wait, "wait", true, "wait for the control plane to become ready")
+	cmd.Flags().BoolVar(&a.verbose, "verbose", false, "show every resource kubectl applies instead of a summary")
 	return cmd
 }
 
-func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig string, dryRun, wait, verbose bool, stdout, stderr io.Writer) error {
-	if image == "" {
+func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) error {
+	if a.image == "" {
 		return errNoBurrowdImage()
 	}
-	token, err := randHex(16)
-	if err != nil {
-		return err
-	}
-	dbPassword, err := randHex(12)
-	if err != nil {
-		return err
+
+	// render builds the manifests (minting fresh secrets) on demand: dry-run prints them without
+	// touching a cluster, and the real path applies them once a target context is resolved.
+	render := func() (string, error) {
+		token, err := randHex(16)
+		if err != nil {
+			return "", err
+		}
+		dbPassword, err := randHex(12)
+		if err != nil {
+			return "", err
+		}
+		return renderManifests(installOptions{
+			Namespace:      a.namespace,
+			AppNamespace:   a.appNamespace,
+			AddonNamespace: connect.DefaultAddonNamespace,
+			Image:          a.image,
+			Token:          token,
+			DBPassword:     dbPassword,
+			Port:           connect.DefaultPort,
+		})
 	}
 
-	manifests, err := renderManifests(installOptions{
-		Namespace:      namespace,
-		AppNamespace:   appNamespace,
-		AddonNamespace: connect.DefaultAddonNamespace,
-		Image:          image,
-		Token:          token,
-		DBPassword:     dbPassword,
-		Port:           connect.DefaultPort,
-	})
-	if err != nil {
-		return err
-	}
-
-	if dryRun {
+	// dry-run prints the manifests without contacting a cluster and without needing a context.
+	if a.dryRun {
+		manifests, err := render()
+		if err != nil {
+			return err
+		}
 		fmt.Fprint(stdout, manifests)
 		return nil
 	}
 
-	cs, err := clientset(kubeconfig)
+	// Resolve the install target explicitly (ADR-0037). Burrow operates a cluster you point it at,
+	// so a missing or empty kubeconfig is a clear stop, not a raw library error.
+	contexts, err := listContexts(a.kubeconfig)
+	if err != nil || len(contexts) == 0 {
+		return errNoCluster()
+	}
+	// No context given: list the contexts (marking the current one) and instruct re-running with
+	// one. Non-interactive and never installs into a guessed target.
+	if a.kubeContext == "" {
+		writeInstallContextHint(stdout, contexts)
+		return nil
+	}
+	if !contextExists(contexts, a.kubeContext) {
+		return fmt.Errorf("context %q is not in your kubeconfig; available: %s\nrun `burrow install <context>` with one of these",
+			a.kubeContext, contextNames(contexts))
+	}
+
+	manifests, err := render()
 	if err != nil {
 		return err
 	}
-	if installed, err := alreadyInstalled(ctx, cs, namespace); err != nil {
+
+	cs, err := clientsetFn(a.kubeconfig, a.kubeContext)
+	if err != nil {
+		return err
+	}
+	if installed, err := alreadyInstalled(ctx, cs, a.namespace); err != nil {
 		return err
 	} else if installed {
 		return fmt.Errorf("Burrow is already installed in namespace %q; run `burrow upgrade` to update it "+
-			"(re-running install would mint new secrets and break the existing control plane)", namespace)
+			"(re-running install would mint new secrets and break the existing control plane)", a.namespace)
 	}
 
-	if err := kubectlApply(ctx, kubeconfig, manifests, verbose, stdout, stderr); err != nil {
+	if err := applyFn(ctx, a.kubeconfig, a.kubeContext, manifests, a.verbose, stdout, stderr); err != nil {
 		return err
 	}
 
-	if wait {
-		if err := waitForReady(ctx, kubeconfig, namespace, stdout); err != nil {
+	if a.wait {
+		if err := waitForReady(ctx, a.kubeconfig, a.kubeContext, a.namespace, stdout); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "\nBurrow is installed and ready in namespace %q.\n", namespace)
+		fmt.Fprintf(stdout, "\nBurrow is installed and ready in namespace %q.\n", a.namespace)
 	} else {
-		fmt.Fprintf(stdout, "\nBurrow installed into namespace %q (not waiting for readiness).\n", namespace)
+		fmt.Fprintf(stdout, "\nBurrow installed into namespace %q (not waiting for readiness).\n", a.namespace)
 	}
 
 	// Installing tells you what your cluster can do (ADR-0034): probe the cluster's capabilities
@@ -216,10 +280,89 @@ func runInstall(ctx context.Context, namespace, appNamespace, image, kubeconfig 
 	// failure here never fails a successful install, since the agent reads capabilities live anyway.
 	printCapabilitySummary(ctx, cs, stdout)
 
-	if wait {
+	// Name and record the environment (ADR-0036/0037): write a local handle pinned as current, so
+	// first-run detection flips and `burrow env list` shows it without connecting.
+	if err := recordEnvironment(a, stdout); err != nil {
+		return err
+	}
+
+	if a.wait {
 		fmt.Fprint(stdout, "Deploy an app:\n  burrow app deploy <app> --image <ref>\n")
 	}
 	return nil
+}
+
+// recordEnvironment writes the just-installed environment into the local config as a handle and
+// pins it as the current environment (ADR-0036/0037). The name is the explicit --environment or a
+// generated adjective-animal name. It prints the confirmation and the rename hint.
+func recordEnvironment(a installArgs, stdout io.Writer) error {
+	name := a.environment
+	if name == "" {
+		name = friendlyName()
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		return err
+	}
+	if err := cfg.Add(localconfig.Environment{
+		Name:                  name,
+		Context:               a.kubeContext,
+		ControlPlaneNamespace: a.namespace,
+		AppNamespace:          a.appNamespace,
+	}); err != nil {
+		return err
+	}
+	cfg.Current = name
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "\nInstalled. Environment %q is now your current environment.\n", name)
+	fmt.Fprintf(stdout, "Rename it any time:  burrow env rename %s <new-name>\n", name)
+	return nil
+}
+
+// errNoCluster is the clear stop when there is no kubeconfig (or it holds no contexts): Burrow
+// operates a cluster you point it at, so it explains how to point it rather than surfacing a raw
+// library error.
+func errNoCluster() error {
+	return fmt.Errorf("no kubeconfig found, so there is no cluster to install into. Burrow operates a " +
+		"cluster you point it at: set $KUBECONFIG or create ~/.kube/config, then run `burrow install <context>`")
+}
+
+// writeInstallContextHint lists the kubeconfig contexts (marking the current one) and instructs the
+// user to re-run install with one. It does not install and does not prompt (ADR-0037).
+func writeInstallContextHint(w io.Writer, contexts []connect.Context) {
+	fmt.Fprintln(w, "Pick the cluster to install Burrow into. Your kubeconfig contexts:")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "CURRENT\tNAME\tCLUSTER")
+	for _, c := range contexts {
+		marker := ""
+		if c.Current {
+			marker = "*"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", marker, c.Name, c.Cluster)
+	}
+	_ = tw.Flush()
+	fmt.Fprintln(w, "\nThen run `burrow install <context>` with one of these.")
+}
+
+// contextExists reports whether name is one of the kubeconfig contexts.
+func contextExists(contexts []connect.Context, name string) bool {
+	for _, c := range contexts {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// contextNames returns the context names joined for an error message.
+func contextNames(contexts []connect.Context) string {
+	names := make([]string, 0, len(contexts))
+	for _, c := range contexts {
+		names = append(names, c.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // printCapabilitySummary probes the cluster's capabilities with the kubeconfig client and prints a
@@ -235,8 +378,8 @@ func printCapabilitySummary(ctx context.Context, cs kubernetes.Interface, stdout
 // waitForReady blocks until the in-cluster Postgres and burrowd are ready, printing
 // progress. burrowd only becomes ready after it has reached Postgres and applied its
 // migrations, so this confirms the whole control plane is up.
-func waitForReady(ctx context.Context, kubeconfig, namespace string, out io.Writer) error {
-	cs, err := clientset(kubeconfig)
+func waitForReady(ctx context.Context, kubeconfig, kubeContext, namespace string, out io.Writer) error {
+	cs, err := clientsetFn(kubeconfig, kubeContext)
 	if err != nil {
 		return err
 	}
@@ -270,14 +413,19 @@ func waitForDeployment(ctx context.Context, cs kubernetes.Interface, namespace, 
 	}
 }
 
-// kubectlApply pipes the manifests to `kubectl apply -f -`. By default it prints a one-line
-// summary of how many resources changed; with verbose it streams kubectl's per-resource output.
-func kubectlApply(ctx context.Context, kubeconfig, manifests string, verbose bool, stdout, stderr io.Writer) error {
-	return applyAndSummarize(ctx, applyArgs(kubeconfig, "-"), manifests, verbose, stdout, stderr)
+// kubectlApply pipes the manifests to `kubectl apply -f -`, targeting kubeContext when set so the
+// manifests land in the named cluster (empty means the kubeconfig's current context). By default it
+// prints a one-line summary of how many resources changed; with verbose it streams kubectl's
+// per-resource output.
+func kubectlApply(ctx context.Context, kubeconfig, kubeContext, manifests string, verbose bool, stdout, stderr io.Writer) error {
+	return applyAndSummarize(ctx, applyArgs(kubeconfig, kubeContext, "-"), manifests, verbose, stdout, stderr)
 }
 
-func applyArgs(kubeconfig, source string) []string {
+func applyArgs(kubeconfig, kubeContext, source string) []string {
 	args := []string{"apply", "-f", source}
+	if kubeContext != "" {
+		args = append([]string{"--context", kubeContext}, args...)
+	}
 	if kubeconfig != "" {
 		args = append([]string{"--kubeconfig", kubeconfig}, args...)
 	}

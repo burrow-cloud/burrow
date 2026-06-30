@@ -104,7 +104,10 @@ k3d image import "$BURROWD_IMAGE" -c "$CLUSTER"
 
 # --- 3. install Burrow + wait for readiness -----------------------------------------------
 echo "=== burrow install (waits for the control plane to be ready) ==="
-"$BURROW" install --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
+# install takes the target kube context as a required positional argument (ADR-0037): derive it
+# from the kubeconfig so install targets this k3d cluster explicitly.
+CTX=$(kubectl --kubeconfig "$KCFG" config current-context)
+"$BURROW" install "$CTX" --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
 
 # --- 4. install the logs add-on -----------------------------------------------------------
 echo "=== addon install logs (VictoriaLogs store + Fluent Bit collector) ==="

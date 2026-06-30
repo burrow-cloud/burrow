@@ -84,7 +84,7 @@ func TestIngressDetection(t *testing.T) {
 func TestIngressInstallDryRun(t *testing.T) {
 	var out, errb bytes.Buffer
 	// dry-run must not touch a cluster (no kubeconfig needed) — it only prints the plan.
-	err := run(context.Background(), []string{"system", "ingress", "install", "--dry-run", "--staging", "--email", "a@b.com"}, &out, &errb)
+	err := run(context.Background(), []string{"cluster", "ingress", "install", "--dry-run", "--staging", "--email", "a@b.com"}, &out, &errb)
 	if err != nil {
 		t.Fatalf("ingress install --dry-run: %v", err)
 	}
@@ -108,7 +108,7 @@ const costNoticeMarker = "LoadBalancers normally cost money"
 func TestIngressInstallDryRunExpose(t *testing.T) {
 	// loadbalancer: the plan names the cloud (LoadBalancer) manifest and carries the cost notice.
 	var lb bytes.Buffer
-	if err := run(context.Background(), []string{"system", "ingress", "install", "--dry-run", "--expose", "loadbalancer"}, &lb, &lb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "ingress", "install", "--dry-run", "--expose", "loadbalancer"}, &lb, &lb); err != nil {
 		t.Fatalf("dry-run loadbalancer: %v", err)
 	}
 	if !strings.Contains(lb.String(), costNoticeMarker) {
@@ -123,7 +123,7 @@ func TestIngressInstallDryRunExpose(t *testing.T) {
 
 	// nodeport: the plan references the baremetal (NodePort) manifest and omits the cost notice.
 	var np bytes.Buffer
-	if err := run(context.Background(), []string{"system", "ingress", "install", "--dry-run", "--expose", "nodeport"}, &np, &np); err != nil {
+	if err := run(context.Background(), []string{"cluster", "ingress", "install", "--dry-run", "--expose", "nodeport"}, &np, &np); err != nil {
 		t.Fatalf("dry-run nodeport: %v", err)
 	}
 	if strings.Contains(np.String(), costNoticeMarker) {

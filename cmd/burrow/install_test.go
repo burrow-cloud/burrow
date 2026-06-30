@@ -6,9 +6,195 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
+
+// stubInstall replaces install's cluster-touching seams with fakes for a real (non-dry-run) install
+// path: a fixed set of kubeconfig contexts, a fake clientset (empty cluster: not already installed),
+// and an apply that records the kube context it targeted. It points $BURROW_CONFIG at a temp file
+// so the recorded environment handle is asserted without touching the user's real config. It
+// returns a pointer to the captured target context. All seams are restored on cleanup.
+func stubInstall(t *testing.T, contexts []connect.Context, contextsErr error) *string {
+	t.Helper()
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+
+	origList := listContexts
+	listContexts = func(string) ([]connect.Context, error) { return contexts, contextsErr }
+
+	origCS := clientsetFn
+	clientsetFn = func(string, string) (kubernetes.Interface, error) { return fake.NewSimpleClientset(), nil }
+
+	var targeted string
+	origApply := applyFn
+	applyFn = func(_ context.Context, _ string, kubeContext string, _ string, _ bool, _, _ io.Writer) error {
+		targeted = kubeContext
+		return nil
+	}
+
+	t.Cleanup(func() {
+		listContexts = origList
+		clientsetFn = origCS
+		applyFn = origApply
+	})
+	return &targeted
+}
+
+func twoContexts() []connect.Context {
+	return []connect.Context{
+		{Name: "dev", Cluster: "dev-cluster", Current: true},
+		{Name: "prod", Cluster: "prod-cluster"},
+	}
+}
+
+func TestInstallRecordsAndPinsEnvironment(t *testing.T) {
+	targeted := stubInstall(t, twoContexts(), nil)
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"install", "prod", "--environment", "my-prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb)
+	if err != nil {
+		t.Fatalf("install prod: %v\n%s", err, errb.String())
+	}
+
+	// The apply targeted exactly the named context (never the current/dev one).
+	if *targeted != "prod" {
+		t.Errorf("apply targeted context %q, want prod", *targeted)
+	}
+
+	// The environment is recorded and pinned as current.
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if cfg.Current != "my-prod" {
+		t.Errorf("current environment = %q, want my-prod (the new handle must be pinned)", cfg.Current)
+	}
+	env, ok := cfg.Lookup("my-prod")
+	if !ok {
+		t.Fatalf("environment my-prod was not recorded: %+v", cfg.Environments)
+	}
+	if env.Context != "prod" {
+		t.Errorf("recorded context = %q, want prod", env.Context)
+	}
+	if env.ControlPlaneNamespace != connect.DefaultNamespace || env.AppNamespace != connect.DefaultAppNamespace {
+		t.Errorf("recorded namespaces = (%q,%q), want (%q,%q)", env.ControlPlaneNamespace, env.AppNamespace, connect.DefaultNamespace, connect.DefaultAppNamespace)
+	}
+
+	// The confirmation names the environment and points at rename.
+	if !strings.Contains(out.String(), `Environment "my-prod" is now your current environment`) {
+		t.Errorf("missing the environment confirmation:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "burrow env rename my-prod") {
+		t.Errorf("missing the rename hint:\n%s", out.String())
+	}
+}
+
+func TestInstallGeneratesEnvironmentName(t *testing.T) {
+	stubInstall(t, twoContexts(), nil)
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"install", "dev", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb)
+	if err != nil {
+		t.Fatalf("install dev: %v\n%s", err, errb.String())
+	}
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	// Omitting --environment generates an adjective-animal name, recorded and pinned.
+	if cfg.Current == "" {
+		t.Fatal("no environment was pinned")
+	}
+	if !strings.Contains(cfg.Current, "-") {
+		t.Errorf("generated name %q is not adjective-animal", cfg.Current)
+	}
+	if _, ok := cfg.Lookup(cfg.Current); !ok {
+		t.Errorf("pinned environment %q is not in the config", cfg.Current)
+	}
+}
+
+func TestInstallNoArgListsContextsAndDoesNotInstall(t *testing.T) {
+	targeted := stubInstall(t, twoContexts(), nil)
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"install", "--burrowd-image", "img:1"}, &out, &errb)
+	if err != nil {
+		t.Fatalf("bare install: %v\n%s", err, errb.String())
+	}
+
+	s := out.String()
+	// It lists the contexts, marks the current one, and instructs re-running with one.
+	for _, want := range []string{"dev", "prod", "*", "burrow install <context>"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("context listing missing %q:\n%s", want, s)
+		}
+	}
+	// It must NOT install: nothing applied, nothing recorded.
+	if *targeted != "" {
+		t.Errorf("bare install should not apply anything, but targeted %q", *targeted)
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if cfg.Current != "" || len(cfg.Environments) != 0 {
+		t.Errorf("bare install should record nothing, got current=%q envs=%+v", cfg.Current, cfg.Environments)
+	}
+}
+
+func TestInstallNoKubeconfigStops(t *testing.T) {
+	stubInstall(t, nil, errors.New("no configuration has been provided"))
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"install", "--burrowd-image", "img:1"}, &out, &errb)
+	if err == nil {
+		t.Fatal("install with no kubeconfig should error")
+	}
+	for _, want := range []string{"no kubeconfig found", "$KUBECONFIG", "~/.kube/config"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing-kubeconfig stop missing %q, got: %v", want, err)
+		}
+	}
+}
+
+func TestInstallUnknownContextErrors(t *testing.T) {
+	stubInstall(t, twoContexts(), nil)
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"install", "staging", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb)
+	if err == nil {
+		t.Fatal("install into an unknown context should error")
+	}
+	if !strings.Contains(err.Error(), "staging") || !strings.Contains(err.Error(), "dev, prod") {
+		t.Errorf("unknown-context error should name the bad context and list available ones, got: %v", err)
+	}
+}
+
+func TestClusterIngressReplacesSystem(t *testing.T) {
+	// `system` is gone.
+	var sysOut, sysErr bytes.Buffer
+	if err := run(context.Background(), []string{"system", "ingress", "install", "--dry-run"}, &sysOut, &sysErr); err == nil {
+		t.Error("the `system` command group should be removed")
+	}
+	// `cluster ingress install` exists (dry-run needs no cluster).
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "ingress", "install", "--dry-run"}, &out, &errb); err != nil {
+		t.Fatalf("cluster ingress install --dry-run: %v\n%s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "kind: ClusterIssuer") {
+		t.Errorf("cluster ingress install should print the ingress plan:\n%s", out.String())
+	}
+}
 
 func TestRenderManifests(t *testing.T) {
 	out, err := renderManifests(installOptions{

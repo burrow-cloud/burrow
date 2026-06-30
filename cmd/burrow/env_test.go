@@ -335,7 +335,7 @@ func TestEnvAddAppliesRegistersAndRecordsHandle(t *testing.T) {
 	// applied.
 	var applied string
 	orig := applyFn
-	applyFn = func(_ context.Context, _ string, manifests string, _ bool, _, _ io.Writer) error {
+	applyFn = func(_ context.Context, _ string, _ string, manifests string, _ bool, _, _ io.Writer) error {
 		applied = manifests
 		return nil
 	}
@@ -390,7 +390,7 @@ func TestEnvAddNamespaceOverride(t *testing.T) {
 	defer srv.Close()
 
 	orig := applyFn
-	applyFn = func(_ context.Context, _ string, _ string, _ bool, _, _ io.Writer) error { return nil }
+	applyFn = func(_ context.Context, _ string, _ string, _ string, _ bool, _, _ io.Writer) error { return nil }
 	defer func() { applyFn = orig }()
 
 	var out, errb bytes.Buffer

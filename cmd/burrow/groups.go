@@ -7,8 +7,9 @@ import "github.com/spf13/cobra"
 
 // The CLI is grouped by the task a person is doing rather than as a flat verb list (ADR-0024):
 // `app` operates a deployed application, `config` sets up the credentials Burrow uses, and
-// `system` manages cluster-wide infrastructure. install/upgrade, guard, and version stay at the
-// top level. The grouping is a human-discoverability aid; the MCP tool surface stays flat.
+// `cluster` both inspects the cluster's capabilities and provisions its shared infrastructure
+// (ingress/TLS). install/upgrade, guard, and version stay at the top level. The grouping is a
+// human-discoverability aid; the MCP tool surface stays flat.
 
 // newAppCmd groups the operations on a deployed application.
 func newAppCmd() *cobra.Command {
@@ -46,18 +47,5 @@ func newConfigCmd() *cobra.Command {
 			"agent never holds them.",
 	}
 	cmd.AddCommand(newProviderCmd(), newRegistryCmd())
-	return cmd
-}
-
-// newSystemCmd groups the cluster-wide infrastructure Burrow installs and manages.
-func newSystemCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "system",
-		Short: "Manage cluster-wide infrastructure Burrow uses (ingress, TLS)",
-		Long: "system manages the shared, cluster-wide infrastructure Burrow builds on — the ingress\n" +
-			"controller and cert-manager — as opposed to per-app operations (`app`) or Burrow's own\n" +
-			"control plane (`install`/`upgrade`).",
-	}
-	cmd.AddCommand(newIngressCmd())
 	return cmd
 }

@@ -163,7 +163,7 @@ func alreadyInstalled(ctx context.Context, cs kubernetes.Interface, namespace st
 // clientset builds a Kubernetes clientset from the kubeconfig (or in-cluster config), using
 // the same config resolution as connect.
 func clientset(kubeconfig string) (*kubernetes.Clientset, error) {
-	cfg, err := connect.RESTConfig(kubeconfig)
+	cfg, err := connect.RESTConfig(kubeconfig, "")
 	if err != nil {
 		return nil, err
 	}

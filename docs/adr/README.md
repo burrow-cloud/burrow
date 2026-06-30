@@ -60,3 +60,4 @@ alternatives that were rejected.
 | [0032](0032-postgres-backups.md) | Postgres backups — logical `pg_dump`/`pg_restore` via Jobs to a backup PVC, recorded in the control-plane database; restore is confirm-gated | Accepted |
 | [0033](0033-relicense-to-apache.md) | Relicense the whole repository to Apache-2.0; monetize via managed cloud + a proprietary enterprise tier + risk transfer | Accepted |
 | [0034](0034-agent-native-onboarding.md) | Agent-native onboarding — detect cluster capabilities (no cluster-type picker), provision missing substrate on cost-aware consent, prove the first URL | Accepted |
+| [0035](0035-environments.md) | Environments — context-routed clusters (cluster-per-env) then namespace-scoped environments, each with its own guardrail policy ("free in staging, gated in prod") | Accepted |

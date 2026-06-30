@@ -1,5 +1,7 @@
 # Burrow
 
+> For developers moving fast with AI who don't want to break things
+
 **Production grade self hosting for your apps, operated by your AI agent, with guardrails.**
 Point [Claude Code](https://claude.com/claude-code), Cursor, Codex, or bring your own at your
 Kubernetes cluster. It deploys, scales, debugs, and ships your apps to a URL over

@@ -5,13 +5,9 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net"
 	"runtime/debug"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -20,10 +16,6 @@ import (
 
 	"github.com/burrow-cloud/burrow/connect"
 )
-
-// probeTimeout caps the best-effort control-plane probe so `burrow version` returns promptly even
-// when the targeted cluster is unreachable.
-const probeTimeout = 5 * time.Second
 
 // newVersionCmd reports this CLI's version and, best effort, the version of the control plane
 // installed in the cluster — read from the burrowd Deployment's image, so it works even if
@@ -44,7 +36,7 @@ func newVersionCmd() *cobra.Command {
 			// the failure path below still reports cleanly.
 			ctxName, _ := connect.TargetContextName(kubeconfig, kubeContext)
 
-			ctx, cancel := context.WithTimeout(cmd.Context(), probeTimeout)
+			ctx, cancel := context.WithTimeout(cmd.Context(), connect.ProbeTimeout)
 			defer cancel()
 			cs, err := clientsetForContext(kubeconfig, kubeContext)
 			if err != nil {
@@ -72,36 +64,8 @@ func controlPlaneLine(img string, err error, ctxName, namespace string) string {
 	case apierrors.IsNotFound(err):
 		return fmt.Sprintf("control plane: not installed (context %q, namespace %q)", ctxName, namespace)
 	default:
-		return fmt.Sprintf("control plane: unreachable via context %q (%s)", ctxName, probeReason(err))
+		return fmt.Sprintf("control plane: unreachable via context %q (%s)", ctxName, connect.FailureReason(err))
 	}
-}
-
-// probeReason reduces a connectivity error to a concise reason, dropping the dialed URL that the
-// Kubernetes client prepends. It names the common failures explicitly (timeout, DNS, refused) and
-// otherwise strips the `Get "<url>": ` prefix so the URL noise stays out of the version line.
-func probeReason(err error) string {
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Sprintf("timed out after %s", probeTimeout)
-	case errors.Is(err, syscall.ECONNREFUSED):
-		return "connection refused"
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return "no such host"
-	}
-	return trimDialPrefix(err.Error())
-}
-
-// trimDialPrefix removes a leading `Get "<url>": ` (or any `<verb> "<url>": `) that the Kubernetes
-// REST client puts on transport errors, leaving just the underlying reason.
-func trimDialPrefix(s string) string {
-	if quote := strings.Index(s, ` "`); quote >= 0 {
-		if sep := strings.Index(s[quote:], `": `); sep >= 0 {
-			return s[quote+sep+len(`": `):]
-		}
-	}
-	return s
 }
 
 // version is the CLI release version, stamped at build time with

@@ -62,3 +62,4 @@ alternatives that were rejected.
 | [0034](0034-agent-native-onboarding.md) | Agent-native onboarding — detect cluster capabilities (no cluster-type picker), provision missing substrate on cost-aware consent, prove the first URL | Accepted |
 | [0035](0035-environments.md) | Environments — context-routed clusters (cluster-per-env) then namespace-scoped environments, each with its own guardrail policy ("free in staging, gated in prod") | Accepted |
 | [0036](0036-environment-selection.md) | Environment selection — one `burrow env` surface that follows the kube context, named local handles (`~/.burrow/config`), `burrow scan`; retires the `burrow context` command | Accepted |
+| [0037](0037-cli-onboarding-and-organization.md) | CLI onboarding and command organization — intent-based help groups, explicit positional `install <context>` (server-side apply, no kubectl), first-run config awareness; drops `system` into `cluster` | Accepted |

@@ -1,5 +1,9 @@
 # Burrow
 
+<p align="center">
+  <img src="docs/assets/mascot.jpg" alt="The Burrow mascot, a vigilant groundhog standing watch" width="300">
+</p>
+
 > For developers moving fast with AI who don't want to break things
 
 **Production grade self hosting for your apps, operated by your AI agent, with guardrails.**

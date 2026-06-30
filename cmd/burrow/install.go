@@ -235,7 +235,7 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	// No context given: list the contexts (marking the current one) and instruct re-running with
 	// one. Non-interactive and never installs into a guessed target.
 	if a.kubeContext == "" {
-		writeInstallContextHint(stdout, contexts)
+		writeInstallContextHint(ctx, stdout, a.kubeconfig, a.namespace, contexts)
 		return nil
 	}
 	if !contextExists(contexts, a.kubeContext) {
@@ -330,21 +330,47 @@ func errNoCluster() error {
 		"cluster you point it at: set $KUBECONFIG or create ~/.kube/config, then run `burrow install <context>`")
 }
 
-// writeInstallContextHint lists the kubeconfig contexts (marking the current one) and instructs the
-// user to re-run install with one. It does not install and does not prompt (ADR-0037).
-func writeInstallContextHint(w io.Writer, contexts []connect.Context) {
-	fmt.Fprintln(w, "Pick the cluster to install Burrow into. Your kubeconfig contexts:")
+// writeInstallContextHint lists the kubeconfig contexts (marking the current one) and, for each,
+// probes whether Burrow is already installed, so a user picking a cluster to install into can see at
+// a glance which contexts already run Burrow and which are free. It instructs re-running install
+// with a context that has none; it does not install and does not prompt (ADR-0037). Probing is
+// sequential and bounded per context by connect.ProbeTimeout, matching `burrow env scan`.
+func writeInstallContextHint(ctx context.Context, w io.Writer, kubeconfig, namespace string, contexts []connect.Context) {
+	fmt.Fprint(w, "Installs Burrow into your cluster.\n\n"+
+		"Usage:\n"+
+		"  burrow install <context>\n\n"+
+		"Your kubeconfig contexts:\n\n")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CURRENT\tNAME\tCLUSTER")
+	fmt.Fprintln(tw, "CURRENT\tNAME\tCLUSTER\tBURROWD")
 	for _, c := range contexts {
 		marker := ""
 		if c.Current {
 			marker = "*"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", marker, c.Name, c.Cluster)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", marker, c.Name, c.Cluster, installStatusFor(ctx, kubeconfig, c.Name, namespace))
 	}
 	_ = tw.Flush()
-	fmt.Fprintln(w, "\nThen run `burrow install <context>` with one of these.")
+	fmt.Fprintln(w, "\nRun `burrow install <context>` with a context that does not already have Burrow.")
+	fmt.Fprintln(w, "A context that already has Burrow can be used from here: run `burrow env scan` to")
+	fmt.Fprintln(w, "register it, then `burrow env use <name>`.")
+}
+
+// installStatusFor probes one context for an installed burrowd and renders its BURROWD cell:
+// "installed (<tag>)", "not installed", or "unreachable (<reason>)". It reuses the scan probe seam
+// and classifyProbe so the install listing and `burrow env scan` cannot diverge.
+func installStatusFor(ctx context.Context, kubeconfig, kubeContext, namespace string) string {
+	probeCtx, cancel := context.WithTimeout(ctx, connect.ProbeTimeout)
+	img, perr := scanProbeFn(probeCtx, kubeconfig, kubeContext, namespace)
+	cancel()
+	status, version, _ := classifyProbe(img, perr)
+	switch status {
+	case "installed":
+		return fmt.Sprintf("installed (%s)", version)
+	case "unreachable":
+		return fmt.Sprintf("unreachable (%s)", version)
+	default:
+		return status
+	}
 }
 
 // contextExists reports whether name is one of the kubeconfig contexts.

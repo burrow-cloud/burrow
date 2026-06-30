@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -124,7 +125,24 @@ func TestInstallGeneratesEnvironmentName(t *testing.T) {
 }
 
 func TestInstallNoArgListsContextsAndDoesNotInstall(t *testing.T) {
-	targeted := stubInstall(t, twoContexts(), nil)
+	contexts := []connect.Context{
+		{Name: "dev", Cluster: "dev-cluster", Current: true},
+		{Name: "prod", Cluster: "prod-cluster"},
+		{Name: "broken", Cluster: "broken-cluster"},
+	}
+	targeted := stubInstall(t, contexts, nil)
+	// Probe outcomes spanning all three install statuses, so the BURROWD column is exercised end
+	// to end without a real cluster.
+	stubScanProbe(t, func(kubeContext string) (string, error) {
+		switch kubeContext {
+		case "dev":
+			return "ghcr.io/burrow-cloud/burrowd:v0.7.0", nil
+		case "prod":
+			return "", notFoundErr()
+		default: // broken: an unreachable cluster
+			return "", &net.DNSError{Err: "no such host", Name: "broken.invalid", IsNotFound: true}
+		}
+	})
 
 	var out, errb bytes.Buffer
 	err := run(context.Background(), []string{"install", "--burrowd-image", "img:1"}, &out, &errb)
@@ -133,11 +151,22 @@ func TestInstallNoArgListsContextsAndDoesNotInstall(t *testing.T) {
 	}
 
 	s := out.String()
-	// It lists the contexts, marks the current one, and instructs re-running with one.
-	for _, want := range []string{"dev", "prod", "*", "burrow install <context>"} {
+	// It prints the header/usage, lists the contexts, marks the current one, shows the per-context
+	// install status in a BURROWD column, and instructs re-running with a free context.
+	for _, want := range []string{
+		"Installs Burrow into your cluster.",
+		"burrow install <context>",
+		"CURRENT", "NAME", "CLUSTER", "BURROWD",
+		"dev", "prod", "broken", "*",
+		"installed (v0.7.0)", "not installed", "unreachable",
+	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("context listing missing %q:\n%s", want, s)
 		}
+	}
+	// A blank line separates the heading from the table header so they do not run together.
+	if !strings.Contains(s, "Your kubeconfig contexts:\n\n") {
+		t.Errorf("expected a blank line after the contexts heading:\n%s", s)
 	}
 	// It must NOT install: nothing applied, nothing recorded.
 	if *targeted != "" {

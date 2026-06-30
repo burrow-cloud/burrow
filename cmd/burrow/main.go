@@ -94,13 +94,23 @@ func newRootCmd() *cobra.Command {
 	// rather than Cobra's default alphabetical sort.
 	cobra.EnableCommandSorting = false
 	root := &cobra.Command{
-		Use:   "burrow",
-		Short: "Operate applications on your cluster through the Burrow control plane",
-		Long: "burrow operates applications on your Kubernetes cluster through the Burrow\n" +
-			"control plane: deploy by image reference, then status, logs, rollback, and scale.\n" +
-			"It auto-connects via your kubeconfig; no config beyond kubectl access.",
+		Use:           "burrow",
+		Short:         rootShortDesc,
+		Long:          rootShortDesc,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// RunE handles only a truly bare `burrow` (no subcommand): Cobra rejects an unknown
+		// subcommand before RunE, and `-h`/`--help` short-circuits to help before RunE, so neither
+		// reaches here. A first-run user (no ~/.burrow/config) gets just the install banner instead
+		// of the full command wall; once set up, bare `burrow` falls through to the grouped help, the
+		// same as `burrow -h` (ADR-0037).
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if exists, err := localconfig.Exists(); err == nil && !exists {
+				fmt.Fprint(cmd.OutOrStdout(), firstRunBanner)
+				return nil
+			}
+			return cmd.Help()
+		},
 	}
 	// The completion command stays visible so a user can discover it (ADR-0037); Cobra's built-in
 	// covers bash, zsh, fish, and PowerShell.
@@ -122,7 +132,6 @@ func newRootCmd() *cobra.Command {
 		// version (and the auto-generated completion/help) fall in the default group.
 		newVersionCmd(),
 	)
-	installFirstRunBanner(root)
 	return root
 }
 

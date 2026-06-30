@@ -117,8 +117,19 @@ audit log you read with `burrow audit`. And secrets never travel over MCP at all
 references them by key, you set the values, and they are written straight into a Kubernetes
 Secret.
 
-*Per-environment guardrails, so prod can be locked down while staging stays permissive, are on
-the [roadmap](docs/ROADMAP.md).*
+Guardrails can be set **per environment**, so prod can be locked down while staging stays
+permissive. Add `--env <name>` to scope an app-level guardrail to one environment; an environment
+with no override of its own inherits the global policy:
+
+```sh
+burrow guard set --env prod app.delete deny      # lock prod: the agent can never delete a prod app
+burrow guard set app.delete allow                # ... while staging and the rest stay permissive
+burrow guard list --env prod                     # prod's effective policy, marking env-specific vs inherited
+```
+
+The app-level guardrails (deploy, scale, expose, delete, rollback) are environment-scopable. The
+cluster-level ones (DNS changes, add-on install or removal) act on the whole cluster, so they are
+set globally without `--env`.
 
 ## Try it
 

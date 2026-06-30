@@ -336,7 +336,9 @@ type configSetRequest struct {
 }
 
 func (s *server) guardList(w http.ResponseWriter, r *http.Request) {
-	gs, err := s.engine.Guardrails(r.Context())
+	// The optional env query selects a named environment's effective policy; empty is the global
+	// policy, reproducing the pre-environments behavior (ADR-0035 phase 2c).
+	gs, err := s.engine.Guardrails(r.Context(), r.URL.Query().Get("env"))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -349,12 +351,15 @@ func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
+	// The optional env query scopes the set to a named environment (storing the env-prefixed code);
+	// empty sets the global disposition (ADR-0035 phase 2c).
+	env := r.URL.Query().Get("env")
 	code := controlplane.GuardrailCode(r.PathValue("code"))
-	if err := s.engine.SetGuardrail(r.Context(), code, controlplane.Disposition(req.Disposition)); err != nil {
+	if err := s.engine.SetGuardrail(r.Context(), env, code, controlplane.Disposition(req.Disposition)); err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	gs, err := s.engine.Guardrails(r.Context())
+	gs, err := s.engine.Guardrails(r.Context(), env)
 	if err != nil {
 		writeEngineError(w, err)
 		return

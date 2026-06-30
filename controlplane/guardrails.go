@@ -6,6 +6,7 @@ package controlplane
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Disposition is how the control plane enforces a guardrail when an operation trips it:
@@ -78,6 +79,10 @@ type GuardrailInfo struct {
 	Code        GuardrailCode `json:"code"`
 	Disposition Disposition   `json:"disposition"`
 	Description string        `json:"description"`
+	// Source reports where the effective disposition came from when the guardrail is inspected for a
+	// named environment (ADR-0035 phase 2c): "env" for an environment-specific override, "global" for
+	// the global policy, or "default" for the built-in default. It is empty for the global listing.
+	Source string `json:"source,omitempty"`
 }
 
 // knownGuardrails enumerates every configurable guardrail in a stable order with a human
@@ -107,11 +112,41 @@ func KnownGuardrail(code GuardrailCode) bool {
 	return false
 }
 
-// Guardrails returns each known guardrail with its effective disposition under the policy.
+// EnvScopable reports whether a guardrail can be scoped to a named environment (ADR-0035 phase
+// 2c). The app-level guardrails (app.*) gate per-app operations that always carry an environment,
+// so they can be locked down per environment — strict prod, permissive staging. The cluster-level
+// guardrails (addon.*, dns.*) gate cluster-wide operations that are not env-scoped (installing an
+// add-on or writing DNS affects the whole cluster), so they are only ever set globally.
+func EnvScopable(code GuardrailCode) bool {
+	return strings.HasPrefix(string(code), "app.")
+}
+
+// Guardrails returns each known guardrail with its effective disposition under the global policy
+// (ADR-0020). Use GuardrailsFor to inspect a named environment's effective policy.
 func (p Policy) Guardrails() []GuardrailInfo {
+	return p.guardrails("")
+}
+
+// GuardrailsFor returns each known guardrail with its effective disposition for the named
+// environment (ADR-0035 phase 2c): the disposition under the env-prefixed override, falling back to
+// the global override, then the built-in default. Each entry's Source records where the effective
+// disposition came from ("env", "global", or "default") so `guard list --env` can show which
+// guardrails are env-specific and which are inherited. An empty or "default" env reproduces the
+// global policy exactly (and leaves Source unset, as for Guardrails).
+func (p Policy) GuardrailsFor(env string) []GuardrailInfo {
+	return p.guardrails(env)
+}
+
+func (p Policy) guardrails(env string) []GuardrailInfo {
+	named := env != "" && env != DefaultEnvironment
 	out := make([]GuardrailInfo, len(knownGuardrails))
 	for i, g := range knownGuardrails {
-		out[i] = GuardrailInfo{Code: g.Code, Disposition: p.disposition(g.Code), Description: g.Description}
+		disp, source := p.dispositionSource(env, g.Code)
+		info := GuardrailInfo{Code: g.Code, Disposition: disp, Description: g.Description}
+		if named {
+			info.Source = source
+		}
+		out[i] = info
 	}
 	return out
 }
@@ -156,12 +191,12 @@ func AsGuardrail(err error) (*GuardrailError, bool) {
 // either denies the operation or marks it as needing confirmation. It assumes replicas is
 // already known non-negative (a negative count is a malformed request, validated
 // separately, not a guardrail concern).
-func (p Policy) evaluateReplicas(op string, replicas int32, confirmed bool) error {
+func (p Policy) evaluateReplicas(env, op string, replicas int32, confirmed bool) error {
 	if replicas == 0 {
-		return p.enforce(op, GuardrailScaleToZero, confirmed, "scaling to zero replicas", 0, 0)
+		return p.enforce(env, op, GuardrailScaleToZero, confirmed, "scaling to zero replicas", 0, 0)
 	}
 	if replicas > p.MaxReplicas {
-		return p.enforce(op, GuardrailReplicaCeiling, confirmed,
+		return p.enforce(env, op, GuardrailReplicaCeiling, confirmed,
 			fmt.Sprintf("requested %d replicas exceeds the policy ceiling of %d", replicas, p.MaxReplicas),
 			replicas, p.MaxReplicas)
 	}
@@ -169,9 +204,11 @@ func (p Policy) evaluateReplicas(op string, replicas int32, confirmed bool) erro
 }
 
 // enforce applies the configured disposition for a tripped guardrail, producing the right
-// structured outcome: proceed (nil), confirmation required, or denied.
-func (p Policy) enforce(op string, code GuardrailCode, confirmed bool, what string, requested, limit int32) error {
-	switch p.disposition(code) {
+// structured outcome: proceed (nil), confirmation required, or denied. The env scopes the
+// disposition lookup (ADR-0035 phase 2c): a named environment's override wins, falling back to the
+// global policy; an empty or "default" env consults the global policy only.
+func (p Policy) enforce(env, op string, code GuardrailCode, confirmed bool, what string, requested, limit int32) error {
+	switch p.disposition(env, code) {
 	case DispositionAllow:
 		return nil
 	case DispositionConfirm:
@@ -198,16 +235,31 @@ func (p Policy) enforce(op string, code GuardrailCode, confirmed bool, what stri
 }
 
 // evaluateGuardrail applies a categorical guardrail — one that always trips when its
-// operation is attempted, like public exposure — using the configured disposition.
-func (p Policy) evaluateGuardrail(op string, code GuardrailCode, confirmed bool, what string) error {
-	return p.enforce(op, code, confirmed, what, 0, 0)
+// operation is attempted, like public exposure — using the configured disposition for env.
+func (p Policy) evaluateGuardrail(env, op string, code GuardrailCode, confirmed bool, what string) error {
+	return p.enforce(env, op, code, confirmed, what, 0, 0)
 }
 
-// disposition returns the configured disposition for a guardrail, defaulting to deny when
-// it is unset or invalid — the safe default (ADR-0020).
-func (p Policy) disposition(code GuardrailCode) Disposition {
-	if d, ok := p.Dispositions[code]; ok && d.Valid() {
-		return d
+// disposition returns the configured disposition for a guardrail in the named environment,
+// defaulting to deny when it is unset or invalid — the safe default (ADR-0020, ADR-0035 phase 2c).
+func (p Policy) disposition(env string, code GuardrailCode) Disposition {
+	d, _ := p.dispositionSource(env, code)
+	return d
+}
+
+// dispositionSource resolves a guardrail's effective disposition for env and reports where it came
+// from (ADR-0035 phase 2c). For a named environment it first consults the env-prefixed code
+// (e.g. prod.app.delete), so an environment can lock down or relax an operation independently;
+// absent that, it falls back to the global code, then to the deny-when-unset default. An empty or
+// "default" env skips the env-prefixed lookup, reproducing the pre-environments behavior exactly.
+func (p Policy) dispositionSource(env string, code GuardrailCode) (Disposition, string) {
+	if env != "" && env != DefaultEnvironment {
+		if d, ok := p.Dispositions[GuardrailCode(env+"."+string(code))]; ok && d.Valid() {
+			return d, "env"
+		}
 	}
-	return DispositionDeny
+	if d, ok := p.Dispositions[code]; ok && d.Valid() {
+		return d, "global"
+	}
+	return DispositionDeny, "default"
 }

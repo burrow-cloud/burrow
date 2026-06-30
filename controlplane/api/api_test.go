@@ -67,6 +67,37 @@ func TestGuardEndpoints(t *testing.T) {
 	}
 }
 
+// TestGuardEndpointsEnvScoped confirms the guard endpoints carry the optional env query through to the
+// engine: a registered env scopes the set, an unknown env is 404, and a cluster-level guardrail
+// cannot be env-scoped (400) (ADR-0035 phase 2c).
+func TestGuardEndpointsEnvScoped(t *testing.T) {
+	h, _, _, d := newAPI(t)
+	if err := d.CreateEnvironment(context.Background(), "prod", "burrow-apps-prod"); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+
+	// Scope app.delete to prod: the response reflects the env-specific disposition with its source.
+	rr := do(h, "PUT", "/v1/guard/app.delete?env=prod", token, `{"disposition":"deny"}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"source":"env"`) {
+		t.Fatalf("env guard set = %d %s", rr.Code, rr.Body.String())
+	}
+	// The global policy is untouched: a plain list does not carry the env source.
+	if rr := do(h, "GET", "/v1/guard", token, ""); rr.Code != 200 || strings.Contains(rr.Body.String(), `"source"`) {
+		t.Errorf("global guard list leaked an env source = %d %s", rr.Code, rr.Body.String())
+	}
+	// An unknown environment is a 404.
+	if rr := do(h, "PUT", "/v1/guard/app.delete?env=ghost", token, `{"disposition":"deny"}`); rr.Code != 404 {
+		t.Errorf("unknown env code = %d, want 404", rr.Code)
+	}
+	if rr := do(h, "GET", "/v1/guard?env=ghost", token, ""); rr.Code != 404 {
+		t.Errorf("unknown env list code = %d, want 404", rr.Code)
+	}
+	// A cluster-level guardrail cannot be env-scoped (400).
+	if rr := do(h, "PUT", "/v1/guard/addon.install?env=prod", token, `{"disposition":"deny"}`); rr.Code != 400 {
+		t.Errorf("cluster-level env scope code = %d, want 400", rr.Code)
+	}
+}
+
 // newProviderAPI builds an API whose engine exposes the credential store and DNS factory, so
 // the provider-endpoint test can seed the token the CLI would have written and control the
 // vendor's verdict.

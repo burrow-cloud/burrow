@@ -153,7 +153,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		return DeployResult{}, fmt.Errorf("deploy %s: loading guardrail policy: %w", req.App, err)
 	}
 	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(req.Replicas)), "env": envName(req.Env)}
-	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, "", pol.evaluateReplicas("deploy", req.Replicas, req.Confirm)); err != nil {
+	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, "", pol.evaluateReplicas(req.Env, "deploy", req.Replicas, req.Confirm)); err != nil {
 		return DeployResult{}, err
 	}
 
@@ -441,7 +441,7 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (A
 	}
 	args := map[string]string{"type": string(t), "image": spec.Image}
 	if err := e.recordDecision(ctx, auditOpAddonInstall, string(t), args, GuardrailAddonInstall,
-		pol.evaluateGuardrail("addon install", GuardrailAddonInstall, confirm, fmt.Sprintf("installing the %s add-on (%s)", t, spec.Image))); err != nil {
+		pol.evaluateGuardrail("", "addon install", GuardrailAddonInstall, confirm, fmt.Sprintf("installing the %s add-on (%s)", t, spec.Image))); err != nil {
 		return AddonInfo{}, err
 	}
 	info, err := e.k8s.DeployAddon(ctx, spec)
@@ -534,7 +534,7 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) err
 		return fmt.Errorf("remove addon %s: loading guardrail policy: %w", name, err)
 	}
 	if err := e.recordDecision(ctx, auditOpAddonRemove, name, nil, GuardrailAddonRemove,
-		pol.evaluateGuardrail("addon remove", GuardrailAddonRemove, confirm, fmt.Sprintf("removing the add-on %q", name))); err != nil {
+		pol.evaluateGuardrail("", "addon remove", GuardrailAddonRemove, confirm, fmt.Sprintf("removing the add-on %q", name))); err != nil {
 		return err
 	}
 	// The registry is the source of truth for what add-ons exist (ADR-0025): load it first so an
@@ -634,7 +634,7 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app string, confi
 	}
 	args := map[string]string{"addon": string(t), "app": app}
 	if err := e.recordDecision(ctx, auditOpAddonDetach, app, args, GuardrailAddonDetach,
-		pol.evaluateGuardrail("addon detach", GuardrailAddonDetach, confirm,
+		pol.evaluateGuardrail("", "addon detach", GuardrailAddonDetach, confirm,
 			fmt.Sprintf("detaching %q from the %s add-on (drops its database and role)", app, t))); err != nil {
 		return err
 	}
@@ -756,7 +756,7 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID st
 	}
 	args := map[string]string{"addon": string(t), "app": app, "backup": backupID}
 	if err := e.recordDecision(ctx, auditOpAddonRestore, app, args, GuardrailAddonRestore,
-		pol.evaluateGuardrail("addon restore", GuardrailAddonRestore, confirm,
+		pol.evaluateGuardrail("", "addon restore", GuardrailAddonRestore, confirm,
 			fmt.Sprintf("restoring %q from backup %s (overwrites its live database)", app, backupID))); err != nil {
 		return err
 	}
@@ -811,7 +811,7 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	}
 	args := map[string]string{"env": envName(env)}
 	if err := e.recordDecision(ctx, auditOpAppDelete, app, args, GuardrailAppDelete,
-		pol.evaluateGuardrail("app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app))); err != nil {
+		pol.evaluateGuardrail(env, "app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app))); err != nil {
 		return err
 	}
 
@@ -1026,7 +1026,7 @@ func (e *Engine) Scale(ctx context.Context, app, env string, replicas int32, con
 		return ScaleResult{}, fmt.Errorf("scale %s: loading guardrail policy: %w", app, err)
 	}
 	args := map[string]string{"replicas": strconv.Itoa(int(replicas)), "env": envName(env)}
-	if err := e.recordDecision(ctx, auditOpScale, app, args, "", pol.evaluateReplicas("scale", replicas, confirm)); err != nil {
+	if err := e.recordDecision(ctx, auditOpScale, app, args, "", pol.evaluateReplicas(env, "scale", replicas, confirm)); err != nil {
 		return ScaleResult{}, err
 	}
 
@@ -1075,7 +1075,7 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 	}
 	args := map[string]string{"host": req.Host, "port": strconv.Itoa(int(req.Port)), "tls": strconv.FormatBool(req.TLS), "env": envName(req.Env)}
 	if err := e.recordDecision(ctx, auditOpExpose, req.App, args, GuardrailExposePublic,
-		pol.evaluateGuardrail("expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host))); err != nil {
+		pol.evaluateGuardrail(req.Env, "expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host))); err != nil {
 		return ExposeResult{}, err
 	}
 
@@ -1225,26 +1225,58 @@ func (e *Engine) Unexpose(ctx context.Context, app, env string) error {
 	return nil
 }
 
-// Guardrails returns the current guardrail policy as a list for inspection (ADR-0020).
-func (e *Engine) Guardrails(ctx context.Context) ([]GuardrailInfo, error) {
+// Guardrails returns the guardrail policy as a list for inspection (ADR-0020). With an empty or
+// "default" env it returns the global policy; with a named environment it returns that
+// environment's effective policy under the env to global to default fallback, each entry marking
+// whether its disposition is env-specific or inherited (ADR-0035 phase 2c). A named environment
+// must be registered; an unknown one is a clear ErrNotFound.
+func (e *Engine) Guardrails(ctx context.Context, env string) ([]GuardrailInfo, error) {
+	if env != "" && env != DefaultEnvironment {
+		if _, err := e.db.GetEnvironment(ctx, env); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil, fmt.Errorf("guardrails: unknown environment %q: %w", env, ErrNotFound)
+			}
+			return nil, fmt.Errorf("guardrails: resolving environment %q: %w", env, err)
+		}
+	}
 	p, err := e.db.Policy(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("guardrails: loading policy: %w", err)
 	}
-	return p.Guardrails(), nil
+	return p.GuardrailsFor(env), nil
 }
 
 // SetGuardrail sets one guardrail's disposition (ADR-0020). It rejects an unknown guardrail
 // or an invalid disposition as ErrInvalid. This is the operator's lever — exposed via the
 // CLI, never as an MCP tool, so the agent cannot change its own guardrails.
-func (e *Engine) SetGuardrail(ctx context.Context, code GuardrailCode, d Disposition) error {
+//
+// With an empty or "default" env it sets the global disposition for code (today's behavior). With a
+// named environment it stores the env-prefixed code (e.g. prod.app.delete) so the environment's
+// policy can diverge from the global one (ADR-0035 phase 2c). A named environment must be registered
+// (an unknown one is ErrNotFound, catching typos), and only the app-level guardrails are
+// env-scopable: a cluster-level guardrail (addon.*, dns.*) gates a cluster-wide operation and can
+// only be set globally, so env-scoping one is rejected as ErrInvalid.
+func (e *Engine) SetGuardrail(ctx context.Context, env string, code GuardrailCode, d Disposition) error {
 	if !KnownGuardrail(code) {
 		return fmt.Errorf("set guardrail: unknown guardrail %q: %w", code, ErrInvalid)
 	}
 	if !d.Valid() {
 		return fmt.Errorf("set guardrail: invalid disposition %q (want allow, confirm, or deny): %w", d, ErrInvalid)
 	}
-	return e.db.SetGuardrail(ctx, code, d)
+	stored := code
+	if env != "" && env != DefaultEnvironment {
+		if !EnvScopable(code) {
+			return fmt.Errorf("set guardrail: %q is a cluster-level guardrail and cannot be scoped to an environment; set it globally without --env: %w", code, ErrInvalid)
+		}
+		if _, err := e.db.GetEnvironment(ctx, env); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("set guardrail: unknown environment %q: %w", env, ErrNotFound)
+			}
+			return fmt.Errorf("set guardrail: resolving environment %q: %w", env, err)
+		}
+		stored = GuardrailCode(env + "." + string(code))
+	}
+	return e.db.SetGuardrail(ctx, stored, d)
 }
 
 // Rollback restores the app's previously running release by redeploying its reference
@@ -1283,7 +1315,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	}
 	args := map[string]string{"image": target.Image, "to_release": target.ID, "env": envName(env)}
 	if err := e.recordDecision(ctx, auditOpRollback, app, args, GuardrailRollback,
-		pol.evaluateGuardrail("rollback", GuardrailRollback, confirm,
+		pol.evaluateGuardrail(env, "rollback", GuardrailRollback, confirm,
 			fmt.Sprintf("rolling %q back to its previous release %s (image %s)", app, target.ID, target.Image))); err != nil {
 		return RollbackResult{}, err
 	}

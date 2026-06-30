@@ -47,7 +47,7 @@ func newClusterCmd() *cobra.Command {
 			"NodePort-only, whether cert-manager is installed for TLS, the cloud provider, and whether\n" +
 			"a DNS provider is configured. That view is read-only and changes nothing.\n\n" +
 			"`burrow cluster ingress install` provisions the shared ingress/TLS infrastructure\n" +
-			"(ingress-nginx, cert-manager, a Let's Encrypt issuer) — a one-time operator setup.",
+			"(ingress-nginx, cert-manager, a Let's Encrypt issuer); a one-time operator setup.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()

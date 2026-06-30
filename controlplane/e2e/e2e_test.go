@@ -82,7 +82,7 @@ func TestEngineDeployRollbackE2E(t *testing.T) {
 	waitForImage(t, ctx, engine, app, "busybox:1.37")
 
 	// Roll back — redeploys v1's reference (ADR-0007).
-	rb, err := engine.Rollback(ctx, app, false)
+	rb, err := engine.Rollback(ctx, app, "", false)
 	if err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
@@ -97,7 +97,7 @@ func waitForImage(t *testing.T, ctx context.Context, engine *cp.Engine, app, ima
 	t.Helper()
 	deadline := time.Now().Add(150 * time.Second)
 	for {
-		st, err := engine.Status(ctx, app)
+		st, err := engine.Status(ctx, app, "")
 		if err == nil && st.Running && st.Workload.Available && st.Workload.Image == image {
 			return
 		}

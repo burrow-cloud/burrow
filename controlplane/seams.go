@@ -93,6 +93,15 @@ type DatabaseProvisioner interface {
 // to the runtime. It is deliberately narrow — the v0.1 operations (deploy, status,
 // logs, scale, and the delete that supports teardown) and nothing more.
 type Kubernetes interface {
+	// WithNamespace returns a view of this seam whose per-app resource operations (deploy,
+	// status, logs, scale, delete, expose/unexpose, and the per-app Secret) act in ns instead
+	// of the configured app namespace — the mechanism that routes an operation to a named
+	// environment's namespace (ADR-0035 phase 2). Add-on operations are unaffected: add-ons live
+	// in their own namespace. An empty ns, or ns equal to the configured app namespace, returns a
+	// view equivalent to the receiver, so default-environment behavior is identical to before
+	// environments existed.
+	WithNamespace(ns string) Kubernetes
+
 	// ApplyWorkload creates or updates the workload for spec.App to match spec.
 	ApplyWorkload(ctx context.Context, spec WorkloadSpec) error
 	// WorkloadStatus returns the observed state of app's workload, or ErrNotFound if

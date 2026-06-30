@@ -72,10 +72,13 @@ func (e *APIError) Error() string {
 
 // The DTOs below mirror the control-plane API's JSON shapes (snake_case).
 
-// DeployRequest carries a deploy's code-free metadata. Env is deliberately absent: an app's
-// non-secret config is an independently-managed store, set with SetConfig and sourced at apply
-// time rather than passed per deploy (ADR-0028).
+// DeployRequest carries a deploy's code-free metadata. The non-secret config is deliberately absent:
+// an app's config is an independently-managed store, set with SetConfig and sourced at apply time
+// rather than passed per deploy (ADR-0028). Env names the target environment (ADR-0035 phase 2b):
+// empty or "default" targets the default environment's namespace, a registered name targets that
+// environment's namespace.
 type DeployRequest struct {
+	Env         string   `json:"env,omitempty"`
 	Image       string   `json:"image"`
 	Command     []string `json:"command,omitempty"`
 	MetricsPort int32    `json:"metrics_port,omitempty"`
@@ -312,18 +315,19 @@ func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (Dep
 	return out, err
 }
 
-func (c *Client) Status(ctx context.Context, app string) (StatusResult, error) {
+func (c *Client) Status(ctx context.Context, app, env string) (StatusResult, error) {
 	var out StatusResult
-	err := c.do(ctx, http.MethodGet, c.appPath(app, "status"), nil, &out)
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "status"), env), nil, &out)
 	return out, err
 }
 
-// Apps lists the workload status of every Burrow-managed app.
-func (c *Client) Apps(ctx context.Context) ([]WorkloadStatus, error) {
+// Apps lists the workload status of every Burrow-managed app in the target environment (ADR-0035
+// phase 2b). An empty env lists the default environment's namespace.
+func (c *Client) Apps(ctx context.Context, env string) ([]WorkloadStatus, error) {
 	var out struct {
 		Apps []WorkloadStatus `json:"apps"`
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/apps", nil, &out)
+	err := c.do(ctx, http.MethodGet, withEnv("/v1/apps", env), nil, &out)
 	return out.Apps, err
 }
 
@@ -487,7 +491,7 @@ func (c *Client) QueryMetrics(ctx context.Context, query string, backend string)
 	return out.Samples, err
 }
 
-func (c *Client) Logs(ctx context.Context, app string, tail int) ([]LogLine, error) {
+func (c *Client) Logs(ctx context.Context, app, env string, tail int) ([]LogLine, error) {
 	path := c.appPath(app, "logs")
 	if tail > 0 {
 		path += "?tail=" + strconv.Itoa(tail)
@@ -495,52 +499,54 @@ func (c *Client) Logs(ctx context.Context, app string, tail int) ([]LogLine, err
 	var out struct {
 		Lines []LogLine `json:"lines"`
 	}
-	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	err := c.do(ctx, http.MethodGet, withEnv(path, env), nil, &out)
 	return out.Lines, err
 }
 
-// DeleteApp removes an app entirely — its workload, routing, and release history. The delete
-// is guarded and held for confirmation by default; pass confirm=true to proceed past the hold.
-func (c *Client) DeleteApp(ctx context.Context, app string, confirm bool) error {
+// DeleteApp removes an app entirely — its workload, routing, and release history — in the target
+// environment (ADR-0035 phase 2b). The delete is guarded and held for confirmation by default; pass
+// confirm=true to proceed past the hold.
+func (c *Client) DeleteApp(ctx context.Context, app, env string, confirm bool) error {
 	path := "/v1/apps/" + url.PathEscape(app)
 	if confirm {
 		path += "?confirm=true"
 	}
-	return c.do(ctx, http.MethodDelete, path, nil, nil)
+	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
 }
 
-func (c *Client) Rollback(ctx context.Context, app string, confirm bool) (RollbackResult, error) {
+func (c *Client) Rollback(ctx context.Context, app, env string, confirm bool) (RollbackResult, error) {
 	var out RollbackResult
 	path := c.appPath(app, "rollback")
 	if confirm {
 		path += "?confirm=true"
 	}
-	err := c.do(ctx, http.MethodPost, path, nil, &out)
+	err := c.do(ctx, http.MethodPost, withEnv(path, env), nil, &out)
 	return out, err
 }
 
-func (c *Client) Scale(ctx context.Context, app string, replicas int32, confirm bool) (ScaleResult, error) {
+func (c *Client) Scale(ctx context.Context, app, env string, replicas int32, confirm bool) (ScaleResult, error) {
 	var out ScaleResult
-	body := map[string]any{"replicas": replicas, "confirm": confirm}
+	body := map[string]any{"env": env, "replicas": replicas, "confirm": confirm}
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "scale"), body, &out)
 	return out, err
 }
 
-func (c *Client) Expose(ctx context.Context, app, host string, port int32, tls bool, issuer string, confirm bool) (ExposeResult, error) {
+func (c *Client) Expose(ctx context.Context, app, env, host string, port int32, tls bool, issuer string, confirm bool) (ExposeResult, error) {
 	var out ExposeResult
-	body := map[string]any{"host": host, "port": port, "tls": tls, "issuer": issuer, "confirm": confirm}
+	body := map[string]any{"env": env, "host": host, "port": port, "tls": tls, "issuer": issuer, "confirm": confirm}
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "expose"), body, &out)
 	return out, err
 }
 
-func (c *Client) Unexpose(ctx context.Context, app string) error {
-	return c.do(ctx, http.MethodPost, c.appPath(app, "unexpose"), nil, nil)
+func (c *Client) Unexpose(ctx context.Context, app, env string) error {
+	return c.do(ctx, http.MethodPost, withEnv(c.appPath(app, "unexpose"), env), nil, nil)
 }
 
-// Reachability reports whether an app is reachable at its hostname, link by link.
-func (c *Client) Reachability(ctx context.Context, app string) (ReachabilityResult, error) {
+// Reachability reports whether an app is reachable at its hostname, link by link, in the target
+// environment (ADR-0035 phase 2b).
+func (c *Client) Reachability(ctx context.Context, app, env string) (ReachabilityResult, error) {
 	var out ReachabilityResult
-	err := c.do(ctx, http.MethodGet, c.appPath(app, "reachability"), nil, &out)
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "reachability"), env), nil, &out)
 	return out, err
 }
 
@@ -557,7 +563,7 @@ const ReachabilityPollInterval = 3 * time.Second
 // with Reachable false means the timeout elapsed and result.BlockedOn names the link to fix.
 // after supplies the poll clock as a one-shot timer channel so tests can drive the loop without
 // real time; pass nil for the real clock (time.After).
-func (c *Client) WaitReachable(ctx context.Context, app string, timeout time.Duration, after func(time.Duration) <-chan time.Time) (ReachabilityResult, error) {
+func (c *Client) WaitReachable(ctx context.Context, app, env string, timeout time.Duration, after func(time.Duration) <-chan time.Time) (ReachabilityResult, error) {
 	if after == nil {
 		after = time.After
 	}
@@ -565,7 +571,7 @@ func (c *Client) WaitReachable(ctx context.Context, app string, timeout time.Dur
 	if interval > timeout {
 		interval = timeout
 	}
-	res, err := c.Reachability(ctx, app)
+	res, err := c.Reachability(ctx, app, env)
 	if err != nil || res.Reachable {
 		return res, err
 	}
@@ -581,7 +587,7 @@ func (c *Client) WaitReachable(ctx context.Context, app string, timeout time.Dur
 			return res, ctx.Err()
 		case <-after(wait):
 		}
-		res, err = c.Reachability(ctx, app)
+		res, err = c.Reachability(ctx, app, env)
 		if err != nil || res.Reachable {
 			return res, err
 		}
@@ -592,27 +598,29 @@ func (c *Client) WaitReachable(ctx context.Context, app string, timeout time.Dur
 // SetConfig upserts one non-secret config var for an app (ADR-0028). By default the running workload
 // rolls so the app picks the value up; noRestart only persists, landing the change on the next
 // deploy.
-func (c *Client) SetConfig(ctx context.Context, app, key, value string, noRestart bool) error {
-	body := map[string]any{"key": key, "value": value, "no_restart": noRestart}
+func (c *Client) SetConfig(ctx context.Context, app, env, key, value string, noRestart bool) error {
+	body := map[string]any{"env": env, "key": key, "value": value, "no_restart": noRestart}
 	return c.do(ctx, http.MethodPost, c.appPath(app, "config"), body, nil)
 }
 
 // UnsetConfig removes one config var for an app (ADR-0028). By default the running workload rolls; with
-// noRestart the removal only persists and lands on the next deploy.
-func (c *Client) UnsetConfig(ctx context.Context, app, key string, noRestart bool) error {
+// noRestart the removal only persists and lands on the next deploy. env names the target environment
+// (ADR-0035 phase 2b).
+func (c *Client) UnsetConfig(ctx context.Context, app, env, key string, noRestart bool) error {
 	path := "/v1/apps/" + url.PathEscape(app) + "/config/" + url.PathEscape(key)
 	if noRestart {
 		path += "?no_restart=true"
 	}
-	return c.do(ctx, http.MethodDelete, path, nil, nil)
+	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
 }
 
-// Config returns the app's non-secret config store (ADR-0028).
-func (c *Client) Config(ctx context.Context, app string) (map[string]string, error) {
+// Config returns the app's non-secret config store (ADR-0028). env names the target environment
+// (ADR-0035 phase 2b).
+func (c *Client) Config(ctx context.Context, app, env string) (map[string]string, error) {
 	var out struct {
 		Config map[string]string `json:"config"`
 	}
-	err := c.do(ctx, http.MethodGet, c.appPath(app, "config"), nil, &out)
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "config"), env), nil, &out)
 	return out.Config, err
 }
 
@@ -621,34 +629,50 @@ func (c *Client) Config(ctx context.Context, app string) (map[string]string, err
 // Secret; it is never logged, never stored in Postgres, and is still never carried over MCP (there
 // is no secret-set MCP tool). By default the running workload rolls so it picks the value up; with
 // noRestart the change only persists and lands on the next deploy.
-func (c *Client) SetSecret(ctx context.Context, app, key, value string, noRestart bool) error {
-	body := map[string]any{"key": key, "value": value, "no_restart": noRestart}
+func (c *Client) SetSecret(ctx context.Context, app, env, key, value string, noRestart bool) error {
+	body := map[string]any{"env": env, "key": key, "value": value, "no_restart": noRestart}
 	return c.do(ctx, http.MethodPost, c.appPath(app, "secrets"), body, nil)
 }
 
 // Secrets returns the KEYS in an app's per-app Secret, never the values (ADR-0028/0004). Secret
-// values live only in the Kubernetes Secret; a list reads keys only and never returns a value.
-func (c *Client) Secrets(ctx context.Context, app string) ([]string, error) {
+// values live only in the Kubernetes Secret; a list reads keys only and never returns a value. env
+// names the target environment (ADR-0035 phase 2b), whose namespace holds the per-app Secret.
+func (c *Client) Secrets(ctx context.Context, app, env string) ([]string, error) {
 	var out struct {
 		Keys []string `json:"keys"`
 	}
-	err := c.do(ctx, http.MethodGet, c.appPath(app, "secrets"), nil, &out)
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "secrets"), env), nil, &out)
 	return out.Keys, err
 }
 
 // UnsetSecret removes one key from an app's per-app Secret (ADR-0028). Removing a key carries no
 // value, so it is allowed over the API/MCP. By default the running workload rolls so it drops the
-// value; with noRestart the change only persists and lands on the next deploy.
-func (c *Client) UnsetSecret(ctx context.Context, app, key string, noRestart bool) error {
+// value; with noRestart the change only persists and lands on the next deploy. env names the target
+// environment (ADR-0035 phase 2b).
+func (c *Client) UnsetSecret(ctx context.Context, app, env, key string, noRestart bool) error {
 	path := "/v1/apps/" + url.PathEscape(app) + "/secrets/" + url.PathEscape(key)
 	if noRestart {
 		path += "?no_restart=true"
 	}
-	return c.do(ctx, http.MethodDelete, path, nil, nil)
+	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
 }
 
 func (c *Client) appPath(app, verb string) string {
 	return "/v1/apps/" + url.PathEscape(app) + "/" + verb
+}
+
+// withEnv appends an env query parameter to path when env is non-empty, so an operation targets a
+// named environment (ADR-0035 phase 2b). An empty env leaves the path unchanged and the server
+// defaults to the default environment.
+func withEnv(path, env string) string {
+	if env == "" {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "env=" + url.QueryEscape(env)
 }
 
 // Guardrails lists the control-plane guardrails and their current dispositions.

@@ -35,6 +35,15 @@ type contextArg struct {
 	Context string `json:"context,omitempty" jsonschema:"optional: the kubeconfig context (environment) to target, e.g. prod-cluster or staging; default is the current context. Each environment is a separate cluster with its own guardrail policy, so this is how you operate prod versus staging."`
 }
 
+// envArg is embedded in every per-app tool's input so a call can target a named environment within a
+// cluster (ADR-0035 phase 2b). It composes with contextArg: context picks the cluster, env picks the
+// namespace-per-environment inside it. Its single field is promoted into the tool's generated input
+// schema as an optional "env" property; an empty value means the default environment. An environment
+// name is non-secret metadata, not a credential. Use burrow_environments to discover the names.
+type envArg struct {
+	Env string `json:"env,omitempty" jsonschema:"optional: the environment to operate in (e.g. staging or prod); default is the default environment. Within the targeted cluster, this picks the namespace-per-environment; use burrow_environments to see what is registered."`
+}
+
 // NewServer builds the Burrow MCP server: an agent-neutral surface (ADR-0003) exposing
 // the control plane's operations as MCP tools. Each tool translates a call into a
 // control-plane API call via the client and returns the structured result; a control
@@ -48,7 +57,7 @@ func NewServer(clientFor ClientForContext, contexts ContextLister, version strin
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_deploy",
-		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Config is NOT passed here: an app's config is a separate, app-global store sourced at deploy time, so set any config vars the release needs with burrow_config_set BEFORE deploying — the new release then boots with it on first start. (burrow_config_set with no_restart=true followed by burrow_deploy is a single restart.) For SECRETS (DB URLs, API keys), do not put values in config and do not paste secret values into this conversation: ask the user to run `burrow app secret set <app> KEY=VALUE` themselves BEFORE deploying, then confirm the key with burrow_secret_list. Returns the new release and the release it superseded (the rollback handle). Pass context to target a specific cluster/environment (default the current one); this is how you deploy to staging versus prod, and each environment enforces its own guardrails.",
+		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Config is NOT passed here: an app's config is a separate, app-global store sourced at deploy time, so set any config vars the release needs with burrow_config_set BEFORE deploying — the new release then boots with it on first start. (burrow_config_set with no_restart=true followed by burrow_deploy is a single restart.) For SECRETS (DB URLs, API keys), do not put values in config and do not paste secret values into this conversation: ask the user to run `burrow app secret set <app> KEY=VALUE` themselves BEFORE deploying, then confirm the key with burrow_secret_list. Returns the new release and the release it superseded (the rollback handle). Pass context to target a specific cluster (default the current one). Pass env to target a namespace-environment within that cluster, such as staging or prod (default the default environment); this is how you deploy the same app to staging versus prod. Use burrow_environments to see the environments registered in a cluster.",
 	}, deployTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
@@ -78,7 +87,7 @@ func NewServer(clientFor ClientForContext, contexts ContextLister, version strin
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_apps",
-		Description: "List the applications Burrow manages and each one's running state (image, ready/desired replicas, availability), so you can discover what is deployed before operating on it. Read-only. Pass context to survey a specific cluster/environment (default the current one); this is how you compare prod versus staging.",
+		Description: "List the applications Burrow manages and each one's running state (image, ready/desired replicas, availability), so you can discover what is deployed before operating on it. Read-only. Pass context to survey a specific cluster (default the current one), and env to survey a namespace-environment within it such as staging or prod (default the default environment); this is how you compare prod versus staging.",
 	}, appsTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
@@ -128,7 +137,7 @@ func NewServer(clientFor ClientForContext, contexts ContextLister, version strin
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_status",
-		Description: "Report an application's status: its most recent release and the live workload state (desired/ready replicas, availability). Pass context to read a specific cluster/environment (default the current one); this is how you check prod versus staging.",
+		Description: "Report an application's status: its most recent release and the live workload state (desired/ready replicas, availability). Pass context to read a specific cluster (default the current one), and env to read a namespace-environment within it such as staging or prod (default the default environment); this is how you check prod versus staging.",
 	}, statusTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
@@ -213,6 +222,7 @@ func Serve(ctx context.Context, clientFor ClientForContext, contexts ContextList
 
 type deployInput struct {
 	contextArg
+	envArg
 	App         string   `json:"app" jsonschema:"the application name (a DNS-1123 label)"`
 	Image       string   `json:"image" jsonschema:"the pullable container image reference to deploy, e.g. registry.example.com/app:1.2.3"`
 	Command     []string `json:"command,omitempty" jsonschema:"optional command override for the container"`
@@ -223,17 +233,20 @@ type deployInput struct {
 
 type appInput struct {
 	contextArg
+	envArg
 	App string `json:"app" jsonschema:"the application name"`
 }
 
 type logsInput struct {
 	contextArg
+	envArg
 	App  string `json:"app" jsonschema:"the application name"`
 	Tail int    `json:"tail,omitempty" jsonschema:"maximum number of recent log lines to return"`
 }
 
 type scaleInput struct {
 	contextArg
+	envArg
 	App      string `json:"app" jsonschema:"the application name"`
 	Replicas int32  `json:"replicas" jsonschema:"desired number of replicas"`
 	Confirm  bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an operation a guardrail held for confirmation (e.g. scaling to zero); do not self-confirm"`
@@ -245,7 +258,7 @@ func deployTool(clientFor ClientForContext) sdk.ToolHandlerFor[deployInput, clie
 		if err != nil {
 			return nil, client.DeployResult{}, err
 		}
-		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Image: in.Image, Command: in.Command, MetricsPort: in.MetricsPort, Replicas: in.Replicas, Confirm: in.Confirm})
+		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Env: in.Env, Image: in.Image, Command: in.Command, MetricsPort: in.MetricsPort, Replicas: in.Replicas, Confirm: in.Confirm})
 		if err != nil {
 			return nil, client.DeployResult{}, err
 		}
@@ -255,6 +268,7 @@ func deployTool(clientFor ClientForContext) sdk.ToolHandlerFor[deployInput, clie
 
 type configSetInput struct {
 	contextArg
+	envArg
 	App       string `json:"app" jsonschema:"the application name"`
 	Key       string `json:"key" jsonschema:"the config var name (e.g. LOG_LEVEL)"`
 	Value     string `json:"value" jsonschema:"the value to set"`
@@ -263,6 +277,7 @@ type configSetInput struct {
 
 type configUnsetInput struct {
 	contextArg
+	envArg
 	App       string `json:"app" jsonschema:"the application name"`
 	Key       string `json:"key" jsonschema:"the config var name to remove"`
 	NoRestart bool   `json:"no_restart,omitempty" jsonschema:"true to persist the removal without rolling the running app; the change lands on the next deploy"`
@@ -284,7 +299,7 @@ func configSetTool(clientFor ClientForContext) sdk.ToolHandlerFor[configSetInput
 		if err != nil {
 			return nil, keyAck{}, err
 		}
-		if err := c.SetConfig(ctx, in.App, in.Key, in.Value, in.NoRestart); err != nil {
+		if err := c.SetConfig(ctx, in.App, in.Env, in.Key, in.Value, in.NoRestart); err != nil {
 			return nil, keyAck{}, err
 		}
 		return nil, keyAck{App: in.App, Key: in.Key}, nil
@@ -297,7 +312,7 @@ func configUnsetTool(clientFor ClientForContext) sdk.ToolHandlerFor[configUnsetI
 		if err != nil {
 			return nil, keyAck{}, err
 		}
-		if err := c.UnsetConfig(ctx, in.App, in.Key, in.NoRestart); err != nil {
+		if err := c.UnsetConfig(ctx, in.App, in.Env, in.Key, in.NoRestart); err != nil {
 			return nil, keyAck{}, err
 		}
 		return nil, keyAck{App: in.App, Key: in.Key}, nil
@@ -310,7 +325,7 @@ func configListTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, con
 		if err != nil {
 			return nil, configOutput{}, err
 		}
-		cfg, err := c.Config(ctx, in.App)
+		cfg, err := c.Config(ctx, in.App, in.Env)
 		if err != nil {
 			return nil, configOutput{}, err
 		}
@@ -320,6 +335,7 @@ func configListTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, con
 
 type secretUnsetInput struct {
 	contextArg
+	envArg
 	App       string `json:"app" jsonschema:"the application name"`
 	Key       string `json:"key" jsonschema:"the secret environment variable name to remove (the KEY, not a value)"`
 	NoRestart bool   `json:"no_restart,omitempty" jsonschema:"true to persist the removal without rolling the running app; the change lands on the next deploy"`
@@ -336,7 +352,7 @@ func secretListTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, sec
 		if err != nil {
 			return nil, secretsOutput{}, err
 		}
-		keys, err := c.Secrets(ctx, in.App)
+		keys, err := c.Secrets(ctx, in.App, in.Env)
 		if err != nil {
 			return nil, secretsOutput{}, err
 		}
@@ -350,7 +366,7 @@ func secretUnsetTool(clientFor ClientForContext) sdk.ToolHandlerFor[secretUnsetI
 		if err != nil {
 			return nil, keyAck{}, err
 		}
-		if err := c.UnsetSecret(ctx, in.App, in.Key, in.NoRestart); err != nil {
+		if err := c.UnsetSecret(ctx, in.App, in.Env, in.Key, in.NoRestart); err != nil {
 			return nil, keyAck{}, err
 		}
 		return nil, keyAck{App: in.App, Key: in.Key}, nil
@@ -363,7 +379,7 @@ func statusTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, client.
 		if err != nil {
 			return nil, client.StatusResult{}, err
 		}
-		res, err := c.Status(ctx, in.App)
+		res, err := c.Status(ctx, in.App, in.Env)
 		if err != nil {
 			return nil, client.StatusResult{}, err
 		}
@@ -382,7 +398,7 @@ func logsTool(clientFor ClientForContext) sdk.ToolHandlerFor[logsInput, logsOutp
 		if err != nil {
 			return nil, logsOutput{}, err
 		}
-		lines, err := c.Logs(ctx, in.App, in.Tail)
+		lines, err := c.Logs(ctx, in.App, in.Env, in.Tail)
 		if err != nil {
 			return nil, logsOutput{}, err
 		}
@@ -392,6 +408,7 @@ func logsTool(clientFor ClientForContext) sdk.ToolHandlerFor[logsInput, logsOutp
 
 type rollbackInput struct {
 	contextArg
+	envArg
 	App     string `json:"app" jsonschema:"the application name"`
 	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed a rollback that an operator's guardrail held for confirmation; do not self-confirm"`
 }
@@ -402,7 +419,7 @@ func rollbackTool(clientFor ClientForContext) sdk.ToolHandlerFor[rollbackInput, 
 		if err != nil {
 			return nil, client.RollbackResult{}, err
 		}
-		res, err := c.Rollback(ctx, in.App, in.Confirm)
+		res, err := c.Rollback(ctx, in.App, in.Env, in.Confirm)
 		if err != nil {
 			return nil, client.RollbackResult{}, err
 		}
@@ -416,7 +433,7 @@ func scaleTool(clientFor ClientForContext) sdk.ToolHandlerFor[scaleInput, client
 		if err != nil {
 			return nil, client.ScaleResult{}, err
 		}
-		res, err := c.Scale(ctx, in.App, in.Replicas, in.Confirm)
+		res, err := c.Scale(ctx, in.App, in.Env, in.Replicas, in.Confirm)
 		if err != nil {
 			return nil, client.ScaleResult{}, err
 		}
@@ -426,6 +443,7 @@ func scaleTool(clientFor ClientForContext) sdk.ToolHandlerFor[scaleInput, client
 
 type exposeInput struct {
 	contextArg
+	envArg
 	App     string `json:"app" jsonschema:"the application name"`
 	Host    string `json:"host" jsonschema:"the external hostname to route to the app, e.g. app.example.com"`
 	Port    int32  `json:"port" jsonschema:"the app's container port to forward to"`
@@ -440,7 +458,7 @@ func exposeTool(clientFor ClientForContext) sdk.ToolHandlerFor[exposeInput, clie
 		if err != nil {
 			return nil, client.ExposeResult{}, err
 		}
-		res, err := c.Expose(ctx, in.App, in.Host, in.Port, in.TLS, in.Issuer, in.Confirm)
+		res, err := c.Expose(ctx, in.App, in.Env, in.Host, in.Port, in.TLS, in.Issuer, in.Confirm)
 		if err != nil {
 			return nil, client.ExposeResult{}, err
 		}
@@ -459,7 +477,7 @@ func unexposeTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, unexp
 		if err != nil {
 			return nil, unexposeOutput{}, err
 		}
-		if err := c.Unexpose(ctx, in.App); err != nil {
+		if err := c.Unexpose(ctx, in.App, in.Env); err != nil {
 			return nil, unexposeOutput{}, err
 		}
 		return nil, unexposeOutput{App: in.App}, nil
@@ -468,6 +486,7 @@ func unexposeTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, unexp
 
 type reachabilityInput struct {
 	contextArg
+	envArg
 	App  string `json:"app" jsonschema:"the application name"`
 	Wait bool   `json:"wait,omitempty" jsonschema:"poll until the app is live (reachable) or a timeout, instead of a single point-in-time check; use after deploying, exposing, and pointing DNS to confirm the app is live and get its URL"`
 }
@@ -483,10 +502,12 @@ func reachabilityTool(clientFor ClientForContext) sdk.ToolHandlerFor[reachabilit
 		if err != nil {
 			return nil, client.ReachabilityResult{}, err
 		}
-		reach := c.Reachability
+		reach := func(ctx context.Context, app string) (client.ReachabilityResult, error) {
+			return c.Reachability(ctx, app, in.Env)
+		}
 		if in.Wait {
 			reach = func(ctx context.Context, app string) (client.ReachabilityResult, error) {
-				return c.WaitReachable(ctx, app, reachabilityWaitTimeout, nil)
+				return c.WaitReachable(ctx, app, in.Env, reachabilityWaitTimeout, nil)
 			}
 		}
 		res, err := reach(ctx, in.App)
@@ -557,9 +578,10 @@ type providersOutput struct {
 	Providers []providerInfo `json:"providers"`
 }
 
-// appsInput carries only the optional context: listing apps takes no other arguments.
+// appsInput carries the optional context and environment: listing apps takes no other arguments.
 type appsInput struct {
 	contextArg
+	envArg
 }
 
 // appInfo is one app's running state in the apps listing.
@@ -581,7 +603,7 @@ func appsTool(clientFor ClientForContext) sdk.ToolHandlerFor[appsInput, appsOutp
 		if err != nil {
 			return nil, appsOutput{}, err
 		}
-		apps, err := c.Apps(ctx)
+		apps, err := c.Apps(ctx, in.Env)
 		if err != nil {
 			return nil, appsOutput{}, err
 		}
@@ -659,6 +681,7 @@ func addonInstallTool(clientFor ClientForContext) sdk.ToolHandlerFor[addonInstal
 
 type appDeleteInput struct {
 	contextArg
+	envArg
 	App     string `json:"app" jsonschema:"the application name to delete (a DNS-1123 label)"`
 	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed this destructive delete; do not self-confirm"`
 }
@@ -673,7 +696,7 @@ func appDeleteTool(clientFor ClientForContext) sdk.ToolHandlerFor[appDeleteInput
 		if err != nil {
 			return nil, appDeleteOutput{}, err
 		}
-		if err := c.DeleteApp(ctx, in.App, in.Confirm); err != nil {
+		if err := c.DeleteApp(ctx, in.App, in.Env, in.Confirm); err != nil {
 			return nil, appDeleteOutput{}, err
 		}
 		return nil, appDeleteOutput{Deleted: in.App}, nil

@@ -71,7 +71,7 @@ func newSecretSetCmd() *cobra.Command {
 				return err
 			}
 			for k, v := range kv.m {
-				if err := c.SetSecret(ctx, app, k, v, noRestart); err != nil {
+				if err := c.SetSecret(ctx, app, o.env, k, v, noRestart); err != nil {
 					return err
 				}
 				human := fmt.Sprintf("set secret %s on %s", k, app)
@@ -86,6 +86,7 @@ func newSecretSetCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "persist the value without rolling the running workload; it lands on the next deploy")
 	return cmd
 }
@@ -102,7 +103,7 @@ func newSecretListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			keys, err := c.Secrets(ctx, args[0])
+			keys, err := c.Secrets(ctx, args[0], o.env)
 			if err != nil {
 				return err
 			}
@@ -121,6 +122,7 @@ func newSecretListCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 
@@ -138,7 +140,7 @@ func newSecretUnsetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.UnsetSecret(ctx, app, key, noRestart); err != nil {
+			if err := c.UnsetSecret(ctx, app, o.env, key, noRestart); err != nil {
 				return err
 			}
 			human := fmt.Sprintf("unset secret %s on %s", key, app)
@@ -149,6 +151,7 @@ func newSecretUnsetCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "persist the removal without rolling the running workload; it lands on the next deploy")
 	return cmd
 }

@@ -77,6 +77,21 @@ func (a *Adapter) WithAddonNamespace(ns string) *Adapter {
 	return a
 }
 
+// WithNamespace returns a copy of the Adapter whose app-resource operations act in ns instead of
+// the configured app namespace — the mechanism that routes an operation to a named environment's
+// namespace (ADR-0035 phase 2). The add-on namespace is unchanged, so add-ons still land in their
+// own namespace. An empty ns, or ns equal to the current app namespace, returns the receiver
+// unchanged, so default-environment behavior is identical to before environments existed. The copy
+// is shallow: it shares the same client, so no new connection is made per operation.
+func (a *Adapter) WithNamespace(ns string) controlplane.Kubernetes {
+	if ns == "" || ns == a.namespace {
+		return a
+	}
+	cp := *a
+	cp.namespace = ns
+	return &cp
+}
+
 func (a *Adapter) ApplyWorkload(ctx context.Context, spec controlplane.WorkloadSpec) error {
 	if spec.Kind != "" && spec.Kind != controlplane.WorkloadDeployment {
 		return fmt.Errorf("kube: workload kind %q is not supported in v0.1 (Deployment only): %w", spec.Kind, controlplane.ErrNotImplemented)

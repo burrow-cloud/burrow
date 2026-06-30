@@ -197,7 +197,7 @@ func TestStatus(t *testing.T) {
 	r.Add("img:1", "sha256:1")
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 3})
 
-	st, err := e.Status(ctx, "web")
+	st, err := e.Status(ctx, "web", "")
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestStatus(t *testing.T) {
 
 func TestStatusUnknownApp(t *testing.T) {
 	e, _, _, _, _ := newEngine(t, permissive())
-	if _, err := e.Status(context.Background(), "ghost"); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.Status(context.Background(), "ghost", ""); !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("Status(ghost) err = %v, want ErrNotFound", err)
 	}
 }
@@ -226,11 +226,11 @@ func TestLogs(t *testing.T) {
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
 	k.SetLogs("web", []cp.LogLine{{Pod: "web-1", Message: "hello"}})
 
-	lines, err := e.Logs(ctx, "web", cp.LogOptions{})
+	lines, err := e.Logs(ctx, "web", "", cp.LogOptions{})
 	if err != nil || len(lines) != 1 || lines[0].Message != "hello" {
 		t.Fatalf("Logs = %+v, err=%v", lines, err)
 	}
-	if _, err := e.Logs(ctx, "ghost", cp.LogOptions{}); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.Logs(ctx, "ghost", "", cp.LogOptions{}); !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("Logs(ghost) err = %v, want ErrNotFound", err)
 	}
 }
@@ -241,7 +241,7 @@ func TestScale(t *testing.T) {
 	r.Add("img:1", "sha256:1")
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2})
 
-	res, err := e.Scale(ctx, "web", 5, false)
+	res, err := e.Scale(ctx, "web", "", 5, false)
 	if err != nil {
 		t.Fatalf("Scale: %v", err)
 	}
@@ -253,12 +253,12 @@ func TestScale(t *testing.T) {
 	}
 
 	// Guardrails apply to scale too.
-	_, err = e.Scale(ctx, "web", 0, false)
+	_, err = e.Scale(ctx, "web", "", 0, false)
 	mustGuardrail(t, err, cp.GuardrailScaleToZero)
-	_, err = e.Scale(ctx, "web", 99, false)
+	_, err = e.Scale(ctx, "web", "", 99, false)
 	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
 	// Unknown app.
-	if _, err := e.Scale(ctx, "ghost", 3, false); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.Scale(ctx, "ghost", "", 3, false); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("scale ghost err = %v, want ErrNotFound", err)
 	}
 }
@@ -274,7 +274,7 @@ func TestPolicyReadLive(t *testing.T) {
 	}
 	// Tighten the policy at runtime; the next operation must observe it.
 	d.SetPolicy(cp.Policy{MaxReplicas: 1})
-	_, err := e.Scale(ctx, "web", 5, false)
+	_, err := e.Scale(ctx, "web", "", 5, false)
 	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
 }
 
@@ -346,10 +346,10 @@ func TestExpose(t *testing.T) {
 	}
 
 	// Unexpose removes it; a second unexpose is ErrNotFound.
-	if err := e.Unexpose(ctx, "web"); err != nil {
+	if err := e.Unexpose(ctx, "web", ""); err != nil {
 		t.Fatalf("unexpose: %v", err)
 	}
-	if err := e.Unexpose(ctx, "web"); !errors.Is(err, cp.ErrNotFound) {
+	if err := e.Unexpose(ctx, "web", ""); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("second unexpose = %v, want ErrNotFound", err)
 	}
 }
@@ -369,7 +369,7 @@ func TestExposeTLS(t *testing.T) {
 	if res.URL != "https://web.example.com" {
 		t.Errorf("URL = %q, want https://web.example.com", res.URL)
 	}
-	if rr, _ := e.Reachability(ctx, "web"); !rr.TLS {
+	if rr, _ := e.Reachability(ctx, "web", ""); !rr.TLS {
 		t.Errorf("reachability TLS = false, want true")
 	}
 
@@ -394,7 +394,7 @@ func TestReachability(t *testing.T) {
 	}
 
 	// Not deployed.
-	if r, _ := e.Reachability(ctx, "web"); r.Deployed || r.Reachable || !strings.Contains(r.Summary, "not deployed") {
+	if r, _ := e.Reachability(ctx, "web", ""); r.Deployed || r.Reachable || !strings.Contains(r.Summary, "not deployed") {
 		t.Errorf("not-deployed = %+v", r)
 	}
 
@@ -404,7 +404,7 @@ func TestReachability(t *testing.T) {
 	}
 
 	// Deployed and ready, but not exposed.
-	if r, _ := e.Reachability(ctx, "web"); !r.Ready || r.Exposed || !strings.Contains(r.Summary, "not exposed") {
+	if r, _ := e.Reachability(ctx, "web", ""); !r.Ready || r.Exposed || !strings.Contains(r.Summary, "not exposed") {
 		t.Errorf("not-exposed = %+v", r)
 	}
 
@@ -412,20 +412,20 @@ func TestReachability(t *testing.T) {
 	if err := k.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.example.com", Port: 8080}); err != nil {
 		t.Fatalf("expose: %v", err)
 	}
-	if r, _ := e.Reachability(ctx, "web"); !r.Exposed || r.Address != "" || !strings.Contains(r.Summary, "no external address") {
+	if r, _ := e.Reachability(ctx, "web", ""); !r.Exposed || r.Address != "" || !strings.Contains(r.Summary, "no external address") {
 		t.Errorf("no-address = %+v", r)
 	}
 
 	// Address assigned, but DNS points elsewhere.
 	k.SetIngressAddress("web", "1.2.3.4")
 	dns.Set("web.example.com", "9.9.9.9")
-	if r, _ := e.Reachability(ctx, "web"); r.DNSPointsAtCluster || !strings.Contains(r.Summary, "doesn't point at the cluster") {
+	if r, _ := e.Reachability(ctx, "web", ""); r.DNSPointsAtCluster || !strings.Contains(r.Summary, "doesn't point at the cluster") {
 		t.Errorf("dns-mismatch = %+v", r)
 	}
 
 	// DNS points at the cluster → reachable.
 	dns.Set("web.example.com", "1.2.3.4")
-	if r, _ := e.Reachability(ctx, "web"); !r.Reachable || !r.DNSPointsAtCluster || !strings.Contains(r.Summary, "reachable at http://web.example.com") {
+	if r, _ := e.Reachability(ctx, "web", ""); !r.Reachable || !r.DNSPointsAtCluster || !strings.Contains(r.Summary, "reachable at http://web.example.com") {
 		t.Errorf("reachable = %+v", r)
 	}
 }
@@ -448,7 +448,7 @@ func TestReachabilityVerdict(t *testing.T) {
 	}
 
 	// Not deployed → blocked on the deployment, not reachable, no URL.
-	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.URL != "" || r.BlockedOn != "deployment" {
+	if r, _ := e.Reachability(ctx, "web", ""); r.Reachable || r.URL != "" || r.BlockedOn != "deployment" {
 		t.Errorf("not-deployed verdict = {reachable:%v url:%q blocked:%q}", r.Reachable, r.URL, r.BlockedOn)
 	}
 
@@ -458,7 +458,7 @@ func TestReachabilityVerdict(t *testing.T) {
 	}
 
 	// Deployed and ready but not exposed → blocked on the ingress (routing).
-	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.BlockedOn != "ingress" {
+	if r, _ := e.Reachability(ctx, "web", ""); r.Reachable || r.BlockedOn != "ingress" {
 		t.Errorf("not-exposed verdict = {reachable:%v blocked:%q}", r.Reachable, r.BlockedOn)
 	}
 
@@ -466,26 +466,26 @@ func TestReachabilityVerdict(t *testing.T) {
 	if err := k.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.example.com", Port: 8080, TLS: true, Issuer: "letsencrypt"}); err != nil {
 		t.Fatalf("expose: %v", err)
 	}
-	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.BlockedOn != "ingress controller" {
+	if r, _ := e.Reachability(ctx, "web", ""); r.Reachable || r.BlockedOn != "ingress controller" {
 		t.Errorf("no-address verdict = {reachable:%v blocked:%q}", r.Reachable, r.BlockedOn)
 	}
 
 	// Address assigned, but the TLS certificate has not been issued → blocked on the certificate.
 	k.SetIngressAddress("web", "1.2.3.4")
 	dns.Set("web.example.com", "1.2.3.4")
-	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.BlockedOn != "tls certificate" {
+	if r, _ := e.Reachability(ctx, "web", ""); r.Reachable || r.BlockedOn != "tls certificate" {
 		t.Errorf("no-cert verdict = {reachable:%v blocked:%q}", r.Reachable, r.BlockedOn)
 	}
 
 	// Certificate issued and every other link green → reachable at an https URL.
 	k.SetCertReady("web", true)
-	if r, _ := e.Reachability(ctx, "web"); !r.Reachable || r.BlockedOn != "" || r.URL != "https://web.example.com" {
+	if r, _ := e.Reachability(ctx, "web", ""); !r.Reachable || r.BlockedOn != "" || r.URL != "https://web.example.com" {
 		t.Errorf("reachable verdict = {reachable:%v url:%q blocked:%q}", r.Reachable, r.URL, r.BlockedOn)
 	}
 
 	// DNS drifting off the cluster blocks reachability again, now on dns.
 	dns.Set("web.example.com", "9.9.9.9")
-	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.BlockedOn != "dns" {
+	if r, _ := e.Reachability(ctx, "web", ""); r.Reachable || r.BlockedOn != "dns" {
 		t.Errorf("dns-drift verdict = {reachable:%v blocked:%q}", r.Reachable, r.BlockedOn)
 	}
 }
@@ -514,7 +514,7 @@ func TestReachabilityVerdictHTTP(t *testing.T) {
 	k.SetIngressAddress("web", "1.2.3.4")
 	dns.Set("web.example.com", "1.2.3.4")
 	// No TLS requested, so cert readiness is irrelevant and the URL is http.
-	if r, _ := e.Reachability(ctx, "web"); !r.Reachable || r.URL != "http://web.example.com" {
+	if r, _ := e.Reachability(ctx, "web", ""); !r.Reachable || r.URL != "http://web.example.com" {
 		t.Errorf("http verdict = {reachable:%v url:%q}", r.Reachable, r.URL)
 	}
 }
@@ -527,7 +527,7 @@ func TestRollback(t *testing.T) {
 	v1, _ := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
 	v2, _ := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1})
 
-	res, err := e.Rollback(ctx, "web", false)
+	res, err := e.Rollback(ctx, "web", "", false)
 	if err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -556,13 +556,13 @@ func TestRollbackNothingToRollBack(t *testing.T) {
 	e, _, r, _, _ := newEngine(t, permissive())
 
 	// No releases at all.
-	if _, err := e.Rollback(ctx, "web", false); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.Rollback(ctx, "web", "", false); !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("rollback with no releases err = %v, want ErrNotFound", err)
 	}
 	// A single deploy has no prior to roll back to.
 	r.Add("img:1", "sha256:1")
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
-	if _, err := e.Rollback(ctx, "web", false); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.Rollback(ctx, "web", "", false); !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("rollback with one release err = %v, want ErrNotFound", err)
 	}
 }
@@ -577,7 +577,7 @@ func TestRollbackGuardrailHolds(t *testing.T) {
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1})
 
 	// Held for confirmation: the rollback does not happen, and the cluster keeps img:2.
-	_, err := e.Rollback(ctx, "web", false)
+	_, err := e.Rollback(ctx, "web", "", false)
 	mustGuardrail(t, err, cp.GuardrailRollback)
 	if g, _ := cp.AsGuardrail(err); !g.NeedsConfirmation {
 		t.Errorf("NeedsConfirmation = false, want true")
@@ -587,7 +587,7 @@ func TestRollbackGuardrailHolds(t *testing.T) {
 	}
 
 	// With confirmation it proceeds and restores img:1.
-	res, err := e.Rollback(ctx, "web", true)
+	res, err := e.Rollback(ctx, "web", "", true)
 	if err != nil {
 		t.Fatalf("confirmed rollback: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestRollbackGuardrailDenies(t *testing.T) {
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1})
 
 	// A deny refuses outright — even with confirm, it does not proceed.
-	_, err := e.Rollback(ctx, "web", true)
+	_, err := e.Rollback(ctx, "web", "", true)
 	mustGuardrail(t, err, cp.GuardrailRollback)
 	if g, _ := cp.AsGuardrail(err); g.NeedsConfirmation {
 		t.Errorf("NeedsConfirmation = true, want false for a deny")

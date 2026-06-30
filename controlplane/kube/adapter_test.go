@@ -26,6 +26,34 @@ const ns = "default"
 
 func i32p(v int32) *int32 { return &v }
 
+// TestWithNamespaceRoutesAppResources confirms a namespace-scoped adapter view applies app resources
+// into the named namespace (an environment's namespace), while the unscoped view keeps using the
+// configured app namespace (ADR-0035 phase 2b).
+func TestWithNamespaceRoutesAppResources(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	const envNS = "burrow-apps-staging"
+	if err := a.WithNamespace(envNS).ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("ApplyWorkload(staging): %v", err)
+	}
+	if _, err := client.AppsV1().Deployments(envNS).Get(ctx, "web", metav1.GetOptions{}); err != nil {
+		t.Fatalf("deployment not found in %s: %v", envNS, err)
+	}
+	if _, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("deployment unexpectedly present in the default namespace %s (err=%v)", ns, err)
+	}
+
+	// An empty namespace, or one equal to the configured app namespace, keeps the default behavior.
+	if err := a.WithNamespace("").ApplyWorkload(ctx, cp.WorkloadSpec{App: "api", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("ApplyWorkload(default): %v", err)
+	}
+	if _, err := client.AppsV1().Deployments(ns).Get(ctx, "api", metav1.GetOptions{}); err != nil {
+		t.Errorf("default-namespace deployment missing: %v", err)
+	}
+}
+
 func TestExposeCreatesServiceAndIngress(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

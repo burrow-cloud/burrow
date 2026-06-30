@@ -18,7 +18,7 @@ func TestListSecretsReturnsKeysOnly(t *testing.T) {
 	k.SetSecret("web", "STRIPE_KEY", "sk_live_x")
 	k.SetSecret("web", "DATABASE_URL", "postgres://y")
 
-	keys, err := e.ListSecrets(ctx, "web")
+	keys, err := e.ListSecrets(ctx, "web", "")
 	if err != nil {
 		t.Fatalf("ListSecrets: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestListSecretsReturnsKeysOnly(t *testing.T) {
 
 func TestListSecretsEmpty(t *testing.T) {
 	e, _, _, _, _ := newEngine(t, permissive())
-	keys, err := e.ListSecrets(context.Background(), "web")
+	keys, err := e.ListSecrets(context.Background(), "web", "")
 	if err != nil {
 		t.Fatalf("ListSecrets: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestSetSecretWritesValueAndRolls(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	if err := e.SetSecret(ctx, "web", "STRIPE_KEY", "sk_live_x", false); err != nil {
+	if err := e.SetSecret(ctx, "web", "", "STRIPE_KEY", "sk_live_x", false); err != nil {
 		t.Fatalf("SetSecret: %v", err)
 	}
 	// The value lands in the per-app Secret (the fake stores what burrowd wrote).
@@ -67,7 +67,7 @@ func TestSetSecretNoRestartDoesNotRoll(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	if err := e.SetSecret(ctx, "web", "A", "1", true); err != nil {
+	if err := e.SetSecret(ctx, "web", "", "A", "1", true); err != nil {
 		t.Fatalf("SetSecret no-restart: %v", err)
 	}
 	if v, ok := k.SecretValue("web", "A"); !ok || v != "1" {
@@ -82,7 +82,7 @@ func TestSetSecretNoRunningWorkloadIsNoOpRoll(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _, _ := newEngine(t, permissive())
 	// No deployed workload: the value persists, and the missing-workload roll is not an error.
-	if err := e.SetSecret(ctx, "web", "A", "1", false); err != nil {
+	if err := e.SetSecret(ctx, "web", "", "A", "1", false); err != nil {
 		t.Fatalf("SetSecret with no workload: %v", err)
 	}
 	if v, ok := k.SecretValue("web", "A"); !ok || v != "1" {
@@ -100,7 +100,7 @@ func TestUnsetSecretRemovesAndRolls(t *testing.T) {
 	k.SetSecret("web", "A", "1")
 	k.SetSecret("web", "B", "2")
 
-	if err := e.UnsetSecret(ctx, "web", "A", false); err != nil {
+	if err := e.UnsetSecret(ctx, "web", "", "A", false); err != nil {
 		t.Fatalf("UnsetSecret: %v", err)
 	}
 	if _, ok := k.SecretValue("web", "A"); ok {
@@ -124,7 +124,7 @@ func TestUnsetSecretNoRestartDoesNotRoll(t *testing.T) {
 	}
 	k.SetSecret("web", "A", "1")
 
-	if err := e.UnsetSecret(ctx, "web", "A", true); err != nil {
+	if err := e.UnsetSecret(ctx, "web", "", "A", true); err != nil {
 		t.Fatalf("UnsetSecret no-restart: %v", err)
 	}
 	if _, ok := k.SecretValue("web", "A"); ok {
@@ -140,7 +140,7 @@ func TestUnsetSecretNoRunningWorkloadIsNoOpRoll(t *testing.T) {
 	e, k, _, _, _ := newEngine(t, permissive())
 	k.SetSecret("web", "A", "1")
 	// No deployed workload: the unset persists, and the missing-workload roll is not an error.
-	if err := e.UnsetSecret(ctx, "web", "A", false); err != nil {
+	if err := e.UnsetSecret(ctx, "web", "", "A", false); err != nil {
 		t.Fatalf("UnsetSecret with no workload: %v", err)
 	}
 	if _, ok := k.SecretValue("web", "A"); ok {
@@ -152,19 +152,19 @@ func TestSecretInvalidInputs(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _, _ := newEngine(t, permissive())
 
-	if _, err := e.ListSecrets(ctx, "Bad!"); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.ListSecrets(ctx, "Bad!", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("ListSecrets bad app = %v, want ErrInvalid", err)
 	}
-	if err := e.SetSecret(ctx, "web", "1BAD", "x", true); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetSecret(ctx, "web", "", "1BAD", "x", true); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetSecret bad key = %v, want ErrInvalid", err)
 	}
-	if err := e.SetSecret(ctx, "Bad!", "A", "x", true); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetSecret(ctx, "Bad!", "", "A", "x", true); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetSecret bad app = %v, want ErrInvalid", err)
 	}
-	if err := e.UnsetSecret(ctx, "web", "1BAD", true); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.UnsetSecret(ctx, "web", "", "1BAD", true); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("UnsetSecret bad key = %v, want ErrInvalid", err)
 	}
-	if err := e.UnsetSecret(ctx, "Bad!", "A", true); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.UnsetSecret(ctx, "Bad!", "", "A", true); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("UnsetSecret bad app = %v, want ErrInvalid", err)
 	}
 }

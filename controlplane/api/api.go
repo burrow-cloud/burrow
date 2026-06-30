@@ -114,7 +114,7 @@ type server struct {
 func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("app")
 	confirm := r.URL.Query().Get("confirm") == "true"
-	if err := s.engine.DeleteApp(r.Context(), app, confirm); err != nil {
+	if err := s.engine.DeleteApp(r.Context(), app, r.URL.Query().Get("env"), confirm); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -136,7 +136,7 @@ func (s *server) deploy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listApps(w http.ResponseWriter, r *http.Request) {
-	apps, err := s.engine.ListApps(r.Context())
+	apps, err := s.engine.ListApps(r.Context(), r.URL.Query().Get("env"))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -151,7 +151,7 @@ type appsResponse struct {
 }
 
 func (s *server) status(w http.ResponseWriter, r *http.Request) {
-	res, err := s.engine.Status(r.Context(), r.PathValue("app"))
+	res, err := s.engine.Status(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -169,7 +169,7 @@ func (s *server) logs(w http.ResponseWriter, r *http.Request) {
 		}
 		opts.TailLines = n
 	}
-	lines, err := s.engine.Logs(r.Context(), r.PathValue("app"), opts)
+	lines, err := s.engine.Logs(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), opts)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -179,7 +179,7 @@ func (s *server) logs(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) rollback(w http.ResponseWriter, r *http.Request) {
 	confirm := r.URL.Query().Get("confirm") == "true"
-	res, err := s.engine.Rollback(r.Context(), r.PathValue("app"), confirm)
+	res, err := s.engine.Rollback(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), confirm)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -192,7 +192,7 @@ func (s *server) scale(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.Scale(r.Context(), r.PathValue("app"), req.Replicas, req.Confirm)
+	res, err := s.engine.Scale(r.Context(), r.PathValue("app"), req.Env, req.Replicas, req.Confirm)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -215,7 +215,7 @@ func (s *server) expose(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) unexpose(w http.ResponseWriter, r *http.Request) {
-	if err := s.engine.Unexpose(r.Context(), r.PathValue("app")); err != nil {
+	if err := s.engine.Unexpose(r.Context(), r.PathValue("app"), r.URL.Query().Get("env")); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -223,7 +223,7 @@ func (s *server) unexpose(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) reachability(w http.ResponseWriter, r *http.Request) {
-	res, err := s.engine.Reachability(r.Context(), r.PathValue("app"))
+	res, err := s.engine.Reachability(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -232,12 +232,12 @@ func (s *server) reachability(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listConfig(w http.ResponseWriter, r *http.Request) {
-	env, err := s.engine.ListConfig(r.Context(), r.PathValue("app"))
+	cfg, err := s.engine.ListConfig(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
 	if err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, configResponse{Config: env})
+	writeJSON(w, http.StatusOK, configResponse{Config: cfg})
 }
 
 func (s *server) setConfig(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +245,7 @@ func (s *server) setConfig(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if err := s.engine.SetConfig(r.Context(), r.PathValue("app"), req.Key, req.Value, req.NoRestart); err != nil {
+	if err := s.engine.SetConfig(r.Context(), r.PathValue("app"), req.Env, req.Key, req.Value, req.NoRestart); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -255,7 +255,7 @@ func (s *server) setConfig(w http.ResponseWriter, r *http.Request) {
 func (s *server) unsetConfig(w http.ResponseWriter, r *http.Request) {
 	noRestart := r.URL.Query().Get("no_restart") == "true"
 	key := r.PathValue("key")
-	if err := s.engine.UnsetConfig(r.Context(), r.PathValue("app"), key, noRestart); err != nil {
+	if err := s.engine.UnsetConfig(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), key, noRestart); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -278,7 +278,7 @@ func (s *server) setSecret(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if err := s.engine.SetSecret(r.Context(), r.PathValue("app"), req.Key, req.Value, req.NoRestart); err != nil {
+	if err := s.engine.SetSecret(r.Context(), r.PathValue("app"), req.Env, req.Key, req.Value, req.NoRestart); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -287,7 +287,7 @@ func (s *server) setSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
-	keys, err := s.engine.ListSecrets(r.Context(), r.PathValue("app"))
+	keys, err := s.engine.ListSecrets(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -298,7 +298,7 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
 func (s *server) unsetSecret(w http.ResponseWriter, r *http.Request) {
 	noRestart := r.URL.Query().Get("no_restart") == "true"
 	key := r.PathValue("key")
-	if err := s.engine.UnsetSecret(r.Context(), r.PathValue("app"), key, noRestart); err != nil {
+	if err := s.engine.UnsetSecret(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), key, noRestart); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -316,6 +316,9 @@ type secretsResponse struct {
 // Kubernetes Secret (ADR-0029) — it is never logged, never audited, and never stored in Postgres.
 // NoRestart persists it without rolling the running workload; the change lands on the next deploy.
 type secretSetRequest struct {
+	// Env is the environment whose namespace the secret lands in (ADR-0035 phase 2b); empty targets
+	// the default environment.
+	Env       string `json:"env,omitempty"`
 	Key       string `json:"key"`
 	Value     string `json:"value"`
 	NoRestart bool   `json:"no_restart,omitempty"`
@@ -324,6 +327,9 @@ type secretSetRequest struct {
 // configSetRequest is the body of a config set (the app comes from the path). NoRestart persists the
 // change without rolling the running workload; the change lands on the next deploy (ADR-0028).
 type configSetRequest struct {
+	// Env is the environment whose workload is rolled when the config changes (ADR-0035 phase 2b);
+	// empty targets the default environment.
+	Env       string `json:"env,omitempty"`
 	Key       string `json:"key"`
 	Value     string `json:"value"`
 	NoRestart bool   `json:"no_restart,omitempty"`
@@ -749,7 +755,10 @@ func health(w http.ResponseWriter, _ *http.Request) {
 
 // scaleRequest is the body of a scale call (the app comes from the path).
 type scaleRequest struct {
-	Replicas int32 `json:"replicas"`
+	// Env is the environment whose namespace the workload lives in (ADR-0035 phase 2b); empty
+	// targets the default environment.
+	Env      string `json:"env,omitempty"`
+	Replicas int32  `json:"replicas"`
 	// Confirm acknowledges a confirm-disposition guardrail so the scale proceeds past it
 	// (ADR-0020).
 	Confirm bool `json:"confirm,omitempty"`

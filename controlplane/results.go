@@ -14,7 +14,11 @@ import "time"
 // non-secret config is an independently-managed, app-global store, sourced at apply time
 // rather than passed per deploy (ADR-0028) — set it with SetConfig before deploying.
 type DeployRequest struct {
-	App     string   `json:"app"`
+	App string `json:"app"`
+	// Env is the environment to deploy into (ADR-0035 phase 2b): empty or "default" targets the
+	// implicit default environment's namespace, a registered name targets that environment's
+	// namespace. An unregistered name is an error.
+	Env     string   `json:"env,omitempty"`
 	Image   string   `json:"image"`
 	Command []string `json:"command,omitempty"`
 	// MetricsPort, when positive, annotates the deployed pod so the metrics add-on scrapes
@@ -51,7 +55,10 @@ type StatusResult struct {
 // ScaleResult reports the outcome of a scale.
 // ExposeRequest describes making an app reachable at a hostname (ADR-0018).
 type ExposeRequest struct {
-	App  string `json:"app"`
+	App string `json:"app"`
+	// Env is the environment whose namespace the app lives in (ADR-0035 phase 2b): empty or
+	// "default" targets the default environment, a registered name targets that environment.
+	Env  string `json:"env,omitempty"`
 	Host string `json:"host"`
 	Port int32  `json:"port"`
 	// TLS requests an HTTPS certificate for Host via cert-manager; Issuer names the

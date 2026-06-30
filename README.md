@@ -153,6 +153,26 @@ Prefer to build from source? `go build -o burrow ./cmd/burrow && go build -o bur
 
 `burrow upgrade` rolls the control plane forward in place, preserving your state.
 
+## Shell completion
+
+`burrow` ships completion for bash, zsh, fish, and PowerShell. Load it for your shell:
+
+```sh
+# bash (current shell; add to ~/.bashrc to persist)
+source <(burrow completion bash)
+
+# zsh (current shell; add to ~/.zshrc to persist)
+source <(burrow completion zsh)
+
+# fish
+burrow completion fish | source
+
+# PowerShell (add to your $PROFILE to persist)
+burrow completion powershell | Out-String | Invoke-Expression
+```
+
+Run `burrow completion <shell> --help` for how to install it permanently on your system.
+
 ## Version status
 
 Burrow follows semver from v0.1 toward v1.0. This table never lags the code

@@ -23,6 +23,7 @@ import (
 
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 func main() {
@@ -88,6 +89,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	return root.ExecuteContext(ctx)
 }
 
+// Command groups organize `burrow --help` by intent along the golden path (ADR-0037), rather
+// than as a flat verb wall. version, completion, and help carry no group, so Cobra lists them
+// in the default "Additional Commands" section.
+const (
+	groupGetStarted   = "get-started"
+	groupEnvironments = "environments"
+	groupOperate      = "operate"
+	groupGovern       = "govern"
+)
+
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "burrow",
@@ -98,25 +109,59 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.CompletionOptions.HiddenDefaultCmd = true
-	root.AddCommand(
-		// Bootstrap + lifecycle of the control plane — top level (ADR-0024).
-		newInstallCmd(),
-		newUpgradeCmd(),
-		// Task groups.
-		newAppCmd(),
-		newAddonCmd(),
-		newConfigCmd(),
-		newSystemCmd(),
-		// Cross-cutting policy + meta — top level.
-		newClusterCmd(),
-		newContextCmd(),
-		newEnvCmd(),
-		newGuardCmd(),
-		newAuditCmd(),
-		newVersionCmd(),
+	// Cobra's built-in completion command stays enabled and visible (ADR-0037): it emits the
+	// bash/zsh/fish/PowerShell scripts and lists alongside version and help.
+
+	root.AddGroup(
+		&cobra.Group{ID: groupGetStarted, Title: "Get started:"},
+		&cobra.Group{ID: groupEnvironments, Title: "Environments:"},
+		&cobra.Group{ID: groupOperate, Title: "Operate:"},
+		&cobra.Group{ID: groupGovern, Title: "Govern:"},
 	)
+
+	// Get started: install and grow the control plane and the cluster it runs on. `system` is
+	// folded into `cluster` and `context` into `env` in sibling ADR-0036/0037 slices; until those
+	// land they are grouped with their successors so the help stays coherent.
+	addGrouped(root, groupGetStarted, newInstallCmd(), newUpgradeCmd(), newClusterCmd(), newConfigCmd(), newSystemCmd())
+	// Environments: select which cluster/namespace a command targets.
+	addGrouped(root, groupEnvironments, newEnvCmd(), newContextCmd())
+	// Operate: act on deployed applications and their backing add-ons.
+	addGrouped(root, groupOperate, newAppCmd(), newAddonCmd())
+	// Govern: the guardrail policy and the audit trail.
+	addGrouped(root, groupGovern, newGuardCmd(), newAuditCmd())
+	// version sits with completion and help in the default "Additional Commands" section.
+	root.AddCommand(newVersionCmd())
+
+	installFirstRunBanner(root)
 	return root
+}
+
+// addGrouped adds each command to root under the given help group.
+func addGrouped(root *cobra.Command, group string, cmds ...*cobra.Command) {
+	for _, c := range cmds {
+		c.GroupID = group
+		root.AddCommand(c)
+	}
+}
+
+// firstRunBanner leads the help of a brand-new install (no client-side config yet), routing the
+// user to `burrow install` before the grouped command list (ADR-0037).
+const firstRunBanner = "Burrow is not set up yet. Start with \"burrow install\" to install the\n" +
+	"control plane into a cluster, then re-run \"burrow\" to see all commands.\n\n"
+
+// installFirstRunBanner wraps the root help so that, on first run (when the client-side config
+// does not exist), the help leads with a short banner pointing at `burrow install`. Once the
+// config exists the normal grouped help shows. Subcommand help is unaffected.
+func installFirstRunBanner(root *cobra.Command) {
+	defaultHelp := root.HelpFunc()
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		if cmd == root {
+			if exists, err := localconfig.Exists(); err == nil && !exists {
+				fmt.Fprint(cmd.OutOrStdout(), firstRunBanner)
+			}
+		}
+		defaultHelp(cmd, args)
+	})
 }
 
 // commonOpts holds the configuration the control-plane operations share.

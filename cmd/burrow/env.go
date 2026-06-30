@@ -65,7 +65,7 @@ func newEnvCmd() *cobra.Command {
 			"Role there (privileged kubeconfig-side setup, like install); `burrow env list` shows them.\n\n" +
 			"This is distinct from `burrow app config`, which sets an app's environment variables.",
 	}
-	cmd.AddCommand(newEnvAddCmd(), newEnvListCmd())
+	cmd.AddCommand(newEnvAddCmd(), newEnvListCmd(), newEnvScanCmd())
 	return cmd
 }
 

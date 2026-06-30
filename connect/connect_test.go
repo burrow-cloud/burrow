@@ -7,10 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -95,6 +98,103 @@ func TestClientContextSelectsCluster(t *testing.T) {
 		t.Errorf("current context's cluster (ctx-one) was contacted; --context should redirect to ctx-two")
 	}
 }
+
+// notInstalledServer is a fake API server that answers the token Secret Get with a Kubernetes
+// NotFound, standing in for a cluster where burrowd has not been installed.
+func notInstalledServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(&metav1.Status{
+			TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},
+			Status:   metav1.StatusFailure,
+			Code:     http.StatusNotFound,
+			Reason:   metav1.StatusReasonNotFound,
+			Message:  `secrets "burrowd-api-token" not found`,
+			Details:  &metav1.StatusDetails{Name: "burrowd-api-token", Kind: "secrets"},
+		})
+	}))
+}
+
+// TestClientNotInstalled confirms that when the token Secret is absent (burrowd not installed),
+// Client returns an actionable message that names the targeted context and points at
+// `burrow install`, with no raw "reading token secret ... not found" Kubernetes error.
+func TestClientNotInstalled(t *testing.T) {
+	srv := notInstalledServer()
+	defer srv.Close()
+
+	// The current context (ctx-one) points at the not-installed cluster.
+	path := writeKubeconfig(t, twoContextConfig(srv.URL, "https://unused.invalid:6443"))
+
+	_, err := Client(context.Background(), Options{Kubeconfig: path, Namespace: "burrow"})
+	if err == nil {
+		t.Fatal("Client should fail when burrowd is not installed")
+	}
+	msg := err.Error()
+	for _, want := range []string{`burrow is not installed in context "ctx-one"`, `namespace "burrow"`, `run "burrow install"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want substring %q", msg, want)
+		}
+	}
+	for _, no := range []string{"reading token secret", "not found", "secrets"} {
+		if strings.Contains(msg, no) {
+			t.Errorf("error = %q, should not contain the raw Kubernetes error %q", msg, no)
+		}
+	}
+}
+
+// TestClientUnreachable confirms that when the cluster cannot be reached, Client reports the
+// control plane unreachable, names the targeted context, and leaks no dialed URL.
+func TestClientUnreachable(t *testing.T) {
+	cfg := twoContextConfig("https://burrow-connect-unreachable.invalid:6443", "https://unused.invalid:6443")
+	// Rename the current context so the message clearly names it.
+	cfg.Contexts["do-nyc1-prod"] = cfg.Contexts["ctx-one"]
+	delete(cfg.Contexts, "ctx-one")
+	cfg.CurrentContext = "do-nyc1-prod"
+	path := writeKubeconfig(t, cfg)
+
+	_, err := Client(context.Background(), Options{Kubeconfig: path, Namespace: "burrow"})
+	if err == nil {
+		t.Fatal("Client should fail when the cluster is unreachable")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `control plane unreachable via context "do-nyc1-prod"`) {
+		t.Errorf("error = %q, want the unreachable line naming the context", msg)
+	}
+	if strings.Contains(msg, "https://") || strings.Contains(msg, `Get "`) {
+		t.Errorf("error = %q, leaked the dialed URL", msg)
+	}
+}
+
+// TestFailureReason confirms each common connectivity failure reduces to a concise reason with no
+// dialed URL, and that an unrecognized error keeps its message minus the `Get "<url>": ` prefix.
+// This is the shared classifier `burrow version` and Client both depend on.
+func TestFailureReason(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"timeout", context.DeadlineExceeded, "timed out after 5s"},
+		{"dns", &net.DNSError{Err: "no such host", Name: "abc123.example.com"}, "no such host"},
+		{"refused", syscall.ECONNREFUSED, "connection refused"},
+		{"other strips the Get URL prefix", errString(`Get "https://abc123.example.com/apis/apps/v1": broken pipe`), "broken pipe"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FailureReason(tc.err); got != tc.want {
+				t.Errorf("FailureReason(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+			if strings.Contains(FailureReason(tc.err), "https://") {
+				t.Errorf("FailureReason(%v) leaked a URL: %q", tc.err, FailureReason(tc.err))
+			}
+		})
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
 
 // tokenServer is a fake API server that records that it was hit and serves the install token
 // Secret for any namespace, so Client.readToken succeeds against it.

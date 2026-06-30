@@ -90,7 +90,10 @@ func Client(ctx context.Context, o Options) (*client.Client, error) {
 	}
 	token, err := readToken(ctx, cs, o.Namespace, o.TokenSecret, o.TokenKey)
 	if err != nil {
-		return nil, err
+		// Translate the raw Kubernetes error into an actionable, context-named message: a
+		// missing token Secret means burrowd is not installed, a dial error means the cluster
+		// is unreachable. Every command that connects goes through here, so they all benefit.
+		return nil, connectError(o, err)
 	}
 	hc, err := rest.HTTPClientFor(cfg)
 	if err != nil {
@@ -109,11 +112,13 @@ func proxyBaseURL(apiServer, namespace, service string, port int) string {
 func readToken(ctx context.Context, cs kubernetes.Interface, namespace, secret, key string) (string, error) {
 	s, err := cs.CoreV1().Secrets(namespace).Get(ctx, secret, metav1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("connect: reading token secret %s/%s: %w", namespace, secret, err)
+		// Return the raw error so the caller can classify it (NotFound vs. a dial failure)
+		// and render an actionable message; readToken does not wrap it itself.
+		return "", err
 	}
 	v, ok := s.Data[key]
 	if !ok {
-		return "", fmt.Errorf("connect: token secret %s/%s has no key %q", namespace, secret, key)
+		return "", fmt.Errorf("token secret %s/%s has no key %q", namespace, secret, key)
 	}
 	return string(v), nil
 }

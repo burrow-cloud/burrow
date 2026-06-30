@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"syscall"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -126,35 +125,6 @@ func TestControlPlaneLine(t *testing.T) {
 		})
 	}
 }
-
-// TestProbeReason confirms each common connectivity failure reduces to a concise reason with no
-// dialed URL, and that an unrecognized error keeps its message minus the `Get "<url>": ` prefix.
-func TestProbeReason(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want string
-	}{
-		{"timeout", context.DeadlineExceeded, "timed out after 5s"},
-		{"dns", &net.DNSError{Err: "no such host", Name: "abc123.example.com"}, "no such host"},
-		{"refused", syscall.ECONNREFUSED, "connection refused"},
-		{"other strips the Get URL prefix", errString(`Get "https://abc123.example.com/apis/apps/v1": broken pipe`), "broken pipe"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := probeReason(tc.err); got != tc.want {
-				t.Errorf("probeReason(%v) = %q, want %q", tc.err, got, tc.want)
-			}
-			if strings.Contains(probeReason(tc.err), "https://") {
-				t.Errorf("probeReason(%v) leaked a URL: %q", tc.err, probeReason(tc.err))
-			}
-		})
-	}
-}
-
-type errString string
-
-func (e errString) Error() string { return string(e) }
 
 // fakeBurrowdDeployment is a fake API server for one cluster that serves the burrowd Deployment
 // with the given image, recording that it was hit, so a version probe through it reports that

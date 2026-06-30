@@ -48,3 +48,23 @@ func Contexts(kubeconfig string) ([]Context, error) {
 	}
 	return out, nil
 }
+
+// TargetContextName returns the name of the kubeconfig context an operation will target: the
+// override when non-empty, otherwise the kubeconfig's current context. It reads the kubeconfig
+// the same way Contexts does (honoring an explicit path, otherwise the ambient KUBECONFIG /
+// ~/.kube/config) and needs no control-plane connection, so a command can name the context it is
+// about to probe even before reaching the cluster.
+func TargetContextName(kubeconfig, override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfig != "" {
+		rules.ExplicitPath = kubeconfig
+	}
+	cfg, err := rules.Load()
+	if err != nil {
+		return "", fmt.Errorf("connect: loading kubeconfig: %w", err)
+	}
+	return cfg.CurrentContext, nil
+}

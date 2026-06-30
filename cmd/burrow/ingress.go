@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -16,19 +17,25 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/burrow-cloud/burrow/controlplane"
+	"github.com/burrow-cloud/burrow/controlplane/kube"
 )
 
 // The ingress stack Burrow installs when a cluster has none. Pinned to specific upstream
-// releases so a cluster always gets a known-good set; bump these deliberately. The
-// ingress-nginx "cloud" manifest provisions a LoadBalancer Service (the right default for a
-// managed cluster like DigitalOcean); a bare-metal/hostPort variant can come later behind a
-// flag (ADR-0018).
+// releases so a cluster always gets a known-good set; bump these deliberately. Two
+// ingress-nginx variants at the same pinned controller version: the "cloud" manifest
+// provisions a LoadBalancer Service (a billable cloud load balancer, the right default for a
+// managed cluster like DigitalOcean); the "baremetal" manifest provisions a NodePort Service
+// (no cloud load balancer, no extra charge) for bare-metal or cost-sensitive clusters. The
+// --expose flag (ADR-0034 slice 2) picks between them.
 const (
-	ingressNginxManifest = "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml"
-	certManagerManifest  = "https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml"
+	ingressNginxManifest          = "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml"
+	ingressNginxBaremetalManifest = "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/baremetal/deploy.yaml"
+	certManagerManifest           = "https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml"
 
 	// Let's Encrypt ACME directories. Staging has high rate limits but issues untrusted
-	// certificates — use it to validate the flow without burning the production quota.
+	// certificates; use it to validate the flow without burning the production quota.
 	acmeProductionURL = "https://acme-v02.api.letsencrypt.org/directory"
 	acmeStagingURL    = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
@@ -36,6 +43,20 @@ const (
 	// cert-manager annotation points at the issuer this command creates.
 	defaultIssuerName = "letsencrypt"
 )
+
+// The values of the --expose flag (ADR-0034 slice 2): which ingress-nginx Service the
+// controller gets. "auto" runs the slice-1 capability detection and picks loadbalancer on a
+// known cloud provider, nodeport on bare-metal / no-LB-support clusters.
+const (
+	exposeAuto         = "auto"
+	exposeLoadBalancer = "loadbalancer"
+	exposeNodePort     = "nodeport"
+)
+
+// detectCapabilities is the capability-detection seam used to resolve --expose auto, defaulting
+// to the production read-only probe (ADR-0034 slice 1). It is a package var so tests can inject
+// a fake detector; the production detector runs over the kubeconfig clientset.
+var detectCapabilities func(context.Context, kubernetes.Interface) (controlplane.ClusterCapabilities, error) = kube.DetectCapabilities
 
 // issuerTemplate renders a Let's Encrypt ClusterIssuer with an HTTP-01 solver via the
 // ingress-nginx class. HTTP-01 needs only that the host's DNS already points at the
@@ -65,9 +86,21 @@ type ingressOptions struct {
 	issuerName string
 	staging    bool
 	kubeconfig string
+	expose     string
+	yes        bool
 	dryRun     bool
 	wait       bool
 	verbose    bool
+}
+
+// validateExpose checks the --expose value, treating an empty value as auto.
+func (o ingressOptions) validateExpose() error {
+	switch o.expose {
+	case "", exposeAuto, exposeLoadBalancer, exposeNodePort:
+		return nil
+	default:
+		return fmt.Errorf("invalid --expose %q: want loadbalancer, nodeport, or auto", o.expose)
+	}
 }
 
 func (o ingressOptions) acmeServer() string {
@@ -87,8 +120,8 @@ func newIngressCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "ingress",
 		Short: "Set up cluster ingress and TLS (install)",
-		Long: "ingress provisions the pieces that make apps reachable over HTTPS — the\n" +
-			"ingress-nginx controller, cert-manager, and a Let's Encrypt issuer — installing only\n" +
+		Long: "ingress provisions the pieces that make apps reachable over HTTPS (the\n" +
+			"ingress-nginx controller, cert-manager, and a Let's Encrypt issuer), installing only\n" +
 			"what the cluster does not already have. It is a one-time setup an operator runs with\n" +
 			"their kubeconfig, not an agent operation.",
 	}
@@ -99,14 +132,16 @@ func newIngressCmd() *cobra.Command {
 		Short: "Install ingress-nginx, cert-manager, and a Let's Encrypt issuer (whichever are missing)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runIngressInstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return runIngressInstall(cmd.Context(), o, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	install.Flags().StringVar(&o.email, "email", "", "ACME registration email for Let's Encrypt (recommended: receives expiry notices)")
 	install.Flags().StringVar(&o.issuerName, "issuer-name", defaultIssuerName, "name of the ClusterIssuer to create")
 	install.Flags().BoolVar(&o.staging, "staging", false, "use the Let's Encrypt staging environment (untrusted certs, high rate limits) to test the flow")
 	install.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
-	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print what would be installed instead of applying it")
+	install.Flags().StringVar(&o.expose, "expose", exposeAuto, "how to expose the controller: loadbalancer (billable cloud LB), nodeport (free, point DNS at a node IP), or auto (detect from the provider)")
+	install.Flags().BoolVarP(&o.yes, "yes", "y", false, "do not prompt for confirmation (non-interactive)")
+	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the plan (including the cost notice) instead of applying it")
 	install.Flags().BoolVar(&o.wait, "wait", true, "wait for cert-manager to become ready before creating the issuer")
 	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource kubectl applies instead of a summary")
 
@@ -114,20 +149,24 @@ func newIngressCmd() *cobra.Command {
 	return parent
 }
 
-func runIngressInstall(ctx context.Context, o ingressOptions, stdout, stderr io.Writer) error {
+func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, stdout, stderr io.Writer) error {
 	if o.issuerName == "" {
 		o.issuerName = defaultIssuerName
+	}
+	if err := o.validateExpose(); err != nil {
+		return err
 	}
 	issuer, err := renderIssuer(o)
 	if err != nil {
 		return err
 	}
 
+	// dry-run prints the plan and the cost notice without contacting the cluster, so an operator
+	// can review what an install would do (including the billable-resource warning) before running
+	// it. auto is left unresolved here: picking loadbalancer vs nodeport needs the live capability
+	// probe, which only runs on the real apply.
 	if o.dryRun {
-		fmt.Fprintf(stdout, "ingress install would, against your current cluster:\n")
-		fmt.Fprintf(stdout, "  - install ingress-nginx if absent:  kubectl apply -f %s\n", ingressNginxManifest)
-		fmt.Fprintf(stdout, "  - install cert-manager if absent:   kubectl apply -f %s\n", certManagerManifest)
-		fmt.Fprintf(stdout, "  - apply this ClusterIssuer (%s):\n\n%s\n", o.acmeServer(), indent(issuer))
+		writeIngressDryRunPlan(o, issuer, stdout)
 		return nil
 	}
 
@@ -136,16 +175,41 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdout, stderr io.
 		return err
 	}
 
-	// Ingress controller: install only if absent.
+	// Resolve --expose (auto runs the slice-1 capability probe), then read what is already present
+	// so the plan only lists the missing pieces (detect-and-skip).
+	expose, providerName, err := resolveExpose(ctx, o.expose, cs)
+	if err != nil {
+		return err
+	}
+	manifest := ingressManifestFor(expose)
+
 	hasNginx, err := ingressControllerPresent(ctx, cs)
 	if err != nil {
 		return err
 	}
+	hasCertManager, err := certManagerPresent(ctx, cs)
+	if err != nil {
+		return err
+	}
+
+	// Print the plan with the cost notice, then confirm before any write (ADR-0034 slice 2:
+	// nothing cluster-wide is installed without an explicit yes). -y skips the prompt.
+	writeIngressPlan(stdout, o, expose, providerName, manifest, hasNginx, hasCertManager)
+	ok, err := confirmInstall(o, stdin, stdout)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Fprintln(stdout, "Aborted. Nothing was changed.")
+		return nil
+	}
+
+	// Ingress controller: install only if absent.
 	if hasNginx {
-		fmt.Fprintln(stdout, "ingress-nginx already present — using it.")
+		fmt.Fprintln(stdout, "ingress-nginx already present, using it.")
 	} else {
-		fmt.Fprintln(stdout, "Installing ingress-nginx...")
-		if err := kubectlApplyURL(ctx, o.kubeconfig, ingressNginxManifest, o.verbose, stdout, stderr); err != nil {
+		fmt.Fprintf(stdout, "Installing ingress-nginx (%s)...\n", manifestVariantLabel(expose))
+		if err := kubectlApplyURL(ctx, o.kubeconfig, manifest, o.verbose, stdout, stderr); err != nil {
 			return err
 		}
 		if o.wait {
@@ -156,12 +220,8 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdout, stderr io.
 	}
 
 	// cert-manager: install only if absent.
-	hasCertManager, err := certManagerPresent(ctx, cs)
-	if err != nil {
-		return err
-	}
 	if hasCertManager {
-		fmt.Fprintln(stdout, "cert-manager already present — using it.")
+		fmt.Fprintln(stdout, "cert-manager already present, using it.")
 	} else {
 		fmt.Fprintln(stdout, "Installing cert-manager...")
 		if err := kubectlApplyURL(ctx, o.kubeconfig, certManagerManifest, o.verbose, stdout, stderr); err != nil {
@@ -189,6 +249,147 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdout, stderr io.
 		"  burrow app publish <app> --host <name> --port <n> --tls\n"+
 		"The controller's external address can take a few minutes; check `burrow app reachability <app>`.\n")
 	return nil
+}
+
+// resolveExpose turns the --expose value into a concrete mode and the detected provider name
+// for the cost notice. auto runs the slice-1 capability probe and picks loadbalancer on a known
+// cloud provider (LoadBalancer support inferred) or nodeport otherwise. loadbalancer also probes
+// best-effort, only to name the provider in the cost notice; a probe failure there is non-fatal.
+// nodeport needs no probe.
+func resolveExpose(ctx context.Context, mode string, cs kubernetes.Interface) (expose, providerName string, err error) {
+	switch mode {
+	case exposeNodePort:
+		return exposeNodePort, "", nil
+	case exposeLoadBalancer:
+		if caps, derr := detectCapabilities(ctx, cs); derr == nil {
+			return exposeLoadBalancer, caps.Provider.Name, nil
+		}
+		return exposeLoadBalancer, "", nil
+	default: // auto (or empty)
+		caps, derr := detectCapabilities(ctx, cs)
+		if derr != nil {
+			return "", "", fmt.Errorf("detecting capabilities to pick an expose mode (pass --expose loadbalancer or --expose nodeport to skip detection): %w", derr)
+		}
+		if caps.LoadBalancer.Supported {
+			return exposeLoadBalancer, caps.Provider.Name, nil
+		}
+		return exposeNodePort, caps.Provider.Name, nil
+	}
+}
+
+// ingressManifestFor returns the pinned ingress-nginx manifest for the resolved expose mode: the
+// baremetal (NodePort) manifest for nodeport, the cloud (LoadBalancer) manifest otherwise.
+func ingressManifestFor(expose string) string {
+	if expose == exposeNodePort {
+		return ingressNginxBaremetalManifest
+	}
+	return ingressNginxManifest
+}
+
+// manifestVariantLabel describes the chosen ingress-nginx Service for plan and progress output.
+func manifestVariantLabel(expose string) string {
+	if expose == exposeNodePort {
+		return "baremetal, NodePort Service"
+	}
+	return "cloud, LoadBalancer Service"
+}
+
+// costNotice names the LoadBalancer as a billable cloud resource on the detected provider and
+// points to the free nodeport alternative. It never hardcodes a price (they drift); it flags the
+// class of cost and the provider and says to check current pricing (ADR-0034 slice 2).
+func costNotice(providerName string) string {
+	provider := providerName
+	if provider == "" {
+		provider = "your cloud provider"
+	}
+	return fmt.Sprintf("Cost: the loadbalancer path provisions a billable cloud load balancer on %s, "+
+		"a recurring cloud charge. Check %s's current pricing before proceeding. For a free "+
+		"alternative, rerun with --expose nodeport (a NodePort Service, no cloud load balancer; "+
+		"you then point DNS at a node's external IP).", provider, provider)
+}
+
+// nodePortNotice explains the nodeport path: no billable load balancer, but the operator points
+// DNS at a node IP.
+func nodePortNotice() string {
+	return "Note: the nodeport path creates a NodePort Service (no cloud load balancer, no extra " +
+		"charge). Point your DNS at a node's external IP to reach the controller."
+}
+
+// writeIngressPlan prints the live install plan: only the missing pieces (detect-and-skip), and
+// the cost notice (loadbalancer) or the node-IP note (nodeport).
+func writeIngressPlan(w io.Writer, o ingressOptions, expose, providerName, manifest string, hasNginx, hasCertManager bool) {
+	fmt.Fprintf(w, "Plan (expose: %s). Against your current cluster, ingress install will:\n", expose)
+	if hasNginx {
+		fmt.Fprintln(w, "  - ingress-nginx: already present, skip.")
+	} else {
+		fmt.Fprintf(w, "  - install ingress-nginx (%s): kubectl apply -f %s\n", manifestVariantLabel(expose), manifest)
+	}
+	if hasCertManager {
+		fmt.Fprintln(w, "  - cert-manager: already present, skip.")
+	} else {
+		fmt.Fprintf(w, "  - install cert-manager: kubectl apply -f %s\n", certManagerManifest)
+	}
+	fmt.Fprintf(w, "  - apply a Let's Encrypt ClusterIssuer %q (%s).\n\n", o.issuerName, o.acmeServer())
+	if expose == exposeLoadBalancer {
+		fmt.Fprintln(w, costNotice(providerName))
+	} else {
+		fmt.Fprintln(w, nodePortNotice())
+	}
+	fmt.Fprintln(w)
+}
+
+// writeIngressDryRunPlan prints the plan without contacting the cluster. The conditional installs
+// stay "if absent" (no live detect-and-skip), and auto is reported as resolved at apply time. The
+// cost notice is shown for loadbalancer (and the auto case, which may resolve to it); nodeport
+// shows the node-IP note instead.
+func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
+	expose := o.expose
+	if expose == "" {
+		expose = exposeAuto
+	}
+	fmt.Fprintf(w, "Plan (expose: %s, dry run). Against your current cluster, ingress install would:\n", expose)
+	switch expose {
+	case exposeNodePort:
+		fmt.Fprintf(w, "  - install ingress-nginx if absent (baremetal, NodePort Service): kubectl apply -f %s\n", ingressNginxBaremetalManifest)
+	case exposeLoadBalancer:
+		fmt.Fprintf(w, "  - install ingress-nginx if absent (cloud, LoadBalancer Service): kubectl apply -f %s\n", ingressNginxManifest)
+	default: // auto
+		fmt.Fprintf(w, "  - install ingress-nginx if absent (auto: cloud/LoadBalancer on a known provider, else baremetal/NodePort): kubectl apply -f %s\n", ingressNginxManifest)
+	}
+	fmt.Fprintf(w, "  - install cert-manager if absent: kubectl apply -f %s\n", certManagerManifest)
+	fmt.Fprintf(w, "  - apply this ClusterIssuer (%s):\n\n%s\n\n", o.acmeServer(), indent(issuer))
+	switch expose {
+	case exposeNodePort:
+		fmt.Fprintln(w, nodePortNotice())
+	case exposeLoadBalancer:
+		fmt.Fprintln(w, costNotice(""))
+	default: // auto
+		fmt.Fprintln(w, "Cost: in auto mode a known cloud provider resolves to the loadbalancer path, which "+
+			"provisions a billable cloud load balancer (a recurring cloud charge). Check your cloud "+
+			"provider's current pricing. For a free alternative, use --expose nodeport (a NodePort "+
+			"Service, no cloud load balancer; you then point DNS at a node's external IP).")
+	}
+}
+
+// confirmInstall gates the install on an explicit yes (ADR-0034 slice 2). -y / --yes skips the
+// prompt for non-interactive use; otherwise it prompts and reads the answer.
+func confirmInstall(o ingressOptions, in io.Reader, out io.Writer) (bool, error) {
+	if o.yes {
+		return true, nil
+	}
+	return confirmProceed(in, out)
+}
+
+// confirmProceed prompts for confirmation and reports whether the operator typed yes. Anything but
+// y / yes (case-insensitive) is a no, including an empty line or EOF (the [y/N] default).
+func confirmProceed(in io.Reader, out io.Writer) (bool, error) {
+	fmt.Fprint(out, "Proceed? [y/N]: ")
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return false, fmt.Errorf("reading confirmation: %w", err)
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
 }
 
 // renderIssuer renders the ClusterIssuer manifest for the options.

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/burrow-cloud/burrow/client"
 )
@@ -159,5 +160,67 @@ func TestClientStatus(t *testing.T) {
 	}
 	if !res.HasRelease || !res.Running || res.Workload.DesiredReplicas != 3 || !res.Workload.Available {
 		t.Errorf("status = %+v", res)
+	}
+}
+
+// immediateAfter is a WaitReachable poll clock that fires at once, so the wait loop runs to
+// convergence or timeout without any real sleeping.
+func immediateAfter(time.Duration) <-chan time.Time {
+	ch := make(chan time.Time, 1)
+	ch <- time.Time{}
+	return ch
+}
+
+func TestWaitReachableConverges(t *testing.T) {
+	var polls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls++
+		// Flip to live on the third poll, modelling a chain that converges after a few checks.
+		if polls >= 3 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"app": "web", "reachable": true, "url": "https://web.example.com",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "reachable": false, "blocked_on": "tls certificate",
+		})
+	}))
+	defer srv.Close()
+
+	c := client.NewClient(srv.URL, "tok")
+	res, err := c.WaitReachable(context.Background(), "web", time.Minute, immediateAfter)
+	if err != nil {
+		t.Fatalf("WaitReachable: %v", err)
+	}
+	if !res.Reachable || res.URL != "https://web.example.com" {
+		t.Errorf("verdict = {reachable:%v url:%q}", res.Reachable, res.URL)
+	}
+	if polls != 3 {
+		t.Errorf("polls = %d, want 3 (stops as soon as it converges)", polls)
+	}
+}
+
+func TestWaitReachableTimesOut(t *testing.T) {
+	var polls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "reachable": false, "blocked_on": "tls certificate",
+		})
+	}))
+	defer srv.Close()
+
+	c := client.NewClient(srv.URL, "tok")
+	// 9s timeout at a 3s poll interval is one immediate check plus three interval polls.
+	res, err := c.WaitReachable(context.Background(), "web", 9*time.Second, immediateAfter)
+	if err != nil {
+		t.Fatalf("WaitReachable: %v", err)
+	}
+	if res.Reachable || res.BlockedOn != "tls certificate" {
+		t.Errorf("verdict = {reachable:%v blocked:%q}, want blocked on tls certificate", res.Reachable, res.BlockedOn)
+	}
+	if polls != 4 {
+		t.Errorf("polls = %d, want 4 (bounded by the timeout, no infinite loop)", polls)
 	}
 }

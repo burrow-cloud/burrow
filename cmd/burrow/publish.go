@@ -6,6 +6,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -54,15 +55,32 @@ func newPublishCmd() *cobra.Command {
 
 func newReachabilityCmd() *cobra.Command {
 	o := &commonOpts{}
+	var wait bool
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "reachability <app>",
-		Short: "Report whether an app is reachable at its hostname (controller, address, DNS)",
-		Args:  exactArgs(1),
+		Short: "Report whether an app is reachable at its hostname (controller, address, TLS, DNS)",
+		Long: "reachability reports the converged verdict for an app's reachability chain: whether it\n" +
+			"is live and at what URL, or the first link it is blocked on. With --wait it polls until\n" +
+			"the app is live or the timeout elapses, so a deploy/expose/DNS sequence can be confirmed\n" +
+			"in one call.",
+		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := o.client(ctx)
 			if err != nil {
 				return err
+			}
+			if wait {
+				res, err := c.WaitReachable(ctx, args[0], timeout, nil)
+				if err != nil {
+					return err
+				}
+				if res.Reachable {
+					return emit(cmd.OutOrStdout(), o.json, res, fmt.Sprintf("%s is live at %s", res.App, res.URL))
+				}
+				human := fmt.Sprintf("not reachable after %s: waiting on %s", timeout, res.BlockedOn)
+				return emit(cmd.OutOrStdout(), o.json, res, human)
 			}
 			res, err := c.Reachability(ctx, args[0])
 			if err != nil {
@@ -73,6 +91,8 @@ func newReachabilityCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	cmd.Flags().BoolVar(&wait, "wait", false, "poll until the app is live (reachable) or the timeout elapses")
+	cmd.Flags().DurationVar(&timeout, "timeout", 3*time.Minute, "how long to wait for the app to become live with --wait")
 	return cmd
 }
 

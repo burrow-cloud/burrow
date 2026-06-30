@@ -430,6 +430,95 @@ func TestReachability(t *testing.T) {
 	}
 }
 
+// TestReachabilityVerdict checks the converged verdict (Reachable, URL, BlockedOn): BlockedOn
+// names the first unready link, Reachable is true only when every link is green, and URL's
+// scheme follows whether TLS was requested.
+func TestReachabilityVerdict(t *testing.T) {
+	ctx := context.Background()
+	k := fake.NewKubernetes()
+	reg := fake.NewRegistry()
+	dns := fake.NewResolver()
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Registry: reg, Database: fake.NewDatabase(),
+		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: dns,
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Not deployed → blocked on the deployment, not reachable, no URL.
+	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.URL != "" || r.BlockedOn != "deployment" {
+		t.Errorf("not-deployed verdict = {reachable:%v url:%q blocked:%q}", r.Reachable, r.URL, r.BlockedOn)
+	}
+
+	reg.Add("img:1", "sha256:1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	// Deployed and ready but not exposed → blocked on the ingress (routing).
+	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.BlockedOn != "ingress" {
+		t.Errorf("not-exposed verdict = {reachable:%v blocked:%q}", r.Reachable, r.BlockedOn)
+	}
+
+	// Exposed with TLS requested, but no external address yet → blocked on the ingress controller.
+	if err := k.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.example.com", Port: 8080, TLS: true, Issuer: "letsencrypt"}); err != nil {
+		t.Fatalf("expose: %v", err)
+	}
+	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.BlockedOn != "ingress controller" {
+		t.Errorf("no-address verdict = {reachable:%v blocked:%q}", r.Reachable, r.BlockedOn)
+	}
+
+	// Address assigned, but the TLS certificate has not been issued → blocked on the certificate.
+	k.SetIngressAddress("web", "1.2.3.4")
+	dns.Set("web.example.com", "1.2.3.4")
+	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.BlockedOn != "tls certificate" {
+		t.Errorf("no-cert verdict = {reachable:%v blocked:%q}", r.Reachable, r.BlockedOn)
+	}
+
+	// Certificate issued and every other link green → reachable at an https URL.
+	k.SetCertReady("web", true)
+	if r, _ := e.Reachability(ctx, "web"); !r.Reachable || r.BlockedOn != "" || r.URL != "https://web.example.com" {
+		t.Errorf("reachable verdict = {reachable:%v url:%q blocked:%q}", r.Reachable, r.URL, r.BlockedOn)
+	}
+
+	// DNS drifting off the cluster blocks reachability again, now on dns.
+	dns.Set("web.example.com", "9.9.9.9")
+	if r, _ := e.Reachability(ctx, "web"); r.Reachable || r.BlockedOn != "dns" {
+		t.Errorf("dns-drift verdict = {reachable:%v blocked:%q}", r.Reachable, r.BlockedOn)
+	}
+}
+
+// TestReachabilityVerdictHTTP checks that a non-TLS app's live URL uses the http scheme.
+func TestReachabilityVerdictHTTP(t *testing.T) {
+	ctx := context.Background()
+	k := fake.NewKubernetes()
+	reg := fake.NewRegistry()
+	dns := fake.NewResolver()
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Registry: reg, Database: fake.NewDatabase(),
+		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: dns,
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	reg.Add("img:1", "sha256:1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if err := k.Expose(ctx, cp.ExposeSpec{App: "web", Host: "web.example.com", Port: 8080}); err != nil {
+		t.Fatalf("expose: %v", err)
+	}
+	k.SetIngressAddress("web", "1.2.3.4")
+	dns.Set("web.example.com", "1.2.3.4")
+	// No TLS requested, so cert readiness is irrelevant and the URL is http.
+	if r, _ := e.Reachability(ctx, "web"); !r.Reachable || r.URL != "http://web.example.com" {
+		t.Errorf("http verdict = {reachable:%v url:%q}", r.Reachable, r.URL)
+	}
+}
+
 func TestRollback(t *testing.T) {
 	ctx := context.Background()
 	e, k, r, d, _ := newEngine(t, permissive())

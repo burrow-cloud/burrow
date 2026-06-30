@@ -146,9 +146,12 @@ type ReachabilityResult struct {
 	Host               string   `json:"host,omitempty"`
 	Address            string   `json:"address,omitempty"`
 	TLS                bool     `json:"tls"`
+	CertReady          bool     `json:"cert_ready"`
 	DNSPointsAtCluster bool     `json:"dns_points_at_cluster"`
 	DNSAddresses       []string `json:"dns_addresses,omitempty"`
 	Reachable          bool     `json:"reachable"`
+	URL                string   `json:"url,omitempty"`
+	BlockedOn          string   `json:"blocked_on,omitempty"`
 	Summary            string   `json:"summary"`
 }
 
@@ -539,6 +542,51 @@ func (c *Client) Reachability(ctx context.Context, app string) (ReachabilityResu
 	var out ReachabilityResult
 	err := c.do(ctx, http.MethodGet, c.appPath(app, "reachability"), nil, &out)
 	return out, err
+}
+
+// ReachabilityPollInterval is how often WaitReachable re-checks reachability while polling.
+const ReachabilityPollInterval = 3 * time.Second
+
+// WaitReachable polls Reachability until the app converges to live (Reachable) or timeout
+// elapses, then returns the last verdict. It is the thin-client wait-until-live behind
+// `burrow app reachability --wait` and the burrow_reachability MCP tool's wait mode; the
+// control-plane engine stays point-in-time, so the polling and the clock live here, never in
+// the engine (ADR-0034 slice 3).
+//
+// A returned result with Reachable true means the app is live at result.URL; a returned result
+// with Reachable false means the timeout elapsed and result.BlockedOn names the link to fix.
+// after supplies the poll clock as a one-shot timer channel so tests can drive the loop without
+// real time; pass nil for the real clock (time.After).
+func (c *Client) WaitReachable(ctx context.Context, app string, timeout time.Duration, after func(time.Duration) <-chan time.Time) (ReachabilityResult, error) {
+	if after == nil {
+		after = time.After
+	}
+	interval := ReachabilityPollInterval
+	if interval > timeout {
+		interval = timeout
+	}
+	res, err := c.Reachability(ctx, app)
+	if err != nil || res.Reachable {
+		return res, err
+	}
+	// remaining is a logical countdown decremented by each poll interval, so convergence and
+	// timeout are deterministic without reading a wall clock here.
+	for remaining := timeout; remaining > 0; remaining -= interval {
+		wait := interval
+		if wait > remaining {
+			wait = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		case <-after(wait):
+		}
+		res, err = c.Reachability(ctx, app)
+		if err != nil || res.Reachable {
+			return res, err
+		}
+	}
+	return res, nil
 }
 
 // SetEnv upserts one non-secret env key for an app (ADR-0028). By default the running workload

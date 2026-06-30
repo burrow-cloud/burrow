@@ -166,3 +166,26 @@ jobs:
       - name: delete cluster
         if: always()
         run: k3d cluster delete burrow-ci
+
+  # pr-checks is the single aggregate gate, intended to be the ONLY required status check in branch
+  # protection. It passes when every other job passed or was legitimately skipped (a docs-only change,
+  # or the merge_group-only heavy job on a PR) and fails if any job failed or was cancelled. Requiring
+  # just this one check keeps the per-job checks from showing as "skipped/expected" on a PR while still
+  # gating the merge on their real results in the queue. Add new jobs to its `needs` to include them.
+  pr-checks:
+    name: PR checks
+    needs: [changes, build, license, kube-integration]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: require every job to have passed or been skipped
+        run: |
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "upstream job results: $results"
+          for r in $results; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "::error::a required job result was '$r' — failing the PR checks gate"
+              exit 1
+            fi
+          done
+          echo "all upstream jobs passed or were legitimately skipped"

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,9 +17,17 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/burrow-cloud/burrow/client"
-	bconnect "github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/mcp"
 )
+
+// passthroughResolver is a trivial EnvResolver for tests that do not exercise the local-config
+// resolution: it carries the env handle name through as the app namespace and the context through
+// as the kube context, so a tool's env argument reaches the API as the namespace selector and its
+// context routes the client. The real localconfig resolution is exercised separately in
+// TestEnvHandleResolvesViaLocalConfig.
+func passthroughResolver(env, kubeContext string) (mcp.Resolved, error) {
+	return mcp.Resolved{Name: env, Context: kubeContext, AppNamespace: env}, nil
+}
 
 // newSession wires the given Burrow MCP server to an in-process MCP client session over an
 // in-memory transport.
@@ -37,19 +47,19 @@ func newSession(t *testing.T, server *sdk.Server) *sdk.ClientSession {
 }
 
 // connect wires the Burrow MCP server (fronting the given mock API handler) to an
-// in-process MCP client session. Its client factory ignores the per-call context and points
-// every call at the mock API; the routing of context to a client is exercised separately in
-// TestPerCallContextRouting.
+// in-process MCP client session. Its client factory ignores the resolved target and points
+// every call at the mock API; the routing of a resolved target to a client is exercised
+// separately in TestPerCallContextRouting.
 func connect(t *testing.T, apiHandler http.HandlerFunc) *sdk.ClientSession {
 	t.Helper()
 	api := httptest.NewServer(apiHandler)
 	t.Cleanup(api.Close)
 
-	clientFor := func(string) (*client.Client, error) { return client.NewClient(api.URL, "tok"), nil }
-	lister := func() ([]bconnect.Context, error) {
-		return []bconnect.Context{{Name: "current", Cluster: "c", Current: true}}, nil
+	clientFor := func(mcp.Resolved) (*client.Client, error) { return client.NewClient(api.URL, "tok"), nil }
+	envs := func() ([]mcp.EnvHandle, error) {
+		return []mcp.EnvHandle{{Name: "current", Context: "c", Namespace: "ns", Current: true}}, nil
 	}
-	return newSession(t, mcp.NewServer(clientFor, lister, "test"))
+	return newSession(t, mcp.NewServer(passthroughResolver, clientFor, envs, "test"))
 }
 
 func decodeStructured[T any](t *testing.T, res *sdk.CallToolResult) T {
@@ -75,10 +85,17 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_contexts", "burrow_environments"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_environments"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
+	}
+
+	// burrow_contexts is removed (ADR-0036 slice 5): the agent's discovery tool is
+	// burrow_environments, which lists the local Burrow config handles. There is no separate
+	// raw-context listing tool over MCP.
+	if got["burrow_contexts"] {
+		t.Error("burrow_contexts must NOT exist: it was removed in favor of burrow_environments (ADR-0036)")
 	}
 
 	// Security boundary (ADR-0032): restore overwrites an app's live database, so it is CLI-only —
@@ -106,6 +123,7 @@ func TestListTools(t *testing.T) {
 		}
 	}
 	hasContext := map[string]bool{}
+	hasEnv := map[string]bool{}
 	for _, tool := range res.Tools {
 		if tool.InputSchema == nil {
 			continue
@@ -124,6 +142,9 @@ func TestListTools(t *testing.T) {
 			if prop == "context" {
 				hasContext[tool.Name] = true
 			}
+			if prop == "env" {
+				hasEnv[tool.Name] = true
+			}
 			if prop == "token" || prop == "auth" {
 				t.Errorf("tool %q exposes a %q input: a credential value must never cross MCP", tool.Name, prop)
 			}
@@ -138,18 +159,22 @@ func TestListTools(t *testing.T) {
 		}
 	}
 
-	// Per-call environment routing (ADR-0035): every operating tool, read or mutate, takes an
-	// optional `context`. `context` is a kubeconfig label, not a credential, so the secret scan
-	// above lets it through. burrow_environments lists a cluster's registered environments, so it
-	// is an operating tool and takes a context too. burrow_contexts is the exception: it lists the
-	// contexts the agent can target and so takes no context of its own.
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_apps", "burrow_scale", "burrow_cluster", "burrow_guard", "burrow_environments"} {
+	// Per-call environment targeting (ADR-0036): every operating tool, read or mutate, takes an
+	// optional `env` (a local Burrow config handle, the normal path) and an optional `context` (a
+	// low-level raw override). Both are non-secret selector labels, so the secret scan above lets
+	// them through.
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_apps", "burrow_scale", "burrow_cluster", "burrow_guard"} {
 		if !hasContext[want] {
 			t.Errorf("tool %q has no context input: every operating tool must be targetable per call", want)
 		}
+		if !hasEnv[want] {
+			t.Errorf("tool %q has no env input: env (a local handle) is the normal way to target an environment", want)
+		}
 	}
-	if hasContext["burrow_contexts"] {
-		t.Error("burrow_contexts must NOT take a context: it lists the contexts to target")
+	// burrow_environments lists the local Burrow config handles (ADR-0036): it contacts no cluster,
+	// so it takes neither an env nor a context of its own (it lists the environments to name).
+	if hasContext["burrow_environments"] || hasEnv["burrow_environments"] {
+		t.Error("burrow_environments must NOT take env/context: it lists the local handles to target")
 	}
 }
 
@@ -175,14 +200,14 @@ func TestPerCallContextRouting(t *testing.T) {
 
 	var mu sync.Mutex
 	var gotContexts []string
-	clientFor := func(kubeContext string) (*client.Client, error) {
+	clientFor := func(r mcp.Resolved) (*client.Client, error) {
 		mu.Lock()
-		gotContexts = append(gotContexts, kubeContext)
+		gotContexts = append(gotContexts, r.Context)
 		mu.Unlock()
 		return client.NewClient(api.URL, "tok"), nil
 	}
-	lister := func() ([]bconnect.Context, error) { return nil, nil }
-	cs := newSession(t, mcp.NewServer(clientFor, lister, "test"))
+	envs := func() ([]mcp.EnvHandle, error) { return nil, nil }
+	cs := newSession(t, mcp.NewServer(passthroughResolver, clientFor, envs, "test"))
 
 	call := func(name string, args map[string]any) {
 		t.Helper()
@@ -215,23 +240,102 @@ func TestPerCallContextRouting(t *testing.T) {
 	}
 }
 
-// TestContextsToolListsContexts confirms burrow_contexts returns the available kubeconfig contexts
-// (clusters) and marks the current one, so the agent knows what it can name in another tool's
-// context argument (ADR-0035 phase 1b; the tool was renamed from burrow_environments in phase 2a).
-func TestContextsToolListsContexts(t *testing.T) {
-	clientFor := func(string) (*client.Client, error) {
-		t.Error("burrow_contexts must not build a control-plane client: it reads the local kubeconfig")
+// TestEnvHandleResolvesViaLocalConfig confirms a tool's env argument is resolved as a local Burrow
+// config handle (ADR-0036 slice 5): with a temp $BURROW_CONFIG naming a handle, env:"<handle>"
+// routes the client to that handle's kube context and sends its app namespace to the control plane.
+// The real localconfig-backed resolver (the one burrow-mcp wires) is used; only the client factory
+// is faked.
+func TestEnvHandleResolvesViaLocalConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config")
+	cfg := "" +
+		"apiVersion: burrow.dev/v1\n" +
+		"kind: Config\n" +
+		"environments:\n" +
+		"  - name: nonprod\n" +
+		"    context: do-nyc1-nonprod\n" +
+		"    appNamespace: team-x\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	t.Setenv("BURROW_CONFIG", cfgPath)
+
+	var gotEnvQuery string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEnvQuery = r.URL.Query().Get("env")
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web"})
+	}))
+	t.Cleanup(api.Close)
+
+	var gotContext string
+	clientFor := func(res mcp.Resolved) (*client.Client, error) {
+		gotContext = res.Context
+		return client.NewClient(api.URL, "tok"), nil
+	}
+	envs := func() ([]mcp.EnvHandle, error) { return nil, nil }
+	// The kubeconfig path is irrelevant for a named handle: it resolves without reading kubeconfig.
+	cs := newSession(t, mcp.NewServer(mcp.LocalConfigResolver(""), clientFor, envs, "test"))
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_status",
+		Arguments: map[string]any{"app": "web", "env": "nonprod"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	if gotContext != "do-nyc1-nonprod" {
+		t.Errorf("client routed to context %q, want do-nyc1-nonprod", gotContext)
+	}
+	if gotEnvQuery != "team-x" {
+		t.Errorf("app namespace sent to the control plane = %q, want team-x", gotEnvQuery)
+	}
+}
+
+// TestUnknownEnvHandleErrors confirms naming an env handle not in the local config fails the tool
+// call with a clear error instead of silently mis-targeting (ADR-0036).
+func TestUnknownEnvHandleErrors(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config")
+	if err := os.WriteFile(cfgPath, []byte("apiVersion: burrow.dev/v1\nkind: Config\n"), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	t.Setenv("BURROW_CONFIG", cfgPath)
+
+	clientFor := func(mcp.Resolved) (*client.Client, error) {
+		t.Error("an unknown handle must not build a client")
 		return nil, nil
 	}
-	lister := func() ([]bconnect.Context, error) {
-		return []bconnect.Context{
-			{Name: "prod-cluster", Cluster: "prod", Current: false},
-			{Name: "staging", Cluster: "stg", Current: true},
-		}, nil
-	}
-	cs := newSession(t, mcp.NewServer(clientFor, lister, "test"))
+	envs := func() ([]mcp.EnvHandle, error) { return nil, nil }
+	cs := newSession(t, mcp.NewServer(mcp.LocalConfigResolver(""), clientFor, envs, "test"))
 
-	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "burrow_contexts"})
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_status",
+		Arguments: map[string]any{"app": "web", "env": "ghost"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected a tool error for an unknown env handle")
+	}
+}
+
+// TestMutatingToolEchoesEnv confirms a mutating tool's result includes the environment it acted in,
+// so a defaulted or named target is legible to the agent and the audit trail (ADR-0036).
+func TestMutatingToolEchoesEnv(t *testing.T) {
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"release": map[string]any{"id": "r1", "app": "web", "image": "img:1", "status": "deployed", "replicas": 1},
+		})
+	})
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_deploy",
+		Arguments: map[string]any{"app": "web", "image": "img:1", "replicas": 1, "env": "staging"},
+	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
@@ -239,43 +343,36 @@ func TestContextsToolListsContexts(t *testing.T) {
 		t.Fatalf("tool returned error: %v", res.Content)
 	}
 	out := decodeStructured[struct {
-		Contexts []struct {
-			Name    string `json:"name"`
-			Cluster string `json:"cluster"`
-			Current bool   `json:"current"`
-		} `json:"contexts"`
+		Environment struct {
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"environment"`
+		Release client.Release `json:"release"`
 	}](t, res)
-	if len(out.Contexts) != 2 {
-		t.Fatalf("contexts = %+v, want 2", out.Contexts)
+	// The passthrough resolver carries env -> {name, app namespace}, so the echo names the target.
+	if out.Environment.Name != "staging" || out.Environment.Namespace != "staging" {
+		t.Errorf("result did not echo the environment: %+v", out.Environment)
 	}
-	current := map[string]bool{}
-	for _, c := range out.Contexts {
-		current[c.Name] = c.Current
-	}
-	if !current["staging"] {
-		t.Errorf("staging should be marked current: %+v", out.Contexts)
-	}
-	if current["prod-cluster"] {
-		t.Errorf("prod-cluster should not be marked current: %+v", out.Contexts)
+	if out.Release.ID != "r1" {
+		t.Errorf("deploy result lost the release: %+v", out.Release)
 	}
 }
 
-// TestEnvironmentsToolListsRegisteredEnvs confirms burrow_environments lists a cluster's registered
-// namespace-environments via the control-plane client, including the implicit default (ADR-0035
-// phase 2a).
-func TestEnvironmentsToolListsRegisteredEnvs(t *testing.T) {
-	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/environments" {
-			t.Errorf("path = %q, want /v1/environments", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"environments": []map[string]any{
-				{"name": "default", "namespace": "burrow-apps", "default": true},
-				{"name": "staging", "namespace": "burrow-apps-staging"},
-			},
-		})
-	})
+// TestEnvironmentsToolListsLocalHandles confirms burrow_environments lists the local Burrow config
+// handles (the agent's targetable environments) rather than a cluster's registry, returning each
+// handle's name, context, and app namespace and marking the current one (ADR-0036 slice 5).
+func TestEnvironmentsToolListsLocalHandles(t *testing.T) {
+	clientFor := func(mcp.Resolved) (*client.Client, error) {
+		t.Error("burrow_environments must not build a control-plane client: it reads the local config")
+		return nil, nil
+	}
+	envs := func() ([]mcp.EnvHandle, error) {
+		return []mcp.EnvHandle{
+			{Name: "dev", Context: "do-nyc1-dev", Namespace: "burrow-apps"},
+			{Name: "nonprod", Context: "do-nyc1-nonprod", Namespace: "team-x", Current: true},
+		}, nil
+	}
+	cs := newSession(t, mcp.NewServer(passthroughResolver, clientFor, envs, "test"))
 
 	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "burrow_environments"})
 	if err != nil {
@@ -287,18 +384,22 @@ func TestEnvironmentsToolListsRegisteredEnvs(t *testing.T) {
 	out := decodeStructured[struct {
 		Environments []struct {
 			Name      string `json:"name"`
+			Context   string `json:"context"`
 			Namespace string `json:"namespace"`
-			Default   bool   `json:"default"`
+			Current   bool   `json:"current"`
 		} `json:"environments"`
 	}](t, res)
 	if len(out.Environments) != 2 {
 		t.Fatalf("environments = %+v, want 2", out.Environments)
 	}
-	if out.Environments[0].Name != "default" || !out.Environments[0].Default {
-		t.Errorf("first environment should be the default: %+v", out.Environments)
+	if out.Environments[0].Name != "dev" || out.Environments[0].Context != "do-nyc1-dev" || out.Environments[0].Namespace != "burrow-apps" {
+		t.Errorf("dev handle wrong: %+v", out.Environments[0])
 	}
-	if out.Environments[1].Name != "staging" || out.Environments[1].Namespace != "burrow-apps-staging" {
-		t.Errorf("staging environment wrong: %+v", out.Environments)
+	if out.Environments[1].Name != "nonprod" || !out.Environments[1].Current {
+		t.Errorf("nonprod should be marked current: %+v", out.Environments[1])
+	}
+	if out.Environments[0].Current {
+		t.Errorf("dev should not be marked current: %+v", out.Environments[0])
 	}
 }
 

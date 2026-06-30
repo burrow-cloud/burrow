@@ -37,58 +37,57 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	return burrowmcp.Serve(ctx, clientFor, contextLister(), version)
+	kubeconfig := os.Getenv("BURROW_KUBECONFIG")
+	resolve := burrowmcp.LocalConfigResolver(kubeconfig)
+	envs := burrowmcp.LocalConfigEnvLister(kubeconfig)
+	return burrowmcp.Serve(ctx, resolve, clientFor, envs, version)
 }
 
-// clientFactory builds the per-context control-plane client factory the MCP server uses to target
-// one environment per call (ADR-0035). With BURROW_CONTROL_PLANE_URL set it talks to that URL
+// clientFactory builds the per-target control-plane client factory the MCP server uses to target
+// one environment per call (ADR-0036). With BURROW_CONTROL_PLANE_URL set it talks to that URL
 // directly (e.g. an ingress) using BURROW_API_TOKEN; a direct URL names exactly one control plane,
-// so the per-call context does not apply and every call uses it. Otherwise it auto-connects through
-// the Kubernetes API-server proxy using the ambient kubeconfig, building a client per context and
-// reading each cluster's own install-Secret token (ADR-0014) — so an agent can launch burrow-mcp
-// with no configuration beyond kubectl access. The proxy-path factory is concurrency-safe and
-// caches one client per context (an empty context is the current kubeconfig context).
-func clientFactory(ctx context.Context) (burrowmcp.ClientForContext, error) {
+// so the resolved target does not apply and every call uses it. Otherwise it auto-connects through
+// the Kubernetes API-server proxy using the ambient kubeconfig, building a client per resolved
+// target (its kube context and control-plane namespace) and reading each cluster's own
+// install-Secret token (ADR-0014) — so an agent can launch burrow-mcp with no configuration beyond
+// kubectl access. The proxy-path factory is concurrency-safe and caches one client per
+// context+control-plane-namespace (an empty context is the current kubeconfig context). The
+// handle's app namespace is not a connection dimension: it travels to burrowd per request.
+func clientFactory(ctx context.Context) (burrowmcp.ClientForEnv, error) {
 	if baseURL := os.Getenv("BURROW_CONTROL_PLANE_URL"); baseURL != "" {
 		token := os.Getenv("BURROW_API_TOKEN")
 		if token == "" {
 			return nil, errors.New("BURROW_API_TOKEN is required with BURROW_CONTROL_PLANE_URL")
 		}
 		c := client.NewClient(baseURL, token)
-		return func(string) (*client.Client, error) { return c, nil }, nil
+		return func(burrowmcp.Resolved) (*client.Client, error) { return c, nil }, nil
 	}
 
 	kubeconfig := os.Getenv("BURROW_KUBECONFIG")
-	namespace := envOr("BURROW_NAMESPACE", connect.DefaultNamespace)
 	var mu sync.Mutex
 	cache := map[string]*client.Client{}
-	return func(kubeContext string) (*client.Client, error) {
+	return func(r burrowmcp.Resolved) (*client.Client, error) {
+		namespace := r.ControlPlaneNamespace
+		if namespace == "" {
+			namespace = envOr("BURROW_NAMESPACE", connect.DefaultNamespace)
+		}
+		key := r.Context + "\x00" + namespace
 		mu.Lock()
 		defer mu.Unlock()
-		if c, ok := cache[kubeContext]; ok {
+		if c, ok := cache[key]; ok {
 			return c, nil
 		}
 		c, err := connect.Client(ctx, connect.Options{
 			Kubeconfig: kubeconfig,
 			Namespace:  namespace,
-			Context:    kubeContext,
+			Context:    r.Context,
 		})
 		if err != nil {
 			return nil, err
 		}
-		cache[kubeContext] = c
+		cache[key] = c
 		return c, nil
 	}, nil
-}
-
-// contextLister lists the kubeconfig contexts the agent can target (ADR-0035), reusing the same
-// helper as `burrow context list` and backing the burrow_contexts tool. It reads the ambient
-// kubeconfig (or BURROW_KUBECONFIG) and contacts no cluster.
-func contextLister() burrowmcp.ContextLister {
-	kubeconfig := os.Getenv("BURROW_KUBECONFIG")
-	return func() ([]connect.Context, error) {
-		return connect.Contexts(kubeconfig)
-	}
 }
 
 func envOr(key, fallback string) string {

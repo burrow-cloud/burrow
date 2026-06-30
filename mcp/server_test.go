@@ -15,7 +15,6 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/burrow-cloud/burrow/client"
-	bconnect "github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/mcp"
 )
 
@@ -38,18 +37,15 @@ func newSession(t *testing.T, server *sdk.Server) *sdk.ClientSession {
 
 // connect wires the Burrow MCP server (fronting the given mock API handler) to an
 // in-process MCP client session. Its client factory ignores the per-call context and points
-// every call at the mock API; the routing of context to a client is exercised separately in
-// TestPerCallContextRouting.
+// every call at the mock API; the routing of an env handle to a context + client is exercised
+// separately in TestEnvHandleRoutesAndSendsName.
 func connect(t *testing.T, apiHandler http.HandlerFunc) *sdk.ClientSession {
 	t.Helper()
 	api := httptest.NewServer(apiHandler)
 	t.Cleanup(api.Close)
 
 	clientFor := func(string) (*client.Client, error) { return client.NewClient(api.URL, "tok"), nil }
-	lister := func() ([]bconnect.Context, error) {
-		return []bconnect.Context{{Name: "current", Cluster: "c", Current: true}}, nil
-	}
-	return newSession(t, mcp.NewServer(clientFor, lister, "test"))
+	return newSession(t, mcp.NewServer(clientFor, "", "test"))
 }
 
 func decodeStructured[T any](t *testing.T, res *sdk.CallToolResult) T {
@@ -75,10 +71,16 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_contexts", "burrow_environments"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_environments"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
+	}
+
+	// burrow_contexts is retired (ADR-0036): the agent discovers what it can target through
+	// burrow_environments (local handles), not a raw kubeconfig-context listing.
+	if got["burrow_contexts"] {
+		t.Error("burrow_contexts must NOT exist: it is retired in favor of burrow_environments (ADR-0036)")
 	}
 
 	// Security boundary (ADR-0032): restore overwrites an app's live database, so it is CLI-only —
@@ -138,18 +140,18 @@ func TestListTools(t *testing.T) {
 		}
 	}
 
-	// Per-call environment routing (ADR-0035): every operating tool, read or mutate, takes an
-	// optional `context`. `context` is a kubeconfig label, not a credential, so the secret scan
-	// above lets it through. burrow_environments lists a cluster's registered environments, so it
-	// is an operating tool and takes a context too. burrow_contexts is the exception: it lists the
-	// contexts the agent can target and so takes no context of its own.
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_apps", "burrow_scale", "burrow_cluster", "burrow_guard", "burrow_environments"} {
+	// Per-call targeting (ADR-0035/0036): every operating tool that contacts a cluster, read or
+	// mutate, takes an optional `context` (the low-level raw kube-context override). `context` is a
+	// kubeconfig label, not a credential, so the secret scan above lets it through.
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_apps", "burrow_scale", "burrow_cluster", "burrow_guard"} {
 		if !hasContext[want] {
 			t.Errorf("tool %q has no context input: every operating tool must be targetable per call", want)
 		}
 	}
-	if hasContext["burrow_contexts"] {
-		t.Error("burrow_contexts must NOT take a context: it lists the contexts to target")
+	// burrow_environments lists the LOCAL handles (ADR-0036), reading the local config and contacting
+	// no cluster, so it takes no context of its own.
+	if hasContext["burrow_environments"] {
+		t.Error("burrow_environments must NOT take a context: it lists local handles and contacts no cluster")
 	}
 }
 
@@ -181,8 +183,7 @@ func TestPerCallContextRouting(t *testing.T) {
 		mu.Unlock()
 		return client.NewClient(api.URL, "tok"), nil
 	}
-	lister := func() ([]bconnect.Context, error) { return nil, nil }
-	cs := newSession(t, mcp.NewServer(clientFor, lister, "test"))
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
 
 	call := func(name string, args map[string]any) {
 		t.Helper()
@@ -215,67 +216,28 @@ func TestPerCallContextRouting(t *testing.T) {
 	}
 }
 
-// TestContextsToolListsContexts confirms burrow_contexts returns the available kubeconfig contexts
-// (clusters) and marks the current one, so the agent knows what it can name in another tool's
-// context argument (ADR-0035 phase 1b; the tool was renamed from burrow_environments in phase 2a).
-func TestContextsToolListsContexts(t *testing.T) {
+// TestEnvironmentsToolListsLocalHandles confirms burrow_environments lists the LOCAL environment
+// handles from the handle config (not the burrowd registry), marking the pinned current selection,
+// and contacts no cluster (ADR-0036 slice 5b).
+func TestEnvironmentsToolListsLocalHandles(t *testing.T) {
+	writeHandleConfig(t, `apiVersion: burrow.dev/v1
+kind: Config
+current: prod
+environments:
+  - name: dev
+    context: do-nyc1-dev
+    appNamespace: burrow-apps
+  - name: prod
+    context: do-nyc1-prod
+    appNamespace: apps
+    env: prod
+`)
+
 	clientFor := func(string) (*client.Client, error) {
-		t.Error("burrow_contexts must not build a control-plane client: it reads the local kubeconfig")
+		t.Error("burrow_environments must not build a control-plane client: it reads the local handle config")
 		return nil, nil
 	}
-	lister := func() ([]bconnect.Context, error) {
-		return []bconnect.Context{
-			{Name: "prod-cluster", Cluster: "prod", Current: false},
-			{Name: "staging", Cluster: "stg", Current: true},
-		}, nil
-	}
-	cs := newSession(t, mcp.NewServer(clientFor, lister, "test"))
-
-	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "burrow_contexts"})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if res.IsError {
-		t.Fatalf("tool returned error: %v", res.Content)
-	}
-	out := decodeStructured[struct {
-		Contexts []struct {
-			Name    string `json:"name"`
-			Cluster string `json:"cluster"`
-			Current bool   `json:"current"`
-		} `json:"contexts"`
-	}](t, res)
-	if len(out.Contexts) != 2 {
-		t.Fatalf("contexts = %+v, want 2", out.Contexts)
-	}
-	current := map[string]bool{}
-	for _, c := range out.Contexts {
-		current[c.Name] = c.Current
-	}
-	if !current["staging"] {
-		t.Errorf("staging should be marked current: %+v", out.Contexts)
-	}
-	if current["prod-cluster"] {
-		t.Errorf("prod-cluster should not be marked current: %+v", out.Contexts)
-	}
-}
-
-// TestEnvironmentsToolListsRegisteredEnvs confirms burrow_environments lists a cluster's registered
-// namespace-environments via the control-plane client, including the implicit default (ADR-0035
-// phase 2a).
-func TestEnvironmentsToolListsRegisteredEnvs(t *testing.T) {
-	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/environments" {
-			t.Errorf("path = %q, want /v1/environments", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"environments": []map[string]any{
-				{"name": "default", "namespace": "burrow-apps", "default": true},
-				{"name": "staging", "namespace": "burrow-apps-staging"},
-			},
-		})
-	})
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
 
 	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "burrow_environments"})
 	if err != nil {
@@ -287,18 +249,27 @@ func TestEnvironmentsToolListsRegisteredEnvs(t *testing.T) {
 	out := decodeStructured[struct {
 		Environments []struct {
 			Name      string `json:"name"`
+			Context   string `json:"context"`
 			Namespace string `json:"namespace"`
-			Default   bool   `json:"default"`
+			Env       string `json:"env"`
+			Current   bool   `json:"current"`
 		} `json:"environments"`
 	}](t, res)
 	if len(out.Environments) != 2 {
-		t.Fatalf("environments = %+v, want 2", out.Environments)
+		t.Fatalf("environments = %+v, want 2 local handles", out.Environments)
 	}
-	if out.Environments[0].Name != "default" || !out.Environments[0].Default {
-		t.Errorf("first environment should be the default: %+v", out.Environments)
+	if out.Environments[0].Name != "dev" || out.Environments[0].Context != "do-nyc1-dev" {
+		t.Errorf("first handle = %+v, want dev/do-nyc1-dev", out.Environments[0])
 	}
-	if out.Environments[1].Name != "staging" || out.Environments[1].Namespace != "burrow-apps-staging" {
-		t.Errorf("staging environment wrong: %+v", out.Environments)
+	prod := out.Environments[1]
+	if prod.Name != "prod" || prod.Context != "do-nyc1-prod" || prod.Env != "prod" {
+		t.Errorf("prod handle = %+v, want prod/do-nyc1-prod with env name prod", prod)
+	}
+	if !prod.Current {
+		t.Errorf("prod should be marked current (it is pinned): %+v", out.Environments)
+	}
+	if out.Environments[0].Current {
+		t.Errorf("dev should not be marked current: %+v", out.Environments)
 	}
 }
 

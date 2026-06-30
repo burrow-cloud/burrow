@@ -37,7 +37,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	return burrowmcp.Serve(ctx, clientFor, contextLister(), version)
+	// The kubeconfig path is used only to mark which local handle is current in burrow_environments;
+	// it never selects an agent's target (ADR-0036). An env argument resolves through the local
+	// handle config ($BURROW_CONFIG, else ~/.burrow/config), read by the MCP server per call.
+	kubeconfig := os.Getenv("BURROW_KUBECONFIG")
+	return burrowmcp.Serve(ctx, clientFor, kubeconfig, version)
 }
 
 // clientFactory builds the per-context control-plane client factory the MCP server uses to target
@@ -79,16 +83,6 @@ func clientFactory(ctx context.Context) (burrowmcp.ClientForContext, error) {
 		cache[kubeContext] = c
 		return c, nil
 	}, nil
-}
-
-// contextLister lists the kubeconfig contexts the agent can target (ADR-0035), reusing the same
-// helper as `burrow context list` and backing the burrow_contexts tool. It reads the ambient
-// kubeconfig (or BURROW_KUBECONFIG) and contacts no cluster.
-func contextLister() burrowmcp.ContextLister {
-	kubeconfig := os.Getenv("BURROW_KUBECONFIG")
-	return func() ([]connect.Context, error) {
-		return connect.Contexts(kubeconfig)
-	}
 }
 
 func envOr(key, fallback string) string {

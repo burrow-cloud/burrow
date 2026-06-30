@@ -10,85 +10,86 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/burrow-cloud/burrow/client"
-	"github.com/burrow-cloud/burrow/connect"
 )
 
-// ClientForContext resolves a control-plane client for a kubeconfig context (an environment;
-// ADR-0035 phase 1). An empty context string means the current kubeconfig context (today's
-// behavior). Each context's cluster runs its own burrowd with its own credentials and its own
-// guardrail policy, so the agent targets an environment per call by naming its context. The MCP
-// server holds one factory instead of one client (ADR-0035, ADR-0005); burrow-mcp builds it to
-// cache a client per context.
+// ClientForContext resolves a control-plane client for a kubeconfig context (the cluster whose
+// burrowd a call targets; ADR-0035, ADR-0036). An empty context string means the current kubeconfig
+// context. Each context's cluster runs its own burrowd with its own credentials and its own
+// guardrail policy. The MCP server holds one factory instead of one client (ADR-0035, ADR-0005);
+// burrow-mcp builds it to cache a client per context. The server resolves the agent's env argument
+// (a local handle name) to a kube context through localconfig before calling this (ADR-0036 slice
+// 5b).
 type ClientForContext func(kubeContext string) (*client.Client, error)
 
-// ContextLister lists the kubeconfig contexts (clusters) the agent can target, marking the current
-// one, so the burrow_contexts tool can tell the agent what it may name in any tool's context
-// argument (ADR-0035 phase 1). It backs `burrow_contexts`, the read-only context listing — distinct
-// from burrow_environments, which lists the namespace-environments registered in a cluster (phase 2).
-type ContextLister func() ([]connect.Context, error)
-
-// contextArg is embedded in every tool's input so each call can target a specific environment.
+// contextArg is embedded in every operating tool's input as a low-level, raw kube-context override.
 // Its single field is promoted into the tool's generated input schema as an optional "context"
-// property. An empty value means the current kubeconfig context. It is non-secret: a context
-// name is a kubeconfig label, not a credential (ADR-0035, ADR-0005).
+// property. An empty value means the current kubeconfig context. It is non-secret: a context name is
+// a kubeconfig label, not a credential (ADR-0035, ADR-0005). On a per-app tool the env argument
+// (a local environment handle) is the primary target and wins when both are set; context is the
+// escape hatch for targeting a cluster that has no handle (ADR-0036 slice 5b).
 type contextArg struct {
-	Context string `json:"context,omitempty" jsonschema:"optional: the kubeconfig context (environment) to target, e.g. prod-cluster or staging; default is the current context. Each environment is a separate cluster with its own guardrail policy, so this is how you operate prod versus staging."`
+	Context string `json:"context,omitempty" jsonschema:"optional, low-level: the raw kubeconfig context (which cluster's burrowd) to target, e.g. prod-cluster; default is the current context. Prefer env, which names a local environment handle; env wins when both are set, and context is only for targeting a cluster that has no handle."`
 }
 
-// envArg is embedded in every per-app tool's input so a call can target a named environment within a
-// cluster (ADR-0035 phase 2b). It composes with contextArg: context picks the cluster, env picks the
-// namespace-per-environment inside it. Its single field is promoted into the tool's generated input
-// schema as an optional "env" property; an empty value means the default environment. An environment
-// name is non-secret metadata, not a credential. Use burrow_environments to discover the names.
+// envArg is embedded in every per-app tool's input as the primary target: the LOCAL ENVIRONMENT
+// HANDLE to operate (ADR-0036 slice 5b). Its single field is promoted into the tool's generated
+// input schema as an optional "env" property. burrow-mcp resolves the handle through the local
+// config to the cluster (kube context) it targets and the burrowd-registered environment NAME it
+// sends; an empty value follows the current kube context with the default environment. An
+// environment name is non-secret selector metadata, not a credential. Use burrow_environments to
+// discover the handle names.
 type envArg struct {
-	Env string `json:"env,omitempty" jsonschema:"optional: the environment to operate in (e.g. staging or prod); default is the default environment. Within the targeted cluster, this picks the namespace-per-environment; use burrow_environments to see what is registered."`
+	Env string `json:"env,omitempty" jsonschema:"optional: the local environment handle to operate in (e.g. staging or prod); default follows the current kube context with the default environment. burrow-mcp resolves the handle to its cluster and the registered environment it sends. Use burrow_environments to see the handles you can name. Every mutating tool echoes the environment it acted in."`
 }
 
 // NewServer builds the Burrow MCP server: an agent-neutral surface (ADR-0003) exposing
 // the control plane's operations as MCP tools. Each tool translates a call into a
 // control-plane API call via the client and returns the structured result; a control
 // plane error becomes a tool error the agent can read. The server holds no cluster
-// credentials (ADR-0005). It targets one environment per call (ADR-0035): every tool takes
-// an optional context, resolved to that cluster's client through clientFor, burrow_contexts
-// lists the kubeconfig contexts (clusters) the agent can name, and burrow_environments lists the
-// namespace-environments registered in a cluster.
-func NewServer(clientFor ClientForContext, contexts ContextLister, version string) *sdk.Server {
+// credentials (ADR-0005). It targets one environment per call (ADR-0036): a per-app tool's env
+// argument names a local environment handle, resolved through localconfig to the cluster (kube
+// context) it targets and the burrowd-registered environment NAME it sends; the resolved client
+// comes from clientFor, and every mutating tool echoes the environment it acted in.
+// burrow_environments lists the local handles the agent can name (kubeconfig is the path used to
+// mark the current one).
+func NewServer(clientFor ClientForContext, kubeconfig, version string) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{Name: "burrow", Title: "Burrow", Version: version}, nil)
+	sel := selector{kubeconfig: kubeconfig}
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_deploy",
-		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Config is NOT passed here: an app's config is a separate, app-global store sourced at deploy time, so set any config vars the release needs with burrow_config_set BEFORE deploying — the new release then boots with it on first start. (burrow_config_set with no_restart=true followed by burrow_deploy is a single restart.) For SECRETS (DB URLs, API keys), do not put values in config and do not paste secret values into this conversation: ask the user to run `burrow app secret set <app> KEY=VALUE` themselves BEFORE deploying, then confirm the key with burrow_secret_list. Returns the new release and the release it superseded (the rollback handle). Pass context to target a specific cluster (default the current one). Pass env to target a namespace-environment within that cluster, such as staging or prod (default the default environment); this is how you deploy the same app to staging versus prod. Use burrow_environments to see the environments registered in a cluster.",
-	}, deployTool(clientFor))
+		Description: "Deploy an application to the cluster by container image reference. The image must already be pushed to a registry the cluster can pull from; only the reference and small metadata are sent, never code. Config is NOT passed here: an app's config is a separate, app-global store sourced at deploy time, so set any config vars the release needs with burrow_config_set BEFORE deploying — the new release then boots with it on first start. (burrow_config_set with no_restart=true followed by burrow_deploy is a single restart.) For SECRETS (DB URLs, API keys), do not put values in config and do not paste secret values into this conversation: ask the user to run `burrow app secret set <app> KEY=VALUE` themselves BEFORE deploying, then confirm the key with burrow_secret_list. Returns the new release and the release it superseded (the rollback handle), plus the environment it acted in. Pass env to target a local environment handle, such as staging or prod (default follows the current kube context with the default environment); this is how you deploy the same app to staging versus prod. Use burrow_environments to see the handles you can name; context is a low-level override for a cluster with no handle.",
+	}, deployTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_config_set",
 		Description: "Set (upsert) a non-secret config var for an app (configuration set as an environment variable). The config store is the single source of truth, sourced into the workload at deploy time. By default the running app is rolled so it picks the change up; set no_restart=true to only persist it and let it land on the next deploy (so setting config then deploying is a single restart). For secrets, do not use config: config vars are non-secret.",
-	}, configSetTool(clientFor))
+	}, configSetTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_config_list",
 		Description: "List an app's non-secret config vars (the config store). Read-only.",
-	}, configListTool(clientFor))
+	}, configListTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_config_unset",
 		Description: "Remove a non-secret config var from an app. By default the running app is rolled so it drops the value; set no_restart=true to only persist the removal and let it land on the next deploy.",
-	}, configUnsetTool(clientFor))
+	}, configUnsetTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_secret_list",
 		Description: "List the KEYS of an app's secret environment variables — never the values (secret values never travel over MCP; ADR-0029). Read-only. Use this to confirm a secret the app needs is present before deploying. To SET a secret value, there is no tool: NEVER ask the user to paste a secret value into this conversation (anything in the prompt is retained in context and re-sent on later tool calls). Instead, ask the user to run `burrow app secret set <app> KEY=VALUE` themselves at their terminal, then confirm with this list tool.",
-	}, secretListTool(clientFor))
+	}, secretListTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_secret_unset",
 		Description: "Remove a secret environment variable from an app by KEY (no value crosses MCP). By default the running app is rolled so it drops the value; set no_restart=true to only persist the removal and let it land on the next deploy. To SET a secret, ask the user to run `burrow app secret set <app> KEY=VALUE` themselves — never have them paste a secret value into this conversation.",
-	}, secretUnsetTool(clientFor))
+	}, secretUnsetTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_apps",
-		Description: "List the applications Burrow manages and each one's running state (image, ready/desired replicas, availability), so you can discover what is deployed before operating on it. Read-only. Pass context to survey a specific cluster (default the current one), and env to survey a namespace-environment within it such as staging or prod (default the default environment); this is how you compare prod versus staging.",
-	}, appsTool(clientFor))
+		Description: "List the applications Burrow manages and each one's running state (image, ready/desired replicas, availability), so you can discover what is deployed before operating on it. Read-only. Pass env to survey a local environment handle such as staging or prod (default follows the current kube context with the default environment); this is how you compare prod versus staging. Use burrow_environments to see the handles you can name.",
+	}, appsTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_addons",
@@ -133,42 +134,42 @@ func NewServer(clientFor ClientForContext, contexts ContextLister, version strin
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_app_delete",
 		Description: "Delete an application entirely: its workload, its routing (Service and Ingress), and its recorded release history, so it disappears from the apps listing and from status. This is destructive and irreversible. Held for confirmation by a guardrail by default; set confirm=true ONLY after the user explicitly approves, never on your own.",
-	}, appDeleteTool(clientFor))
+	}, appDeleteTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_status",
-		Description: "Report an application's status: its most recent release and the live workload state (desired/ready replicas, availability). Pass context to read a specific cluster (default the current one), and env to read a namespace-environment within it such as staging or prod (default the default environment); this is how you check prod versus staging.",
-	}, statusTool(clientFor))
+		Description: "Report an application's status: its most recent release and the live workload state (desired/ready replicas, availability). Pass env to read a local environment handle such as staging or prod (default follows the current kube context with the default environment); this is how you check prod versus staging. Use burrow_environments to see the handles you can name.",
+	}, statusTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_logs",
 		Description: "Return recent log lines for an application's workload.",
-	}, logsTool(clientFor))
+	}, logsTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_rollback",
 		Description: "Roll an application back to its previously running release by redeploying that release's image reference. Returns the new release and which release it restored. Allowed by default (rollback is a recovery action), but an operator may configure a guardrail to hold it for confirmation; when held, the error says so — ask the user, then retry with confirm set to true.",
-	}, rollbackTool(clientFor))
+	}, rollbackTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_scale",
 		Description: "Change an application's replica count. A guardrail may refuse it (e.g. above the replica ceiling) or hold it for confirmation (e.g. scaling to zero); when held, the error says so — ask the user, then retry with confirm set to true.",
-	}, scaleTool(clientFor))
+	}, scaleTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_expose",
 		Description: "Make a deployed application reachable from outside the cluster at a hostname, by creating a Service and an Ingress. Public exposure is held for confirmation by a guardrail by default; when held, the error says so — ask the user, then retry with confirm set to true. Reachability also needs an ingress controller and DNS pointing the host at the cluster.",
-	}, exposeTool(clientFor))
+	}, exposeTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_unexpose",
 		Description: "Remove an application's exposure (its Service and Ingress). Does not affect the running workload.",
-	}, unexposeTool(clientFor))
+	}, unexposeTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_reachability",
 		Description: "Report whether an application is reachable at its hostname, link by link: deployed and ready, exposed, given an external address by an ingress controller, a TLS certificate when one was requested, and DNS pointing the host at that address. Returns a plain one-line summary plus the full chain, so you can tell the user exactly which link is missing and what to do. After deploying, exposing (burrow_expose), and pointing DNS at the cluster, call this with wait set to true to poll until the app is live and get its URL; when the app converges, reachable is true and url is the live address, and if it returns blocked_on that names the one link to fix. Read-only.",
-	}, reachabilityTool(clientFor))
+	}, reachabilityTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_domain_add",
@@ -201,23 +202,18 @@ func NewServer(clientFor ClientForContext, contexts ContextLister, version strin
 	}, auditTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
-		Name:        "burrow_contexts",
-		Description: "List the kubeconfig contexts you can target: each is a separate cluster running its own burrowd with its own guardrail policy (ADR-0035). Marks the current context, which any tool uses when you omit its context argument. Pass one of these names as the context argument on another tool to operate that cluster, so you can deploy to a staging cluster and gate a prod cluster by naming the context. Read-only: it reads the local kubeconfig and contacts no cluster.",
-	}, contextsTool(contexts))
-
-	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_environments",
-		Description: "List the environments registered in a cluster: namespace-per-environment (ADR-0035 phase 2), where one cluster has a separate app namespace per environment (e.g. staging, prod). Each entry is an environment name and the namespace its apps deploy into; the implicit `default` environment (the namespace burrowd already runs against) is listed first and marked default. Pass context to read a specific cluster (default the current one). Read-only.",
-	}, environmentsTool(clientFor))
+		Description: "List your local environment handles: each names a cluster (kube context) and the registered environment to operate, so you know what to pass as the env argument on a per-app tool (ADR-0036). Each entry has the handle name, the kube context it targets, the app namespace, the registered environment it sends (empty for the cluster default), and whether it is the current selection. Read-only: it reads the local handle config and contacts no cluster.",
+	}, environmentsTool(sel))
 
 	return s
 }
 
 // Serve runs the Burrow MCP server over stdio until the client disconnects. It targets one
-// environment per call through clientFor (ADR-0035), and lists the available kubeconfig contexts
-// via contexts.
-func Serve(ctx context.Context, clientFor ClientForContext, contexts ContextLister, version string) error {
-	return NewServer(clientFor, contexts, version).Run(ctx, &sdk.StdioTransport{})
+// environment per call through clientFor, resolving a per-app tool's env handle through the local
+// config (ADR-0036). kubeconfig is the path used to mark the current handle in burrow_environments.
+func Serve(ctx context.Context, clientFor ClientForContext, kubeconfig, version string) error {
+	return NewServer(clientFor, kubeconfig, version).Run(ctx, &sdk.StdioTransport{})
 }
 
 type deployInput struct {
@@ -252,17 +248,28 @@ type scaleInput struct {
 	Confirm  bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an operation a guardrail held for confirmation (e.g. scaling to zero); do not self-confirm"`
 }
 
-func deployTool(clientFor ClientForContext) sdk.ToolHandlerFor[deployInput, client.DeployResult] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in deployInput) (*sdk.CallToolResult, client.DeployResult, error) {
-		c, err := clientFor(in.Context)
+// deployOutput is the deploy result plus the environment the deploy acted in (ADR-0036): the
+// client.DeployResult fields are promoted alongside an "environment" echo.
+type deployOutput struct {
+	client.DeployResult
+	targeted
+}
+
+func deployTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[deployInput, deployOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in deployInput) (*sdk.CallToolResult, deployOutput, error) {
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
-			return nil, client.DeployResult{}, err
+			return nil, deployOutput{}, err
 		}
-		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Env: in.Env, Image: in.Image, Command: in.Command, MetricsPort: in.MetricsPort, Replicas: in.Replicas, Confirm: in.Confirm})
+		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, client.DeployResult{}, err
+			return nil, deployOutput{}, err
 		}
-		return nil, res, nil
+		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Env: tgt.env, Image: in.Image, Command: in.Command, MetricsPort: in.MetricsPort, Replicas: in.Replicas, Confirm: in.Confirm})
+		if err != nil {
+			return nil, deployOutput{}, err
+		}
+		return nil, deployOutput{DeployResult: res, targeted: tgt.echo()}, nil
 	}
 }
 
@@ -283,49 +290,63 @@ type configUnsetInput struct {
 	NoRestart bool   `json:"no_restart,omitempty" jsonschema:"true to persist the removal without rolling the running app; the change lands on the next deploy"`
 }
 
-// keyAck is a small structured ack for a config or secret key mutation.
+// keyAck is a small structured ack for a config or secret key mutation, with the environment it
+// acted in echoed back (ADR-0036).
 type keyAck struct {
 	App string `json:"app"`
 	Key string `json:"key"`
+	targeted
 }
 
 type configOutput struct {
 	Config map[string]string `json:"config"`
 }
 
-func configSetTool(clientFor ClientForContext) sdk.ToolHandlerFor[configSetInput, keyAck] {
+func configSetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[configSetInput, keyAck] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in configSetInput) (*sdk.CallToolResult, keyAck, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, keyAck{}, err
 		}
-		if err := c.SetConfig(ctx, in.App, in.Env, in.Key, in.Value, in.NoRestart); err != nil {
+		c, err := clientFor(tgt.context)
+		if err != nil {
 			return nil, keyAck{}, err
 		}
-		return nil, keyAck{App: in.App, Key: in.Key}, nil
+		if err := c.SetConfig(ctx, in.App, tgt.env, in.Key, in.Value, in.NoRestart); err != nil {
+			return nil, keyAck{}, err
+		}
+		return nil, keyAck{App: in.App, Key: in.Key, targeted: tgt.echo()}, nil
 	}
 }
 
-func configUnsetTool(clientFor ClientForContext) sdk.ToolHandlerFor[configUnsetInput, keyAck] {
+func configUnsetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[configUnsetInput, keyAck] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in configUnsetInput) (*sdk.CallToolResult, keyAck, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, keyAck{}, err
 		}
-		if err := c.UnsetConfig(ctx, in.App, in.Env, in.Key, in.NoRestart); err != nil {
+		c, err := clientFor(tgt.context)
+		if err != nil {
 			return nil, keyAck{}, err
 		}
-		return nil, keyAck{App: in.App, Key: in.Key}, nil
+		if err := c.UnsetConfig(ctx, in.App, tgt.env, in.Key, in.NoRestart); err != nil {
+			return nil, keyAck{}, err
+		}
+		return nil, keyAck{App: in.App, Key: in.Key, targeted: tgt.echo()}, nil
 	}
 }
 
-func configListTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, configOutput] {
+func configListTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appInput, configOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, configOutput, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, configOutput{}, err
 		}
-		cfg, err := c.Config(ctx, in.App, in.Env)
+		c, err := clientFor(tgt.context)
+		if err != nil {
+			return nil, configOutput{}, err
+		}
+		cfg, err := c.Config(ctx, in.App, tgt.env)
 		if err != nil {
 			return nil, configOutput{}, err
 		}
@@ -346,13 +367,17 @@ type secretsOutput struct {
 	Keys []string `json:"keys"`
 }
 
-func secretListTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, secretsOutput] {
+func secretListTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appInput, secretsOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, secretsOutput, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, secretsOutput{}, err
 		}
-		keys, err := c.Secrets(ctx, in.App, in.Env)
+		c, err := clientFor(tgt.context)
+		if err != nil {
+			return nil, secretsOutput{}, err
+		}
+		keys, err := c.Secrets(ctx, in.App, tgt.env)
 		if err != nil {
 			return nil, secretsOutput{}, err
 		}
@@ -360,26 +385,34 @@ func secretListTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, sec
 	}
 }
 
-func secretUnsetTool(clientFor ClientForContext) sdk.ToolHandlerFor[secretUnsetInput, keyAck] {
+func secretUnsetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[secretUnsetInput, keyAck] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in secretUnsetInput) (*sdk.CallToolResult, keyAck, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, keyAck{}, err
 		}
-		if err := c.UnsetSecret(ctx, in.App, in.Env, in.Key, in.NoRestart); err != nil {
+		c, err := clientFor(tgt.context)
+		if err != nil {
 			return nil, keyAck{}, err
 		}
-		return nil, keyAck{App: in.App, Key: in.Key}, nil
+		if err := c.UnsetSecret(ctx, in.App, tgt.env, in.Key, in.NoRestart); err != nil {
+			return nil, keyAck{}, err
+		}
+		return nil, keyAck{App: in.App, Key: in.Key, targeted: tgt.echo()}, nil
 	}
 }
 
-func statusTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, client.StatusResult] {
+func statusTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appInput, client.StatusResult] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, client.StatusResult, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, client.StatusResult{}, err
 		}
-		res, err := c.Status(ctx, in.App, in.Env)
+		c, err := clientFor(tgt.context)
+		if err != nil {
+			return nil, client.StatusResult{}, err
+		}
+		res, err := c.Status(ctx, in.App, tgt.env)
 		if err != nil {
 			return nil, client.StatusResult{}, err
 		}
@@ -392,13 +425,17 @@ type logsOutput struct {
 	Lines []client.LogLine `json:"lines"`
 }
 
-func logsTool(clientFor ClientForContext) sdk.ToolHandlerFor[logsInput, logsOutput] {
+func logsTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[logsInput, logsOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in logsInput) (*sdk.CallToolResult, logsOutput, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, logsOutput{}, err
 		}
-		lines, err := c.Logs(ctx, in.App, in.Env, in.Tail)
+		c, err := clientFor(tgt.context)
+		if err != nil {
+			return nil, logsOutput{}, err
+		}
+		lines, err := c.Logs(ctx, in.App, tgt.env, in.Tail)
 		if err != nil {
 			return nil, logsOutput{}, err
 		}
@@ -413,31 +450,51 @@ type rollbackInput struct {
 	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed a rollback that an operator's guardrail held for confirmation; do not self-confirm"`
 }
 
-func rollbackTool(clientFor ClientForContext) sdk.ToolHandlerFor[rollbackInput, client.RollbackResult] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in rollbackInput) (*sdk.CallToolResult, client.RollbackResult, error) {
-		c, err := clientFor(in.Context)
+// rollbackOutput is the rollback result plus the environment it acted in (ADR-0036).
+type rollbackOutput struct {
+	client.RollbackResult
+	targeted
+}
+
+func rollbackTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[rollbackInput, rollbackOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in rollbackInput) (*sdk.CallToolResult, rollbackOutput, error) {
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
-			return nil, client.RollbackResult{}, err
+			return nil, rollbackOutput{}, err
 		}
-		res, err := c.Rollback(ctx, in.App, in.Env, in.Confirm)
+		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, client.RollbackResult{}, err
+			return nil, rollbackOutput{}, err
 		}
-		return nil, res, nil
+		res, err := c.Rollback(ctx, in.App, tgt.env, in.Confirm)
+		if err != nil {
+			return nil, rollbackOutput{}, err
+		}
+		return nil, rollbackOutput{RollbackResult: res, targeted: tgt.echo()}, nil
 	}
 }
 
-func scaleTool(clientFor ClientForContext) sdk.ToolHandlerFor[scaleInput, client.ScaleResult] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in scaleInput) (*sdk.CallToolResult, client.ScaleResult, error) {
-		c, err := clientFor(in.Context)
+// scaleOutput is the scale result plus the environment it acted in (ADR-0036).
+type scaleOutput struct {
+	client.ScaleResult
+	targeted
+}
+
+func scaleTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[scaleInput, scaleOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in scaleInput) (*sdk.CallToolResult, scaleOutput, error) {
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
-			return nil, client.ScaleResult{}, err
+			return nil, scaleOutput{}, err
 		}
-		res, err := c.Scale(ctx, in.App, in.Env, in.Replicas, in.Confirm)
+		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, client.ScaleResult{}, err
+			return nil, scaleOutput{}, err
 		}
-		return nil, res, nil
+		res, err := c.Scale(ctx, in.App, tgt.env, in.Replicas, in.Confirm)
+		if err != nil {
+			return nil, scaleOutput{}, err
+		}
+		return nil, scaleOutput{ScaleResult: res, targeted: tgt.echo()}, nil
 	}
 }
 
@@ -452,35 +509,51 @@ type exposeInput struct {
 	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed exposing the app to the public internet; do not self-confirm"`
 }
 
-func exposeTool(clientFor ClientForContext) sdk.ToolHandlerFor[exposeInput, client.ExposeResult] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in exposeInput) (*sdk.CallToolResult, client.ExposeResult, error) {
-		c, err := clientFor(in.Context)
+// exposeOutput is the expose result plus the environment it acted in (ADR-0036).
+type exposeOutput struct {
+	client.ExposeResult
+	targeted
+}
+
+func exposeTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[exposeInput, exposeOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in exposeInput) (*sdk.CallToolResult, exposeOutput, error) {
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
-			return nil, client.ExposeResult{}, err
+			return nil, exposeOutput{}, err
 		}
-		res, err := c.Expose(ctx, in.App, in.Env, in.Host, in.Port, in.TLS, in.Issuer, in.Confirm)
+		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, client.ExposeResult{}, err
+			return nil, exposeOutput{}, err
 		}
-		return nil, res, nil
+		res, err := c.Expose(ctx, in.App, tgt.env, in.Host, in.Port, in.TLS, in.Issuer, in.Confirm)
+		if err != nil {
+			return nil, exposeOutput{}, err
+		}
+		return nil, exposeOutput{ExposeResult: res, targeted: tgt.echo()}, nil
 	}
 }
 
-// unexposeOutput is a small structured ack for the unexpose tool.
+// unexposeOutput is a small structured ack for the unexpose tool, with the environment it acted in
+// echoed back (ADR-0036).
 type unexposeOutput struct {
 	App string `json:"app"`
+	targeted
 }
 
-func unexposeTool(clientFor ClientForContext) sdk.ToolHandlerFor[appInput, unexposeOutput] {
+func unexposeTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appInput, unexposeOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, unexposeOutput, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, unexposeOutput{}, err
 		}
-		if err := c.Unexpose(ctx, in.App, in.Env); err != nil {
+		c, err := clientFor(tgt.context)
+		if err != nil {
 			return nil, unexposeOutput{}, err
 		}
-		return nil, unexposeOutput{App: in.App}, nil
+		if err := c.Unexpose(ctx, in.App, tgt.env); err != nil {
+			return nil, unexposeOutput{}, err
+		}
+		return nil, unexposeOutput{App: in.App, targeted: tgt.echo()}, nil
 	}
 }
 
@@ -496,18 +569,22 @@ type reachabilityInput struct {
 // the thin client layer (ADR-0034 slice 3).
 const reachabilityWaitTimeout = 3 * time.Minute
 
-func reachabilityTool(clientFor ClientForContext) sdk.ToolHandlerFor[reachabilityInput, client.ReachabilityResult] {
+func reachabilityTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[reachabilityInput, client.ReachabilityResult] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in reachabilityInput) (*sdk.CallToolResult, client.ReachabilityResult, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
+		if err != nil {
+			return nil, client.ReachabilityResult{}, err
+		}
+		c, err := clientFor(tgt.context)
 		if err != nil {
 			return nil, client.ReachabilityResult{}, err
 		}
 		reach := func(ctx context.Context, app string) (client.ReachabilityResult, error) {
-			return c.Reachability(ctx, app, in.Env)
+			return c.Reachability(ctx, app, tgt.env)
 		}
 		if in.Wait {
 			reach = func(ctx context.Context, app string) (client.ReachabilityResult, error) {
-				return c.WaitReachable(ctx, app, in.Env, reachabilityWaitTimeout, nil)
+				return c.WaitReachable(ctx, app, tgt.env, reachabilityWaitTimeout, nil)
 			}
 		}
 		res, err := reach(ctx, in.App)
@@ -597,13 +674,17 @@ type appsOutput struct {
 	Apps []appInfo `json:"apps"`
 }
 
-func appsTool(clientFor ClientForContext) sdk.ToolHandlerFor[appsInput, appsOutput] {
+func appsTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appsInput, appsOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in appsInput) (*sdk.CallToolResult, appsOutput, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, appsOutput{}, err
 		}
-		apps, err := c.Apps(ctx, in.Env)
+		c, err := clientFor(tgt.context)
+		if err != nil {
+			return nil, appsOutput{}, err
+		}
+		apps, err := c.Apps(ctx, tgt.env)
 		if err != nil {
 			return nil, appsOutput{}, err
 		}
@@ -688,18 +769,23 @@ type appDeleteInput struct {
 
 type appDeleteOutput struct {
 	Deleted string `json:"deleted"`
+	targeted
 }
 
-func appDeleteTool(clientFor ClientForContext) sdk.ToolHandlerFor[appDeleteInput, appDeleteOutput] {
+func appDeleteTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appDeleteInput, appDeleteOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in appDeleteInput) (*sdk.CallToolResult, appDeleteOutput, error) {
-		c, err := clientFor(in.Context)
+		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
 			return nil, appDeleteOutput{}, err
 		}
-		if err := c.DeleteApp(ctx, in.App, in.Env, in.Confirm); err != nil {
+		c, err := clientFor(tgt.context)
+		if err != nil {
 			return nil, appDeleteOutput{}, err
 		}
-		return nil, appDeleteOutput{Deleted: in.App}, nil
+		if err := c.DeleteApp(ctx, in.App, tgt.env, in.Confirm); err != nil {
+			return nil, appDeleteOutput{}, err
+		}
+		return nil, appDeleteOutput{Deleted: in.App, targeted: tgt.echo()}, nil
 	}
 }
 
@@ -978,67 +1064,20 @@ func auditTool(clientFor ClientForContext) sdk.ToolHandlerFor[auditInput, auditO
 	}
 }
 
-// contextsInput has no fields: listing contexts reads the local kubeconfig and takes no
-// arguments, not even a context (it lists the contexts the agent can target).
-type contextsInput struct{}
-
-// contextInfo is the agent's view of one kubeconfig context (a cluster).
-type contextInfo struct {
-	Name    string `json:"name"`
-	Cluster string `json:"cluster"`
-	Current bool   `json:"current"`
-}
-
-type contextsOutput struct {
-	Contexts []contextInfo `json:"contexts"`
-}
-
-func contextsTool(contexts ContextLister) sdk.ToolHandlerFor[contextsInput, contextsOutput] {
-	return func(_ context.Context, _ *sdk.CallToolRequest, _ contextsInput) (*sdk.CallToolResult, contextsOutput, error) {
-		ctxs, err := contexts()
-		if err != nil {
-			return nil, contextsOutput{}, err
-		}
-		out := contextsOutput{Contexts: make([]contextInfo, 0, len(ctxs))}
-		for _, c := range ctxs {
-			out.Contexts = append(out.Contexts, contextInfo{Name: c.Name, Cluster: c.Cluster, Current: c.Current})
-		}
-		return nil, out, nil
-	}
-}
-
-// environmentsInput carries only the optional context: listing a cluster's registered environments
-// takes no other arguments.
-type environmentsInput struct {
-	contextArg
-}
-
-// environmentInfo is the agent's view of one registered environment (ADR-0035 phase 2): the
-// environment name, the namespace its apps deploy into, and whether it is the implicit default.
-type environmentInfo struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Default   bool   `json:"default"`
-}
+// environmentsInput has no fields: burrow_environments lists the local environment handles and
+// takes no arguments, not even a context (it lists what the agent can name as env; ADR-0036).
+type environmentsInput struct{}
 
 type environmentsOutput struct {
 	Environments []environmentInfo `json:"environments"`
 }
 
-func environmentsTool(clientFor ClientForContext) sdk.ToolHandlerFor[environmentsInput, environmentsOutput] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in environmentsInput) (*sdk.CallToolResult, environmentsOutput, error) {
-		c, err := clientFor(in.Context)
+func environmentsTool(sel selector) sdk.ToolHandlerFor[environmentsInput, environmentsOutput] {
+	return func(_ context.Context, _ *sdk.CallToolRequest, _ environmentsInput) (*sdk.CallToolResult, environmentsOutput, error) {
+		envs, err := sel.list()
 		if err != nil {
 			return nil, environmentsOutput{}, err
 		}
-		envs, err := c.ListEnvironments(ctx)
-		if err != nil {
-			return nil, environmentsOutput{}, err
-		}
-		out := environmentsOutput{Environments: make([]environmentInfo, 0, len(envs))}
-		for _, e := range envs {
-			out.Environments = append(out.Environments, environmentInfo{Name: e.Name, Namespace: e.Namespace, Default: e.Default})
-		}
-		return nil, out, nil
+		return nil, environmentsOutput{Environments: envs}, nil
 	}
 }

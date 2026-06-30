@@ -12,11 +12,17 @@ CLUSTER="${K3D_CLUSTER:-burrow-ci}"
 KCFG=$(k3d kubeconfig write "$CLUSTER")
 export KUBECONFIG="$KCFG"
 
-# On any failure (including the install readiness wait, which otherwise exits before any
-# diagnostics), dump cluster state so a flake is debuggable — pod status plus the control
-# plane's describe and logs (including a crashed container's previous logs).
+# Failure handling separates a flake from a real bug. on_err (the ERR trap) prints the actual
+# failing command FIRST, so the cause is not buried under the cluster dump, then classifies by
+# phase: a failure during infra setup (cluster and control-plane bring-up) is most likely transient
+# and exits 75 (safe to rerun); a failure once the test body is running is a real defect and exits 1
+# (do not blindly rerun). dump_diagnostics prints pod status plus the control plane's describe and
+# logs (including a crashed container's previous logs).
+TEMPFAIL=75
+PHASE=setup
+
 dump_diagnostics() {
-  echo "=== DIAGNOSTICS: a step failed, dumping cluster state ==="
+  echo "=== DIAGNOSTICS: dumping cluster state ==="
   kubectl get pods -A -o wide || true
   echo "--- burrow namespace events ---"
   kubectl -n burrow get events --sort-by=.lastTimestamp | tail -n 30 || true
@@ -49,7 +55,20 @@ dump_diagnostics() {
   echo "--- prometheus fixture logs ---"
   kubectl -n burrow-e2e-prom logs deploy/prometheus --tail=60 || true
 }
-trap dump_diagnostics ERR
+# on_err runs on any set -e command failure. It is passed the failing command's exit code, the line,
+# and the command itself (captured before they change), so the log's first line is the real cause.
+on_err() {
+  local rc=$1 line=$2 cmd=$3
+  echo "=== STEP FAILED (exit ${rc}): ${cmd}  [line ${line}, phase ${PHASE}] ==="
+  dump_diagnostics
+  if [ "$PHASE" = setup ]; then
+    echo "=== classified: infra/setup failure, most likely transient: exiting ${TEMPFAIL} (safe to rerun) ==="
+    exit "$TEMPFAIL"
+  fi
+  echo "=== classified: failure in the test body, treat as a real defect: exiting 1 (do not blindly rerun) ==="
+  exit 1
+}
+trap 'on_err "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 WORK=$(mktemp -d)
 BURROW="$WORK/burrow"
@@ -66,6 +85,10 @@ k3d image import "$BURROWD_IMAGE" -c "$CLUSTER"
 
 echo "=== burrow install (waits for the control plane to be ready) ==="
 "$BURROW" install --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
+
+# Past control-plane bring-up: failures from here are real defects in the stack under test, not the
+# infra flakes that setup failures usually are. Classify accordingly (exit 1, not the rerunnable 75).
+PHASE=test
 
 echo "=== burrow app deploy (auto-connect: kubeconfig + API-server proxy, no port-forward) ==="
 "$BURROW" app deploy web --image nginx:alpine --kubeconfig "$KCFG"

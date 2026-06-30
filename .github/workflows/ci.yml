@@ -77,7 +77,12 @@ jobs:
   kube-integration:
     name: kubernetes integration (k3d)
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # Run the heavy (~9 min) integration job only in the merge queue, not on every PR push. The
+    # merge_group run tests the actual merged-onto-main result, so also running it on the PR branch
+    # just doubles the wait (PR run, then queue run). A skipped required check still counts as
+    # passing for branch protection and the queue (same as the docs-only skip above), so PRs stay
+    # green on the fast checks and this gate runs once, at merge.
+    if: needs.changes.outputs.code == 'true' && github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     # Make the `go test` steps compile with the same flags ko uses for the burrowd build, so ko
     # reuses the client-go objects the tests already compiled instead of a cold recompile. ko
@@ -116,10 +121,17 @@ jobs:
         run: k3d cluster create burrow-ci --wait --timeout 120s
       - name: preload test images
         run: |
-          for img in busybox:1.36 busybox:1.37 mendhak/http-https-echo:31 nginx:alpine nginx:1.27-alpine victoriametrics/victoria-logs:v1.51.0 victoriametrics/victoria-metrics:v1.115.0 victoriametrics/vmagent:v1.115.0 fluent/fluent-bit:3.2.10 grafana/loki:3.2.1 prom/prometheus:v3.1.0 valkey/valkey:8.0 postgres:17.4 curlimages/curl:8.11.1; do
-            docker pull "$img"
-            k3d image import "$img" -c burrow-ci
-          done
+          images="busybox:1.36 busybox:1.37 mendhak/http-https-echo:31 nginx:alpine nginx:1.27-alpine victoriametrics/victoria-logs:v1.51.0 victoriametrics/victoria-metrics:v1.115.0 victoriametrics/vmagent:v1.115.0 fluent/fluent-bit:3.2.10 grafana/loki:3.2.1 prom/prometheus:v3.1.0 valkey/valkey:8.0 postgres:17.4 curlimages/curl:8.11.1"
+          # Pull in parallel (serial pulls dominated this step) with a short retry for transient
+          # registry hiccups, then import them all into k3d in a single call.
+          printf '%s\n' $images | xargs -P 8 -n1 sh -c '
+            for attempt in 1 2 3; do
+              docker pull "$1" && exit 0
+              echo "retry $attempt: docker pull $1" >&2
+              sleep 3
+            done
+            exit 1' _
+          k3d image import $images -c burrow-ci
       - name: run the kube, engine e2e, and connect proxy tests against k3d
         run: |
           KCFG=$(k3d kubeconfig write burrow-ci)

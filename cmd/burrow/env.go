@@ -77,7 +77,7 @@ func newEnvCmd() *cobra.Command {
 		},
 	}
 	bindEnvListFlags(cmd.Flags(), o)
-	cmd.AddCommand(newEnvListCmd(), newEnvUseCmd(), newEnvFollowCmd(), newEnvRenameCmd(), newEnvAddCmd())
+	cmd.AddCommand(newEnvListCmd(), newEnvUseCmd(), newEnvFollowCmd(), newEnvRenameCmd(), newEnvAddCmd(), newEnvScanCmd())
 	return cmd
 }
 

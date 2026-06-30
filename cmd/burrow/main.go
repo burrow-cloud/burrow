@@ -89,6 +89,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 }
 
 func newRootCmd() *cobra.Command {
+	// List commands in the order they are added (golden-path order within each group, ADR-0037)
+	// rather than Cobra's default alphabetical sort.
+	cobra.EnableCommandSorting = false
 	root := &cobra.Command{
 		Use:   "burrow",
 		Short: "Operate applications on your cluster through the Burrow control plane",
@@ -98,22 +101,27 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.CompletionOptions.HiddenDefaultCmd = true
+	// The completion command stays visible so a user can discover it (ADR-0037); Cobra's built-in
+	// covers bash, zsh, fish, and PowerShell.
+	addGroups(root)
 	root.AddCommand(
-		// Bootstrap + lifecycle of the control plane — top level (ADR-0024).
-		newInstallCmd(),
-		newUpgradeCmd(),
-		// Task groups.
-		newAppCmd(),
-		newAddonCmd(),
-		newConfigCmd(),
-		// Cross-cutting policy + meta — top level.
-		newClusterCmd(),
-		newEnvCmd(),
-		newGuardCmd(),
-		newAuditCmd(),
+		// Get started: install, point at a cluster, configure credentials (ADR-0037).
+		grouped(newInstallCmd(), groupGetStarted),
+		grouped(newUpgradeCmd(), groupGetStarted),
+		grouped(newClusterCmd(), groupGetStarted),
+		grouped(newConfigCmd(), groupGetStarted),
+		// Environments: select which cluster/namespace commands target.
+		grouped(newEnvCmd(), groupEnvironments),
+		// Operate: act on deployed applications and their add-ons.
+		grouped(newAppCmd(), groupOperate),
+		grouped(newAddonCmd(), groupOperate),
+		// Govern: guardrail policy and the audit trail.
+		grouped(newGuardCmd(), groupGovern),
+		grouped(newAuditCmd(), groupGovern),
+		// version (and the auto-generated completion/help) fall in the default group.
 		newVersionCmd(),
 	)
+	installFirstRunBanner(root)
 	return root
 }
 

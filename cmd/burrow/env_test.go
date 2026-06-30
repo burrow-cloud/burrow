@@ -10,10 +10,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/burrow-cloud/burrow/client"
+	"k8s.io/client-go/tools/clientcmd/api"
+
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 func TestRenderEnvManifests(t *testing.T) {
@@ -98,22 +101,231 @@ func fakeEnvAPI(t *testing.T, onAdd func(name, namespace string)) *httptest.Serv
 				onAdd(body.Name, body.Namespace)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"name": body.Name, "namespace": body.Namespace})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/environments":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"environments": []map[string]any{
-					{"name": "default", "namespace": "burrow-apps", "default": true},
-					{"name": "staging", "namespace": "burrow-apps-staging"},
-				},
-			})
 		default:
 			http.Error(w, "unexpected", http.StatusNotFound)
 		}
 	}))
 }
 
-func TestEnvAddAppliesAndRegisters(t *testing.T) {
+// tempConfig points $BURROW_CONFIG at a fresh temp file so a test never touches ~/.burrow/config,
+// and returns the path.
+func tempConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config")
+	t.Setenv("BURROW_CONFIG", path)
+	return path
+}
+
+// kubeconfigWithCurrent writes a kubeconfig naming the given contexts, with `current` selected, and
+// returns its path. It backs the follow-mode resolution `burrow env list` performs.
+func kubeconfigWithCurrent(t *testing.T, current string, contexts ...string) string {
+	t.Helper()
+	cfg := api.NewConfig()
+	cfg.Clusters["c"] = &api.Cluster{Server: "https://x:6443", InsecureSkipTLSVerify: true}
+	cfg.AuthInfos["u"] = &api.AuthInfo{Token: "t"}
+	for _, c := range contexts {
+		cfg.Contexts[c] = &api.Context{Cluster: "c", AuthInfo: "u"}
+	}
+	cfg.CurrentContext = current
+	return writeKubeconfig(t, cfg)
+}
+
+// twoHandleConfig saves a config with dev and nonprod handles (optionally pinning one) to the path
+// $BURROW_CONFIG points at.
+func twoHandleConfig(t *testing.T, current string) {
+	t.Helper()
+	cfg := &localconfig.Config{
+		Current: current,
+		Environments: []localconfig.Environment{
+			{Name: "dev", Context: "ctx-dev", AppNamespace: "burrow-apps"},
+			{Name: "nonprod", Context: "ctx-nonprod", AppNamespace: "team-x"},
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+}
+
+// TestEnvListFollowing lists handles and marks the one matching the current kube context as the
+// current, following-kubectl row.
+func TestEnvListFollowing(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "")
+	kc := kubeconfigWithCurrent(t, "ctx-nonprod", "ctx-dev", "ctx-nonprod")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "list", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env list: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	for _, want := range []string{"NAME", "CONTEXT", "NAMESPACE", "dev", "nonprod", "ctx-nonprod", "team-x"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("env list output missing %q\n%s", want, s)
+		}
+	}
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, "nonprod") && !strings.Contains(line, "<--- current (following kubectl)") {
+			t.Errorf("nonprod row not marked current (following kubectl): %q", line)
+		}
+		if strings.HasPrefix(line, "dev") && strings.Contains(line, "current") {
+			t.Errorf("dev row wrongly marked current: %q", line)
+		}
+	}
+}
+
+// TestEnvListPinned marks the pinned handle as current (pinned), regardless of the kube context.
+func TestEnvListPinned(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "dev")
+	kc := kubeconfigWithCurrent(t, "ctx-nonprod", "ctx-dev", "ctx-nonprod")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "list", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env list: %v\n%s", err, errb.String())
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "dev") && !strings.Contains(line, "<--- current (pinned)") {
+			t.Errorf("dev row not marked current (pinned): %q", line)
+		}
+		if strings.HasPrefix(line, "nonprod") && strings.Contains(line, "current") {
+			t.Errorf("nonprod row wrongly marked current: %q", line)
+		}
+	}
+}
+
+// TestEnvListUnregistered prints the trailing follow line when the current context matches no handle.
+func TestEnvListUnregistered(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "")
+	kc := kubeconfigWithCurrent(t, "ctx-orphan", "ctx-dev", "ctx-nonprod", "ctx-orphan")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "list", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env list: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "following kubectl: ctx-orphan (unregistered)") {
+		t.Errorf("missing unregistered follow line\n%s", s)
+	}
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, "dev") || strings.HasPrefix(line, "nonprod") {
+			if strings.Contains(line, "current") {
+				t.Errorf("no handle row should be marked current when following an unregistered context: %q", line)
+			}
+		}
+	}
+}
+
+// TestEnvListJSON honors --json, surfacing the handles and the resolved selection.
+func TestEnvListJSON(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "dev")
+	kc := kubeconfigWithCurrent(t, "ctx-nonprod", "ctx-dev", "ctx-nonprod")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "list", "--json", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env list --json: %v\n%s", err, errb.String())
+	}
+	var got envListResult
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out.String())
+	}
+	if got.Current != "dev" || got.Mode != string(localconfig.ModePinned) {
+		t.Errorf("resolved current/mode = %q/%q, want dev/pinned", got.Current, got.Mode)
+	}
+	if len(got.Environments) != 2 {
+		t.Errorf("environments = %d, want 2", len(got.Environments))
+	}
+}
+
+// TestEnvListBare confirms the bare `burrow env` lists handles, like `burrow env list`.
+func TestEnvListBare(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "")
+	kc := kubeconfigWithCurrent(t, "ctx-dev", "ctx-dev", "ctx-nonprod")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env: %v\n%s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "nonprod") || !strings.Contains(out.String(), "dev") {
+		t.Errorf("bare `env` did not list handles\n%s", out.String())
+	}
+}
+
+// TestEnvUse pins a handle and rejects an unregistered name.
+func TestEnvUse(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "use", "nonprod"}, &out, &errb); err != nil {
+		t.Fatalf("env use: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Current != "nonprod" {
+		t.Errorf("current = %q, want nonprod", cfg.Current)
+	}
+
+	out.Reset()
+	errb.Reset()
+	if err := run(context.Background(), []string{"env", "use", "ghost"}, &out, &errb); err == nil {
+		t.Errorf("env use of an unregistered handle should error")
+	}
+}
+
+// TestEnvFollow clears the pin.
+func TestEnvFollow(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "dev")
+	kc := kubeconfigWithCurrent(t, "ctx-nonprod", "ctx-dev", "ctx-nonprod")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "follow", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env follow: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Current != "" {
+		t.Errorf("current = %q, want empty after follow", cfg.Current)
+	}
+}
+
+// TestEnvRename renames a handle and carries the pin when the renamed handle was current.
+func TestEnvRename(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "dev")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "rename", "dev", "dev-new"}, &out, &errb); err != nil {
+		t.Fatalf("env rename: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, ok := cfg.Lookup("dev"); ok {
+		t.Errorf("old handle dev should be gone")
+	}
+	if _, ok := cfg.Lookup("dev-new"); !ok {
+		t.Errorf("renamed handle dev-new should exist")
+	}
+	if cfg.Current != "dev-new" {
+		t.Errorf("current = %q, want the pin to follow the rename to dev-new", cfg.Current)
+	}
+}
+
+// TestEnvAddAppliesRegistersAndRecordsHandle confirms `env add` does the ADR-0035 server-side setup
+// (apply namespace+RBAC, register with burrowd) AND records the ADR-0036 local handle.
+func TestEnvAddAppliesRegistersAndRecordsHandle(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
+	tempConfig(t)
 
 	var addedName, addedNs string
 	srv := fakeEnvAPI(t, func(name, ns string) { addedName, addedNs = name, ns })
@@ -130,12 +342,12 @@ func TestEnvAddAppliesAndRegisters(t *testing.T) {
 	defer func() { applyFn = orig }()
 
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"env", "add", "staging", "--control-plane", srv.URL, "--token", "t"}, &out, &errb)
+	err := run(context.Background(), []string{"env", "add", "staging", "--context", "staging-ctx", "--control-plane", srv.URL, "--token", "t"}, &out, &errb)
 	if err != nil {
 		t.Fatalf("env add: %v\n%s", err, errb.String())
 	}
 
-	// The default namespace is <app-namespace>-<name>.
+	// (a) burrowd registration: default namespace is <app-namespace>-<name>.
 	if addedName != "staging" || addedNs != "burrow-apps-staging" {
 		t.Errorf("registered (%q,%q), want (staging, burrow-apps-staging)", addedName, addedNs)
 	}
@@ -145,11 +357,33 @@ func TestEnvAddAppliesAndRegisters(t *testing.T) {
 	if !strings.Contains(out.String(), `Environment "staging" created`) {
 		t.Errorf("confirmation output = %q", out.String())
 	}
+
+	// (b) local handle recorded: name -> targeted context, control-plane + app namespaces.
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	h, ok := cfg.Lookup("staging")
+	if !ok {
+		t.Fatalf("env add did not record a local handle for staging\n%s", out.String())
+	}
+	if h.Context != "staging-ctx" {
+		t.Errorf("handle context = %q, want the targeted context staging-ctx", h.Context)
+	}
+	if h.AppNamespace != "burrow-apps-staging" {
+		t.Errorf("handle app namespace = %q, want burrow-apps-staging", h.AppNamespace)
+	}
+	if h.ControlPlaneNamespace != "burrow" {
+		t.Errorf("handle control-plane namespace = %q, want burrow", h.ControlPlaneNamespace)
+	}
 }
 
+// TestEnvAddNamespaceOverride confirms --namespace overrides the derived env namespace, in both the
+// burrowd registration and the local handle.
 func TestEnvAddNamespaceOverride(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
+	tempConfig(t)
 
 	var addedNs string
 	srv := fakeEnvAPI(t, func(_, ns string) { addedNs = ns })
@@ -160,54 +394,46 @@ func TestEnvAddNamespaceOverride(t *testing.T) {
 	defer func() { applyFn = orig }()
 
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"env", "add", "prod", "--namespace", "team-prod", "--control-plane", srv.URL, "--token", "t"}, &out, &errb)
+	err := run(context.Background(), []string{"env", "add", "prod", "--namespace", "team-prod", "--context", "prod-ctx", "--control-plane", srv.URL, "--token", "t"}, &out, &errb)
 	if err != nil {
 		t.Fatalf("env add: %v\n%s", err, errb.String())
 	}
 	if addedNs != "team-prod" {
 		t.Errorf("--namespace override: registered namespace = %q, want team-prod", addedNs)
 	}
-}
-
-func TestWriteEnvList(t *testing.T) {
-	var b bytes.Buffer
-	writeEnvList(&b, []client.Environment{
-		{Name: "default", Namespace: "burrow-apps", Default: true},
-		{Name: "staging", Namespace: "burrow-apps-staging"},
-	})
-	out := b.String()
-	for _, want := range []string{"DEFAULT", "NAME", "NAMESPACE", "default", "staging", "burrow-apps-staging"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("env list output missing %q\n%s", want, out)
-		}
-	}
-	for _, line := range strings.Split(out, "\n") {
-		// The default row carries the * marker; the staging row does not.
-		if strings.Contains(line, "default") && strings.Contains(line, "burrow-apps") && !strings.Contains(line, "*") {
-			t.Errorf("default environment row not marked with *: %q", line)
-		}
-		if strings.Contains(line, "staging") && strings.Contains(line, "*") {
-			t.Errorf("non-default row wrongly marked: %q", line)
-		}
-	}
-}
-
-func TestEnvListCommand(t *testing.T) {
-	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
-	t.Setenv("BURROW_API_TOKEN", "")
-
-	srv := fakeEnvAPI(t, nil)
-	defer srv.Close()
-
-	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"env", "list", "--control-plane", srv.URL, "--token", "t"}, &out, &errb)
+	cfg, err := localconfig.Load()
 	if err != nil {
-		t.Fatalf("env list: %v\n%s", err, errb.String())
+		t.Fatalf("load: %v", err)
 	}
-	s := out.String()
-	for _, want := range []string{"default", "staging", "burrow-apps-staging"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("env list output missing %q\n%s", want, s)
-		}
+	h, ok := cfg.Lookup("prod")
+	if !ok || h.AppNamespace != "team-prod" {
+		t.Errorf("local handle = %+v (found=%v), want app namespace team-prod", h, ok)
+	}
+}
+
+// TestWriteEnvList covers the kubectx-style rendering directly, including the active-row markers and
+// the unregistered follow line.
+func TestWriteEnvList(t *testing.T) {
+	envs := []localconfig.Environment{
+		{Name: "dev", Context: "ctx-dev", AppNamespace: "burrow-apps"},
+		{Name: "nonprod", Context: "ctx-nonprod", AppNamespace: "team-x"},
+	}
+
+	var pinned bytes.Buffer
+	writeEnvList(&pinned, envs, localconfig.Resolved{Name: "dev", Context: "ctx-dev", Mode: localconfig.ModePinned})
+	if !strings.Contains(pinned.String(), "<--- current (pinned)") {
+		t.Errorf("pinned marker missing\n%s", pinned.String())
+	}
+
+	var unreg bytes.Buffer
+	writeEnvList(&unreg, envs, localconfig.Resolved{Context: "ctx-orphan", Mode: localconfig.ModeFollowing})
+	if !strings.Contains(unreg.String(), "following kubectl: ctx-orphan (unregistered)") {
+		t.Errorf("unregistered follow line missing\n%s", unreg.String())
+	}
+
+	var empty bytes.Buffer
+	writeEnvList(&empty, nil, localconfig.Resolved{Context: "ctx-dev", Mode: localconfig.ModeFollowing})
+	if !strings.Contains(empty.String(), "No environments.") {
+		t.Errorf("empty list message missing\n%s", empty.String())
 	}
 }

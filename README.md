@@ -122,21 +122,21 @@ the [roadmap](docs/ROADMAP.md).*
 
 ## Try it
 
-You need a cluster you can reach with `kubectl` (DigitalOcean is the reference target) and Go
-to build the CLI — a Homebrew tap is
-[proposed](docs/adr/0016-cli-distribution-and-upgrade-lifecycle.md) so this won't need a Go
-toolchain later.
+You need a cluster you can reach with `kubectl` (DigitalOcean is the reference target). Install
+the CLIs with Homebrew:
 
 ```sh
-go build -o burrow ./cmd/burrow && go build -o burrow-mcp ./cmd/burrow-mcp
+brew install burrow-cloud/tap/burrow     # installs burrow and burrow-mcp
 
-./burrow install                            # control plane → your cluster (uses your kubeconfig)
-claude mcp add burrow "$(pwd)/burrow-mcp"    # point your agent at it (auto-connects via kubeconfig)
+burrow install                           # control plane to your cluster (uses your kubeconfig)
+claude mcp add burrow burrow-mcp         # point your agent at it (auto-connects via kubeconfig)
 
-# then just talk to your agent — or drive it directly:
-./burrow app deploy web --image nginx:alpine
-./burrow app status web
+# then just talk to your agent, or drive it directly:
+burrow app deploy web --image nginx:alpine
+burrow app status web
 ```
+
+Prefer to build from source? `go build -o burrow ./cmd/burrow && go build -o burrow-mcp ./cmd/burrow-mcp`.
 
 `burrow upgrade` rolls the control plane forward in place, preserving your state.
 

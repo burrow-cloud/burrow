@@ -107,6 +107,12 @@ func runEnvScan(ctx context.Context, kubeconfig, namespace string, w io.Writer) 
 	if err != nil {
 		return err
 	}
+	installed := 0
+	for _, row := range rows {
+		if row.installed {
+			installed++
+		}
+	}
 	var added []string
 	for _, row := range rows {
 		if !row.installed || hasHandleForContext(cfg, row.context) {
@@ -122,15 +128,23 @@ func runEnvScan(ctx context.Context, kubeconfig, namespace string, w io.Writer) 
 		}
 		added = append(added, name)
 	}
-	if len(added) == 0 {
-		fmt.Fprintln(w, "\nNo new environments to register.")
-		return nil
+
+	// Close with an outcome-aware message rather than a flat "nothing to register", which reads as a
+	// non-sequitur when every context simply has no Burrow installed yet.
+	switch {
+	case len(added) > 0:
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "\nRegistered %d environment handle(s): %s\n", len(added), strings.Join(added, ", "))
+		fmt.Fprintln(w, "See `burrow env list`.")
+	case installed > 0:
+		fmt.Fprintln(w, "\nAll installed environments are already registered. See `burrow env list`.")
+	default:
+		fmt.Fprintf(w, "\nNo Burrow control plane found in any context. Install one with `burrow install <context>`,\n"+
+			"then re-run scan.\n")
+		fmt.Fprintf(w, "(scan probed the %q control-plane namespace; pass --namespace if yours differs.)\n", namespace)
 	}
-	if err := cfg.Save(); err != nil {
-		return err
-	}
-	fmt.Fprintf(w, "\nRegistered %d environment handle(s): %s\n", len(added), strings.Join(added, ", "))
-	fmt.Fprintln(w, "See `burrow env list`.")
 	return nil
 }
 

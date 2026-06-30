@@ -101,8 +101,8 @@ func TestEnvScanIdempotent(t *testing.T) {
 	if err := run(context.Background(), []string{"env", "scan", "--kubeconfig", kc}, &out, &errb); err != nil {
 		t.Fatalf("env scan: %v\n%s", err, errb.String())
 	}
-	if !strings.Contains(out.String(), "No new environments to register.") {
-		t.Errorf("expected the no-op message when every installed context already has a handle\n%s", out.String())
+	if !strings.Contains(out.String(), "All installed environments are already registered.") {
+		t.Errorf("expected the already-registered message when every installed context already has a handle\n%s", out.String())
 	}
 	got, err := localconfig.Load()
 	if err != nil {
@@ -110,5 +110,40 @@ func TestEnvScanIdempotent(t *testing.T) {
 	}
 	if len(got.Environments) != 1 {
 		t.Errorf("environments = %d, want the single pre-existing handle (no duplicate)", len(got.Environments))
+	}
+}
+
+// TestEnvScanNoneInstalled confirms the closing message when no context has Burrow installed points
+// at install and names the probed control-plane namespace, rather than the bare "nothing to
+// register" non-sequitur.
+func TestEnvScanNoneInstalled(t *testing.T) {
+	tempConfig(t)
+	kc := kubeconfigWithCurrent(t, "dev", "dev", "prod")
+
+	stubScanProbe(t, func(string) (string, error) {
+		return "", notFoundErr()
+	})
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "scan", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env scan: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	for _, want := range []string{
+		"No Burrow control plane found in any context.",
+		"burrow install <context>",
+		`probed the "burrow" control-plane namespace`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("none-installed closing missing %q\n%s", want, s)
+		}
+	}
+	// Nothing installed means nothing registered.
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.Environments) != 0 {
+		t.Errorf("no handles should be registered when nothing is installed, got %+v", cfg.Environments)
 	}
 }

@@ -24,6 +24,7 @@ type Kubernetes struct {
 	deploys   map[string]*deployState
 	exposed   map[string]controlplane.ExposeSpec
 	addresses map[string]string // app -> ingress external address (controller-assigned)
+	certReady map[string]bool   // app -> whether the requested TLS certificate has been issued
 	addons    map[string]controlplane.AddonInfo
 	secrets   map[string]map[string]string // app -> per-app Secret (key -> value)
 	backups   []backupCall                 // RunBackupJob calls, in order
@@ -52,6 +53,7 @@ func NewKubernetes() *Kubernetes {
 		deploys:   make(map[string]*deployState),
 		exposed:   make(map[string]controlplane.ExposeSpec),
 		addresses: make(map[string]string),
+		certReady: make(map[string]bool),
 		addons:    make(map[string]controlplane.AddonInfo),
 		secrets:   make(map[string]map[string]string),
 		errs:      make(map[Op]error),
@@ -146,6 +148,14 @@ func (k *Kubernetes) SetIngressAddress(app, addr string) {
 	k.addresses[app] = addr
 }
 
+// SetCertReady sets whether the requested TLS certificate reported for app's exposure has been
+// issued, modelling cert-manager having populated the certificate Secret.
+func (k *Kubernetes) SetCertReady(app string, ready bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.certReady[app] = ready
+}
+
 func (k *Kubernetes) ExposureStatus(ctx context.Context, app string) (controlplane.ExposureStatus, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -156,7 +166,7 @@ func (k *Kubernetes) ExposureStatus(ctx context.Context, app string) (controlpla
 	if !ok {
 		return controlplane.ExposureStatus{}, nil
 	}
-	return controlplane.ExposureStatus{Exposed: true, Host: spec.Host, Address: k.addresses[app], TLS: spec.TLS}, nil
+	return controlplane.ExposureStatus{Exposed: true, Host: spec.Host, Address: k.addresses[app], TLS: spec.TLS, CertReady: k.certReady[app]}, nil
 }
 
 // SetError makes op return err until cleared with SetError(op, nil).

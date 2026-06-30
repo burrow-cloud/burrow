@@ -312,7 +312,33 @@ func (a *Adapter) ExposureStatus(ctx context.Context, app string) (controlplane.
 			break
 		}
 	}
+	// When TLS was requested, cert-manager issues the certificate into the Secret named in the
+	// Ingress's TLS section. A Secret holding a certificate is the readiness signal the
+	// reachability chain reports, so the agent can wait on issuance rather than declare an HTTPS
+	// URL live before the certificate exists.
+	if name := tlsSecretName(ing); name != "" {
+		sec, err := a.client.CoreV1().Secrets(a.namespace).Get(ctx, name, metav1.GetOptions{})
+		switch {
+		case apierrors.IsNotFound(err):
+			// Certificate not issued yet: CertReady stays false.
+		case err != nil:
+			return controlplane.ExposureStatus{}, fmt.Errorf("kube: reading tls secret %q for %q: %w", name, app, err)
+		default:
+			out.CertReady = len(sec.Data[corev1.TLSCertKey]) > 0
+		}
+	}
 	return out, nil
+}
+
+// tlsSecretName returns the Secret cert-manager populates with the Ingress's certificate, or ""
+// when the Ingress requests no TLS.
+func tlsSecretName(ing *networkingv1.Ingress) string {
+	for _, t := range ing.Spec.TLS {
+		if t.SecretName != "" {
+			return t.SecretName
+		}
+	}
+	return ""
 }
 
 // SecretKeys returns the env-var names in app's per-app Secret, sorted, never the values

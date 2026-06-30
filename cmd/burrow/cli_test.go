@@ -407,6 +407,35 @@ func TestReachabilityCommand(t *testing.T) {
 	}
 }
 
+func TestReachabilityWaitLive(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		// Already live on the first check, so --wait converges without polling.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "reachable": true, "url": "https://web.example.com",
+		})
+	}, "app", "reachability", "web", "--wait")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "web is live at https://web.example.com") {
+		t.Errorf("output = %q, want the live URL", out)
+	}
+}
+
+func TestReachabilityWaitTimeout(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "reachable": false, "blocked_on": "tls certificate",
+		})
+	}, "app", "reachability", "web", "--wait", "--timeout", "1ms")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "not reachable after 1ms: waiting on tls certificate") {
+		t.Errorf("output = %q, want the blocked-on message", out)
+	}
+}
+
 func TestExposeCommand(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || r.URL.Path != "/v1/apps/web/expose" {

@@ -116,6 +116,31 @@ func TestExposeTLS(t *testing.T) {
 		len(ing.Spec.TLS[0].Hosts) != 1 || ing.Spec.TLS[0].Hosts[0] != "web.example.com" {
 		t.Errorf("ingress TLS = %+v, want host web.example.com secret web-tls", ing.Spec.TLS)
 	}
+
+	// With no certificate Secret yet, the exposure reports TLS requested but the cert not ready.
+	st, err := a.ExposureStatus(ctx, "web")
+	if err != nil {
+		t.Fatalf("ExposureStatus: %v", err)
+	}
+	if !st.TLS || st.CertReady {
+		t.Errorf("before issuance: TLS=%v CertReady=%v, want TLS true, CertReady false", st.TLS, st.CertReady)
+	}
+
+	// cert-manager populates the named Secret with the certificate; CertReady then flips true.
+	if _, err := client.CoreV1().Secrets(ns).Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-tls", Namespace: ns},
+		Type:       corev1.SecretTypeTLS,
+		Data:       map[string][]byte{corev1.TLSCertKey: []byte("cert"), corev1.TLSPrivateKeyKey: []byte("key")},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create tls secret: %v", err)
+	}
+	st, err = a.ExposureStatus(ctx, "web")
+	if err != nil {
+		t.Fatalf("ExposureStatus after issuance: %v", err)
+	}
+	if !st.CertReady {
+		t.Errorf("after issuance: CertReady=false, want true")
+	}
 }
 
 func TestExposureStatus(t *testing.T) {

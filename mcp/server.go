@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"context"
+	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -131,7 +132,7 @@ func NewServer(c *client.Client, version string) *sdk.Server {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_reachability",
-		Description: "Report whether an application is reachable at its hostname, link by link: deployed and ready, exposed, given an external address by an ingress controller, and DNS pointing the host at that address. Returns a plain one-line summary plus the full chain, so you can tell the user exactly which link is missing and what to do. Read-only.",
+		Description: "Report whether an application is reachable at its hostname, link by link: deployed and ready, exposed, given an external address by an ingress controller, a TLS certificate when one was requested, and DNS pointing the host at that address. Returns a plain one-line summary plus the full chain, so you can tell the user exactly which link is missing and what to do. After deploying, exposing (burrow_expose), and pointing DNS at the cluster, call this with wait set to true to poll until the app is live and get its URL; when the app converges, reachable is true and url is the live address, and if it returns blocked_on that names the one link to fix. Read-only.",
 	}, reachabilityTool(c))
 
 	sdk.AddTool(s, &sdk.Tool{
@@ -370,9 +371,25 @@ func unexposeTool(c *client.Client) sdk.ToolHandlerFor[appInput, unexposeOutput]
 	}
 }
 
-func reachabilityTool(c *client.Client) sdk.ToolHandlerFor[appInput, client.ReachabilityResult] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, client.ReachabilityResult, error) {
-		res, err := c.Reachability(ctx, in.App)
+type reachabilityInput struct {
+	App  string `json:"app" jsonschema:"the application name"`
+	Wait bool   `json:"wait,omitempty" jsonschema:"poll until the app is live (reachable) or a timeout, instead of a single point-in-time check; use after deploying, exposing, and pointing DNS to confirm the app is live and get its URL"`
+}
+
+// reachabilityWaitTimeout bounds how long the burrow_reachability tool polls in wait mode before
+// returning the last verdict. The control-plane engine stays point-in-time; this wait lives in
+// the thin client layer (ADR-0034 slice 3).
+const reachabilityWaitTimeout = 3 * time.Minute
+
+func reachabilityTool(c *client.Client) sdk.ToolHandlerFor[reachabilityInput, client.ReachabilityResult] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in reachabilityInput) (*sdk.CallToolResult, client.ReachabilityResult, error) {
+		reach := c.Reachability
+		if in.Wait {
+			reach = func(ctx context.Context, app string) (client.ReachabilityResult, error) {
+				return c.WaitReachable(ctx, app, reachabilityWaitTimeout, nil)
+			}
+		}
+		res, err := reach(ctx, in.App)
 		if err != nil {
 			return nil, client.ReachabilityResult{}, err
 		}

@@ -81,10 +81,18 @@ type ReachabilityResult struct {
 	Host               string   `json:"host,omitempty"`
 	Address            string   `json:"address,omitempty"` // controller-assigned external address
 	TLS                bool     `json:"tls"`               // the Ingress requests an HTTPS certificate
+	CertReady          bool     `json:"cert_ready"`        // the requested TLS certificate has been issued
 	DNSPointsAtCluster bool     `json:"dns_points_at_cluster"`
 	DNSAddresses       []string `json:"dns_addresses,omitempty"`
-	Reachable          bool     `json:"reachable"`
-	Summary            string   `json:"summary"`
+	// Reachable is the converged verdict: every link in the chain is green and the app is live.
+	Reachable bool `json:"reachable"`
+	// URL is where the app is live when Reachable (https when TLS was requested, else http); it
+	// is empty until Reachable.
+	URL string `json:"url,omitempty"`
+	// BlockedOn names the first unready link when not Reachable (e.g. "ingress controller",
+	// "tls certificate", "dns"); it is empty when Reachable. It is the one link to fix next.
+	BlockedOn string `json:"blocked_on,omitempty"`
+	Summary   string `json:"summary"`
 }
 
 type ScaleResult struct {

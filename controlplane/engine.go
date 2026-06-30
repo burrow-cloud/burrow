@@ -1036,6 +1036,7 @@ func (e *Engine) Reachability(ctx context.Context, app string) (ReachabilityResu
 	ws, err := e.k8s.WorkloadStatus(ctx, app)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
+			res.BlockedOn = "deployment"
 			res.Summary = fmt.Sprintf("%s is not deployed yet — deploy it first.", app)
 			return res, nil
 		}
@@ -1052,6 +1053,7 @@ func (e *Engine) Reachability(ctx context.Context, app string) (ReachabilityResu
 	res.Host = exp.Host
 	res.Address = exp.Address
 	res.TLS = exp.TLS
+	res.CertReady = exp.CertReady
 
 	if exp.Exposed && exp.Host != "" {
 		if addrs, err := e.resolver.LookupHost(ctx, exp.Host); err == nil {
@@ -1065,9 +1067,40 @@ func (e *Engine) Reachability(ctx context.Context, app string) (ReachabilityResu
 		}
 	}
 
-	res.Reachable = res.Ready && res.Exposed && res.Address != "" && res.DNSPointsAtCluster
+	// Converged verdict: a pure, point-in-time read of the chain. BlockedOn names the first
+	// unready link; Reachable means every link is green and URL is set to the live address.
+	res.BlockedOn = reachabilityBlockedOn(res)
+	res.Reachable = res.BlockedOn == ""
+	if res.Reachable {
+		res.URL = "http://" + res.Host
+		if res.TLS {
+			res.URL = "https://" + res.Host
+		}
+	}
 	res.Summary = reachabilitySummary(res)
 	return res, nil
+}
+
+// reachabilityBlockedOn returns the first unready link in the reachability chain, or "" when
+// every link is green. The order follows the chain controller -> routing -> TLS -> DNS
+// (ADR-0018): each link depends on the ones before it, so the first gap is the one to fix.
+func reachabilityBlockedOn(r ReachabilityResult) string {
+	switch {
+	case !r.Deployed:
+		return "deployment"
+	case !r.Ready:
+		return "workload"
+	case !r.Exposed:
+		return "ingress"
+	case r.Address == "":
+		return "ingress controller"
+	case r.TLS && !r.CertReady:
+		return "tls certificate"
+	case !r.DNSPointsAtCluster:
+		return "dns"
+	default:
+		return ""
+	}
 }
 
 // reachabilitySummary turns the chain into a one-line, plain-English verdict naming the
@@ -1080,6 +1113,8 @@ func reachabilitySummary(r ReachabilityResult) string {
 		return fmt.Sprintf("%s is running but not exposed — run `burrow app publish %s --host <name> --port <n>`.", r.App, r.App)
 	case r.Address == "":
 		return fmt.Sprintf("%s is exposed at %s but no external address is assigned yet — is an ingress controller installed and running?", r.App, r.Host)
+	case r.TLS && !r.CertReady:
+		return fmt.Sprintf("%s is exposed at %s with an external address, but its TLS certificate is not ready yet; cert-manager is still issuing it.", r.App, r.Host)
 	case !r.DNSPointsAtCluster:
 		return fmt.Sprintf("%s is exposed at %s, but DNS for %s doesn't point at the cluster yet — add a DNS record pointing %s at %s.", r.App, r.Host, r.Host, r.Host, r.Address)
 	case r.TLS:

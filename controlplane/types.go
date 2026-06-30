@@ -78,6 +78,9 @@ type ExposureStatus struct {
 	Address string
 	// TLS reports whether the Ingress requests a certificate (its spec has a TLS entry).
 	TLS bool
+	// CertReady reports whether the requested TLS certificate has been issued (its Secret holds a
+	// certificate). It is meaningful only when TLS is true.
+	CertReady bool
 }
 
 // LogOptions selects which log lines to return.

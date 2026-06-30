@@ -287,3 +287,31 @@ func TestToolSurfacesControlPlaneError(t *testing.T) {
 		t.Errorf("error content = %q, want it to mention the guardrail code", text.String())
 	}
 }
+
+func TestReachabilityToolWaitConverges(t *testing.T) {
+	// The app is already live on the first check, so wait mode converges without polling (no real
+	// sleeping); the poll/timeout loop itself is exercised deterministically in the client tests.
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/apps/web/reachability" {
+			t.Errorf("path = %q, want /v1/apps/web/reachability", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "reachable": true, "url": "https://web.example.com",
+		})
+	})
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_reachability",
+		Arguments: map[string]any{"app": "web", "wait": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	out := decodeStructured[client.ReachabilityResult](t, res)
+	if !out.Reachable || out.URL != "https://web.example.com" {
+		t.Errorf("verdict = {reachable:%v url:%q}, want live at the https URL", out.Reachable, out.URL)
+	}
+}

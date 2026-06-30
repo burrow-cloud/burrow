@@ -42,12 +42,12 @@ func newAppConfigSetCmd() *cobra.Command {
 			if err := kv.Set(args[1]); err != nil {
 				return err
 			}
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			for k, v := range kv.m {
-				if err := c.SetConfig(ctx, app, o.env, k, v, noRestart); err != nil {
+				if err := c.SetConfig(ctx, app, env, k, v, noRestart); err != nil {
 					return err
 				}
 				human := fmt.Sprintf("set %s on %s", k, app)
@@ -77,11 +77,11 @@ func newAppConfigUnsetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			app, key := args[0], args[1]
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			if err := c.UnsetConfig(ctx, app, o.env, key, noRestart); err != nil {
+			if err := c.UnsetConfig(ctx, app, env, key, noRestart); err != nil {
 				return err
 			}
 			human := fmt.Sprintf("unset %s on %s", key, app)
@@ -105,11 +105,11 @@ func newAppConfigListCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			cfg, err := c.Config(ctx, args[0], o.env)
+			cfg, err := c.Config(ctx, args[0], env)
 			if err != nil {
 				return err
 			}

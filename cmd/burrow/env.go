@@ -337,6 +337,10 @@ func runEnvAdd(ctx context.Context, o *commonOpts, name, envNamespace string, ve
 		Context:               ctxName,
 		ControlPlaneNamespace: o.namespace,
 		AppNamespace:          envNamespace,
+		// Namespace-per-environment: commands send burrowd this registered NAME (the same one just
+		// registered above), which burrowd maps to envNamespace and the env's guardrails (ADR-0036).
+		// burrowd resolves the NAME, never the raw namespace, and errors on an unknown one.
+		Env: name,
 	}
 	if _, ok := cfg.Lookup(name); ok {
 		// Re-running add for an existing handle refreshes its target rather than erroring.

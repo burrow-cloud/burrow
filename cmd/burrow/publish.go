@@ -31,11 +31,11 @@ func newPublishCmd() *cobra.Command {
 			if port <= 0 {
 				return errors.New("--port is required")
 			}
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			res, err := c.Expose(ctx, args[0], o.env, host, int32(port), tls, issuer, confirm)
+			res, err := c.Expose(ctx, args[0], env, host, int32(port), tls, issuer, confirm)
 			if err != nil {
 				return err
 			}
@@ -68,12 +68,12 @@ func newReachabilityCmd() *cobra.Command {
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			if wait {
-				res, err := c.WaitReachable(ctx, args[0], o.env, timeout, nil)
+				res, err := c.WaitReachable(ctx, args[0], env, timeout, nil)
 				if err != nil {
 					return err
 				}
@@ -83,7 +83,7 @@ func newReachabilityCmd() *cobra.Command {
 				human := fmt.Sprintf("not reachable after %s: waiting on %s", timeout, res.BlockedOn)
 				return emit(cmd.OutOrStdout(), o.json, res, human)
 			}
-			res, err := c.Reachability(ctx, args[0], o.env)
+			res, err := c.Reachability(ctx, args[0], env)
 			if err != nil {
 				return err
 			}
@@ -106,11 +106,11 @@ func newUnpublishCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			if err := c.Unexpose(ctx, args[0], o.env); err != nil {
+			if err := c.Unexpose(ctx, args[0], env); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "unpublished %s\n", args[0])

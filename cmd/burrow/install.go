@@ -309,6 +309,10 @@ func recordEnvironment(a installArgs, stdout io.Writer) error {
 		Context:               a.kubeContext,
 		ControlPlaneNamespace: a.namespace,
 		AppNamespace:          a.appNamespace,
+		// Cluster-per-environment: the whole cluster is the environment, so commands send burrowd
+		// no env name and get the default app namespace and the global guardrails (ADR-0036). A
+		// namespace-per-environment env carries its registered name instead (see `burrow env add`).
+		Env: "",
 	}); err != nil {
 		return err
 	}

@@ -54,11 +54,19 @@ type Config struct {
 // Environment is a user-named handle resolving to a kube context and the namespaces the
 // environment lives in (ADR-0036). ControlPlaneNamespace defaults to DefaultControlPlaneNamespace
 // when empty; AppNamespace empty means callers fall back to the burrowd default app namespace.
+//
+// Env is the burrowd-registered environment NAME a command sends with each operation, which
+// burrowd maps to the operation's namespace and per-environment guardrails. Empty means the
+// cluster's default app namespace and the global guardrails (the cluster-per-environment case,
+// where the whole cluster is the environment); a namespace-per-environment handle carries the
+// same name it was registered with via `burrow env add`. It is deliberately distinct from
+// AppNamespace, which is for display only: burrowd resolves a registered NAME, not a raw namespace.
 type Environment struct {
 	Name                  string `yaml:"name"`
 	Context               string `yaml:"context"`
 	ControlPlaneNamespace string `yaml:"controlPlaneNamespace,omitempty"`
 	AppNamespace          string `yaml:"appNamespace,omitempty"`
+	Env                   string `yaml:"env,omitempty"`
 }
 
 // controlPlaneNamespaceOrDefault returns the handle's control-plane namespace, or the

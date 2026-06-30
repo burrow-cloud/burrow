@@ -21,11 +21,11 @@ func newAppListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			apps, err := c.Apps(ctx, o.env)
+			apps, err := c.Apps(ctx, env)
 			if err != nil {
 				return err
 			}
@@ -90,7 +90,7 @@ func newDeployCmd() *cobra.Command {
 			if image == "" {
 				return errors.New("--image is required")
 			}
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -100,7 +100,7 @@ func newDeployCmd() *cobra.Command {
 				}
 			}
 			res, err := c.Deploy(ctx, app, client.DeployRequest{
-				Env:         o.env,
+				Env:         env,
 				Image:       image,
 				Command:     command,
 				MetricsPort: int32(metricsPort),
@@ -136,11 +136,11 @@ func newStatusCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			res, err := c.Status(ctx, args[0], o.env)
+			res, err := c.Status(ctx, args[0], env)
 			if err != nil {
 				return err
 			}
@@ -161,11 +161,11 @@ func newLogsCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			lines, err := c.Logs(ctx, args[0], o.env, tail)
+			lines, err := c.Logs(ctx, args[0], env, tail)
 			if err != nil {
 				return err
 			}
@@ -206,11 +206,11 @@ func newRollbackCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			res, err := c.Rollback(ctx, args[0], o.env, confirm)
+			res, err := c.Rollback(ctx, args[0], env, confirm)
 			if err != nil {
 				return err
 			}
@@ -238,11 +238,11 @@ func newScaleCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("replicas must be a number, got %q", args[1])
 			}
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			res, err := c.Scale(ctx, args[0], o.env, int32(n), confirm)
+			res, err := c.Scale(ctx, args[0], env, int32(n), confirm)
 			if err != nil {
 				return err
 			}
@@ -265,11 +265,11 @@ func newAppDeleteCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			if err := c.DeleteApp(ctx, args[0], o.env, confirm); err != nil {
+			if err := c.DeleteApp(ctx, args[0], env, confirm); err != nil {
 				return err
 			}
 			human := fmt.Sprintf("deleted app %s (workload, routing, and release history)", args[0])

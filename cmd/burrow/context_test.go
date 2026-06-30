@@ -17,6 +17,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
+
+	"github.com/burrow-cloud/burrow/connect"
 )
 
 // writeKubeconfig writes cfg to a temp file and returns its path.
@@ -43,7 +45,10 @@ func twoContextConfig(serverStaging, serverProd string) *api.Config {
 
 func TestWriteContextList(t *testing.T) {
 	var b bytes.Buffer
-	writeContextList(&b, twoContextConfig("https://staging:6443", "https://prod:6443"))
+	writeContextList(&b, []connect.Context{
+		{Name: "prod", Cluster: "c-prod", Current: false},
+		{Name: "staging", Cluster: "c-staging", Current: true},
+	})
 	out := b.String()
 
 	for _, want := range []string{"CURRENT", "NAME", "CLUSTER", "staging", "prod", "c-staging", "c-prod"} {

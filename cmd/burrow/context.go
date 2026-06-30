@@ -6,12 +6,11 @@ package main
 import (
 	"fmt"
 	"io"
-	"sort"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/clientcmd/api"
+
+	"github.com/burrow-cloud/burrow/connect"
 )
 
 // newContextCmd groups read-only commands over the kubeconfig contexts. A kubeconfig context is a
@@ -41,11 +40,11 @@ func newContextListCmd() *cobra.Command {
 			"Each context is a cluster you can operate by passing its name to the global --context flag.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := loadRawKubeconfig(kubeconfig)
+			contexts, err := connect.Contexts(kubeconfig)
 			if err != nil {
 				return err
 			}
-			writeContextList(cmd.OutOrStdout(), cfg)
+			writeContextList(cmd.OutOrStdout(), contexts)
 			return nil
 		},
 	}
@@ -53,40 +52,21 @@ func newContextListCmd() *cobra.Command {
 	return cmd
 }
 
-// loadRawKubeconfig loads the merged kubeconfig as a raw api.Config (contexts, clusters, current
-// context), honoring an explicit path and otherwise the ambient KUBECONFIG / ~/.kube/config.
-func loadRawKubeconfig(path string) (*api.Config, error) {
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if path != "" {
-		rules.ExplicitPath = path
-	}
-	cfg, err := rules.Load()
-	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
-	}
-	return cfg, nil
-}
-
-// writeContextList prints the contexts, sorted by name, marking the current one with a *.
-func writeContextList(w io.Writer, cfg *api.Config) {
-	if len(cfg.Contexts) == 0 {
+// writeContextList prints the contexts (already sorted by connect.Contexts), marking the current
+// one with a *.
+func writeContextList(w io.Writer, contexts []connect.Context) {
+	if len(contexts) == 0 {
 		fmt.Fprintln(w, "No contexts found in the kubeconfig.")
 		return
 	}
-	names := make([]string, 0, len(cfg.Contexts))
-	for name := range cfg.Contexts {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CURRENT\tNAME\tCLUSTER")
-	for _, name := range names {
+	for _, c := range contexts {
 		marker := ""
-		if name == cfg.CurrentContext {
+		if c.Current {
 			marker = "*"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", marker, name, cfg.Contexts[name].Cluster)
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", marker, c.Name, c.Cluster)
 	}
 	_ = tw.Flush()
 }

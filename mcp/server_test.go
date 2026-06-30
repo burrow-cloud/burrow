@@ -9,33 +9,47 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/burrow-cloud/burrow/client"
+	bconnect "github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/mcp"
 )
 
-// connect wires the Burrow MCP server (fronting the given mock API handler) to an
-// in-process MCP client session over an in-memory transport.
-func connect(t *testing.T, apiHandler http.HandlerFunc) *sdk.ClientSession {
+// newSession wires the given Burrow MCP server to an in-process MCP client session over an
+// in-memory transport.
+func newSession(t *testing.T, server *sdk.Server) *sdk.ClientSession {
 	t.Helper()
-	api := httptest.NewServer(apiHandler)
-	t.Cleanup(api.Close)
-
-	server := mcp.NewServer(client.NewClient(api.URL, "tok"), "test")
 	ct, st := sdk.NewInMemoryTransports()
 	if _, err := server.Connect(context.Background(), st, nil); err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
-	client := sdk.NewClient(&sdk.Implementation{Name: "test", Version: "0"}, nil)
-	cs, err := client.Connect(context.Background(), ct, nil)
+	c := sdk.NewClient(&sdk.Implementation{Name: "test", Version: "0"}, nil)
+	cs, err := c.Connect(context.Background(), ct, nil)
 	if err != nil {
 		t.Fatalf("client connect: %v", err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
 	return cs
+}
+
+// connect wires the Burrow MCP server (fronting the given mock API handler) to an
+// in-process MCP client session. Its client factory ignores the per-call context and points
+// every call at the mock API; the routing of context to a client is exercised separately in
+// TestPerCallContextRouting.
+func connect(t *testing.T, apiHandler http.HandlerFunc) *sdk.ClientSession {
+	t.Helper()
+	api := httptest.NewServer(apiHandler)
+	t.Cleanup(api.Close)
+
+	clientFor := func(string) (*client.Client, error) { return client.NewClient(api.URL, "tok"), nil }
+	lister := func() ([]bconnect.Context, error) {
+		return []bconnect.Context{{Name: "current", Cluster: "c", Current: true}}, nil
+	}
+	return newSession(t, mcp.NewServer(clientFor, lister, "test"))
 }
 
 func decodeStructured[T any](t *testing.T, res *sdk.CallToolResult) T {
@@ -61,7 +75,7 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_environments"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
@@ -91,6 +105,7 @@ func TestListTools(t *testing.T) {
 			t.Errorf("tool %q must NOT exist: a credential value never travels over MCP", banned)
 		}
 	}
+	hasContext := map[string]bool{}
 	for _, tool := range res.Tools {
 		if tool.InputSchema == nil {
 			continue
@@ -106,6 +121,9 @@ func TestListTools(t *testing.T) {
 			t.Fatalf("decode %q input schema: %v", tool.Name, err)
 		}
 		for prop := range schema.Properties {
+			if prop == "context" {
+				hasContext[tool.Name] = true
+			}
 			if prop == "token" || prop == "auth" {
 				t.Errorf("tool %q exposes a %q input: a credential value must never cross MCP", tool.Name, prop)
 			}
@@ -118,6 +136,126 @@ func TestListTools(t *testing.T) {
 				t.Errorf("tool %q exposes a %q input: a database secret value must never cross MCP", tool.Name, prop)
 			}
 		}
+	}
+
+	// Per-call environment routing (ADR-0035): every operating tool, read or mutate, takes an
+	// optional `context`. `context` is a kubeconfig label, not a credential, so the secret scan
+	// above lets it through. burrow_environments is the exception: it lists the contexts the agent
+	// can target and so takes no context of its own.
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_apps", "burrow_scale", "burrow_cluster", "burrow_guard"} {
+		if !hasContext[want] {
+			t.Errorf("tool %q has no context input: every operating tool must be targetable per call", want)
+		}
+	}
+	if hasContext["burrow_environments"] {
+		t.Error("burrow_environments must NOT take a context: it lists the contexts to target")
+	}
+}
+
+// TestPerCallContextRouting confirms a tool's optional context selects which client (which
+// cluster's burrowd) the call routes to, and that omitting it uses the default current context
+// (the empty string), for a read tool and a mutating tool alike (ADR-0035 phase 1b).
+func TestPerCallContextRouting(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/deploy") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"release": map[string]any{"id": "r1", "app": "web", "image": "img:1", "status": "deployed", "replicas": 1},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "has_release": true, "running": true,
+			"release":  map[string]any{"id": "r1", "image": "img:1", "status": "deployed"},
+			"workload": map[string]any{"desired_replicas": 1, "ready_replicas": 1, "available": true},
+		})
+	}))
+	t.Cleanup(api.Close)
+
+	var mu sync.Mutex
+	var gotContexts []string
+	clientFor := func(kubeContext string) (*client.Client, error) {
+		mu.Lock()
+		gotContexts = append(gotContexts, kubeContext)
+		mu.Unlock()
+		return client.NewClient(api.URL, "tok"), nil
+	}
+	lister := func() ([]bconnect.Context, error) { return nil, nil }
+	cs := newSession(t, mcp.NewServer(clientFor, lister, "test"))
+
+	call := func(name string, args map[string]any) {
+		t.Helper()
+		res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatalf("CallTool %q: %v", name, err)
+		}
+		if res.IsError {
+			t.Fatalf("tool %q returned error: %v", name, res.Content)
+		}
+	}
+
+	// A read tool routes to the named context.
+	call("burrow_status", map[string]any{"app": "web", "context": "prod-cluster"})
+	// A mutating tool routes to the named context.
+	call("burrow_deploy", map[string]any{"app": "web", "image": "img:1", "replicas": 1, "context": "staging"})
+	// Omitting context falls back to the current context (the empty string).
+	call("burrow_status", map[string]any{"app": "web"})
+
+	want := []string{"prod-cluster", "staging", ""}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotContexts) != len(want) {
+		t.Fatalf("requested contexts = %v, want %v", gotContexts, want)
+	}
+	for i, w := range want {
+		if gotContexts[i] != w {
+			t.Errorf("call %d routed to context %q, want %q (all: %v)", i, gotContexts[i], w, gotContexts)
+		}
+	}
+}
+
+// TestEnvironmentsToolListsContexts confirms burrow_environments returns the available
+// environments (kubeconfig contexts) and marks the current one, so the agent knows what it can
+// name in another tool's context argument (ADR-0035 phase 1b).
+func TestEnvironmentsToolListsContexts(t *testing.T) {
+	clientFor := func(string) (*client.Client, error) {
+		t.Error("burrow_environments must not build a control-plane client: it reads the local kubeconfig")
+		return nil, nil
+	}
+	lister := func() ([]bconnect.Context, error) {
+		return []bconnect.Context{
+			{Name: "prod-cluster", Cluster: "prod", Current: false},
+			{Name: "staging", Cluster: "stg", Current: true},
+		}, nil
+	}
+	cs := newSession(t, mcp.NewServer(clientFor, lister, "test"))
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "burrow_environments"})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	out := decodeStructured[struct {
+		Environments []struct {
+			Name    string `json:"name"`
+			Cluster string `json:"cluster"`
+			Current bool   `json:"current"`
+		} `json:"environments"`
+	}](t, res)
+	if len(out.Environments) != 2 {
+		t.Fatalf("environments = %+v, want 2", out.Environments)
+	}
+	current := map[string]bool{}
+	for _, e := range out.Environments {
+		current[e.Name] = e.Current
+	}
+	if !current["staging"] {
+		t.Errorf("staging should be marked current: %+v", out.Environments)
+	}
+	if current["prod-cluster"] {
+		t.Errorf("prod-cluster should not be marked current: %+v", out.Environments)
 	}
 }
 

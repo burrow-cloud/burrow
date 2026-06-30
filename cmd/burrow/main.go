@@ -23,6 +23,7 @@ import (
 
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 func main() {
@@ -161,18 +162,118 @@ func bindClientFlags(flags *pflag.FlagSet, o *commonOpts) {
 	flags.BoolVar(&o.json, "json", false, "print the raw JSON result")
 }
 
-// client returns a control-plane client. With --control-plane set it talks to that URL
-// directly (e.g. an ingress) using --token. Otherwise it auto-connects through the
-// Kubernetes API-server proxy with the ambient kubeconfig, reading the token from the
-// install Secret — so a developer with kubectl access configures nothing (ADR-0014).
+// client returns a control-plane client for the raw connection flags (--context, --namespace),
+// without resolving the active environment handle. Commands that do not target an app
+// (install, env add, guard, audit, addon) use it so a pinned handle never silently redirects a
+// cluster-setup or policy command. Per-app commands use resolveAndConnect instead (ADR-0036).
 func (o *commonOpts) client(ctx context.Context) (*client.Client, error) {
+	return o.connect(ctx, target{context: o.context, controlPlaneNamespace: o.namespace})
+}
+
+// target is the resolved target a per-app command acts against (ADR-0036 slice 5a): the kube
+// context to connect to, the control-plane namespace burrowd runs in, the burrowd-registered
+// environment NAME to send with the operation, and a human display string. resolveTarget folds
+// the pinned/followed handle together with the --context/--env/--namespace overrides to build it.
+type target struct {
+	context               string
+	controlPlaneNamespace string
+	env                   string
+	display               string
+}
+
+// resolveTarget decides which cluster + environment a per-app command targets (ADR-0036). With
+// --control-plane it talks to that URL directly and sends the raw --env, unchanged. Otherwise it
+// resolves the active handle (the pinned one, or the current kube context in follow mode) and
+// applies the flag overrides: --context replaces the kube context, --env replaces the burrowd env
+// name, an explicit --namespace replaces the control-plane namespace. The env value is always a
+// registered env NAME (or empty for the cluster's default namespace and global guardrails), never
+// a raw namespace, because burrowd resolves a NAME and errors on an unknown one.
+func (o *commonOpts) resolveTarget() (target, error) {
+	if o.controlPlane != "" {
+		display := fmt.Sprintf("targeting control plane at %s", o.controlPlane)
+		if o.env != "" {
+			display += fmt.Sprintf(" (env %q)", o.env)
+		}
+		return target{env: o.env, display: display}, nil
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		return target{}, err
+	}
+	resolved, err := localconfig.Resolve(cfg, o.kubeconfig)
+	if err != nil {
+		return target{}, err
+	}
+	kubeContext := resolved.Context
+	if o.context != "" {
+		kubeContext = o.context
+	}
+	env := resolved.Env
+	if o.env != "" {
+		env = o.env
+	}
+	cpn := resolved.ControlPlaneNamespace
+	if o.namespace != "" && o.namespace != connect.DefaultNamespace {
+		cpn = o.namespace
+	}
+	if cpn == "" {
+		cpn = connect.DefaultNamespace
+	}
+	return target{
+		context:               kubeContext,
+		controlPlaneNamespace: cpn,
+		env:                   env,
+		display:               targetLine(resolved, o.context, o.env, kubeContext, env),
+	}, nil
+}
+
+// targetLine renders the one-line target shown on stderr before a per-app operation so a context
+// switch or a pin is never silent (ADR-0036). With no flag overrides it uses the resolved handle's
+// own description (pinned, or following the current kube context); an explicit --context or --env
+// names the exact override target instead.
+func targetLine(resolved localconfig.Resolved, ctxOverride, envOverride, finalContext, finalEnv string) string {
+	if ctxOverride == "" && envOverride == "" {
+		if resolved.Mode == localconfig.ModePinned {
+			return "targeting " + resolved.Render()
+		}
+		return resolved.Render()
+	}
+	s := fmt.Sprintf("targeting context %q", finalContext)
+	if finalEnv != "" {
+		s += fmt.Sprintf(", env %q", finalEnv)
+	}
+	s += " (flag override)"
+	return s
+}
+
+// resolveAndConnect resolves the active target (ADR-0036), prints it to stderr so it never
+// pollutes stdout or a --json result, connects to the resolved cluster, and returns the client and
+// the burrowd env NAME to send with the operation.
+func (o *commonOpts) resolveAndConnect(ctx context.Context, stderr io.Writer) (*client.Client, string, error) {
+	tgt, err := o.resolveTarget()
+	if err != nil {
+		return nil, "", err
+	}
+	fmt.Fprintln(stderr, tgt.display)
+	c, err := o.connect(ctx, tgt)
+	if err != nil {
+		return nil, "", err
+	}
+	return c, tgt.env, nil
+}
+
+// connect builds a control-plane client for a target. With --control-plane set it talks to that
+// URL directly (e.g. an ingress) using --token. Otherwise it auto-connects through the Kubernetes
+// API-server proxy with the ambient kubeconfig, reading the token from the install Secret in the
+// target's control-plane namespace, so a developer with kubectl access configures nothing (ADR-0014).
+func (o *commonOpts) connect(ctx context.Context, tgt target) (*client.Client, error) {
 	if o.controlPlane != "" {
 		if o.token == "" {
 			return nil, errors.New("--token (or BURROW_API_TOKEN) is required with --control-plane")
 		}
 		return client.NewClient(o.controlPlane, o.token), nil
 	}
-	return connect.Client(ctx, connect.Options{Kubeconfig: o.kubeconfig, Context: o.context, Namespace: o.namespace})
+	return connect.Client(ctx, connect.Options{Kubeconfig: o.kubeconfig, Context: tgt.context, Namespace: tgt.controlPlaneNamespace})
 }
 
 // emit prints v as indented JSON when asJSON, otherwise the human-readable line.

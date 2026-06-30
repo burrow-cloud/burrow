@@ -69,6 +69,9 @@ func fakeBurrowdCluster(hit *bool) *httptest.Server {
 func TestContextFlagWired(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
+	// Isolate the local selector state so the resolved target depends only on the kubeconfig and
+	// the --context flag, never the developer's real ~/.burrow/config (ADR-0036).
+	tempConfig(t)
 
 	var stagingHit, prodHit bool
 	staging := fakeBurrowdCluster(&stagingHit)

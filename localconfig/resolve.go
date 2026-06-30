@@ -21,14 +21,17 @@ const (
 )
 
 // Resolved is the concrete target a command will act against, derived from the config and
-// the kubeconfig. Namespace is the app namespace; empty means the caller falls back to the
-// burrowd default app namespace. In follow mode Name is empty when the current context
-// matches no registered handle (an "unregistered" current context).
+// the kubeconfig. Namespace is the app namespace (for display); empty means the caller falls
+// back to the burrowd default app namespace. Env is the burrowd-registered environment NAME to
+// send with the operation (empty means the cluster's default namespace and global guardrails);
+// it is what burrowd resolves, not a raw namespace. In follow mode Name (and Env) are empty
+// when the current context matches no registered handle (an "unregistered" current context).
 type Resolved struct {
 	Name                  string
 	Context               string
 	Namespace             string
 	ControlPlaneNamespace string
+	Env                   string
 	Mode                  Mode
 }
 
@@ -39,7 +42,7 @@ type Resolved struct {
 // the target is that context, its namespace (so kubens moves Burrow too; empty when the
 // context sets none, leaving the burrowd default to apply), and the default control-plane
 // namespace. If the current context matches a registered handle by context name, that
-// handle's Name is surfaced; otherwise Name is empty.
+// handle's Name and Env (the burrowd env name to send) are surfaced; otherwise both are empty.
 func Resolve(cfg *Config, kubeconfigPath string) (Resolved, error) {
 	if cfg != nil && cfg.Current != "" {
 		env, ok := cfg.Lookup(cfg.Current)
@@ -53,6 +56,7 @@ func Resolve(cfg *Config, kubeconfigPath string) (Resolved, error) {
 			Context:               env.Context,
 			Namespace:             env.AppNamespace,
 			ControlPlaneNamespace: env.controlPlaneNamespaceOrDefault(),
+			Env:                   env.Env,
 			Mode:                  ModePinned,
 		}, nil
 	}
@@ -70,6 +74,7 @@ func Resolve(cfg *Config, kubeconfigPath string) (Resolved, error) {
 	if cfg != nil {
 		if env, ok := cfg.lookupByContext(context); ok {
 			resolved.Name = env.Name
+			resolved.Env = env.Env
 		}
 	}
 	return resolved, nil

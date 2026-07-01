@@ -33,66 +33,53 @@ service behind the same guardrails.
 
 ## Talk to your agent
 
-What you can say today (✅), and where it is headed (🔭):
+Once Burrow is connected, you operate your apps by talking to your agent. Things you can say today:
 
-- ✅ **"Deploy `ghcr.io/me/app:1.4` and serve it at example.com over HTTPS."** The image,
-  ingress and TLS, and the DNS record, from one ask.
-- ✅ **"Roll back the last release."** · **"Scale web to 3."** · **"Show me the logs."** ·
-  **"Is my app reachable? If not, what's broken?"**
-- ✅ **"How is my app doing?"** · **"Why is it slow?"** → Burrow installs logs
-  ([VictoriaLogs](https://docs.victoriametrics.com/victorialogs/)) on your cluster, *or connects*
-  to the logs and metrics you already run ([Loki](https://grafana.com/oss/loki/),
-  [Prometheus](https://prometheus.io)), and your agent *queries* them and answers in plain
-  language: answers, not dashboards.
-- ✅ **"My site is slow, add a cache."** → your agent writes the [ValKey](https://valkey.io)
-  integration; Burrow deploys ValKey to your cluster and wires it in.
-- 🔭 **"Autoscale web on load."** · **"Show me this month's cluster spend."** → autoscaling and
-  cost controls are on the [roadmap](docs/ROADMAP.md).
+- **"Deploy my app to prod."** Your agent figures out which app from the folder you are in, builds it, ships it, and rolls it out to your cluster.
+- **"Roll back the last release."**
+- **"Scale web up."** or **"Scale web to 3."**
+- **"Show me any 500 errors from my web app and figure out what happened."** Your agent reads the logs and tells you what broke, in plain language.
+- **"How is my app doing?"** or **"Why is my app slow?"** Straight answers, no dashboards to dig through.
+- **"My site is slow, would a cache help?"** Your agent checks your logs and metrics, tells you if it would, and if you say yes, sets one up and wires your app to it.
 
-The pattern is the same every time: the agent writes the code; **Burrow provisions the
-vetted, permissively-licensed building block, wires it in with sane defaults, and operates
-it**, with every change gated by the control-plane guardrails. The ✅ items work now, and the
-🔭 items are the [roadmap](docs/ROADMAP.md). The [version table](#version-status) never lags
-the code.
+Coming soon: **"Make web autoscale at 90% CPU."** and **"Limit web to 500MB of memory and 1 CPU."**
 
 ## Built for day two
 
-The hard part of Kubernetes isn't the first deploy — it's everything after. The recurring
-complaint from small teams is the **day-two tax**: upgrades that break prod, certs and ingress
-that drift, and "why is my app slow?" debugging across a stack nobody has time to master. That
-second day is Burrow's job:
+The hard part isn't the first deploy, it's everything after. Once your app is live, this is
+what you get:
 
-- **Upgrades in place** — `burrow upgrade` rolls the control plane forward without losing state.
-- **Reachability you can reason about** — `reachability` walks the whole chain (controller →
-  ingress → TLS → DNS) and names the *one* broken link, so "it's down" becomes "the cert hasn't
-  issued yet."
-- **Operate by talking** — status, logs, rollback, scale — the agent does the work, the
-  guardrails keep it on the rails.
-- **"How is my app doing?"** — the agent installs logs on your cluster, or connects to the logs
-  and metrics you already run, and answers in plain language (shipped in v0.4).
+- **It keeps running.** Your app self-heals when something falls over, and new releases roll
+  out without taking the old one down.
+- **It stays reachable, over HTTPS.** Your app gets a URL with TLS, and when something is off
+  you get a straight answer about which link in the chain broke ("the cert hasn't issued yet"),
+  not just "it's down."
+- **You operate it by talking.** Status, logs, rollback, scale: your agent does the work, and
+  the guardrails keep it from breaking prod.
+- **You get plain-language answers.** Ask "how is my app doing?" or "why is it slow?" and your
+  agent reads the logs and metrics and tells you, no dashboards to dig through.
 
-And every change is gated: **the agent proposes, you approve, it executes** — with the deploy
-record as the audit trail. That human-in-the-loop step is what makes letting an agent operate
-production actually acceptable.
+And every change is gated: **the agent proposes, you approve, it executes**, with a record of
+what happened. That human-in-the-loop step is what makes letting an agent operate production
+actually acceptable.
 
 ## How it works
 
-Four layers ([architecture](docs/ARCHITECTURE.md)):
+Three things:
 
-1. **Your agent** — any MCP client, not ours.
-2. **The MCP server** — thin, agent-neutral, holds no cluster credentials. The remote control.
-3. **The control plane** — the product: deploy, rollout and rollback, status and logs,
-   scaling, reachability, the guardrails, and the record of who did what. Holds the cluster
-   credentials; the only layer that talks to Kubernetes.
-4. **Kubernetes** — your cluster.
+1. **Your agent** - any AI coding agent you already use (Claude Code, Cursor, Codex, Copilot,
+   OpenCode).
+2. **Burrow** - the piece you install. It holds your cluster credentials, does the work
+   (deploy, scale, logs, backing services), and gates every change behind guardrails so the
+   agent cannot break prod.
+3. **Your Kubernetes cluster** - your infrastructure, which you own.
 
-Two invariants keep it safe and fast: **code never travels over MCP** — only tool calls and
-small metadata; the built image moves through a container registry
-([ADR-0004](docs/adr/0004-code-never-over-mcp.md)) — and **guardrails live in the control
-plane**, between your agent and your cluster, returning a structured result the agent can
-reason over ([ADR-0006](docs/adr/0006-guardrails-in-the-control-plane.md)). It is fully
-self-hostable: the single-tenant control plane, the MCP server, and the CLI run entirely on
-your own cluster.
+Two things keep it safe: your code never passes through Burrow (it moves through a container
+registry, not the agent connection), and every change the agent tries to make is checked
+before it runs. Nothing lands on your cluster that you did not approve.
+
+The full architecture (the four layers underneath, and the credential boundary) is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for anyone who wants the detail.
 
 ## What "guardrails" mean
 

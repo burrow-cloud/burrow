@@ -72,3 +72,19 @@ Open your agent and ask it to deploy something. For example:
 
 Your agent calls Burrow, Burrow runs the deploy on your cluster under the guardrails you control,
 and it reports back what happened.
+
+## Upgrade
+
+To update the CLI:
+
+```sh
+brew update && brew upgrade burrow
+```
+
+To roll the in-cluster Burrow forward after a new release:
+
+```sh
+burrow upgrade
+```
+
+`burrow upgrade` updates the installed control plane in place and preserves your state.

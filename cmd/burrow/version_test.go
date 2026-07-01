@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+// stubLatestRelease replaces the fetchLatestRelease seam for one test so `burrow version` makes no
+// network call: it returns the given tag and error and restores the original on cleanup.
+func stubLatestRelease(t *testing.T, tag string, err error) {
+	t.Helper()
+	orig := fetchLatestRelease
+	fetchLatestRelease = func(context.Context) (string, error) { return tag, err }
+	t.Cleanup(func() { fetchLatestRelease = orig })
+}
 
 func TestCliVersionDevDefault(t *testing.T) {
 	// A test binary has no module release version, so the CLI reports the dev default.
@@ -70,20 +80,22 @@ func TestImageTag(t *testing.T) {
 }
 
 func TestVersionCommandPrintsCLILine(t *testing.T) {
+	stubLatestRelease(t, "", errors.New("offline"))
 	var out, errb bytes.Buffer
 	// No reachable cluster in the test env, so the control-plane line is best-effort; the CLI
 	// line must always print and the command must succeed.
 	if err := run(context.Background(), []string{"version", "--kubeconfig", "/nonexistent"}, &out, &errb); err != nil {
 		t.Fatalf("version: %v", err)
 	}
-	if s := out.String(); !strings.Contains(s, "burrow (CLI):  dev") {
+	if s := out.String(); !strings.Contains(s, "burrow (CLI):") || !strings.Contains(s, "dev") {
 		t.Errorf("version output = %q, want the CLI version line", s)
 	}
 }
 
-// TestControlPlaneLine covers the rendered control-plane line for each probe outcome: it must name
-// the targeted context on success, when nothing is installed, and when the cluster is unreachable.
-func TestControlPlaneLine(t *testing.T) {
+// TestControlPlaneValue covers the rendered control-plane value cell for each probe outcome: it
+// must name the targeted context on success, when nothing is installed, and when the cluster is
+// unreachable. The value carries no "control plane:" label; the command aligns that in a tabwriter.
+func TestControlPlaneValue(t *testing.T) {
 	notFound := apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "deployments"}, "burrowd")
 	cases := []struct {
 		name      string
@@ -95,23 +107,23 @@ func TestControlPlaneLine(t *testing.T) {
 		{
 			name:    "success names the context and namespace",
 			img:     "ghcr.io/burrow-cloud/burrowd:v0.6.0",
-			wantHas: []string{`control plane: v0.6.0 (context "nonprod", namespace "burrow")`},
+			wantHas: []string{`v0.6.0 (context "nonprod", namespace "burrow")`},
 		},
 		{
 			name:    "not installed names the context and namespace",
 			err:     notFound,
-			wantHas: []string{`control plane: not installed (context "nonprod", namespace "burrow")`},
+			wantHas: []string{`not installed (context "nonprod", namespace "burrow")`},
 		},
 		{
 			name:      "unreachable names the context and omits the URL",
 			err:       &net.DNSError{Err: "no such host", Name: "abc123.k8s.example.com", IsNotFound: true},
-			wantHas:   []string{`control plane: unreachable via context "nonprod" (no such host)`},
+			wantHas:   []string{`unreachable via context "nonprod" (no such host)`},
 			wantNotIn: []string{"http", "abc123"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := controlPlaneLine(tc.img, tc.err, "nonprod", "burrow")
+			got := controlPlaneValue(tc.img, tc.err, "nonprod", "burrow")
 			for _, want := range tc.wantHas {
 				if !strings.Contains(got, want) {
 					t.Errorf("line = %q, want substring %q", got, want)
@@ -123,6 +135,144 @@ func TestControlPlaneLine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestUpgradeHints covers the pure compare/hint logic without a cluster or network: a behind
+// control plane and a behind CLI each get their hint, a dev/pseudo CLI is exempt, and when nothing
+// is behind the reassurance line stands alone.
+func TestUpgradeHints(t *testing.T) {
+	cases := []struct {
+		name            string
+		cli, cp, latest string
+		wantHas         []string
+		wantNotIn       []string
+	}{
+		{
+			name: "control plane behind", cli: "dev", cp: "v0.7.0", latest: "v0.7.2",
+			wantHas:   []string{"Your control plane is behind. Run `burrow upgrade` to update it to v0.7.2."},
+			wantNotIn: []string{"brew upgrade", "You are on the latest release."},
+		},
+		{
+			name: "cli behind", cli: "v0.7.0", cp: "v0.7.2", latest: "v0.7.2",
+			wantHas:   []string{"A newer burrow (v0.7.2) is available. Run `brew upgrade burrow`."},
+			wantNotIn: []string{"burrow upgrade", "You are on the latest release."},
+		},
+		{
+			name: "both behind", cli: "v0.7.0", cp: "v0.7.0", latest: "v0.7.2",
+			wantHas: []string{"burrow upgrade", "brew upgrade burrow"},
+		},
+		{
+			name: "both current", cli: "v0.7.2", cp: "v0.7.2", latest: "v0.7.2",
+			wantHas:   []string{"You are on the latest release."},
+			wantNotIn: []string{"upgrade"},
+		},
+		{
+			name: "dev cli exempt from brew hint", cli: "dev", cp: "v0.7.2", latest: "v0.7.2",
+			wantHas:   []string{"You are on the latest release."},
+			wantNotIn: []string{"brew upgrade"},
+		},
+		{
+			name: "pseudo cli exempt from brew hint", cli: "v0.7.3-0.20260101000000-abcdef123456", cp: "v0.7.2", latest: "v0.7.2",
+			wantHas:   []string{"You are on the latest release."},
+			wantNotIn: []string{"brew upgrade"},
+		},
+		{
+			name: "uninstalled control plane is not behind", cli: "dev", cp: "", latest: "v0.7.2",
+			wantHas:   []string{"You are on the latest release."},
+			wantNotIn: []string{"burrow upgrade"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strings.Join(upgradeHints(tc.cli, tc.cp, tc.latest), "\n")
+			for _, want := range tc.wantHas {
+				if !strings.Contains(got, want) {
+					t.Errorf("hints = %q, want substring %q", got, want)
+				}
+			}
+			for _, no := range tc.wantNotIn {
+				if strings.Contains(got, no) {
+					t.Errorf("hints = %q, should not contain %q", got, no)
+				}
+			}
+		})
+	}
+}
+
+// TestVersionControlPlaneBehind runs the whole command with a faked cluster on v0.7.0 and a faked
+// latest release of v0.7.2, and confirms the `burrow upgrade` hint names the right target.
+func TestVersionControlPlaneBehind(t *testing.T) {
+	stubLatestRelease(t, "v0.7.2", nil)
+	var hit bool
+	cluster := fakeBurrowdDeployment(&hit, "ghcr.io/burrow-cloud/burrowd:v0.7.0")
+	defer cluster.Close()
+	path := writeKubeconfig(t, twoContextConfig(cluster.URL, "https://unused.invalid:6443"))
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"version", "--kubeconfig", path}, &out, &errb); err != nil {
+		t.Fatalf("version: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	// Assert on labels and values as separate substrings so the tabwriter's column padding does
+	// not make the test brittle.
+	for _, want := range []string{
+		"control plane:", "v0.7.0",
+		"latest release:", "v0.7.2",
+		"Your control plane is behind. Run `burrow upgrade` to update it to v0.7.2.",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("version output = %q, want substring %q", s, want)
+		}
+	}
+}
+
+// TestVersionAllCurrent confirms that when the control plane matches the latest release, the command
+// prints the latest line and the reassurance, with no upgrade hint.
+func TestVersionAllCurrent(t *testing.T) {
+	stubLatestRelease(t, "v0.7.2", nil)
+	var hit bool
+	cluster := fakeBurrowdDeployment(&hit, "ghcr.io/burrow-cloud/burrowd:v0.7.2")
+	defer cluster.Close()
+	path := writeKubeconfig(t, twoContextConfig(cluster.URL, "https://unused.invalid:6443"))
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"version", "--kubeconfig", path}, &out, &errb); err != nil {
+		t.Fatalf("version: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "latest release:") || !strings.Contains(s, "v0.7.2") {
+		t.Errorf("version output = %q, want the latest release line", s)
+	}
+	if !strings.Contains(s, "You are on the latest release.") {
+		t.Errorf("version output = %q, want the reassurance line", s)
+	}
+	if strings.Contains(s, "upgrade") {
+		t.Errorf("version output = %q, should carry no upgrade hint", s)
+	}
+}
+
+// TestVersionFetchErrorSkipsReleaseLines confirms a failed latest-release check prints nothing extra:
+// no latest line and no hint, so `burrow version` still works offline.
+func TestVersionFetchErrorSkipsReleaseLines(t *testing.T) {
+	stubLatestRelease(t, "", errors.New("offline"))
+	var hit bool
+	cluster := fakeBurrowdDeployment(&hit, "ghcr.io/burrow-cloud/burrowd:v0.7.0")
+	defer cluster.Close()
+	path := writeKubeconfig(t, twoContextConfig(cluster.URL, "https://unused.invalid:6443"))
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"version", "--kubeconfig", path}, &out, &errb); err != nil {
+		t.Fatalf("version: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "control plane:") || !strings.Contains(s, "v0.7.0") {
+		t.Errorf("version output = %q, want the control-plane line", s)
+	}
+	for _, no := range []string{"latest release:", "burrow upgrade", "brew upgrade", "You are on the latest release."} {
+		if strings.Contains(s, no) {
+			t.Errorf("version output = %q, should not contain %q when the release check fails", s, no)
+		}
 	}
 }
 
@@ -146,6 +296,7 @@ func fakeBurrowdDeployment(hit *bool, image string) *httptest.Server {
 // TestVersionContextFlagSelectsCluster confirms --context targets the named context's cluster: the
 // probe reports prod's burrowd image and names prod, not the current context (staging).
 func TestVersionContextFlagSelectsCluster(t *testing.T) {
+	stubLatestRelease(t, "", errors.New("offline"))
 	var stagingHit, prodHit bool
 	staging := fakeBurrowdDeployment(&stagingHit, "ghcr.io/burrow-cloud/burrowd:v0.5.0")
 	prod := fakeBurrowdDeployment(&prodHit, "ghcr.io/burrow-cloud/burrowd:v0.6.0")
@@ -159,7 +310,7 @@ func TestVersionContextFlagSelectsCluster(t *testing.T) {
 		t.Fatalf("version: %v\n%s", err, errb.String())
 	}
 	s := out.String()
-	if !strings.Contains(s, `control plane: v0.6.0 (context "prod", namespace "burrow")`) {
+	if !strings.Contains(s, "control plane:") || !strings.Contains(s, `v0.6.0 (context "prod", namespace "burrow")`) {
 		t.Errorf("version output = %q, want prod's image and context", s)
 	}
 	if !prodHit {
@@ -173,6 +324,7 @@ func TestVersionContextFlagSelectsCluster(t *testing.T) {
 // TestVersionUnreachableCluster confirms a dead cluster yields the concise "unreachable via context"
 // line that names the current context and carries no full URL, with the command still succeeding.
 func TestVersionUnreachableCluster(t *testing.T) {
+	stubLatestRelease(t, "", errors.New("offline"))
 	// A current context "do-nyc1-prod" pointing at a non-resolvable host: the probe fails fast on
 	// DNS without needing a real cluster.
 	cfg := twoContextConfig("https://burrow-version-unreachable.invalid:6443", "https://unused.invalid:6443")

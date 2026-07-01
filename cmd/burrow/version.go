@@ -5,17 +5,60 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"runtime/debug"
 	"strings"
+	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/burrow-cloud/burrow/connect"
 )
+
+// latestReleaseURL is the unauthenticated GitHub API endpoint that returns this repository's
+// latest published release. The repository is public, so it reads without a token.
+const latestReleaseURL = "https://api.github.com/repos/burrow-cloud/burrow/releases/latest"
+
+// latestReleaseTimeout bounds the latest-release check so `burrow version` never hangs on a slow
+// or unreachable network: the check is best-effort and skipped silently on any failure.
+const latestReleaseTimeout = 3 * time.Second
+
+// fetchLatestRelease returns the tag of the latest published release (e.g. "v0.7.2"), or an error.
+// It is a package var so tests can fake it with no network. It is best-effort by contract: any
+// failure (offline, timeout, non-200, rate-limited, malformed body) is returned so the caller can
+// skip the release check silently rather than fail `burrow version`.
+var fetchLatestRelease = func(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, latestReleaseTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, latestReleaseURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("github releases API returned %s", resp.Status)
+	}
+	var body struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	return body.TagName, nil
+}
 
 // newVersionCmd reports this CLI's version and, best effort, the version of the control plane
 // installed in the cluster — read from the burrowd Deployment's image, so it works even if
@@ -28,8 +71,11 @@ func newVersionCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
-			// The CLI line prints first and always; control-plane connectivity never blocks it.
-			fmt.Fprintf(out, "burrow (CLI):  %s\n", cliVersion())
+			// Render the status lines through one tabwriter so the CLI, control-plane, and
+			// latest-release values column-align regardless of their differing label widths. The
+			// CLI line prints first and always; control-plane connectivity never blocks it.
+			tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+			fmt.Fprintf(tw, "burrow (CLI):\t%s\n", cliVersion())
 
 			// Name the targeted context so the control-plane line is legible in both the success and
 			// failure cases. Best effort: a missing or unreadable kubeconfig leaves it empty, which
@@ -38,13 +84,34 @@ func newVersionCmd() *cobra.Command {
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), connect.ProbeTimeout)
 			defer cancel()
+
+			// cpVer is the control plane's release version, read from the burrowd image tag on a
+			// successful probe and left empty otherwise (not installed or unreachable). It feeds the
+			// latest-release comparison below.
+			var cpVer string
 			cs, err := clientsetForContext(kubeconfig, kubeContext)
 			if err != nil {
-				fmt.Fprintln(out, controlPlaneLine("", err, ctxName, namespace))
-				return nil
+				fmt.Fprintf(tw, "control plane:\t%s\n", controlPlaneValue("", err, ctxName, namespace))
+			} else if img, imgErr := burrowdImage(ctx, cs, namespace); imgErr != nil {
+				fmt.Fprintf(tw, "control plane:\t%s\n", controlPlaneValue(img, imgErr, ctxName, namespace))
+			} else {
+				fmt.Fprintf(tw, "control plane:\t%s\n", controlPlaneValue(img, nil, ctxName, namespace))
+				cpVer = imageTag(img)
 			}
-			img, err := burrowdImage(ctx, cs, namespace)
-			fmt.Fprintln(out, controlPlaneLine(img, err, ctxName, namespace))
+
+			// Best effort: compare against the latest published release and flag an outdated CLI or
+			// control plane. Any failure (offline, timeout, rate-limited) is skipped silently, so
+			// `burrow version` still works with no network and never hangs.
+			var hints []string
+			if latest, lerr := fetchLatestRelease(cmd.Context()); lerr == nil && latest != "" {
+				fmt.Fprintf(tw, "latest release:\t%s\n", latest)
+				hints = upgradeHints(cliVersion(), cpVer, latest)
+			}
+			// Flush the aligned block before the hints, which print at the left margin unaligned.
+			_ = tw.Flush()
+			for _, hint := range hints {
+				fmt.Fprintln(out, hint)
+			}
 			return nil
 		},
 	}
@@ -54,17 +121,19 @@ func newVersionCmd() *cobra.Command {
 	return cmd
 }
 
-// controlPlaneLine renders the "control plane:" line from a probe result: the burrowd image and
-// the error from reading its Deployment, plus the targeted context and namespace. It is pure so
-// the success, not-installed, and unreachable renderings are unit-tested without a cluster.
-func controlPlaneLine(img string, err error, ctxName, namespace string) string {
+// controlPlaneValue renders the value cell of the "control plane" line from a probe result: the
+// burrowd image tag and the error from reading its Deployment, plus the targeted context and
+// namespace. It is the cell content only (no "control plane:" label) so the caller can align it in
+// a tabwriter, and it is pure so the success, not-installed, and unreachable renderings are
+// unit-tested without a cluster.
+func controlPlaneValue(img string, err error, ctxName, namespace string) string {
 	switch {
 	case err == nil:
-		return fmt.Sprintf("control plane: %s (context %q, namespace %q)", imageTag(img), ctxName, namespace)
+		return fmt.Sprintf("%s (context %q, namespace %q)", imageTag(img), ctxName, namespace)
 	case apierrors.IsNotFound(err):
-		return fmt.Sprintf("control plane: not installed (context %q, namespace %q)", ctxName, namespace)
+		return fmt.Sprintf("not installed (context %q, namespace %q)", ctxName, namespace)
 	default:
-		return fmt.Sprintf("control plane: unreachable via context %q (%s)", ctxName, connect.FailureReason(err))
+		return fmt.Sprintf("unreachable via context %q (%s)", ctxName, connect.FailureReason(err))
 	}
 }
 
@@ -87,6 +156,29 @@ func cliVersion() string {
 		return bi.Main.Version
 	}
 	return "dev"
+}
+
+// upgradeHints compares the CLI and control-plane versions against the latest published release and
+// returns the applicable upgrade hint lines. It is pure so the comparison is unit-testable without a
+// cluster or network:
+//   - a control plane on a valid release older than latest gets the `burrow upgrade` hint;
+//   - a CLI on a valid, non-pseudo release older than latest gets the `brew upgrade` hint (a local
+//     dev/pseudo build is exempt, since there is nothing to brew-upgrade);
+//   - when neither is behind, a single reassurance that this is the latest release.
+//
+// It assumes latest is a non-empty tag (the caller only calls it when the release check succeeded).
+func upgradeHints(cliVer, cpVer, latest string) []string {
+	var hints []string
+	if semver.IsValid(cpVer) && semver.Compare(cpVer, latest) < 0 {
+		hints = append(hints, fmt.Sprintf("Your control plane is behind. Run `burrow upgrade` to update it to %s.", latest))
+	}
+	if semver.IsValid(cliVer) && !module.IsPseudoVersion(cliVer) && semver.Compare(cliVer, latest) < 0 {
+		hints = append(hints, fmt.Sprintf("A newer burrow (%s) is available. Run `brew upgrade burrow`.", latest))
+	}
+	if len(hints) == 0 {
+		hints = append(hints, "You are on the latest release.")
+	}
+	return hints
 }
 
 // imageTag returns just the version tag of an image reference (the part after the last colon,

@@ -250,7 +250,7 @@ func newAddonConnectCmd() *cobra.Command {
 			"it connects rather than distributes. Pass the in-cluster endpoint with --endpoint.\n\n" +
 			"For an authenticated backend, pass --auth: you are prompted for a bearer token with the\n" +
 			"input hidden. The token travels over burrowd's authenticated control-plane API (TLS), which\n" +
-			"writes it into the burrow-credentials Secret (ADR-0030); it never travels over MCP and is\n" +
+			"writes it into the burrow-credentials Secret; it never travels over MCP and is\n" +
 			"never logged.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

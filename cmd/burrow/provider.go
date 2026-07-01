@@ -85,7 +85,7 @@ func newProviderAddCmd() *cobra.Command {
 			"history or the process table; for scripts, pipe it in instead\n" +
 			"(echo \"$TOKEN\" | burrow config provider add cloudflare). The token travels over\n" +
 			"burrowd's authenticated control-plane API (TLS), which validates it against the vendor\n" +
-			"and writes it into the burrow-credentials Secret (ADR-0030); it never travels over MCP\n" +
+			"and writes it into the burrow-credentials Secret; it never travels over MCP\n" +
 			"and is never logged. Pass --name to register more than one provider of the same type.\n\n" +
 			"Supported types: " + providerTypesHint() + " (see `burrow config provider types`).",
 		Example: "  burrow config provider add cloudflare\n" +

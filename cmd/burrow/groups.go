@@ -44,19 +44,28 @@ func grouped(cmd *cobra.Command, id string) *cobra.Command {
 
 // rootShortDesc is the root command's one-line description, reused atop the first-run banner so the
 // two stay in sync. No em-dashes: it is user-facing CLI output.
-const rootShortDesc = "Operate applications on your own Kubernetes cluster through the Burrow control plane."
+const rootShortDesc = "Run your apps on your own Kubernetes cluster, operated by an AI agent under guardrails."
+
+// rootLongDesc is the root command's full description, shown at the top of `burrow -h`. It names the
+// two surfaces: the agent operates apps through the MCP server, and a person uses this CLI to install
+// Burrow, manage environments and credentials, and set the guardrail policy. No em-dashes: it is
+// user-facing CLI output.
+const rootLongDesc = "Burrow runs your apps on your own Kubernetes cluster, operated by an AI agent under " +
+	"guardrails you control. The agent deploys, scales, and debugs through Burrow's MCP server; you use " +
+	"this CLI to install Burrow, manage environments and credentials, and set the guardrail policy the " +
+	"agent runs under."
 
 // firstRunBanner is what bare `burrow` prints when no local config exists yet, routing a brand-new
-// user straight to install rather than the full command wall (ADR-0037). It leads with the one-line
-// description and ends with a pointer to `-h` for the full command list. It is shown only on the
-// bare-invocation path (root RunE); `burrow -h` shows the grouped help without it. No em-dashes: it
-// is user-facing CLI output.
+// user straight to install rather than the full command wall. It leads with the one-line description,
+// flags that Burrow is not set up, and closes with a few `Use "..."` pointers. It is shown only on
+// the bare-invocation path (root RunE); `burrow -h` shows the grouped help without it. No em-dashes
+// (the ⚠️ alert is intentional): it is user-facing CLI output.
 const firstRunBanner = rootShortDesc + "\n\n" +
-	"Burrow is not set up yet. Point it at a cluster to get started:\n\n" +
+	"⚠️  Burrow is not set up yet. Point it at a cluster to get started:\n\n" +
 	"  burrow install <context>\n\n" +
-	"Run `burrow install` with no argument to list your kubeconfig contexts, or\n" +
-	"`burrow env scan` to find an existing Burrow already in your clusters.\n\n" +
-	"Run `burrow -h` for the full list of commands.\n"
+	"Use \"burrow install\" to list your contexts and install into one.\n" +
+	"Use \"burrow env scan\" to find an existing Burrow in your clusters.\n" +
+	"Use \"burrow -h\" to see all commands.\n"
 
 // newAppCmd groups the operations on a deployed application.
 func newAppCmd() *cobra.Command {

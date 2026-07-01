@@ -411,6 +411,31 @@ func TestEnvAddNamespaceOverride(t *testing.T) {
 	}
 }
 
+// TestEnvHelpConciseNoADR confirms `burrow env -h` shows the concise description, a single Usage
+// line, and neither an internal ADR reference nor the unrelated `burrow app config` pointer.
+func TestEnvHelpConciseNoADR(t *testing.T) {
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "-h"}, &out, &errb); err != nil {
+		t.Fatalf("env -h: %v\n%s", err, errb.String())
+	}
+	s := out.String() + errb.String()
+	if !strings.Contains(s, "Select and manage Burrow environments. An environment is a named handle") {
+		t.Errorf("env help missing the concise description:\n%s", s)
+	}
+	for _, unwanted := range []string{"ADR", "burrow app config"} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("env help should not mention %q:\n%s", unwanted, s)
+		}
+	}
+	// A single Usage line at the bottom, not the old two-line `[flags]`/`[command]` pair.
+	if !strings.Contains(s, "burrow env [command] [flags]") {
+		t.Errorf("env help missing the single Usage line:\n%s", s)
+	}
+	if strings.Contains(s, "burrow env [flags]\n") {
+		t.Errorf("env help still renders the two-line usage:\n%s", s)
+	}
+}
+
 // TestWriteEnvList covers the kubectx-style rendering directly, including the active-row markers and
 // the unregistered follow line.
 func TestWriteEnvList(t *testing.T) {

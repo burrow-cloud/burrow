@@ -68,8 +68,19 @@ func TestBareBurrowFirstRunShowsBanner(t *testing.T) {
 		t.Fatalf("bare burrow: %v\n%s", err, errb.String())
 	}
 	s := out.String() + errb.String()
-	if !strings.Contains(s, "Burrow is not set up yet") || !strings.Contains(s, "burrow install") {
-		t.Errorf("bare first-run output missing the install banner\n%s", s)
+	for _, want := range []string{
+		// Leads with the one-line description, flags that Burrow is not set up, and points at install.
+		"Run your apps on your own Kubernetes cluster",
+		"Burrow is not set up yet",
+		"burrow install <context>",
+		// The `Use "..."` pointers guide the next step.
+		`Use "burrow install" to list your contexts and install into one.`,
+		`Use "burrow env scan" to find an existing Burrow in your clusters.`,
+		`Use "burrow -h" to see all commands.`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("bare first-run banner missing %q\n%s", want, s)
+		}
 	}
 	// The banner stands alone: the full grouped command wall must not print underneath it.
 	for _, unwanted := range []string{"Get started:", "Operate:", "Available Commands"} {

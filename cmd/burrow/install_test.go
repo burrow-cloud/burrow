@@ -151,22 +151,28 @@ func TestInstallNoArgListsContextsAndDoesNotInstall(t *testing.T) {
 	}
 
 	s := out.String()
-	// It prints the header/usage, lists the contexts, marks the current one, shows the per-context
-	// install status in a BURROWD column, and instructs re-running with a free context.
+	// It prints the intro, lists the contexts under a CONTEXT column, marks the current one, shows the
+	// per-context install status in a BURROWD column, then the Examples block and a single Usage line.
 	for _, want := range []string{
-		"Installs Burrow into your cluster.",
-		"burrow install <context>",
-		"CURRENT", "NAME", "CLUSTER", "BURROWD",
+		"Install the Burrow control plane into your cluster.",
+		"CURRENT", "CONTEXT", "CLUSTER", "BURROWD",
 		"dev", "prod", "broken", "*",
 		"installed (v0.7.0)", "not installed", "unreachable",
+		"# Install Burrow into a context with the defaults",
+		"burrow install do-nyc1-cluster",
+		"burrow install <context> [flags]",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("context listing missing %q:\n%s", want, s)
 		}
 	}
 	// A blank line separates the heading from the table header so they do not run together.
-	if !strings.Contains(s, "Your kubeconfig contexts:\n\n") {
+	if !strings.Contains(s, "Detected Kubernetes contexts:\n\n") {
 		t.Errorf("expected a blank line after the contexts heading:\n%s", s)
+	}
+	// Usage sits at the bottom, after the Examples block (kubectl-style layout).
+	if i, j := strings.Index(s, "Examples:"), strings.Index(s, "Usage:"); i < 0 || j < 0 || i > j {
+		t.Errorf("Examples should appear before the Usage line at the bottom:\n%s", s)
 	}
 	// It must NOT install: nothing applied, nothing recorded.
 	if *targeted != "" {

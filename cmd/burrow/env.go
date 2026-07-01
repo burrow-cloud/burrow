@@ -64,14 +64,10 @@ func newEnvCmd() *cobra.Command {
 	o := &envListOpts{}
 	cmd := &cobra.Command{
 		Use:   "env",
-		Short: "Select and manage Burrow environments (local handles)",
-		Long: "env is the single environment surface (ADR-0036). An environment is a user-named handle\n" +
-			"resolving to {context, control-plane-namespace, app-namespace}, kept client-side in\n" +
-			"~/.burrow/config (override with $BURROW_CONFIG), like the kubeconfig.\n\n" +
-			"With nothing pinned, commands follow the current kube context, so `kubectx`/`kubens` move\n" +
-			"Burrow too; pin a handle with `burrow env use <name>` and return to following with\n" +
-			"`burrow env follow`. The bare `burrow env` lists the handles and marks the active one.\n\n" +
-			"This is distinct from `burrow app config`, which sets an app's environment variables.",
+		Short: "Select and manage Burrow environments",
+		Long: "Select and manage Burrow environments. An environment is a named handle for a cluster and\n" +
+			"namespace; your commands target the active one. With nothing pinned, Burrow follows your\n" +
+			"current kube context.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runEnvList(cmd.OutOrStdout(), o)
@@ -296,11 +292,11 @@ func newEnvAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <name>",
 		Short: "Create an environment: its namespace, burrowd's Role there, the registry entry, and a local handle",
-		Long: "add creates an environment for namespace-per-environment (ADR-0035). It applies the\n" +
-			"environment's namespace and a burrowd Role/RoleBinding in it with your kubeconfig (the\n" +
-			"same privileged setup install does, because burrowd holds only namespaced Roles and cannot\n" +
-			"create namespaces or RBAC itself), registers the environment with the control plane, and\n" +
-			"records a local handle for it (ADR-0036) so `burrow env list` shows it.\n\n" +
+		Long: "add creates an environment for namespace-per-environment. It applies the environment's\n" +
+			"namespace and a burrowd Role/RoleBinding in it with your kubeconfig (the same privileged\n" +
+			"setup install does, because burrowd holds only namespaced Roles and cannot create\n" +
+			"namespaces or RBAC itself), registers the environment with the control plane, and records\n" +
+			"a local handle for it so `burrow env list` shows it.\n\n" +
 			"The namespace defaults to <app-namespace>-<name> (e.g. burrow-apps-staging); override it\n" +
 			"with --namespace.",
 		Args: exactArgs(1),

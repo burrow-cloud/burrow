@@ -40,7 +40,7 @@ func newEnvScanCmd() *cobra.Command {
 		Short: "Probe every kube context for an installed Burrow and register the ones it finds",
 		Long: "scan walks every context in your kubeconfig and probes each cluster for an installed\n" +
 			"Burrow control plane (in the control-plane namespace, default \"burrow\"). It prints a table\n" +
-			"of what it finds, then registers a local handle (ADR-0036) for each installed context that\n" +
+			"of what it finds, then registers a local handle for each installed context that\n" +
 			"does not have one yet.\n\n" +
 			"It reads clusters but changes only ~/.burrow/config (override with $BURROW_CONFIG); it never\n" +
 			"modifies a cluster. To install Burrow into a cluster that has none, use `burrow install`.",

@@ -37,7 +37,7 @@ var installableAddons = []installableAddon{
 	{string(controlplane.AddonLogs), "log aggregation (VictoriaLogs)"},
 	{string(controlplane.AddonMetrics), "metrics (VictoriaMetrics + a vmagent scraper)"},
 	{string(controlplane.AddonCache), "in-memory cache (ValKey)"},
-	{string(controlplane.AddonPostgres), "shared PostgreSQL"},
+	{string(controlplane.AddonPostgres), "cluster-shared PostgreSQL"},
 }
 
 // metricsRBACManifest is the per-add-on metrics RBAC template, embedded like the install manifests

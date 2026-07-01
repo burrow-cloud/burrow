@@ -3,7 +3,10 @@
 
 package controlplane
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // The types below are the structured inputs and outputs of the engine's operations.
 // Every operation returns a result an agent can reason over — what changed and, where
@@ -106,6 +109,57 @@ type ScaleResult struct {
 	App              string `json:"app"`
 	PreviousReplicas int32  `json:"previous_replicas"`
 	Replicas         int32  `json:"replicas"`
+}
+
+// AutoscaleSpec is the desired autoscaling shape for an app's Deployment (ADR-0006): the replica
+// band the HorizontalPodAutoscaler moves within and the resource-utilization targets it scales on.
+// It is code-free metadata that travels over the API. CPUPercent is required; MemoryPercent is
+// optional (0 means no memory metric).
+type AutoscaleSpec struct {
+	// MinReplicas is the floor the autoscaler will not scale below. Must be at least 1.
+	MinReplicas int32 `json:"min_replicas"`
+	// MaxReplicas is the ceiling the autoscaler will not scale above. Must be >= MinReplicas and is
+	// itself bounded by the replica-ceiling guardrail (Policy.MaxReplicas).
+	MaxReplicas int32 `json:"max_replicas"`
+	// CPUPercent is the target average CPU utilization (1..100) the autoscaler holds the app at.
+	CPUPercent int32 `json:"cpu_percent"`
+	// MemoryPercent is the target average memory utilization (1..100), or 0 to add no memory metric.
+	MemoryPercent int32 `json:"memory_percent,omitempty"`
+}
+
+// validate reports whether the autoscale spec is well-formed: a floor of at least one replica, a
+// ceiling no lower than the floor, a CPU target in 1..100 (so CPU is always set), and a memory
+// target that is either unset (0) or in 1..100.
+func (s AutoscaleSpec) validate() error {
+	if s.MinReplicas < 1 {
+		return fmt.Errorf("min replicas %d must be at least 1", s.MinReplicas)
+	}
+	if s.MaxReplicas < s.MinReplicas {
+		return fmt.Errorf("max replicas %d must be at least min replicas %d", s.MaxReplicas, s.MinReplicas)
+	}
+	if s.CPUPercent < 1 || s.CPUPercent > 100 {
+		return fmt.Errorf("cpu target %d must be between 1 and 100", s.CPUPercent)
+	}
+	if s.MemoryPercent < 0 || s.MemoryPercent > 100 {
+		return fmt.Errorf("memory target %d must be between 0 and 100 (0 leaves it unset)", s.MemoryPercent)
+	}
+	return nil
+}
+
+// AutoscaleResult reports the outcome of configuring autoscaling: the effective spec that was
+// applied, the app and environment it acted in, and whether metrics-server is present. When it is
+// absent, MetricsAvailable is false and Warning explains that the autoscaler is set but will not
+// scale until metrics-server is installed — the HPA is applied regardless (its creation does not
+// need metrics-server; only its scaling does).
+type AutoscaleResult struct {
+	App              string `json:"app"`
+	Env              string `json:"env,omitempty"`
+	MinReplicas      int32  `json:"min_replicas"`
+	MaxReplicas      int32  `json:"max_replicas"`
+	CPUPercent       int32  `json:"cpu_percent"`
+	MemoryPercent    int32  `json:"memory_percent,omitempty"`
+	MetricsAvailable bool   `json:"metrics_available"`
+	Warning          string `json:"warning,omitempty"`
 }
 
 // RollbackResult reports the outcome of a rollback. A rollback is itself a forward

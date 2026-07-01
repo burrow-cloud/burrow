@@ -27,19 +27,21 @@ var _ controlplane.Kubernetes = (*Kubernetes)(nil)
 // introspection helpers (Spec, SecretValue, …) read the receiver view's namespace; the
 // namespace-qualified variants (SpecInNamespace, SecretValueInNamespace) read a named one.
 type Kubernetes struct {
-	mu        *sync.Mutex
-	ns        string // the namespace this view's per-app operations act in
-	base      string // the namespace treated as the default (unprefixed) one
-	deploys   map[string]*deployState
-	exposed   map[string]controlplane.ExposeSpec
-	addresses map[string]string // app -> ingress external address (controller-assigned)
-	certReady map[string]bool   // app -> whether the requested TLS certificate has been issued
-	addons    map[string]controlplane.AddonInfo
-	secrets   map[string]map[string]string // app -> per-app Secret (key -> value)
-	backups   *[]backupCall                // RunBackupJob calls, in order
-	restores  *[]backupCall                // RunRestoreJob calls, in order
-	backupSiz *int64                       // size RunBackupJob reports
-	errs      map[Op]error
+	mu           *sync.Mutex
+	ns           string // the namespace this view's per-app operations act in
+	base         string // the namespace treated as the default (unprefixed) one
+	deploys      map[string]*deployState
+	exposed      map[string]controlplane.ExposeSpec
+	addresses    map[string]string // app -> ingress external address (controller-assigned)
+	certReady    map[string]bool   // app -> whether the requested TLS certificate has been issued
+	addons       map[string]controlplane.AddonInfo
+	secrets      map[string]map[string]string          // app -> per-app Secret (key -> value)
+	autoscalers  map[string]controlplane.AutoscaleSpec // app -> applied HPA spec (namespace-keyed)
+	backups      *[]backupCall                         // RunBackupJob calls, in order
+	restores     *[]backupCall                         // RunRestoreJob calls, in order
+	backupSiz    *int64                                // size RunBackupJob reports
+	metricsAvail *bool                                 // whether metrics-server is reported present
+	errs         map[Op]error
 }
 
 // fakeBaseNamespace is the namespace the fake treats as the default: app resources in it are keyed
@@ -98,22 +100,27 @@ type deployState struct {
 	restartedAt time.Time // last RestartWorkload timestamp; zero until rolled
 }
 
-// NewKubernetes returns an empty fake cluster.
+// NewKubernetes returns an empty fake cluster. metrics-server is reported present by default (the
+// common case, where an applied HPA scales); a test models a cluster without it via
+// SetMetricsAvailable(false).
 func NewKubernetes() *Kubernetes {
+	metricsAvail := true
 	return &Kubernetes{
-		mu:        &sync.Mutex{},
-		ns:        fakeBaseNamespace,
-		base:      fakeBaseNamespace,
-		deploys:   make(map[string]*deployState),
-		exposed:   make(map[string]controlplane.ExposeSpec),
-		addresses: make(map[string]string),
-		certReady: make(map[string]bool),
-		addons:    make(map[string]controlplane.AddonInfo),
-		secrets:   make(map[string]map[string]string),
-		backups:   &[]backupCall{},
-		restores:  &[]backupCall{},
-		backupSiz: new(int64),
-		errs:      make(map[Op]error),
+		mu:           &sync.Mutex{},
+		ns:           fakeBaseNamespace,
+		base:         fakeBaseNamespace,
+		deploys:      make(map[string]*deployState),
+		exposed:      make(map[string]controlplane.ExposeSpec),
+		addresses:    make(map[string]string),
+		certReady:    make(map[string]bool),
+		addons:       make(map[string]controlplane.AddonInfo),
+		secrets:      make(map[string]map[string]string),
+		autoscalers:  make(map[string]controlplane.AutoscaleSpec),
+		backups:      &[]backupCall{},
+		restores:     &[]backupCall{},
+		backupSiz:    new(int64),
+		metricsAvail: &metricsAvail,
+		errs:         make(map[Op]error),
 	}
 }
 
@@ -366,6 +373,53 @@ func (k *Kubernetes) ScaleWorkload(ctx context.Context, app string, replicas int
 	d.spec.Replicas = replicas
 	d.ready = replicas
 	return nil
+}
+
+// SetMetricsAvailable sets whether MetricsAPIAvailable reports metrics-server present, modelling a
+// cluster with or without it. It shares the flag across namespace views (like the other pointer
+// state), so a test sets it once on the base fake.
+func (k *Kubernetes) SetMetricsAvailable(available bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	*k.metricsAvail = available
+}
+
+// Autoscaler returns the applied HPA spec for app in this view's namespace and whether one exists —
+// test-only introspection of ApplyAutoscaler/DeleteAutoscaler.
+func (k *Kubernetes) Autoscaler(app string) (controlplane.AutoscaleSpec, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	spec, ok := k.autoscalers[k.key(app)]
+	return spec, ok
+}
+
+func (k *Kubernetes) ApplyAutoscaler(ctx context.Context, app string, spec controlplane.AutoscaleSpec) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpApplyAutoscaler]; err != nil {
+		return err
+	}
+	k.autoscalers[k.key(app)] = spec
+	return nil
+}
+
+func (k *Kubernetes) DeleteAutoscaler(ctx context.Context, app string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpDeleteAutoscaler]; err != nil {
+		return err
+	}
+	delete(k.autoscalers, k.key(app)) // missing HPA is a no-op: idempotent
+	return nil
+}
+
+func (k *Kubernetes) MetricsAPIAvailable(ctx context.Context) (bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpMetricsAPIAvailable]; err != nil {
+		return false, err
+	}
+	return *k.metricsAvail, nil
 }
 
 func (k *Kubernetes) Logs(ctx context.Context, app string, opts controlplane.LogOptions) ([]controlplane.LogLine, error) {

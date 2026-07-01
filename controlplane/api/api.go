@@ -51,6 +51,9 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/logs", s.logs)
 	v1.HandleFunc("POST /v1/apps/{app}/rollback", s.rollback)
 	v1.HandleFunc("POST /v1/apps/{app}/scale", s.scale)
+	// autoscale applies (POST) or removes (DELETE) an app's HorizontalPodAutoscaler (ADR-0006).
+	v1.HandleFunc("POST /v1/apps/{app}/autoscale", s.autoscale)
+	v1.HandleFunc("DELETE /v1/apps/{app}/autoscale", s.disableAutoscale)
 	v1.HandleFunc("POST /v1/apps/{app}/expose", s.expose)
 	v1.HandleFunc("POST /v1/apps/{app}/unexpose", s.unexpose)
 	v1.HandleFunc("GET /v1/apps/{app}/reachability", s.reachability)
@@ -198,6 +201,33 @@ func (s *server) scale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) autoscale(w http.ResponseWriter, r *http.Request) {
+	var req autoscaleRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.engine.Autoscale(r.Context(), r.PathValue("app"), req.Env, controlplane.AutoscaleSpec{
+		MinReplicas:   req.Min,
+		MaxReplicas:   req.Max,
+		CPUPercent:    req.CPU,
+		MemoryPercent: req.Memory,
+	}, req.Confirm)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) disableAutoscale(w http.ResponseWriter, r *http.Request) {
+	confirm := r.URL.Query().Get("confirm") == "true"
+	if err := s.engine.DisableAutoscale(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), confirm); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app")})
 }
 
 func (s *server) expose(w http.ResponseWriter, r *http.Request) {
@@ -765,6 +795,20 @@ type scaleRequest struct {
 	Env      string `json:"env,omitempty"`
 	Replicas int32  `json:"replicas"`
 	// Confirm acknowledges a confirm-disposition guardrail so the scale proceeds past it
+	// (ADR-0020).
+	Confirm bool `json:"confirm,omitempty"`
+}
+
+// autoscaleRequest is the body of an autoscale call (the app comes from the path). It carries the
+// replica band, the CPU (and optional memory) utilization targets, and the env whose namespace the
+// app lives in (ADR-0006, ADR-0035 phase 2b).
+type autoscaleRequest struct {
+	Env    string `json:"env,omitempty"`
+	Min    int32  `json:"min"`
+	Max    int32  `json:"max"`
+	CPU    int32  `json:"cpu"`
+	Memory int32  `json:"memory,omitempty"`
+	// Confirm acknowledges a confirm-disposition guardrail so the autoscale proceeds past it
 	// (ADR-0020).
 	Confirm bool `json:"confirm,omitempty"`
 }

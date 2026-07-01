@@ -26,6 +26,11 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Autoscaling an app manages a HorizontalPodAutoscaler on its Deployment in the app namespace
+  # (ADR-0006). burrowd creates/updates it on `app autoscale` and deletes it on `app autoscale off`.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
   # burrowd reads each app's per-app env Secret (burrow-app-<app>-secrets) to LIST its keys and
   # UNSET a key, and create/update let it WRITE a secret value it received over the authenticated
   # control-plane API (ADR-0029) — and let a future provisioned backend (e.g. the Postgres add-on)

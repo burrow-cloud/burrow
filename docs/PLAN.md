@@ -146,6 +146,10 @@ environment, with prod gated while staging stays permissive.
 
 **Next:**
 
+- **v0.8 lead — application autoscaling.** `burrow app autoscale <app>` applies an autoscaling/v2
+  HorizontalPodAutoscaler on the app's Deployment with sane defaults (1..10 replicas at 80% CPU),
+  its max bounded by the replica-ceiling guardrail, and `burrow app autoscale <app> off` removes it.
+  It warns when metrics-server is absent (the HPA is set but will not scale until it is installed).
 - Add-on RBAC is now staged per-add-on by the CLI at install time (least privilege): the base install
   no longer carries the metrics vmagent grant, `burrow addon install metrics` applies it kubeconfig-side
   before the API call, and burrowd verifies it (read-only) and fails cleanly on the agent path if absent.

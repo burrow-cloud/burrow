@@ -1047,6 +1047,106 @@ func (e *Engine) Scale(ctx context.Context, app, env string, replicas int32, con
 	return ScaleResult{App: app, PreviousReplicas: prev, Replicas: replicas}, nil
 }
 
+// metricsAbsentWarning is the note an autoscale carries when metrics-server is not detected: the HPA
+// is applied (its creation needs no metrics-server), but it will not actually scale the app until
+// metrics-server is installed to serve the CPU/memory metrics it reads. No em-dash: it is printed
+// verbatim by the CLI.
+const metricsAbsentWarning = "autoscaling needs metrics-server, which was not detected. The autoscaler is set but will not scale until metrics-server is installed."
+
+// Autoscale configures autoscaling for an app: it applies an autoscaling/v2 HorizontalPodAutoscaler
+// on the app's Deployment with the requested replica band and utilization targets (ADR-0006). It is
+// guarded twice — the app.autoscale guardrail gates the operation (allow by default), and the
+// app.replica_ceiling guardrail bounds the requested max the same way it bounds a manual scale, so a
+// max above the ceiling is denied exactly like scaling above it. The HPA is applied even when
+// metrics-server is absent (creating it needs no metrics); the result then carries a Warning that it
+// will not scale until metrics-server is installed.
+func (e *Engine) Autoscale(ctx context.Context, app, env string, spec AutoscaleSpec, confirm bool) (AutoscaleResult, error) {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return AutoscaleResult{}, fmt.Errorf("autoscale: %w: %w", ErrInvalid, err)
+	}
+	if err := spec.validate(); err != nil {
+		return AutoscaleResult{}, fmt.Errorf("autoscale %s: %w: %w", app, err, ErrInvalid)
+	}
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return AutoscaleResult{}, fmt.Errorf("autoscale %s: %w", app, err)
+	}
+	k := e.k8s.WithNamespace(ns)
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return AutoscaleResult{}, fmt.Errorf("autoscale %s: loading guardrail policy: %w", app, err)
+	}
+	args := map[string]string{
+		"min":    strconv.Itoa(int(spec.MinReplicas)),
+		"max":    strconv.Itoa(int(spec.MaxReplicas)),
+		"cpu":    strconv.Itoa(int(spec.CPUPercent)),
+		"memory": strconv.Itoa(int(spec.MemoryPercent)),
+		"env":    envName(env),
+	}
+	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale, pol.evaluateAutoscale(env, spec, confirm)); err != nil {
+		return AutoscaleResult{}, err
+	}
+
+	if err := k.ApplyAutoscaler(ctx, app, spec); err != nil {
+		e.recordExecution(ctx, auditOpAutoscale, app, args, err)
+		return AutoscaleResult{}, fmt.Errorf("autoscale %s: %w", app, err)
+	}
+	e.recordExecution(ctx, auditOpAutoscale, app, args, nil)
+
+	// metrics-server presence is a best-effort warning, never fatal: the HPA is already applied.
+	metricsAvailable, warning := e.metricsAvailability(ctx, k)
+	return AutoscaleResult{
+		App:              app,
+		Env:              envName(env),
+		MinReplicas:      spec.MinReplicas,
+		MaxReplicas:      spec.MaxReplicas,
+		CPUPercent:       spec.CPUPercent,
+		MemoryPercent:    spec.MemoryPercent,
+		MetricsAvailable: metricsAvailable,
+		Warning:          warning,
+	}, nil
+}
+
+// metricsAvailability probes whether metrics-server is present through the workload seam, returning
+// the warning when it is absent. It is best-effort: a discovery error is treated as absent (with the
+// warning) rather than surfaced, so a probe hiccup never fails an autoscale whose HPA already applied.
+func (e *Engine) metricsAvailability(ctx context.Context, k Kubernetes) (bool, string) {
+	available, err := k.MetricsAPIAvailable(ctx)
+	if err != nil || !available {
+		return false, metricsAbsentWarning
+	}
+	return true, ""
+}
+
+// DisableAutoscale turns autoscaling off for an app by removing its HorizontalPodAutoscaler
+// (ADR-0006). It is guarded by the same app.autoscale guardrail and audited. It is idempotent:
+// removing autoscaling from an app that has none succeeds without error.
+func (e *Engine) DisableAutoscale(ctx context.Context, app, env string, confirm bool) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("autoscale off: %w: %w", ErrInvalid, err)
+	}
+	ns, err := e.resolveNamespace(ctx, env)
+	if err != nil {
+		return fmt.Errorf("autoscale off %s: %w", app, err)
+	}
+	k := e.k8s.WithNamespace(ns)
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return fmt.Errorf("autoscale off %s: loading guardrail policy: %w", app, err)
+	}
+	args := map[string]string{"env": envName(env), "off": "true"}
+	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale,
+		pol.evaluateGuardrail(env, "autoscale", GuardrailAutoscale, confirm, "disabling autoscaling")); err != nil {
+		return err
+	}
+	if err := k.DeleteAutoscaler(ctx, app); err != nil {
+		e.recordExecution(ctx, auditOpAutoscale, app, args, err)
+		return fmt.Errorf("autoscale off %s: %w", app, err)
+	}
+	e.recordExecution(ctx, auditOpAutoscale, app, args, nil)
+	return nil
+}
+
 // Expose makes an app reachable at a hostname through an Ingress (ADR-0018). It is a guarded
 // operation: public exposure trips the app.expose_public guardrail, which holds for confirmation
 // by default. The app must already be deployed.

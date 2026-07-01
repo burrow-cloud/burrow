@@ -125,6 +125,20 @@ type Kubernetes interface {
 	DeleteAddon(ctx context.Context, name string) error
 	// ScaleWorkload sets the desired replica count for app's workload.
 	ScaleWorkload(ctx context.Context, app string, replicas int32) error
+
+	// ApplyAutoscaler creates or updates an autoscaling/v2 HorizontalPodAutoscaler named after app,
+	// targeting app's Deployment, per spec — the replica band and the CPU (and optional memory)
+	// utilization targets (ADR-0006). It is create-or-update: re-applying adjusts the existing HPA.
+	// Creating the HPA does not require metrics-server; only its scaling does.
+	ApplyAutoscaler(ctx context.Context, app string, spec AutoscaleSpec) error
+	// DeleteAutoscaler removes app's HorizontalPodAutoscaler. Deleting an absent HPA is a no-op, not
+	// an error, so turning autoscaling off is idempotent.
+	DeleteAutoscaler(ctx context.Context, app string) error
+	// MetricsAPIAvailable reports whether the metrics.k8s.io API group is served (metrics-server is
+	// installed), so the engine can warn that an applied HPA will not scale until it is. It is
+	// best-effort by contract: the engine treats an error as "absent" and warns rather than failing,
+	// so a discovery hiccup never blocks applying the HPA.
+	MetricsAPIAvailable(ctx context.Context) (bool, error)
 	// Logs returns recent log lines for app's workload.
 	Logs(ctx context.Context, app string, opts LogOptions) ([]LogLine, error)
 	// DeleteWorkload removes app's workload. Deleting a missing workload returns

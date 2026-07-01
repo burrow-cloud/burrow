@@ -34,6 +34,18 @@ func mcpTempOpencodeConfig(t *testing.T) string {
 	return path
 }
 
+// mcpTempClaudeSettings points the claude settings seam at a fresh temp file and returns its path.
+// Nothing exists at the path until a test writes it, so a preview and a not-yet-hardened install can
+// exercise the create branch without touching the real ~/.claude/settings.json.
+func mcpTempClaudeSettings(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "claude", "settings.json")
+	orig := claudeSettingsPath
+	claudeSettingsPath = func() (string, error) { return path, nil }
+	t.Cleanup(func() { claudeSettingsPath = orig })
+	return path
+}
+
 // fakeCLI stubs the CLI-backed adapter seams (claude/codex/copilot): whether the binary is on PATH,
 // whether it reports burrow already configured, and it records every runCommand invocation. It
 // restores the seams on cleanup. The fake is name-agnostic, so a test exercises one tool at a time.
@@ -148,9 +160,11 @@ type cliToolCase struct {
 	addCommand string // the exact rendered add command line
 }
 
+// claude is intentionally absent: it has its own adapter (mcp-add plus the harden step) with
+// divergent messaging, exercised by the dedicated TestMcpClaude* tests below. codex and copilot
+// still share the generic cliTool, so the table keeps proving that path is untouched.
 func cliToolCases() []cliToolCase {
 	return []cliToolCase{
-		{arg: "claude", display: "Claude Code", addCommand: "claude mcp add --scope user burrow -- burrow-mcp"},
 		{arg: "codex", display: "Codex", addCommand: "codex mcp add burrow -- burrow-mcp"},
 		{arg: "copilot", display: "Copilot", addCommand: "copilot mcp add burrow -- burrow-mcp"},
 	}
@@ -260,6 +274,245 @@ func TestMcpCliInstallNotOnPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --- claude: the generic mcp-add plus the burrow-CLI deny rule (harden step) ---
+
+// claudeDeny reads permissions.deny from a settings file as a slice of strings.
+func claudeDeny(t *testing.T, path string) []string {
+	t.Helper()
+	root := readCursor(t, path)
+	perms, _ := root["permissions"].(map[string]any)
+	raw, _ := perms["deny"].([]any)
+	out := make([]string, 0, len(raw))
+	for _, r := range raw {
+		if s, ok := r.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func countRule(rules []string, want string) int {
+	n := 0
+	for _, r := range rules {
+		if r == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestMcpClaudeInstallAddsMcpAndHardens is the default path: install adds the MCP server AND writes
+// the burrow-CLI deny rule to a fresh ~/.claude/settings.json, printing the add line, the harden
+// note, and the try-prompt.
+func TestMcpClaudeInstallAddsMcpAndHardens(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	calls := fakeCLI(t, true, false) // on PATH, mcp not yet configured
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude", "install"}, &out, &out); err != nil {
+		t.Fatalf("claude install: %v", err)
+	}
+
+	// The MCP add ran exactly once (the harden step writes a file, it does not exec).
+	if len(*calls) != 1 {
+		t.Fatalf("ran %d commands, want exactly the add: %v", len(*calls), *calls)
+	}
+	if got := strings.Join((*calls)[0], " "); got != "claude mcp add --scope user burrow -- burrow-mcp" {
+		t.Errorf("add invocation = %q", got)
+	}
+
+	// The settings file was created with the deny rule.
+	if deny := claudeDeny(t, settings); countRule(deny, "Bash(burrow *)") != 1 {
+		t.Errorf("deny rules = %v, want exactly one Bash(burrow *)", deny)
+	}
+	if _, err := os.Stat(settings + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("a backup was made for a brand-new file")
+	}
+
+	for _, want := range []string{
+		"Added Burrow to Claude Code.",
+		"added Bash(burrow *) to ~/.claude/settings.json",
+		"see docs/HARDENING.md",
+		"Then open your agent and try:",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("install output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestMcpClaudeInstallPreservesAndBacksUp confirms the harden merge keeps unrelated settings and a
+// pre-existing deny rule, and backs the original up byte-for-byte.
+func TestMcpClaudeInstallPreservesAndBacksUp(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pre := `{
+  "model": "opus",
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf *)"
+    ],
+    "allow": [
+      "Bash(docker *)"
+    ]
+  }
+}
+`
+	if err := os.WriteFile(settings, []byte(pre), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeCLI(t, true, false)
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude", "install"}, &out, &out); err != nil {
+		t.Fatalf("claude install: %v", err)
+	}
+
+	// The backup preserves the original exactly.
+	bak, err := os.ReadFile(settings + ".bak")
+	if err != nil {
+		t.Fatalf("expected a .bak of the pre-existing file: %v", err)
+	}
+	if string(bak) != pre {
+		t.Errorf("backup content = %q, want the original", string(bak))
+	}
+
+	// The merged file keeps the unrelated key, the allow rule, and the pre-existing deny rule, and
+	// adds the burrow deny rule.
+	root := readCursor(t, settings)
+	if root["model"] != "opus" {
+		t.Errorf("unrelated top-level key dropped: %#v", root)
+	}
+	perms, _ := root["permissions"].(map[string]any)
+	allow, _ := perms["allow"].([]any)
+	if len(allow) != 1 || allow[0] != "Bash(docker *)" {
+		t.Errorf("allow rules dropped: %#v", perms["allow"])
+	}
+	deny := claudeDeny(t, settings)
+	if countRule(deny, "Bash(rm -rf *)") != 1 || countRule(deny, "Bash(burrow *)") != 1 {
+		t.Errorf("deny rules = %v, want the pre-existing rule preserved and burrow added", deny)
+	}
+}
+
+// TestMcpClaudeInstallIsIdempotent runs install twice with the MCP server already present so the
+// harden step is the only work: the first run adds the rule, the second is a no-op with no duplicate.
+func TestMcpClaudeInstallIsIdempotent(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	fakeCLI(t, true, true) // mcp already configured, so only the harden step can act
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude", "install"}, &out, &out); err != nil {
+		t.Fatalf("claude install: %v", err)
+	}
+	if !strings.Contains(out.String(), "added Bash(burrow *) to ~/.claude/settings.json") {
+		t.Errorf("first run should report the harden note:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := run(context.Background(), []string{"mcp", "claude", "install"}, &out, &out); err != nil {
+		t.Fatalf("claude install (2nd): %v", err)
+	}
+	if !strings.Contains(out.String(), "Burrow is already configured in Claude Code. Nothing to do.") {
+		t.Errorf("2nd run should be a no-op:\n%s", out.String())
+	}
+	if deny := claudeDeny(t, settings); countRule(deny, "Bash(burrow *)") != 1 {
+		t.Errorf("deny rules = %v, want exactly one Bash(burrow *) after two runs", deny)
+	}
+}
+
+// TestMcpClaudeInstallNoHarden confirms --no-harden does the MCP add but never touches the settings
+// file.
+func TestMcpClaudeInstallNoHarden(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	calls := fakeCLI(t, true, false)
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude", "install", "--no-harden"}, &out, &out); err != nil {
+		t.Fatalf("claude install --no-harden: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("ran %d commands, want exactly the add: %v", len(*calls), *calls)
+	}
+	if !strings.Contains(out.String(), "Added Burrow to Claude Code.") {
+		t.Errorf("missing the add success line:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "Bash(burrow *)") {
+		t.Errorf("--no-harden should not mention the deny rule:\n%s", out.String())
+	}
+	assertNoFile(t, settings)
+	assertNoFile(t, settings+".bak")
+}
+
+// TestMcpClaudePreviewShowsBothParts confirms the preview shows the MCP add command and the harden
+// step (with the --no-harden opt-out), mutating nothing.
+func TestMcpClaudePreviewShowsBothParts(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	fakeCLI(t, true, false) // on PATH, not yet configured
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude"}, &out, &out); err != nil {
+		t.Fatalf("mcp claude: %v", err)
+	}
+	for _, want := range []string{
+		"Connect Burrow to Claude Code.",
+		"claude mcp add --scope user burrow -- burrow-mcp",
+		"Bash(burrow *)",
+		"~/.claude/settings.json",
+		"--no-harden",
+		"Run `burrow mcp claude install` to apply.",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("claude preview missing %q:\n%s", want, out.String())
+		}
+	}
+	assertNoFile(t, settings)
+}
+
+// TestMcpClaudePreviewNoHarden confirms the preview reflects --no-harden: the add still shows, the
+// harden step is called off.
+func TestMcpClaudePreviewNoHarden(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	fakeCLI(t, true, false)
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude", "--no-harden"}, &out, &out); err != nil {
+		t.Fatalf("mcp claude --no-harden: %v", err)
+	}
+	if !strings.Contains(out.String(), "claude mcp add --scope user burrow -- burrow-mcp") {
+		t.Errorf("preview should still show the add command:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Hardening is off (--no-harden)") {
+		t.Errorf("preview should note hardening is off:\n%s", out.String())
+	}
+	assertNoFile(t, settings)
+}
+
+// TestMcpClaudePreviewBothConfigured confirms that once the MCP server and the deny rule are both
+// present, the preview reports nothing to do and mutates nothing.
+func TestMcpClaudePreviewBothConfigured(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, []byte(`{"permissions":{"deny":["Bash(burrow *)"]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeCLI(t, true, true) // mcp already configured
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude"}, &out, &out); err != nil {
+		t.Fatalf("mcp claude: %v", err)
+	}
+	if !strings.Contains(out.String(), "Burrow is already configured in Claude Code. Nothing to do.") {
+		t.Errorf("preview should report nothing to do:\n%s", out.String())
+	}
+	if _, err := os.Stat(settings + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("preview must not back up or write anything")
 	}
 }
 

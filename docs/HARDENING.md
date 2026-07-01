@@ -28,6 +28,15 @@ use:
 
 ## Example: Claude Code
 
+`burrow mcp claude install` does the first step for you: alongside adding the MCP server, it
+merges the `Bash(burrow *)` deny rule into your user-wide `~/.claude/settings.json` (preserving
+everything else, backing the file up first). So denying the `burrow` CLI is handled
+automatically. Pass `--no-harden` to skip it if you manage permissions yourself.
+
+The manual JSON below is still useful for the fuller lockdown: denying `kubectl` and `helm`
+(still your call, since Burrow does not know which cluster tools you want blocked), pinning the
+rules at the project level, or hardening another agent.
+
 Claude Code enforces this with permission rules in a settings file, where `deny` rules take
 precedence over `allow`. Put this in `.claude/settings.json` (project-level, checked into git)
 or `~/.claude/settings.json` (user-wide):

@@ -65,12 +65,35 @@ var opencodeConfigPath = func() (string, error) {
 	return filepath.Join(home, ".config", "opencode", "opencode.json"), nil
 }
 
+// claudeSettingsPath resolves Claude Code's user settings file, where connecting Claude Code also
+// writes the deny rule that stops the agent running the `burrow` CLI directly (see the harden step).
+// It is a package var so a test can point it at a temp dir and exercise the real create/merge/backup
+// logic without touching the real home directory.
+var claudeSettingsPath = func() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "settings.json"), nil
+}
+
 // The tilde forms shown in help and messages, independent of where the seams actually resolve (a
 // temp dir in tests), so the user always sees the familiar path.
 const (
 	cursorConfigDisplay   = "~/.cursor/mcp.json"
 	opencodeConfigDisplay = "~/.config/opencode/opencode.json"
+	claudeSettingsDisplay = "~/.claude/settings.json"
 )
+
+// claudeDenyRule is the exact Claude Code permission pattern that blocks the agent from running the
+// burrow CLI in its shell. The space before `*` is a word boundary: it matches `burrow guard set …`
+// but not a differently named tool like `burrowctl`. docs/HARDENING.md documents the same string.
+const claudeDenyRule = "Bash(burrow *)"
+
+// claudeHardenNote is printed after an install that added the deny rule, pointing the user at the
+// fuller lockdown (kubectl/helm) they may also want. No em-dashes: it is user-facing output.
+const claudeHardenNote = "Blocked the agent from running the burrow CLI directly (added Bash(burrow *) to " +
+	"~/.claude/settings.json). To also stop it bypassing Burrow with kubectl or helm, see docs/HARDENING.md.\n"
 
 // mcpTryPrompt is appended after any successful install, giving the user a concrete first thing to
 // ask their agent. It leads with a blank line so it sits below the success line. No em-dashes.
@@ -116,7 +139,7 @@ type mcpTool interface {
 // mcpTools maps the tool argument to its adapter. Keep it in sync with the supported-tools list in
 // mcpOverview and the valid-tools error below.
 var mcpTools = map[string]mcpTool{
-	"claude":   cliTool{key: "claude", bin: "claude", display: "Claude Code", addArgs: []string{"mcp", "add", "--scope", "user", "burrow", "--", "burrow-mcp"}},
+	"claude":   claudeTool{cli: cliTool{key: "claude", bin: "claude", display: "Claude Code", addArgs: []string{"mcp", "add", "--scope", "user", "burrow", "--", "burrow-mcp"}}, harden: true},
 	"cursor":   cursorTool{},
 	"codex":    cliTool{key: "codex", bin: "codex", display: "Codex", addArgs: []string{"mcp", "add", "burrow", "--", "burrow-mcp"}},
 	"copilot":  cliTool{key: "copilot", bin: "copilot", display: "Copilot", addArgs: []string{"mcp", "add", "burrow", "--", "burrow-mcp"}},
@@ -129,6 +152,7 @@ var mcpTools = map[string]mcpTool{
 const mcpBuiltinTools = "claude, cursor, codex, copilot, opencode"
 
 func newMcpCmd() *cobra.Command {
+	var noHarden bool
 	cmd := &cobra.Command{
 		Use:   "mcp [tool] [install]",
 		Short: "Connect Burrow to your AI agent",
@@ -142,16 +166,21 @@ func newMcpCmd() *cobra.Command {
 			"  burrow mcp claude install",
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runMcp(args, cmd.OutOrStdout())
+			return runMcp(args, cmd.OutOrStdout(), noHarden)
 		},
 	}
+	// Connecting Claude Code also denies the burrow CLI in its shell so the agent cannot bypass the
+	// control-plane guardrails; --no-harden opts out for users who manage their own permissions. The
+	// flag is a no-op for every other tool. No em-dashes in the help string: it is user-facing.
+	cmd.Flags().BoolVar(&noHarden, "no-harden", false,
+		"For Claude Code, skip adding the burrow CLI deny rule to ~/.claude/settings.json (manage permissions yourself)")
 	return cmd
 }
 
 // runMcp routes the positional args: none prints the overview, one previews a tool, and two applies
 // it when the second arg is the literal `install`. It mutates nothing except on the two-arg install
 // path.
-func runMcp(args []string, w io.Writer) error {
+func runMcp(args []string, w io.Writer, noHarden bool) error {
 	if len(args) == 0 {
 		fmt.Fprint(w, mcpOverview)
 		return nil
@@ -162,6 +191,12 @@ func runMcp(args []string, w io.Writer) error {
 		// MCP-capable tool can use, so point the user at it and invite a support request.
 		fmt.Fprintf(w, mcpUnknownToolMessage, args[0])
 		return nil
+	}
+	// Claude's install can also harden Claude Code's settings (the burrow-CLI deny rule); --no-harden
+	// turns that off. The flag is a no-op for every other tool, so it only touches the claude adapter.
+	if ct, ok := tool.(claudeTool); ok {
+		ct.harden = !noHarden
+		tool = ct
 	}
 	if len(args) == 1 {
 		fmt.Fprint(w, tool.preview())
@@ -212,23 +247,207 @@ func (t cliTool) preview() string {
 		"Run `burrow mcp %s install` to apply.\n", t.display, t.addCommand(), t.key)
 }
 
-func (t cliTool) install(w io.Writer) error {
+// addOutcome is the result of the idempotent mcp-add step, so a composing adapter (claude) can add
+// its own steps and messaging around it rather than duplicating the CLI dance.
+type addOutcome int
+
+const (
+	addMissingCLI addOutcome = iota // the agent CLI is not on PATH (a manual hint was written)
+	addAlready                      // Burrow was already configured; nothing ran
+	addDone                         // the add command ran and succeeded
+)
+
+// ensureAdded performs the idempotent `mcp add` step and reports what happened, writing only the
+// not-on-PATH hint itself (the caller owns the success/already messaging so it can compose extra
+// steps). `mcp add` errors if a server named burrow already exists, so it pre-checks and no-ops.
+func (t cliTool) ensureAdded(w io.Writer) (addOutcome, error) {
 	if _, err := mcpLookPath(t.bin); err != nil {
 		fmt.Fprintf(w, "%s CLI (%s) not found on PATH. Install it, or run this yourself:\n  %s\n", t.display, t.bin, t.addCommand())
-		return nil
+		return addMissingCLI, nil
 	}
-	// `mcp add` errors if a server named burrow already exists, so pre-check and no-op instead,
-	// keeping a repeat run idempotent.
 	if commandSucceeds(t.bin, "mcp", "get", "burrow") {
-		fmt.Fprintf(w, "Burrow is already configured in %s. Nothing to do.\n", t.display)
-		return nil
+		return addAlready, nil
 	}
 	if err := runCommand(t.bin, t.addArgs...); err != nil {
-		return fmt.Errorf("running %s: %w", t.addCommand(), err)
+		return addDone, fmt.Errorf("running %s: %w", t.addCommand(), err)
 	}
-	fmt.Fprintf(w, "Added Burrow to %s. Restart %s to pick it up.\n", t.display, t.display)
-	fmt.Fprint(w, mcpTryPrompt)
+	return addDone, nil
+}
+
+func (t cliTool) install(w io.Writer) error {
+	outcome, err := t.ensureAdded(w)
+	if err != nil {
+		return err
+	}
+	switch outcome {
+	case addAlready:
+		fmt.Fprintf(w, "Burrow is already configured in %s. Nothing to do.\n", t.display)
+	case addDone:
+		fmt.Fprintf(w, "Added Burrow to %s. Restart %s to pick it up.\n", t.display, t.display)
+		fmt.Fprint(w, mcpTryPrompt)
+	}
 	return nil
+}
+
+// --- claude: cliTool mcp-add plus the burrow-CLI deny rule in ~/.claude/settings.json ---
+
+// claudeTool connects Claude Code and, by default, hardens it: on top of the generic `mcp add` (via
+// the composed cliTool), it merges the `Bash(burrow *)` deny rule into the user settings so the agent
+// cannot run the burrow CLI directly and shell around the control-plane guardrails (e.g. `burrow guard
+// set`). The harden step is idempotent and preserves every other setting; `--no-harden` turns it off.
+type claudeTool struct {
+	cli    cliTool // the generic mcp-add adapter, reused rather than duplicated
+	harden bool    // whether install also writes the deny rule (default true; --no-harden turns off)
+}
+
+func (t claudeTool) preview() string {
+	mcpDone := t.cli.configured()
+	hardenDone := claudeHardened()
+	// Both parts settled (harden off counts the harden part as settled): nothing to do.
+	if mcpDone && (!t.harden || hardenDone) {
+		return fmt.Sprintf("Burrow is already configured in %s. Nothing to do.\n", t.cli.display)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Connect Burrow to %s.\n\n", t.cli.display)
+
+	if mcpDone {
+		b.WriteString("The MCP server is already configured.\n\n")
+	} else {
+		fmt.Fprintf(&b, "This will run:\n  %s\n\n", t.cli.addCommand())
+	}
+
+	if t.harden {
+		if hardenDone {
+			fmt.Fprintf(&b, "The %s deny rule is already in %s.\n\n", claudeDenyRule, claudeSettingsDisplay)
+		} else {
+			fmt.Fprintf(&b, "It will also add %s to %s deny rules, so the agent cannot run the burrow CLI\n"+
+				"directly (which would let it bypass the control-plane guardrails). Pass --no-harden to skip\n"+
+				"this and manage permissions yourself.\n\n", claudeDenyRule, claudeSettingsDisplay)
+		}
+	} else {
+		fmt.Fprintf(&b, "Hardening is off (--no-harden), so the %s deny rule will not be added.\n\n", claudeDenyRule)
+	}
+
+	b.WriteString("burrow-mcp is a stdio MCP server that uses your kubeconfig and active environment, so no extra config is needed.\n\n")
+	fmt.Fprintf(&b, "Run `burrow mcp %s install` to apply.\n", t.cli.key)
+	return b.String()
+}
+
+func (t claudeTool) install(w io.Writer) error {
+	outcome, err := t.cli.ensureAdded(w)
+	if err != nil {
+		return err
+	}
+
+	hardenChanged := false
+	if t.harden {
+		if hardenChanged, err = ensureClaudeDenyRule(); err != nil {
+			return err
+		}
+	}
+
+	// Nothing to do: the server was already present and the harden part is settled (off or already
+	// there). The not-on-PATH case is not "nothing to do" (ensureAdded wrote a manual hint).
+	if outcome == addAlready && !hardenChanged {
+		fmt.Fprintf(w, "Burrow is already configured in %s. Nothing to do.\n", t.cli.display)
+		return nil
+	}
+
+	if outcome == addDone {
+		fmt.Fprintf(w, "Added Burrow to %s. Restart %s to pick it up.\n", t.cli.display, t.cli.display)
+	}
+	if hardenChanged {
+		fmt.Fprint(w, claudeHardenNote)
+	}
+	if outcome == addDone || hardenChanged {
+		fmt.Fprint(w, mcpTryPrompt)
+	}
+	return nil
+}
+
+// claudeHardened reports whether ~/.claude/settings.json already denies the burrow CLI.
+func claudeHardened() bool {
+	path, err := claudeSettingsPath()
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	root := map[string]any{}
+	if json.Unmarshal(data, &root) != nil {
+		return false
+	}
+	return claudeDenyPresent(root)
+}
+
+// claudeDenyPresent reports whether the settings tree already lists the burrow-CLI deny rule under
+// permissions.deny.
+func claudeDenyPresent(root map[string]any) bool {
+	perms, _ := root["permissions"].(map[string]any)
+	deny, _ := perms["deny"].([]any)
+	for _, r := range deny {
+		if s, _ := r.(string); s == claudeDenyRule {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureClaudeDenyRule merges the burrow-CLI deny rule into ~/.claude/settings.json, preserving every
+// other key (other permissions, allow rules, unrelated settings) and backing up an existing file
+// first. It reports whether it changed anything, returning false (and writing nothing) when the rule
+// is already present, so a repeat install is idempotent.
+func ensureClaudeDenyRule() (bool, error) {
+	path, err := claudeSettingsPath()
+	if err != nil {
+		return false, err
+	}
+	root := map[string]any{}
+	existed := false
+	if data, err := os.ReadFile(path); err == nil {
+		existed = true
+		if len(bytes.TrimSpace(data)) > 0 {
+			if err := json.Unmarshal(data, &root); err != nil {
+				return false, fmt.Errorf("parsing %s: %w", claudeSettingsDisplay, err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("reading %s: %w", claudeSettingsDisplay, err)
+	}
+
+	if claudeDenyPresent(root) {
+		return false, nil
+	}
+
+	perms, _ := root["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+	}
+	deny, _ := perms["deny"].([]any)
+	deny = append(deny, claudeDenyRule)
+	perms["deny"] = deny
+	root["permissions"] = perms
+
+	if existed {
+		if err := backupFile(path); err != nil {
+			return false, err
+		}
+	} else if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
+	}
+
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("encoding %s: %w", claudeSettingsDisplay, err)
+	}
+	out = append(out, '\n')
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return false, fmt.Errorf("writing %s: %w", claudeSettingsDisplay, err)
+	}
+	return true, nil
 }
 
 // --- cursor: ~/.cursor/mcp.json (no CLI, edited directly) ---

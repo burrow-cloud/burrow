@@ -134,6 +134,9 @@ burrow completion fish > ~/.config/fish/completions/burrow.fish   # fish
 burrow completion powershell | Out-String | Invoke-Expression     # PowerShell
 ```
 
+Then reload your shell so completion loads: `source ~/.zshrc` (or `source ~/.bashrc`), or just
+open a new terminal.
+
 Run `burrow completion <shell> --help` for how to install it permanently.
 
 ## Changelog
@@ -169,11 +172,12 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code.
 
 How the code is licensed ([LICENSING.md](LICENSING.md)):
 
-- **All of Burrow's code in this repository is Apache-2.0**: the CLI, the MCP server, and the
+- All of Burrow's code in this repository is Apache-2.0: the CLI, the MCP server, and the
   software that runs in your cluster. Read, modify, self-host, and integrate against it freely.
-- Burrow is **open core**: the managed cloud and the enterprise tier (SSO, teams, compliance,
-  support) are separate, proprietary products (see [COMMERCIAL.md](COMMERCIAL.md)).
 
-**Contributions are welcome.** Open an issue or a discussion. Bug reports, ideas, and design
+Burrow is open source. Need enterprise features such as SSO? Reach out at
+[hi@burrow-cloud.dev](mailto:hi@burrow-cloud.dev).
+
+Contributions are welcome. Open an issue or a discussion. Bug reports, ideas, and design
 feedback are the best way to help and to shape where Burrow goes. Commits are signed off under
 the Developer Certificate of Origin (`git commit -s`). See [CONTRIBUTING.md](CONTRIBUTING.md).

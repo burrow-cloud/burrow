@@ -1,16 +1,14 @@
 # Contributing to Burrow
 
-Contributions are welcome — and issues and discussions are the most valuable ones. Bug
+Contributions are welcome, and issues and discussions are the most valuable ones. Bug
 reports, design feedback, feature ideas, reproductions, and questions have no strings
 attached and are the best way to help and to shape where Burrow goes.
 
 Code contributions are coordinated with the maintainer. Burrow keeps a single copyright
-holder so it can be offered under commercial licenses ([COMMERCIAL.md](COMMERCIAL.md),
-[ADR-0001](docs/adr/0001-license-and-dco.md)) — a deliberate part of the open-core model,
-not a judgment about the value of community code. If you'd like to contribute code, open an
-issue to talk it through first; substantial contributions can be accepted under a Contributor
-License Agreement (CLA) that keeps that model intact. Community input never affects
-ownership, which is why issues and discussions are wide open.
+holder, so substantial outside code is accepted under a Contributor License Agreement (CLA).
+This is not a judgment about the value of community code. If you would like to contribute
+code, open an issue to talk it through first. Community input never affects ownership, which
+is why issues and discussions are wide open.
 
 ## How to contribute, concretely
 

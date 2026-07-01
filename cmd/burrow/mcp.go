@@ -54,9 +54,23 @@ var cursorConfigPath = func() (string, error) {
 	return filepath.Join(home, ".cursor", "mcp.json"), nil
 }
 
-// cursorConfigDisplay is the tilde form shown in help and messages, independent of where the seam
-// actually resolves (a temp dir in tests), so the user always sees the familiar path.
-const cursorConfigDisplay = "~/.cursor/mcp.json"
+// opencodeConfigPath resolves OpenCode's config file. OpenCode's `mcp add` only wires remote
+// (URL) servers, so a local stdio server like burrow-mcp is configured through the file; the path is
+// a package var so a test can point it at a temp dir.
+var opencodeConfigPath = func() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "opencode", "opencode.json"), nil
+}
+
+// The tilde forms shown in help and messages, independent of where the seams actually resolve (a
+// temp dir in tests), so the user always sees the familiar path.
+const (
+	cursorConfigDisplay   = "~/.cursor/mcp.json"
+	opencodeConfigDisplay = "~/.config/opencode/opencode.json"
+)
 
 // mcpTryPrompt is appended after any successful install, giving the user a concrete first thing to
 // ask their agent. It leads with a blank line so it sits below the success line. No em-dashes.
@@ -70,11 +84,26 @@ const mcpOverview = "Connect Burrow to your AI agent so it can operate your clus
 	"  claude    Claude Code\n" +
 	"  cursor    Cursor\n" +
 	"  codex     Codex\n" +
-	"  copilot   Copilot\n\n" +
+	"  copilot   Copilot\n" +
+	"  opencode  OpenCode\n\n" +
 	"Preview what will be added:\n" +
 	"  burrow mcp <tool>\n\n" +
 	"Apply it:\n" +
-	"  burrow mcp <tool> install\n"
+	"  burrow mcp <tool> install\n\n" +
+	"Burrow's MCP server is `burrow-mcp` (stdio, no arguments). Any MCP-capable tool can use it.\n" +
+	"Using another agent? Request support: " + mcpIssuesURL + "\n"
+
+// mcpIssuesURL is where a user whose agent has no built-in setup can request first-class support.
+const mcpIssuesURL = "https://github.com/burrow-cloud/burrow/issues/new"
+
+// mcpUnknownToolMessage is printed for `burrow mcp <tool>` when the tool has no built-in adapter:
+// rather than error, it points the user at burrow-mcp (any MCP-capable tool can use it) and invites
+// a support request. The %q is the tool the user named. No em-dashes: it is user-facing output.
+const mcpUnknownToolMessage = "Burrow has no built-in setup for %q yet.\n\n" +
+	"Burrow's MCP server is `burrow-mcp` (a stdio server, no arguments) that any MCP-capable tool " +
+	"can use; add it to that tool's MCP config.\n\n" +
+	"Built-in setup: " + mcpBuiltinTools + ".\n" +
+	"Request support: " + mcpIssuesURL + "\n"
 
 // mcpTool is one coding-agent adapter: it can render a preview of what connecting it entails and
 // apply that change. Each adapter is small and seam-isolated so it is unit-testable without a real
@@ -87,13 +116,17 @@ type mcpTool interface {
 // mcpTools maps the tool argument to its adapter. Keep it in sync with the supported-tools list in
 // mcpOverview and the valid-tools error below.
 var mcpTools = map[string]mcpTool{
-	"claude":  cliTool{key: "claude", bin: "claude", display: "Claude Code", addArgs: []string{"mcp", "add", "--scope", "user", "burrow", "--", "burrow-mcp"}},
-	"cursor":  cursorTool{},
-	"codex":   cliTool{key: "codex", bin: "codex", display: "Codex", addArgs: []string{"mcp", "add", "burrow", "--", "burrow-mcp"}},
-	"copilot": cliTool{key: "copilot", bin: "copilot", display: "Copilot", addArgs: []string{"mcp", "add", "burrow", "--", "burrow-mcp"}},
+	"claude":   cliTool{key: "claude", bin: "claude", display: "Claude Code", addArgs: []string{"mcp", "add", "--scope", "user", "burrow", "--", "burrow-mcp"}},
+	"cursor":   cursorTool{},
+	"codex":    cliTool{key: "codex", bin: "codex", display: "Codex", addArgs: []string{"mcp", "add", "burrow", "--", "burrow-mcp"}},
+	"copilot":  cliTool{key: "copilot", bin: "copilot", display: "Copilot", addArgs: []string{"mcp", "add", "burrow", "--", "burrow-mcp"}},
+	"opencode": opencodeTool{},
+	"aider":    aiderTool{},
 }
 
-const mcpValidTools = "claude, cursor, codex, copilot"
+// mcpBuiltinTools lists the tools Burrow can set up first-class (aider is recognized but has no MCP
+// support, so it is not "setup"). It feeds the help text and the unknown-tool message.
+const mcpBuiltinTools = "claude, cursor, codex, copilot, opencode"
 
 func newMcpCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -102,7 +135,7 @@ func newMcpCmd() *cobra.Command {
 		Long: "Connect Burrow to your AI agent so it can operate your cluster.\n\n" +
 			"Preview what a tool needs with `burrow mcp <tool>`, then apply it with\n" +
 			"`burrow mcp <tool> install`. The change is idempotent, so a second run is safe, and any\n" +
-			"file it edits is backed up first. Supported tools: " + mcpValidTools + ".",
+			"file it edits is backed up first. Supported tools: " + mcpBuiltinTools + ".",
 		Example: "  # See what connecting Claude Code will add\n" +
 			"  burrow mcp claude\n\n" +
 			"  # Apply it\n" +
@@ -125,7 +158,10 @@ func runMcp(args []string, w io.Writer) error {
 	}
 	tool, ok := mcpTools[args[0]]
 	if !ok {
-		return fmt.Errorf("unknown tool %q; valid tools are %s", args[0], mcpValidTools)
+		// An agent Burrow has no adapter for is not an error: burrow-mcp is a plain stdio server any
+		// MCP-capable tool can use, so point the user at it and invite a support request.
+		fmt.Fprintf(w, mcpUnknownToolMessage, args[0])
+		return nil
 	}
 	if len(args) == 1 {
 		fmt.Fprint(w, tool.preview())
@@ -282,6 +318,124 @@ func (cursorTool) install(w io.Writer) error {
 	}
 	fmt.Fprintf(w, "Added Burrow to Cursor (%s). Restart Cursor to pick it up.\n", cursorConfigDisplay)
 	fmt.Fprint(w, mcpTryPrompt)
+	return nil
+}
+
+// --- opencode: ~/.config/opencode/opencode.json (mcp add wires only remote servers) ---
+
+type opencodeTool struct{}
+
+func (opencodeTool) preview() string {
+	if opencodeConfigured() {
+		return fmt.Sprintf("Burrow is already configured in OpenCode (%s). Nothing to do.\n", opencodeConfigDisplay)
+	}
+	return "Connect Burrow to OpenCode.\n\n" +
+		"This will add to " + opencodeConfigDisplay + ":\n" +
+		"  {\n" +
+		"    \"mcp\": {\n" +
+		"      \"burrow\": {\n" +
+		"        \"type\": \"local\",\n" +
+		"        \"command\": [\"burrow-mcp\"],\n" +
+		"        \"enabled\": true\n" +
+		"      }\n" +
+		"    }\n" +
+		"  }\n\n" +
+		"Your other MCP servers are preserved, and the file is backed up first.\n\n" +
+		"Run `burrow mcp opencode install` to apply.\n"
+}
+
+// opencodeConfigured reports whether opencode.json already lists a `burrow` server under `mcp`.
+func opencodeConfigured() bool {
+	path, err := opencodeConfigPath()
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	root := map[string]any{}
+	if json.Unmarshal(data, &root) != nil {
+		return false
+	}
+	servers, _ := root["mcp"].(map[string]any)
+	_, ok := servers["burrow"]
+	return ok
+}
+
+func (opencodeTool) install(w io.Writer) error {
+	path, err := opencodeConfigPath()
+	if err != nil {
+		return err
+	}
+	root := map[string]any{}
+	existed := false
+	if data, err := os.ReadFile(path); err == nil {
+		existed = true
+		if len(bytes.TrimSpace(data)) > 0 {
+			if err := json.Unmarshal(data, &root); err != nil {
+				return fmt.Errorf("parsing %s: %w", opencodeConfigDisplay, err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("reading %s: %w", opencodeConfigDisplay, err)
+	}
+
+	servers, _ := root["mcp"].(map[string]any)
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	if _, ok := servers["burrow"]; ok {
+		fmt.Fprintf(w, "Burrow is already configured in OpenCode (%s). Nothing to do.\n", opencodeConfigDisplay)
+		return nil
+	}
+	servers["burrow"] = map[string]any{
+		"type":    "local",
+		"command": []string{"burrow-mcp"},
+		"enabled": true,
+	}
+	root["mcp"] = servers
+	// A fresh config carries OpenCode's schema pointer so the editor validates it; an existing file
+	// keeps whatever it already declares.
+	if _, ok := root["$schema"]; !ok {
+		root["$schema"] = "https://opencode.ai/config.json"
+	}
+
+	if existed {
+		if err := backupFile(path); err != nil {
+			return err
+		}
+	} else if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
+	}
+
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding %s: %w", opencodeConfigDisplay, err)
+	}
+	out = append(out, '\n')
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", opencodeConfigDisplay, err)
+	}
+	fmt.Fprintf(w, "Added Burrow to OpenCode (%s). Restart OpenCode to pick it up.\n", opencodeConfigDisplay)
+	fmt.Fprint(w, mcpTryPrompt)
+	return nil
+}
+
+// --- aider: no MCP support ---
+
+// aiderMessage is printed for both preview and install: Aider has no MCP support, so there is
+// nothing to configure. It still names burrow-mcp for anyone running an MCP bridge. No em-dashes.
+const aiderMessage = "Aider does not support MCP servers, so there is nothing to install here. " +
+	"Burrow's MCP server is `burrow-mcp` (a stdio server); if you run an MCP bridge for Aider, " +
+	"point it at that.\n"
+
+type aiderTool struct{}
+
+func (aiderTool) preview() string { return aiderMessage }
+
+func (aiderTool) install(w io.Writer) error {
+	fmt.Fprint(w, aiderMessage)
 	return nil
 }
 

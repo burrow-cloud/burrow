@@ -96,7 +96,7 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "burrow",
 		Short:         rootShortDesc,
-		Long:          rootShortDesc,
+		Long:          rootLongDesc,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// RunE handles only a truly bare `burrow` (no subcommand): Cobra rejects an unknown
@@ -112,6 +112,9 @@ func newRootCmd() *cobra.Command {
 			return cmd.Help()
 		},
 	}
+	// Render help in kubectl's order (description, examples, commands, flags, then a single Usage
+	// line at the bottom) on the root; subcommands inherit the templates.
+	applyHelpLayout(root)
 	// The completion command stays visible so a user can discover it (ADR-0037); Cobra's built-in
 	// covers bash, zsh, fish, and PowerShell.
 	addGroups(root)

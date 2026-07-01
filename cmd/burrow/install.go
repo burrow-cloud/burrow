@@ -159,18 +159,28 @@ var clientsetFn = func(kubeconfig, kubeContext string) (kubernetes.Interface, er
 // fixed set (and the missing-kubeconfig error) without depending on the machine's real kubeconfig.
 var listContexts = connect.Contexts
 
+// installExamples is the Examples block for `install`, shared by the command's `-h` help and the
+// no-argument context listing so the two never drift.
+const installExamples = "  # Install Burrow into a context with the defaults\n" +
+	"  burrow install do-nyc1-cluster\n\n" +
+	"  # Install into a different app namespace\n" +
+	"  burrow install do-nyc1-cluster --app-namespace my-apps\n\n" +
+	"  # Preview the manifests without applying them\n" +
+	"  burrow install do-nyc1-cluster --dry-run"
+
 func newInstallCmd() *cobra.Command {
 	a := installArgs{}
 	cmd := &cobra.Command{
-		Use:   "install [context]",
+		Use:   "install <context>",
 		Short: "Install the Burrow control plane into a cluster",
-		Long: "install deploys the Burrow control plane into the kube context you name.\n\n" +
-			"The context is a required argument: install targets exactly that cluster and never the\n" +
-			"ambient current context implicitly, so it cannot install into prod by accident. Run\n" +
-			"`burrow install` with no argument to list your kubeconfig contexts.\n\n" +
+		Long: "Install the Burrow control plane into the kube context you name.\n\n" +
+			"The context is required: install targets exactly that cluster and never the ambient\n" +
+			"current context implicitly, so it cannot install into prod by accident. Run `burrow\n" +
+			"install` with no argument to list your contexts.\n\n" +
 			"On success it names the environment (a generated name, or --environment) and records it\n" +
-			"as your current environment in ~/.burrow/config.",
-		Args: cobra.MaximumNArgs(1),
+			"as your current environment.",
+		Example: installExamples,
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
 				a.kubeContext = args[0]
@@ -336,12 +346,12 @@ func errNoCluster() error {
 // with a context that has none; it does not install and does not prompt (ADR-0037). Probing is
 // sequential and bounded per context by connect.ProbeTimeout, matching `burrow env scan`.
 func writeInstallContextHint(ctx context.Context, w io.Writer, kubeconfig, namespace string, contexts []connect.Context) {
-	fmt.Fprint(w, "Installs Burrow into your cluster.\n\n"+
-		"Usage:\n"+
-		"  burrow install <context>\n\n"+
-		"Your kubeconfig contexts:\n\n")
+	fmt.Fprint(w, "Install the Burrow control plane into your cluster.\n\n")
+	fmt.Fprintf(w, "The control plane installs into a namespace (default %q); your apps deploy into the\n"+
+		"app namespace (default %q).\n\n", connect.DefaultNamespace, connect.DefaultAppNamespace)
+	fmt.Fprint(w, "Choose a context to install into. Detected Kubernetes contexts:\n\n")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CURRENT\tNAME\tCLUSTER\tBURROWD")
+	fmt.Fprintln(tw, "CURRENT\tCONTEXT\tCLUSTER\tBURROWD")
 	for _, c := range contexts {
 		marker := ""
 		if c.Current {
@@ -350,9 +360,9 @@ func writeInstallContextHint(ctx context.Context, w io.Writer, kubeconfig, names
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", marker, c.Name, c.Cluster, installStatusFor(ctx, kubeconfig, c.Name, namespace))
 	}
 	_ = tw.Flush()
-	fmt.Fprintln(w, "\nRun `burrow install <context>` with a context that does not already have Burrow.")
-	fmt.Fprintln(w, "A context that already has Burrow can be used from here: run `burrow env scan` to")
-	fmt.Fprintln(w, "register it, then `burrow env use <name>`.")
+	// Close with the same Examples block `install -h` shows and a single Usage line at the bottom,
+	// matching the kubectl-style help layout.
+	fmt.Fprintf(w, "\nExamples:\n%s\n\nUsage:\n  burrow install <context> [flags]\n", installExamples)
 }
 
 // installStatusFor probes one context for an installed burrowd and renders its BURROWD cell:

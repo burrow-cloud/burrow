@@ -64,14 +64,10 @@ func newEnvCmd() *cobra.Command {
 	o := &envListOpts{}
 	cmd := &cobra.Command{
 		Use:   "env",
-		Short: "Select and manage Burrow environments (local handles)",
-		Long: "env is the single environment surface (ADR-0036). An environment is a user-named handle\n" +
-			"resolving to {context, control-plane-namespace, app-namespace}, kept client-side in\n" +
-			"~/.burrow/config (override with $BURROW_CONFIG), like the kubeconfig.\n\n" +
-			"With nothing pinned, commands follow the current kube context, so `kubectx`/`kubens` move\n" +
-			"Burrow too; pin a handle with `burrow env use <name>` and return to following with\n" +
-			"`burrow env follow`. The bare `burrow env` lists the handles and marks the active one.\n\n" +
-			"This is distinct from `burrow app config`, which sets an app's environment variables.",
+		Short: "Select and manage Burrow environments",
+		Long: "Select and manage Burrow environments. An environment is a named handle for a cluster and\n" +
+			"namespace; your commands target the active one. With nothing pinned, Burrow follows your\n" +
+			"current kube context.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runEnvList(cmd.OutOrStdout(), o)
@@ -150,33 +146,36 @@ func runEnvList(w io.Writer, o *envListOpts) error {
 // and the empty-state block so the surface is discoverable from either.
 const envFooter = "Run `burrow env -h` for all environment commands."
 
-// writeEnvList prints the handles kubectx-style. The active row gets a trailing
-// "<--- current (pinned)" or "<--- current (following kubectl)"; when following an unregistered
-// context (no handle matches), a trailing line names it so the next command's target is never
-// ambiguous (ADR-0036). With no handles at all it prints a structured empty-state instead, routing
-// a new user to the ways to register one. Both forms close with the help footer.
+// writeEnvList prints the handles as a CURRENT/NAME/CONTEXT/NAMESPACE table, matching the install
+// context listing's column style: the active env carries a "*" in the CURRENT column. A single
+// legend below the table explains the marker and the active mode in plain words (a user need not
+// know what "pinned" means). When following an unregistered context (no handle matches), a line
+// names it instead, since no row is marked (ADR-0036). With no handles at all it prints a structured
+// empty-state instead, routing a new user to the ways to register one. Both forms close with the
+// help footer.
 func writeEnvList(w io.Writer, envs []localconfig.Environment, resolved localconfig.Resolved) {
 	if len(envs) == 0 {
 		writeEnvEmptyState(w, resolved)
 		return
 	}
+	active := resolved.Name != ""
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tCONTEXT\tNAMESPACE")
+	fmt.Fprintln(tw, "CURRENT\tNAME\tCONTEXT\tNAMESPACE")
 	for _, e := range envs {
-		row := fmt.Sprintf("%s\t%s\t%s", e.Name, e.Context, e.AppNamespace)
-		if resolved.Name != "" && e.Name == resolved.Name {
-			switch resolved.Mode {
-			case localconfig.ModePinned:
-				row += "\t<--- current (pinned)"
-			case localconfig.ModeFollowing:
-				row += "\t<--- current (following kubectl)"
-			}
+		marker := ""
+		if active && e.Name == resolved.Name {
+			marker = "*"
 		}
-		fmt.Fprintln(tw, row)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", marker, e.Name, e.Context, e.AppNamespace)
 	}
 	_ = tw.Flush()
-	if resolved.Mode == localconfig.ModeFollowing && resolved.Name == "" && resolved.Context != "" {
-		fmt.Fprintf(w, "following kubectl: %s (unregistered)\n", resolved.Context)
+	switch {
+	case active && resolved.Mode == localconfig.ModePinned:
+		fmt.Fprintln(w, "\n* current environment, pinned. Return to following your kube context with `burrow env follow`.")
+	case active: // following a registered context
+		fmt.Fprintln(w, "\n* current environment, following your kube context. Pin one with `burrow env use <name>`.")
+	case resolved.Mode == localconfig.ModeFollowing && resolved.Context != "":
+		fmt.Fprintf(w, "\nfollowing kubectl: %s (unregistered)\n", resolved.Context)
 	}
 	fmt.Fprintf(w, "\n%s\n", envFooter)
 }
@@ -295,12 +294,12 @@ func newEnvAddCmd() *cobra.Command {
 	var verbose bool
 	cmd := &cobra.Command{
 		Use:   "add <name>",
-		Short: "Create an environment: its namespace, burrowd's Role there, the registry entry, and a local handle",
-		Long: "add creates an environment for namespace-per-environment (ADR-0035). It applies the\n" +
-			"environment's namespace and a burrowd Role/RoleBinding in it with your kubeconfig (the\n" +
-			"same privileged setup install does, because burrowd holds only namespaced Roles and cannot\n" +
-			"create namespaces or RBAC itself), registers the environment with the control plane, and\n" +
-			"records a local handle for it (ADR-0036) so `burrow env list` shows it.\n\n" +
+		Short: "Create a namespace-scoped environment and register it.",
+		Long: "add creates an environment for namespace-per-environment. It applies the environment's\n" +
+			"namespace and a burrowd Role/RoleBinding in it with your kubeconfig (the same privileged\n" +
+			"setup install does, because burrowd holds only namespaced Roles and cannot create\n" +
+			"namespaces or RBAC itself), registers the environment with the control plane, and records\n" +
+			"a local handle for it so `burrow env list` shows it.\n\n" +
 			"The namespace defaults to <app-namespace>-<name> (e.g. burrow-apps-staging); override it\n" +
 			"with --namespace.",
 		Args: exactArgs(1),

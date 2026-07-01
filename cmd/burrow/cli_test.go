@@ -638,6 +638,60 @@ func TestKVFlag(t *testing.T) {
 	}
 }
 
+// TestHelpLayoutKubectlStyle confirms every help screen renders in kubectl's order: the single
+// Usage line sits at the bottom, after the Flags block (and thus after the description), and no help
+// screen leaks an internal ADR reference into user-facing copy.
+func TestHelpLayoutKubectlStyle(t *testing.T) {
+	configWithEnv(t) // a config is present so the root `-h` never mixes in the first-run banner
+
+	screens := [][]string{
+		{"-h"},
+		{"install", "-h"},
+		{"upgrade", "-h"},
+		{"cluster", "-h"},
+		{"config", "-h"},
+		{"config", "provider", "add", "-h"},
+		{"env", "-h"},
+		{"env", "add", "-h"},
+		{"env", "scan", "-h"},
+		{"app", "-h"},
+		{"app", "deploy", "-h"},
+		{"app", "secret", "set", "-h"},
+		{"addon", "-h"},
+		{"addon", "connect", "-h"},
+		{"guard", "-h"},
+		{"audit", "-h"},
+		{"version", "-h"},
+	}
+	for _, args := range screens {
+		var out, errb bytes.Buffer
+		if err := run(context.Background(), args, &out, &errb); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, errb.String())
+		}
+		s := out.String() + errb.String()
+
+		// No help screen may expose an internal ADR reference in user-facing copy.
+		if strings.Contains(s, "ADR") {
+			t.Errorf("%v help leaks an ADR reference:\n%s", args, s)
+		}
+
+		// Usage is a single line at the bottom.
+		usage := strings.LastIndex(s, "Usage:")
+		if usage < 0 {
+			t.Errorf("%v help has no Usage line:\n%s", args, s)
+			continue
+		}
+		// It must render after the description (never at the very top).
+		if usage == 0 {
+			t.Errorf("%v help puts Usage at the very top:\n%s", args, s)
+		}
+		// When a Flags block is present, Usage comes after it (kubectl order).
+		if f := strings.Index(s, "Flags:"); f >= 0 && f > usage {
+			t.Errorf("%v help renders Flags after Usage; want Usage at the bottom:\n%s", args, s)
+		}
+	}
+}
+
 func TestExactArgsErrorNamesArgsAndPrintsUsage(t *testing.T) {
 	// A missing <app> names the argument and prints the command's usage, not Cobra's bare
 	// "accepts 1 arg(s), received 0".

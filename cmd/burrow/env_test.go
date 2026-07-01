@@ -158,18 +158,25 @@ func TestEnvListFollowing(t *testing.T) {
 		t.Fatalf("env list: %v\n%s", err, errb.String())
 	}
 	s := out.String()
-	for _, want := range []string{"NAME", "CONTEXT", "NAMESPACE", "dev", "nonprod", "ctx-nonprod", "team-x"} {
+	for _, want := range []string{"CURRENT", "NAME", "CONTEXT", "NAMESPACE", "dev", "nonprod", "ctx-nonprod", "team-x"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("env list output missing %q\n%s", want, s)
 		}
 	}
+	// The active env's data row carries a "*" in the leading CURRENT column; the other does not.
 	for _, line := range strings.Split(s, "\n") {
-		if strings.HasPrefix(line, "nonprod") && !strings.Contains(line, "<--- current (following kubectl)") {
-			t.Errorf("nonprod row not marked current (following kubectl): %q", line)
-		}
-		if strings.HasPrefix(line, "dev") && strings.Contains(line, "current") {
+		switch {
+		case strings.Contains(line, "ctx-nonprod") && !strings.HasPrefix(line, "*"):
+			t.Errorf("nonprod row not marked current with a leading *: %q", line)
+		case strings.Contains(line, "ctx-dev") && strings.HasPrefix(line, "*"):
 			t.Errorf("dev row wrongly marked current: %q", line)
 		}
+	}
+	if !strings.Contains(s, "* current environment, following your kube context. Pin one with `burrow env use <name>`.") {
+		t.Errorf("missing the following-mode legend in plain language\n%s", s)
+	}
+	if strings.Contains(s, "(pinned)") || strings.Contains(s, "<---") {
+		t.Errorf("output should not carry the old inline markers\n%s", s)
 	}
 }
 
@@ -183,13 +190,21 @@ func TestEnvListPinned(t *testing.T) {
 	if err := run(context.Background(), []string{"env", "list", "--kubeconfig", kc}, &out, &errb); err != nil {
 		t.Fatalf("env list: %v\n%s", err, errb.String())
 	}
-	for _, line := range strings.Split(out.String(), "\n") {
-		if strings.HasPrefix(line, "dev") && !strings.Contains(line, "<--- current (pinned)") {
-			t.Errorf("dev row not marked current (pinned): %q", line)
-		}
-		if strings.HasPrefix(line, "nonprod") && strings.Contains(line, "current") {
+	s := out.String()
+	for _, line := range strings.Split(s, "\n") {
+		switch {
+		case strings.Contains(line, "ctx-dev") && !strings.HasPrefix(line, "*"):
+			t.Errorf("dev row not marked current with a leading *: %q", line)
+		case strings.Contains(line, "ctx-nonprod") && strings.HasPrefix(line, "*"):
 			t.Errorf("nonprod row wrongly marked current: %q", line)
 		}
+	}
+	// The legend names the pinned mode in plain language and points at how to return to following.
+	if !strings.Contains(s, "* current environment, pinned. Return to following your kube context with `burrow env follow`.") {
+		t.Errorf("missing the pinned-mode legend in plain language\n%s", s)
+	}
+	if strings.Contains(s, "(pinned)") || strings.Contains(s, "<---") {
+		t.Errorf("output should not carry the old inline markers\n%s", s)
 	}
 }
 
@@ -411,6 +426,31 @@ func TestEnvAddNamespaceOverride(t *testing.T) {
 	}
 }
 
+// TestEnvHelpConciseNoADR confirms `burrow env -h` shows the concise description, a single Usage
+// line, and neither an internal ADR reference nor the unrelated `burrow app config` pointer.
+func TestEnvHelpConciseNoADR(t *testing.T) {
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "-h"}, &out, &errb); err != nil {
+		t.Fatalf("env -h: %v\n%s", err, errb.String())
+	}
+	s := out.String() + errb.String()
+	if !strings.Contains(s, "Select and manage Burrow environments. An environment is a named handle") {
+		t.Errorf("env help missing the concise description:\n%s", s)
+	}
+	for _, unwanted := range []string{"ADR", "burrow app config"} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("env help should not mention %q:\n%s", unwanted, s)
+		}
+	}
+	// A single Usage line at the bottom, not the old two-line `[flags]`/`[command]` pair.
+	if !strings.Contains(s, "burrow env [command] [flags]") {
+		t.Errorf("env help missing the single Usage line:\n%s", s)
+	}
+	if strings.Contains(s, "burrow env [flags]\n") {
+		t.Errorf("env help still renders the two-line usage:\n%s", s)
+	}
+}
+
 // TestWriteEnvList covers the kubectx-style rendering directly, including the active-row markers and
 // the unregistered follow line.
 func TestWriteEnvList(t *testing.T) {
@@ -421,12 +461,21 @@ func TestWriteEnvList(t *testing.T) {
 
 	var pinned bytes.Buffer
 	writeEnvList(&pinned, envs, localconfig.Resolved{Name: "dev", Context: "ctx-dev", Mode: localconfig.ModePinned})
-	if !strings.Contains(pinned.String(), "<--- current (pinned)") {
-		t.Errorf("pinned marker missing\n%s", pinned.String())
+	ps := pinned.String()
+	// A CURRENT column heads the table and the active env's row leads with "*"; the legend explains
+	// the pinned mode in plain words, without the old inline "(pinned)" marker.
+	if !strings.Contains(ps, "CURRENT") || !strings.Contains(ps, "NAME") {
+		t.Errorf("populated list missing the CURRENT/NAME columns\n%s", ps)
+	}
+	if !strings.Contains(ps, "* current environment, pinned. Return to following your kube context with `burrow env follow`.") {
+		t.Errorf("pinned legend missing\n%s", ps)
+	}
+	if strings.Contains(ps, "(pinned)") || strings.Contains(ps, "<---") {
+		t.Errorf("old inline pinned marker should be gone\n%s", ps)
 	}
 	// The populated list closes with the help footer too.
-	if !strings.Contains(pinned.String(), "Run `burrow env -h` for all environment commands.") {
-		t.Errorf("populated list missing the env footer\n%s", pinned.String())
+	if !strings.Contains(ps, "Run `burrow env -h` for all environment commands.") {
+		t.Errorf("populated list missing the env footer\n%s", ps)
 	}
 
 	var unreg bytes.Buffer

@@ -28,7 +28,7 @@ func newSecretCmd() *cobra.Command {
 			"the workload at runtime from a per-app Kubernetes Secret. `secret set` sends the value\n" +
 			"over burrowd's authenticated control-plane API (TLS), and burrowd writes it to the\n" +
 			"Secret; the value is never carried over MCP, never logged, and never written to the\n" +
-			"control plane's database (ADR-0029/0004). `secret list` shows only the KEYS.\n\n" +
+			"control plane's database. `secret list` shows only the KEYS.\n\n" +
 			"NEVER paste a secret value into an agent prompt — anything in the prompt is retained in\n" +
 			"the conversation and re-sent on later tool calls. Run `secret set` yourself; the agent\n" +
 			"can confirm the key is present with `secret list`.",
@@ -49,8 +49,7 @@ func newSecretSetCmd() *cobra.Command {
 		Short: "Set (upsert) a secret environment variable for an app",
 		Long: "set sends a secret value to burrowd over the authenticated control-plane API (TLS),\n" +
 			"and burrowd writes it into the app's per-app Kubernetes Secret. The value never travels\n" +
-			"over MCP, is never logged, and is never stored in the control plane's database\n" +
-			"(ADR-0029/0004).\n\n" +
+			"over MCP, is never logged, and is never stored in the control plane's database.\n\n" +
 			"NEVER paste a secret value into an agent prompt — it is retained in the conversation\n" +
 			"and re-sent on every later tool call. Run this command yourself at your terminal; the\n" +
 			"agent can confirm the key landed with `burrow app secret list <app>`.\n\n" +

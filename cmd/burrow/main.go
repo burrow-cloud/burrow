@@ -122,6 +122,7 @@ func newRootCmd() *cobra.Command {
 		// Get started: install, point at a cluster, configure credentials (ADR-0037).
 		grouped(newInstallCmd(), groupGetStarted),
 		grouped(newUpgradeCmd(), groupGetStarted),
+		grouped(newMcpCmd(), groupGetStarted),
 		grouped(newClusterCmd(), groupGetStarted),
 		grouped(newConfigCmd(), groupGetStarted),
 		// Environments: select which cluster/namespace commands target.

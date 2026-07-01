@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
 
+	"golang.org/x/term"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -129,6 +131,19 @@ func (ap *applier) apply(ctx context.Context, manifests string, dryRun, verbose 
 	}
 	sortForApply(objs)
 
+	// On a real terminal, animate a single rewriting progress line as each resource is applied so
+	// the install does not sit silent during the apply lag. When stdout is not a terminal (CI, a
+	// pipe, or the e2e capturing output) or verbose is listing every resource, emit no carriage
+	// returns: only the final summary/listing prints, keeping captured output clean.
+	total := len(objs)
+	showProgress := !verbose && isTerminal(stdout)
+	progressWidth := len(fmt.Sprintf("Applying resources... %d/%d", total, total))
+	reportProgress := func(done int) {
+		if showProgress {
+			fmt.Fprintf(stdout, "\r%-*s", progressWidth, fmt.Sprintf("Applying resources... %d/%d", done, total))
+		}
+	}
+
 	var results []applyResult
 	var pending []*unstructured.Unstructured
 	for _, obj := range objs {
@@ -143,6 +158,7 @@ func (ap *applier) apply(ctx context.Context, manifests string, dryRun, verbose 
 			return err
 		}
 		results = append(results, applyResult{describeObject(obj), action})
+		reportProgress(len(results))
 	}
 
 	if len(pending) > 0 {
@@ -153,11 +169,27 @@ func (ap *applier) apply(ctx context.Context, manifests string, dryRun, verbose 
 				return err
 			}
 			results = append(results, applyResult{describeObject(obj), action})
+			reportProgress(len(results))
 		}
 	}
 
+	// Close the progress line with a newline so the summary starts on its own line.
+	if showProgress && len(results) > 0 {
+		fmt.Fprintln(stdout)
+	}
 	writeApplyResults(results, verbose, stdout)
 	return nil
+}
+
+// isTerminal reports whether w is a real terminal: an *os.File whose file descriptor is a tty. A
+// bytes.Buffer or any other non-file writer (what tests and captured/piped output pass) is not a
+// terminal, so the carriage-return progress animation is suppressed there and only plain lines print.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd()))
 }
 
 // applyOne resolves an object's resource and scope via the RESTMapper, then server-side-applies it

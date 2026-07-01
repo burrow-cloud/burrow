@@ -20,7 +20,7 @@ const (
 	// AddonCache is an in-memory cache (ValKey, BSD-3) the agent wires an app to — a backing
 	// service the app connects to, not one the agent queries, so it has no query seam.
 	AddonCache AddonType = "cache"
-	// AddonPostgres is a shared PostgreSQL instance (the official postgres image, PostgreSQL
+	// AddonPostgres is a cluster-shared PostgreSQL instance (the official postgres image, PostgreSQL
 	// License) the agent attaches an app to — Burrow provisions a database and login role per app
 	// inside the one instance and writes the app's DATABASE_URL into its per-app Secret (ADR-0031).
 	AddonPostgres AddonType = "postgres"

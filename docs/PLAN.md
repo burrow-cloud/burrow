@@ -189,5 +189,5 @@ targeted deterministic fault injection for the reconcile/deploy paths; and ephem
 
 - **License: settled.** The whole repository is **Apache-2.0**
   ([ADR-0033](adr/0033-relicense-to-apache.md), superseding ADR-0001's split); sole copyright
-  ownership with CLA-gated outside code. Burrow is open core — managed cloud and the enterprise
-  tier are separate proprietary products.
+  ownership with CLA-gated outside code. The managed cloud and enterprise tier are a separate
+  product that does not live in this repository.

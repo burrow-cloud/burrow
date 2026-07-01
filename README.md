@@ -9,8 +9,8 @@
 **Production grade self hosting for your apps, operated by your AI agent, with guardrails.**
 Point [Claude Code](https://claude.com/claude-code), Cursor, Codex, or bring your own at your
 Kubernetes cluster. It deploys, scales, debugs, and ships your apps to a URL over
-[MCP](https://modelcontextprotocol.io). You own the infrastructure and the control plane that
-drives it, and every change the agent makes is gated by a guardrail, so it can't break prod.
+[MCP](https://modelcontextprotocol.io). You own the infrastructure and everything that drives
+it, and every change the agent makes is gated by a guardrail, so it can't break prod.
 
 It is not another git deploy host. Vercel and friends run your app on *their* platform; Burrow
 operates *your* cluster (real Kubernetes, done right), and goes past the app to the whole
@@ -19,132 +19,97 @@ service behind the same guardrails.
 
 ## Why Burrow
 
-- **Own your infrastructure, no lock-in.** The control plane is yours. It self hosts in your
-  own cluster, holds the cluster credentials, and is open source (Apache-2.0). No vendor
-  platform sits in the path, and there is nothing to migrate off of later.
-- **Production grade by default.** It is real Kubernetes done right: self-healing workloads,
-  rolling deploys, ingress and TLS, in-place upgrades, with sane defaults, so the hard parts
-  are handled rather than left as homework.
-- **A guardrailed agent, safe enough for prod.** The agent is a tool you drive, not an
-  autonomous operator turned loose on a cluster. It proposes, you approve, and every mutating
-  operation passes the control-plane guardrails and lands in an audit trail. Secrets never
-  travel over MCP. That control model is what makes letting an agent operate production
-  acceptable.
+- **Own your infrastructure, no lock-in.** Burrow self-hosts in your own cluster. It is open source (Apache-2.0), and there is no vendor platform in the path to migrate off later.
+- **Production grade by default.** Real Kubernetes done right, controlled by your agent: self-healing workloads, rolling deploys, ingress and TLS, in-place upgrades, all with sane defaults.
+- **Guardrails you control.** You decide what the agent can and cannot do, per environment. Lock prod down while staging stays free.
 
 ## Talk to your agent
 
-What you can say today (✅), and where it is headed (🔭):
+Once Burrow is connected, you operate your apps by talking to your agent. Things you can say today:
 
-- ✅ **"Deploy `ghcr.io/me/app:1.4` and serve it at example.com over HTTPS."** The image,
-  ingress and TLS, and the DNS record, from one ask.
-- ✅ **"Roll back the last release."** · **"Scale web to 3."** · **"Show me the logs."** ·
-  **"Is my app reachable? If not, what's broken?"**
-- ✅ **"How is my app doing?"** · **"Why is it slow?"** → Burrow installs logs
-  ([VictoriaLogs](https://docs.victoriametrics.com/victorialogs/)) on your cluster, *or connects*
-  to the logs and metrics you already run ([Loki](https://grafana.com/oss/loki/),
-  [Prometheus](https://prometheus.io)), and your agent *queries* them and answers in plain
-  language: answers, not dashboards.
-- ✅ **"My site is slow, add a cache."** → your agent writes the [ValKey](https://valkey.io)
-  integration; Burrow deploys ValKey to your cluster and wires it in.
-- 🔭 **"Autoscale web on load."** · **"Show me this month's cluster spend."** → autoscaling and
-  cost controls are on the [roadmap](docs/ROADMAP.md).
+- `Deploy my app to prod`
+  - Burrow figures out which app you mean from the folder you are in, builds it, and rolls it out to your cluster.
+- `Roll back the last release`
+- `Scale web up` or `Scale web to 3`
+- `Show me any 500 errors from my web app and figure out what happened`
+  - Your agent reads the logs and tells you what broke, in plain language.
+- `Why isn't my site reachable at example.com?`
+  - Your agent walks the chain (DNS, TLS, cluster), finds the broken link, and proposes a fix.
+- `How is my app doing?` or `Why is my app slow?`
+  - Straight answers, no dashboards to dig through.
+- `My site is slow, would a cache help?`
+  - Your agent checks your logs and metrics, tells you if it would, and if you say yes, sets one up and wires your app to it.
 
-The pattern is the same every time: the agent writes the code; **Burrow provisions the
-vetted, permissively-licensed building block, wires it in with sane defaults, and operates
-it**, with every change gated by the control-plane guardrails. The ✅ items work now, and the
-🔭 items are the [roadmap](docs/ROADMAP.md). The [version table](#version-status) never lags
-the code.
+Coming soon: `Make web autoscale at 90% CPU` and `Limit web to 500MB of memory and 1 CPU`.
+
+## Guardrails
+
+Guardrails are how you decide what your agent can and cannot do. Every risky action is checked against your policy before it runs, so the agent proposes and you stay in control.
+
+    burrow guard set --env prod app.delete deny   # never let the agent delete an app in prod
+    burrow guard set dns.write allow               # let it add DNS records
+    burrow guard set dns.delete deny               # but never delete them
+
+App-level rules can be scoped per environment, so the agent moves fast in staging while prod stays locked down.
+
+## Addons
+
+Building something new, or adding a capability? Ask your agent to stand up a backing service and wire your app to it:
+
+- `Add a Postgres database and connect my app to it`
+- `Set up logging so I can see what my app is doing`
+- `Add a cache to speed up my site`
+
+Available today: **Postgres** (a cluster-shared database), **logs** (VictoriaLogs), **metrics** (VictoriaMetrics), and **cache** (ValKey).
+
+By default the agent asks before standing anything up: it proposes, you approve. Make it hands-off with `burrow guard set addon.install allow`, or install it yourself with `burrow addon install postgres`.
+
+Want an addon we do not have yet? [Request one](https://github.com/burrow-cloud/burrow/issues/new?labels=addon).
 
 ## Built for day two
 
-The hard part of Kubernetes isn't the first deploy — it's everything after. The recurring
-complaint from small teams is the **day-two tax**: upgrades that break prod, certs and ingress
-that drift, and "why is my app slow?" debugging across a stack nobody has time to master. That
-second day is Burrow's job:
+The hard part isn't the first deploy, it's everything after. Once your app is live, this is
+what you get:
 
-- **Upgrades in place** — `burrow upgrade` rolls the control plane forward without losing state.
-- **Reachability you can reason about** — `reachability` walks the whole chain (controller →
-  ingress → TLS → DNS) and names the *one* broken link, so "it's down" becomes "the cert hasn't
-  issued yet."
-- **Operate by talking** — status, logs, rollback, scale — the agent does the work, the
-  guardrails keep it on the rails.
-- **"How is my app doing?"** — the agent installs logs on your cluster, or connects to the logs
-  and metrics you already run, and answers in plain language (shipped in v0.4).
+- **It keeps running.** Your app self-heals when something falls over, and new releases roll
+  out without taking the old one down.
+- **It stays reachable, over HTTPS.** Your app gets a URL with TLS, and when something is off
+  you get a straight answer about which link in the chain broke ("the cert hasn't issued yet"),
+  not just "it's down."
+- **You operate it by talking.** Status, logs, rollback, scale: your agent does the work, and
+  the guardrails keep it from breaking prod.
+- **You get plain-language answers.** Ask "how is my app doing?" or "why is it slow?" and your
+  agent reads the logs and metrics and tells you, no dashboards to dig through.
 
-And every change is gated: **the agent proposes, you approve, it executes** — with the deploy
-record as the audit trail. That human-in-the-loop step is what makes letting an agent operate
-production actually acceptable.
+And every change is gated: **the agent proposes, you approve, it executes**, with a record of
+what happened. That human-in-the-loop step is what makes letting an agent operate production
+actually acceptable.
 
 ## How it works
 
-Four layers ([architecture](docs/ARCHITECTURE.md)):
+Three things:
 
-1. **Your agent** — any MCP client, not ours.
-2. **The MCP server** — thin, agent-neutral, holds no cluster credentials. The remote control.
-3. **The control plane** — the product: deploy, rollout and rollback, status and logs,
-   scaling, reachability, the guardrails, and the record of who did what. Holds the cluster
-   credentials; the only layer that talks to Kubernetes.
-4. **Kubernetes** — your cluster.
+1. **Your agent** - any AI coding agent you already use (Claude Code, Cursor, Codex, Copilot,
+   OpenCode).
+2. **Burrow** - the piece you install. It holds your cluster credentials, does the work
+   (deploy, scale, logs, backing services), and gates every change behind guardrails so the
+   agent cannot break prod.
+3. **Your Kubernetes cluster** - your infrastructure, which you own.
 
-Two invariants keep it safe and fast: **code never travels over MCP** — only tool calls and
-small metadata; the built image moves through a container registry
-([ADR-0004](docs/adr/0004-code-never-over-mcp.md)) — and **guardrails live in the control
-plane**, between your agent and your cluster, returning a structured result the agent can
-reason over ([ADR-0006](docs/adr/0006-guardrails-in-the-control-plane.md)). It is fully
-self-hostable: the single-tenant control plane, the MCP server, and the CLI run entirely on
-your own cluster.
+Two things keep it safe: your code never passes through Burrow (it moves through a container
+registry, not the agent connection), and every change the agent tries to make is checked
+before it runs. Nothing lands on your cluster that you did not approve.
 
-## What "guardrails" mean
-
-Letting an agent operate a cluster is only acceptable if it cannot do something you did not
-approve. In Burrow, guardrails are policy that lives in the **control plane, not in the
-agent**, so the agent can't bypass them or change its own limits. Every mutating operation
-passes through them and gets one of three dispositions:
-
-- **allow**: the operation runs.
-- **confirm**: it is held until you approve. The agent gets back a structured "needs
-  confirmation" result, not a success, so it has to ask first.
-- **deny**: it is blocked outright.
-
-You set the policy from the CLI. There is deliberately **no MCP tool for it**, so an agent can
-never loosen its own guardrails:
-
-```sh
-burrow guard list                       # every guardrail and its current disposition
-burrow guard set app.delete deny            # never let the agent delete an app
-burrow guard set app.scale_to_zero confirm  # scaling to zero needs your sign-off
-burrow guard set app.expose_public confirm  # putting something on the public internet needs approval
-```
-
-Guardrails cover the operations that carry risk: deleting an app, scaling to zero, exposing a
-service publicly, DNS changes, installing or removing add-ons, restoring a database, rolling
-back. Every attempt and its outcome (allowed, held, denied, executed) lands in an append-only
-audit log you read with `burrow audit`. And secrets never travel over MCP at all: the agent
-references them by key, you set the values, and they are written straight into a Kubernetes
-Secret.
-
-Guardrails can be set **per environment**, so prod can be locked down while staging stays
-permissive. Add `--env <name>` to scope an app-level guardrail to one environment; an environment
-with no override of its own inherits the global policy:
-
-```sh
-burrow guard set --env prod app.delete deny      # lock prod: the agent can never delete a prod app
-burrow guard set app.delete allow                # ... while staging and the rest stay permissive
-burrow guard list --env prod                     # prod's effective policy, marking env-specific vs inherited
-```
-
-The app-level guardrails (deploy, scale, expose, delete, rollback) are environment-scopable. The
-cluster-level ones (DNS changes, add-on install or removal) act on the whole cluster, so they are
-set globally without `--env`.
+For a deeper look at the architecture, see [Architecture](docs/ARCHITECTURE.md).
 
 ## Try it
 
-You need a cluster you can reach with `kubectl` (DigitalOcean is the reference target). Three
+You need a cluster you can reach with `kubectl`. Three
 commands get you from nothing to an agent operating your cluster:
 
 ```sh
 brew install burrow-cloud/tap/burrow     # installs burrow and burrow-mcp
-burrow install <context>                 # control plane into the named kube context (run `burrow install` to list them)
+burrow install <context>                 # installs Burrow into the named kube context (run `burrow install` to list them)
 burrow mcp claude install                # connect your agent (or: cursor, codex, copilot, opencode)
 ```
 
@@ -156,7 +121,7 @@ complete list of supported agents and how to connect any other MCP-capable tool.
 
 Prefer to build from source? `go build -o burrow ./cmd/burrow && go build -o burrow-mcp ./cmd/burrow-mcp`.
 
-`burrow upgrade` rolls the control plane forward in place, preserving your state.
+Upgrading later? See [Upgrade](docs/getting-started.md#upgrade).
 
 ## Shell completion
 
@@ -169,48 +134,50 @@ burrow completion fish > ~/.config/fish/completions/burrow.fish   # fish
 burrow completion powershell | Out-String | Invoke-Expression     # PowerShell
 ```
 
+Then reload your shell so completion loads: `source ~/.zshrc` (or `source ~/.bashrc`), or just
+open a new terminal.
+
 Run `burrow completion <shell> --help` for how to install it permanently.
 
-## Version status
+## Changelog
 
-Burrow follows semver from v0.1 toward v1.0. This table never lags the code
-([ADR-0009](docs/adr/0009-honest-status.md)).
+Burrow follows semver from v0.1 toward v1.0. This table never lags the code.
 
 | Version | Scope | Status |
 | --- | --- | --- |
 | **v0.1** | Install into a cluster · connect an agent over MCP · deploy by image reference · status · logs · rollback · scale · in-place upgrade | ✅ shipped ([v0.1.1](https://github.com/burrow-cloud/burrow/tree/v0.1.1)) |
 | **v0.2** | Reach an app at a URL: shared-ingress routing · `publish` + cert-manager TLS · `reachability` surface · DNS automation (DigitalOcean / Cloudflare) · `ingress install` · configurable guardrails | ✅ shipped ([v0.2.1](https://github.com/burrow-cloud/burrow/tree/v0.2.1)) |
 | **v0.3** | Operability + agent-experience hardening: CLI grouped by task (`app`/`config`/`system`) · `app list` · account-scoped Cloudflare tokens · public-DNS reachability · request log | ✅ shipped ([v0.3.0](https://github.com/burrow-cloud/burrow/tree/v0.3.0)) |
-| **v0.4** | Agent-provisioned building blocks: install logs (VictoriaLogs) / metrics (VictoriaMetrics + vmagent) — or **connect** the logs/metrics you already run (Loki, Prometheus) — and query them to answer "how is my app doing?" · cache (ValKey) · `app delete` · tunable rollback guardrail | ✅ shipped ([v0.4.0](https://github.com/burrow-cloud/burrow/tree/v0.4.0)) |
-| **v0.5** | App config, secrets, credentials, and the audit log: `app config` / `app secret` lifecycle (`deploy` takes no config) · secrets & vendor/connected-backend credentials flow through the control-plane API, **never MCP**, never logged · `burrow audit` trail of guarded operations · apps default to a dedicated `burrow-apps` namespace | ✅ shipped ([v0.5.0](https://github.com/burrow-cloud/burrow/tree/v0.5.0)) |
-| **v0.6** | First backend building block, agent-native onboarding, and the Apache relicense: Postgres add-on (`addon install`/`attach postgres`, a per-app database + role, generated `DATABASE_URL` wired into the app) · `pg_dump`/`pg_restore` backups behind a confirm guardrail · read-only `burrow_audit` MCP tool · agent-native onboarding (cluster-capability detection, cost-aware ingress/TLS provisioning with a LoadBalancer-vs-NodePort choice, a verified "live at https://…" check) · dotted guardrail codes (`app.delete`) · **whole repository relicensed to Apache-2.0** | ✅ shipped ([v0.6.0](https://github.com/burrow-cloud/burrow/tree/v0.6.0)) |
+| **v0.4** | Agent-provisioned building blocks: install logs (VictoriaLogs) / metrics (VictoriaMetrics + vmagent), or **connect** the logs/metrics you already run (Loki, Prometheus), and query them to answer "how is my app doing?" · cache (ValKey) · `app delete` · tunable rollback guardrail | ✅ shipped ([v0.4.0](https://github.com/burrow-cloud/burrow/tree/v0.4.0)) |
+| **v0.5** | App config, secrets, credentials, and the audit log: `app config` / `app secret` lifecycle (`deploy` takes no config) · secrets & vendor/connected-backend credentials flow through Burrow's own API, **never MCP**, never logged · `burrow audit` trail of guarded operations · apps default to a dedicated `burrow-apps` namespace | ✅ shipped ([v0.5.0](https://github.com/burrow-cloud/burrow/tree/v0.5.0)) |
+| **v0.6** | First backend building block, agent-native onboarding, and the Apache relicense: Postgres addon (`addon install`/`attach postgres`, a per-app database + role, generated `DATABASE_URL` wired into the app) · `pg_dump`/`pg_restore` backups behind a confirm guardrail · read-only `burrow_audit` MCP tool · agent-native onboarding (cluster-capability detection, cost-aware ingress/TLS provisioning with a LoadBalancer-vs-NodePort choice, a verified "live at https://…" check) · dotted guardrail codes (`app.delete`) · **whole repository relicensed to Apache-2.0** | ✅ shipped ([v0.6.0](https://github.com/burrow-cloud/burrow/tree/v0.6.0)) |
 | **v0.7** | Environments and a self-contained, kubectl-free CLI: cluster-per-env via kubeconfig-context routing (`--context`, per-call agent routing) and namespace-per-env via a burrowd registry (`burrow env add`), with **per-environment guardrails** that gate prod while staging stays permissive (`burrow guard set --env prod app.delete deny`) · one `burrow env` surface over named local handles that follows the kube context by default (`use`/`follow`/`list`/`rename`/`scan`), resolving both CLI and agent operations through the active environment (retires `burrow context`) · intent-based `--help` groups, explicit `burrow install <context>` that names the environment, a first-run banner, shell completion, `system` folded into `cluster` · **`burrow` no longer needs `kubectl`** (client-go server-side apply) · the `app env`→`app config` rename | ✅ shipped ([v0.7.1](https://github.com/burrow-cloud/burrow/tree/v0.7.1)) |
 | v1.0 | Production self-host: the deploy-and-operate core and common day-two building blocks, hardened | planned ([roadmap](docs/ROADMAP.md)) |
 
 ## Documentation
 
-- [docs/getting-started.md](docs/getting-started.md) — set up Burrow on your cluster and connect
+- [docs/getting-started.md](docs/getting-started.md): set up Burrow on your cluster and connect
   your agent, start to finish.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the system design: the four layers, the
-  invariants, and the request paths.
-- [docs/HARDENING.md](docs/HARDENING.md) — keep the control plane the agent's only path to
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the system design, its four layers,
+  invariants, and request paths.
+- [docs/HARDENING.md](docs/HARDENING.md): keep Burrow the agent's only path to
   the cluster, so the guardrails actually bound it.
-- [docs/ROADMAP.md](docs/ROADMAP.md) — version milestones, v0.1 → v1.0.
-- [docs/PLAN.md](docs/PLAN.md) — the current execution plan.
-- [docs/adr/](docs/adr/README.md) — Architecture Decision Records: every load-bearing
+- [docs/ROADMAP.md](docs/ROADMAP.md): version milestones, v0.1 → v1.0.
+- [docs/PLAN.md](docs/PLAN.md): the current execution plan.
+- [docs/adr/](docs/adr/README.md): Architecture Decision Records, every load-bearing
   decision, with its reasoning and rejected alternatives.
-- [CLAUDE.md](CLAUDE.md) — the contributor and agent guide.
+- [CLAUDE.md](CLAUDE.md): the contributor and agent guide.
 
 ## License and contributing
 
-How the code is licensed ([LICENSING.md](LICENSING.md),
-[ADR-0033](docs/adr/0033-relicense-to-apache.md)):
+How the code is licensed ([LICENSING.md](LICENSING.md)):
 
-- **All of Burrow's code in this repository is Apache-2.0** — the CLI, the MCP server, the
-  control plane, and the operator. Read, modify, self-host, and integrate against it freely.
-- Burrow is **open core**: the managed cloud and the enterprise tier (SSO, teams, compliance,
-  support) are separate, proprietary products — see [COMMERCIAL.md](COMMERCIAL.md).
+- All of Burrow's code in this repository is Apache-2.0: the CLI, the MCP server, and the
+  software that runs in your cluster. Read, modify, self-host, and integrate against it freely.
 
-**Contributions are welcome** — open an issue or a discussion. Bug reports, ideas, and design
+Burrow is open source. Need enterprise features such as SSO? Reach out at
+[hi@burrow-cloud.dev](mailto:hi@burrow-cloud.dev).
+
+Contributions are welcome. Open an issue or a discussion. Bug reports, ideas, and design
 feedback are the best way to help and to shape where Burrow goes. Commits are signed off under
 the Developer Certificate of Origin (`git commit -s`). See [CONTRIBUTING.md](CONTRIBUTING.md).

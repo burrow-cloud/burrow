@@ -616,7 +616,7 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app string) (Atta
 }
 
 // DetachAddon removes app's DATABASE_URL and, behind the addon.detach confirm guardrail (it
-// destroys data), drops app's database and role from the shared Postgres instance (ADR-0031). The
+// destroys data), drops app's database and role from the cluster-shared Postgres instance (ADR-0031). The
 // audit row records {addon, app} only.
 func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app string, confirm bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {

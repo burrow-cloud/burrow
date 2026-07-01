@@ -697,3 +697,45 @@ func TestMethodNotAllowed(t *testing.T) {
 		t.Errorf("status = %d, want 405", rec.Code)
 	}
 }
+
+func TestAutoscaleEndpoint(t *testing.T) {
+	h, k, _, d := newAPI(t)
+	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAutoscale, cp.DispositionAllow))
+
+	rec := do(h, "POST", "/v1/apps/web/autoscale", token, `{"min":1,"max":4,"cpu":90}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("autoscale status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var res cp.AutoscaleResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.MaxReplicas != 4 || res.CPUPercent != 90 {
+		t.Errorf("result = %+v, want max 4 cpu 90", res)
+	}
+	if _, ok := k.Autoscaler("web"); !ok {
+		t.Errorf("HPA not applied by the endpoint")
+	}
+
+	// DELETE turns autoscaling off.
+	if rec := do(h, "DELETE", "/v1/apps/web/autoscale", token, ""); rec.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := k.Autoscaler("web"); ok {
+		t.Errorf("HPA should be gone after disable")
+	}
+}
+
+func TestAutoscaleMaxOverCeilingDenied(t *testing.T) {
+	h, _, _, d := newAPI(t)
+	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAutoscale, cp.DispositionAllow))
+	// A max above the ceiling is denied via the replica-ceiling guardrail (422, a structured
+	// guardrail refusal).
+	rec := do(h, "POST", "/v1/apps/web/autoscale", token, `{"min":1,"max":50,"cpu":80}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "app.replica_ceiling") {
+		t.Errorf("body = %s, want the replica-ceiling code", rec.Body.String())
+	}
+}

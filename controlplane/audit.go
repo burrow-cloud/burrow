@@ -95,6 +95,7 @@ const auditCaller = "control-plane"
 const (
 	auditOpDeploy       = "deploy"
 	auditOpScale        = "scale"
+	auditOpAutoscale    = "autoscale"
 	auditOpRollback     = "rollback"
 	auditOpAppDelete    = "app_delete"
 	auditOpExpose       = "expose"

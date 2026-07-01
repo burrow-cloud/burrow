@@ -6,6 +6,7 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,7 +72,7 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_environments"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_autoscale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_environments"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
@@ -465,5 +466,64 @@ func TestReachabilityToolWaitConverges(t *testing.T) {
 	out := decodeStructured[client.ReachabilityResult](t, res)
 	if !out.Reachable || out.URL != "https://web.example.com" {
 		t.Errorf("verdict = {reachable:%v url:%q}, want live at the https URL", out.Reachable, out.URL)
+	}
+}
+
+func TestAutoscaleToolAppliesDefaults(t *testing.T) {
+	var gotMethod, gotPath, gotBody string
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotMethod, gotPath, gotBody = r.Method, r.URL.Path, string(b)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "env": "default", "min_replicas": 1, "max_replicas": 10, "cpu_percent": 90,
+			"metrics_available": false, "warning": "autoscaling needs metrics-server, which was not detected.",
+		})
+	})
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_autoscale",
+		Arguments: map[string]any{"app": "web", "cpu": 90},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	if gotMethod != "POST" || gotPath != "/v1/apps/web/autoscale" {
+		t.Errorf("request = %s %s, want POST /v1/apps/web/autoscale", gotMethod, gotPath)
+	}
+	// The agent named only cpu; the tool fills the min/max defaults (1/10).
+	if !strings.Contains(gotBody, `"min":1`) || !strings.Contains(gotBody, `"max":10`) || !strings.Contains(gotBody, `"cpu":90`) {
+		t.Errorf("body = %s, want min 1, max 10, cpu 90", gotBody)
+	}
+	out := decodeStructured[client.AutoscaleResult](t, res)
+	if out.MaxReplicas != 10 || out.CPUPercent != 90 || out.MetricsAvailable {
+		t.Errorf("result = %+v", out)
+	}
+	if out.Warning == "" {
+		t.Errorf("expected the metrics-absent warning to reach the agent")
+	}
+}
+
+func TestAutoscaleToolOff(t *testing.T) {
+	var gotMethod, gotPath string
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	})
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_autoscale",
+		Arguments: map[string]any{"app": "web", "off": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	if gotMethod != "DELETE" || gotPath != "/v1/apps/web/autoscale" {
+		t.Errorf("request = %s %s, want DELETE /v1/apps/web/autoscale", gotMethod, gotPath)
 	}
 }

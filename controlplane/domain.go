@@ -180,6 +180,11 @@ func DefaultPolicy() Policy {
 			// able to restore a broken app without friction. An operator who wants sign-off can
 			// raise it to confirm or deny with `guard set app.rollback ...`.
 			GuardrailRollback: DispositionAllow,
+			// Autoscaling is helpful and non-destructive, so it is allowed by default — its max is
+			// independently bounded by the replica ceiling. An operator who wants a human to own the
+			// scaling shape (e.g. in prod) can raise it to confirm or deny with `guard set
+			// app.autoscale ...`, per environment.
+			GuardrailAutoscale: DispositionAllow,
 		},
 		MaxReplicas: 50,
 	}

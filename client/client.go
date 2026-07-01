@@ -128,6 +128,32 @@ type ScaleResult struct {
 	Replicas         int32  `json:"replicas"`
 }
 
+// AutoscaleRequest carries a desired autoscaling shape for an app (ADR-0006): the replica band and
+// the CPU (and optional memory) utilization targets, plus the target environment. Env names the
+// environment whose namespace the app lives in (ADR-0035 phase 2b).
+type AutoscaleRequest struct {
+	Env     string `json:"env,omitempty"`
+	Min     int32  `json:"min"`
+	Max     int32  `json:"max"`
+	CPU     int32  `json:"cpu"`
+	Memory  int32  `json:"memory,omitempty"`
+	Confirm bool   `json:"confirm,omitempty"`
+}
+
+// AutoscaleResult reports the applied autoscaling shape, the app and environment it acted in, and
+// whether metrics-server is present. When it is absent, MetricsAvailable is false and Warning
+// explains the autoscaler is set but will not scale until metrics-server is installed.
+type AutoscaleResult struct {
+	App              string `json:"app"`
+	Env              string `json:"env,omitempty"`
+	MinReplicas      int32  `json:"min_replicas"`
+	MaxReplicas      int32  `json:"max_replicas"`
+	CPUPercent       int32  `json:"cpu_percent"`
+	MemoryPercent    int32  `json:"memory_percent,omitempty"`
+	MetricsAvailable bool   `json:"metrics_available"`
+	Warning          string `json:"warning,omitempty"`
+}
+
 type RollbackResult struct {
 	Release               Release `json:"release"`
 	RolledBackToReleaseID string  `json:"rolled_back_to_release_id"`
@@ -533,6 +559,27 @@ func (c *Client) Scale(ctx context.Context, app, env string, replicas int32, con
 	body := map[string]any{"env": env, "replicas": replicas, "confirm": confirm}
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "scale"), body, &out)
 	return out, err
+}
+
+// Autoscale configures autoscaling for an app: it applies a HorizontalPodAutoscaler on the app's
+// Deployment with the requested replica band and utilization targets (ADR-0006). The result reports
+// the applied shape and, when metrics-server is absent, a warning that the autoscaler will not scale
+// until it is installed.
+func (c *Client) Autoscale(ctx context.Context, app string, req AutoscaleRequest) (AutoscaleResult, error) {
+	var out AutoscaleResult
+	body := map[string]any{"env": req.Env, "min": req.Min, "max": req.Max, "cpu": req.CPU, "memory": req.Memory, "confirm": req.Confirm}
+	err := c.do(ctx, http.MethodPost, c.appPath(app, "autoscale"), body, &out)
+	return out, err
+}
+
+// DisableAutoscale turns autoscaling off for an app by removing its HorizontalPodAutoscaler
+// (ADR-0006). It is idempotent: removing autoscaling from an app that has none succeeds.
+func (c *Client) DisableAutoscale(ctx context.Context, app, env string, confirm bool) error {
+	path := c.appPath(app, "autoscale")
+	if confirm {
+		path += "?confirm=true"
+	}
+	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
 }
 
 func (c *Client) Expose(ctx context.Context, app, env, host string, port int32, tls bool, issuer string, confirm bool) (ExposeResult, error) {

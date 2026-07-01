@@ -224,3 +224,54 @@ func TestWaitReachableTimesOut(t *testing.T) {
 		t.Errorf("polls = %d, want 4 (bounded by the timeout, no infinite loop)", polls)
 	}
 }
+
+func TestClientAutoscaleBody(t *testing.T) {
+	var gotBody, gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody, gotMethod, gotPath = string(b), r.Method, r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "min_replicas": 1, "max_replicas": 8, "cpu_percent": 90,
+			"metrics_available": false, "warning": "autoscaling needs metrics-server, which was not detected.",
+		})
+	}))
+	defer srv.Close()
+
+	c := client.NewClient(srv.URL, "tok")
+	res, err := c.Autoscale(context.Background(), "web", client.AutoscaleRequest{Min: 1, Max: 8, CPU: 90})
+	if err != nil {
+		t.Fatalf("Autoscale: %v", err)
+	}
+	if gotMethod != "POST" || gotPath != "/v1/apps/web/autoscale" {
+		t.Errorf("request = %s %s, want POST /v1/apps/web/autoscale", gotMethod, gotPath)
+	}
+	if !strings.Contains(gotBody, `"max":8`) || !strings.Contains(gotBody, `"cpu":90`) {
+		t.Errorf("body = %s, want max 8 cpu 90", gotBody)
+	}
+	if res.MaxReplicas != 8 || res.CPUPercent != 90 || res.MetricsAvailable {
+		t.Errorf("result = %+v", res)
+	}
+	if res.Warning == "" {
+		t.Errorf("expected a metrics-absent warning")
+	}
+}
+
+func TestClientDisableAutoscale(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := client.NewClient(srv.URL, "tok")
+	if err := c.DisableAutoscale(context.Background(), "web", "prod", true); err != nil {
+		t.Fatalf("DisableAutoscale: %v", err)
+	}
+	if gotMethod != "DELETE" || gotPath != "/v1/apps/web/autoscale" {
+		t.Errorf("request = %s %s, want DELETE /v1/apps/web/autoscale", gotMethod, gotPath)
+	}
+	if !strings.Contains(gotQuery, "confirm=true") || !strings.Contains(gotQuery, "env=prod") {
+		t.Errorf("query = %q, want confirm and env", gotQuery)
+	}
+}

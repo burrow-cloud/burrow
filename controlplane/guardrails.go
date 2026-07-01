@@ -71,6 +71,12 @@ const (
 	// broken app quickly; an operator can set it to confirm or deny to require sign-off for
 	// server-side, agent-independent enforcement (ADR-0020).
 	GuardrailRollback GuardrailCode = "app.rollback"
+	// GuardrailAutoscale: the operation would configure (or turn off) autoscaling for an app — apply
+	// a HorizontalPodAutoscaler on its Deployment. Allowed by default: autoscaling is helpful and
+	// non-destructive, and the autoscaler's max is independently bounded by the replica ceiling
+	// (GuardrailReplicaCeiling). An operator can raise it to confirm or deny per environment, e.g.
+	// deny in prod so only a human sets the scaling shape there.
+	GuardrailAutoscale GuardrailCode = "app.autoscale"
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through
@@ -100,6 +106,7 @@ var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailAddonRestore, Description: "restore an app's database from a backup, overwriting its live contents"},
 	{Code: GuardrailAppDelete, Description: "delete an app entirely (its workload, routing, and release history)"},
 	{Code: GuardrailRollback, Description: "roll an application back to its previous release"},
+	{Code: GuardrailAutoscale, Description: "configure autoscaling for an application"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.
@@ -199,6 +206,25 @@ func (p Policy) evaluateReplicas(env, op string, replicas int32, confirmed bool)
 		return p.enforce(env, op, GuardrailReplicaCeiling, confirmed,
 			fmt.Sprintf("requested %d replicas exceeds the policy ceiling of %d", replicas, p.MaxReplicas),
 			replicas, p.MaxReplicas)
+	}
+	return nil
+}
+
+// evaluateAutoscale evaluates an autoscale request against the policy, given whether the caller has
+// confirmed. It applies two guardrails in order: the app.autoscale guardrail gates the operation
+// itself (allow by default), and the app.replica_ceiling guardrail bounds the autoscaler's max the
+// same way it bounds a manual scale — a max above the ceiling is denied exactly like scaling above
+// it (ADR-0006). It returns nil to proceed, or the first *GuardrailError that denies the operation
+// or marks it as needing confirmation. The spec is assumed already validated (min >= 1, max >= min),
+// so the ceiling is the only replica bound a guardrail concerns itself with here.
+func (p Policy) evaluateAutoscale(env string, spec AutoscaleSpec, confirmed bool) error {
+	if err := p.evaluateGuardrail(env, "autoscale", GuardrailAutoscale, confirmed, "configuring autoscaling"); err != nil {
+		return err
+	}
+	if spec.MaxReplicas > p.MaxReplicas {
+		return p.enforce(env, "autoscale", GuardrailReplicaCeiling, confirmed,
+			fmt.Sprintf("requested max of %d replicas exceeds the policy ceiling of %d", spec.MaxReplicas, p.MaxReplicas),
+			spec.MaxReplicas, p.MaxReplicas)
 	}
 	return nil
 }

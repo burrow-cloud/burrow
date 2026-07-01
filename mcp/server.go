@@ -157,6 +157,11 @@ func NewServer(clientFor ClientForContext, kubeconfig, version string) *sdk.Serv
 	}, scaleTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_autoscale",
+		Description: "Configure autoscaling for an application by applying a HorizontalPodAutoscaler on its Deployment, so it scales its replica count between a min and a max to hold a target CPU (and optionally memory) utilization. Use it for requests like \"make web autoscale\" (sane defaults) or \"make web autoscale at 90% CPU\". The max is bounded by the replica-ceiling guardrail: a max above the ceiling is denied exactly like scaling above it. Autoscaling needs metrics-server installed in the cluster; the HPA is created regardless, and the result warns (metrics_available false, a warning message) when metrics-server was not detected, meaning the autoscaler is set but will not scale until it is installed. Set off to true to remove autoscaling (idempotent). A guardrail may hold this for confirmation or deny it (e.g. an operator may deny autoscaling in prod); when held, the error says so, ask the user, then retry with confirm set to true. Echoes the environment it acted in.",
+	}, autoscaleTool(clientFor, sel))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_expose",
 		Description: "Make a deployed application reachable from outside the cluster at a hostname, by creating a Service and an Ingress. Public exposure is held for confirmation by a guardrail by default; when held, the error says so — ask the user, then retry with confirm set to true. Reachability also needs an ingress controller and DNS pointing the host at the cluster.",
 	}, exposeTool(clientFor, sel))
@@ -495,6 +500,68 @@ func scaleTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[scal
 			return nil, scaleOutput{}, err
 		}
 		return nil, scaleOutput{ScaleResult: res, targeted: tgt.echo()}, nil
+	}
+}
+
+type autoscaleInput struct {
+	contextArg
+	envArg
+	App     string `json:"app" jsonschema:"the application name"`
+	Off     bool   `json:"off,omitempty" jsonschema:"set true to REMOVE autoscaling from the app (idempotent); the min/max/cpu/memory fields are ignored"`
+	Min     int32  `json:"min,omitempty" jsonschema:"minimum replicas the autoscaler will not go below (default 1); at least 1"`
+	Max     int32  `json:"max,omitempty" jsonschema:"maximum replicas the autoscaler will not exceed (default 10); bounded by the replica-ceiling guardrail"`
+	CPU     int32  `json:"cpu,omitempty" jsonschema:"target average CPU utilization percent, 1..100 (default 80)"`
+	Memory  int32  `json:"memory,omitempty" jsonschema:"optional target average memory utilization percent, 1..100; 0 leaves it unset"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed an autoscale a guardrail held for confirmation; do not self-confirm"`
+}
+
+// autoscaleDefaults fills the sane defaults for an autoscale-on call so an agent can say "make web
+// autoscale" with no numbers: min 1, max 10, cpu 80. They mirror the CLI's flag defaults. A supplied
+// value (non-zero) wins; the off path ignores them.
+func (in autoscaleInput) withDefaults() autoscaleInput {
+	if in.Min == 0 {
+		in.Min = 1
+	}
+	if in.Max == 0 {
+		in.Max = 10
+	}
+	if in.CPU == 0 {
+		in.CPU = 80
+	}
+	return in
+}
+
+// autoscaleOutput is the autoscale result plus the environment it acted in (ADR-0036). On the off
+// path only App and the environment echo are set.
+type autoscaleOutput struct {
+	client.AutoscaleResult
+	targeted
+}
+
+func autoscaleTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[autoscaleInput, autoscaleOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in autoscaleInput) (*sdk.CallToolResult, autoscaleOutput, error) {
+		tgt, err := sel.resolve(in.Env, in.Context)
+		if err != nil {
+			return nil, autoscaleOutput{}, err
+		}
+		c, err := clientFor(tgt.context)
+		if err != nil {
+			return nil, autoscaleOutput{}, err
+		}
+		if in.Off {
+			if err := c.DisableAutoscale(ctx, in.App, tgt.env, in.Confirm); err != nil {
+				return nil, autoscaleOutput{}, err
+			}
+			return nil, autoscaleOutput{AutoscaleResult: client.AutoscaleResult{App: in.App}, targeted: tgt.echo()}, nil
+		}
+		in = in.withDefaults()
+		res, err := c.Autoscale(ctx, in.App, client.AutoscaleRequest{
+			Env: tgt.env, Min: in.Min, Max: in.Max, CPU: in.CPU, Memory: in.Memory, Confirm: in.Confirm,
+		})
+		if err != nil {
+			return nil, autoscaleOutput{}, err
+		}
+		return nil, autoscaleOutput{AutoscaleResult: res, targeted: tgt.echo()}, nil
 	}
 }
 

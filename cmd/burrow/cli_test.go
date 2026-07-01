@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -721,5 +722,87 @@ func TestExactArgsErrorNamesArgsAndPrintsUsage(t *testing.T) {
 	_ = run(context.Background(), []string{"app", "status", "web", "extra"}, &out, &errb)
 	if !strings.Contains(errb.String(), "takes only <app>") {
 		t.Errorf("extra-arg message = %q", errb.String())
+	}
+}
+
+func TestAutoscaleDefaults(t *testing.T) {
+	var gotMethod, gotPath, gotBody string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotMethod, gotPath, gotBody = r.Method, r.URL.Path, string(b)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "env": "default", "min_replicas": 1, "max_replicas": 10, "cpu_percent": 80,
+			"metrics_available": true,
+		})
+	}, "app", "autoscale", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "POST" || gotPath != "/v1/apps/web/autoscale" {
+		t.Errorf("request = %s %s", gotMethod, gotPath)
+	}
+	// The flag defaults (min 1, max 10, cpu 80) travel in the request body.
+	if !strings.Contains(gotBody, `"min":1`) || !strings.Contains(gotBody, `"max":10`) || !strings.Contains(gotBody, `"cpu":80`) {
+		t.Errorf("body = %s, want defaults 1/10/80", gotBody)
+	}
+	if !strings.Contains(out, "set web to autoscale between 1 and 10 replicas at 80% CPU") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+func TestAutoscaleCPUFlag(t *testing.T) {
+	var gotBody string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "env": "default", "min_replicas": 1, "max_replicas": 10, "cpu_percent": 90,
+			"metrics_available": true,
+		})
+	}, "app", "autoscale", "web", "--cpu", "90")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(gotBody, `"cpu":90`) {
+		t.Errorf("body = %s, want cpu 90", gotBody)
+	}
+	if !strings.Contains(out, "at 90% CPU") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+func TestAutoscaleMetricsWarning(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "env": "default", "min_replicas": 1, "max_replicas": 10, "cpu_percent": 80,
+			"metrics_available": false,
+			"warning":           "autoscaling needs metrics-server, which was not detected. The autoscaler is set but will not scale until metrics-server is installed.",
+		})
+	}, "app", "autoscale", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "Note: autoscaling needs metrics-server, which was not detected.") {
+		t.Errorf("output = %q, want the metrics-absent note", out)
+	}
+	if strings.Contains(out, "—") {
+		t.Errorf("output must not contain an em-dash: %q", out)
+	}
+}
+
+func TestAutoscaleOff(t *testing.T) {
+	var gotMethod, gotPath string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}, "app", "autoscale", "web", "off")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "DELETE" || gotPath != "/v1/apps/web/autoscale" {
+		t.Errorf("request = %s %s, want DELETE /v1/apps/web/autoscale", gotMethod, gotPath)
+	}
+	if !strings.Contains(out, "turned autoscaling off for web") {
+		t.Errorf("output = %q", out)
 	}
 }

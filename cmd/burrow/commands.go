@@ -256,6 +256,77 @@ func newScaleCmd() *cobra.Command {
 	return cmd
 }
 
+func newAutoscaleCmd() *cobra.Command {
+	o := &commonOpts{}
+	var (
+		min, max, cpu, memory int32
+		confirm               bool
+	)
+	cmd := &cobra.Command{
+		Use:   "autoscale <app> [off]",
+		Short: "Autoscale an app, or turn autoscaling off",
+		Long: "autoscale sets up a HorizontalPodAutoscaler on the app's Deployment so it scales\n" +
+			"between --min and --max replicas to hold a target CPU (and optional memory)\n" +
+			"utilization. The max is bounded by the replica-ceiling guardrail. Autoscaling needs\n" +
+			"metrics-server; without it the autoscaler is set but will not scale until it is\n" +
+			"installed.\n\n" +
+			"Run \"burrow app autoscale <app> off\" to remove autoscaling.",
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			app := args[0]
+			off := len(args) == 2
+			if off && args[1] != "off" {
+				return fmt.Errorf("second argument must be \"off\" to turn autoscaling off, got %q", args[1])
+			}
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			if off {
+				if err := c.DisableAutoscale(ctx, app, env, confirm); err != nil {
+					return err
+				}
+				human := fmt.Sprintf("turned autoscaling off for %s", app)
+				return emit(cmd.OutOrStdout(), o.json, map[string]string{"app": app}, human)
+			}
+			res, err := c.Autoscale(ctx, app, client.AutoscaleRequest{Env: env, Min: min, Max: max, CPU: cpu, Memory: memory, Confirm: confirm})
+			if err != nil {
+				return err
+			}
+			return emit(cmd.OutOrStdout(), o.json, res, formatAutoscale(res))
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	cmd.Flags().Int32Var(&min, "min", 1, "minimum replicas")
+	cmd.Flags().Int32Var(&max, "max", 10, "maximum replicas (bounded by the replica-ceiling guardrail)")
+	cmd.Flags().Int32Var(&cpu, "cpu", 80, "target average CPU utilization percent")
+	cmd.Flags().Int32Var(&memory, "memory", 0, "target average memory utilization percent (0 leaves it unset)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	return cmd
+}
+
+// formatAutoscale renders the applied autoscaling shape for the human-readable result. When
+// metrics-server was not detected it appends the plain-language note the result carries (no
+// em-dashes: it is printed verbatim).
+func formatAutoscale(res client.AutoscaleResult) string {
+	target := fmt.Sprintf("%d%% CPU", res.CPUPercent)
+	if res.MemoryPercent > 0 {
+		target += fmt.Sprintf(" and %d%% memory", res.MemoryPercent)
+	}
+	env := res.Env
+	if env == "" {
+		env = "default"
+	}
+	s := fmt.Sprintf("set %s to autoscale between %d and %d replicas at %s in the %s environment",
+		res.App, res.MinReplicas, res.MaxReplicas, target, env)
+	if res.Warning != "" {
+		s += "\nNote: " + res.Warning
+	}
+	return s
+}
+
 func newAppDeleteCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm bool

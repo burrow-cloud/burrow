@@ -347,8 +347,8 @@ func errNoCluster() error {
 // sequential and bounded per context by connect.ProbeTimeout, matching `burrow env scan`.
 func writeInstallContextHint(ctx context.Context, w io.Writer, kubeconfig, namespace string, contexts []connect.Context) {
 	fmt.Fprint(w, "Install the Burrow control plane into your cluster.\n\n")
-	fmt.Fprintf(w, "The control plane installs into a namespace (default %q); your apps deploy into the app\n"+
-		"namespace (default %q).\n\n", connect.DefaultNamespace, connect.DefaultAppNamespace)
+	fmt.Fprintf(w, "The control plane installs into a namespace (default %q); your apps deploy into the\n"+
+		"app namespace (default %q).\n\n", connect.DefaultNamespace, connect.DefaultAppNamespace)
 	fmt.Fprint(w, "Choose a context to install into. Detected Kubernetes contexts:\n\n")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CURRENT\tCONTEXT\tCLUSTER\tBURROWD")

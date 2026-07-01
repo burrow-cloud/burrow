@@ -31,21 +31,26 @@ service behind the same guardrails.
 
 Once Burrow is connected, you operate your apps by talking to your agent. Things you can say today:
 
-- **"Deploy my app to prod."** Your agent figures out which app from the folder you are in, builds it, ships it, and rolls it out to your cluster.
-- **"Roll back the last release."**
-- **"Scale web up."** or **"Scale web to 3."**
-- **"Why isn't my site reachable at example.com?"** Your agent walks the whole chain, DNS, TLS, and the cluster, finds the broken link, and proposes a fix.
-- **"Show me any 500 errors from my web app and figure out what happened."** Your agent reads the logs and tells you what broke, in plain language.
-- **"How is my app doing?"** or **"Why is my app slow?"** Straight answers, no dashboards to dig through.
-- **"My site is slow, would a cache help?"** Your agent checks your logs and metrics, tells you if it would, and if you say yes, sets one up and wires your app to it.
+- `Deploy my app to prod`
+  - Burrow figures out which app you mean from the folder you are in, builds it, and rolls it out to your cluster.
+- `Roll back the last release`
+- `Scale web up` or `Scale web to 3`
+- `Show me any 500 errors from my web app and figure out what happened`
+  - Your agent reads the logs and tells you what broke, in plain language.
+- `Why isn't my site reachable at example.com?`
+  - Your agent walks the chain (DNS, TLS, cluster), finds the broken link, and proposes a fix.
+- `How is my app doing?` or `Why is my app slow?`
+  - Straight answers, no dashboards to dig through.
+- `My site is slow, would a cache help?`
+  - Your agent checks your logs and metrics, tells you if it would, and if you say yes, sets one up and wires your app to it.
 
-Coming soon: **"Make web autoscale at 90% CPU."** and **"Limit web to 500MB of memory and 1 CPU."**
+Coming soon: `Make web autoscale at 90% CPU` and `Limit web to 500MB of memory and 1 CPU`.
 
 ## Add-ons
 
-Starting something new, or adding a capability? Ask your agent. "Add a Postgres database and connect my app to it." Burrow can stand up Postgres, logs, metrics, or a cache on your cluster, and your agent writes the integration code to wire your app in.
+Starting something new, or adding a capability? Ask your agent. `Add a Postgres database and connect my app to it.` Burrow can stand up Postgres, logs, metrics, or a cache on your cluster, and your agent writes the integration code to wire your app in.
 
-Standing up infrastructure is gated by a guardrail, so by default the agent asks first: it proposes the add-on, you approve, and it installs and connects your app in one go. Want it hands-off? `burrow guard set addon.install allow` lets the agent do it without asking. Prefer to stay in control? Install it yourself with `burrow addon install postgres`, then tell your agent: "I just installed the Postgres add-on, configure my app to use it."
+Standing up infrastructure is gated by a guardrail, so by default the agent asks first: it proposes the add-on, you approve, and it installs and connects your app in one go. Want it hands-off? `burrow guard set addon.install allow` lets the agent do it without asking. Prefer to stay in control? Install it yourself with `burrow addon install postgres`, then tell your agent: `I just installed the Postgres add-on, configure my app to use it.`
 
 ## Built for day two
 

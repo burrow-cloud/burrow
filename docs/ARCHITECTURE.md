@@ -9,9 +9,9 @@ real applications on a Kubernetes cluster by driving Burrow through an MCP serve
 agent says "deploy this," "roll it back," "show me the logs," "scale it," and Burrow does
 it safely on the user's own cluster.
 
-This repository is the **open core**: the single-tenant control plane, the MCP server, and
+This repository is **open source**: the single-tenant control plane, the MCP server, and
 the CLI, packaged so a developer can self-host the whole thing. The multi-tenant managed
-cloud (billing, teams, dashboard, SSO) is a separate, private product and does not live
+cloud (billing, teams, dashboard, SSO) is a separate product and does not live
 here.
 
 ## The four layers

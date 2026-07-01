@@ -11,9 +11,9 @@ it, and operates their infrastructure by talking to the agent. **Compute first:*
 job is deploying someone's code and running it. Databases, domains, autoscaling, and cost
 controls come later ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
-This repository is the **open core**: the single-tenant control plane, the MCP server, and
+This repository is **open source**: the single-tenant control plane, the MCP server, and
 the CLI, packaged so a developer can self-host the whole thing. The multi-tenant managed
-cloud (billing, teams, dashboard, SSO) is a separate, private product and does **not** live
+cloud (billing, teams, dashboard, SSO) is a separate product and does not live
 here.
 
 > **Status: pre-implementation.** No feature code has shipped. The foundations (module,
@@ -176,8 +176,8 @@ the v0.1 slice ([docs/PLAN.md](docs/PLAN.md)).
 - **All code is Apache-2.0** ([LICENSING.md](LICENSING.md),
   [ADR-0033](docs/adr/0033-relicense-to-apache.md)). Each new `.go` file gets an
   `SPDX-License-Identifier: Apache-2.0` header; the CI check (`scripts/check-spdx.sh`) enforces
-  it. The *code* in this repo is open source; **Burrow the product is "open core"** — the managed
-  cloud and enterprise tier are proprietary and separate ([ADR-0009](docs/adr/0009-honest-status.md)).
+  it. The code in this repo is open source; the managed cloud and enterprise tier are a
+  separate product that does not live here ([ADR-0009](docs/adr/0009-honest-status.md)).
 - **Outside code is not merged under the DCO alone** — the maintainer keeps sole copyright
   for commercial licensing, so outside-code PRs are declined or CLA-gated; issues and
   discussions are the open way to contribute ([CONTRIBUTING.md](CONTRIBUTING.md)).

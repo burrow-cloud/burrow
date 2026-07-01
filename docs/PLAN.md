@@ -157,6 +157,15 @@ environment, with prod gated while staging stays permissive.
   a frictionless cluster on-ramp — live in [ROADMAP.md](ROADMAP.md). **Deferred until requested:**
   server-side build from a git reference ([ADR-0008](adr/0008-two-build-paths.md)).
 
+Shipped in **v0.7.1** (patch): a `burrow mcp <tool> [install]` command that connects Burrow's MCP
+server to Claude Code, Cursor, Codex, Copilot, or OpenCode (preview by default, idempotent, and it
+backs up any file it edits), with a generic fallback for any other agent and a new
+[getting-started guide](getting-started.md); a kubectl-style `--help` layout (usage at the bottom,
+examples, a first-run `burrow` vs `burrow -h` split); a one-command `addon install` that stages an
+add-on's RBAC client-side then installs through the API (the metrics vmagent grant moved out of the
+base install for least privilege); a TTY-aware install progress indicator; and a consistent
+`burrow env` listing plus an install context list with an installed-status column.
+
 Shipped in **v0.3**: the CLI regrouped by task (`app`/`config`/`system`, `expose`→`publish` —
 [ADR-0024](adr/0024-cli-command-taxonomy.md)) with `app list`; the Cloudflare adapter verifying
 account-scoped (`cfat_`) tokens by listing zones; the app Ingress bound to the ingress-nginx

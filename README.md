@@ -133,7 +133,7 @@ set globally without `--env`.
 
 ## Try it
 
-You need a cluster you can reach with `kubectl` (DigitalOcean is the reference target). Three
+You need a cluster you can reach with `kubectl`. Three
 commands get you from nothing to an agent operating your cluster:
 
 ```sh

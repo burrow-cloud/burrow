@@ -7,7 +7,7 @@ you.
 ## Prerequisites
 
 - An existing Kubernetes cluster you can reach, with a context in your kubeconfig (the same access
-  `kubectl` uses). DigitalOcean is the reference target, but any reachable cluster works.
+  `kubectl` uses). Any reachable cluster works.
 - [Homebrew](https://brew.sh), to install the CLI.
 
 ## Part 1 - Set up Burrow on your cluster

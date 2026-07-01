@@ -43,7 +43,7 @@ func TestRootHelpShowsGroups(t *testing.T) {
 
 	for _, want := range []string{
 		"Get started:", "Environments:", "Operate:", "Govern:",
-		"install", "upgrade", "cluster", "config", "env", "app", "addon", "guard", "audit",
+		"install", "upgrade", "mcp", "cluster", "config", "env", "app", "addon", "guard", "audit",
 		"version", "completion", "help",
 	} {
 		if !strings.Contains(s, want) {

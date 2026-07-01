@@ -648,6 +648,7 @@ func TestHelpLayoutKubectlStyle(t *testing.T) {
 		{"-h"},
 		{"install", "-h"},
 		{"upgrade", "-h"},
+		{"mcp", "-h"},
 		{"cluster", "-h"},
 		{"config", "-h"},
 		{"config", "provider", "add", "-h"},

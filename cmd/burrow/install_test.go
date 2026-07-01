@@ -463,3 +463,24 @@ func TestInstallRequiresImageWhenNoDefault(t *testing.T) {
 		t.Errorf("error should tell the user to pass --burrowd-image, got: %v", err)
 	}
 }
+
+// TestPostInstallGuidancePointsAtMcp confirms the post-install tail routes the user to connect their
+// agent over MCP (Burrow is agent-driven, not CLI-deploy-driven) rather than at the old
+// `burrow app deploy` message, and stays free of em-dashes as user-facing copy.
+func TestPostInstallGuidancePointsAtMcp(t *testing.T) {
+	for _, want := range []string{
+		"Burrow is ready. Connect your AI agent to operate it:",
+		"burrow mcp claude",
+		"Then open your agent and ask it to deploy your app.",
+	} {
+		if !strings.Contains(postInstallGuidance, want) {
+			t.Errorf("post-install guidance missing %q:\n%s", want, postInstallGuidance)
+		}
+	}
+	if strings.Contains(postInstallGuidance, "burrow app deploy") {
+		t.Errorf("post-install guidance should no longer point at `burrow app deploy`:\n%s", postInstallGuidance)
+	}
+	if strings.Contains(postInstallGuidance, "—") {
+		t.Errorf("post-install guidance must not contain an em-dash:\n%s", postInstallGuidance)
+	}
+}

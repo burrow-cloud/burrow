@@ -146,6 +146,23 @@ func TestApplyDryRunSetsDryRunAll(t *testing.T) {
 	}
 }
 
+func TestApplyNonTTYNoCarriageReturn(t *testing.T) {
+	ap, _ := testApplier()
+	// A bytes.Buffer is not an *os.File, so it is treated as non-terminal: the summary prints but
+	// the carriage-return progress animation is suppressed, keeping captured/piped output clean.
+	var out bytes.Buffer
+	if err := ap.apply(context.Background(), twoDocManifest, false, false, &out, &out); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	s := out.String()
+	if strings.Contains(s, "\r") {
+		t.Errorf("non-TTY output should not contain a carriage return, got %q", s)
+	}
+	if !strings.Contains(s, "Applied 2 resource(s):") {
+		t.Errorf("non-TTY output missing the summary, got %q", s)
+	}
+}
+
 func TestApplyVerboseListsEachResource(t *testing.T) {
 	ap, _ := testApplier()
 	var out bytes.Buffer

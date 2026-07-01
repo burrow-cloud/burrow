@@ -139,19 +139,20 @@ set globally without `--env`.
 
 ## Try it
 
-You need a cluster you can reach with `kubectl` (DigitalOcean is the reference target). Install
-the CLIs with Homebrew:
+You need a cluster you can reach with `kubectl` (DigitalOcean is the reference target). Three
+commands get you from nothing to an agent operating your cluster:
 
 ```sh
 brew install burrow-cloud/tap/burrow     # installs burrow and burrow-mcp
-
 burrow install <context>                 # control plane into the named kube context (run `burrow install` to list them)
-claude mcp add burrow burrow-mcp         # point your agent at it (auto-connects via kubeconfig)
-
-# then just talk to your agent, or drive it directly:
-burrow app deploy web --image nginx:alpine
-burrow app status web
+burrow mcp claude install                # connect your agent (or: cursor, codex, copilot, opencode)
 ```
+
+Then just talk to your agent ("deploy this and serve it at example.com over HTTPS"), or drive
+Burrow directly with `burrow app deploy web --image nginx:alpine` and `burrow app status web`.
+
+See [docs/getting-started.md](docs/getting-started.md) for the full walkthrough, including the
+complete list of supported agents and how to connect any other MCP-capable tool.
 
 Prefer to build from source? `go build -o burrow ./cmd/burrow && go build -o burrow-mcp ./cmd/burrow-mcp`.
 
@@ -188,6 +189,8 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code
 
 ## Documentation
 
+- [docs/getting-started.md](docs/getting-started.md) — set up Burrow on your cluster and connect
+  your agent, start to finish.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the system design: the four layers, the
   invariants, and the request paths.
 - [docs/HARDENING.md](docs/HARDENING.md) — keep the control plane the agent's only path to

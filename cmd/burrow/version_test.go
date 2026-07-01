@@ -87,14 +87,15 @@ func TestVersionCommandPrintsCLILine(t *testing.T) {
 	if err := run(context.Background(), []string{"version", "--kubeconfig", "/nonexistent"}, &out, &errb); err != nil {
 		t.Fatalf("version: %v", err)
 	}
-	if s := out.String(); !strings.Contains(s, "burrow (CLI):  dev") {
+	if s := out.String(); !strings.Contains(s, "burrow (CLI):") || !strings.Contains(s, "dev") {
 		t.Errorf("version output = %q, want the CLI version line", s)
 	}
 }
 
-// TestControlPlaneLine covers the rendered control-plane line for each probe outcome: it must name
-// the targeted context on success, when nothing is installed, and when the cluster is unreachable.
-func TestControlPlaneLine(t *testing.T) {
+// TestControlPlaneValue covers the rendered control-plane value cell for each probe outcome: it
+// must name the targeted context on success, when nothing is installed, and when the cluster is
+// unreachable. The value carries no "control plane:" label; the command aligns that in a tabwriter.
+func TestControlPlaneValue(t *testing.T) {
 	notFound := apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "deployments"}, "burrowd")
 	cases := []struct {
 		name      string
@@ -106,23 +107,23 @@ func TestControlPlaneLine(t *testing.T) {
 		{
 			name:    "success names the context and namespace",
 			img:     "ghcr.io/burrow-cloud/burrowd:v0.6.0",
-			wantHas: []string{`control plane: v0.6.0 (context "nonprod", namespace "burrow")`},
+			wantHas: []string{`v0.6.0 (context "nonprod", namespace "burrow")`},
 		},
 		{
 			name:    "not installed names the context and namespace",
 			err:     notFound,
-			wantHas: []string{`control plane: not installed (context "nonprod", namespace "burrow")`},
+			wantHas: []string{`not installed (context "nonprod", namespace "burrow")`},
 		},
 		{
 			name:      "unreachable names the context and omits the URL",
 			err:       &net.DNSError{Err: "no such host", Name: "abc123.k8s.example.com", IsNotFound: true},
-			wantHas:   []string{`control plane: unreachable via context "nonprod" (no such host)`},
+			wantHas:   []string{`unreachable via context "nonprod" (no such host)`},
 			wantNotIn: []string{"http", "abc123"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := controlPlaneLine(tc.img, tc.err, "nonprod", "burrow")
+			got := controlPlaneValue(tc.img, tc.err, "nonprod", "burrow")
 			for _, want := range tc.wantHas {
 				if !strings.Contains(got, want) {
 					t.Errorf("line = %q, want substring %q", got, want)
@@ -213,9 +214,11 @@ func TestVersionControlPlaneBehind(t *testing.T) {
 		t.Fatalf("version: %v\n%s", err, errb.String())
 	}
 	s := out.String()
+	// Assert on labels and values as separate substrings so the tabwriter's column padding does
+	// not make the test brittle.
 	for _, want := range []string{
-		"control plane: v0.7.0",
-		"latest release: v0.7.2",
+		"control plane:", "v0.7.0",
+		"latest release:", "v0.7.2",
 		"Your control plane is behind. Run `burrow upgrade` to update it to v0.7.2.",
 	} {
 		if !strings.Contains(s, want) {
@@ -238,7 +241,7 @@ func TestVersionAllCurrent(t *testing.T) {
 		t.Fatalf("version: %v\n%s", err, errb.String())
 	}
 	s := out.String()
-	if !strings.Contains(s, "latest release: v0.7.2") {
+	if !strings.Contains(s, "latest release:") || !strings.Contains(s, "v0.7.2") {
 		t.Errorf("version output = %q, want the latest release line", s)
 	}
 	if !strings.Contains(s, "You are on the latest release.") {
@@ -263,7 +266,7 @@ func TestVersionFetchErrorSkipsReleaseLines(t *testing.T) {
 		t.Fatalf("version: %v\n%s", err, errb.String())
 	}
 	s := out.String()
-	if !strings.Contains(s, "control plane: v0.7.0") {
+	if !strings.Contains(s, "control plane:") || !strings.Contains(s, "v0.7.0") {
 		t.Errorf("version output = %q, want the control-plane line", s)
 	}
 	for _, no := range []string{"latest release:", "burrow upgrade", "brew upgrade", "You are on the latest release."} {
@@ -307,7 +310,7 @@ func TestVersionContextFlagSelectsCluster(t *testing.T) {
 		t.Fatalf("version: %v\n%s", err, errb.String())
 	}
 	s := out.String()
-	if !strings.Contains(s, `control plane: v0.6.0 (context "prod", namespace "burrow")`) {
+	if !strings.Contains(s, "control plane:") || !strings.Contains(s, `v0.6.0 (context "prod", namespace "burrow")`) {
 		t.Errorf("version output = %q, want prod's image and context", s)
 	}
 	if !prodHit {

@@ -104,32 +104,68 @@ func upgradeOptions(ctx context.Context, cs kubernetes.Interface, namespace, ima
 	if err != nil {
 		return installOptions{}, err
 	}
+	addonNamespace, err := addonNamespaceOf(ctx, cs, namespace)
+	if err != nil {
+		return installOptions{}, err
+	}
 	return installOptions{
-		Namespace:    namespace,
-		AppNamespace: appNamespace,
-		Image:        image,
-		Token:        token,
-		DBPassword:   dbPassword,
-		Port:         connect.DefaultPort,
+		Namespace:      namespace,
+		AppNamespace:   appNamespace,
+		AddonNamespace: addonNamespace,
+		Image:          image,
+		Token:          token,
+		DBPassword:     dbPassword,
+		Port:           connect.DefaultPort,
 	}, nil
 }
 
 // appNamespaceOf reads the app namespace from the running burrowd Deployment's
 // BURROW_NAMESPACE env, so an upgrade keeps deploying apps where they already go rather than
-// silently moving them.
+// silently moving them. The env is required: every install renders it, so its absence means
+// the deployment is not one burrow installed.
 func appNamespaceOf(ctx context.Context, cs kubernetes.Interface, namespace string) (string, error) {
+	v, err := burrowdEnv(ctx, cs, namespace, "BURROW_NAMESPACE")
+	if err != nil {
+		return "", err
+	}
+	if v == "" {
+		return "", fmt.Errorf("the burrowd deployment in %s has no BURROW_NAMESPACE env", namespace)
+	}
+	return v, nil
+}
+
+// addonNamespaceOf reads the add-on namespace from the running burrowd Deployment's
+// BURROW_ADDON_NAMESPACE env, so an upgrade re-renders the manifests with the same add-on
+// namespace rather than an empty one (which the install template would render as a Namespace
+// with no name, failing server-side apply). Installs that predate add-ons carry no such env;
+// those fall back to the default add-on namespace.
+func addonNamespaceOf(ctx context.Context, cs kubernetes.Interface, namespace string) (string, error) {
+	v, err := burrowdEnv(ctx, cs, namespace, "BURROW_ADDON_NAMESPACE")
+	if err != nil {
+		return "", err
+	}
+	if v == "" {
+		return connect.DefaultAddonNamespace, nil
+	}
+	return v, nil
+}
+
+// burrowdEnv reads a single env var's value from the running burrowd Deployment. It returns
+// "" (no error) when the var is absent, and errors only when the Deployment itself cannot be
+// read, so callers decide whether a missing var is fatal or has a default.
+func burrowdEnv(ctx context.Context, cs kubernetes.Interface, namespace, name string) (string, error) {
 	d, err := cs.AppsV1().Deployments(namespace).Get(ctx, "burrowd", metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("reading the burrowd deployment in %s: %w", namespace, err)
 	}
 	for _, c := range d.Spec.Template.Spec.Containers {
 		for _, e := range c.Env {
-			if e.Name == "BURROW_NAMESPACE" {
+			if e.Name == name {
 				return e.Value, nil
 			}
 		}
 	}
-	return "", fmt.Errorf("the burrowd deployment in %s has no BURROW_NAMESPACE env", namespace)
+	return "", nil
 }
 
 // secretValue reads one key from a Secret. The raw NotFound error is preserved (wrapped) so

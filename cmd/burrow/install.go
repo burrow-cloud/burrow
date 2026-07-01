@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -440,11 +441,7 @@ func waitForDeployment(ctx context.Context, cs kubernetes.Interface, namespace, 
 	for {
 		d, err := cs.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err == nil {
-			desired := int32(1)
-			if d.Spec.Replicas != nil {
-				desired = *d.Spec.Replicas
-			}
-			if desired > 0 && d.Status.ObservedGeneration >= d.Generation && d.Status.ReadyReplicas >= desired {
+			if deploymentRolledOut(d) {
 				fmt.Fprintln(out, " ready")
 				return nil
 			}
@@ -455,6 +452,25 @@ func waitForDeployment(ctx context.Context, cs kubernetes.Interface, namespace, 
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// deploymentRolledOut reports whether the Deployment's newest revision is fully rolled out,
+// using the same completion test as `kubectl rollout status` (Kubernetes
+// deploymentutil.DeploymentComplete). Status.ReadyReplicas alone is insufficient: it counts
+// ready pods across BOTH the old and new ReplicaSets, so during a rolling update the old pod
+// keeps it satisfied while the new pod is still ContainerCreating — greenlighting the old
+// revision. Requiring UpdatedReplicas/AvailableReplicas to reach desired and Replicas to equal
+// UpdatedReplicas confirms the new revision is the only one left and available.
+func deploymentRolledOut(d *appsv1.Deployment) bool {
+	desired := int32(1)
+	if d.Spec.Replicas != nil {
+		desired = *d.Spec.Replicas
+	}
+	return desired > 0 &&
+		d.Status.ObservedGeneration >= d.Generation &&
+		d.Status.UpdatedReplicas >= desired &&
+		d.Status.Replicas == d.Status.UpdatedReplicas &&
+		d.Status.AvailableReplicas >= desired
 }
 
 func randHex(n int) (string, error) {

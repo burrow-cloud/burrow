@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -461,6 +463,61 @@ func TestInstallRequiresImageWhenNoDefault(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--burrowd-image") {
 		t.Errorf("error should tell the user to pass --burrowd-image, got: %v", err)
+	}
+}
+
+// TestDeploymentRolledOut pins the readiness predicate waitForDeployment uses so `burrow upgrade`
+// (a rolling update) only reports the control plane ready once the NEW revision is fully rolled
+// out. The regression it guards: Status.ReadyReplicas counts ready pods across BOTH the old and
+// new ReplicaSets, so the old pod satisfied it while the new pod was still ContainerCreating and
+// the watcher greenlit the old revision. Mid-rollout states must be false; only the completed
+// state is true.
+func TestDeploymentRolledOut(t *testing.T) {
+	one := int32(1)
+	dep := func(gen, obsGen, replicas, updated, available, ready int32) *appsv1.Deployment {
+		return &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Generation: int64(gen)},
+			Spec:       appsv1.DeploymentSpec{Replicas: &one},
+			Status: appsv1.DeploymentStatus{
+				ObservedGeneration: int64(obsGen),
+				Replicas:           replicas,
+				UpdatedReplicas:    updated,
+				AvailableReplicas:  available,
+				ReadyReplicas:      ready,
+			},
+		}
+	}
+	cases := []struct {
+		name string
+		d    *appsv1.Deployment
+		want bool
+	}{
+		// Fresh deploy still in progress: no new-template pod created yet.
+		{"fresh deploy in progress", dep(1, 1, 0, 0, 0, 0), false},
+		// Mid-rollout surge: old+new both Ready (ReadyReplicas=2) but the new revision is not yet
+		// the only one — this is the exact state the old ReadyReplicas>=desired check mis-read.
+		{"mid-rollout surge", dep(2, 2, 2, 1, 1, 2), false},
+		// New pod created but not yet Available (still ContainerCreating).
+		{"new pod not available", dep(2, 2, 1, 1, 0, 1), false},
+		// Fully rolled out: new revision is the only one, created and available.
+		{"fully rolled out", dep(2, 2, 1, 1, 1, 1), true},
+		// Stale status: the controller has not observed the new spec yet.
+		{"stale observedGeneration", dep(2, 1, 1, 1, 1, 1), false},
+	}
+	for _, c := range cases {
+		if got := deploymentRolledOut(c.d); got != c.want {
+			t.Errorf("%s: deploymentRolledOut = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	// desired == 0 (scaled to zero) is never "rolled out" for readiness purposes.
+	zero := int32(0)
+	scaledDown := &appsv1.Deployment{
+		Spec:   appsv1.DeploymentSpec{Replicas: &zero},
+		Status: appsv1.DeploymentStatus{ObservedGeneration: 1},
+	}
+	if deploymentRolledOut(scaledDown) {
+		t.Errorf("desired=0 should not be considered rolled out")
 	}
 }
 

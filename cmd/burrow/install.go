@@ -303,7 +303,7 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 // agent over MCP, not by CLI deploys, so it points the user at connecting their agent rather than at
 // a `burrow app deploy` command. No em-dashes: it is user-facing CLI output.
 const postInstallGuidance = "Burrow is ready. Connect your AI agent to operate it:\n" +
-	"  burrow mcp claude        (or: cursor, codex)\n\n" +
+	"  burrow mcp claude        (or: cursor, codex, copilot)\n\n" +
 	"Then open your agent and ask it to deploy your app.\n"
 
 // recordEnvironment writes the just-installed environment into the local config as a handle and

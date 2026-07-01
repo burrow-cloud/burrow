@@ -23,7 +23,7 @@ import (
 // `burrow mcp <tool> install` applies it (idempotently, backing up any file it edits).
 
 // runCommand runs an external command with its output wired to the terminal. It is a package var so
-// a test can fake the claude-CLI invocation without a real `claude` on PATH.
+// a test can fake the agent-CLI invocations without a real CLI on PATH.
 var runCommand = func(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stdout = os.Stdout
@@ -43,8 +43,9 @@ var commandSucceeds = func(name string, args ...string) bool {
 // found/not-found branches without depending on what is installed on the machine.
 var mcpLookPath = exec.LookPath
 
-// cursorConfigPath and codexConfigPath resolve the per-tool config files. They are package vars so a
-// test can point them at a temp dir and exercise the real create/merge/backup logic safely.
+// cursorConfigPath resolves Cursor's MCP config file. Cursor has no CLI, so it is edited directly;
+// the path is a package var so a test can point it at a temp dir and exercise the real
+// create/merge/backup logic safely.
 var cursorConfigPath = func() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -53,20 +54,9 @@ var cursorConfigPath = func() (string, error) {
 	return filepath.Join(home, ".cursor", "mcp.json"), nil
 }
 
-var codexConfigPath = func() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".codex", "config.toml"), nil
-}
-
-// The tilde forms shown in help and messages, independent of where the seams actually resolve (a
-// temp dir in tests), so the user always sees the familiar path.
-const (
-	cursorConfigDisplay = "~/.cursor/mcp.json"
-	codexConfigDisplay  = "~/.codex/config.toml"
-)
+// cursorConfigDisplay is the tilde form shown in help and messages, independent of where the seam
+// actually resolves (a temp dir in tests), so the user always sees the familiar path.
+const cursorConfigDisplay = "~/.cursor/mcp.json"
 
 // mcpTryPrompt is appended after any successful install, giving the user a concrete first thing to
 // ask their agent. It leads with a blank line so it sits below the success line. No em-dashes.
@@ -77,9 +67,10 @@ const mcpTryPrompt = "\nThen open your agent and try:\n" +
 // preview then apply. No em-dashes: it is user-facing CLI output.
 const mcpOverview = "Connect Burrow to your AI agent so it can operate your cluster.\n\n" +
 	"Supported tools:\n" +
-	"  claude   Claude Code\n" +
-	"  cursor   Cursor\n" +
-	"  codex    Codex\n\n" +
+	"  claude    Claude Code\n" +
+	"  cursor    Cursor\n" +
+	"  codex     Codex\n" +
+	"  copilot   Copilot\n\n" +
 	"Preview what will be added:\n" +
 	"  burrow mcp <tool>\n\n" +
 	"Apply it:\n" +
@@ -96,12 +87,13 @@ type mcpTool interface {
 // mcpTools maps the tool argument to its adapter. Keep it in sync with the supported-tools list in
 // mcpOverview and the valid-tools error below.
 var mcpTools = map[string]mcpTool{
-	"claude": claudeTool{},
-	"cursor": cursorTool{},
-	"codex":  codexTool{},
+	"claude":  cliTool{key: "claude", bin: "claude", display: "Claude Code", addArgs: []string{"mcp", "add", "--scope", "user", "burrow", "--", "burrow-mcp"}},
+	"cursor":  cursorTool{},
+	"codex":   cliTool{key: "codex", bin: "codex", display: "Codex", addArgs: []string{"mcp", "add", "burrow", "--", "burrow-mcp"}},
+	"copilot": cliTool{key: "copilot", bin: "copilot", display: "Copilot", addArgs: []string{"mcp", "add", "burrow", "--", "burrow-mcp"}},
 }
 
-const mcpValidTools = "claude, cursor, codex"
+const mcpValidTools = "claude, cursor, codex, copilot"
 
 func newMcpCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -109,8 +101,8 @@ func newMcpCmd() *cobra.Command {
 		Short: "Connect Burrow to your AI agent",
 		Long: "Connect Burrow to your AI agent so it can operate your cluster.\n\n" +
 			"Preview what a tool needs with `burrow mcp <tool>`, then apply it with\n" +
-			"`burrow mcp <tool> install`. The file-based tools are backed up before any edit and\n" +
-			"the change is idempotent, so a second run is safe. Supported tools: " + mcpValidTools + ".",
+			"`burrow mcp <tool> install`. The change is idempotent, so a second run is safe, and any\n" +
+			"file it edits is backed up first. Supported tools: " + mcpValidTools + ".",
 		Example: "  # See what connecting Claude Code will add\n" +
 			"  burrow mcp claude\n\n" +
 			"  # Apply it\n" +
@@ -145,50 +137,65 @@ func runMcp(args []string, w io.Writer) error {
 	return tool.install(w)
 }
 
-// --- claude: the Claude Code CLI ---
+// --- cliTool: agents with a native `mcp` CLI (claude, codex, copilot) ---
 
-type claudeTool struct{}
-
-const claudeAlreadyConfigured = "Burrow is already configured in Claude Code. Nothing to do.\n"
-
-// claudeConfigured reports whether the claude CLI already has a `burrow` MCP server. It is only
-// meaningful when `claude` is on PATH; callers gate on LookPath first.
-func claudeConfigured() bool {
-	return commandSucceeds("claude", "mcp", "get", "burrow")
+// cliTool is the generic adapter for a coding agent that ships an `mcp` subcommand of the identical
+// shape: `<bin> mcp get burrow` reports whether Burrow is configured, and `<bin> mcp add ... burrow
+// -- burrow-mcp` adds it. Only the binary, its display name, and the exact add args differ (claude
+// needs `--scope user`), so one adapter parameterized by those three fields covers all three tools.
+type cliTool struct {
+	key     string   // the `burrow mcp <key>` argument, matching the binary name
+	bin     string   // the CLI binary to run and look up on PATH
+	display string   // the human name shown in messages, e.g. "Claude Code"
+	addArgs []string // the exact args to `bin` that add Burrow, e.g. mcp add [--scope user] burrow -- burrow-mcp
 }
 
-func (claudeTool) preview() string {
-	if _, err := mcpLookPath("claude"); err == nil && claudeConfigured() {
-		return claudeAlreadyConfigured
-	}
-	return "Connect Burrow to Claude Code.\n\n" +
-		"This will run:\n" +
-		"  claude mcp add --scope user burrow -- burrow-mcp\n\n" +
-		"burrow-mcp is a stdio MCP server that uses your kubeconfig and active environment, so no extra config is needed.\n\n" +
-		"Run `burrow mcp claude install` to apply.\n"
+// addCommand renders the full add invocation as a copy-pasteable command line for previews and the
+// not-on-PATH hint.
+func (t cliTool) addCommand() string {
+	return t.bin + " " + strings.Join(t.addArgs, " ")
 }
 
-func (claudeTool) install(w io.Writer) error {
-	if _, err := mcpLookPath("claude"); err != nil {
-		fmt.Fprint(w, "Claude Code CLI (claude) not found on PATH. Install it, or run this yourself:\n"+
-			"  claude mcp add --scope user burrow -- burrow-mcp\n")
+// configured reports whether the agent already has a `burrow` MCP server. It is only meaningful when
+// the CLI is on PATH, so it gates on LookPath first.
+func (t cliTool) configured() bool {
+	if _, err := mcpLookPath(t.bin); err != nil {
+		return false
+	}
+	return commandSucceeds(t.bin, "mcp", "get", "burrow")
+}
+
+func (t cliTool) preview() string {
+	if t.configured() {
+		return fmt.Sprintf("Burrow is already configured in %s. Nothing to do.\n", t.display)
+	}
+	return fmt.Sprintf("Connect Burrow to %s.\n\n"+
+		"This will run:\n"+
+		"  %s\n\n"+
+		"burrow-mcp is a stdio MCP server that uses your kubeconfig and active environment, so no extra config is needed.\n\n"+
+		"Run `burrow mcp %s install` to apply.\n", t.display, t.addCommand(), t.key)
+}
+
+func (t cliTool) install(w io.Writer) error {
+	if _, err := mcpLookPath(t.bin); err != nil {
+		fmt.Fprintf(w, "%s CLI (%s) not found on PATH. Install it, or run this yourself:\n  %s\n", t.display, t.bin, t.addCommand())
 		return nil
 	}
-	// `claude mcp add` errors if a server named burrow already exists, so pre-check and no-op
-	// instead, matching the idempotent behavior of the file-based tools.
-	if claudeConfigured() {
-		fmt.Fprint(w, claudeAlreadyConfigured)
+	// `mcp add` errors if a server named burrow already exists, so pre-check and no-op instead,
+	// keeping a repeat run idempotent.
+	if commandSucceeds(t.bin, "mcp", "get", "burrow") {
+		fmt.Fprintf(w, "Burrow is already configured in %s. Nothing to do.\n", t.display)
 		return nil
 	}
-	if err := runCommand("claude", "mcp", "add", "--scope", "user", "burrow", "--", "burrow-mcp"); err != nil {
-		return fmt.Errorf("running claude mcp add: %w", err)
+	if err := runCommand(t.bin, t.addArgs...); err != nil {
+		return fmt.Errorf("running %s: %w", t.addCommand(), err)
 	}
-	fmt.Fprint(w, "Added Burrow to Claude Code. Restart Claude Code (or run /mcp) to pick it up.\n")
+	fmt.Fprintf(w, "Added Burrow to %s. Restart %s to pick it up.\n", t.display, t.display)
 	fmt.Fprint(w, mcpTryPrompt)
 	return nil
 }
 
-// --- cursor: ~/.cursor/mcp.json ---
+// --- cursor: ~/.cursor/mcp.json (no CLI, edited directly) ---
 
 type cursorTool struct{}
 
@@ -274,84 +281,6 @@ func (cursorTool) install(w io.Writer) error {
 		return fmt.Errorf("writing %s: %w", cursorConfigDisplay, err)
 	}
 	fmt.Fprintf(w, "Added Burrow to Cursor (%s). Restart Cursor to pick it up.\n", cursorConfigDisplay)
-	fmt.Fprint(w, mcpTryPrompt)
-	return nil
-}
-
-// --- codex: ~/.codex/config.toml ---
-
-type codexTool struct{}
-
-// codexBlock is the TOML table appended for Burrow. A plain text append keeps the dependency graph
-// free of a TOML parser; the append is guarded by an idempotent header check.
-const codexBlock = "[mcp_servers.burrow]\ncommand = \"burrow-mcp\"\n"
-
-const codexHeader = "[mcp_servers.burrow]"
-
-func (codexTool) preview() string {
-	if codexConfigured() {
-		return fmt.Sprintf("Burrow is already configured in Codex (%s). Nothing to do.\n", codexConfigDisplay)
-	}
-	return "Connect Burrow to Codex.\n\n" +
-		"This will add to " + codexConfigDisplay + ":\n" +
-		"  [mcp_servers.burrow]\n" +
-		"  command = \"burrow-mcp\"\n\n" +
-		"Your other MCP servers are preserved, and the file is backed up first.\n\n" +
-		"Run `burrow mcp codex install` to apply.\n"
-}
-
-// codexConfigured reports whether ~/.codex/config.toml already declares the burrow MCP table.
-func codexConfigured() bool {
-	path, err := codexConfigPath()
-	if err != nil {
-		return false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(data), codexHeader)
-}
-
-func (codexTool) install(w io.Writer) error {
-	path, err := codexConfigPath()
-	if err != nil {
-		return err
-	}
-	data, err := os.ReadFile(path)
-	existed := err == nil
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reading %s: %w", codexConfigDisplay, err)
-	}
-	if strings.Contains(string(data), codexHeader) {
-		fmt.Fprintf(w, "Burrow is already configured in Codex (%s). Nothing to do.\n", codexConfigDisplay)
-		return nil
-	}
-
-	if existed {
-		if err := backupFile(path); err != nil {
-			return err
-		}
-	} else if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
-	}
-
-	var b strings.Builder
-	b.Write(data)
-	// Separate the appended table from existing content with a blank line, unless the file is
-	// empty or already ends in one.
-	if len(data) > 0 && !strings.HasSuffix(string(data), "\n\n") {
-		if strings.HasSuffix(string(data), "\n") {
-			b.WriteString("\n")
-		} else {
-			b.WriteString("\n\n")
-		}
-	}
-	b.WriteString(codexBlock)
-	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", codexConfigDisplay, err)
-	}
-	fmt.Fprintf(w, "Added Burrow to Codex (%s). Restart Codex to pick it up.\n", codexConfigDisplay)
 	fmt.Fprint(w, mcpTryPrompt)
 	return nil
 }

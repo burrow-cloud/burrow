@@ -145,7 +145,7 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code.
 | **v0.1** | Install into a cluster · connect an agent over MCP · deploy by image reference · status · logs · rollback · scale · in-place upgrade | ✅ shipped ([v0.1.1](https://github.com/burrow-cloud/burrow/tree/v0.1.1)) |
 | **v0.2** | Reach an app at a URL: shared-ingress routing · `publish` + cert-manager TLS · `reachability` surface · DNS automation (DigitalOcean / Cloudflare) · `ingress install` · configurable guardrails | ✅ shipped ([v0.2.1](https://github.com/burrow-cloud/burrow/tree/v0.2.1)) |
 | **v0.3** | Operability + agent-experience hardening: CLI grouped by task (`app`/`config`/`system`) · `app list` · account-scoped Cloudflare tokens · public-DNS reachability · request log | ✅ shipped ([v0.3.0](https://github.com/burrow-cloud/burrow/tree/v0.3.0)) |
-| **v0.4** | Agent-provisioned building blocks: install logs (VictoriaLogs) / metrics (VictoriaMetrics + vmagent) — or **connect** the logs/metrics you already run (Loki, Prometheus) — and query them to answer "how is my app doing?" · cache (ValKey) · `app delete` · tunable rollback guardrail | ✅ shipped ([v0.4.0](https://github.com/burrow-cloud/burrow/tree/v0.4.0)) |
+| **v0.4** | Agent-provisioned building blocks: install logs (VictoriaLogs) / metrics (VictoriaMetrics + vmagent), or **connect** the logs/metrics you already run (Loki, Prometheus), and query them to answer "how is my app doing?" · cache (ValKey) · `app delete` · tunable rollback guardrail | ✅ shipped ([v0.4.0](https://github.com/burrow-cloud/burrow/tree/v0.4.0)) |
 | **v0.5** | App config, secrets, credentials, and the audit log: `app config` / `app secret` lifecycle (`deploy` takes no config) · secrets & vendor/connected-backend credentials flow through Burrow's own API, **never MCP**, never logged · `burrow audit` trail of guarded operations · apps default to a dedicated `burrow-apps` namespace | ✅ shipped ([v0.5.0](https://github.com/burrow-cloud/burrow/tree/v0.5.0)) |
 | **v0.6** | First backend building block, agent-native onboarding, and the Apache relicense: Postgres addon (`addon install`/`attach postgres`, a per-app database + role, generated `DATABASE_URL` wired into the app) · `pg_dump`/`pg_restore` backups behind a confirm guardrail · read-only `burrow_audit` MCP tool · agent-native onboarding (cluster-capability detection, cost-aware ingress/TLS provisioning with a LoadBalancer-vs-NodePort choice, a verified "live at https://…" check) · dotted guardrail codes (`app.delete`) · **whole repository relicensed to Apache-2.0** | ✅ shipped ([v0.6.0](https://github.com/burrow-cloud/burrow/tree/v0.6.0)) |
 | **v0.7** | Environments and a self-contained, kubectl-free CLI: cluster-per-env via kubeconfig-context routing (`--context`, per-call agent routing) and namespace-per-env via a burrowd registry (`burrow env add`), with **per-environment guardrails** that gate prod while staging stays permissive (`burrow guard set --env prod app.delete deny`) · one `burrow env` surface over named local handles that follows the kube context by default (`use`/`follow`/`list`/`rename`/`scan`), resolving both CLI and agent operations through the active environment (retires `burrow context`) · intent-based `--help` groups, explicit `burrow install <context>` that names the environment, a first-run banner, shell completion, `system` folded into `cluster` · **`burrow` no longer needs `kubectl`** (client-go server-side apply) · the `app env`→`app config` rename | ✅ shipped ([v0.7.1](https://github.com/burrow-cloud/burrow/tree/v0.7.1)) |
@@ -153,17 +153,17 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code.
 
 ## Documentation
 
-- [docs/getting-started.md](docs/getting-started.md) — set up Burrow on your cluster and connect
+- [docs/getting-started.md](docs/getting-started.md): set up Burrow on your cluster and connect
   your agent, start to finish.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the system design: the four layers, the
-  invariants, and the request paths.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the system design, its four layers,
+  invariants, and request paths.
 - [docs/HARDENING.md](docs/HARDENING.md): keep Burrow the agent's only path to
   the cluster, so the guardrails actually bound it.
-- [docs/ROADMAP.md](docs/ROADMAP.md) — version milestones, v0.1 → v1.0.
-- [docs/PLAN.md](docs/PLAN.md) — the current execution plan.
-- [docs/adr/](docs/adr/README.md) — Architecture Decision Records: every load-bearing
+- [docs/ROADMAP.md](docs/ROADMAP.md): version milestones, v0.1 → v1.0.
+- [docs/PLAN.md](docs/PLAN.md): the current execution plan.
+- [docs/adr/](docs/adr/README.md): Architecture Decision Records, every load-bearing
   decision, with its reasoning and rejected alternatives.
-- [CLAUDE.md](CLAUDE.md) — the contributor and agent guide.
+- [CLAUDE.md](CLAUDE.md): the contributor and agent guide.
 
 ## License and contributing
 
@@ -172,8 +172,8 @@ How the code is licensed ([LICENSING.md](LICENSING.md)):
 - **All of Burrow's code in this repository is Apache-2.0**: the CLI, the MCP server, and the
   software that runs in your cluster. Read, modify, self-host, and integrate against it freely.
 - Burrow is **open core**: the managed cloud and the enterprise tier (SSO, teams, compliance,
-  support) are separate, proprietary products — see [COMMERCIAL.md](COMMERCIAL.md).
+  support) are separate, proprietary products (see [COMMERCIAL.md](COMMERCIAL.md)).
 
-**Contributions are welcome** — open an issue or a discussion. Bug reports, ideas, and design
+**Contributions are welcome.** Open an issue or a discussion. Bug reports, ideas, and design
 feedback are the best way to help and to shape where Burrow goes. Commits are signed off under
 the Developer Certificate of Origin (`git commit -s`). See [CONTRIBUTING.md](CONTRIBUTING.md).

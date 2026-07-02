@@ -83,7 +83,15 @@ deploy. Use a dedicated, long-lived Personal Access Token with the `read:package
 ([create one here](https://github.com/settings/tokens/new?scopes=read:packages)):
 
 ```sh
-burrow config registry login ghcr.io -u <github-username> -p <read:packages-PAT>
+burrow config registry login ghcr.io -u <github-username>
+```
+
+Give it the username and it prompts for the token with the input hidden, so the token never lands
+in your shell history or the process table. The prompt also links you to the right page to create
+a token for your registry. For automation, pipe the token in with `--password-stdin` instead:
+
+```sh
+echo "$TOKEN" | burrow config registry login ghcr.io -u <github-username> --password-stdin
 ```
 
 Make the token long-lived. Burrow stores it as-is in your cluster and does not refresh it, so an

@@ -34,11 +34,11 @@ func IsImagePullReason(reason string) bool {
 
 // ImagePullIssue builds the actionable Issue message for a workload whose pod cannot pull its
 // image: it names the image, the registry host the credentials are missing for, and the exact
-// `burrow registry login` command the user runs to fix it. The credential step is human- and
+// `burrow config registry login` command the user runs to fix it. The credential step is human- and
 // CLI-only and never crosses MCP (ADR-0017), so the message points at the user's terminal.
 func ImagePullIssue(image, reason string) string {
 	host := RegistryHost(image)
-	return fmt.Sprintf("cannot pull image %q (%s): the cluster has no credentials for registry %q. If it is private, ask the user to run: burrow registry login %s", image, reason, host, host)
+	return fmt.Sprintf("cannot pull image %q (%s): the cluster has no credentials for registry %q. If it is private, ask the user to run: burrow config registry login %s", image, reason, host, host)
 }
 
 // RegistryHost returns the registry host of an image reference following the Docker convention:

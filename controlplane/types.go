@@ -69,7 +69,7 @@ type WorkloadStatus struct {
 	Available bool `json:"available"`
 	// Issue is a human- and agent-actionable explanation of why an unavailable workload is
 	// blocked, when the cluster reports a genuinely blocking pod condition — e.g. a pull
-	// failure that names the image, the registry host, and the `burrow registry login`
+	// failure that names the image, the registry host, and the `burrow config registry login`
 	// fix (ADR-0006). It is best-effort enrichment: empty when the workload is healthy or
 	// when no blocking condition was observed, so it never becomes a required field.
 	Issue string `json:"issue,omitempty"`

@@ -109,7 +109,7 @@ type WorkloadStatus struct {
 	Available       bool   `json:"available"`
 	// Issue is a human- and agent-actionable explanation of why an unavailable workload is
 	// blocked (e.g. an image the cluster cannot pull, naming the registry and the
-	// `burrow registry login` fix); empty when the workload is healthy. IssueReason is the
+	// `burrow config registry login` fix); empty when the workload is healthy. IssueReason is the
 	// raw Kubernetes reason behind it (e.g. "ImagePullBackOff"). See ADR-0006.
 	Issue       string `json:"issue,omitempty"`
 	IssueReason string `json:"issue_reason,omitempty"`

@@ -73,20 +73,21 @@ Open your agent and ask it to deploy something. For example:
 Your agent calls Burrow, Burrow runs the deploy on your cluster under the guardrails you control,
 and it reports back what happened.
 
+Tag each image with an incrementing version (for example `v0.1.0`, then `v0.1.1`) and never reuse a
+tag, so every deploy is a distinct artifact and rollbacks stay clean.
+
 ### Private registries
 
 If the image lives in a private registry, give the cluster credentials to pull it before you
-deploy:
+deploy. Use a dedicated, long-lived Personal Access Token with the `read:packages` scope
+([create one here](https://github.com/settings/tokens/new?scopes=read:packages)):
 
 ```sh
-burrow config registry login ghcr.io -u <user> -p <PAT-with-read:packages>
+burrow config registry login ghcr.io -u <github-username> -p <read:packages-PAT>
 ```
 
-Or reuse a registry you are already logged in to on your machine:
-
-```sh
-burrow config registry login ghcr.io --from-docker-config
-```
+Make the token long-lived. Burrow stores it as-is in your cluster and does not refresh it, so an
+ephemeral or CI token (such as an Actions `GITHUB_TOKEN`) will break future pulls once it expires.
 
 This is a one-time credential step you run yourself at your terminal. The credential is stored in
 your cluster and never travels over MCP, so the agent cannot do it for you. Without it, a private

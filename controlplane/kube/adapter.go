@@ -138,7 +138,7 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 	if c := dep.Spec.Template.Spec.Containers; len(c) > 0 {
 		image = c[0].Image
 	}
-	return controlplane.WorkloadStatus{
+	st := controlplane.WorkloadStatus{
 		App:             app,
 		Kind:            controlplane.WorkloadDeployment,
 		Image:           image,
@@ -146,7 +146,39 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 		ReadyReplicas:   dep.Status.ReadyReplicas,
 		UpdatedReplicas: dep.Status.UpdatedReplicas,
 		Available:       deploymentAvailable(dep, desired),
-	}, nil
+	}
+	// Best-effort enrichment: when the workload is not serving, look for a blocking pod
+	// condition (an image the cluster cannot pull) and turn it into an actionable Issue. A
+	// pod-list error must not fail Status, so it is swallowed and Issue is left empty.
+	if !st.Available {
+		if issue, reason := a.pullIssue(ctx, app); reason != "" {
+			st.Issue, st.IssueReason = issue, reason
+		}
+	}
+	return st, nil
+}
+
+// pullIssue inspects the app's pods for a blocking image-pull failure and, if one is found,
+// returns the actionable Issue message and the raw Kubernetes reason. It selects the app's pods
+// by the same label the workload sets (nameLabel=app) and reads each container's waiting state.
+// It is best-effort: a list error, or no blocking waiting reason, yields ("", ""), and the raw
+// reason drives the message rather than the image, so a genuinely blocking pull is reported and
+// a transient ContainerCreating is not.
+func (a *Adapter) pullIssue(ctx context.Context, app string) (issue, reason string) {
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: nameLabel + "=" + app})
+	if err != nil {
+		return "", "" // best-effort: never fail Status on enrichment
+	}
+	for i := range pods.Items {
+		for _, cs := range pods.Items[i].Status.ContainerStatuses {
+			w := cs.State.Waiting
+			if w == nil || !controlplane.IsImagePullReason(w.Reason) {
+				continue
+			}
+			return controlplane.ImagePullIssue(cs.Image, w.Reason), w.Reason
+		}
+	}
+	return "", ""
 }
 
 func (a *Adapter) ListWorkloads(ctx context.Context) ([]controlplane.WorkloadStatus, error) {

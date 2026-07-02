@@ -73,6 +73,26 @@ Open your agent and ask it to deploy something. For example:
 Your agent calls Burrow, Burrow runs the deploy on your cluster under the guardrails you control,
 and it reports back what happened.
 
+### Private registries
+
+If the image lives in a private registry, give the cluster credentials to pull it before you
+deploy:
+
+```sh
+burrow registry login ghcr.io -u <user> -p <PAT-with-read:packages>
+```
+
+Or reuse a registry you are already logged in to on your machine:
+
+```sh
+burrow registry login ghcr.io --from-docker-config
+```
+
+This is a one-time credential step you run yourself at your terminal. The credential is stored in
+your cluster and never travels over MCP, so the agent cannot do it for you. Without it, a private
+image lands in `ImagePullBackOff`, and `burrow status` (or the agent's status check) reports the
+missing registry and this exact fix.
+
 ## Upgrade
 
 To update the CLI:

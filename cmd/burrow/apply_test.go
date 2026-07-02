@@ -124,9 +124,13 @@ func TestApplyIssuesOneApplyPerObject(t *testing.T) {
 		}
 	}
 
-	// Both objects are new to the fake (Get returns NotFound), so they summarize as created.
-	if got, want := out.String(), "Applied 2 resource(s): 2 created.\n"; got != want {
+	// Both objects are new to the fake (Get returns NotFound), so they summarize as created. The
+	// buffer is not a terminal, so the success glyph is the plain ✓ with no ANSI escape.
+	if got, want := out.String(), "✓ Applied 2 resource(s): 2 created.\n"; got != want {
 		t.Errorf("summary = %q, want %q", got, want)
+	}
+	if strings.Contains(out.String(), "\x1b") {
+		t.Errorf("non-TTY summary must not contain an ANSI escape, got %q", out.String())
 	}
 }
 

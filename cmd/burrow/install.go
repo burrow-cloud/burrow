@@ -295,7 +295,7 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	}
 
 	if a.wait {
-		fmt.Fprint(stdout, postInstallGuidance)
+		fmt.Fprintf(stdout, "%s %s", okMark(stdout), postInstallGuidance)
 	}
 	return nil
 }
@@ -442,12 +442,12 @@ func waitForDeployment(ctx context.Context, cs kubernetes.Interface, namespace, 
 		d, err := cs.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err == nil {
 			if deploymentRolledOut(d) {
-				fmt.Fprintln(out, " ready")
+				fmt.Fprintln(out, " "+okMark(out))
 				return nil
 			}
 		}
 		if time.Now().After(deadline) {
-			fmt.Fprintln(out, " timed out")
+			fmt.Fprintln(out, " "+failMark(out)+" timed out")
 			return fmt.Errorf("%s did not become ready within %s", label, timeout)
 		}
 		time.Sleep(2 * time.Second)

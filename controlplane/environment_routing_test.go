@@ -86,8 +86,17 @@ func TestUnknownEnvironmentIsAClearError(t *testing.T) {
 	if !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("Deploy(ghost) err = %v, want ErrNotFound", err)
 	}
-	if !strings.Contains(err.Error(), "unknown environment") {
+	// The error is actionable (ADR-0006): it names the unknown environment and tells the caller the
+	// exact command to register it, so an agent can guide the user to `burrow env add <name>`.
+	msg := err.Error()
+	if !strings.Contains(msg, "unknown environment") {
 		t.Errorf("error = %q, want it to mention the unknown environment", err)
+	}
+	if !strings.Contains(msg, "ghost") {
+		t.Errorf("error = %q, want it to name the environment %q", err, "ghost")
+	}
+	if !strings.Contains(msg, "burrow env add ghost") {
+		t.Errorf("error = %q, want it to tell the caller to run `burrow env add ghost`", err)
 	}
 	// Nothing was applied to any namespace.
 	if _, ok := k.SpecInNamespace("ghost", "web"); ok {

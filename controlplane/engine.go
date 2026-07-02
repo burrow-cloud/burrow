@@ -1514,7 +1514,7 @@ func (e *Engine) resolveNamespace(ctx context.Context, env string) (string, erro
 	got, err := e.db.GetEnvironment(ctx, env)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return "", fmt.Errorf("unknown environment %q: %w", env, ErrNotFound)
+			return "", fmt.Errorf("unknown environment %q is not registered; ask the user to create it by running: burrow env add %s: %w", env, env, ErrNotFound)
 		}
 		return "", fmt.Errorf("resolving environment %q: %w", env, err)
 	}

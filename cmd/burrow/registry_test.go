@@ -4,14 +4,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -147,6 +150,56 @@ func TestRegistryListSorted(t *testing.T) {
 	empty, err := registryList(ctx, nsWithDefaultSA("apps"), "apps")
 	if err != nil || len(empty) != 0 {
 		t.Errorf("expected empty list with no error, got %v, %v", empty, err)
+	}
+}
+
+// runRegistry drives the real registry subcommand RunE against a fake clientset, returning its
+// stdout. It pins the app namespace with --app-namespace so the discovery path is skipped.
+func runRegistry(t *testing.T, cs *fake.Clientset, args ...string) string {
+	t.Helper()
+	orig := registryClientset
+	registryClientset = func(string) (kubernetes.Interface, error) { return cs, nil }
+	t.Cleanup(func() { registryClientset = orig })
+
+	var out, errb bytes.Buffer
+	cmd := newRegistryCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	cmd.SetArgs(append([]string{"--app-namespace", "apps"}, args...))
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("registry %v: %v (stderr: %s)", args, err, errb.String())
+	}
+	return out.String()
+}
+
+// TestRegistryOutputHasNoNamespaceJargon locks the developer-facing result messages to plain,
+// non-Kubernetes language: Burrow's users are not cluster experts, so the raw term "namespace"
+// must not leak into login, logout, or empty-list output.
+func TestRegistryOutputHasNoNamespaceJargon(t *testing.T) {
+	// Empty-list state.
+	if got := runRegistry(t, nsWithDefaultSA("apps"), "list"); got != "no image registries configured\n" {
+		t.Errorf("empty list output = %q, want %q", got, "no image registries configured\n")
+	}
+
+	// Login success.
+	cs := nsWithDefaultSA("apps")
+	if got := runRegistry(t, cs, "login", "ghcr.io", "-u", "alice", "-p", "tok123"); got != "configured registry \"ghcr.io\" for your apps\n" {
+		t.Errorf("login output = %q, want %q", got, "configured registry \"ghcr.io\" for your apps\n")
+	}
+
+	// Logout.
+	if got := runRegistry(t, cs, "logout", "ghcr.io"); got != "removed registry \"ghcr.io\"\n" {
+		t.Errorf("logout output = %q, want %q", got, "removed registry \"ghcr.io\"\n")
+	}
+
+	// Belt and braces: none of the result messages may contain the jargon term.
+	for _, got := range []string{
+		runRegistry(t, nsWithDefaultSA("apps"), "list"),
+		runRegistry(t, nsWithDefaultSA("apps"), "login", "ghcr.io", "-u", "a", "-p", "b"),
+	} {
+		if strings.Contains(got, "namespace") {
+			t.Errorf("registry output leaks %q: %q", "namespace", got)
+		}
 	}
 }
 

@@ -9,10 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
@@ -79,7 +76,6 @@ func newRegistryCmd() *cobra.Command {
 	}
 
 	var username, password string
-	var fromDocker bool
 	login := &cobra.Command{
 		Use:   "login <host>",
 		Short: "Store a credential for a private registry",
@@ -91,16 +87,10 @@ func newRegistryCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			u, p := username, password
-			if fromDocker {
-				if u, p, err = dockerConfigAuth(host); err != nil {
-					return err
-				}
+			if username == "" || password == "" {
+				return errors.New("a username and password/token are required (use -u/-p)")
 			}
-			if u == "" || p == "" {
-				return errors.New("a username and password/token are required (use -u/-p or --from-docker-config)")
-			}
-			if err := registryLogin(ctx, cs, appNS, host, u, p); err != nil {
+			if err := registryLogin(ctx, cs, appNS, host, username, password); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "configured registry %q for your apps\n", host)
@@ -109,7 +99,6 @@ func newRegistryCmd() *cobra.Command {
 	}
 	login.Flags().StringVarP(&username, "username", "u", "", "registry username")
 	login.Flags().StringVarP(&password, "password", "p", "", "registry password or token")
-	login.Flags().BoolVar(&fromDocker, "from-docker-config", false, "read the credential for <host> from ~/.docker/config.json")
 
 	logout := &cobra.Command{
 		Use:   "logout <host>",
@@ -306,44 +295,4 @@ func setPullSecretOnDefaultSA(ctx context.Context, cs kubernetes.Interface, name
 		return fmt.Errorf("updating the default service account in %s: %w", namespace, err)
 	}
 	return nil
-}
-
-// dockerConfigAuth reads the credential for host from the developer's Docker config, so
-// `--from-docker-config` can reuse a `docker login` the user already did.
-func dockerConfigAuth(host string) (username, password string, err error) {
-	path := os.Getenv("DOCKER_CONFIG")
-	if path != "" {
-		path = filepath.Join(path, "config.json")
-	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", "", fmt.Errorf("locating docker config: %w", err)
-		}
-		path = filepath.Join(home, ".docker", "config.json")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", "", fmt.Errorf("reading docker config %s: %w", path, err)
-	}
-	var cfg dockerConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return "", "", fmt.Errorf("parsing docker config %s: %w", path, err)
-	}
-	a, ok := cfg.Auths[host]
-	if !ok {
-		return "", "", fmt.Errorf("no credentials for %q in %s; run `docker login %s` first", host, path, host)
-	}
-	if a.Username != "" && a.Password != "" {
-		return a.Username, a.Password, nil
-	}
-	if a.Auth != "" {
-		decoded, err := base64.StdEncoding.DecodeString(a.Auth)
-		if err != nil {
-			return "", "", fmt.Errorf("decoding docker auth for %q: %w", host, err)
-		}
-		if i := strings.IndexByte(string(decoded), ':'); i >= 0 {
-			return string(decoded)[:i], string(decoded)[i+1:], nil
-		}
-	}
-	return "", "", fmt.Errorf("docker config has no usable credential for %q", host)
 }

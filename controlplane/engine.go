@@ -205,7 +205,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	// The execution-row args carry the env KEY NAMES only — never values (ADR-0027).
 	args["env_keys"] = auditKeys(env)
 
-	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: req.Replicas}
+	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: req.Replicas, ReleaseID: rel.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
@@ -317,7 +317,7 @@ func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app string) error
 	if err != nil {
 		return fmt.Errorf("set env %s: reading env: %w", app, err)
 	}
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: env, Command: cur.Command, MetricsPort: cur.MetricsPort, Replicas: cur.Replicas}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: env, Command: cur.Command, MetricsPort: cur.MetricsPort, Replicas: cur.Replicas, ReleaseID: cur.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		return fmt.Errorf("set env %s: applying to cluster: %w", app, err)
 	}
@@ -1448,7 +1448,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 
 	args["env_keys"] = auditKeys(cfg) // KEY NAMES only — never values (ADR-0027)
 
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: target.Replicas}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: target.Replicas, ReleaseID: rel.ID}
 	if err := e.k8s.WithNamespace(ns).ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)

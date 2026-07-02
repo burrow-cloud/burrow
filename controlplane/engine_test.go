@@ -128,6 +128,66 @@ func TestDeployHappyPath(t *testing.T) {
 	}
 }
 
+// TestDeploySameImageRollsViaReleaseAnnotation proves the fix: two deploys of the SAME image
+// reference produce pod templates with DIFFERENT release IDs, so the server-side apply changes and
+// a rollout happens (fresh pods) — the flow behind "fix the pull credential, then re-deploy".
+func TestDeploySameImageRollsViaReleaseAnnotation(t *testing.T) {
+	ctx := context.Background()
+	e, k, r, _, _ := newEngine(t, permissive())
+	r.Add("registry.example.com/web:1", "sha256:web1")
+
+	res1, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/web:1", Replicas: 1})
+	if err != nil {
+		t.Fatalf("first Deploy: %v", err)
+	}
+	spec1, ok := k.Spec("web")
+	if !ok {
+		t.Fatalf("no cluster spec after first deploy")
+	}
+	if spec1.ReleaseID != res1.Release.ID {
+		t.Errorf("first spec ReleaseID = %q, want the release ID %q", spec1.ReleaseID, res1.Release.ID)
+	}
+
+	res2, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/web:1", Replicas: 1})
+	if err != nil {
+		t.Fatalf("second Deploy: %v", err)
+	}
+	spec2, ok := k.Spec("web")
+	if !ok {
+		t.Fatalf("no cluster spec after second deploy")
+	}
+	if spec2.ReleaseID != res2.Release.ID {
+		t.Errorf("second spec ReleaseID = %q, want the release ID %q", spec2.ReleaseID, res2.Release.ID)
+	}
+	if spec1.ReleaseID == spec2.ReleaseID {
+		t.Errorf("re-deploy of an identical image kept ReleaseID %q: the pod template did not change, so no rollout would happen", spec1.ReleaseID)
+	}
+}
+
+// TestReapplyEnvKeepsCurrentReleaseID asserts a config reapply stamps the CURRENT release's ID, so
+// it does not spuriously churn the release annotation — its intended roll comes from the env change,
+// not an extra release bump.
+func TestReapplyEnvKeepsCurrentReleaseID(t *testing.T) {
+	ctx := context.Background()
+	e, k, r, _, _ := newEngine(t, permissive())
+	r.Add("registry.example.com/web:1", "sha256:web1")
+
+	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/web:1", Replicas: 1})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if err := e.SetConfig(ctx, "web", "", "K", "V", false); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	spec, ok := k.Spec("web")
+	if !ok {
+		t.Fatalf("no cluster spec after config set")
+	}
+	if spec.ReleaseID != res.Release.ID {
+		t.Errorf("reapply ReleaseID = %q, want the current release ID %q (no spurious churn)", spec.ReleaseID, res.Release.ID)
+	}
+}
+
 func TestDeployImageNotFound(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, d, _ := newEngine(t, permissive())

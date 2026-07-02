@@ -38,6 +38,11 @@ type WorkloadSpec struct {
 	// metrics add-on's scraper discovers and scrapes /metrics on it. Zero adds no annotations.
 	MetricsPort int32
 	Replicas    int32
+	// ReleaseID is the release this workload is applying. It is stamped on the pod template (under
+	// ReleaseAnnotation) so a new release always rolls the workload, even when the image reference
+	// is unchanged; re-applying the same release reuses the same ID, so the apply stays idempotent.
+	// Empty adds no annotation.
+	ReleaseID string
 }
 
 // ExposeSpec describes how to make an app reachable at a hostname (ADR-0018). v0.2 routes

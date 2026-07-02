@@ -542,6 +542,68 @@ func TestApplyNoMetricsPortAddsNoAnnotations(t *testing.T) {
 	}
 }
 
+func TestApplyStampsReleaseAnnotation(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1, ReleaseID: "rel-abc"}); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
+	}
+	dep, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := dep.Spec.Template.Annotations[cp.ReleaseAnnotation]; got != "rel-abc" {
+		t.Errorf("%s = %q, want rel-abc", cp.ReleaseAnnotation, got)
+	}
+}
+
+func TestApplyReleaseAnnotationCoexistsWithMetrics(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1, MetricsPort: 8080, ReleaseID: "rel-xyz"}); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
+	}
+	dep, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	ann := dep.Spec.Template.Annotations
+	if ann[cp.ReleaseAnnotation] != "rel-xyz" {
+		t.Errorf("%s = %q, want rel-xyz", cp.ReleaseAnnotation, ann[cp.ReleaseAnnotation])
+	}
+	// The release stamp must not clobber the metrics annotations.
+	if ann["prometheus.io/scrape"] != "true" {
+		t.Errorf("prometheus.io/scrape = %q, want true", ann["prometheus.io/scrape"])
+	}
+	if ann["prometheus.io/port"] != "8080" {
+		t.Errorf("prometheus.io/port = %q, want 8080", ann["prometheus.io/port"])
+	}
+	if ann["prometheus.io/path"] != "/metrics" {
+		t.Errorf("prometheus.io/path = %q, want /metrics", ann["prometheus.io/path"])
+	}
+}
+
+func TestApplyNoReleaseIDAddsNoReleaseAnnotation(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
+	}
+	dep, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, ok := dep.Spec.Template.Annotations[cp.ReleaseAnnotation]; ok {
+		t.Errorf("%s present with empty ReleaseID, want none (annotations=%v)", cp.ReleaseAnnotation, dep.Spec.Template.Annotations)
+	}
+}
+
 func TestApplyUpdatesDeployment(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

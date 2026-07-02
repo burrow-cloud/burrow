@@ -41,6 +41,13 @@ func (a App) Validate() error {
 // value under an existing key, which does not otherwise mutate the template (ADR-0028).
 const RestartedAtAnnotation = "burrow.cloud/restarted-at"
 
+// ReleaseAnnotation is the pod-template annotation Burrow stamps with the release ID so every
+// deploy of a new release rolls the workload, even when the image reference is unchanged. A
+// re-deploy of the same image is a new release with a new ID, so the pod template differs and the
+// server-side apply triggers a rollout (replacing pods whose per-creation state is stale — e.g.
+// an imagePullSecret bound before `burrow config registry login` fixed the pull credential).
+const ReleaseAnnotation = "burrow.cloud/release"
+
 // AppSecretName is the per-app Kubernetes Secret that holds an app's secret env (ADR-0028): one
 // object per app in the app namespace, keys = env-var names, values = secret values. The values
 // live only here — never inlined into the Deployment spec, never written to Postgres, and never

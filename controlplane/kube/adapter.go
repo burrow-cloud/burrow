@@ -567,6 +567,16 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		}
 	}
 
+	// Stamp the release ID on the pod template so every new release rolls the workload, even when
+	// the image reference is unchanged (a re-deploy is a new release with a new ID). Merge it with
+	// any metrics annotations rather than clobbering them; an empty ReleaseID adds nothing.
+	if spec.ReleaseID != "" {
+		if podAnnotations == nil {
+			podAnnotations = map[string]string{}
+		}
+		podAnnotations[controlplane.ReleaseAnnotation] = spec.ReleaseID
+	}
+
 	// Source every key in the app's per-app Secret as an env var (ADR-0028). optional: true so a
 	// workload with no secrets set still applies (the Secret may not exist yet) — the values live
 	// only in the Secret, never inlined here. The name is derived from the app, so a deploy,

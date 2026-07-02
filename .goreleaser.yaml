@@ -66,6 +66,10 @@ brews:
     install: |
       bin.install "burrow"
       bin.install "burrow-mcp"
+    caveats: |
+      burrow-mcp was updated. Restart any open agent session so it loads the new
+      MCP server. You can resume your previous one (for example, `claude --resume`).
+      Your `burrow` CLI in the terminal is already up to date.
 
 release:
   github:

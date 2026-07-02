@@ -18,9 +18,16 @@ alternatives that were rejected.
   [docs/ROADMAP.md](../ROADMAP.md) and [docs/PLAN.md](../PLAN.md), or as a skipped/failing
   test that names the ADR.
 
-## Status values
+## Format
 
-`Proposed` · `Accepted` · `Rejected` · `Superseded by ADR-00NN`
+New ADRs follow [template.md](template.md): a **Status** badge, then a one-paragraph **TL;DR**
+(the decision in brief, with its relationships to other ADRs), then Context, Decision,
+Consequences, and Rejected alternatives. Status badges:
+
+✅ `Accepted` · 🟡 `Proposed` · ❌ `Rejected` · ♻️ `Superseded by ADR-00NN`
+
+Earlier records predate this format; it applies going forward (Accepted ADRs are immutable, so
+they are not reformatted).
 
 ## Index
 

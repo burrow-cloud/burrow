@@ -2,13 +2,23 @@
 
 ## Status
 
-Accepted. Builds on [ADR-0002](0002-four-layer-architecture.md) (the control plane is the
-product; the CLI and MCP server are thin clients), [ADR-0005](0005-mcp-server-holds-no-cluster-credentials.md)
-(the MCP server is a thin, credential-free client), [ADR-0013](0013-database-migrations-and-upgrade-policy.md)
-(single-minor-step upgrades), and [ADR-0006](0006-guardrails-in-the-control-plane.md) (every
-operation returns a structured result the agent can reason over). Interacts with
-[ADR-0027](0027-audit-log.md) (the acting client version belongs in the record). Supersedes
-nothing.
+✅ Accepted
+
+## TL;DR
+
+The control plane is the version-compatibility anchor: it stays backward-compatible to clients
+one minor version back and never refuses a request on version difference alone, so one person
+upgrading burrowd cannot break a teammate's older CLI. A client-version header turns genuine
+incompatibility — a newer client calling a feature the server lacks, or a client older than the
+supported window — into an actionable "run `burrow upgrade`" error instead of an opaque failure.
+
+Builds on [ADR-0002](0002-four-layer-architecture.md) and
+[ADR-0005](0005-mcp-server-holds-no-cluster-credentials.md) (the control plane is the product;
+the CLI and MCP server are thin clients), and on
+[ADR-0013](0013-database-migrations-and-upgrade-policy.md) (single-minor-step upgrades);
+realizes [ADR-0006](0006-guardrails-in-the-control-plane.md) (every operation returns a
+structured result the agent can reason over); interacts with [ADR-0027](0027-audit-log.md) (the
+acting client version belongs in the record). Supersedes nothing.
 
 ## Context
 

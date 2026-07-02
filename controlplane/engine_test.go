@@ -256,6 +256,52 @@ func TestStatus(t *testing.T) {
 	}
 }
 
+func TestStatusImagePullIssue(t *testing.T) {
+	ctx := context.Background()
+	e, k, r, _, _ := newEngine(t, permissive())
+	r.Add("ghcr.io/burrow-cloud/website:0.1.1", "sha256:1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "ghcr.io/burrow-cloud/website:0.1.1", Replicas: 1}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	// The cluster cannot pull the private image: the pod lands in ImagePullBackOff.
+	k.SetImagePullFailure("web", cp.ReasonImagePullBackOff)
+
+	st, err := e.Status(ctx, "web", "")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Workload.Available {
+		t.Fatalf("workload = %+v, want not available", st.Workload)
+	}
+	if st.Workload.IssueReason != cp.ReasonImagePullBackOff {
+		t.Errorf("issue reason = %q, want %q", st.Workload.IssueReason, cp.ReasonImagePullBackOff)
+	}
+	for _, want := range []string{`registry "ghcr.io"`, "burrow registry login ghcr.io"} {
+		if !strings.Contains(st.Workload.Issue, want) {
+			t.Errorf("issue = %q, want it to contain %q", st.Workload.Issue, want)
+		}
+	}
+}
+
+func TestStatusHealthyNoIssue(t *testing.T) {
+	ctx := context.Background()
+	e, _, r, _, _ := newEngine(t, permissive())
+	r.Add("img:1", "sha256:1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	st, err := e.Status(ctx, "web", "")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !st.Workload.Available {
+		t.Fatalf("workload = %+v, want available", st.Workload)
+	}
+	if st.Workload.Issue != "" || st.Workload.IssueReason != "" {
+		t.Errorf("healthy workload carries issue = %q / %q, want empty", st.Workload.Issue, st.Workload.IssueReason)
+	}
+}
+
 func TestStatusUnknownApp(t *testing.T) {
 	e, _, _, _, _ := newEngine(t, permissive())
 	if _, err := e.Status(context.Background(), "ghost", ""); !errors.Is(err, cp.ErrNotFound) {

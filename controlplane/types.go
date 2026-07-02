@@ -67,6 +67,16 @@ type WorkloadStatus struct {
 	// Available reports whether the workload currently meets its availability
 	// condition (enough ready replicas to serve).
 	Available bool `json:"available"`
+	// Issue is a human- and agent-actionable explanation of why an unavailable workload is
+	// blocked, when the cluster reports a genuinely blocking pod condition — e.g. a pull
+	// failure that names the image, the registry host, and the `burrow registry login`
+	// fix (ADR-0006). It is best-effort enrichment: empty when the workload is healthy or
+	// when no blocking condition was observed, so it never becomes a required field.
+	Issue string `json:"issue,omitempty"`
+	// IssueReason is the raw, machine-usable Kubernetes reason behind Issue (e.g.
+	// "ImagePullBackOff" or "ErrImagePull"), for an agent that wants to branch on the cause
+	// rather than parse the prose. Empty whenever Issue is empty.
+	IssueReason string `json:"issue_reason,omitempty"`
 }
 
 // ExposureStatus is the observed state of an app's exposure, for the reachability surface

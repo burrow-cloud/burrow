@@ -366,6 +366,9 @@ func formatStatus(res client.StatusResult) string {
 			avail = "available"
 		}
 		s += fmt.Sprintf("workload: %d/%d replicas ready, %s", res.Workload.ReadyReplicas, res.Workload.DesiredReplicas, avail)
+		if res.Workload.Issue != "" {
+			s += "\nissue: " + res.Workload.Issue
+		}
 	} else {
 		s += "workload: not running"
 	}

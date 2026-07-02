@@ -94,10 +94,32 @@ type backupCall struct {
 }
 
 type deployState struct {
-	spec        controlplane.WorkloadSpec
-	ready       int32
-	logs        []controlplane.LogLine
-	restartedAt time.Time // last RestartWorkload timestamp; zero until rolled
+	spec          controlplane.WorkloadSpec
+	ready         int32
+	logs          []controlplane.LogLine
+	restartedAt   time.Time // last RestartWorkload timestamp; zero until rolled
+	waitingReason string    // injected blocking pod waiting reason (e.g. ImagePullBackOff); empty when healthy
+}
+
+// status builds the observed WorkloadStatus for this deploy state, mirroring the real adapter:
+// availability comes from the ready/desired replicas, and an injected blocking pod waiting
+// reason (SetImagePullFailure) becomes the same actionable Issue the real adapter attaches when
+// the workload is not serving. It centralizes the shape so WorkloadStatus and ListWorkloads agree.
+func (d *deployState) status(app string) controlplane.WorkloadStatus {
+	st := controlplane.WorkloadStatus{
+		App:             app,
+		Kind:            d.spec.Kind,
+		Image:           d.spec.Image,
+		DesiredReplicas: d.spec.Replicas,
+		ReadyReplicas:   d.ready,
+		UpdatedReplicas: d.ready,
+		Available:       d.spec.Replicas > 0 && d.ready >= d.spec.Replicas,
+	}
+	if !st.Available && controlplane.IsImagePullReason(d.waitingReason) {
+		st.Issue = controlplane.ImagePullIssue(d.spec.Image, d.waitingReason)
+		st.IssueReason = d.waitingReason
+	}
+	return st
 }
 
 // NewKubernetes returns an empty fake cluster. metrics-server is reported present by default (the
@@ -265,6 +287,20 @@ func (k *Kubernetes) SetReady(app string, ready int32) {
 	}
 }
 
+// SetImagePullFailure models a workload whose pod cannot pull its image: it drops ready to 0 (so
+// the workload is not Available) and records reason as the blocking pod waiting reason, so
+// WorkloadStatus/ListWorkloads report the same actionable Issue the real adapter attaches on a
+// genuine ImagePullBackOff. Pass a non-image-pull reason (or "") to clear it. It is a no-op if
+// app has no workload.
+func (k *Kubernetes) SetImagePullFailure(app, reason string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if d := k.deploys[k.key(app)]; d != nil {
+		d.ready = 0
+		d.waitingReason = reason
+	}
+}
+
 // SetLogs replaces the stored log lines for app.
 func (k *Kubernetes) SetLogs(app string, lines []controlplane.LogLine) {
 	k.mu.Lock()
@@ -323,15 +359,7 @@ func (k *Kubernetes) WorkloadStatus(ctx context.Context, app string) (controlpla
 	if d == nil {
 		return controlplane.WorkloadStatus{}, fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
-	return controlplane.WorkloadStatus{
-		App:             app,
-		Kind:            d.spec.Kind,
-		Image:           d.spec.Image,
-		DesiredReplicas: d.spec.Replicas,
-		ReadyReplicas:   d.ready,
-		UpdatedReplicas: d.ready,
-		Available:       d.spec.Replicas > 0 && d.ready >= d.spec.Replicas,
-	}, nil
+	return d.status(app), nil
 }
 
 func (k *Kubernetes) ListWorkloads(ctx context.Context) ([]controlplane.WorkloadStatus, error) {
@@ -346,15 +374,7 @@ func (k *Kubernetes) ListWorkloads(ctx context.Context) ([]controlplane.Workload
 		if !ok {
 			continue // a workload in a different namespace; listing is per-namespace
 		}
-		out = append(out, controlplane.WorkloadStatus{
-			App:             app,
-			Kind:            d.spec.Kind,
-			Image:           d.spec.Image,
-			DesiredReplicas: d.spec.Replicas,
-			ReadyReplicas:   d.ready,
-			UpdatedReplicas: d.ready,
-			Available:       d.spec.Replicas > 0 && d.ready >= d.spec.Replicas,
-		})
+		out = append(out, d.status(app))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].App < out[j].App })
 	return out, nil

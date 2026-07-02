@@ -636,6 +636,96 @@ func TestWorkloadStatusNotFound(t *testing.T) {
 	}
 }
 
+// unavailableDeployment is a Deployment with no ready replicas, so WorkloadStatus reports it not
+// available and looks at the pods for a blocking condition.
+func unavailableDeployment(image string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: i32p(1),
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: image}}}},
+		},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: 0},
+	}
+}
+
+func TestWorkloadStatusImagePullIssue(t *testing.T) {
+	const image = "ghcr.io/burrow-cloud/website:0.1.1"
+	dep := unavailableDeployment(image)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-abc", Namespace: ns, Labels: map[string]string{"app.kubernetes.io/name": "web"}},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "web",
+				Image: image,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: cp.ReasonImagePullBackOff, Message: "Back-off pulling image"}},
+			}},
+		},
+	}
+	a := kube.New(fake.NewSimpleClientset(dep, pod), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.Available {
+		t.Fatalf("status = %+v, want not available", st)
+	}
+	if st.IssueReason != cp.ReasonImagePullBackOff {
+		t.Errorf("issue reason = %q, want %q", st.IssueReason, cp.ReasonImagePullBackOff)
+	}
+	for _, want := range []string{image, `registry "ghcr.io"`, "burrow registry login ghcr.io"} {
+		if !strings.Contains(st.Issue, want) {
+			t.Errorf("issue = %q, want it to contain %q", st.Issue, want)
+		}
+	}
+}
+
+func TestWorkloadStatusTransientReasonNoIssue(t *testing.T) {
+	dep := unavailableDeployment("img:1")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-abc", Namespace: ns, Labels: map[string]string{"app.kubernetes.io/name": "web"}},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "web",
+				Image: "img:1",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+			}},
+		},
+	}
+	a := kube.New(fake.NewSimpleClientset(dep, pod), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.Issue != "" || st.IssueReason != "" {
+		t.Errorf("transient waiting reason surfaced issue = %q / %q, want empty", st.Issue, st.IssueReason)
+	}
+}
+
+// TestWorkloadStatusPodListErrorIsBestEffort confirms a failure to list pods during enrichment
+// does not fail Status: the workload state is still returned, just without an Issue.
+func TestWorkloadStatusPodListErrorIsBestEffort(t *testing.T) {
+	dep := unavailableDeployment("img:1")
+	client := fake.NewSimpleClientset(dep)
+	client.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("boom: pod list failed")
+	})
+	a := kube.New(client, ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus must not fail on a pod-list error, got: %v", err)
+	}
+	if st.Issue != "" || st.IssueReason != "" {
+		t.Errorf("issue = %q / %q, want empty when enrichment could not list pods", st.Issue, st.IssueReason)
+	}
+	if st.DesiredReplicas != 1 {
+		t.Errorf("desired = %d, want 1 (base status still populated)", st.DesiredReplicas)
+	}
+}
+
 func TestScale(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

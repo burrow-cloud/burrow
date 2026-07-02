@@ -276,7 +276,7 @@ func TestStatusImagePullIssue(t *testing.T) {
 	if st.Workload.IssueReason != cp.ReasonImagePullBackOff {
 		t.Errorf("issue reason = %q, want %q", st.Workload.IssueReason, cp.ReasonImagePullBackOff)
 	}
-	for _, want := range []string{`registry "ghcr.io"`, "burrow registry login ghcr.io"} {
+	for _, want := range []string{`registry "ghcr.io"`, "burrow config registry login ghcr.io"} {
 		if !strings.Contains(st.Workload.Issue, want) {
 			t.Errorf("issue = %q, want it to contain %q", st.Workload.Issue, want)
 		}

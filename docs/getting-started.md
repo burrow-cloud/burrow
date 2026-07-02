@@ -79,13 +79,13 @@ If the image lives in a private registry, give the cluster credentials to pull i
 deploy:
 
 ```sh
-burrow registry login ghcr.io -u <user> -p <PAT-with-read:packages>
+burrow config registry login ghcr.io -u <user> -p <PAT-with-read:packages>
 ```
 
 Or reuse a registry you are already logged in to on your machine:
 
 ```sh
-burrow registry login ghcr.io --from-docker-config
+burrow config registry login ghcr.io --from-docker-config
 ```
 
 This is a one-time credential step you run yourself at your terminal. The credential is stored in

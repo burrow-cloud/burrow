@@ -156,3 +156,33 @@ func mustLogin(t *testing.T, cs *fake.Clientset, ns, host, user, pass string) {
 		t.Fatalf("registryLogin %s: %v", host, err)
 	}
 }
+
+// TestRegistryCommandPath locks the advertised command path to the real command tree. The
+// private-registry guidance (the burrow_deploy tool description, the ImagePullBackOff status
+// Issue, and getting-started) tells users to run `burrow config registry login`; the registry
+// command is deliberately nested under `config`, not exposed at the top level. This guards
+// against re-advertising the wrong `burrow registry login` path: earlier guidance verified the
+// subcommand flags but not the parent path, so the drift slipped through.
+func TestRegistryCommandPath(t *testing.T) {
+	root := newRootCmd()
+
+	// The documented path resolves to the login command with no leftover args.
+	for _, sub := range []string{"login", "logout", "list"} {
+		path := []string{"config", "registry", sub}
+		cmd, rest, err := root.Find(path)
+		if err != nil {
+			t.Fatalf("Find(%v): %v", path, err)
+		}
+		if cmd.Name() != sub || len(rest) != 0 {
+			t.Errorf("Find(%v) resolved to %q with leftover %v, want %q with no leftover",
+				path, cmd.Name(), rest, sub)
+		}
+	}
+
+	// A top-level `burrow registry ...` must NOT resolve: there is no top-level registry command,
+	// so Find reports an unknown command rather than a login command.
+	cmd, _, err := root.Find([]string{"registry", "login"})
+	if err == nil && (cmd.Name() == "registry" || cmd.Name() == "login") {
+		t.Errorf("`burrow registry login` should not resolve to a top-level command, got %q", cmd.Name())
+	}
+}

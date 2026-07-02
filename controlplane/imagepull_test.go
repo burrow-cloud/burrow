@@ -50,7 +50,7 @@ func TestImagePullIssue(t *testing.T) {
 	for _, want := range []string{
 		`ghcr.io/burrow-cloud/website:0.1.1`,
 		`registry "ghcr.io"`,
-		"burrow registry login ghcr.io",
+		"burrow config registry login ghcr.io",
 		cp.ReasonImagePullBackOff,
 	} {
 		if !strings.Contains(msg, want) {

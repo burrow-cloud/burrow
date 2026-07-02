@@ -46,6 +46,9 @@ func TestAuditDeployAllowedRecordsExecuted(t *testing.T) {
 	if rows[0].Outcome != cp.AuditAllowed {
 		t.Errorf("decision outcome = %q, want allowed", rows[0].Outcome)
 	}
+	if rows[0].GuardrailCode != string(cp.GuardrailAppDeploy) {
+		t.Errorf("decision guardrail = %q, want app.deploy", rows[0].GuardrailCode)
+	}
 	if rows[0].Target != "web" {
 		t.Errorf("target = %q, want web", rows[0].Target)
 	}
@@ -61,6 +64,37 @@ func TestAuditDeployAllowedRecordsExecuted(t *testing.T) {
 	// The timestamp comes from the injected clock (2026-06-23T12:00:00Z in the harness).
 	if rows[0].Timestamp.IsZero() {
 		t.Errorf("timestamp should come from the clock, got zero")
+	}
+}
+
+// TestAuditDeployHeldRecordsAppDeploy: a confirm-disposition deploy with no confirm records a held
+// decision row tagged with the app.deploy guardrail and does NOT execute (ADR-0007).
+func TestAuditDeployHeldDoesNotExecute(t *testing.T) {
+	pol := permissive().With(cp.GuardrailAppDeploy, cp.DispositionConfirm)
+	e, k, r, d, _ := newEngine(t, pol)
+	ctx := context.Background()
+	r.Add("img:1", "sha256:deadbeef")
+
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err == nil {
+		t.Fatalf("Deploy without confirm should be held")
+	}
+
+	rows := auditRows(t, d, "deploy")
+	if len(rows) != 1 {
+		t.Fatalf("deploy audit rows = %d, want 1 (held decision only)", len(rows))
+	}
+	if rows[0].Outcome != cp.AuditHeld {
+		t.Errorf("outcome = %q, want held", rows[0].Outcome)
+	}
+	if rows[0].GuardrailCode != string(cp.GuardrailAppDeploy) {
+		t.Errorf("guardrail = %q, want app.deploy", rows[0].GuardrailCode)
+	}
+	if rows[0].Disposition != string(cp.DispositionConfirm) {
+		t.Errorf("disposition = %q, want confirm", rows[0].Disposition)
+	}
+	// Not executed: nothing applied to the cluster.
+	if _, ok := k.Spec("web"); ok {
+		t.Errorf("held deploy must not apply to the cluster")
 	}
 }
 

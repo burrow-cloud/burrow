@@ -57,6 +57,61 @@ func TestEvaluateReplicas(t *testing.T) {
 	}
 }
 
+// TestEvaluateDeploy exercises the composed deploy gate: the categorical app.deploy guardrail
+// (default allow) checked first, then the replica ceiling bound. It proves the composition order —
+// the categorical gate takes precedence over a within-policy deploy, but an allowed deploy still
+// cannot exceed the ceiling — and that env-scoping locks down a single environment while others stay
+// permissive (ADR-0007, ADR-0020, ADR-0035 phase 2c).
+func TestEvaluateDeploy(t *testing.T) {
+	deny := DefaultPolicy().With(GuardrailAppDeploy, DispositionDeny)
+	confirm := DefaultPolicy().With(GuardrailAppDeploy, DispositionConfirm)
+	// prod locked to confirm, default env inherits the allow default.
+	envScoped := DefaultPolicy().With(GuardrailCode("prod."+string(GuardrailAppDeploy)), DispositionConfirm)
+
+	cases := []struct {
+		name        string
+		policy      Policy
+		env         string
+		replicas    int32
+		confirmed   bool
+		wantCode    GuardrailCode // "" means allowed
+		wantConfirm bool
+	}{
+		{"default allow proceeds", DefaultPolicy(), "", 3, false, "", false},
+		{"deny refuses", deny, "", 3, false, GuardrailAppDeploy, false},
+		{"confirm needs confirmation", confirm, "", 3, false, GuardrailAppDeploy, true},
+		{"confirm confirmed proceeds", confirm, "", 3, true, "", false},
+		{"allowed deploy still bounded by ceiling", DefaultPolicy(), "", 51, false, GuardrailReplicaCeiling, false},
+		{"env-scoped prod holds for confirmation", envScoped, "prod", 3, false, GuardrailAppDeploy, true},
+		{"env-scoped default env stays allow", envScoped, "", 3, false, "", false},
+		{"env-scoped staging inherits allow", envScoped, "staging", 3, false, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.policy.evaluateDeploy(c.env, c.replicas, c.confirmed)
+			if c.wantCode == "" {
+				if err != nil {
+					t.Fatalf("evaluateDeploy(env=%q, %d, confirmed=%v) = %v, want allowed", c.env, c.replicas, c.confirmed, err)
+				}
+				return
+			}
+			g, ok := AsGuardrail(err)
+			if !ok {
+				t.Fatalf("evaluateDeploy(env=%q, %d) = %v, want GuardrailError", c.env, c.replicas, err)
+			}
+			if g.Code != c.wantCode {
+				t.Fatalf("code = %q, want %q", g.Code, c.wantCode)
+			}
+			if g.NeedsConfirmation != c.wantConfirm {
+				t.Fatalf("NeedsConfirmation = %v, want %v", g.NeedsConfirmation, c.wantConfirm)
+			}
+			if g.Operation != "deploy" {
+				t.Fatalf("operation = %q, want deploy", g.Operation)
+			}
+		})
+	}
+}
+
 // TestDispositionEnvFallback exercises the env to global to default lookup order (ADR-0035 phase 2c):
 // an env-specific override wins; absent one, a named env falls back to the global override; and the
 // empty and reserved "default" envs reproduce the global lookup exactly.
@@ -131,7 +186,7 @@ func TestGuardrailsForMarksSource(t *testing.T) {
 // TestEnvScopable confirms only the app-level guardrails can be scoped to an environment; the
 // cluster-level ones (addon.*, dns.*) are global (ADR-0035 phase 2c).
 func TestEnvScopable(t *testing.T) {
-	scopable := []GuardrailCode{GuardrailAppDelete, GuardrailRollback, GuardrailExposePublic, GuardrailScaleToZero, GuardrailReplicaCeiling}
+	scopable := []GuardrailCode{GuardrailAppDeploy, GuardrailAppDelete, GuardrailRollback, GuardrailExposePublic, GuardrailScaleToZero, GuardrailReplicaCeiling}
 	global := []GuardrailCode{GuardrailDNSWrite, GuardrailDNSDelete, GuardrailAddonInstall, GuardrailAddonRemove, GuardrailAddonDetach, GuardrailAddonRestore}
 	for _, c := range scopable {
 		if !EnvScopable(c) {

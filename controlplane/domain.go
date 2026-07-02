@@ -166,6 +166,10 @@ type Policy struct {
 func DefaultPolicy() Policy {
 	return Policy{
 		Dispositions: map[GuardrailCode]Disposition{
+			// Deploy is the core action, so it is allowed by default — an agent should be able to
+			// ship a release without friction. An operator who wants sign-off (or a freeze) can raise
+			// it to confirm or deny per environment with `guard set --env prod app.deploy ...`.
+			GuardrailAppDeploy:      DispositionAllow,
 			GuardrailReplicaCeiling: DispositionDeny,
 			GuardrailScaleToZero:    DispositionConfirm,
 			GuardrailExposePublic:   DispositionConfirm,

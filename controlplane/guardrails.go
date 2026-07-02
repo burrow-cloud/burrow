@@ -35,6 +35,12 @@ func (d Disposition) Valid() bool {
 type GuardrailCode string
 
 const (
+	// GuardrailAppDeploy: the operation would deploy a new release of an app. Deploy is the
+	// core action, so it is allowed by default and gated only if an operator opts in — set it
+	// to confirm to require sign-off before a deploy (e.g. in prod), or to deny to freeze
+	// deploys entirely, per environment. Realizes ADR-0007: the explicit deploy call is where
+	// the guardrails live.
+	GuardrailAppDeploy GuardrailCode = "app.deploy"
 	// GuardrailReplicaCeiling: the requested replica count exceeds Policy.MaxReplicas.
 	GuardrailReplicaCeiling GuardrailCode = "app.replica_ceiling"
 	// GuardrailScaleToZero: the operation would scale to zero replicas.
@@ -95,6 +101,7 @@ type GuardrailInfo struct {
 // description, so inspection shows the full set — including unset ones, which read as their
 // default disposition.
 var knownGuardrails = []GuardrailInfo{
+	{Code: GuardrailAppDeploy, Description: "deploy a new release of an application"},
 	{Code: GuardrailReplicaCeiling, Description: "deploy or scale above the replica ceiling"},
 	{Code: GuardrailScaleToZero, Description: "scale an application to zero replicas"},
 	{Code: GuardrailExposePublic, Description: "expose an application to the public internet at a hostname"},
@@ -191,6 +198,19 @@ func AsGuardrail(err error) (*GuardrailError, bool) {
 		return g, true
 	}
 	return nil, false
+}
+
+// evaluateDeploy applies the guardrails that gate a deploy: first the categorical app.deploy
+// gate (allow/confirm/deny — default allow), then the replica ceiling bound. The categorical
+// gate is checked first so a deny/confirm on deploying at all takes precedence; a within-policy
+// deploy still cannot exceed the replica ceiling. Realizes ADR-0007 (explicit deploy is where
+// guardrails live) and ADR-0020 (safe defaults).
+func (p Policy) evaluateDeploy(env string, replicas int32, confirmed bool) error {
+	if err := p.evaluateGuardrail(env, "deploy", GuardrailAppDeploy, confirmed,
+		fmt.Sprintf("deploying a new release to %s", envName(env))); err != nil {
+		return err
+	}
+	return p.evaluateReplicas(env, "deploy", replicas, confirmed)
 }
 
 // evaluateReplicas evaluates a requested replica count for op against the policy, given

@@ -153,7 +153,8 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		return DeployResult{}, fmt.Errorf("deploy %s: loading guardrail policy: %w", req.App, err)
 	}
 	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(req.Replicas)), "env": envName(req.Env)}
-	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, "", pol.evaluateReplicas(req.Env, "deploy", req.Replicas, req.Confirm)); err != nil {
+	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, GuardrailAppDeploy,
+		pol.evaluateDeploy(req.Env, req.Replicas, req.Confirm)); err != nil {
 		return DeployResult{}, err
 	}
 

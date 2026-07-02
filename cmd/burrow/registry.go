@@ -28,6 +28,13 @@ import (
 // ServiceAccount so app Pods inherit it (ADR-0017).
 const registrySecretName = "burrow-registry"
 
+// registryClientset builds the Kubernetes clientset the registry subcommands act with. It is a
+// package var so tests can substitute a fake, mirroring clientsetFn in install.go; it defaults to
+// the real kubeconfig-driven clientset.
+var registryClientset = func(kubeconfig string) (kubernetes.Interface, error) {
+	return clientset(kubeconfig)
+}
+
 // dockerConfig is the on-disk/in-Secret shape of a dockerconfigjson credential file.
 type dockerConfig struct {
 	Auths map[string]dockerAuth `json:"auths"`
@@ -57,7 +64,7 @@ func newRegistryCmd() *cobra.Command {
 	// resolve builds a clientset and determines the app namespace (from the flag or the
 	// install) for whichever subcommand runs.
 	resolve := func(ctx context.Context) (kubernetes.Interface, string, error) {
-		cs, err := clientset(kubeconfig)
+		cs, err := registryClientset(kubeconfig)
 		if err != nil {
 			return nil, "", err
 		}
@@ -96,7 +103,7 @@ func newRegistryCmd() *cobra.Command {
 			if err := registryLogin(ctx, cs, appNS, host, u, p); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "configured registry %q for apps in namespace %q\n", host, appNS)
+			fmt.Fprintf(cmd.OutOrStdout(), "configured registry %q for your apps\n", host)
 			return nil
 		},
 	}
@@ -117,7 +124,7 @@ func newRegistryCmd() *cobra.Command {
 			if err := registryLogout(ctx, cs, appNS, args[0]); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "removed registry %q from namespace %q\n", args[0], appNS)
+			fmt.Fprintf(cmd.OutOrStdout(), "removed registry %q\n", args[0])
 			return nil
 		},
 	}
@@ -138,7 +145,7 @@ func newRegistryCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			if len(hosts) == 0 {
-				fmt.Fprintf(out, "no registries configured in namespace %q\n", appNS)
+				fmt.Fprintln(out, "no image registries configured")
 				return nil
 			}
 			for _, h := range hosts {

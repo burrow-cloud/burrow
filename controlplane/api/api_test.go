@@ -26,8 +26,11 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake
 	t.Helper()
 	k, r, d := fake.NewKubernetes(), fake.NewRegistry(), fake.NewDatabase()
 	// A restrictive baseline (empty dispositions → deny) so guardrail tests opt in explicitly,
-	// but rollback's product default is allow, so seed that to match production.
-	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailRollback, cp.DispositionAllow))
+	// but rollback and deploy have a product default of allow, so seed those to match production
+	// (deploy is the core action and is what the setup `do(... /deploy ...)` calls exercise).
+	d.SetPolicy(cp.Policy{MaxReplicas: 5}.
+		With(cp.GuardrailRollback, cp.DispositionAllow).
+		With(cp.GuardrailAppDeploy, cp.DispositionAllow))
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Registry: r, Database: d,
 		Clock:       fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),

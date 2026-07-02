@@ -147,7 +147,7 @@ func TestDeployImageNotFound(t *testing.T) {
 
 func TestDeployGuardrails(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 5})
+	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
 	r.Add("img:1", "sha256:1")
 
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 6})
@@ -157,6 +157,50 @@ func TestDeployGuardrails(t *testing.T) {
 	// A refused deploy touches nothing.
 	if _, ok := k.Spec("web"); ok {
 		t.Errorf("refused deploy should not apply to the cluster")
+	}
+}
+
+// TestDeployAppDeployGuardrailHolds confirms the app.deploy guardrail can hold a deploy for
+// confirmation: unconfirmed it is held (nothing applied), confirmed it proceeds (ADR-0007).
+func TestDeployAppDeployGuardrailHolds(t *testing.T) {
+	ctx := context.Background()
+	// Deploy defaults to allow; an operator raises it to confirm to require sign-off.
+	e, k, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailAppDeploy, cp.DispositionConfirm))
+	r.Add("img:1", "sha256:1")
+
+	// Held for confirmation: the deploy does not happen.
+	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
+	mustGuardrail(t, err, cp.GuardrailAppDeploy)
+	if g, _ := cp.AsGuardrail(err); !g.NeedsConfirmation {
+		t.Errorf("NeedsConfirmation = false, want true")
+	}
+	if _, ok := k.Spec("web"); ok {
+		t.Errorf("held deploy should not apply to the cluster")
+	}
+
+	// With confirmation it proceeds.
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
+		t.Fatalf("confirmed deploy: %v", err)
+	}
+	if spec, ok := k.Spec("web"); !ok || spec.Image != "img:1" {
+		t.Errorf("confirmed deploy should apply img:1, got %+v ok=%v", spec, ok)
+	}
+}
+
+// TestDeployAppDeployGuardrailDenies confirms a deny disposition refuses the deploy outright, even
+// with confirm set (ADR-0020).
+func TestDeployAppDeployGuardrailDenies(t *testing.T) {
+	ctx := context.Background()
+	e, k, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailAppDeploy, cp.DispositionDeny))
+	r.Add("img:1", "sha256:1")
+
+	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true})
+	mustGuardrail(t, err, cp.GuardrailAppDeploy)
+	if g, _ := cp.AsGuardrail(err); g.NeedsConfirmation {
+		t.Errorf("NeedsConfirmation = true, want false for a deny")
+	}
+	if _, ok := k.Spec("web"); ok {
+		t.Errorf("denied deploy should not apply to the cluster")
 	}
 }
 
@@ -237,9 +281,11 @@ func TestLogs(t *testing.T) {
 
 func TestScale(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 10})
+	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 10}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
 	r.Add("img:1", "sha256:1")
-	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2})
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
 
 	res, err := e.Scale(ctx, "web", "", 5, false)
 	if err != nil {

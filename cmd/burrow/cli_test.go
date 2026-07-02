@@ -493,6 +493,30 @@ func TestGuardSetEnv(t *testing.T) {
 	}
 }
 
+// TestGuardSetEnvAppDeploy confirms the marquee `guard set --env prod app.deploy confirm` round-trips:
+// the app.deploy code reaches the API path and the env selector is prod (ADR-0007, ADR-0035 phase 2c).
+func TestGuardSetEnvAppDeploy(t *testing.T) {
+	var gotMethod, gotPath, gotEnv string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotEnv = r.Method, r.URL.Path, r.URL.Query().Get("env")
+		_ = json.NewEncoder(w).Encode(map[string]any{"guardrails": []map[string]any{
+			{"code": "app.deploy", "disposition": "confirm", "description": "deploy a new release of an application", "source": "env"},
+		}})
+	}, "guard", "set", "app.deploy", "confirm", "--env", "prod")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "PUT" || gotPath != "/v1/guard/app.deploy" {
+		t.Errorf("request = %s %s, want PUT /v1/guard/app.deploy", gotMethod, gotPath)
+	}
+	if gotEnv != "prod" {
+		t.Errorf("env query = %q, want prod", gotEnv)
+	}
+	if !strings.Contains(out, `set guardrail "app.deploy" to "confirm" in environment "prod"`) {
+		t.Errorf("output = %q, want it to name the app.deploy guardrail and the environment", out)
+	}
+}
+
 // TestGuardSetNoEnvOmitsSelector confirms `guard set` without --env sends no env selector, so the
 // server sets the global disposition (ADR-0035 phase 2c).
 func TestGuardSetNoEnvOmitsSelector(t *testing.T) {

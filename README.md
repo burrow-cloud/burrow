@@ -10,7 +10,9 @@
 Point [Claude Code](https://claude.com/claude-code), Cursor, Codex, or bring your own at your
 Kubernetes cluster. It deploys, scales, debugs, and ships your apps to a URL over
 [MCP](https://modelcontextprotocol.io). You own the infrastructure and everything that drives
-it, and every change the agent makes is gated by a guardrail, so it can't break prod.
+it, and every risky move (deploying to prod, deleting an app, rolling back, exposing to the
+internet, DNS and add-on changes) can be gated by a guardrail you set, so the agent proposes
+and you decide.
 
 It is not another git deploy host. Vercel and friends run your app on *their* platform; Burrow
 operates *your* cluster (real Kubernetes, done right), and goes past the app to the whole
@@ -44,11 +46,12 @@ Coming soon: `Make web autoscale at 90% CPU` and `Limit web to 500MB of memory a
 
 ## Guardrails
 
-Guardrails are how you decide what your agent can and cannot do. Every risky action is checked against your policy before it runs, so the agent proposes and you stay in control.
+Guardrails are how you decide what your agent can and cannot do. Every risky action (deploying to prod, deleting an app, rolling back, exposing publicly, DNS and add-on changes) can be gated by a guardrail you set: raise it to confirm to require your sign-off, or to deny to refuse it outright. You opt in, so the agent proposes and you decide.
 
-    burrow guard set --env prod app.delete deny   # never let the agent delete an app in prod
-    burrow guard set dns.write allow               # let it add DNS records
-    burrow guard set dns.delete deny               # but never delete them
+    burrow guard set --env prod app.deploy confirm   # require your sign-off before any prod deploy
+    burrow guard set --env prod app.delete deny      # never let the agent delete an app in prod
+    burrow guard set dns.write allow                  # let it add DNS records
+    burrow guard set dns.delete deny                  # but never delete them
 
 App-level rules can be scoped per environment, so the agent moves fast in staging while prod stays locked down.
 
@@ -77,13 +80,13 @@ what you get:
   you get a straight answer about which link in the chain broke ("the cert hasn't issued yet"),
   not just "it's down."
 - **You operate it by talking.** Status, logs, rollback, scale: your agent does the work, and
-  the guardrails keep it from breaking prod.
+  the guardrails you set gate the risky moves (a prod deploy, a delete) so it can't get past you.
 - **You get plain-language answers.** Ask "how is my app doing?" or "why is it slow?" and your
   agent reads the logs and metrics and tells you, no dashboards to dig through.
 
-And every change is gated: **the agent proposes, you approve, it executes**, with a record of
-what happened. That human-in-the-loop step is what makes letting an agent operate production
-actually acceptable.
+And the risky changes go through you: set a guardrail and **the agent proposes, you approve, it
+executes**, with a record of what happened either way. That human-in-the-loop step is what makes
+letting an agent operate production actually acceptable.
 
 ## How it works
 
@@ -92,8 +95,8 @@ Three things:
 1. **Your agent** - any AI coding agent you already use (Claude Code, Cursor, Codex, Copilot,
    OpenCode).
 2. **Burrow** - the piece you install. It holds your cluster credentials, does the work
-   (deploy, scale, logs, backing services), and gates every change behind guardrails so the
-   agent cannot break prod.
+   (deploy, scale, logs, backing services), and gates the risky actions behind the guardrails
+   you set, per environment, so the agent stays inside the lines you draw.
 3. **Your Kubernetes cluster** - your infrastructure, which you own.
 
 Two things keep it safe: your code never passes through Burrow (it moves through a container

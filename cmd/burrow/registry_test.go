@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
@@ -154,22 +155,38 @@ func TestRegistryListSorted(t *testing.T) {
 }
 
 // runRegistry drives the real registry subcommand RunE against a fake clientset, returning its
-// stdout. It pins the app namespace with --app-namespace so the discovery path is skipped.
+// stdout. It pins the app namespace with --app-namespace so the discovery path is skipped, and
+// forces a non-interactive stdin so credential resolution is deterministic (no ambient TTY).
 func runRegistry(t *testing.T, cs *fake.Clientset, args ...string) string {
+	t.Helper()
+	out, errb, err := execRegistry(t, cs, "", false, args...)
+	if err != nil {
+		t.Fatalf("registry %v: %v (stderr: %s)", args, err, errb)
+	}
+	return out
+}
+
+// execRegistry drives the registry command with an explicit stdin and interactive-terminal flag,
+// returning stdout, stderr, and the RunE error. The terminal flag drives the stdinIsTerminal seam
+// so the prompt paths are exercised without a real TTY.
+func execRegistry(t *testing.T, cs *fake.Clientset, stdin string, terminal bool, args ...string) (string, string, error) {
 	t.Helper()
 	orig := registryClientset
 	registryClientset = func(string) (kubernetes.Interface, error) { return cs, nil }
 	t.Cleanup(func() { registryClientset = orig })
 
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return terminal }
+	t.Cleanup(func() { stdinIsTerminal = origTerm })
+
 	var out, errb bytes.Buffer
 	cmd := newRegistryCmd()
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)
+	cmd.SetIn(strings.NewReader(stdin))
 	cmd.SetArgs(append([]string{"--app-namespace", "apps"}, args...))
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("registry %v: %v (stderr: %s)", args, err, errb.String())
-	}
-	return out.String()
+	err := cmd.ExecuteContext(context.Background())
+	return out.String(), errb.String(), err
 }
 
 // TestRegistryOutputHasNoNamespaceJargon locks the developer-facing result messages to plain,
@@ -199,6 +216,125 @@ func TestRegistryOutputHasNoNamespaceJargon(t *testing.T) {
 	} {
 		if strings.Contains(got, "namespace") {
 			t.Errorf("registry output leaks %q: %q", "namespace", got)
+		}
+	}
+}
+
+// TestRegistryLoginPasswordStdin feeds the token on standard input with the username supplied by
+// flag: the non-interactive automation path. The credential must reach the stored Secret.
+func TestRegistryLoginPasswordStdin(t *testing.T) {
+	cs := nsWithDefaultSA("apps")
+	out, errb, err := execRegistry(t, cs, "tok-stdin\n", false, "login", "ghcr.io", "-u", "alice", "--password-stdin")
+	if err != nil {
+		t.Fatalf("login --password-stdin: %v (stderr: %s)", err, errb)
+	}
+	if out != "configured registry \"ghcr.io\" for your apps\n" {
+		t.Errorf("login output = %q", out)
+	}
+	cfg := registrySecretConfig(t, cs, "apps")
+	if auth := cfg.Auths["ghcr.io"]; auth.Username != "alice" || auth.Password != "tok-stdin" {
+		t.Errorf("stored credential = %q/%q, want alice/tok-stdin (trailing newline trimmed)", auth.Username, auth.Password)
+	}
+}
+
+// TestRegistryLoginFlagPassword keeps the explicit -u/-p path working non-interactively.
+func TestRegistryLoginFlagPassword(t *testing.T) {
+	cs := nsWithDefaultSA("apps")
+	out, errb, err := execRegistry(t, cs, "", false, "login", "ghcr.io", "-u", "alice", "-p", "tok123")
+	if err != nil {
+		t.Fatalf("login -u/-p: %v (stderr: %s)", err, errb)
+	}
+	if out != "configured registry \"ghcr.io\" for your apps\n" {
+		t.Errorf("login output = %q", out)
+	}
+	cfg := registrySecretConfig(t, cs, "apps")
+	if auth := cfg.Auths["ghcr.io"]; auth.Username != "alice" || auth.Password != "tok123" {
+		t.Errorf("stored credential = %q/%q, want alice/tok123", auth.Username, auth.Password)
+	}
+}
+
+// TestRegistryLoginPasswordStdinAndFlagConflict locks the mutual exclusion of -p and
+// --password-stdin: supplying both is a clear error and nothing is written.
+func TestRegistryLoginPasswordStdinAndFlagConflict(t *testing.T) {
+	cs := nsWithDefaultSA("apps")
+	_, _, err := execRegistry(t, cs, "tok\n", false, "login", "ghcr.io", "-u", "alice", "-p", "tok123", "--password-stdin")
+	if err == nil {
+		t.Fatal("expected an error when -p and --password-stdin are combined")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error = %q, want it to mention mutual exclusion", err)
+	}
+	if _, gerr := cs.CoreV1().Secrets("apps").Get(context.Background(), registrySecretName, metav1.GetOptions{}); !apierrors.IsNotFound(gerr) {
+		t.Errorf("no secret should be written on a conflict, got err=%v", gerr)
+	}
+}
+
+// TestRegistryLoginNonInteractiveNoPassword covers the no-terminal-no-password case: with a
+// username but no -p and no --password-stdin, and a non-interactive stdin, the command errors
+// clearly and points at the non-interactive path.
+func TestRegistryLoginNonInteractiveNoPassword(t *testing.T) {
+	cs := nsWithDefaultSA("apps")
+	_, _, err := execRegistry(t, cs, "", false, "login", "ghcr.io", "-u", "alice")
+	if err == nil {
+		t.Fatal("expected an error with no password on a non-interactive stdin")
+	}
+	if !strings.Contains(err.Error(), "no password provided") || !strings.Contains(err.Error(), "--password-stdin") {
+		t.Errorf("error = %q, want it to name the missing password and --password-stdin", err)
+	}
+}
+
+// TestRegistryLoginNonInteractiveNoUsername covers a missing username with no terminal to prompt.
+func TestRegistryLoginNonInteractiveNoUsername(t *testing.T) {
+	cs := nsWithDefaultSA("apps")
+	_, _, err := execRegistry(t, cs, "tok\n", false, "login", "ghcr.io", "--password-stdin")
+	if err == nil {
+		t.Fatal("expected an error with no username on a non-interactive stdin")
+	}
+	if !strings.Contains(err.Error(), "no username provided") {
+		t.Errorf("error = %q, want it to name the missing username", err)
+	}
+}
+
+// TestRegistryLoginFlagPasswordWarnsOnTerminal checks that -p on an interactive terminal still
+// works but prints the docker-style insecurity warning to stderr.
+func TestRegistryLoginFlagPasswordWarnsOnTerminal(t *testing.T) {
+	cs := nsWithDefaultSA("apps")
+	out, errb, err := execRegistry(t, cs, "", true, "login", "ghcr.io", "-u", "alice", "-p", "tok123")
+	if err != nil {
+		t.Fatalf("login -u/-p on terminal: %v (stderr: %s)", err, errb)
+	}
+	if out != "configured registry \"ghcr.io\" for your apps\n" {
+		t.Errorf("login output = %q", out)
+	}
+	if !strings.Contains(errb, "insecure") {
+		t.Errorf("stderr = %q, want an insecurity warning for -p on a terminal", errb)
+	}
+}
+
+// TestRegistryTokenHint locks the provider-aware token guidance to the right page per registry,
+// and a URL-free generic line for anything else.
+func TestRegistryTokenHint(t *testing.T) {
+	cases := []struct {
+		host      string
+		wantSub   string
+		wantNoURL bool
+	}{
+		{"ghcr.io", "https://github.com/settings/tokens/new?scopes=read:packages", false},
+		{"registry.gitlab.com", "https://gitlab.com/-/user_settings/personal_access_tokens", false},
+		{"docker.io", "https://app.docker.com/settings/personal-access-tokens", false},
+		{"registry.example.com", "", true},
+	}
+	for _, tc := range cases {
+		got := registryTokenHint(tc.host)
+		if tc.wantSub != "" && !strings.Contains(got, tc.wantSub) {
+			t.Errorf("registryTokenHint(%q) = %q, want it to contain %q", tc.host, got, tc.wantSub)
+		}
+		if tc.wantNoURL {
+			for _, url := range []string{"github.com", "gitlab.com", "docker.com"} {
+				if strings.Contains(got, url) {
+					t.Errorf("registryTokenHint(%q) = %q, want no provider URL", tc.host, got)
+				}
+			}
 		}
 	}
 }

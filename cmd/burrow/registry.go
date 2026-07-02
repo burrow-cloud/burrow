@@ -4,14 +4,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,19 +81,32 @@ func newRegistryCmd() *cobra.Command {
 	}
 
 	var username, password string
+	var passwordStdin bool
 	login := &cobra.Command{
 		Use:   "login <host>",
-		Short: "Store a credential for a private registry",
-		Args:  exactArgs(1),
+		Short: "Store a credential for a private registry (prompts for the token)",
+		Long: "login stores the credentials the cluster uses to pull images from a private\n" +
+			"registry. Omit the flags and it prompts: the username as normal input, the\n" +
+			"password or token with the input hidden, so the token never lands in your shell\n" +
+			"history or the process table. For a private GitHub registry use a dedicated,\n" +
+			"long-lived Personal Access Token with the read:packages scope. Pass -u to skip\n" +
+			"the username prompt; -p supplies the token on the command line (insecure, kept\n" +
+			"for non-interactive use); --password-stdin reads the token from standard input\n" +
+			"for scripts and CI (echo \"$TOKEN\" | burrow config registry login ghcr.io -u me\n" +
+			"--password-stdin).",
+		Example: "  burrow config registry login ghcr.io -u me\n" +
+			"  echo \"$TOKEN\" | burrow config registry login ghcr.io -u me --password-stdin",
+		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			host := args[0]
-			cs, appNS, err := resolve(ctx)
+			username, password, err := resolveLoginCredentials(cmd, host, username, password, passwordStdin)
 			if err != nil {
 				return err
 			}
-			if username == "" || password == "" {
-				return errors.New("a username and password/token are required (use -u/-p)")
+			cs, appNS, err := resolve(ctx)
+			if err != nil {
+				return err
 			}
 			if err := registryLogin(ctx, cs, appNS, host, username, password); err != nil {
 				return err
@@ -97,8 +115,9 @@ func newRegistryCmd() *cobra.Command {
 			return nil
 		},
 	}
-	login.Flags().StringVarP(&username, "username", "u", "", "registry username")
-	login.Flags().StringVarP(&password, "password", "p", "", "registry password or token")
+	login.Flags().StringVarP(&username, "username", "u", "", "registry username (prompted when omitted)")
+	login.Flags().StringVarP(&password, "password", "p", "", "registry password or token on the command line (insecure; prefer the prompt or --password-stdin)")
+	login.Flags().BoolVar(&passwordStdin, "password-stdin", false, "read the password or token from standard input")
 
 	logout := &cobra.Command{
 		Use:   "logout <host>",
@@ -146,6 +165,125 @@ func newRegistryCmd() *cobra.Command {
 
 	parent.AddCommand(login, logout, list)
 	return parent
+}
+
+// stdinIsTerminal reports whether the command's standard input is an interactive terminal. It is
+// a package var so tests can force the non-interactive path deterministically without a real TTY.
+var stdinIsTerminal = func(in io.Reader) bool {
+	f, ok := in.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
+// resolveLoginCredentials determines the username and password/token for a registry login from
+// the flags and, when the flags are omitted on an interactive terminal, secure prompts. The
+// resolution order is: for the password, --password-stdin, then -p, then a hidden interactive
+// prompt, then an error; for the username, -u, then a visible interactive prompt, then an error.
+// It follows docker login: -p on a terminal earns a warning because it leaks the token into shell
+// history and the process table, and a non-interactive shell with no supplied password is an
+// error that names the non-interactive path.
+func resolveLoginCredentials(cmd *cobra.Command, host, username, password string, passwordStdin bool) (string, string, error) {
+	if passwordStdin && password != "" {
+		return "", "", errors.New("--password/-p and --password-stdin are mutually exclusive")
+	}
+	in := cmd.InOrStdin()
+	errOut := cmd.ErrOrStderr()
+	interactive := stdinIsTerminal(in)
+
+	// Print the provider-aware "where to get a token" hint once, right before the prompts, and
+	// only when a missing credential means we are actually going to prompt for it.
+	promptUsername := username == "" && interactive
+	promptPassword := !passwordStdin && password == "" && interactive
+	if promptUsername || promptPassword {
+		fmt.Fprintln(errOut, registryTokenHint(host))
+	}
+
+	// Username: -u, else an interactive prompt, else an error.
+	if username == "" {
+		if !interactive {
+			return "", "", errors.New("no username provided: pass -u/--username, or run the command in an interactive terminal to be prompted")
+		}
+		u, err := readLine(in, errOut, "Username: ")
+		if err != nil {
+			return "", "", err
+		}
+		username = u
+	}
+
+	// Password: --password-stdin, else -p, else an interactive hidden prompt, else an error.
+	switch {
+	case passwordStdin:
+		b, err := io.ReadAll(in)
+		if err != nil {
+			return "", "", fmt.Errorf("reading password from standard input: %w", err)
+		}
+		password = strings.TrimRight(string(b), "\r\n")
+	case password != "":
+		if interactive {
+			fmt.Fprintln(errOut, "warning: using --password/-p on the command line is insecure; prefer the interactive prompt or --password-stdin")
+		}
+	case interactive:
+		p, err := readHidden(in, errOut, "Password (read:packages token): ")
+		if err != nil {
+			return "", "", err
+		}
+		password = p
+	default:
+		return "", "", errors.New("no password provided: pass --password-stdin (echo \"$TOKEN\" | burrow config registry login <host> -u <user> --password-stdin), or run the command in an interactive terminal to be prompted")
+	}
+
+	if username == "" {
+		return "", "", errors.New("a username is required")
+	}
+	if password == "" {
+		return "", "", errors.New("a password or token is required")
+	}
+	return username, password, nil
+}
+
+// registryTokenHint returns a one-line, provider-aware pointer to where the user creates a pull
+// token for the given registry host. Modern terminals linkify a full URL, so the user can click
+// straight through to the right page. Unknown hosts get a generic line with no URL. This mapping
+// is the single source of truth for provider token guidance; the MCP layer stays generic.
+func registryTokenHint(host string) string {
+	switch {
+	case host == "ghcr.io" || strings.HasSuffix(host, ".ghcr.io"):
+		return "Create a read:packages token: https://github.com/settings/tokens/new?scopes=read:packages"
+	case host == "registry.gitlab.com":
+		return "Create a personal access token with the read_registry scope: https://gitlab.com/-/user_settings/personal_access_tokens"
+	case host == "docker.io" || host == "registry-1.docker.io" || host == "index.docker.io":
+		return "Create an access token: https://app.docker.com/settings/personal-access-tokens"
+	default:
+		return "Create an access token with pull (read) access in your registry's account settings."
+	}
+}
+
+// readLine prints prompt to out and reads one visible line from in, trimming surrounding
+// whitespace. It is used for non-secret input such as the registry username.
+func readLine(in io.Reader, out io.Writer, prompt string) (string, error) {
+	fmt.Fprint(out, prompt)
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("reading input: %w", err)
+	}
+	return strings.TrimSpace(line), nil
+}
+
+// readHidden prints prompt to out and reads one line from in without echoing it, so a token never
+// shows on screen. It requires in to be a terminal (an *os.File whose fd is a tty); callers gate
+// it on stdinIsTerminal. A trailing newline is written after the read because the hidden input
+// does not echo the Enter key.
+func readHidden(in io.Reader, out io.Writer, prompt string) (string, error) {
+	f, ok := in.(*os.File)
+	if !ok {
+		return "", errors.New("cannot read a hidden password from a non-terminal")
+	}
+	fmt.Fprint(out, prompt)
+	b, err := term.ReadPassword(int(f.Fd()))
+	fmt.Fprintln(out) // terminate the line the hidden input was typed on
+	if err != nil {
+		return "", fmt.Errorf("reading password: %w", err)
+	}
+	return strings.TrimSpace(string(b)), nil
 }
 
 // registryLogin upserts the host's credential into the burrow-registry Secret and ensures the

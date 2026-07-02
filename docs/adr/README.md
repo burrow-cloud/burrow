@@ -18,9 +18,16 @@ alternatives that were rejected.
   [docs/ROADMAP.md](../ROADMAP.md) and [docs/PLAN.md](../PLAN.md), or as a skipped/failing
   test that names the ADR.
 
-## Status values
+## Format
 
-`Proposed` · `Accepted` · `Rejected` · `Superseded by ADR-00NN`
+New ADRs follow [template.md](template.md): a **Status** badge, then a one-paragraph **TL;DR**
+(the decision in brief, with its relationships to other ADRs), then Context, Decision,
+Consequences, and Rejected alternatives. Status badges:
+
+✅ `Accepted` · 🟡 `Proposed` · ❌ `Rejected` · ♻️ `Superseded by ADR-00NN`
+
+Earlier records predate this format; it applies going forward (Accepted ADRs are immutable, so
+they are not reformatted).
 
 ## Index
 
@@ -64,3 +71,4 @@ alternatives that were rejected.
 | [0036](0036-environment-selection.md) | Environment selection — one `burrow env` surface that follows the kube context, named local handles (`~/.burrow/config`), `burrow scan`; retires the `burrow context` command | Accepted |
 | [0037](0037-cli-onboarding-and-organization.md) | CLI onboarding and command organization — intent-based help groups, explicit positional `install <context>` (server-side apply, no kubectl), first-run config awareness; drops `system` into `cluster` | Accepted |
 | [0038](0038-scoped-agent-credential.md) | Scoped agent credential — `install` mints a `burrow-agent` ServiceAccount + narrow RBAC and writes a burrowd-only kubeconfig to `~/.burrow/`; the human keeps the admin kubeconfig; shared SA now, a `principal` seam for per-user SSO later | Accepted |
+| [0039](0039-cli-control-plane-version-skew.md) | Version skew between the CLI and the control plane — burrowd is the compatibility anchor, backward-compatible one minor back, never a hard block on version difference; a client-version header turns new-client-against-old-server into an actionable "run `burrow upgrade`" error | Accepted |

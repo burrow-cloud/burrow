@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -395,7 +396,7 @@ func TestSummarizeApply(t *testing.T) {
 	var b bytes.Buffer
 	summarizeApplyResults(results, &b)
 	got := b.String()
-	want := "Applied 6 resource(s): 3 created, 2 configured, 1 unchanged.\n"
+	want := "✓ Applied 6 resource(s): 3 created, 2 configured, 1 unchanged.\n"
 	if got != want {
 		t.Errorf("summary = %q, want %q", got, want)
 	}
@@ -518,6 +519,60 @@ func TestDeploymentRolledOut(t *testing.T) {
 	}
 	if deploymentRolledOut(scaledDown) {
 		t.Errorf("desired=0 should not be considered rolled out")
+	}
+}
+
+// TestWaitForDeploymentMarksReady drives waitForDeployment against a fake clientset holding a
+// fully rolled-out Deployment and asserts the success line ends with the ✓ glyph. The output
+// buffer is not a terminal, so the mark must be the plain glyph with no ANSI escape — color must
+// never leak into captured/piped output.
+func TestWaitForDeploymentMarksReady(t *testing.T) {
+	one := int32(1)
+	cs := fake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "burrowd", Namespace: "burrow", Generation: 1},
+		Spec:       appsv1.DeploymentSpec{Replicas: &one},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			Replicas:           1,
+			UpdatedReplicas:    1,
+			AvailableReplicas:  1,
+			ReadyReplicas:      1,
+		},
+	})
+	var out bytes.Buffer
+	if err := waitForDeployment(context.Background(), cs, "burrow", "burrowd", "control plane", &out, time.Minute); err != nil {
+		t.Fatalf("waitForDeployment: %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "✓") {
+		t.Errorf("ready output should contain the ✓ glyph, got %q", s)
+	}
+	if strings.Contains(s, "\x1b") {
+		t.Errorf("non-TTY ready output must not contain an ANSI escape, got %q", s)
+	}
+}
+
+// TestWaitForDeploymentMarksTimeout drives waitForDeployment against a Deployment that never rolls
+// out with an immediately-elapsed timeout and asserts the failure line carries the ✗ glyph, again
+// with no ANSI escape leaking into the non-terminal buffer.
+func TestWaitForDeploymentMarksTimeout(t *testing.T) {
+	one := int32(1)
+	cs := fake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "burrowd", Namespace: "burrow", Generation: 1},
+		Spec:       appsv1.DeploymentSpec{Replicas: &one},
+		// No status: never rolled out, so the wait falls through to the timeout branch.
+	})
+	var out bytes.Buffer
+	err := waitForDeployment(context.Background(), cs, "burrow", "burrowd", "control plane", &out, 0)
+	if err == nil {
+		t.Fatal("waitForDeployment should time out when the deployment never rolls out")
+	}
+	s := out.String()
+	if !strings.Contains(s, "✗") {
+		t.Errorf("timeout output should contain the ✗ glyph, got %q", s)
+	}
+	if strings.Contains(s, "\x1b") {
+		t.Errorf("non-TTY timeout output must not contain an ANSI escape, got %q", s)
 	}
 }
 

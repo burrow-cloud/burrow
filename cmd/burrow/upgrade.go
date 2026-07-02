@@ -80,7 +80,7 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	if err := waitForReady(ctx, kubeconfig, "", namespace, stdout); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "\nBurrow is upgraded and ready in namespace %q.\n", namespace)
+	fmt.Fprintf(stdout, "\n%s Burrow is upgraded and ready in namespace %q.\n", okMark(stdout), namespace)
 	return nil
 }
 

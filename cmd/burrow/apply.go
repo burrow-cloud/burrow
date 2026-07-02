@@ -351,5 +351,5 @@ func summarizeApplyResults(results []applyResult, w io.Writer) {
 	for _, action := range others {
 		parts = append(parts, fmt.Sprintf("%d %s", counts[action], action))
 	}
-	fmt.Fprintf(w, "Applied %d resource(s): %s.\n", len(results), strings.Join(parts, ", "))
+	fmt.Fprintf(w, "%s Applied %d resource(s): %s.\n", okMark(w), len(results), strings.Join(parts, ", "))
 }

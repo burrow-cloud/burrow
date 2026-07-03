@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 // existingInstall builds a fake cluster that looks like a completed `burrow install` in
@@ -122,6 +125,65 @@ func TestUpgradeOptionsNotInstalled(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not installed") {
 		t.Errorf("error should explain Burrow is not installed, got: %v", err)
+	}
+}
+
+// TestUpgradeBackfillsAgentCredential asserts the upgrade's local-side backfill provisions the
+// scoped agent kubeconfig onto the operator's existing handle for the upgraded cluster (ADR-0038 §4),
+// so a control plane installed before the scoped credential existed gains the local kubeconfig.
+func TestUpgradeBackfillsAgentCredential(t *testing.T) {
+	tempConfig(t)
+	kc := kubeconfigWithCurrent(t, "dev", "dev")
+	cfg := &localconfig.Config{Environments: []localconfig.Environment{{Name: "dev", Context: "dev", ControlPlaneNamespace: "burrow"}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	stubJoinAgentCredential(t, func(envName string) (string, string, error) {
+		return "/tmp/agents/" + envName, agentKubeContextName, nil
+	})
+
+	var out bytes.Buffer
+	backfillAgentCredential(context.Background(), kc, "burrow", &out)
+
+	got, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	env, _ := got.Lookup("dev")
+	if env.AgentKubeconfig != "/tmp/agents/dev" || env.AgentContext != agentKubeContextName {
+		t.Errorf("upgrade did not backfill the scoped credential onto the dev handle: %+v", env)
+	}
+	if !strings.Contains(out.String(), "Backfilled the scoped agent credential") {
+		t.Errorf("missing the backfill confirmation:\n%s", out.String())
+	}
+}
+
+// TestUpgradeBackfillBestEffort asserts the backfill never fails the upgrade: when the join cannot
+// run it warns and leaves the handle unchanged, returning normally.
+func TestUpgradeBackfillBestEffort(t *testing.T) {
+	tempConfig(t)
+	kc := kubeconfigWithCurrent(t, "dev", "dev")
+	cfg := &localconfig.Config{Environments: []localconfig.Environment{{Name: "dev", Context: "dev", ControlPlaneNamespace: "burrow"}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	stubJoinAgentCredential(t, func(string) (string, string, error) {
+		return "", "", errors.New("agent token secret unreadable")
+	})
+
+	var out bytes.Buffer
+	backfillAgentCredential(context.Background(), kc, "burrow", &out) // must not panic or fail
+
+	got, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	env, _ := got.Lookup("dev")
+	if env.AgentKubeconfig != "" {
+		t.Errorf("a failed backfill must leave the handle without a cred, got %+v", env)
+	}
+	if !strings.Contains(out.String(), "Warning") {
+		t.Errorf("a failed backfill should warn:\n%s", out.String())
 	}
 }
 

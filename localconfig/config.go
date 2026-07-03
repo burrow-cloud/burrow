@@ -71,7 +71,9 @@ type Environment struct {
 	// mints for the scoped agent credential (ADR-0038), written under ~/.burrow/ (never
 	// ~/.kube/config). AgentContext names the single context inside it. Both are empty for handles
 	// created before the scoped credential existed or joined out of band; consumers fall back to
-	// the ambient kubeconfig then. No consumer reads them yet — that wiring is ADR-0038 phase 2.
+	// the ambient kubeconfig then. The operate path (`burrow-mcp` and the CLI) reads them to reach
+	// burrowd with the scoped credential; `install` (fresh mint or join), `env scan`, and `upgrade`
+	// write them.
 	AgentKubeconfig string `yaml:"agentKubeconfig,omitempty"`
 	AgentContext    string `yaml:"agentContext,omitempty"`
 }
@@ -211,6 +213,21 @@ func (c *Config) LookupByContext(context string) (Environment, bool) {
 		}
 	}
 	return Environment{}, false
+}
+
+// SetAgentCredential records the scoped agent kubeconfig path and its context on the named handle,
+// backing the ADR-0038 phase 3 backfill (`upgrade` and a re-run `install` join provisioning the
+// scoped credential onto a handle registered before it existed). It reports whether a handle by that
+// name was found; the caller Saves.
+func (c *Config) SetAgentCredential(name, kubeconfig, context string) bool {
+	for i := range c.Environments {
+		if c.Environments[i].Name == name {
+			c.Environments[i].AgentKubeconfig = kubeconfig
+			c.Environments[i].AgentContext = context
+			return true
+		}
+	}
+	return false
 }
 
 // Add registers a new handle. The name must be non-empty and not already in use.

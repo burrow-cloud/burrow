@@ -15,6 +15,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -108,6 +109,126 @@ func TestInstallRecordsAndPinsEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "burrow env rename my-prod") {
 		t.Errorf("missing the rename hint:\n%s", out.String())
+	}
+}
+
+// stubInstallJoin sets up install's seams for the JOIN path (ADR-0038 §4): a fixed context set, a
+// fake clientset that already holds the burrowd-api-token Secret (so alreadyInstalled reports true),
+// an applyFn that flips a flag if it is ever called (join must NOT apply), and a stubbed
+// joinAgentCredentialFn returning joinErr or a fixed local path. $BURROW_CONFIG points at a temp
+// file. It returns pointers to the apply flag and the recorded join write-name.
+func stubInstallJoin(t *testing.T, joinErr error) (applied *bool, joinName *string) {
+	t.Helper()
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+
+	origList := listContexts
+	listContexts = func(string) ([]connect.Context, error) { return twoContexts(), nil }
+
+	origCS := clientsetFn
+	clientsetFn = func(string, string) (kubernetes.Interface, error) {
+		return fake.NewSimpleClientset(&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: connect.DefaultTokenSecret, Namespace: connect.DefaultNamespace},
+			Data:       map[string][]byte{connect.DefaultTokenKey: []byte("existing-token")},
+		}), nil
+	}
+
+	var appliedFlag bool
+	origApply := applyFn
+	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error {
+		appliedFlag = true
+		return nil
+	}
+
+	var name string
+	origJoin := joinAgentCredentialFn
+	joinAgentCredentialFn = func(_ context.Context, _, _, _, envName string) (string, string, error) {
+		name = envName
+		if joinErr != nil {
+			return "", "", joinErr
+		}
+		return filepath.Join(t.TempDir(), "agents", envName), agentKubeContextName, nil
+	}
+
+	t.Cleanup(func() {
+		listContexts = origList
+		clientsetFn = origCS
+		applyFn = origApply
+		joinAgentCredentialFn = origJoin
+	})
+	return &appliedFlag, &name
+}
+
+// TestInstallJoinsExistingInstall covers a second user (or a re-run) installing into an
+// already-installed cluster: install does NOT re-apply the manifests, it joins locally — reading the
+// existing scoped agent credential and recording the handle with it — and prints the distinct
+// "joined" message (ADR-0038 §4).
+func TestInstallJoinsExistingInstall(t *testing.T) {
+	applied, joinName := stubInstallJoin(t, nil)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"install", "prod", "--environment", "shared-prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("install join: %v\n%s", err, errb.String())
+	}
+
+	// Join makes no cluster changes: apply must never run.
+	if *applied {
+		t.Error("install into an already-installed cluster must not apply manifests (join is local-only)")
+	}
+	if *joinName != "shared-prod" {
+		t.Errorf("join wrote under %q, want the environment name shared-prod", *joinName)
+	}
+
+	// The handle is recorded and pinned, carrying the scoped credential from the join.
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if cfg.Current != "shared-prod" {
+		t.Errorf("current environment = %q, want shared-prod", cfg.Current)
+	}
+	env, ok := cfg.Lookup("shared-prod")
+	if !ok {
+		t.Fatalf("joined environment was not recorded: %+v", cfg.Environments)
+	}
+	if env.Context != "prod" || env.AgentKubeconfig == "" || env.AgentContext != agentKubeContextName {
+		t.Errorf("joined handle = %+v, want context prod with a scoped agent credential", env)
+	}
+
+	// The message clearly says JOINED and no cluster changes, distinct from a fresh "Installed."
+	s := out.String()
+	for _, want := range []string{"Joined the existing Burrow install", "no cluster changes were made", `Environment "shared-prod" is now your current environment`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("join output missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "\nInstalled. Environment") {
+		t.Errorf("join must not print the fresh-install confirmation:\n%s", s)
+	}
+}
+
+// TestInstallJoinUnreadableCredentialErrors covers a joining user who cannot read the agent token
+// Secret: the join surfaces the actionable error rather than silently recording a handle (ADR-0038 §4).
+func TestInstallJoinUnreadableCredentialErrors(t *testing.T) {
+	applied, _ := stubInstallJoin(t, errors.New("cannot read the scoped agent credential: needs read access; ask an operator"))
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"install", "prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb)
+	if err == nil {
+		t.Fatal("join with an unreadable agent credential should error")
+	}
+	if !strings.Contains(err.Error(), "read access") {
+		t.Errorf("join error should surface the actionable read-access message, got: %v", err)
+	}
+	if *applied {
+		t.Error("a failed join must still not have applied manifests")
+	}
+	// Nothing is recorded when the join fails.
+	cfg, err2 := localconfig.Load()
+	if err2 != nil {
+		t.Fatalf("loading config: %v", err2)
+	}
+	if len(cfg.Environments) != 0 {
+		t.Errorf("a failed join should record no handle, got %+v", cfg.Environments)
 	}
 }
 

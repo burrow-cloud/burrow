@@ -35,10 +35,20 @@ import (
 //   - `get`/`list` on Pods, Deployments, or any workload;
 //   - any access in the app or add-on namespaces;
 //   - any cluster-scoped read (e.g. nodes).
+//
+// The same live harness should also exercise the Phase 3 multi-user JOIN (ADR-0038 §4): install as an
+// admin identity, then have a SECOND, restricted identity run the join path (joinAgentCredential /
+// `burrow install <context>` on the already-installed cluster) and assert it reads the existing
+// burrow-agent-token Secret and writes a WORKING scoped kubeconfig without minting any cluster
+// resources; and assert that a third identity with NO read access to that Secret gets the clear,
+// actionable error (readAgentToken's forbidden message) rather than a silent success. The
+// seam-isolated tests here and in agentcred_test.go pin the join's read/build/write behavior and the
+// actionable errors against fakes, but only a live API server proves the RBAC actually gates the
+// second and third identities as intended.
 func TestAgentCredentialRBACConfinement(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("live RBAC-confinement verification needs a real API server (KUBEBUILDER_ASSETS); " +
-			"deferred follow-up — see the test doc comment for the confinement matrix to assert")
+			"deferred follow-up — see the test doc comment for the confinement and multi-user-join matrices to assert")
 	}
-	t.Skip("envtest harness for ADR-0038 RBAC confinement is not yet wired (deferred follow-up)")
+	t.Skip("envtest harness for ADR-0038 RBAC confinement and multi-user join is not yet wired (deferred follow-up)")
 }

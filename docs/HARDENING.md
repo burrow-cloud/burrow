@@ -26,6 +26,55 @@ kubeconfig is the real trust boundary — so the highest-value hardening step is
 credential the *only* kubeconfig the agent can reach (point its `KUBECONFIG` at the scoped file, or
 run it in a container/VM that carries only that credential).
 
+### Joining an already-installed cluster (multi-user)
+
+A second person on an already-installed cluster does not re-install: `burrow install <context>`
+detects the existing control plane and performs a **local join** — it reads the existing
+`burrow-agent` credential and writes only their own `~/.burrow` scoped kubeconfig, making no cluster
+changes. `burrow env scan` and `burrow upgrade` do the same backfill for handles and for clusters
+installed before the scoped credential existed.
+
+The join reads the `burrow-agent-token` Secret in the control-plane namespace, so a joining user
+needs `get` on exactly that Secret. Burrow **does not** widen the default RBAC to grant it: by
+default the joining user must have kubeconfig access sufficient to read that one Secret (e.g. the
+admin who installed, or anyone already granted it), otherwise the join fails with a clear, actionable
+error and an operator hands over the scoped kubeconfig from `~/.burrow/agents/` out of band.
+
+An operator who wants **self-serve join** for a team can add a small Role granting exactly that read
+and bind it to the joining group — for example:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burrow-agent-token-reader
+  namespace: burrow          # the control-plane namespace
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["burrow-agent-token"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burrow-agent-token-reader
+  namespace: burrow
+subjects:
+  - kind: Group
+    name: your-team-group    # the identity your cluster maps joining users to
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: burrow-agent-token-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+This grants only `get` on the one shared agent-token Secret — nothing else — and is an opt-in an
+operator applies deliberately; Burrow never applies it for you. (The agents share one `burrow-agent`
+ServiceAccount today; per-user credentials keyed on an identity come with the later SSO work,
+ADR-0038 §5.)
+
 A coding agent (Claude Code, Cursor, …) still runs with a shell, so the shell-denies below are
 defense in depth on top of that boundary. Unless you restrict it, it can:
 

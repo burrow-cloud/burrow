@@ -119,11 +119,22 @@ func runEnvScan(ctx context.Context, kubeconfig, namespace string, w io.Writer) 
 			continue
 		}
 		name := uniqueHandleName(cfg, row.context)
-		if err := cfg.Add(localconfig.Environment{
+		env := localconfig.Environment{
 			Name:                  name,
 			Context:               row.context,
 			ControlPlaneNamespace: namespace,
-		}); err != nil {
+		}
+		// Backfill the scoped agent credential for this handle (ADR-0038 §4): read the existing
+		// burrow-agent credential and write the local scoped kubeconfig. Best-effort — a pre-Phase-1
+		// install carries none and a joining user may lack read access, so register the handle
+		// without a scoped cred rather than fail the scan; the operator can `burrow upgrade` to mint
+		// it. Idempotent by construction: a context that already has a handle is skipped above, so a
+		// re-scan neither rewrites the kubeconfig nor duplicates the handle.
+		if path, agentCtx, jerr := joinAgentCredentialFn(ctx, kubeconfig, row.context, namespace, name); jerr == nil {
+			env.AgentKubeconfig = path
+			env.AgentContext = agentCtx
+		}
+		if err := cfg.Add(env); err != nil {
 			return err
 		}
 		added = append(added, name)

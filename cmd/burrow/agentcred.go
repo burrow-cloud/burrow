@@ -5,17 +5,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
+	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -63,9 +66,19 @@ func mintAgentKubeconfig(ctx context.Context, cs kubernetes.Interface, restCfg *
 	if err != nil {
 		return nil, err
 	}
+	return assembleAgentKubeconfig(restCfg, namespace, token, caFromSecret)
+}
 
+// assembleAgentKubeconfig serializes a self-contained, single-cluster/user/context kubeconfig from a
+// bearer token and the cluster coordinates. It is the shared build+serialize step for both the
+// fresh-mint path (mintAgentKubeconfig, which freshly mints and polls the token) and the join path
+// (joinAgentCredential, which reads an existing token) — the only difference between them is how the
+// token is obtained. The CA comes from the token Secret's ca.crt when present, falling back to the
+// REST config's CAData or CAFile so the kubeconfig never references a CA file the agent cannot read.
+func assembleAgentKubeconfig(restCfg *rest.Config, namespace, token string, caFromSecret []byte) ([]byte, error) {
 	ca := caFromSecret
 	if len(ca) == 0 {
+		var err error
 		ca, err = restConfigCA(restCfg)
 		if err != nil {
 			return nil, err
@@ -98,6 +111,89 @@ func mintAgentKubeconfig(ctx context.Context, cs kubernetes.Interface, restCfg *
 		return nil, fmt.Errorf("serializing scoped agent kubeconfig: %w", err)
 	}
 	return data, nil
+}
+
+// errAgentCredentialAbsent marks the case where the scoped agent credential is simply not present on
+// the cluster yet — a pre-Phase-1 install, or a token Secret the controller has not populated. It is
+// a sentinel so callers that tolerate a missing credential (`burrow env scan`, the `upgrade`
+// backfill) can distinguish it from an access-denied failure via errors.Is and record a handle
+// without a scoped cred instead of failing.
+var errAgentCredentialAbsent = errors.New("the scoped agent credential is not present on this cluster")
+
+// joinAgentCredentialFn is the seam install, `env scan`, and `upgrade` use to read the existing
+// scoped agent credential from a cluster and write the local kubeconfig for it (ADR-0038 §4). It is a
+// package var so tests substitute it without a real REST config or token Secret; the real path is
+// joinAgentCredentialForContext.
+var joinAgentCredentialFn = joinAgentCredentialForContext
+
+// joinAgentCredentialForContext builds the REST config and clientset for a kube context and joins the
+// existing agent credential there (ADR-0038 §4). envName names the local kubeconfig file, mirroring
+// the fresh-mint path so each environment keeps its own scoped kubeconfig under ~/.burrow/agents/.
+func joinAgentCredentialForContext(ctx context.Context, kubeconfig, kubeContext, namespace, envName string) (agentKubeconfigPath, agentContext string, err error) {
+	restCfg, err := connect.RESTConfig(kubeconfig, kubeContext)
+	if err != nil {
+		return "", "", err
+	}
+	cs, err := clientsetForContext(kubeconfig, kubeContext)
+	if err != nil {
+		return "", "", err
+	}
+	return joinAgentCredential(ctx, cs, restCfg, namespace, envName)
+}
+
+// joinAgentCredential reads the EXISTING scoped agent credential — the burrow-agent-token Secret's
+// token and ca.crt — with the caller's own (admin or ambient) access, builds the self-contained
+// kubeconfig via the shared assembleAgentKubeconfig, and writes it locally via writeAgentKubeconfig
+// (ADR-0038 §4). It mints no cluster resources: a second user joining an already-installed cluster,
+// and the upgrade/scan backfills, all read the one credential `install` already provisioned. envName
+// names the local kubeconfig file. If the token Secret cannot be read it returns a clear, actionable
+// error (see readAgentToken); a merely-absent credential wraps errAgentCredentialAbsent so tolerant
+// callers can skip it.
+func joinAgentCredential(ctx context.Context, cs kubernetes.Interface, restCfg *rest.Config, namespace, envName string) (agentKubeconfigPath, agentContext string, err error) {
+	token, caFromSecret, err := readAgentToken(ctx, cs, namespace, agentTokenSecretName)
+	if err != nil {
+		return "", "", err
+	}
+	data, err := assembleAgentKubeconfig(restCfg, namespace, token, caFromSecret)
+	if err != nil {
+		return "", "", err
+	}
+	path, err := writeAgentKubeconfig(envName, data)
+	if err != nil {
+		return "", "", err
+	}
+	return path, agentKubeContextName, nil
+}
+
+// readAgentToken reads the existing agent-token Secret with a single Get (no polling — the token
+// controller populated it at install time), returning the bearer token and ca.crt. It maps the two
+// failure shapes to clear, actionable errors (ADR-0038 §4):
+//   - RBAC-denied: the joining user lacks read access to the shared agent credential, so an operator
+//     must grant `get` on the Secret or hand over the scoped kubeconfig out of band;
+//   - not-found / not-yet-populated: the credential is not present (a pre-Phase-1 install, or the
+//     token controller has not filled it), wrapped in errAgentCredentialAbsent so tolerant callers
+//     can skip rather than fail.
+func readAgentToken(ctx context.Context, cs kubernetes.Interface, namespace, secret string) (token string, caCrt []byte, err error) {
+	s, getErr := cs.CoreV1().Secrets(namespace).Get(ctx, secret, metav1.GetOptions{})
+	if getErr != nil {
+		if apierrors.IsForbidden(getErr) {
+			return "", nil, fmt.Errorf("cannot read the scoped agent credential (secret %s/%s): %w\n"+
+				"joining an existing Burrow install needs read access to the burrow-agent token; ask an "+
+				"operator to grant `get` on that Secret, or to hand you the scoped kubeconfig from "+
+				"~/.burrow/agents/ out of band", namespace, secret, getErr)
+		}
+		if apierrors.IsNotFound(getErr) {
+			return "", nil, fmt.Errorf("%w: secret %s/%s was not found; an operator can mint it by running "+
+				"`burrow upgrade` on this cluster (ADR-0038)", errAgentCredentialAbsent, namespace, secret)
+		}
+		return "", nil, fmt.Errorf("reading the agent token secret %s/%s: %w", namespace, secret, getErr)
+	}
+	tok := s.Data["token"]
+	if len(tok) == 0 {
+		return "", nil, fmt.Errorf("%w: secret %s/%s carries no token yet (the token controller has not "+
+			"populated it); re-run once it is ready", errAgentCredentialAbsent, namespace, secret)
+	}
+	return string(tok), s.Data["ca.crt"], nil
 }
 
 // pollAgentToken reads the ServiceAccount-token Secret until the token controller has populated its

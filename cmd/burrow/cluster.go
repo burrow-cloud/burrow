@@ -69,6 +69,7 @@ func newClusterCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	cmd.AddCommand(newIngressCmd())
+	cmd.AddCommand(newBootstrapCmd())
 	return cmd
 }
 

@@ -340,28 +340,61 @@ func recordEnvironment(ctx context.Context, a installArgs, cs kubernetes.Interfa
 	return nil
 }
 
-// addAndPinEnvironment registers the environment handle for the install target and pins it as
-// current (ADR-0036/0037), carrying the scoped agent credential (ADR-0038). It is shared by a fresh
-// install (recordEnvironment) and a join of an existing install (joinExistingInstall), so both
-// record a handle the same way.
+// installHandle builds the environment-handle template for an install/join target from installArgs.
+// Cluster-per-environment: the whole cluster is the environment, so commands send burrowd no env
+// name and get the default app namespace and the global guardrails (ADR-0036); a
+// namespace-per-environment env carries its registered name instead (see `burrow env add`). The
+// scoped agent credential is filled in by saveJoinedEnvironment.
+func installHandle(a installArgs, name string) localconfig.Environment {
+	return localconfig.Environment{
+		Name:                  name,
+		Context:               a.kubeContext,
+		ControlPlaneNamespace: a.namespace,
+		AppNamespace:          a.appNamespace,
+		Env:                   "",
+	}
+}
+
+// addAndPinEnvironment registers the environment handle for a fresh install target and pins it as
+// current (ADR-0036/0037), carrying the scoped agent credential (ADR-0038). A fresh install always
+// registers a new handle, so this is the add-and-pin case of saveJoinedEnvironment.
 func addAndPinEnvironment(a installArgs, name, agentKubeconfig, agentContext string) error {
 	cfg, err := localconfig.Load()
 	if err != nil {
 		return err
 	}
-	if err := cfg.Add(localconfig.Environment{
-		Name:                  name,
-		Context:               a.kubeContext,
-		ControlPlaneNamespace: a.namespace,
-		AppNamespace:          a.appNamespace,
-		// Cluster-per-environment: the whole cluster is the environment, so commands send burrowd
-		// no env name and get the default app namespace and the global guardrails (ADR-0036). A
-		// namespace-per-environment env carries its registered name instead (see `burrow env add`).
-		Env:             "",
-		AgentKubeconfig: agentKubeconfig,
-		AgentContext:    agentContext,
-	}); err != nil {
-		return err
+	return saveJoinedEnvironment(cfg, name, false, installHandle(a, name), agentKubeconfig, agentContext)
+}
+
+// joinEnvironmentName resolves the handle name for a join and whether an existing handle for the
+// kube context is being updated: reuse an existing handle's name, else the explicit name, else a
+// generated adjective-animal name. The name is resolved before the credential is landed because it
+// names the local kubeconfig file. Shared by install's join-existing path and `burrow join`
+// (ADR-0044) so both name a joined environment identically.
+func joinEnvironmentName(cfg *localconfig.Config, kubeContext, explicit string) (name string, updateExisting bool) {
+	if existing, ok := cfg.LookupByContext(kubeContext); ok {
+		return existing.Name, true
+	}
+	if explicit != "" {
+		return explicit, false
+	}
+	return friendlyName(), false
+}
+
+// saveJoinedEnvironment records a joined environment's scoped credential into cfg, pins it as
+// current, and Saves (ADR-0038 §4). It updates an existing handle's credential in place
+// (updateExisting) — keeping the join idempotent — or registers the new handle built by the caller.
+// Shared by a fresh install, install's join-existing path, and `burrow join` (ADR-0044) so all
+// three record a handle the same way.
+func saveJoinedEnvironment(cfg *localconfig.Config, name string, updateExisting bool, handle localconfig.Environment, agentKubeconfig, agentContext string) error {
+	if updateExisting {
+		cfg.SetAgentCredential(name, agentKubeconfig, agentContext)
+	} else {
+		handle.AgentKubeconfig = agentKubeconfig
+		handle.AgentContext = agentContext
+		if err := cfg.Add(handle); err != nil {
+			return err
+		}
 	}
 	cfg.Current = name
 	return cfg.Save()
@@ -379,28 +412,14 @@ func joinExistingInstall(ctx context.Context, a installArgs, stdout io.Writer) e
 		return err
 	}
 
-	// Resolve the handle name before joining, since it names the local kubeconfig file: reuse an
-	// existing handle for this context, else the explicit --environment, else a generated name.
-	name := a.environment
-	existing, updateExisting := cfg.LookupByContext(a.kubeContext)
-	if updateExisting {
-		name = existing.Name
-	} else if name == "" {
-		name = friendlyName()
-	}
+	name, updateExisting := joinEnvironmentName(cfg, a.kubeContext, a.environment)
 
 	agentKubeconfig, agentContext, err := joinAgentCredentialFn(ctx, a.kubeconfig, a.kubeContext, a.namespace, name)
 	if err != nil {
 		return err
 	}
 
-	if updateExisting {
-		cfg.SetAgentCredential(name, agentKubeconfig, agentContext)
-		cfg.Current = name
-		if err := cfg.Save(); err != nil {
-			return err
-		}
-	} else if err := addAndPinEnvironment(a, name, agentKubeconfig, agentContext); err != nil {
+	if err := saveJoinedEnvironment(cfg, name, updateExisting, installHandle(a, name), agentKubeconfig, agentContext); err != nil {
 		return err
 	}
 

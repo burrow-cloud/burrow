@@ -62,24 +62,56 @@ func TestIngressDetection(t *testing.T) {
 		t.Errorf("cert-manager should be absent on an empty cluster")
 	}
 
-	// Detect the controller by its IngressClass, and cert-manager by its Deployment.
+	// An orphan "nginx" IngressClass with NO running controller must NOT count as present: the class
+	// outlives a deleted controller, and keying off it would wrongly skip the install. cert-manager is
+	// still detected by its Deployment.
 	cs = fake.NewSimpleClientset(
 		&networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "nginx"}},
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cert-manager", Namespace: "cert-manager"}},
 	)
-	if got, _ := ingressControllerPresent(ctx, cs); !got {
-		t.Errorf("ingress controller should be detected via the nginx IngressClass")
+	if got, _ := ingressControllerPresent(ctx, cs); got {
+		t.Errorf("an orphan nginx IngressClass with no running controller must not be reported present")
 	}
 	if got, _ := certManagerPresent(ctx, cs); !got {
 		t.Errorf("cert-manager should be detected via its Deployment")
 	}
 
-	// Also detect the controller by its Deployment when no IngressClass exists yet.
+	// A ready ingress-nginx controller Deployment (matched by the standard recommended labels) is the
+	// real present signal, wherever its namespace.
 	cs = fake.NewSimpleClientset(
-		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "ingress-nginx-controller", Namespace: "ingress-nginx"}},
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ingress-nginx-controller",
+				Namespace: "ingress-nginx",
+				Labels: map[string]string{
+					"app.kubernetes.io/name":      "ingress-nginx",
+					"app.kubernetes.io/component": "controller",
+				},
+			},
+			Status: appsv1.DeploymentStatus{ReadyReplicas: 1},
+		},
 	)
 	if got, _ := ingressControllerPresent(ctx, cs); !got {
-		t.Errorf("ingress controller should be detected via its Deployment")
+		t.Errorf("a ready ingress-nginx controller Deployment should be detected as present")
+	}
+
+	// The same controller Deployment with 0 ready replicas is NOT present: install must proceed until
+	// a replica is actually running.
+	cs = fake.NewSimpleClientset(
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ingress-nginx-controller",
+				Namespace: "ingress-nginx",
+				Labels: map[string]string{
+					"app.kubernetes.io/name":      "ingress-nginx",
+					"app.kubernetes.io/component": "controller",
+				},
+			},
+			Status: appsv1.DeploymentStatus{ReadyReplicas: 0},
+		},
+	)
+	if got, _ := ingressControllerPresent(ctx, cs); got {
+		t.Errorf("a controller Deployment with 0 ready replicas must not be reported present")
 	}
 }
 

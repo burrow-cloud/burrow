@@ -411,25 +411,37 @@ func renderIssuer(o ingressOptions) (string, error) {
 	return sb.String(), nil
 }
 
-// ingressControllerPresent reports whether an ingress-nginx controller is already installed,
-// detected by the "nginx" IngressClass (what `expose` annotates against) or the controller
-// Deployment in the ingress-nginx namespace.
+// ingressNginxControllerSelector matches the ingress-nginx controller Deployment by its standard
+// recommended labels — the same selector the control-plane capability survey uses (ADR-0034,
+// controlplane/kube detectIngress). The running controller, not merely an IngressClass, is what
+// routes traffic and runs the admission webhook, so its readiness is the real "already installed"
+// signal.
+const ingressNginxControllerSelector = "app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller"
+
+// ingressControllerPresent reports whether a running ingress-nginx controller is already installed,
+// detected by an ingress-nginx controller Deployment with at least one ready replica (listed across
+// all namespaces so it is found wherever the release lives, the conventional "ingress-nginx"
+// namespace or another).
+//
+// It deliberately does NOT key off the "nginx" IngressClass. An IngressClass is cluster-scoped and
+// OUTLIVES the controller that created it: delete the ingress-nginx release and its namespace and the
+// class is left orphaned, routing nothing. Keying off the class made a leftover orphan a false
+// positive that made install skip, leaving a cluster with no controller. Requiring controller
+// readiness (matching the capability survey) makes install proceed instead, and the manifest apply
+// then adopts the orphan class via force-conflicts (see applyOne) — no kubectl deletion required.
 func ingressControllerPresent(ctx context.Context, cs kubernetes.Interface) (bool, error) {
-	_, err := cs.NetworkingV1().IngressClasses().Get(ctx, "nginx", metav1.GetOptions{})
-	if err == nil {
-		return true, nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("checking for an ingress class: %w", err)
-	}
-	_, err = cs.AppsV1().Deployments("ingress-nginx").Get(ctx, "ingress-nginx-controller", metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
+	deps, err := cs.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+		LabelSelector: ingressNginxControllerSelector,
+	})
 	if err != nil {
 		return false, fmt.Errorf("checking for the ingress-nginx controller: %w", err)
 	}
-	return true, nil
+	for i := range deps.Items {
+		if deps.Items[i].Status.ReadyReplicas > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // certManagerPresent reports whether cert-manager is already installed, detected by its

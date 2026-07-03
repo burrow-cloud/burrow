@@ -42,7 +42,6 @@ const k3sInstallScriptURL = "https://get.k3s.io"
 type bootstrapArgs struct {
 	publicIP     string
 	kubeconfig   string
-	environment  string
 	namespace    string
 	appNamespace string
 	image        string
@@ -237,7 +236,6 @@ func newBootstrapCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&a.publicIP, "public-ip", "", "the VPS's public IP (default: auto-detected)")
 	cmd.Flags().StringVar(&a.kubeconfig, "kubeconfig", k3sKubeconfigPath, "path to the local k3s admin kubeconfig")
-	cmd.Flags().StringVar(&a.environment, "environment", "", "name for this environment (default: a generated adjective-animal name)")
 	cmd.Flags().StringVar(&a.namespace, "namespace", connect.DefaultNamespace, "namespace to install the control plane into")
 	cmd.Flags().StringVar(&a.appNamespace, "app-namespace", connect.DefaultAppNamespace, "namespace to deploy applications into")
 	cmd.Flags().StringVar(&a.image, "burrowd-image", defaultBurrowdImage(), "burrowd container image to deploy (must be pullable by the cluster)")
@@ -307,12 +305,15 @@ func installBurrowdOnK3s(ctx context.Context, a bootstrapArgs, stdout, stderr io
 	}
 	return runInstall(ctx, installArgs{
 		kubeContext:  kubeContext,
-		environment:  a.environment,
 		namespace:    a.namespace,
 		appNamespace: a.appNamespace,
 		image:        a.image,
 		kubeconfig:   a.kubeconfig,
 		wait:         a.wait,
+		// Deploy burrowd and mint the scoped agent credential without the laptop-oriented local
+		// bookkeeping: no ~/.burrow handle, no "connect your agent" guidance. bootstrap prints the
+		// join-token block for the laptop instead (ADR-0044).
+		clusterOnly: true,
 	}, stdout, stderr)
 }
 

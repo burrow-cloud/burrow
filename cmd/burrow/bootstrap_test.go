@@ -4,13 +4,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/internal/jointoken"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 // fakeIPDetector is a public-IP detector that returns a fixed IP (or error) without a network call.
@@ -213,6 +221,100 @@ func TestAssembleJoinTokenRewritesServer(t *testing.T) {
 		t.Errorf("token namespace/context = (%q,%q), want (burrow, burrow-vps)", tok.Namespace, tok.ContextName)
 	}
 }
+
+// TestBootstrapDeploysClusterOnly drives the full `burrow cluster bootstrap` flow with every seam
+// faked (no real network, k3s, or cluster) and asserts the cluster-only contract on the VPS: burrowd
+// is deployed but NO local ~/.burrow environment handle is recorded and the laptop-oriented "connect
+// your agent" guidance is not printed; instead the join-token block (the `burrow join` line, the
+// admin-grade warning, and the laptop next steps) is printed.
+func TestBootstrapDeploysClusterOnly(t *testing.T) {
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+
+	kcPath := filepath.Join(t.TempDir(), "k3s.yaml")
+	if err := os.WriteFile(kcPath, []byte(k3sStyleKubeconfig), 0o600); err != nil {
+		t.Fatalf("writing kubeconfig: %v", err)
+	}
+
+	// Public IP: fixed, no network. k3s: already running, so install/wait are skipped.
+	origIP := newIPDetector
+	newIPDetector = func() publicIPDetector { return fakeIPDetector{ip: "203.0.113.10"} }
+	origK3s := newK3sInstaller
+	newK3sInstaller = func(string, io.Writer, io.Writer) k3sInstaller { return &fakeK3sInstaller{running: true} }
+
+	// Install seams: the k3s context is present, the cluster is empty (not already installed), and the
+	// apply is a no-op. mintAgentCredentialFn is deliberately NOT stubbed — cluster-only must not reach it.
+	origList := listContexts
+	listContexts = func(string) ([]connect.Context, error) {
+		return []connect.Context{{Name: "default", Cluster: "default", Current: true}}, nil
+	}
+	origCS := clientsetFn
+	clientsetFn = func(string, string) (kubernetes.Interface, error) { return fake.NewSimpleClientset(), nil }
+	origApply := applyFn
+	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+
+	t.Cleanup(func() {
+		newIPDetector = origIP
+		newK3sInstaller = origK3s
+		listContexts = origList
+		clientsetFn = origCS
+		applyFn = origApply
+	})
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{
+		"cluster", "bootstrap",
+		"--public-ip", "203.0.113.10",
+		"--kubeconfig", kcPath,
+		"--burrowd-image", "img:1",
+		"--wait=false",
+	}, &out, &errb); err != nil {
+		t.Fatalf("cluster bootstrap: %v\n%s", err, errb.String())
+	}
+
+	// Cluster-only: no local ~/.burrow handle recorded, nothing pinned.
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading local config: %v", err)
+	}
+	if len(cfg.Environments) != 0 {
+		t.Errorf("cluster-only bootstrap must record no local environment handle, got %+v", cfg.Environments)
+	}
+	if cfg.Current != "" {
+		t.Errorf("cluster-only bootstrap must pin nothing, got current %q", cfg.Current)
+	}
+
+	s := out.String()
+	// The join-token block is printed for the laptop.
+	if !strings.Contains(s, "burrow join "+prefixForTest) {
+		t.Errorf("bootstrap output missing the `burrow join <token>` line:\n%s", s)
+	}
+	for _, want := range []string{"ADMIN-grade", "brew install burrow", ":6443"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("bootstrap output missing %q:\n%s", want, s)
+		}
+	}
+	// The laptop-oriented install guidance must NOT appear on the VPS.
+	if strings.Contains(s, "Connect your AI agent") {
+		t.Errorf("cluster-only bootstrap must not print the connect-your-agent guidance:\n%s", s)
+	}
+	if strings.Contains(s, "is now your current environment") {
+		t.Errorf("cluster-only bootstrap must not record/announce a local environment:\n%s", s)
+	}
+}
+
+// prefixForTest is the recognizable join-token prefix (burrowjoin.v1.), asserted in the bootstrap
+// output. It is derived from a real encode so the test tracks the codec.
+var prefixForTest = func() string {
+	s, _ := jointoken.Encode(jointoken.Token{
+		Server:                   "https://203.0.113.10:6443",
+		CertificateAuthorityData: []byte("ca"),
+		BearerToken:              "t",
+		Namespace:                "burrow",
+		ContextName:              "burrow-vps",
+	})
+	// "burrowjoin.v1." — everything up to and including the last dot before the payload.
+	return s[:strings.LastIndex(s, ".")+1]
+}()
 
 // TestRewriteServerHost asserts the loopback API server URL is rewritten to the public IP while the
 // port is preserved.

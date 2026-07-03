@@ -445,6 +445,33 @@ func (k *Kubernetes) DeleteAutoscaler(ctx context.Context, app string) error {
 	return nil
 }
 
+// SetAutoscalerActive seeds (or clears) an active HorizontalPodAutoscaler for app in this view's
+// namespace, so a test can model an app the autoscaler owns without applying a full AutoscaleSpec
+// through the engine. It shares the backing store with ApplyAutoscaler/DeleteAutoscaler, so both
+// paths agree on what AutoscalerActive reports.
+func (k *Kubernetes) SetAutoscalerActive(app string, active bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if active {
+		k.autoscalers[k.key(app)] = controlplane.AutoscaleSpec{}
+		return
+	}
+	delete(k.autoscalers, k.key(app))
+}
+
+// AutoscalerActive reports whether app has an applied HPA in this view's namespace — an entry set
+// by ApplyAutoscaler or SetAutoscalerActive and not since deleted. A missing HPA is inactive
+// (false, nil), mirroring the real adapter.
+func (k *Kubernetes) AutoscalerActive(ctx context.Context, app string) (bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpAutoscalerActive]; err != nil {
+		return false, err
+	}
+	_, ok := k.autoscalers[k.key(app)]
+	return ok, nil
+}
+
 func (k *Kubernetes) MetricsAPIAvailable(ctx context.Context) (bool, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()

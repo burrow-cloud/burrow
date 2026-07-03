@@ -121,7 +121,7 @@ func newDeployCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&image, "image", "", "container image reference to deploy (required)")
-	cmd.Flags().IntVar(&replicas, "replicas", 1, "number of replicas")
+	cmd.Flags().IntVar(&replicas, "replicas", 0, "desired replicas (0 = keep current; new apps default to 1; ignored while autoscaling is enabled)")
 	cmd.Flags().IntVar(&metricsPort, "metrics-port", 0, "annotate the pod so the metrics add-on scrapes /metrics on this port")
 	cmd.Flags().StringVar(&build, "build", "", "build and push the image from this directory before deploying")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")

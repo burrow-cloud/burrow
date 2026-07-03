@@ -134,6 +134,11 @@ type Kubernetes interface {
 	// DeleteAutoscaler removes app's HorizontalPodAutoscaler. Deleting an absent HPA is a no-op, not
 	// an error, so turning autoscaling off is idempotent.
 	DeleteAutoscaler(ctx context.Context, app string) error
+	// AutoscalerActive reports whether app has an active HorizontalPodAutoscaler owning its replica
+	// count. A workload apply consults it so a deploy (or rollback, or config/secret reapply) leaves
+	// the HPA-managed count untouched rather than resetting it. A missing HPA is reported as inactive
+	// (false, nil), not an error.
+	AutoscalerActive(ctx context.Context, app string) (bool, error)
 	// MetricsAPIAvailable reports whether the metrics.k8s.io API group is served (metrics-server is
 	// installed), so the engine can warn that an applied HPA will not scale until it is. It is
 	// best-effort by contract: the engine treats an error as "absent" and warns rather than failing,

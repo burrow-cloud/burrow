@@ -61,6 +61,21 @@ func (a *Adapter) DeleteAutoscaler(ctx context.Context, app string) error {
 	return nil
 }
 
+// AutoscalerActive reports whether app has an active HorizontalPodAutoscaler owning its replica
+// count. It gets the autoscaling/v2 HPA named after app: present means active, NotFound means
+// inactive (false, nil, not an error). A workload apply consults it so it leaves the HPA-managed
+// count untouched.
+func (a *Adapter) AutoscalerActive(ctx context.Context, app string) (bool, error) {
+	_, err := a.client.AutoscalingV2().HorizontalPodAutoscalers(a.namespace).Get(ctx, app, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("kube: reading autoscaler %q: %w", app, err)
+	}
+	return true, nil
+}
+
 // MetricsAPIAvailable reports whether the metrics.k8s.io API group is served, i.e. metrics-server is
 // installed. It reads API-group discovery, which needs no RBAC (ADR-0034). A discovery error is
 // returned so the caller can decide; the engine treats it as "absent" and warns rather than failing,

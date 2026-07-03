@@ -45,10 +45,19 @@ func stubInstall(t *testing.T, contexts []connect.Context, contextsErr error) *s
 		return nil
 	}
 
+	// The scoped-agent mint (ADR-0038) is faked here: it needs a real REST config and a
+	// token-controller-populated Secret, which the fake clientset has not got. mintAgentKubeconfig /
+	// writeAgentKubeconfig are exercised directly in their own tests; here we only record a fixed path.
+	origMint := mintAgentCredentialFn
+	mintAgentCredentialFn = func(_ context.Context, _ installArgs, envName string, _ kubernetes.Interface, _ io.Writer) (string, string, error) {
+		return filepath.Join(t.TempDir(), "agents", envName), agentKubeContextName, nil
+	}
+
 	t.Cleanup(func() {
 		listContexts = origList
 		clientsetFn = origCS
 		applyFn = origApply
+		mintAgentCredentialFn = origMint
 	})
 	return &targeted
 }
@@ -313,8 +322,8 @@ func TestRenderManifests(t *testing.T) {
 	//   3. an add-on-namespace-scoped grant (ADR-0031) so burrowd can create/read/delete the
 	//      Postgres add-on's burrow-postgres superuser Secret. Secret values still never cross MCP
 	//      (no secret-set tool) and are never logged or stored in the DB (ADR-0029/0004).
-	if c := strings.Count(out, `resources: ["secrets"]`); c != 3 {
-		t.Errorf("expected exactly three secrets grants (scoped credentials + app-namespace env secrets + add-on-namespace postgres secret), found %d", c)
+	if c := strings.Count(out, `resources: ["secrets"]`); c != 4 {
+		t.Errorf("expected exactly four secrets grants (scoped credentials + app-namespace env secrets + add-on-namespace postgres secret + the agent's get on burrowd-api-token), found %d", c)
 	}
 	if !strings.Contains(out, `verbs: ["get", "list", "create", "update"]`) {
 		t.Errorf("missing the app-namespace env-secrets grant (ADR-0028/0029)")
@@ -332,6 +341,73 @@ func TestRenderManifests(t *testing.T) {
 	}
 	if !strings.Contains(out, `resources: ["serviceaccounts"]`) || !strings.Contains(out, `verbs: ["get"]`) {
 		t.Errorf("missing the read-only serviceaccounts:get grant on the burrowd-addons Role")
+	}
+}
+
+// TestRenderManifestsAgentCredential pins the scoped agent credential the install manifest renders
+// (ADR-0038): a burrow-agent ServiceAccount, a name-scoped Role granting EXACTLY proxy on the
+// burrowd Service and get on the burrowd-api-token Secret (and nothing else), a RoleBinding of that
+// Role to the SA, and a long-lived ServiceAccount-token Secret. The AgentServiceAccount defaults to
+// "burrow-agent".
+func TestRenderManifestsAgentCredential(t *testing.T) {
+	out, err := renderManifests(installOptions{
+		Namespace: "burrow", AppNamespace: "apps", Image: "img:1",
+		Token: "t", DBPassword: "p", Port: 8080,
+	})
+	if err != nil {
+		t.Fatalf("renderManifests: %v", err)
+	}
+
+	for _, want := range []string{
+		"name: burrow-agent",       // the ServiceAccount / Role / RoleBinding name
+		"name: burrow-agent-token", // the long-lived token Secret
+		"type: kubernetes.io/service-account-token",
+		"kubernetes.io/service-account.name: burrow-agent",
+		`resources: ["services/proxy"]`,
+		`resourceNames: ["burrowd", "burrowd:8080", "http:burrowd:", "https:burrowd:"]`,
+		`verbs: ["get", "create", "update", "patch", "delete"]`,
+		`resourceNames: ["burrowd-api-token"]`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered manifests missing agent-credential fragment %q", want)
+		}
+	}
+
+	// The agent Role is EXACTLY two rules — the proxy grant and the token-secret get — and no more.
+	// Slice out the burrow-agent Role block (from its metadata to the next RoleBinding) and assert
+	// its shape: exactly one services/proxy rule and one resourceNames:["burrowd-api-token"] rule,
+	// with no broadening verbs on the secret grant and no other resources.
+	roleStart := strings.Index(out, "kind: Role\nmetadata:\n  name: burrow-agent\n")
+	if roleStart < 0 {
+		t.Fatalf("no burrow-agent Role rendered:\n%s", out)
+	}
+	roleBlock := out[roleStart:]
+	roleBlock = roleBlock[:strings.Index(roleBlock, "kind: RoleBinding")]
+	if c := strings.Count(roleBlock, "- apiGroups:"); c != 2 {
+		t.Errorf("the burrow-agent Role must have EXACTLY two rules, found %d:\n%s", c, roleBlock)
+	}
+	if strings.Count(roleBlock, `resources: ["services/proxy"]`) != 1 {
+		t.Errorf("the burrow-agent Role must have exactly one services/proxy rule:\n%s", roleBlock)
+	}
+	if strings.Count(roleBlock, `resources: ["secrets"]`) != 1 {
+		t.Errorf("the burrow-agent Role must have exactly one secrets rule:\n%s", roleBlock)
+	}
+	// The agent Role must reach nothing beyond the proxy and the one token Secret: no list/watch (so
+	// it cannot enumerate secrets), no pods, no deployments, no other namespaces. (create/update/
+	// patch/delete appear legitimately on the services/proxy rule, so they are not banned here.)
+	for _, banned := range []string{"list", "watch", "pods", "deployments", "services\n", `resources: ["services"]`} {
+		if strings.Contains(roleBlock, banned) {
+			t.Errorf("the burrow-agent Role must not grant %q:\n%s", banned, roleBlock)
+		}
+	}
+
+	// The AgentServiceAccount defaults to burrow-agent when installOptions leaves it empty.
+	o := installOptions{Namespace: "burrow", AppNamespace: "apps", Image: "img:1", Token: "t", DBPassword: "p", Port: 8080}
+	if o.AgentServiceAccount != "" {
+		t.Fatalf("test precondition: AgentServiceAccount should start empty")
+	}
+	if _, err := renderManifests(o); err != nil {
+		t.Fatalf("renderManifests: %v", err)
 	}
 }
 

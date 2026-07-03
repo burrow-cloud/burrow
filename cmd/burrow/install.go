@@ -125,14 +125,15 @@ var installTemplate = template.Must(template.Must(template.New("install").Parse(
 // app workloads aren't mixed in with the control-plane infrastructure. ServiceAccount is burrowd's
 // ServiceAccount name, threaded into the shared app-namespace Role (defaults to "burrowd").
 type installOptions struct {
-	Namespace      string
-	AppNamespace   string
-	AddonNamespace string
-	ServiceAccount string
-	Image          string
-	Token          string
-	DBPassword     string
-	Port           int
+	Namespace           string
+	AppNamespace        string
+	AddonNamespace      string
+	ServiceAccount      string
+	AgentServiceAccount string
+	Image               string
+	Token               string
+	DBPassword          string
+	Port                int
 }
 
 // installArgs are the resolved inputs to an install run: the target kube context (the required
@@ -289,8 +290,9 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	printCapabilitySummary(ctx, cs, stdout)
 
 	// Name and record the environment (ADR-0036/0037): write a local handle pinned as current, so
-	// first-run detection flips and `burrow env list` shows it without connecting.
-	if err := recordEnvironment(a, stdout); err != nil {
+	// first-run detection flips and `burrow env list` shows it without connecting. This also mints
+	// the scoped agent credential (ADR-0038) and records its kubeconfig path on the handle.
+	if err := recordEnvironment(ctx, a, cs, stdout); err != nil {
 		return err
 	}
 
@@ -309,12 +311,24 @@ const postInstallGuidance = "Burrow is ready. Connect your AI agent to operate i
 
 // recordEnvironment writes the just-installed environment into the local config as a handle and
 // pins it as the current environment (ADR-0036/0037). The name is the explicit --environment or a
-// generated adjective-animal name. It prints the confirmation and the rename hint.
-func recordEnvironment(a installArgs, stdout io.Writer) error {
+// generated adjective-animal name. It mints the scoped agent credential (ADR-0038) and records its
+// kubeconfig path on the handle, then prints the confirmation and the rename hint.
+func recordEnvironment(ctx context.Context, a installArgs, cs kubernetes.Interface, stdout io.Writer) error {
 	name := a.environment
 	if name == "" {
 		name = friendlyName()
 	}
+
+	// Mint the scoped, burrowd-only agent credential and write its kubeconfig under ~/.burrow/
+	// (ADR-0038). No consumer reads it yet (that is phase 2), so a mint hiccup — e.g. a slow token
+	// controller — must not fail an otherwise-installed control plane: warn and record the handle
+	// without the credential, which a re-run can provision.
+	agentKubeconfig, agentContext, err := mintAgentCredentialFn(ctx, a, name, cs, stdout)
+	if err != nil {
+		fmt.Fprintf(stdout, "\nWarning: could not mint the scoped agent credential: %v\n"+
+			"The control plane is installed; re-run `burrow install` to provision it.\n", err)
+	}
+
 	cfg, err := localconfig.Load()
 	if err != nil {
 		return err
@@ -327,7 +341,9 @@ func recordEnvironment(a installArgs, stdout io.Writer) error {
 		// Cluster-per-environment: the whole cluster is the environment, so commands send burrowd
 		// no env name and get the default app namespace and the global guardrails (ADR-0036). A
 		// namespace-per-environment env carries its registered name instead (see `burrow env add`).
-		Env: "",
+		Env:             "",
+		AgentKubeconfig: agentKubeconfig,
+		AgentContext:    agentContext,
 	}); err != nil {
 		return err
 	}
@@ -481,9 +497,37 @@ func randHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// mintAgentCredentialFn is the seam recordEnvironment uses to mint and write the scoped agent
+// credential (ADR-0038). It is a package var so install's other tests can substitute a no-op that
+// records a fixed path without a real cluster or token controller; the real path is
+// mintAgentCredential.
+var mintAgentCredentialFn = mintAgentCredential
+
+// mintAgentCredential builds the REST config for the install target, mints the scoped burrowd-only
+// kubeconfig from the agent ServiceAccount's long-lived token Secret, and writes it under ~/.burrow/
+// named for the environment. It returns the written path and the context name inside it.
+func mintAgentCredential(ctx context.Context, a installArgs, envName string, cs kubernetes.Interface, _ io.Writer) (kubeconfigPath, kubeContext string, err error) {
+	restCfg, err := connect.RESTConfig(a.kubeconfig, a.kubeContext)
+	if err != nil {
+		return "", "", err
+	}
+	data, err := mintAgentKubeconfig(ctx, cs, restCfg, a.namespace, agentTokenSecretName)
+	if err != nil {
+		return "", "", err
+	}
+	path, err := writeAgentKubeconfig(envName, data)
+	if err != nil {
+		return "", "", err
+	}
+	return path, agentKubeContextName, nil
+}
+
 func renderManifests(o installOptions) (string, error) {
 	if o.ServiceAccount == "" {
 		o.ServiceAccount = "burrowd"
+	}
+	if o.AgentServiceAccount == "" {
+		o.AgentServiceAccount = agentServiceAccountFn(defaultPrincipal)
 	}
 	var sb strings.Builder
 	if err := installTemplate.Execute(&sb, o); err != nil {

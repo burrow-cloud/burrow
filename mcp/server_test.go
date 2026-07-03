@@ -84,6 +84,43 @@ func TestServerInstructions(t *testing.T) {
 	}
 }
 
+// TestExposureGuidanceSteersToLoadBalancer confirms the agent-facing exposure guidance on the
+// tools that recommend ingress install presents a LoadBalancer as the way to make an app publicly
+// reachable — a public IP to point DNS at — and no longer offers NodePort as a user choice.
+// NodePort exposes on high ports (30000+) and cannot serve a turnkey public site on :80/:443, so
+// the guidance must not suggest it or steer the human at `--expose nodeport`.
+func TestExposureGuidanceSteersToLoadBalancer(t *testing.T) {
+	cs := connect(t, func(http.ResponseWriter, *http.Request) {})
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	desc := map[string]string{}
+	for _, tool := range res.Tools {
+		desc[tool.Name] = tool.Description
+	}
+	for _, name := range []string{"burrow_expose", "burrow_cluster"} {
+		got, ok := desc[name]
+		if !ok {
+			t.Errorf("tool %q not registered", name)
+			continue
+		}
+		if !strings.Contains(got, "LoadBalancer") {
+			t.Errorf("tool %q guidance does not present a LoadBalancer; got:\n%s", name, got)
+		}
+		if !strings.Contains(got, "--expose loadbalancer") {
+			t.Errorf("tool %q guidance omits the `--expose loadbalancer` install command; got:\n%s", name, got)
+		}
+		// NodePort is no longer a user-facing exposure choice: the guidance must not offer it.
+		if strings.Contains(got, "--expose nodeport") {
+			t.Errorf("tool %q guidance still offers `--expose nodeport`: NodePort must not be suggested; got:\n%s", name, got)
+		}
+		if strings.Contains(got, "single point of failure") {
+			t.Errorf("tool %q guidance still carries the NodePort single-point-of-failure framing; got:\n%s", name, got)
+		}
+	}
+}
+
 func TestListTools(t *testing.T) {
 	cs := connect(t, func(http.ResponseWriter, *http.Request) {})
 	res, err := cs.ListTools(context.Background(), nil)

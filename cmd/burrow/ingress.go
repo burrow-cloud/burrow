@@ -207,51 +207,163 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 		return nil
 	}
 
-	// Ingress controller: install only if absent.
+	// Install phase: one aligned, scannable status line per component instead of the interleaved
+	// apply counters. The reporter shows a transient in-progress line on a terminal that the final
+	// line overwrites; verbose still lists every applied resource beneath each component.
+	fmt.Fprintln(stdout, "\nInstalling:")
+	r := ingressReporter{w: stdout, verbose: o.verbose}
+
+	// Ingress controller: install only if absent, then (with --wait) confirm the controller is ready.
 	if hasNginx {
-		fmt.Fprintln(stdout, "ingress-nginx already present, using it.")
+		r.done("ingress-nginx", "already present")
 	} else {
-		fmt.Fprintf(stdout, "Installing ingress-nginx (%s)...\n", manifestVariantLabel(expose))
-		if err := serverSideApplyURL(ctx, o.kubeconfig, manifest, o.verbose, stdout, stderr); err != nil {
+		r.working("ingress-nginx", "installing")
+		detail, err := applyURLDetail(ctx, o, manifest, stdout, stderr)
+		if err != nil {
 			return err
 		}
+		status := "installed" + parenthesize(detail)
 		if o.wait {
-			if err := waitForDeployment(ctx, cs, "ingress-nginx", "ingress-nginx-controller", "ingress controller", stdout, 3*time.Minute); err != nil {
+			r.working("ingress-nginx", "waiting for controller")
+			if err := waitForDeployment(ctx, cs, "ingress-nginx", "ingress-nginx-controller", "ingress controller", io.Discard, 3*time.Minute); err != nil {
 				return err
 			}
+			status += ", controller ready"
 		}
+		r.done("ingress-nginx", status)
 	}
 
-	// cert-manager: install only if absent.
-	if hasCertManager {
-		fmt.Fprintln(stdout, "cert-manager already present, using it.")
-	} else {
-		fmt.Fprintln(stdout, "Installing cert-manager...")
-		if err := serverSideApplyURL(ctx, o.kubeconfig, certManagerManifest, o.verbose, stdout, stderr); err != nil {
+	// cert-manager: install only if absent. The ClusterIssuer is a cert-manager CRD served by its
+	// webhook, so it cannot be applied until the webhook is up — wait for it (whether we just
+	// installed cert-manager or it was already here) and report readiness on the same component line.
+	var certDetail string
+	if !hasCertManager {
+		r.working("cert-manager", "installing")
+		d, err := applyURLDetail(ctx, o, certManagerManifest, stdout, stderr)
+		if err != nil {
 			return err
 		}
+		certDetail = d
 	}
-
-	// The ClusterIssuer is a cert-manager CRD served by its webhook, so it cannot be applied
-	// until the webhook is up — wait for it (whether we just installed cert-manager or it was
-	// already here) and retry, since the webhook briefly rejects calls right after readiness.
 	if o.wait {
-		if err := waitForDeployment(ctx, cs, "cert-manager", "cert-manager-webhook", "cert-manager webhook", stdout, 3*time.Minute); err != nil {
+		r.working("cert-manager", "waiting for webhook")
+		if err := waitForDeployment(ctx, cs, "cert-manager", "cert-manager-webhook", "cert-manager webhook", io.Discard, 3*time.Minute); err != nil {
 			return err
 		}
 	}
-	if o.email == "" {
-		fmt.Fprintln(stderr, "note: no --email given; Let's Encrypt expiry notices will not be sent.")
+	certStatus := "already present"
+	if !hasCertManager {
+		certStatus = "installed" + parenthesize(certDetail)
 	}
-	fmt.Fprintf(stdout, "Creating ClusterIssuer %q...\n", o.issuerName)
-	if err := applyIssuer(ctx, o.kubeconfig, issuer, o.verbose, stdout, stderr); err != nil {
+	if o.wait {
+		certStatus += ", webhook ready"
+	}
+	r.done("cert-manager", certStatus)
+
+	// ClusterIssuer: retried briefly, since the webhook can still reject the call right after
+	// readiness. The status names the ACME environment rather than the apply counts.
+	r.working("ClusterIssuer", "applying")
+	issuerOut := stdout
+	var issuerBuf bytes.Buffer
+	if !o.verbose {
+		issuerOut = &issuerBuf
+	}
+	if err := applyIssuer(ctx, o.kubeconfig, issuer, o.verbose, issuerOut, stderr); err != nil {
 		return err
 	}
+	r.done("ClusterIssuer", fmt.Sprintf("%q applied (%s)", o.issuerName, acmeEnvLabel(o)))
 
-	fmt.Fprintf(stdout, "\nIngress and TLS are set up. Expose an app and request a certificate:\n"+
-		"  burrow app publish <app> --host <name> --port <n> --tls\n"+
-		"The controller's external address can take a few minutes; check `burrow app reachability <app>`.\n")
+	writeIngressDone(stdout, o)
 	return nil
+}
+
+// componentCol is the width the install-phase component names are padded to so their status text
+// lines up in a scannable column. It fits the longest name ("ingress-nginx").
+const componentCol = len("ingress-nginx")
+
+// ingressReporter prints the install phase: one aligned status line per component, marked with the
+// success glyph. On a terminal it first prints a transient in-progress line that the final line
+// overwrites, so a multi-minute readiness wait is not silent; on non-terminal (captured, piped, or
+// verbose) output it prints only the final lines, keeping logs clean.
+type ingressReporter struct {
+	w       io.Writer
+	verbose bool
+}
+
+// working prints a transient "<name> <verb>…" line while a component's apply or wait is in flight.
+// It is a no-op in verbose mode and on non-terminal writers, where no carriage-return animation runs.
+func (r ingressReporter) working(name, verb string) {
+	if r.verbose || !isTerminal(r.w) {
+		return
+	}
+	fmt.Fprintf(r.w, "\r\033[K  · %-*s  %s…", componentCol, name, verb)
+}
+
+// done prints a component's final aligned status line, clearing any transient line first on a terminal.
+func (r ingressReporter) done(name, status string) {
+	if !r.verbose && isTerminal(r.w) {
+		fmt.Fprint(r.w, "\r\033[K")
+	}
+	fmt.Fprintf(r.w, "  %s %-*s  %s\n", okMark(r.w), componentCol, name, status)
+}
+
+// parenthesize wraps a non-empty apply detail in " (...)" for a component status line, and is empty
+// when there is no detail (e.g. verbose mode, where the per-resource listing is the detail).
+func parenthesize(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	return " (" + detail + ")"
+}
+
+// acmeEnvLabel names the Let's Encrypt environment the issuer targets, for the ClusterIssuer line.
+func acmeEnvLabel(o ingressOptions) string {
+	if o.staging {
+		return "Let's Encrypt staging"
+	}
+	return "Let's Encrypt production"
+}
+
+// applyURLDetail applies a remote manifest for one install-phase component and returns the condensed
+// "N created, M configured" detail for its status line. Verbose lists every applied resource to stdout
+// and returns an empty detail (the listing is the detail); non-verbose captures the apply's one-line
+// summary and condenses it, so the interleaved apply counter never reaches the terminal.
+func applyURLDetail(ctx context.Context, o ingressOptions, url string, stdout, stderr io.Writer) (string, error) {
+	if o.verbose {
+		return "", serverSideApplyURL(ctx, o.kubeconfig, url, true, stdout, stderr)
+	}
+	var buf bytes.Buffer
+	if err := serverSideApplyURL(ctx, o.kubeconfig, url, false, &buf, stderr); err != nil {
+		return "", err
+	}
+	return applyDetail(buf.String()), nil
+}
+
+// applyDetail condenses a captured non-verbose apply summary ("✓ Applied N resource(s): X created,
+// Y configured.") into the parenthetical detail for a component status line ("X created, Y
+// configured"). If the expected shape is absent it falls back to the trimmed text, so a formatting
+// change upstream degrades to showing the raw summary rather than an empty detail.
+func applyDetail(summary string) string {
+	s := strings.TrimSpace(summary)
+	const marker = "resource(s): "
+	if i := strings.Index(s, marker); i >= 0 {
+		return strings.TrimSuffix(strings.TrimSpace(s[i+len(marker):]), ".")
+	}
+	return s
+}
+
+// writeIngressDone prints the closing summary block: what is ready, the actionable no-email note (so
+// an operator can add ACME notifications later), and the next-step hints to expose an app and check
+// its reachability.
+func writeIngressDone(w io.Writer, o ingressOptions) {
+	fmt.Fprintln(w, "\nDone. Ingress and TLS are set up.")
+	if o.email == "" {
+		fmt.Fprintln(w, "note: no --email set, so Let's Encrypt expiry and renewal-failure notices are off.")
+		fmt.Fprintln(w, "  Add one anytime: burrow cluster ingress install --email <you@example.com>")
+	}
+	fmt.Fprintln(w, "\nExpose an app and request a certificate:")
+	fmt.Fprintln(w, "  burrow app publish <app> --host <name> --port <n> --tls")
+	fmt.Fprintln(w, "The controller's external address can take a few minutes; check `burrow app reachability <app>`.")
 }
 
 // resolveExpose turns the --expose value into a concrete mode. auto runs the slice-1 capability

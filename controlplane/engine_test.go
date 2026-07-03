@@ -651,6 +651,31 @@ func TestExposeMissingPrerequisites(t *testing.T) {
 		}
 	})
 
+	// The orphan-IngressClass scenario: a cluster-scoped IngressClass lingers after its controller
+	// was removed. Present keys off the running controller, not the class, so the ingress-controller
+	// prerequisite must still fire (and name its fix) even though a class name is reported.
+	t.Run("orphan ingress class still blocks", func(t *testing.T) {
+		e, d := newEngineWithProber(t, cp.ClusterCapabilities{
+			Ingress:     cp.IngressCapability{Present: false, Classes: []string{"nginx"}},
+			CertManager: cp.CertManagerCapability{Present: true},
+		})
+		dnsProvider(t, d)
+		if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+			t.Fatalf("deploy: %v", err)
+		}
+		_, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080})
+		m, ok := cp.AsMissingPrerequisites(err)
+		if !ok {
+			t.Fatalf("expose = %v, want MissingPrerequisitesError", err)
+		}
+		if names := prereqNames(m); !names["ingress controller"] || len(m.Missing) != 1 {
+			t.Errorf("an orphan class must still block on the ingress controller, got %v", names)
+		}
+		if !strings.Contains(err.Error(), "burrow cluster ingress install") {
+			t.Errorf("error text should name the ingress fix:\n%s", err.Error())
+		}
+	})
+
 	// A missing DNS provider alone never blocks: pointing DNS by hand is a valid path.
 	t.Run("only dns provider missing proceeds", func(t *testing.T) {
 		e, _ := newEngineWithProber(t, fullyProvisioned)

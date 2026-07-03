@@ -41,6 +41,21 @@ func TestCapabilitySummary(t *testing.T) {
 	}
 }
 
+// TestClusterReportOrphanIngressClass asserts a lingering IngressClass whose controller was removed
+// renders honestly as an orphan with no running controller, not as a usable ingress.
+func TestClusterReportOrphanIngressClass(t *testing.T) {
+	var b bytes.Buffer
+	caps := fullCaps()
+	caps.Ingress = client.IngressCapability{Present: false, Classes: []string{"nginx"}}
+	writeClusterReport(&b, caps)
+	out := b.String()
+	for _, want := range []string{"no running ingress controller", "orphan IngressClass nginx"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q\n%s", want, out)
+		}
+	}
+}
+
 func TestCapabilitySummaryBareMetal(t *testing.T) {
 	caps := client.ClusterCapabilities{
 		Ingress:  client.IngressCapability{Present: false},

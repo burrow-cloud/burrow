@@ -16,7 +16,8 @@ import (
 // than asking the user to classify it. Each capability reports present / absent / inferred, never
 // an opinion about whether the cluster "should" have it.
 type ClusterCapabilities struct {
-	// Ingress is the ingress-controller situation: present, and which IngressClass(es).
+	// Ingress is the ingress-controller situation: whether a controller is actually running, and
+	// which IngressClass(es) exist.
 	Ingress IngressCapability `json:"ingress"`
 	// Storage is the default-StorageClass situation: whether a default exists and its name.
 	Storage StorageCapability `json:"storage"`
@@ -32,10 +33,19 @@ type ClusterCapabilities struct {
 	DNS DNSCapability `json:"dns"`
 }
 
-// IngressCapability reports the cluster's ingress-controller situation. Present is true when at
-// least one IngressClass exists; Classes are the IngressClass names found, sorted.
+// IngressCapability reports the cluster's ingress-controller situation. Present — the "you can
+// expose" signal — is true only when an ingress controller is actually running (a ready
+// ingress-nginx controller Deployment), NOT merely when an IngressClass exists: an IngressClass is
+// cluster-scoped and can outlive the controller that created it (deleting the ingress-nginx release
+// and its namespace leaves the "nginx" class orphaned), and an orphan class routes nothing. Classes
+// are the IngressClass names found, sorted; they are reported independently of Present because
+// binding an Ingress still needs the class name (e.g. while the controller is being reinstalled).
 type IngressCapability struct {
-	Present bool     `json:"present"`
+	// Present is true only when a ready ingress controller is running — the signal that an expose
+	// will actually get an external address and admission webhook. It is not implied by Classes.
+	Present bool `json:"present"`
+	// Classes are the IngressClass names that exist, sorted. A class may be present while Present is
+	// false (an orphan class whose controller was removed).
 	Classes []string `json:"classes,omitempty"`
 }
 
@@ -80,7 +90,8 @@ type DNSCapability struct {
 }
 
 // ClusterProber detects a cluster's capabilities read-only (ADR-0034): it reads IngressClasses,
-// StorageClasses, and Nodes, and uses API-group discovery to detect cert-manager, then infers
+// ingress-nginx controller Deployments, StorageClasses, and Nodes, and uses API-group discovery to
+// detect cert-manager, then infers
 // LoadBalancer support from the detected provider. It is the seam over those reads so the engine
 // stays unit-testable against a fake; the production adapter (controlplane/kube) wraps a client-go
 // clientset, and the same detection runs whether driven by the kubeconfig client (install) or

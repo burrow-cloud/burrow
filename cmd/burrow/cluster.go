@@ -86,6 +86,11 @@ func writeClusterReport(w io.Writer, caps client.ClusterCapabilities) {
 
 func ingressLine(i client.IngressCapability) string {
 	if !i.Present {
+		if len(i.Classes) > 0 {
+			// An IngressClass is cluster-scoped and can outlive its controller: a lingering class
+			// with no running controller routes nothing. Report the orphan honestly, not as ready.
+			return "no running ingress controller (orphan IngressClass " + strings.Join(i.Classes, ", ") + ")"
+		}
 		return "no ingress controller (no IngressClass found)"
 	}
 	return "IngressClass " + strings.Join(i.Classes, ", ")

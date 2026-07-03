@@ -50,8 +50,8 @@ var cloudProviders = map[string]string{
 // Prober is the production controlplane.ClusterProber: it detects a cluster's read-only
 // capabilities over a client-go clientset (ADR-0034). It wraps the same clientset burrowd already
 // holds, so the live read needs only the narrow read-only ClusterRole the install grants
-// (get/list on nodes, storageclasses, ingressclasses) plus API-group discovery (no RBAC). It never
-// writes.
+// (get/list on nodes, storageclasses, ingressclasses, and deployments) plus API-group discovery
+// (no RBAC). It never writes.
 type Prober struct {
 	client kubernetes.Interface
 }
@@ -77,7 +77,8 @@ func (p *Prober) DetectCapabilities(ctx context.Context) (controlplane.ClusterCa
 }
 
 // DetectCapabilities reads a cluster's capabilities read-only over the given clientset (ADR-0034):
-// the ingress controller and its IngressClasses, the default and all StorageClasses, the cloud
+// the ingress controller (a ready ingress-nginx controller Deployment) and its IngressClasses, the
+// default and all StorageClasses, the cloud
 // provider (from node providerIDs/labels), and cert-manager (via API-group discovery), and infers
 // LoadBalancer support from the provider. It performs only get/list reads and API-group discovery
 // — it never writes. It is a free function so the same detection runs whether driven by the
@@ -117,9 +118,19 @@ func DetectCapabilities(ctx context.Context, client kubernetes.Interface) (contr
 	return caps, nil
 }
 
-// detectIngress lists IngressClasses (networking.k8s.io). An ingress controller installs an
-// IngressClass, so their presence is the signal a controller is available and names the class to
-// bind an Ingress to.
+// ingressNginxControllerSelector matches the ingress-nginx controller Deployment by its standard
+// recommended labels. The running controller — not merely an IngressClass — is what routes traffic,
+// assigns an external address, and runs the admission webhook, so its readiness is the real "you
+// can expose" signal.
+const ingressNginxControllerSelector = "app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller"
+
+// detectIngress reports the cluster's ingress situation. It lists IngressClasses (networking.k8s.io)
+// to name the class an Ingress binds to and — separately — checks that an ingress-nginx controller
+// Deployment is actually present and ready. An IngressClass is cluster-scoped and can OUTLIVE the
+// controller that created it: delete the ingress-nginx release and its namespace and the "nginx"
+// IngressClass is left orphaned, routing nothing. So the class alone is not proof a controller is
+// available; Present (the "you can expose" signal) is set from controller readiness, while Classes
+// is always reported so an Ingress can still name its class.
 func detectIngress(ctx context.Context, client kubernetes.Interface) (controlplane.IngressCapability, error) {
 	list, err := client.NetworkingV1().IngressClasses().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -130,7 +141,34 @@ func detectIngress(ctx context.Context, client kubernetes.Interface) (controlpla
 		classes = append(classes, list.Items[i].Name)
 	}
 	sort.Strings(classes)
-	return controlplane.IngressCapability{Present: len(classes) > 0, Classes: classes}, nil
+
+	ready, err := ingressControllerReady(ctx, client)
+	if err != nil {
+		return controlplane.IngressCapability{}, err
+	}
+	return controlplane.IngressCapability{Present: ready, Classes: classes}, nil
+}
+
+// ingressControllerReady reports whether an ingress-nginx controller Deployment is present with at
+// least one ready replica. It lists Deployments across all namespaces filtered by the standard
+// ingress-nginx controller labels, so it finds the controller wherever the release was installed
+// (the conventional "ingress-nginx" namespace or any other). This is the minimal-RBAC accurate
+// signal: it needs only get/list on apps/deployments — the one grant added to the
+// burrowd-cluster-capabilities ClusterRole — which is narrower and clearer than probing the
+// admission ValidatingWebhookConfiguration.
+func ingressControllerReady(ctx context.Context, client kubernetes.Interface) (bool, error) {
+	deps, err := client.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+		LabelSelector: ingressNginxControllerSelector,
+	})
+	if err != nil {
+		return false, fmt.Errorf("kube: listing ingress-nginx controller deployments: %w", err)
+	}
+	for i := range deps.Items {
+		if deps.Items[i].Status.ReadyReplicas > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // detectStorage lists StorageClasses (storage.k8s.io) and picks the default — the one annotated

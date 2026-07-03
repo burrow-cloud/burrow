@@ -100,7 +100,8 @@ echo "=== burrow app deploy (auto-connect: kubeconfig + API-server proxy, no por
 echo "=== wait for the app to become available ==="
 ok=
 for _ in $(seq 1 45); do
-  if "$BURROW" app status web --kubeconfig "$KCFG" | grep -q "ready, available"; then
+  status_out=$("$BURROW" app status web --kubeconfig "$KCFG")
+  if grep -q "ready, available" <<<"$status_out"; then
     ok=1
     break
   fi
@@ -116,7 +117,8 @@ fi
 
 echo "=== rollback path: deploy a second image, then roll back ==="
 "$BURROW" app deploy web --image nginx:1.27-alpine --kubeconfig "$KCFG"
-"$BURROW" app rollback web --kubeconfig "$KCFG" | grep -q "nginx:alpine" || { echo "FAIL: rollback did not restore nginx:alpine"; exit 1; }
+rollback_out=$("$BURROW" app rollback web --kubeconfig "$KCFG")
+grep -q "nginx:alpine" <<<"$rollback_out" || { echo "FAIL: rollback did not restore nginx:alpine"; exit 1; }
 
 # =============================================================================
 # AUDIT: the append-only record of guarded operations (ADR-0027)
@@ -128,15 +130,15 @@ echo "=== audit: the guarded operations above are recorded ==="
 audit_out=$("$BURROW" audit --app web --kubeconfig "$KCFG")
 printf '%s\n' "$audit_out"
 # A deploy that executed and the rollback that executed must both appear for app web.
-printf '%s\n' "$audit_out" | grep -q "deploy" \
+grep -q "deploy" <<<"$audit_out" \
   || { echo "FAIL: 'burrow audit' did not list a deploy operation for web"; exit 1; }
-printf '%s\n' "$audit_out" | grep -q "rollback" \
+grep -q "rollback" <<<"$audit_out" \
   || { echo "FAIL: 'burrow audit' did not list the rollback operation for web"; exit 1; }
-printf '%s\n' "$audit_out" | grep -q "executed" \
+grep -q "executed" <<<"$audit_out" \
   || { echo "FAIL: 'burrow audit' showed no executed outcome for web"; exit 1; }
 # The outcome filter narrows the read path server-side.
-"$BURROW" audit --app web --operation rollback --outcome executed --kubeconfig "$KCFG" \
-  | grep -q "rollback" || { echo "FAIL: filtered 'burrow audit' did not return the rollback row"; exit 1; }
+filtered_audit=$("$BURROW" audit --app web --operation rollback --outcome executed --kubeconfig "$KCFG")
+grep -q "rollback" <<<"$filtered_audit" || { echo "FAIL: filtered 'burrow audit' did not return the rollback row"; exit 1; }
 echo "--- audit trail lists the guarded operations through CLI -> API -> burrowd -> Postgres ---"
 
 # =============================================================================
@@ -153,7 +155,8 @@ echo "=== env: set a variable on the running app (rolls the Deployment) ==="
 "$BURROW" app config set web BURROW_E2E_ENV=hello-from-store --kubeconfig "$KCFG"
 
 echo "=== config: assert the value round-trips through app config list ==="
-"$BURROW" app config list web --kubeconfig "$KCFG" | grep -qx "BURROW_E2E_ENV=hello-from-store" \
+config_list_out=$("$BURROW" app config list web --kubeconfig "$KCFG")
+grep -qx "BURROW_E2E_ENV=hello-from-store" <<<"$config_list_out" \
   || { echo "FAIL: 'app config list' did not return the set variable"; exit 1; }
 
 echo "=== env: assert the value reached the live Deployment pod template ==="
@@ -170,7 +173,8 @@ echo "--- env rendered into the pod template: BURROW_E2E_ENV=$env_in_template --
 
 echo "=== env: unset removes the variable from the store ==="
 "$BURROW" app config unset web BURROW_E2E_ENV --no-restart --kubeconfig "$KCFG"
-if "$BURROW" app config list web --kubeconfig "$KCFG" | grep -q "BURROW_E2E_ENV"; then
+config_list_after=$("$BURROW" app config list web --kubeconfig "$KCFG")
+if grep -q "BURROW_E2E_ENV" <<<"$config_list_after"; then
   echo "FAIL: BURROW_E2E_ENV still present after unset"
   exit 1
 fi
@@ -218,12 +222,12 @@ echo "--- Deployment injects the per-app Secret via envFrom ---"
 
 echo "=== secret: list shows the KEY but never the value ==="
 secret_list=$("$BURROW" app secret list web --kubeconfig "$KCFG")
-if ! printf '%s\n' "$secret_list" | grep -qx "APP_SECRET"; then
+if ! grep -qx "APP_SECRET" <<<"$secret_list"; then
   echo "FAIL: 'app secret list' did not show the key APP_SECRET"
   printf '%s\n' "$secret_list"
   exit 1
 fi
-if printf '%s\n' "$secret_list" | grep -q "s3cr3t"; then
+if grep -q "s3cr3t" <<<"$secret_list"; then
   echo "FAIL: 'app secret list' leaked the secret VALUE"
   exit 1
 fi
@@ -231,7 +235,8 @@ echo "--- secret list shows APP_SECRET (the key) and not the value ---"
 
 echo "=== secret: unset removes the key from the Secret ==="
 "$BURROW" app secret unset web APP_SECRET --no-restart --kubeconfig "$KCFG"
-if "$BURROW" app secret list web --kubeconfig "$KCFG" | grep -q "APP_SECRET"; then
+secret_list_after=$("$BURROW" app secret list web --kubeconfig "$KCFG")
+if grep -q "APP_SECRET" <<<"$secret_list_after"; then
   echo "FAIL: APP_SECRET still present after unset"
   exit 1
 fi
@@ -278,7 +283,7 @@ found=
 last_out=
 for _ in $(seq 1 18); do
   last_out=$("$BURROW" addon logs 'BURROW_E2E_LOGLINE' --kubeconfig "$KCFG" 2>&1 || true)
-  if printf '%s\n' "$last_out" | grep -q "BURROW_E2E_LOGLINE"; then
+  if grep -q "BURROW_E2E_LOGLINE" <<<"$last_out"; then
     found=1
     break
   fi
@@ -330,7 +335,7 @@ found=
 last_out=
 for _ in $(seq 1 18); do
   last_out=$("$BURROW" addon metrics 'up' --kubeconfig "$KCFG" 2>&1 || true)
-  if printf '%s\n' "$last_out" | grep -q 'job="vmagent"'; then
+  if grep -q 'job="vmagent"' <<<"$last_out"; then
     found=1
     break
   fi
@@ -364,7 +369,7 @@ app_found=
 app_out=
 for _ in $(seq 1 18); do
   app_out=$("$BURROW" addon metrics 'up{pod=~"metricsapp.*"}' --kubeconfig "$KCFG" 2>&1 || true)
-  if printf '%s\n' "$app_out" | grep -q 'pod="metricsapp'; then
+  if grep -q 'pod="metricsapp' <<<"$app_out"; then
     app_found=1
     break
   fi
@@ -405,7 +410,7 @@ cache_out=$(kubectl --kubeconfig "$KCFG" -n burrow-addons run cache-ping \
   --image=valkey/valkey:8.0 --restart=Never --attach --rm -q -- \
   valkey-cli -h burrow-cache.burrow-addons.svc -p 6379 ping 2>&1 || true)
 echo "$cache_out"
-if ! printf '%s\n' "$cache_out" | grep -q "PONG"; then
+if ! grep -q "PONG" <<<"$cache_out"; then
   echo "FAIL: the cache did not answer PING with PONG"
   exit 1 # the ERR trap dumps diagnostics
 fi
@@ -554,7 +559,7 @@ loki_found=
 loki_out=
 for _ in $(seq 1 18); do
   loki_out=$("$BURROW" addon logs '{job="burrow-e2e"} |= "BURROW_E2E_LOKI_MARKER"' --kubeconfig "$KCFG" 2>&1 || true)
-  if printf '%s\n' "$loki_out" | grep -q "BURROW_E2E_LOKI_MARKER"; then
+  if grep -q "BURROW_E2E_LOKI_MARKER" <<<"$loki_out"; then
     loki_found=1
     break
   fi
@@ -674,7 +679,7 @@ prom_found=
 prom_out=
 for _ in $(seq 1 18); do
   prom_out=$("$BURROW" addon metrics 'up' --kubeconfig "$KCFG" 2>&1 || true)
-  if printf '%s\n' "$prom_out" | grep -q 'job="prometheus"'; then
+  if grep -q 'job="prometheus"' <<<"$prom_out"; then
     prom_found=1
     break
   fi

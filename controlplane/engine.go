@@ -121,6 +121,53 @@ func New(d Deps) (*Engine, error) {
 	}, nil
 }
 
+// resolveReplicas computes the effective replica count for a workload apply — deploy, rollback, or a
+// config/secret reapply. A deploy ships the image; it must not rescale the app or fight an active
+// autoscaler. The rules, in order: (1) an active HorizontalPodAutoscaler owns the count, so the
+// current Deployment's desired replicas are preserved and the request is ignored; (2) otherwise an
+// explicit request (> 0) is honored — deploy-time scaling stays possible without an HPA; (3)
+// otherwise (unspecified / 0) the current count is preserved, defaulting to 1 for a new app with no
+// Deployment yet. The result is therefore always >= 1: a deploy can never scale an app to zero, and
+// explicit scale-to-zero stays a `burrow scale <app> 0` operation. k is the namespace-scoped view.
+func (e *Engine) resolveReplicas(ctx context.Context, k Kubernetes, app string, requested int32) (int32, error) {
+	current, hasCurrent, err := currentReplicas(ctx, k, app)
+	if err != nil {
+		return 0, err
+	}
+	active, err := k.AutoscalerActive(ctx, app)
+	if err != nil {
+		return 0, fmt.Errorf("checking autoscaler for %s: %w", app, err)
+	}
+	switch {
+	case active:
+		// The HPA owns the count; preserve what is running, or default to 1 for the unusual case of
+		// an HPA with no Deployment yet, never resetting to zero.
+		if hasCurrent {
+			return current, nil
+		}
+		return 1, nil
+	case requested > 0:
+		return requested, nil
+	case hasCurrent:
+		return current, nil
+	default:
+		return 1, nil // a new app with no Deployment and no explicit count
+	}
+}
+
+// currentReplicas returns app's current desired replica count and whether a Deployment exists.
+// ErrNotFound (a new app with nothing running) is reported as hasCurrent == false, not an error.
+func currentReplicas(ctx context.Context, k Kubernetes, app string) (replicas int32, hasCurrent bool, err error) {
+	st, err := k.WorkloadStatus(ctx, app)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("reading current replicas for %s: %w", app, err)
+	}
+	return st.DesiredReplicas, true, nil
+}
+
 // Deploy rolls out an image by reference (ADR-0007). It validates the request, applies
 // the guardrails, records a new release, applies it to the cluster, and records the
 // outcome — superseding the previously running release on success. burrowd never contacts
@@ -148,9 +195,18 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: loading guardrail policy: %w", req.App, err)
 	}
-	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(req.Replicas)), "env": envName(req.Env)}
+	// Resolve the effective replica count before the guardrail so the guardrail sees the real count:
+	// a deploy ships the image and must not rescale — an active HPA keeps its count, an unspecified
+	// count preserves the running value (or 1 for a new app), and only an explicit count without an
+	// HPA changes scale. The resolved count is always >= 1, so a deploy never trips scale-to-zero
+	// (ADR-0007).
+	replicas, err := e.resolveReplicas(ctx, k, req.App, req.Replicas)
+	if err != nil {
+		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
+	}
+	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(replicas)), "env": envName(req.Env)}
 	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, GuardrailAppDeploy,
-		pol.evaluateDeploy(req.Env, req.Replicas, req.Confirm)); err != nil {
+		pol.evaluateDeploy(req.Env, replicas, req.Confirm)); err != nil {
 		return DeployResult{}, err
 	}
 
@@ -175,7 +231,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		Env:         env,
 		Command:     req.Command,
 		MetricsPort: req.MetricsPort,
-		Replicas:    req.Replicas,
+		Replicas:    replicas,
 		Status:      ReleasePending,
 		CreatedAt:   e.clock.Now(),
 	}
@@ -192,7 +248,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	// The execution-row args carry the env KEY NAMES only — never values (ADR-0027).
 	args["env_keys"] = auditKeys(env)
 
-	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: req.Replicas, ReleaseID: rel.ID}
+	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: replicas, ReleaseID: rel.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
@@ -304,7 +360,13 @@ func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app string) error
 	if err != nil {
 		return fmt.Errorf("set env %s: reading env: %w", app, err)
 	}
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: env, Command: cur.Command, MetricsPort: cur.MetricsPort, Replicas: cur.Replicas, ReleaseID: cur.ID}
+	// A config/secret reapply re-renders the running workload; it must not rescale it. Resolve with
+	// no explicit request so the current count is preserved (or the HPA left to own it).
+	replicas, err := e.resolveReplicas(ctx, k, app, 0)
+	if err != nil {
+		return fmt.Errorf("set env %s: %w", app, err)
+	}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: env, Command: cur.Command, MetricsPort: cur.MetricsPort, Replicas: replicas, ReleaseID: cur.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		return fmt.Errorf("set env %s: applying to cluster: %w", app, err)
 	}
@@ -1416,6 +1478,14 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 		return RollbackResult{}, fmt.Errorf("rollback %s: reading env: %w", app, err)
 	}
 
+	// A rollback restores the prior image and command but must not reset the replica count to the
+	// target release's: resolve with no explicit request so the running count is preserved (or the
+	// HPA left to own it), exactly as a redeploy does.
+	replicas, err := e.resolveReplicas(ctx, e.k8s.WithNamespace(ns), app, 0)
+	if err != nil {
+		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
+	}
+
 	rel := Release{
 		ID:          e.ids.NewID(),
 		App:         app,
@@ -1423,7 +1493,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 		Env:         cfg,
 		Command:     target.Command,
 		MetricsPort: target.MetricsPort,
-		Replicas:    target.Replicas,
+		Replicas:    replicas,
 		Status:      ReleasePending,
 		Supersedes:  cur.ID,
 		CreatedAt:   e.clock.Now(),
@@ -1434,7 +1504,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 
 	args["env_keys"] = auditKeys(cfg) // KEY NAMES only — never values (ADR-0027)
 
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: target.Replicas, ReleaseID: rel.ID}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: replicas, ReleaseID: rel.ID}
 	if err := e.k8s.WithNamespace(ns).ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)

@@ -131,6 +131,30 @@ func TestMetricsAPIAvailableAbsent(t *testing.T) {
 	}
 }
 
+// TestAutoscalerActive reports true only while an HPA named after the app exists: absent before an
+// apply, present after, and absent again after a delete (NotFound → false, no error).
+func TestAutoscalerActive(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	if active, err := a.AutoscalerActive(ctx, "web"); err != nil || active {
+		t.Fatalf("AutoscalerActive before apply = (%v, %v), want (false, nil)", active, err)
+	}
+	if err := a.ApplyAutoscaler(ctx, "web", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}); err != nil {
+		t.Fatalf("ApplyAutoscaler: %v", err)
+	}
+	if active, err := a.AutoscalerActive(ctx, "web"); err != nil || !active {
+		t.Fatalf("AutoscalerActive after apply = (%v, %v), want (true, nil)", active, err)
+	}
+	if err := a.DeleteAutoscaler(ctx, "web"); err != nil {
+		t.Fatalf("DeleteAutoscaler: %v", err)
+	}
+	if active, err := a.AutoscalerActive(ctx, "web"); err != nil || active {
+		t.Fatalf("AutoscalerActive after delete = (%v, %v), want (false, nil)", active, err)
+	}
+}
+
 // metricFor returns the Resource metric spec for the named resource, or nil when absent.
 func metricFor(metrics []autoscalingv2.MetricSpec, name corev1.ResourceName) *autoscalingv2.ResourceMetricSource {
 	for i := range metrics {

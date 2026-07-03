@@ -34,6 +34,7 @@ const (
 	OpRestartWorkload     Op = "RestartWorkload"
 	OpApplyAutoscaler     Op = "ApplyAutoscaler"
 	OpDeleteAutoscaler    Op = "DeleteAutoscaler"
+	OpAutoscalerActive    Op = "AutoscalerActive"
 	OpMetricsAPIAvailable Op = "MetricsAPIAvailable"
 	OpAddonReady          Op = "AddonReady"
 	OpSaveAddon           Op = "SaveAddon"

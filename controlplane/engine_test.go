@@ -188,13 +188,23 @@ func TestDeployGuardrails(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newEngine(t, cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
 
+	// An explicit count above the ceiling still trips the replica-ceiling guardrail: the resolved
+	// count (6, a new app with an explicit request and no HPA) is what the guardrail sees.
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 6})
 	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
-	_, err = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 0})
-	mustGuardrail(t, err, cp.GuardrailScaleToZero)
 	// A refused deploy touches nothing.
 	if _, ok := k.Spec("web"); ok {
 		t.Errorf("refused deploy should not apply to the cluster")
+	}
+
+	// An unspecified count (0) on a deploy resolves to 1 for a new app and never trips
+	// scale-to-zero — a deploy ships the image and can no longer scale an app to zero; explicit
+	// scale-to-zero stays a `scale` operation.
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 0}); err != nil {
+		t.Fatalf("deploy with unspecified replicas should default to 1, not trip scale-to-zero: %v", err)
+	}
+	if spec, ok := k.Spec("web"); !ok || spec.Replicas != 1 {
+		t.Errorf("unspecified-replica deploy should apply 1 replica, got %+v ok=%v", spec, ok)
 	}
 }
 

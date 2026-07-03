@@ -149,7 +149,7 @@ func serverHandler(ready *atomic.Bool, apiHandler *atomic.Pointer[http.Handler])
 // briefly unreachable leaves burrowd not-ready rather than blocking startup or exiting, so
 // it does not crash-loop while Postgres is coming up.
 func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomic.Pointer[http.Handler], storeOut *atomic.Pointer[postgres.Store], ready *atomic.Bool) error {
-	store, err := openWithRetry(ctx, dsn, 2*time.Minute)
+	store, err := openWithRetry(ctx, dsn, 4*time.Minute)
 	if err != nil {
 		return err
 	}

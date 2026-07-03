@@ -84,7 +84,7 @@ var addonCatalog = map[AddonType]AddonSpec{
 	AddonPostgres: {
 		Type:    AddonPostgres,
 		Backend: "postgres",
-		Image:   "postgres:17.4", // official PostgreSQL image, PostgreSQL License (BSD-style)
+		Image:   "postgres:17-alpine", // official PostgreSQL image (Alpine variant — smaller, faster to pull), PostgreSQL License (BSD-style)
 		Port:    5432,
 		// Persistent: a database is durable state, so it gets a volume; the generic stateful path
 		// gives it a Recreate Deployment + a PVC. The superuser password Secret and per-app

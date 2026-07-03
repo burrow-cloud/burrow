@@ -316,6 +316,162 @@ var prefixForTest = func() string {
 	return s[:strings.LastIndex(s, ".")+1]
 }()
 
+// stubBootstrapFullFlow fakes every bootstrap seam (public IP, k3s installer, and the reused install
+// path) so a `burrow cluster bootstrap` run completes without a real network, k3s, or cluster. It
+// installs the given fake k3s installer, restores all seams on cleanup, and returns the k3s-style
+// admin kubeconfig path to pass with --kubeconfig.
+func stubBootstrapFullFlow(t *testing.T, inst k3sInstaller) string {
+	t.Helper()
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+
+	kcPath := filepath.Join(t.TempDir(), "k3s.yaml")
+	if err := os.WriteFile(kcPath, []byte(k3sStyleKubeconfig), 0o600); err != nil {
+		t.Fatalf("writing kubeconfig: %v", err)
+	}
+
+	origIP := newIPDetector
+	newIPDetector = func() publicIPDetector { return fakeIPDetector{ip: "203.0.113.10"} }
+	origK3s := newK3sInstaller
+	newK3sInstaller = func(string, io.Writer, io.Writer) k3sInstaller { return inst }
+	origList := listContexts
+	listContexts = func(string) ([]connect.Context, error) {
+		return []connect.Context{{Name: "default", Cluster: "default", Current: true}}, nil
+	}
+	origCS := clientsetFn
+	clientsetFn = func(string, string) (kubernetes.Interface, error) { return fake.NewSimpleClientset(), nil }
+	origApply := applyFn
+	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+
+	t.Cleanup(func() {
+		newIPDetector = origIP
+		newK3sInstaller = origK3s
+		listContexts = origList
+		clientsetFn = origCS
+		applyFn = origApply
+	})
+	return kcPath
+}
+
+// runBootstrapCLI runs `burrow cluster bootstrap` against kcPath with the given extra flags and
+// returns the error plus captured stdout/stderr.
+func runBootstrapCLI(kcPath string, extra ...string) (error, string, string) {
+	args := append([]string{
+		"cluster", "bootstrap",
+		"--public-ip", "203.0.113.10",
+		"--kubeconfig", kcPath,
+		"--burrowd-image", "img:1",
+		"--wait=false",
+	}, extra...)
+	var out, errb bytes.Buffer
+	err := run(context.Background(), args, &out, &errb)
+	return err, out.String(), errb.String()
+}
+
+// TestBootstrapYesSkipsPrompt asserts --yes bypasses the confirmation entirely (confirmFn is never
+// consulted) and the install proceeds.
+func TestBootstrapYesSkipsPrompt(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) {
+		t.Fatal("confirmFn must not be called when --yes is set")
+		return false, nil
+	}
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	if err, _, errb := runBootstrapCLI(kcPath, "--yes"); err != nil {
+		t.Fatalf("cluster bootstrap --yes: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run when --yes is set")
+	}
+}
+
+// TestBootstrapConfirmYesProceeds asserts a "yes" from the confirmation seam lets the install proceed.
+func TestBootstrapConfirmYesProceeds(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	if err, _, errb := runBootstrapCLI(kcPath); err != nil {
+		t.Fatalf("cluster bootstrap: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run after the confirmation is accepted")
+	}
+}
+
+// TestBootstrapConfirmNoAborts asserts a declined confirmation (a "no", the empty-line default) stops
+// before any install: the k3s installer seam is never called, and the abort is clean (no error).
+func TestBootstrapConfirmNoAborts(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return false, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, _, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("a declined confirmation should abort cleanly, got: %v", err)
+	}
+	if inst.installedWith != nil {
+		t.Error("Install must NOT run when the confirmation is declined")
+	}
+	if !strings.Contains(errb, "Aborted") {
+		t.Errorf("declined bootstrap should say it aborted, stderr:\n%s", errb)
+	}
+}
+
+// TestBootstrapNoTTYWithoutYesAborts asserts that with no controlling terminal (confirmFn reports
+// errNoTTY) and no --yes, bootstrap errors with guidance to pass --yes — it does not hang and does
+// not install.
+func TestBootstrapNoTTYWithoutYesAborts(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return false, errNoTTY }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, _, _ := runBootstrapCLI(kcPath)
+	if err == nil {
+		t.Fatal("expected an error when there is no terminal and --yes was not passed")
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("no-tty error should tell the user to pass --yes, got: %v", err)
+	}
+	if inst.installedWith != nil {
+		t.Error("Install must NOT run when there is no terminal to confirm on")
+	}
+}
+
+// TestBootstrapAlreadyRunningSkipsPrompt asserts that when k3s is already installed and answering the
+// whole run is a no-op for the install, so no confirmation is prompted (confirmFn is never called)
+// even without --yes.
+func TestBootstrapAlreadyRunningSkipsPrompt(t *testing.T) {
+	inst := &fakeK3sInstaller{running: true}
+	kcPath := stubBootstrapFullFlow(t, inst)
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) {
+		t.Fatal("confirmFn must not be called when k3s is already running (a no-op)")
+		return false, nil
+	}
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	if err, _, errb := runBootstrapCLI(kcPath); err != nil {
+		t.Fatalf("cluster bootstrap on an already-running box: %v\n%s", err, errb)
+	}
+	if inst.installedWith != nil {
+		t.Error("Install must not run when k3s is already running")
+	}
+}
+
 // TestRewriteServerHost asserts the loopback API server URL is rewritten to the public IP while the
 // port is preserved.
 func TestRewriteServerHost(t *testing.T) {

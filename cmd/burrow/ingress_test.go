@@ -6,9 +6,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -101,18 +103,28 @@ func TestIngressInstallDryRun(t *testing.T) {
 	}
 }
 
-// costNoticeMarker is the distinctive phrase the LoadBalancer cost notice carries; the nodeport
-// path must never print it. The notice is provider-agnostic (it never names the detected cloud).
-const costNoticeMarker = "LoadBalancers normally cost money"
+// costNoticeMarker is the distinctive phrase the LoadBalancer cost/HA notice carries; the nodeport
+// path must never print it. The notice is provider-agnostic beyond the DigitalOcean example price.
+const costNoticeMarker = "a LoadBalancer is billable"
+
+// spofNoticeMarker is the distinctive phrase the NodePort notice carries: it explains that pointing
+// DNS at a single node makes that node a single point of failure.
+const spofNoticeMarker = "single point of failure"
 
 func TestIngressInstallDryRunExpose(t *testing.T) {
-	// loadbalancer: the plan names the cloud (LoadBalancer) manifest and carries the cost notice.
+	// loadbalancer: the plan names the cloud (LoadBalancer) manifest and carries the cost/HA notice.
 	var lb bytes.Buffer
 	if err := run(context.Background(), []string{"cluster", "ingress", "install", "--dry-run", "--expose", "loadbalancer"}, &lb, &lb); err != nil {
 		t.Fatalf("dry-run loadbalancer: %v", err)
 	}
 	if !strings.Contains(lb.String(), costNoticeMarker) {
 		t.Errorf("loadbalancer dry-run should include the cost notice %q:\n%s", costNoticeMarker, lb.String())
+	}
+	if !strings.Contains(lb.String(), "high availability") {
+		t.Errorf("loadbalancer dry-run should explain the HA benefit:\n%s", lb.String())
+	}
+	if strings.Contains(lb.String(), spofNoticeMarker) {
+		t.Errorf("loadbalancer dry-run should not print the nodeport SPOF notice:\n%s", lb.String())
 	}
 	if !strings.Contains(lb.String(), ingressNginxManifest) {
 		t.Errorf("loadbalancer dry-run should reference the cloud manifest:\n%s", lb.String())
@@ -121,13 +133,17 @@ func TestIngressInstallDryRunExpose(t *testing.T) {
 		t.Errorf("loadbalancer dry-run should not reference the baremetal manifest:\n%s", lb.String())
 	}
 
-	// nodeport: the plan references the baremetal (NodePort) manifest and omits the cost notice.
+	// nodeport: the plan references the baremetal (NodePort) manifest, prints the single-point-of-
+	// failure notice, and omits the cost notice.
 	var np bytes.Buffer
 	if err := run(context.Background(), []string{"cluster", "ingress", "install", "--dry-run", "--expose", "nodeport"}, &np, &np); err != nil {
 		t.Fatalf("dry-run nodeport: %v", err)
 	}
 	if strings.Contains(np.String(), costNoticeMarker) {
 		t.Errorf("nodeport dry-run should omit the cost notice:\n%s", np.String())
+	}
+	if !strings.Contains(np.String(), spofNoticeMarker) {
+		t.Errorf("nodeport dry-run should include the single-point-of-failure notice:\n%s", np.String())
 	}
 	if !strings.Contains(np.String(), ingressNginxBaremetalManifest) {
 		t.Errorf("nodeport dry-run should reference the baremetal manifest:\n%s", np.String())
@@ -170,21 +186,107 @@ func TestResolveExposeAuto(t *testing.T) {
 	}
 }
 
-func TestConfirmInstall(t *testing.T) {
-	// -y / --yes skips the prompt: returns true without reading stdin or printing "Proceed?".
-	var out bytes.Buffer
-	ok, err := confirmInstall(ingressOptions{yes: true}, strings.NewReader("n\n"), &out)
-	if err != nil {
-		t.Fatalf("confirmInstall yes: %v", err)
+func TestIngressInstallApproveFlag(t *testing.T) {
+	install := ingressInstallCmd(t)
+	flags := install.Flags()
+
+	approve := flags.Lookup("approve")
+	if approve == nil {
+		t.Fatal("ingress install should register the --approve flag")
 	}
-	if !ok {
-		t.Errorf("--yes should proceed without prompting")
-	}
-	if strings.Contains(out.String(), "Proceed?") {
-		t.Errorf("--yes should not print the prompt:\n%s", out.String())
+	if approve.Shorthand != "" {
+		t.Errorf("--approve must have no shorthand (a cost approval should not be a single keystroke), got -%s", approve.Shorthand)
 	}
 
-	// Without -y the prompt is shown and the typed answer decides.
+	// --yes and its -y shorthand are gone.
+	if f := flags.Lookup("yes"); f != nil {
+		t.Errorf("--yes should be removed, found %v", f)
+	}
+	if f := flags.ShorthandLookup("y"); f != nil {
+		t.Errorf("-y should be removed, found %v", f)
+	}
+}
+
+// ingressInstallCmd builds the ingress command tree and returns its "install" subcommand.
+func ingressInstallCmd(t *testing.T) *cobra.Command {
+	t.Helper()
+	parent := newIngressCmd()
+	for _, c := range parent.Commands() {
+		if c.Name() == "install" {
+			return c
+		}
+	}
+	t.Fatal("ingress command has no install subcommand")
+	return nil
+}
+
+func TestWriteIngressPlanNotices(t *testing.T) {
+	o := ingressOptions{issuerName: "letsencrypt"}
+
+	// The loadbalancer plan is printed and carries the billable/HA cost notice, not the SPOF notice.
+	var lb bytes.Buffer
+	writeIngressPlan(&lb, o, exposeLoadBalancer, ingressManifestFor(exposeLoadBalancer), false, false)
+	if !strings.Contains(lb.String(), "Plan (expose: loadbalancer)") {
+		t.Errorf("loadbalancer plan should be printed:\n%s", lb.String())
+	}
+	if !strings.Contains(lb.String(), costNoticeMarker) || !strings.Contains(lb.String(), "high availability") {
+		t.Errorf("loadbalancer plan should carry the cost/HA notice:\n%s", lb.String())
+	}
+	if strings.Contains(lb.String(), spofNoticeMarker) {
+		t.Errorf("loadbalancer plan should not carry the SPOF notice:\n%s", lb.String())
+	}
+
+	// The nodeport plan is printed and carries the single-point-of-failure notice, not the cost one.
+	var np bytes.Buffer
+	writeIngressPlan(&np, o, exposeNodePort, ingressManifestFor(exposeNodePort), false, false)
+	if !strings.Contains(np.String(), "Plan (expose: nodeport)") {
+		t.Errorf("nodeport plan should be printed:\n%s", np.String())
+	}
+	if !strings.Contains(np.String(), spofNoticeMarker) {
+		t.Errorf("nodeport plan should carry the SPOF notice:\n%s", np.String())
+	}
+	if strings.Contains(np.String(), costNoticeMarker) {
+		t.Errorf("nodeport plan should not carry the cost notice:\n%s", np.String())
+	}
+}
+
+func TestConfirmInstall(t *testing.T) {
+	// --approve proceeds without prompting: returns true without reading stdin or printing "Proceed?".
+	// It never depends on whether stdin is a terminal.
+	var out bytes.Buffer
+	ok, err := confirmInstall(ingressOptions{approve: true}, strings.NewReader("n\n"), &out)
+	if err != nil {
+		t.Fatalf("confirmInstall approve: %v", err)
+	}
+	if !ok {
+		t.Errorf("--approve should proceed without prompting")
+	}
+	if strings.Contains(out.String(), "Proceed?") {
+		t.Errorf("--approve should not print the prompt:\n%s", out.String())
+	}
+
+	// Non-interactive (no terminal) without --approve must refuse: an error, no prompt, no proceed.
+	// strings.Reader is not a terminal, so the default stdinIsTerminal seam already reports false.
+	var nb bytes.Buffer
+	ok, err = confirmInstall(ingressOptions{}, strings.NewReader(""), &nb)
+	if err == nil {
+		t.Fatalf("non-interactive confirmInstall without --approve should error")
+	}
+	if ok {
+		t.Errorf("non-interactive confirmInstall without --approve should not proceed")
+	}
+	if !strings.Contains(err.Error(), "--approve") {
+		t.Errorf("the non-interactive error should point at --approve:\n%v", err)
+	}
+	if strings.Contains(nb.String(), "Proceed?") {
+		t.Errorf("non-interactive confirmInstall should not prompt:\n%s", nb.String())
+	}
+
+	// On an interactive terminal (forced via the seam) and without --approve, the prompt is shown
+	// and the typed answer decides.
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = origTerm })
 	for _, tc := range []struct {
 		in   string
 		want bool

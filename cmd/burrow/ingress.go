@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -87,7 +88,7 @@ type ingressOptions struct {
 	staging    bool
 	kubeconfig string
 	expose     string
-	yes        bool
+	approve    bool
 	dryRun     bool
 	wait       bool
 	verbose    bool
@@ -140,7 +141,7 @@ func newIngressCmd() *cobra.Command {
 	install.Flags().BoolVar(&o.staging, "staging", false, "use the Let's Encrypt staging environment (untrusted certs, high rate limits) to test the flow")
 	install.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	install.Flags().StringVar(&o.expose, "expose", exposeAuto, "how to expose the controller: loadbalancer (billable cloud LB), nodeport (free, point DNS at a node IP), or auto (detect from the provider)")
-	install.Flags().BoolVarP(&o.yes, "yes", "y", false, "do not prompt for confirmation (non-interactive)")
+	install.Flags().BoolVar(&o.approve, "approve", false, "approve the plan (required non-interactively); the plan and cost notice are always printed. No shorthand: a cost approval should not be a single keystroke.")
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the plan (including the cost notice) instead of applying it")
 	install.Flags().BoolVar(&o.wait, "wait", true, "wait for cert-manager to become ready before creating the issuer")
 	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
@@ -192,8 +193,9 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 		return err
 	}
 
-	// Print the plan with the cost notice, then confirm before any write (ADR-0034 slice 2:
-	// nothing cluster-wide is installed without an explicit yes). -y skips the prompt.
+	// Always print the plan with the cost/SPOF notice before any write (ADR-0034 slice 2: nothing
+	// cluster-wide is installed without the operator seeing what it costs), then gate the write.
+	// Interactive → prompt (default No); non-interactive → require --approve.
 	writeIngressPlan(stdout, o, expose, manifest, hasNginx, hasCertManager)
 	ok, err := confirmInstall(o, stdin, stdout)
 	if err != nil {
@@ -291,22 +293,22 @@ func manifestVariantLabel(expose string) string {
 	return "cloud, LoadBalancer Service"
 }
 
-// costNotice flags that the LoadBalancer path creates a billable cloud resource and points to the
-// free nodeport alternative. It is deliberately provider-agnostic: it never hardcodes a price
-// (they drift) and never names the detected provider (node-label detection is best-effort, and a
-// confidently-wrong provider name would be worse than a general note). It says to check with the
-// cloud provider for current pricing (ADR-0034 slice 2).
+// costNotice explains the LoadBalancer path so the operator understands the tradeoff, not just the
+// price: a LoadBalancer is billable but highly available, because a cloud load balancer spreads
+// traffic across the nodes and the site survives a worker-node failure. It points to the free
+// nodeport alternative for cost-sensitive clusters (ADR-0034 slice 2).
 func costNotice() string {
-	return "Note: ingress-nginx creates a LoadBalancer Service. LoadBalancers normally cost money; " +
-		"check with your cloud provider for current pricing. Free alternative: --expose nodeport " +
-		"(you point DNS at a node IP instead)."
+	return "Note: a LoadBalancer is billable (a cloud load balancer, priced by your provider, for " +
+		"example roughly a low-double-digit dollars per month on DigitalOcean) but it spreads traffic " +
+		"across your nodes, so the site stays reachable when a worker node fails. Choose it for high " +
+		"availability, or --expose nodeport to avoid the cost."
 }
 
-// nodePortNotice explains the nodeport path: no billable load balancer, but the operator points
-// DNS at a node IP.
+// nodePortNotice explains the nodeport path so the operator understands the tradeoff: it is free,
+// but it points DNS at a single node's IP, which makes that node a single point of failure.
 func nodePortNotice() string {
-	return "Note: the nodeport path creates a NodePort Service (no cloud load balancer, no extra " +
-		"charge). Point your DNS at a node's external IP to reach the controller."
+	return "Note: NodePort is free. It points your DNS at a single worker node's IP address, which " +
+		"makes that node a single point of failure: if it goes down, the site becomes unreachable."
 }
 
 // writeIngressPlan prints the live install plan: only the missing pieces (detect-and-skip), and
@@ -360,11 +362,18 @@ func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
 	}
 }
 
-// confirmInstall gates the install on an explicit yes (ADR-0034 slice 2). -y / --yes skips the
-// prompt for non-interactive use; otherwise it prompts and reads the answer.
+// confirmInstall gates the install after the plan is printed (ADR-0034 slice 2). --approve is an
+// explicit approval and proceeds without a prompt. Otherwise, on an interactive terminal it prompts
+// (default No); with no terminal and no --approve it refuses rather than hang or apply, so a
+// billable cloud load balancer is never provisioned non-interactively without explicit approval.
 func confirmInstall(o ingressOptions, in io.Reader, out io.Writer) (bool, error) {
-	if o.yes {
+	if o.approve {
 		return true, nil
+	}
+	if !stdinIsTerminal(in) {
+		return false, errors.New("this installs cluster infrastructure and, on the loadbalancer path, " +
+			"creates a billable cloud load balancer; re-run with --approve to confirm (or --expose " +
+			"nodeport for the free option, or --dry-run to preview)")
 	}
 	return confirmProceed(in, out)
 }

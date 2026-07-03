@@ -892,6 +892,13 @@ func writeEngineError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	// Missing cluster prerequisites is a structured, actionable outcome (ADR-0006): the request was
+	// valid but the cluster is not set up for it. The full checklist rides in the error text so the
+	// agent gets each missing piece and its burrow fix over MCP without inspecting the cluster.
+	if _, ok := controlplane.AsMissingPrerequisites(err); ok {
+		writeError(w, http.StatusUnprocessableEntity, err.Error(), "missing_prerequisites")
+		return
+	}
 	switch {
 	case errors.Is(err, controlplane.ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error(), "not_found")

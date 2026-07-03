@@ -530,6 +530,149 @@ func TestExposeTLS(t *testing.T) {
 	}
 }
 
+// newEngineWithProber builds an engine wired with a ClusterProber reporting caps, so the expose
+// path's prerequisite detection (ADR-0034) can be exercised against a fake cluster. It returns the
+// engine and the database so a test can also seed DNS providers.
+func newEngineWithProber(t *testing.T, caps cp.ClusterCapabilities) (*cp.Engine, *fake.Database) {
+	t.Helper()
+	d := fake.NewDatabase()
+	d.SetPolicy(cp.DefaultPolicy().With(cp.GuardrailExposePublic, cp.DispositionAllow))
+	e, err := cp.New(cp.Deps{
+		Kubernetes: fake.NewKubernetes(), Database: d,
+		Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+		ClusterProber: fake.NewClusterProber(caps),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return e, d
+}
+
+// dnsProvider seeds a DNS-capable provider into the fake registry.
+func dnsProvider(t *testing.T, d *fake.Database) {
+	t.Helper()
+	if err := d.SaveProvider(context.Background(), cp.Provider{
+		Name: "do-dns", Type: cp.ProviderDigitalOcean,
+		Capabilities: []cp.Capability{cp.CapabilityDNS}, SecretKey: "do-dns",
+	}); err != nil {
+		t.Fatalf("SaveProvider: %v", err)
+	}
+}
+
+// TestExposeMissingPrerequisites asserts an expose-with-TLS against a cluster missing cert-manager,
+// an ingress controller, or a DNS provider returns a structured MissingPrerequisitesError naming each
+// missing piece and its burrow fix (ADR-0006), and that a fully provisioned cluster proceeds normally.
+func TestExposeMissingPrerequisites(t *testing.T) {
+	ctx := context.Background()
+	fullyProvisioned := cp.ClusterCapabilities{
+		Ingress:     cp.IngressCapability{Present: true, Classes: []string{"nginx"}},
+		CertManager: cp.CertManagerCapability{Present: true},
+	}
+
+	// Nothing provisioned: a TLS expose enumerates all three prerequisites with their fixes.
+	t.Run("all missing", func(t *testing.T) {
+		e, _ := newEngineWithProber(t, cp.ClusterCapabilities{})
+		if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+			t.Fatalf("deploy: %v", err)
+		}
+		_, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080, TLS: true, Issuer: "letsencrypt"})
+		m, ok := cp.AsMissingPrerequisites(err)
+		if !ok {
+			t.Fatalf("expose = %v, want MissingPrerequisitesError", err)
+		}
+		names := prereqNames(m)
+		for _, want := range []string{"ingress controller", "cert-manager", "DNS provider"} {
+			if !names[want] {
+				t.Errorf("missing prerequisite %q not reported; got %v", want, names)
+			}
+		}
+		s := err.Error()
+		for _, want := range []string{"burrow cluster ingress install", "burrow config provider add", "web.example.com"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("error text missing %q:\n%s", want, s)
+			}
+		}
+	})
+
+	// Only cert-manager missing (ingress + DNS provider present): the checklist names cert-manager
+	// alone.
+	t.Run("only cert-manager missing", func(t *testing.T) {
+		e, d := newEngineWithProber(t, cp.ClusterCapabilities{Ingress: cp.IngressCapability{Present: true}})
+		dnsProvider(t, d)
+		if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+			t.Fatalf("deploy: %v", err)
+		}
+		_, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080, TLS: true, Issuer: "letsencrypt"})
+		m, ok := cp.AsMissingPrerequisites(err)
+		if !ok {
+			t.Fatalf("expose = %v, want MissingPrerequisitesError", err)
+		}
+		if names := prereqNames(m); !names["cert-manager"] || len(m.Missing) != 1 {
+			t.Errorf("want cert-manager alone, got %v", names)
+		}
+	})
+
+	// Only the ingress controller missing (cert-manager + DNS present), a non-TLS expose: the
+	// checklist names the ingress controller alone.
+	t.Run("only ingress controller missing", func(t *testing.T) {
+		e, d := newEngineWithProber(t, cp.ClusterCapabilities{CertManager: cp.CertManagerCapability{Present: true}})
+		dnsProvider(t, d)
+		if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+			t.Fatalf("deploy: %v", err)
+		}
+		_, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080})
+		m, ok := cp.AsMissingPrerequisites(err)
+		if !ok {
+			t.Fatalf("expose = %v, want MissingPrerequisitesError", err)
+		}
+		if names := prereqNames(m); !names["ingress controller"] || len(m.Missing) != 1 {
+			t.Errorf("want ingress controller alone, got %v", names)
+		}
+	})
+
+	// A missing DNS provider alone never blocks: pointing DNS by hand is a valid path.
+	t.Run("only dns provider missing proceeds", func(t *testing.T) {
+		e, _ := newEngineWithProber(t, fullyProvisioned)
+		if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+			t.Fatalf("deploy: %v", err)
+		}
+		res, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080, TLS: true, Issuer: "letsencrypt"})
+		if err != nil {
+			t.Fatalf("expose = %v, want success", err)
+		}
+		if res.URL != "https://web.example.com" {
+			t.Errorf("URL = %q, want https://web.example.com", res.URL)
+		}
+	})
+
+	// Fully provisioned: a TLS expose proceeds normally.
+	t.Run("fully provisioned", func(t *testing.T) {
+		e, d := newEngineWithProber(t, fullyProvisioned)
+		dnsProvider(t, d)
+		if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+			t.Fatalf("deploy: %v", err)
+		}
+		res, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080, TLS: true, Issuer: "letsencrypt"})
+		if err != nil {
+			t.Fatalf("expose = %v, want success", err)
+		}
+		if res.URL != "https://web.example.com" {
+			t.Errorf("URL = %q, want https://web.example.com", res.URL)
+		}
+	})
+}
+
+// prereqNames returns the set of prerequisite names in a MissingPrerequisitesError.
+func prereqNames(m *cp.MissingPrerequisitesError) map[string]bool {
+	names := map[string]bool{}
+	for _, p := range m.Missing {
+		names[p.Name] = true
+	}
+	return names
+}
+
 func TestReachability(t *testing.T) {
 	ctx := context.Background()
 	k := fake.NewKubernetes()

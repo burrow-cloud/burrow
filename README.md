@@ -44,6 +44,14 @@ Once Burrow is connected, you operate your apps by talking to your agent. Things
 
 Coming soon: `Make web autoscale at 90% CPU` and `Limit web to 500MB of memory and 1 CPU`.
 
+## Build it, then fix it
+
+Your agent can write your app. The real test is whether it can *keep it working*, and most agents go blind the moment the code leaves the editor. Burrow gives yours the tooling to diagnose and fix a live app, not just ship it, all as one-command addons that run on the worker nodes you already pay for, so they add capability without adding cost.
+
+- `Why is my app throwing errors?` Burrow adds centralized logging to your cluster and gives your agent access, so it reads what actually happened instead of guessing. Chasing a stubborn bug? It adds logging to your code, redeploys, and reads the new lines back.
+- `My site feels slow` Burrow installs a metrics collector that watches CPU, memory, and traffic. Your agent finds the bottleneck and tells you the fix, or makes it.
+- `My latest change won't deploy` A bad build or a broken image is blocking the rollout. Your agent sees exactly why it failed, fixes the code, and redeploys.
+
 ## Guardrails
 
 Guardrails are how you decide what your agent can and cannot do. Every risky action (deploying to prod, deleting an app, rolling back, exposing publicly, DNS and add-on changes) can be gated by a guardrail you set: raise it to confirm to require your sign-off, or to deny to refuse it outright. You opt in, so the agent proposes and you decide.
@@ -81,8 +89,8 @@ what you get:
   not just "it's down."
 - **You operate it by talking.** Status, logs, rollback, scale: your agent does the work, and
   the guardrails you set gate the risky moves (a prod deploy, a delete) so it can't get past you.
-- **You get plain-language answers.** Ask "how is my app doing?" or "why is it slow?" and your
-  agent reads the logs and metrics and tells you, no dashboards to dig through.
+- **You get plain-language answers.** Ask how things are going and your agent tells you in a
+  sentence, no dashboards to dig through.
 
 And the risky changes go through you: set a guardrail and **the agent proposes, you approve, it
 executes**, with a record of what happened either way. That human-in-the-loop step is what makes

@@ -47,10 +47,10 @@ func newAuditCmd() *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "TIME\tOP\tTARGET\tOUTCOME\tGUARDRAIL")
+			fmt.Fprintln(tw, "TIME\tOP\tTARGET\tPRINCIPAL\tOUTCOME\tGUARDRAIL")
 			for _, e := range entries {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-					e.Timestamp.Format("2006-01-02 15:04:05"), e.Operation, dash(e.Target), e.Outcome, dash(e.GuardrailCode))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					e.Timestamp.Format("2006-01-02 15:04:05"), e.Operation, dash(e.Target), dash(e.Principal), e.Outcome, dash(e.GuardrailCode))
 			}
 			return tw.Flush()
 		},

@@ -235,7 +235,7 @@ ON CONFLICT (code) DO UPDATE SET disposition = EXCLUDED.disposition`
 }
 
 // auditColumns is the audit_log projection in a stable order shared by the scanner.
-const auditColumns = `id, ts, operation, target, args, guardrail_code, disposition, outcome, result, caller`
+const auditColumns = `id, ts, operation, target, args, guardrail_code, disposition, outcome, result, caller, principal`
 
 // defaultAuditLimit caps an unbounded audit query so a huge log never returns in one response.
 const defaultAuditLimit = 200
@@ -252,10 +252,10 @@ func (s *Store) AppendAudit(ctx context.Context, e controlplane.AuditEntry) erro
 		return fmt.Errorf("postgres: append audit: encoding args: %w", err)
 	}
 	const q = `
-INSERT INTO audit_log (ts, operation, target, args, guardrail_code, disposition, outcome, result, caller)
-VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`
+INSERT INTO audit_log (ts, operation, target, args, guardrail_code, disposition, outcome, result, caller, principal)
+VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`
 	_, err = s.db.ExecContext(ctx, q,
-		e.Timestamp, e.Operation, e.Target, string(argsJSON), e.GuardrailCode, e.Disposition, string(e.Outcome), e.Result, e.Caller)
+		e.Timestamp, e.Operation, e.Target, string(argsJSON), e.GuardrailCode, e.Disposition, string(e.Outcome), e.Result, e.Caller, e.Principal)
 	if err != nil {
 		return fmt.Errorf("postgres: append audit: %w", err)
 	}
@@ -319,7 +319,7 @@ func scanAudit(sc scanner) (controlplane.AuditEntry, error) {
 		argsJSON []byte
 		outcome  string
 	)
-	if err := sc.Scan(&e.ID, &ts, &e.Operation, &e.Target, &argsJSON, &e.GuardrailCode, &e.Disposition, &outcome, &e.Result, &e.Caller); err != nil {
+	if err := sc.Scan(&e.ID, &ts, &e.Operation, &e.Target, &argsJSON, &e.GuardrailCode, &e.Disposition, &outcome, &e.Result, &e.Caller, &e.Principal); err != nil {
 		return controlplane.AuditEntry{}, err
 	}
 	if err := json.Unmarshal(argsJSON, &e.Args); err != nil {

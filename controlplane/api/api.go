@@ -695,6 +695,13 @@ type metricsQueryResponse struct {
 	Samples []controlplane.MetricSample `json:"samples"`
 }
 
+// Note (ADR-0038, principal seam): there is no auth change here today — the control plane
+// authenticates with a single API token and every agent shares one ServiceAccount, so the
+// engine's principal seam (controlplane.principalFromContext) simply returns the shared-agent
+// constant. When per-user SSO lands, middleware wrapping these handlers would resolve the SSO
+// identity (e.g. via TokenReview) and put it on the request context here, and the engine seam
+// would read it off ctx — no call-site changes, and past audit rows keep their meaning.
+
 func (s *server) audit(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	filter := controlplane.AuditFilter{

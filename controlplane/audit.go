@@ -70,6 +70,12 @@ type AuditEntry struct {
 	// Caller is the authenticated caller. Identity is coarse until an auth model exists
 	// (ADR-0027): today it is a constant naming the control-plane boundary.
 	Caller string `json:"caller,omitempty"`
+	// Principal is the acting identity — the actor behind the operation, distinct from Caller
+	// (the control-plane boundary that authenticated the request). Today every agent shares one
+	// ServiceAccount, so it is a constant ("shared-agent"); the principal seam (ADR-0038) is
+	// where a future TokenReview→SSO identity resolution fills in a real per-user value, so
+	// attribution becomes additive rather than a migration of past rows' meaning.
+	Principal string `json:"principal,omitempty"`
 }
 
 // AuditFilter narrows an audit query. A zero value matches everything (subject to Limit).
@@ -90,6 +96,23 @@ type AuditFilter struct {
 // operation is attributed to the control-plane boundary; the schema reserves room to enrich
 // this without a migration of meaning.
 const auditCaller = "control-plane"
+
+// auditPrincipal is the acting identity recorded until per-user identities exist (ADR-0038).
+// All agents share one `burrow-agent` ServiceAccount today, so every guarded operation is
+// attributed to this shared-agent constant; the principal seam (principalFromContext) is where
+// a later TokenReview→SSO mapping fills in a real per-user value.
+const auditPrincipal = "shared-agent"
+
+// principalFromContext is the caller-identity seam (ADR-0038): it resolves the acting principal
+// (the actor) from the request context. Today it returns the shared-agent constant, because all
+// agents share one ServiceAccount and there is no auth model to key an identity on. This is the
+// single point where a future TokenReview→SSO identity resolution plugs in: middleware in the
+// API layer would put the resolved SSO identity on the request context (see the note in
+// controlplane/api/api.go), and this seam would read and return it. Kept a package var so a test
+// or the managed product can substitute a resolver without touching call sites.
+var principalFromContext = func(ctx context.Context) string {
+	return auditPrincipal
+}
 
 // The audit operation names, referenced symbolically rather than as scattered string literals.
 const (
@@ -129,6 +152,9 @@ func (e *Engine) recordAudit(ctx context.Context, entry AuditEntry) {
 	entry.Timestamp = e.clock.Now()
 	if entry.Caller == "" {
 		entry.Caller = auditCaller
+	}
+	if entry.Principal == "" {
+		entry.Principal = principalFromContext(ctx)
 	}
 	if err := e.db.AppendAudit(ctx, entry); err != nil {
 		slog.WarnContext(ctx, "audit append failed",

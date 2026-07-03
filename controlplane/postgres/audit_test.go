@@ -5,6 +5,8 @@ package postgres_test
 
 import (
 	"context"
+	"database/sql"
+	"os"
 	"testing"
 	"time"
 
@@ -75,5 +77,62 @@ func TestStoreAuditAppendAndFilter(t *testing.T) {
 	one, err := s.Audit(ctx, cp.AuditFilter{App: app, Limit: 1})
 	if err != nil || len(one) != 1 {
 		t.Fatalf("Audit(app, limit 1) = %d rows, err=%v, want 1", len(one), err)
+	}
+}
+
+// TestStoreAuditPrincipal round-trips the principal column (ADR-0038): a row written with a
+// principal reads it back, and a row inserted the way a pre-migration writer would (no principal
+// column) reads the schema default of empty string — the seeding the migration promises so a later SSO
+// change fills a value rather than migrating stored rows' meaning.
+func TestStoreAuditPrincipal(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-web"
+	base := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+
+	// Write-then-read: the principal survives the round trip.
+	if err := s.AppendAudit(ctx, cp.AuditEntry{
+		Timestamp: base, Operation: "deploy", Target: app,
+		Outcome: cp.AuditExecuted, Caller: "control-plane", Principal: "shared-agent",
+	}); err != nil {
+		t.Fatalf("AppendAudit: %v", err)
+	}
+	got, err := s.Audit(ctx, cp.AuditFilter{App: app})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Audit returned %d rows, want 1", len(got))
+	}
+	if got[0].Principal != "shared-agent" {
+		t.Errorf("principal = %q, want shared-agent", got[0].Principal)
+	}
+	if got[0].Caller != "control-plane" {
+		t.Errorf("caller = %q, want control-plane (distinct from principal)", got[0].Caller)
+	}
+
+	// Pre-existing row: insert directly WITHOUT the principal column (as a writer predating the
+	// migration would), then confirm the read sees the DEFAULT '' rather than erroring.
+	dsn := os.Getenv("BURROW_TEST_DATABASE_URL") // openStore already skipped if unset
+	raw, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer raw.Close()
+	other := t.Name() + "-legacy"
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO audit_log (ts, operation, target, outcome, caller) VALUES ($1, $2, $3, $4, $5)`,
+		base, "deploy", other, string(cp.AuditExecuted), "control-plane"); err != nil {
+		t.Fatalf("raw insert without principal: %v", err)
+	}
+	legacy, err := s.Audit(ctx, cp.AuditFilter{App: other})
+	if err != nil {
+		t.Fatalf("Audit(legacy): %v", err)
+	}
+	if len(legacy) != 1 {
+		t.Fatalf("Audit(legacy) returned %d rows, want 1", len(legacy))
+	}
+	if legacy[0].Principal != "" {
+		t.Errorf("pre-existing row principal = %q, want empty (schema default)", legacy[0].Principal)
 	}
 }

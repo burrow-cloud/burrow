@@ -60,9 +60,50 @@ func TestAuditDeployAllowedRecordsExecuted(t *testing.T) {
 	if rows[0].Caller == "" || rows[1].Caller == "" {
 		t.Errorf("caller should be populated, got %q / %q", rows[0].Caller, rows[1].Caller)
 	}
+	// The principal (actor) is threaded through the caller-identity seam and is the shared-agent
+	// constant today (ADR-0038), distinct from the caller (the control-plane boundary).
+	for i, r := range rows {
+		if r.Principal != "shared-agent" {
+			t.Errorf("row[%d] principal = %q, want shared-agent", i, r.Principal)
+		}
+		if r.Caller != "control-plane" {
+			t.Errorf("row[%d] caller = %q, want control-plane (unchanged)", i, r.Caller)
+		}
+	}
 	// The timestamp comes from the injected clock (2026-06-23T12:00:00Z in the harness).
 	if rows[0].Timestamp.IsZero() {
 		t.Errorf("timestamp should come from the clock, got zero")
+	}
+}
+
+// TestAuditEveryRowCarriesPrincipal: across allowed, held, denied, executed, and failed rows,
+// every recorded audit row carries the shared-agent principal (ADR-0038), and the caller stays
+// the control-plane boundary — the two are distinct fields.
+func TestAuditEveryRowCarriesPrincipal(t *testing.T) {
+	pol := permissive().With(cp.GuardrailAppDeploy, cp.DispositionConfirm).With(cp.GuardrailAppDelete, cp.DispositionDeny)
+	e, _, d, _ := newEngine(t, pol)
+	ctx := context.Background()
+
+	// A held deploy (no confirm) records a held decision row and does not execute.
+	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
+	// A confirmed deploy records an allowed decision row and an executed row.
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
+		t.Fatalf("Deploy(confirm): %v", err)
+	}
+	// A denied delete records a denied decision row.
+	_ = e.DeleteApp(ctx, "web", "", true)
+
+	all := d.AuditRows()
+	if len(all) == 0 {
+		t.Fatal("expected audit rows to be recorded")
+	}
+	for i, r := range all {
+		if r.Principal != "shared-agent" {
+			t.Errorf("row[%d] (%s/%s) principal = %q, want shared-agent", i, r.Operation, r.Outcome, r.Principal)
+		}
+		if r.Caller != "control-plane" {
+			t.Errorf("row[%d] (%s/%s) caller = %q, want control-plane (distinct from principal)", i, r.Operation, r.Outcome, r.Caller)
+		}
 	}
 }
 

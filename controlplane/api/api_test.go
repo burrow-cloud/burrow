@@ -261,6 +261,41 @@ func TestAuditEndpoint(t *testing.T) {
 	}
 }
 
+// TestAuditPrincipalCrossStructRoundTrip guards the json-tag-must-match contract (ADR-0038): the
+// engine marshals cp.AuditEntry on the wire and the client decodes into its own AuditEntry, so a
+// mismatched `principal` tag on either struct would silently drop the field. The engine records
+// the shared-agent principal today; this asserts it survives the engine→wire→client hop.
+func TestAuditPrincipalCrossStructRoundTrip(t *testing.T) {
+	h, _, _ := newAPI(t)
+	if rr := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"registry.example.com/web:1","replicas":2}`); rr.Code != 200 {
+		t.Fatalf("deploy = %d %s", rr.Code, rr.Body.String())
+	}
+
+	rec := do(h, "GET", "/v1/audit?app=web", token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("audit = %d %s", rec.Code, rec.Body.String())
+	}
+	// Decode the engine-produced JSON through the CLIENT's struct — the deserialization side of
+	// the contract. If the tags disagreed, Principal would come back empty here.
+	var out struct {
+		Entries []client.AuditEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode into client struct: %v", err)
+	}
+	if len(out.Entries) == 0 {
+		t.Fatal("expected audit entries")
+	}
+	for i, e := range out.Entries {
+		if e.Principal != "shared-agent" {
+			t.Errorf("client entry[%d] principal = %q, want shared-agent (json tag mismatch drops it)", i, e.Principal)
+		}
+		if e.Caller != "control-plane" {
+			t.Errorf("client entry[%d] caller = %q, want control-plane (distinct from principal)", i, e.Caller)
+		}
+	}
+}
+
 // TestEnvironmentEndpointsRoundTrip exercises POST/GET /v1/environments through the typed client
 // against a live httptest server (ADR-0035 phase 2a): registering an environment and listing it,
 // with the implicit default first.

@@ -75,6 +75,29 @@ operator applies deliberately; Burrow never applies it for you. (The agents shar
 ServiceAccount today; per-user credentials keyed on an identity come with the later SSO work,
 ADR-0038 §5.)
 
+### Make `burrow-mcp` fail closed: `BURROW_MCP_REQUIRE_SCOPED=1`
+
+`burrow-mcp` fails closed around the scoped credential, so a missing credential never silently
+re-grants the agent full cluster access. Two behaviors matter:
+
+- A handle that records a scoped credential whose file is gone is always an error. `burrow-mcp`
+  refuses to fall back to the ambient (admin) kubeconfig and tells the operator to re-mint the
+  credential with `burrow upgrade` (or `burrow install`). This holds even without the strict mode
+  below.
+- Set `BURROW_MCP_REQUIRE_SCOPED=1` in the agent's environment and `burrow-mcp` refuses the ambient
+  fallback entirely. A context with no scoped credential at all (an unregistered context, or a
+  cluster installed before the scoped credential existed) becomes an error too, instead of falling
+  back to whatever ambient kubeconfig the agent can reach. This is the recommended setting for an
+  agent that should reach nothing but the scoped, guardrailed control plane.
+
+Strict mode still honors the explicit escape hatches an operator sets deliberately: a direct
+control-plane URL (`BURROW_CONTROL_PLANE_URL`, which is not cluster admin) and an explicit
+`BURROW_KUBECONFIG`. It refuses only the implicit ambient fallback. The value is truthy for `1`,
+`true`, or `yes` (case-insensitive); empty or unset leaves strict mode off.
+
+The human CLI keeps its graceful ambient fallback for a recorded-but-missing or absent scoped
+credential; only `burrow-mcp`, the agent's surface, fails closed.
+
 A coding agent (Claude Code, Cursor, …) still runs with a shell, so the shell-denies below are
 defense in depth on top of that boundary. Unless you restrict it, it can:
 

@@ -75,6 +75,9 @@ release:
   github:
     owner: burrow-cloud
     name: burrow
+  # auto marks tags with a semver prerelease suffix (e.g. v0.9.0-rc.1) as GitHub
+  # pre-releases, so release candidates never become the "latest" release.
+  prerelease: auto
 
 changelog:
   use: github

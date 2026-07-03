@@ -175,7 +175,7 @@ func (a *Adapter) pullIssue(ctx context.Context, app string) (issue, reason stri
 			if w == nil || !controlplane.IsImagePullReason(w.Reason) {
 				continue
 			}
-			return controlplane.ImagePullIssue(cs.Image, w.Reason), w.Reason
+			return controlplane.ImagePullIssue(cs.Image, w.Reason, w.Message), w.Reason
 		}
 	}
 	return "", ""

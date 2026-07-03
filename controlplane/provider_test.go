@@ -24,7 +24,7 @@ func newProviderEngine(t *testing.T) (*cp.Engine, *fake.Credentials, *fake.DNSFa
 	dnsF := fake.NewDNSFactory()
 	c := fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC))
 	e, err := cp.New(cp.Deps{
-		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
+		Kubernetes: fake.NewKubernetes(), Database: d,
 		Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: creds, DNS: dnsF,
 	})

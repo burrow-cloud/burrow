@@ -25,7 +25,7 @@ func newPostgresEngine(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Databa
 	d.SetPolicy(permissive())
 	prov := fake.NewProvisioner()
 	e, err := cp.New(cp.Deps{
-		Kubernetes: k, Registry: fake.NewRegistry(), Database: d,
+		Kubernetes: k, Database: d,
 		Clock: fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)),
 		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
@@ -143,7 +143,7 @@ func TestAttachWithoutProvisioner(t *testing.T) {
 	d := fake.NewDatabase()
 	d.SetPolicy(permissive())
 	e, err := cp.New(cp.Deps{
-		Kubernetes: k, Registry: fake.NewRegistry(), Database: d,
+		Kubernetes: k, Database: d,
 		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
 	})

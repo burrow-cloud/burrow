@@ -22,9 +22,9 @@ import (
 
 const token = "secret-token"
 
-func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake.Database) {
+func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Database) {
 	t.Helper()
-	k, r, d := fake.NewKubernetes(), fake.NewRegistry(), fake.NewDatabase()
+	k, d := fake.NewKubernetes(), fake.NewDatabase()
 	// A restrictive baseline (empty dispositions → deny) so guardrail tests opt in explicitly,
 	// but rollback and deploy have a product default of allow, so seed those to match production
 	// (deploy is the core action and is what the setup `do(... /deploy ...)` calls exercise).
@@ -32,7 +32,7 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake
 		With(cp.GuardrailRollback, cp.DispositionAllow).
 		With(cp.GuardrailAppDeploy, cp.DispositionAllow))
 	e, err := cp.New(cp.Deps{
-		Kubernetes: k, Registry: r, Database: d,
+		Kubernetes: k, Database: d,
 		Clock:       fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
 		IDs:         fake.NewIDs(),
 		Resolver:    fake.NewResolver(),
@@ -46,11 +46,11 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Registry, *fake
 	if err != nil {
 		t.Fatalf("api.New: %v", err)
 	}
-	return h, k, r, d
+	return h, k, d
 }
 
 func TestGuardEndpoints(t *testing.T) {
-	h, _, _, _ := newAPI(t)
+	h, _, _ := newAPI(t)
 
 	if rr := do(h, "GET", "/v1/guard", token, ""); rr.Code != 200 || !strings.Contains(rr.Body.String(), "app.scale_to_zero") {
 		t.Fatalf("guard list = %d %s", rr.Code, rr.Body.String())
@@ -74,7 +74,7 @@ func TestGuardEndpoints(t *testing.T) {
 // engine: a registered env scopes the set, an unknown env is 404, and a cluster-level guardrail
 // cannot be env-scoped (400) (ADR-0035 phase 2c).
 func TestGuardEndpointsEnvScoped(t *testing.T) {
-	h, _, _, d := newAPI(t)
+	h, _, d := newAPI(t)
 	if err := d.CreateEnvironment(context.Background(), "prod", "burrow-apps-prod"); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
@@ -111,7 +111,7 @@ func newProviderAPI(t *testing.T) (http.Handler, *fake.Credentials, *fake.DNSFac
 	creds := fake.NewCredentials()
 	dnsF := fake.NewDNSFactory()
 	e, err := cp.New(cp.Deps{
-		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
+		Kubernetes: fake.NewKubernetes(), Database: d,
 		Clock: fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)),
 		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: creds, DNS: dnsF,
@@ -225,8 +225,7 @@ func TestDomainEndpoints(t *testing.T) {
 // TestAuditEndpoint exercises the read path: a deploy records audit rows, and GET /v1/audit
 // returns them newest-first, with the app/operation/outcome filters applied.
 func TestAuditEndpoint(t *testing.T) {
-	h, _, r, _ := newAPI(t)
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	h, _, _ := newAPI(t)
 	if rr := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"registry.example.com/web:1","replicas":2}`); rr.Code != 200 {
 		t.Fatalf("deploy = %d %s", rr.Code, rr.Body.String())
 	}
@@ -268,7 +267,7 @@ func TestAuditEndpoint(t *testing.T) {
 func TestEnvironmentEndpointsRoundTrip(t *testing.T) {
 	d := fake.NewDatabase()
 	e, err := cp.New(cp.Deps{
-		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
+		Kubernetes: fake.NewKubernetes(), Database: d,
 		Clock: fake.NewClock(time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)),
 		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
@@ -330,7 +329,7 @@ type errBody struct {
 }
 
 func TestHealthNoAuth(t *testing.T) {
-	h, _, _, _ := newAPI(t)
+	h, _, _ := newAPI(t)
 	rec := do(h, "GET", "/healthz", "", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("health status = %d, want 200", rec.Code)
@@ -338,7 +337,7 @@ func TestHealthNoAuth(t *testing.T) {
 }
 
 func TestAuthRequired(t *testing.T) {
-	h, _, _, _ := newAPI(t)
+	h, _, _ := newAPI(t)
 	if rec := do(h, "GET", "/v1/apps/web/status", "", ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("no token: status = %d, want 401", rec.Code)
 	}
@@ -348,8 +347,7 @@ func TestAuthRequired(t *testing.T) {
 }
 
 func TestAuthViaCustomHeader(t *testing.T) {
-	h, _, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, _, _ := newAPI(t)
 	// X-Burrow-Token (no Authorization) is accepted — the header that survives the
 	// API-server proxy (ADR-0014).
 	req := httptest.NewRequest("POST", "/v1/apps/web/deploy", strings.NewReader(`{"image":"img:1","replicas":2}`))
@@ -362,8 +360,7 @@ func TestAuthViaCustomHeader(t *testing.T) {
 }
 
 func TestDeployHappyPath(t *testing.T) {
-	h, k, r, _ := newAPI(t)
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	h, k, _ := newAPI(t)
 
 	rec := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"registry.example.com/web:1","replicas":2}`)
 	if rec.Code != http.StatusOK {
@@ -379,24 +376,16 @@ func TestDeployHappyPath(t *testing.T) {
 	if res.Release.App != "web" {
 		t.Errorf("release app = %q, want web (from the path)", res.Release.App)
 	}
-	if res.Release.Digest != "sha256:web1" {
-		t.Errorf("digest = %q, want sha256:web1", res.Release.Digest)
+	if res.Release.Digest != "" {
+		t.Errorf("digest = %q, want empty (burrowd does not resolve; ADR-0040)", res.Release.Digest)
 	}
 	if spec, ok := k.Spec("web"); !ok || spec.Image != "registry.example.com/web:1" || spec.Replicas != 2 {
 		t.Errorf("cluster spec = %+v ok=%v", spec, ok)
 	}
 }
 
-func TestDeployImageNotFound(t *testing.T) {
-	h, _, _, _ := newAPI(t)
-	rec := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"missing:1","replicas":1}`)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
-	}
-}
-
 func TestDeployBadRequest(t *testing.T) {
-	h, _, _, _ := newAPI(t)
+	h, _, _ := newAPI(t)
 	// Missing image is a malformed request.
 	rec := do(h, "POST", "/v1/apps/web/deploy", token, `{"replicas":1}`)
 	if rec.Code != http.StatusBadRequest {
@@ -409,8 +398,7 @@ func TestDeployBadRequest(t *testing.T) {
 }
 
 func TestDeployGuardrailCeiling(t *testing.T) {
-	h, _, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, _, _ := newAPI(t)
 	rec := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":9}`)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())
@@ -426,8 +414,7 @@ func TestDeployGuardrailCeiling(t *testing.T) {
 }
 
 func TestStatus(t *testing.T) {
-	h, _, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, _, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":3}`)
 
 	rec := do(h, "GET", "/v1/apps/web/status", token, "")
@@ -442,15 +429,14 @@ func TestStatus(t *testing.T) {
 }
 
 func TestStatusUnknown(t *testing.T) {
-	h, _, _, _ := newAPI(t)
+	h, _, _ := newAPI(t)
 	if rec := do(h, "GET", "/v1/apps/ghost/status", token, ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
 
 func TestScaleAndGuardrail(t *testing.T) {
-	h, _, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, _, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":2}`)
 
 	rec := do(h, "POST", "/v1/apps/web/scale", token, `{"replicas":4}`)
@@ -470,9 +456,8 @@ func TestScaleAndGuardrail(t *testing.T) {
 }
 
 func TestExposeEndpoints(t *testing.T) {
-	h, _, r, d := newAPI(t)
+	h, _, d := newAPI(t)
 	d.SetPolicy(cp.DefaultPolicy().With(cp.GuardrailExposePublic, cp.DispositionAllow))
-	r.Add("img:1", "sha256:1")
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
 
 	rec := do(h, "POST", "/v1/apps/web/expose", token, `{"host":"web.example.com","port":8080}`)
@@ -488,8 +473,7 @@ func TestExposeEndpoints(t *testing.T) {
 }
 
 func TestReachabilityEndpoint(t *testing.T) {
-	h, _, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, _, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
 	rec := do(h, "GET", "/v1/apps/web/reachability", token, "")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "not exposed") {
@@ -498,8 +482,7 @@ func TestReachabilityEndpoint(t *testing.T) {
 }
 
 func TestExposeGuardrailHolds(t *testing.T) {
-	h, _, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, _, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
 	// newAPI leaves app.expose_public unset → deny, so exposure is refused (422 guardrail).
 	if rec := do(h, "POST", "/v1/apps/web/expose", token, `{"host":"web.example.com","port":8080}`); rec.Code != http.StatusUnprocessableEntity {
@@ -508,9 +491,7 @@ func TestExposeGuardrailHolds(t *testing.T) {
 }
 
 func TestRollback(t *testing.T) {
-	h, k, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
-	r.Add("img:2", "sha256:2")
+	h, k, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:2","replicas":1}`)
 
@@ -529,8 +510,7 @@ func TestRollback(t *testing.T) {
 }
 
 func TestLogs(t *testing.T) {
-	h, k, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, k, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
 	k.SetLogs("web", []cp.LogLine{{Pod: "web-1", Message: "a"}, {Pod: "web-1", Message: "b"}})
 
@@ -548,8 +528,7 @@ func TestLogs(t *testing.T) {
 }
 
 func TestConfigEndpoints(t *testing.T) {
-	h, k, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, k, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
 
 	// Set rolls the workload by default: the value reaches the live spec.
@@ -598,8 +577,7 @@ func TestConfigEndpoints(t *testing.T) {
 }
 
 func TestSecretEndpoints(t *testing.T) {
-	h, k, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, k, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
 
 	// `secret set` carries a VALUE over the authenticated API; burrowd writes it to the per-app
@@ -683,8 +661,7 @@ func TestSecretEndpoints(t *testing.T) {
 }
 
 func TestNotImplementedMapsTo501(t *testing.T) {
-	h, k, r, _ := newAPI(t)
-	r.Add("img:1", "sha256:1")
+	h, k, _ := newAPI(t)
 	// An adapter that is not wired yet surfaces ErrNotImplemented; the API reports 501.
 	k.SetError(fake.OpApply, fmt.Errorf("cluster adapter: %w", cp.ErrNotImplemented))
 	rec := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
@@ -694,7 +671,7 @@ func TestNotImplementedMapsTo501(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
-	h, _, _, _ := newAPI(t)
+	h, _, _ := newAPI(t)
 	// GET on a POST-only route — the mux returns 405.
 	if rec := do(h, "GET", "/v1/apps/web/deploy", token, ""); rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", rec.Code)
@@ -702,7 +679,7 @@ func TestMethodNotAllowed(t *testing.T) {
 }
 
 func TestAutoscaleEndpoint(t *testing.T) {
-	h, k, _, d := newAPI(t)
+	h, k, d := newAPI(t)
 	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAutoscale, cp.DispositionAllow))
 
 	rec := do(h, "POST", "/v1/apps/web/autoscale", token, `{"min":1,"max":4,"cpu":90}`)
@@ -730,7 +707,7 @@ func TestAutoscaleEndpoint(t *testing.T) {
 }
 
 func TestAutoscaleMaxOverCeilingDenied(t *testing.T) {
-	h, _, _, d := newAPI(t)
+	h, _, d := newAPI(t)
 	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAutoscale, cp.DispositionAllow))
 	// A max above the ceiling is denied via the replica-ceiling guardrail (422, a structured
 	// guardrail refusal).

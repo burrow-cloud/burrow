@@ -124,30 +124,6 @@ func TestKubernetesErrorInjection(t *testing.T) {
 	}
 }
 
-func TestRegistry(t *testing.T) {
-	ctx := context.Background()
-	r := NewRegistry()
-	r.Add("registry.example.com/web:1", "sha256:abc")
-
-	info, err := r.Resolve(ctx, "registry.example.com/web:1")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if info.Digest != "sha256:abc" {
-		t.Fatalf("digest = %q, want sha256:abc", info.Digest)
-	}
-
-	if _, err := r.Resolve(ctx, "registry.example.com/missing:1"); !errors.Is(err, controlplane.ErrNotFound) {
-		t.Fatalf("missing reference: err = %v, want ErrNotFound", err)
-	}
-
-	boom := errors.New("registry down")
-	r.SetError(OpResolve, boom)
-	if _, err := r.Resolve(ctx, "registry.example.com/web:1"); !errors.Is(err, boom) {
-		t.Fatalf("injected resolve error = %v, want boom", err)
-	}
-}
-
 func TestDatabaseSaveAndQuery(t *testing.T) {
 	ctx := context.Background()
 	d := NewDatabase()

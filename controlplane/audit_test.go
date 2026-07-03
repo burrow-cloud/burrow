@@ -31,9 +31,8 @@ func auditRows(t *testing.T, d *fake.Database, op string) []cp.AuditEntry {
 // TestAuditDeployAllowedRecordsExecuted: a normal allowed deploy records an allowed decision
 // row and an executed row, and never executes a denied or held variant.
 func TestAuditDeployAllowedRecordsExecuted(t *testing.T) {
-	e, _, r, d, _ := newEngine(t, permissive())
+	e, _, d, _ := newEngine(t, permissive())
 	ctx := context.Background()
-	r.Add("img:1", "sha256:deadbeef")
 
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2, Confirm: true}); err != nil {
 		t.Fatalf("Deploy: %v", err)
@@ -71,9 +70,8 @@ func TestAuditDeployAllowedRecordsExecuted(t *testing.T) {
 // decision row tagged with the app.deploy guardrail and does NOT execute (ADR-0007).
 func TestAuditDeployHeldDoesNotExecute(t *testing.T) {
 	pol := permissive().With(cp.GuardrailAppDeploy, cp.DispositionConfirm)
-	e, k, r, d, _ := newEngine(t, pol)
+	e, k, d, _ := newEngine(t, pol)
 	ctx := context.Background()
-	r.Add("img:1", "sha256:deadbeef")
 
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err == nil {
 		t.Fatalf("Deploy without confirm should be held")
@@ -103,9 +101,8 @@ func TestAuditDeployHeldDoesNotExecute(t *testing.T) {
 func TestAuditScaleHeldDoesNotExecute(t *testing.T) {
 	pol := permissive().With(cp.GuardrailReplicaCeiling, cp.DispositionConfirm)
 	pol.MaxReplicas = 3
-	e, k, r, d, _ := newEngine(t, pol)
+	e, k, d, _ := newEngine(t, pol)
 	ctx := context.Background()
-	r.Add("img:1", "sha256:deadbeef")
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -142,9 +139,8 @@ func TestAuditScaleHeldDoesNotExecute(t *testing.T) {
 func TestAuditScaleConfirmedExecutes(t *testing.T) {
 	pol := permissive().With(cp.GuardrailReplicaCeiling, cp.DispositionConfirm)
 	pol.MaxReplicas = 3
-	e, k, r, d, _ := newEngine(t, pol)
+	e, k, d, _ := newEngine(t, pol)
 	ctx := context.Background()
-	r.Add("img:1", "sha256:deadbeef")
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -172,9 +168,8 @@ func TestAuditScaleConfirmedExecutes(t *testing.T) {
 // NOT tear the app down.
 func TestAuditAppDeleteDeniedDoesNotExecute(t *testing.T) {
 	pol := permissive().With(cp.GuardrailAppDelete, cp.DispositionDeny)
-	e, k, r, d, _ := newEngine(t, pol)
+	e, k, d, _ := newEngine(t, pol)
 	ctx := context.Background()
-	r.Add("img:1", "sha256:deadbeef")
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -202,9 +197,8 @@ func TestAuditAppDeleteDeniedDoesNotExecute(t *testing.T) {
 // TestAuditRedactsEnvValues asserts the audit log records env KEY NAMES only, never values. A
 // secret-shaped value set on the app must not appear anywhere in any recorded row.
 func TestAuditRedactsEnvValues(t *testing.T) {
-	e, _, r, d, _ := newEngine(t, permissive())
+	e, _, d, _ := newEngine(t, permissive())
 	ctx := context.Background()
-	r.Add("img:1", "sha256:deadbeef")
 
 	const secretValue = "super-secret-token-value"
 	if err := d.SetAppEnv(ctx, "web", "API_KEY", secretValue); err != nil {
@@ -241,9 +235,8 @@ func TestAuditRedactsEnvValues(t *testing.T) {
 // TestAuditAppendFailureDoesNotFailOperation: an audit append error is swallowed — the deploy
 // still succeeds (the record is best-effort relative to the action, ADR-0027).
 func TestAuditAppendFailureDoesNotFailOperation(t *testing.T) {
-	e, _, r, d, _ := newEngine(t, permissive())
+	e, _, d, _ := newEngine(t, permissive())
 	ctx := context.Background()
-	r.Add("img:1", "sha256:deadbeef")
 	d.SetError(fake.OpAppendAudit, errBoom)
 
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {

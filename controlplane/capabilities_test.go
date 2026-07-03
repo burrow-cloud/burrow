@@ -31,7 +31,7 @@ func TestClusterCapabilitiesFillsDNSFromRegistry(t *testing.T) {
 	})
 
 	e, err := cp.New(cp.Deps{
-		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
+		Kubernetes: fake.NewKubernetes(), Database: d,
 		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(), ClusterProber: prober,
 	})
@@ -59,7 +59,7 @@ func TestClusterCapabilitiesNoDNSProvider(t *testing.T) {
 		Ingress: cp.IngressCapability{Present: true, Classes: []string{"traefik"}},
 	})
 	e, err := cp.New(cp.Deps{
-		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: fake.NewDatabase(),
+		Kubernetes: fake.NewKubernetes(), Database: fake.NewDatabase(),
 		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(), ClusterProber: prober,
 	})
@@ -79,7 +79,7 @@ func TestClusterCapabilitiesNotConfigured(t *testing.T) {
 	ctx := context.Background()
 	// No ClusterProber wired — the read errors cleanly with ErrNotImplemented.
 	e, err := cp.New(cp.Deps{
-		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: fake.NewDatabase(),
+		Kubernetes: fake.NewKubernetes(), Database: fake.NewDatabase(),
 		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
 	})

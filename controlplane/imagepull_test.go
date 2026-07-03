@@ -46,15 +46,29 @@ func TestIsImagePullReason(t *testing.T) {
 }
 
 func TestImagePullIssue(t *testing.T) {
-	msg := cp.ImagePullIssue("ghcr.io/burrow-cloud/website:0.1.1", cp.ReasonImagePullBackOff)
-	for _, want := range []string{
-		`ghcr.io/burrow-cloud/website:0.1.1`,
-		`registry "ghcr.io"`,
-		"burrow config registry login ghcr.io",
-		cp.ReasonImagePullBackOff,
-	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("ImagePullIssue = %q, want it to contain %q", msg, want)
+	// The default (empty or unauthorized message) names the credential fix.
+	for _, message := range []string{"", "unauthorized: authentication required", "pull access denied"} {
+		msg := cp.ImagePullIssue("ghcr.io/burrow-cloud/website:0.1.1", cp.ReasonImagePullBackOff, message)
+		for _, want := range []string{
+			`ghcr.io/burrow-cloud/website:0.1.1`,
+			`registry "ghcr.io"`,
+			"burrow config registry login ghcr.io",
+			cp.ReasonImagePullBackOff,
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("ImagePullIssue(message=%q) = %q, want it to contain %q", message, msg, want)
+			}
+		}
+	}
+
+	// A not-found message names the tag as the likely fix, not the credential.
+	for _, message := range []string{"manifest unknown", `manifest for ghcr.io/x:1 not found`} {
+		msg := cp.ImagePullIssue("ghcr.io/burrow-cloud/website:0.1.1", cp.ReasonErrImagePull, message)
+		if !strings.Contains(msg, "check the tag") {
+			t.Errorf("ImagePullIssue(message=%q) = %q, want it to mention checking the tag", message, msg)
+		}
+		if strings.Contains(msg, "burrow config registry login") {
+			t.Errorf("ImagePullIssue(message=%q) = %q, should not suggest login for a not-found image", message, msg)
 		}
 	}
 }

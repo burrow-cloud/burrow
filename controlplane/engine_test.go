@@ -14,21 +14,20 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane/internal/fake"
 )
 
-func newEngine(t *testing.T, policy cp.Policy) (*cp.Engine, *fake.Kubernetes, *fake.Registry, *fake.Database, *fake.Clock) {
+func newEngine(t *testing.T, policy cp.Policy) (*cp.Engine, *fake.Kubernetes, *fake.Database, *fake.Clock) {
 	t.Helper()
 	k := fake.NewKubernetes()
-	r := fake.NewRegistry()
 	d := fake.NewDatabase()
 	d.SetPolicy(policy)
 	c := fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC))
 	e, err := cp.New(cp.Deps{
-		Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
+		Kubernetes: k, Database: d, Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return e, k, r, d, c
+	return e, k, d, c
 }
 
 // permissive avoids guardrail interference for tests not about guardrails.
@@ -51,9 +50,9 @@ func mustGuardrail(t *testing.T, err error, code cp.GuardrailCode) {
 }
 
 func TestNewValidatesDeps(t *testing.T) {
-	k, r, d, c, id := fake.NewKubernetes(), fake.NewRegistry(), fake.NewDatabase(), fake.NewClock(time.Now()), fake.NewIDs()
+	k, d, c, id := fake.NewKubernetes(), fake.NewDatabase(), fake.NewClock(time.Now()), fake.NewIDs()
 	good := cp.Deps{
-		Kubernetes: k, Registry: r, Database: d, Clock: c, IDs: id, Resolver: fake.NewResolver(),
+		Kubernetes: k, Database: d, Clock: c, IDs: id, Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
 	}
 
@@ -91,8 +90,7 @@ func TestNewValidatesDeps(t *testing.T) {
 
 func TestDeployHappyPath(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, d, _ := newEngine(t, permissive())
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	e, k, d, _ := newEngine(t, permissive())
 
 	// Env is sourced from the app's config store at deploy time, not from the request (ADR-0028).
 	if err := d.SetAppEnv(ctx, "web", "K", "V"); err != nil {
@@ -106,8 +104,8 @@ func TestDeployHappyPath(t *testing.T) {
 	if res.Release.Status != cp.ReleaseDeployed {
 		t.Errorf("release status = %q, want deployed", res.Release.Status)
 	}
-	if res.Release.Digest != "sha256:web1" {
-		t.Errorf("digest = %q, want sha256:web1", res.Release.Digest)
+	if res.Release.Digest != "" {
+		t.Errorf("digest = %q, want empty (burrowd does not resolve; ADR-0040)", res.Release.Digest)
 	}
 	if res.SupersededReleaseID != "" {
 		t.Errorf("first deploy should supersede nothing, got %q", res.SupersededReleaseID)
@@ -133,8 +131,7 @@ func TestDeployHappyPath(t *testing.T) {
 // a rollout happens (fresh pods) — the flow behind "fix the pull credential, then re-deploy".
 func TestDeploySameImageRollsViaReleaseAnnotation(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	e, k, _, _ := newEngine(t, permissive())
 
 	res1, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/web:1", Replicas: 1})
 	if err != nil {
@@ -169,8 +166,7 @@ func TestDeploySameImageRollsViaReleaseAnnotation(t *testing.T) {
 // not an extra release bump.
 func TestReapplyEnvKeepsCurrentReleaseID(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	e, k, _, _ := newEngine(t, permissive())
 
 	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/web:1", Replicas: 1})
 	if err != nil {
@@ -188,27 +184,9 @@ func TestReapplyEnvKeepsCurrentReleaseID(t *testing.T) {
 	}
 }
 
-func TestDeployImageNotFound(t *testing.T) {
-	ctx := context.Background()
-	e, k, _, d, _ := newEngine(t, permissive())
-
-	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/missing:1", Replicas: 1})
-	if !errors.Is(err, cp.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
-	// Nothing applied, nothing recorded.
-	if _, ok := k.Spec("web"); ok {
-		t.Errorf("no deployment should exist after a failed resolve")
-	}
-	if all, _ := d.Releases(ctx, "web"); len(all) != 0 {
-		t.Errorf("no release should be recorded, got %d", len(all))
-	}
-}
-
 func TestDeployGuardrails(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
 
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 6})
 	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
@@ -225,8 +203,7 @@ func TestDeployGuardrails(t *testing.T) {
 func TestDeployAppDeployGuardrailHolds(t *testing.T) {
 	ctx := context.Background()
 	// Deploy defaults to allow; an operator raises it to confirm to require sign-off.
-	e, k, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailAppDeploy, cp.DispositionConfirm))
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailAppDeploy, cp.DispositionConfirm))
 
 	// Held for confirmation: the deploy does not happen.
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
@@ -251,8 +228,7 @@ func TestDeployAppDeployGuardrailHolds(t *testing.T) {
 // with confirm set (ADR-0020).
 func TestDeployAppDeployGuardrailDenies(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailAppDeploy, cp.DispositionDeny))
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailAppDeploy, cp.DispositionDeny))
 
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true})
 	mustGuardrail(t, err, cp.GuardrailAppDeploy)
@@ -266,9 +242,7 @@ func TestDeployAppDeployGuardrailDenies(t *testing.T) {
 
 func TestDeploySupersedesPrevious(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, d, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
-	r.Add("img:2", "sha256:2")
+	e, k, d, _ := newEngine(t, permissive())
 
 	v1, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
 	if err != nil {
@@ -297,8 +271,7 @@ func TestDeploySupersedesPrevious(t *testing.T) {
 
 func TestStatus(t *testing.T) {
 	ctx := context.Background()
-	e, _, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, _, _, _ := newEngine(t, permissive())
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 3})
 
 	st, err := e.Status(ctx, "web", "")
@@ -318,8 +291,7 @@ func TestStatus(t *testing.T) {
 
 func TestStatusImagePullIssue(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("ghcr.io/burrow-cloud/website:0.1.1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "ghcr.io/burrow-cloud/website:0.1.1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -343,10 +315,32 @@ func TestStatusImagePullIssue(t *testing.T) {
 	}
 }
 
+// TestStatusImagePullNotFound checks that when the kubelet's waiting message reports the image is
+// absent (a wrong or unpushed tag) rather than a credential failure, the Issue points at the tag,
+// not the login command (ADR-0040 §4).
+func TestStatusImagePullNotFound(t *testing.T) {
+	ctx := context.Background()
+	e, k, _, _ := newEngine(t, permissive())
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "ghcr.io/burrow-cloud/website:9.9.9", Replicas: 1}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	k.SetImagePullFailureMessage("web", cp.ReasonErrImagePull, "manifest for ghcr.io/burrow-cloud/website:9.9.9 not found: manifest unknown")
+
+	st, err := e.Status(ctx, "web", "")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !strings.Contains(st.Workload.Issue, "check the tag") {
+		t.Errorf("issue = %q, want it to mention checking the tag", st.Workload.Issue)
+	}
+	if strings.Contains(st.Workload.Issue, "burrow config registry login") {
+		t.Errorf("issue = %q, should not suggest login for a not-found image", st.Workload.Issue)
+	}
+}
+
 func TestStatusHealthyNoIssue(t *testing.T) {
 	ctx := context.Background()
-	e, _, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, _, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -363,7 +357,7 @@ func TestStatusHealthyNoIssue(t *testing.T) {
 }
 
 func TestStatusUnknownApp(t *testing.T) {
-	e, _, _, _, _ := newEngine(t, permissive())
+	e, _, _, _ := newEngine(t, permissive())
 	if _, err := e.Status(context.Background(), "ghost", ""); !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("Status(ghost) err = %v, want ErrNotFound", err)
 	}
@@ -371,8 +365,7 @@ func TestStatusUnknownApp(t *testing.T) {
 
 func TestLogs(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
 	k.SetLogs("web", []cp.LogLine{{Pod: "web-1", Message: "hello"}})
 
@@ -387,8 +380,7 @@ func TestLogs(t *testing.T) {
 
 func TestScale(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, cp.Policy{MaxReplicas: 10}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, cp.Policy{MaxReplicas: 10}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -419,8 +411,7 @@ func TestScale(t *testing.T) {
 // operation, so a `guard set` takes effect without a restart (ADR-0020).
 func TestPolicyReadLive(t *testing.T) {
 	ctx := context.Background()
-	e, _, r, d, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, _, d, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -432,7 +423,7 @@ func TestPolicyReadLive(t *testing.T) {
 
 func TestGuardrailsListAndSet(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _, _ := newEngine(t, cp.DefaultPolicy())
+	e, _, _, _ := newEngine(t, cp.DefaultPolicy())
 
 	gs, err := e.Guardrails(ctx, "")
 	if err != nil {
@@ -468,8 +459,7 @@ func TestGuardrailsListAndSet(t *testing.T) {
 
 func TestExpose(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, cp.DefaultPolicy())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, cp.DefaultPolicy())
 
 	// Exposing before deploy is ErrNotFound (confirm to get past the expose guardrail).
 	if _, err := e.Expose(ctx, cp.ExposeRequest{App: "web", Host: "web.example.com", Port: 8080, Confirm: true}); !errors.Is(err, cp.ErrNotFound) {
@@ -508,8 +498,7 @@ func TestExpose(t *testing.T) {
 
 func TestExposeTLS(t *testing.T) {
 	ctx := context.Background()
-	e, _, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailExposePublic, cp.DispositionAllow))
-	r.Add("img:1", "sha256:1")
+	e, _, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailExposePublic, cp.DispositionAllow))
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -534,10 +523,9 @@ func TestExposeTLS(t *testing.T) {
 func TestReachability(t *testing.T) {
 	ctx := context.Background()
 	k := fake.NewKubernetes()
-	reg := fake.NewRegistry()
 	dns := fake.NewResolver()
 	e, err := cp.New(cp.Deps{
-		Kubernetes: k, Registry: reg, Database: fake.NewDatabase(),
+		Kubernetes: k, Database: fake.NewDatabase(),
 		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: dns,
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
 	})
@@ -550,7 +538,6 @@ func TestReachability(t *testing.T) {
 		t.Errorf("not-deployed = %+v", r)
 	}
 
-	reg.Add("img:1", "sha256:1")
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -588,10 +575,9 @@ func TestReachability(t *testing.T) {
 func TestReachabilityVerdict(t *testing.T) {
 	ctx := context.Background()
 	k := fake.NewKubernetes()
-	reg := fake.NewRegistry()
 	dns := fake.NewResolver()
 	e, err := cp.New(cp.Deps{
-		Kubernetes: k, Registry: reg, Database: fake.NewDatabase(),
+		Kubernetes: k, Database: fake.NewDatabase(),
 		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: dns,
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
 	})
@@ -604,7 +590,6 @@ func TestReachabilityVerdict(t *testing.T) {
 		t.Errorf("not-deployed verdict = {reachable:%v url:%q blocked:%q}", r.Reachable, r.URL, r.BlockedOn)
 	}
 
-	reg.Add("img:1", "sha256:1")
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -646,17 +631,15 @@ func TestReachabilityVerdict(t *testing.T) {
 func TestReachabilityVerdictHTTP(t *testing.T) {
 	ctx := context.Background()
 	k := fake.NewKubernetes()
-	reg := fake.NewRegistry()
 	dns := fake.NewResolver()
 	e, err := cp.New(cp.Deps{
-		Kubernetes: k, Registry: reg, Database: fake.NewDatabase(),
+		Kubernetes: k, Database: fake.NewDatabase(),
 		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: dns,
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	reg.Add("img:1", "sha256:1")
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -673,9 +656,7 @@ func TestReachabilityVerdictHTTP(t *testing.T) {
 
 func TestRollback(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, d, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
-	r.Add("img:2", "sha256:2")
+	e, k, d, _ := newEngine(t, permissive())
 	v1, _ := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
 	v2, _ := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1})
 
@@ -705,14 +686,13 @@ func TestRollback(t *testing.T) {
 
 func TestRollbackNothingToRollBack(t *testing.T) {
 	ctx := context.Background()
-	e, _, r, _, _ := newEngine(t, permissive())
+	e, _, _, _ := newEngine(t, permissive())
 
 	// No releases at all.
 	if _, err := e.Rollback(ctx, "web", "", false); !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("rollback with no releases err = %v, want ErrNotFound", err)
 	}
 	// A single deploy has no prior to roll back to.
-	r.Add("img:1", "sha256:1")
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
 	if _, err := e.Rollback(ctx, "web", "", false); !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("rollback with one release err = %v, want ErrNotFound", err)
@@ -722,9 +702,7 @@ func TestRollbackNothingToRollBack(t *testing.T) {
 func TestRollbackGuardrailHolds(t *testing.T) {
 	ctx := context.Background()
 	// Rollback defaults to allow, but an operator can raise it to confirm for sign-off.
-	e, k, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailRollback, cp.DispositionConfirm))
-	r.Add("img:1", "sha256:1")
-	r.Add("img:2", "sha256:2")
+	e, k, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailRollback, cp.DispositionConfirm))
 	v1, _ := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1})
 
@@ -753,9 +731,7 @@ func TestRollbackGuardrailHolds(t *testing.T) {
 
 func TestRollbackGuardrailDenies(t *testing.T) {
 	ctx := context.Background()
-	e, _, r, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailRollback, cp.DispositionDeny))
-	r.Add("img:1", "sha256:1")
-	r.Add("img:2", "sha256:2")
+	e, _, _, _ := newEngine(t, cp.DefaultPolicy().With(cp.GuardrailRollback, cp.DispositionDeny))
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
 	_, _ = e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1})
 

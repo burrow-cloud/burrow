@@ -19,9 +19,7 @@ import (
 // and the failed attempt is recorded as Failed, not Deployed.
 func TestDeployApplyFailureLeavesPriorRunning(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, d, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
-	r.Add("img:2", "sha256:2")
+	e, k, d, _ := newEngine(t, permissive())
 
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("deploy v1: %v", err)
@@ -58,31 +56,9 @@ func TestDeployApplyFailureLeavesPriorRunning(t *testing.T) {
 	}
 }
 
-func TestDeployRegistryError(t *testing.T) {
-	ctx := context.Background()
-	e, k, r, d, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
-	r.SetError(fake.OpResolve, errors.New("registry timeout"))
-
-	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1})
-	if err == nil {
-		t.Fatalf("deploy should fail when the registry errors")
-	}
-	if errors.Is(err, cp.ErrNotFound) {
-		t.Errorf("a registry timeout is not a not-found; err = %v", err)
-	}
-	if _, ok := k.Spec("web"); ok {
-		t.Errorf("nothing should be applied when resolve fails")
-	}
-	if all, _ := d.Releases(ctx, "web"); len(all) != 0 {
-		t.Errorf("nothing should be recorded when resolve fails, got %d", len(all))
-	}
-}
-
 func TestDeploySaveErrorBeforeApply(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, d, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, d, _ := newEngine(t, permissive())
 	d.SetError(fake.OpSaveRelease, errors.New("db unavailable"))
 
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err == nil {
@@ -101,28 +77,23 @@ func TestDeploySaveErrorBeforeApply(t *testing.T) {
 // a failed operation must never change what is running.
 func TestSeededSchedule(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, d, _ := newEngine(t, cp.Policy{MaxReplicas: 1000}.
+	e, k, d, _ := newEngine(t, cp.Policy{MaxReplicas: 1000}.
 		With(cp.GuardrailScaleToZero, cp.DispositionAllow).
 		With(cp.GuardrailAppDeploy, cp.DispositionAllow))
 
 	images := []string{"img:a", "img:b", "img:c"}
-	for _, im := range images {
-		r.Add(im, "sha256:"+im)
-	}
 	const app = "web"
 
 	// setErr routes an injected error to the fake that owns the operation.
 	setErr := func(op fake.Op, err error) {
 		switch op {
-		case fake.OpResolve:
-			r.SetError(op, err)
 		case fake.OpApply, fake.OpStatus, fake.OpScale, fake.OpLogs, fake.OpDelete:
 			k.SetError(op, err)
 		default: // database ops: OpReleases, OpRelease, OpSaveRelease, OpLatestRelease
 			d.SetError(op, err)
 		}
 	}
-	injectable := []fake.Op{fake.OpResolve, fake.OpReleases, fake.OpRelease, fake.OpSaveRelease, fake.OpApply, fake.OpStatus, fake.OpScale}
+	injectable := []fake.Op{fake.OpReleases, fake.OpRelease, fake.OpSaveRelease, fake.OpApply, fake.OpStatus, fake.OpScale}
 
 	rng := rand.New(rand.NewSource(1))
 	expectedImage := "" // last image a deploy/rollback successfully applied

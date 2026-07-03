@@ -13,7 +13,7 @@ import (
 
 func TestListSecretsReturnsKeysOnly(t *testing.T) {
 	ctx := context.Background()
-	e, k, _, _, _ := newEngine(t, permissive())
+	e, k, _, _ := newEngine(t, permissive())
 	// A `secret set` happens over the kubeconfig path, not the engine, so seed the fake directly.
 	k.SetSecret("web", "STRIPE_KEY", "sk_live_x")
 	k.SetSecret("web", "DATABASE_URL", "postgres://y")
@@ -28,7 +28,7 @@ func TestListSecretsReturnsKeysOnly(t *testing.T) {
 }
 
 func TestListSecretsEmpty(t *testing.T) {
-	e, _, _, _, _ := newEngine(t, permissive())
+	e, _, _, _ := newEngine(t, permissive())
 	keys, err := e.ListSecrets(context.Background(), "web", "")
 	if err != nil {
 		t.Fatalf("ListSecrets: %v", err)
@@ -40,8 +40,7 @@ func TestListSecretsEmpty(t *testing.T) {
 
 func TestSetSecretWritesValueAndRolls(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -61,8 +60,7 @@ func TestSetSecretWritesValueAndRolls(t *testing.T) {
 
 func TestSetSecretNoRestartDoesNotRoll(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -80,7 +78,7 @@ func TestSetSecretNoRestartDoesNotRoll(t *testing.T) {
 
 func TestSetSecretNoRunningWorkloadIsNoOpRoll(t *testing.T) {
 	ctx := context.Background()
-	e, k, _, _, _ := newEngine(t, permissive())
+	e, k, _, _ := newEngine(t, permissive())
 	// No deployed workload: the value persists, and the missing-workload roll is not an error.
 	if err := e.SetSecret(ctx, "web", "", "A", "1", false); err != nil {
 		t.Fatalf("SetSecret with no workload: %v", err)
@@ -92,8 +90,7 @@ func TestSetSecretNoRunningWorkloadIsNoOpRoll(t *testing.T) {
 
 func TestUnsetSecretRemovesAndRolls(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -117,8 +114,7 @@ func TestUnsetSecretRemovesAndRolls(t *testing.T) {
 
 func TestUnsetSecretNoRestartDoesNotRoll(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -137,7 +133,7 @@ func TestUnsetSecretNoRestartDoesNotRoll(t *testing.T) {
 
 func TestUnsetSecretNoRunningWorkloadIsNoOpRoll(t *testing.T) {
 	ctx := context.Background()
-	e, k, _, _, _ := newEngine(t, permissive())
+	e, k, _, _ := newEngine(t, permissive())
 	k.SetSecret("web", "A", "1")
 	// No deployed workload: the unset persists, and the missing-workload roll is not an error.
 	if err := e.UnsetSecret(ctx, "web", "", "A", false); err != nil {
@@ -150,7 +146,7 @@ func TestUnsetSecretNoRunningWorkloadIsNoOpRoll(t *testing.T) {
 
 func TestSecretInvalidInputs(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _, _ := newEngine(t, permissive())
+	e, _, _, _ := newEngine(t, permissive())
 
 	if _, err := e.ListSecrets(ctx, "Bad!", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("ListSecrets bad app = %v, want ErrInvalid", err)
@@ -174,8 +170,7 @@ func TestSecretInvalidInputs(t *testing.T) {
 // adapter test asserts the rendered envFrom; here we pin that a deploy applies a spec for the app.
 func TestDeployAppliesSpecForApp(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}

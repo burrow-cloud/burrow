@@ -19,7 +19,6 @@ import (
 // is deterministic and unit-testable against fakes.
 type Engine struct {
 	k8s         Kubernetes
-	registry    Registry
 	db          Database
 	clock       Clock
 	ids         IDSource
@@ -51,7 +50,6 @@ type Engine struct {
 // guarded operation (ADR-0020), so a `guard set` takes effect without restarting.
 type Deps struct {
 	Kubernetes Kubernetes
-	Registry   Registry
 	Database   Database
 	Clock      Clock
 	IDs        IDSource
@@ -90,8 +88,6 @@ func New(d Deps) (*Engine, error) {
 	switch {
 	case d.Kubernetes == nil:
 		return nil, fmt.Errorf("controlplane: New: Kubernetes seam is required")
-	case d.Registry == nil:
-		return nil, fmt.Errorf("controlplane: New: Registry seam is required")
 	case d.Database == nil:
 		return nil, fmt.Errorf("controlplane: New: Database seam is required")
 	case d.Clock == nil:
@@ -111,7 +107,6 @@ func New(d Deps) (*Engine, error) {
 	}
 	return &Engine{
 		k8s:           d.Kubernetes,
-		registry:      d.Registry,
 		db:            d.Database,
 		clock:         d.Clock,
 		ids:           d.IDs,
@@ -127,10 +122,11 @@ func New(d Deps) (*Engine, error) {
 }
 
 // Deploy rolls out an image by reference (ADR-0007). It validates the request, applies
-// the guardrails, resolves the image in the registry, records a new release, applies it
-// to the cluster, and records the outcome — superseding the previously running release
-// on success. The image bytes never pass through here; only the reference does
-// (ADR-0004).
+// the guardrails, records a new release, applies it to the cluster, and records the
+// outcome — superseding the previously running release on success. burrowd never contacts
+// the registry: the workload is applied by image reference and the kubelet resolves and
+// pulls it with the imagePullSecret (ADR-0040). The image bytes never pass through here;
+// only the reference does (ADR-0004).
 func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, error) {
 	if err := (App{Name: req.App}).Validate(); err != nil {
 		return DeployResult{}, fmt.Errorf("deploy: %w: %w", ErrInvalid, err)
@@ -158,14 +154,6 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		return DeployResult{}, err
 	}
 
-	info, err := e.registry.Resolve(ctx, req.Image)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return DeployResult{}, fmt.Errorf("deploy %s: image %q is not present in the registry: %w", req.App, req.Image, err)
-		}
-		return DeployResult{}, fmt.Errorf("deploy %s: resolving image %q: %w", req.App, req.Image, err)
-	}
-
 	releases, err := e.db.Releases(ctx, req.App)
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: reading release history: %w", req.App, err)
@@ -184,7 +172,6 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		ID:          e.ids.NewID(),
 		App:         req.App,
 		Image:       req.Image,
-		Digest:      info.Digest,
 		Env:         env,
 		Command:     req.Command,
 		MetricsPort: req.MetricsPort,
@@ -1433,7 +1420,6 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 		ID:          e.ids.NewID(),
 		App:         app,
 		Image:       target.Image,
-		Digest:      target.Digest,
 		Env:         cfg,
 		Command:     target.Command,
 		MetricsPort: target.MetricsPort,

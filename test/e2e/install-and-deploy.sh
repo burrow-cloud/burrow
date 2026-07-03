@@ -297,7 +297,7 @@ if [ -z "$found" ]; then
   exit 1 # the ERR trap dumps diagnostics
 fi
 echo "--- marker round-tripped through the logs pipeline ---"
-printf '%s\n' "$last_out" | grep "BURROW_E2E_LOGLINE" | head -n 3
+printf '%s\n' "$last_out" | grep "BURROW_E2E_LOGLINE" | head -n 3 || true
 
 echo "=== tidy up the logs add-on and the logger fixture (best-effort) ==="
 # Cleanup is non-fatal — the cluster is deleted after the run regardless.
@@ -349,7 +349,7 @@ if [ -z "$found" ]; then
   exit 1 # the ERR trap dumps diagnostics
 fi
 echo "--- vmagent self-scrape round-tripped through the metrics pipeline ---"
-printf '%s\n' "$last_out" | grep 'job="vmagent"' | head -n 3
+printf '%s\n' "$last_out" | grep 'job="vmagent"' | head -n 3 || true
 
 echo "=== deploy a real metrics-exposing app THROUGH Burrow (--metrics-port) ==="
 # The --metrics-port flag annotates the pod with prometheus.io/scrape=true, port, and
@@ -383,7 +383,7 @@ if [ -z "$app_found" ]; then
   exit 1 # the ERR trap dumps diagnostics
 fi
 echo "--- the app's own metrics round-tripped: an app deployed with --metrics-port is auto-discovered and scraped, and its metrics are queryable ---"
-printf '%s\n' "$app_out" | grep 'pod="metricsapp' | head -n 3
+printf '%s\n' "$app_out" | grep 'pod="metricsapp' | head -n 3 || true
 
 echo "=== tidy up the metrics-exposing app (best-effort) ==="
 # `app delete` may not exist on this branch, so tear the Deployment down with kubectl.
@@ -573,7 +573,7 @@ if [ -z "$loki_found" ]; then
   exit 1 # the ERR trap dumps diagnostics
 fi
 echo "--- marker round-tripped through the connected Loki ---"
-printf '%s\n' "$loki_out" | grep "BURROW_E2E_LOKI_MARKER" | head -n 3
+printf '%s\n' "$loki_out" | grep "BURROW_E2E_LOKI_MARKER" | head -n 3 || true
 
 echo "=== tidy up the connected Loki (best-effort) ==="
 # Removing a connected add-on still goes through addon_remove, which is confirm-by-default,
@@ -693,7 +693,7 @@ if [ -z "$prom_found" ]; then
   exit 1 # the ERR trap dumps diagnostics
 fi
 echo "--- up series round-tripped through the connected Prometheus ---"
-printf '%s\n' "$prom_out" | grep 'job="prometheus"' | head -n 3
+printf '%s\n' "$prom_out" | grep 'job="prometheus"' | head -n 3 || true
 
 echo "=== tidy up the connected Prometheus (best-effort) ==="
 # Removing a connected add-on still goes through addon_remove, which is confirm-by-default,

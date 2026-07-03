@@ -148,6 +148,12 @@ type installArgs struct {
 	dryRun       bool
 	wait         bool
 	verbose      bool
+	// clusterOnly runs the install for its cluster-side effects only (deploy burrowd, and mint the
+	// scoped burrow-agent credential via the manifests), skipping the laptop-oriented local
+	// bookkeeping: it records no ~/.burrow environment handle and prints no "connect your agent"
+	// guidance. `burrow cluster bootstrap` sets it when it deploys burrowd on the VPS (ADR-0044); the
+	// bootstrap prints the join-token block instead. Normal `burrow install` leaves it false.
+	clusterOnly bool
 }
 
 // clientsetFn builds the readiness/probe clientset for a kube context. It is a package var so a
@@ -267,6 +273,12 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	if installed, err := alreadyInstalled(ctx, cs, a.namespace); err != nil {
 		return err
 	} else if installed {
+		// Cluster-only re-run (bootstrap on an already-provisioned VPS): the cluster side is done and
+		// there is no local config to write, so report and return rather than performing the local join.
+		if a.clusterOnly {
+			fmt.Fprintf(stdout, "\nBurrow is already installed in namespace %q.\n", a.namespace)
+			return nil
+		}
 		// A populated control plane must not be re-minted (that would break the running install), so
 		// install performs the local JOIN instead of erroring: it reads the existing scoped agent
 		// credential and writes only this user's local config, making no cluster changes. This is the
@@ -291,6 +303,14 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	// kubeconfig-side and print a one-line summary. The probe is read-only and best-effort — a
 	// failure here never fails a successful install, since the agent reads capabilities live anyway.
 	printCapabilitySummary(ctx, cs, stdout)
+
+	// Cluster-only (bootstrap on the VPS): the cluster-side effects are done — burrowd deployed and
+	// the scoped burrow-agent credential minted by the manifests. Skip the laptop-oriented local
+	// bookkeeping (recording a ~/.burrow handle) and the "connect your agent" guidance; the caller
+	// prints the join-token block for the laptop instead (ADR-0044).
+	if a.clusterOnly {
+		return nil
+	}
 
 	// Name and record the environment (ADR-0036/0037): write a local handle pinned as current, so
 	// first-run detection flips and `burrow env list` shows it without connecting. This also mints

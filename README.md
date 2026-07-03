@@ -35,6 +35,7 @@ Once Burrow is connected, you operate your apps by talking to your agent. Things
   - Burrow figures out which app you mean from the folder you are in, builds it, and rolls it out to your cluster.
 - `Roll back the last release`
 - `Scale web up` or `Scale web to 3`
+- `Autoscale web between 2 and 10 replicas on CPU`
 - `Show me any 500 errors from my web app and figure out what happened`
   - Your agent reads the logs and tells you what broke, in plain language.
 - `Why isn't my site reachable at example.com?`
@@ -44,7 +45,7 @@ Once Burrow is connected, you operate your apps by talking to your agent. Things
 - `My site is slow, would a cache help?`
   - Your agent checks your logs and metrics, tells you if it would, and if you say yes, sets one up and wires your app to it.
 
-Coming soon: `Make web autoscale at 90% CPU` and `Limit web to 500MB of memory and 1 CPU`.
+Coming soon: `Limit web to 500MB of memory and 1 CPU`.
 
 ## Build it, then fix it
 

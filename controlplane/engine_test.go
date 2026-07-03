@@ -594,6 +594,25 @@ func TestExposeMissingPrerequisites(t *testing.T) {
 				t.Errorf("error text missing %q:\n%s", want, s)
 			}
 		}
+		// The DNS-provider guidance now names the supported provider types and asks the user
+		// which vendor hosts the domain before offering to configure a supported one, instead
+		// of defaulting to a manual registrar step.
+		for _, want := range []string{"supported provider", "ask the user which hosts", "not supported"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("DNS-provider guidance missing %q:\n%s", want, s)
+			}
+		}
+		for _, pt := range cp.SupportedProviderTypes() {
+			servesDNS := false
+			for _, c := range pt.Capabilities() {
+				if c == cp.CapabilityDNS {
+					servesDNS = true
+				}
+			}
+			if servesDNS && !strings.Contains(s, string(pt)) {
+				t.Errorf("DNS-provider guidance does not name supported DNS type %q:\n%s", pt, s)
+			}
+		}
 	})
 
 	// Only cert-manager missing (ingress + DNS provider present): the checklist names cert-manager

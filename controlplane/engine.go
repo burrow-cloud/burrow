@@ -1317,11 +1317,7 @@ func (e *Engine) exposePrerequisites(ctx context.Context, req ExposeRequest) err
 		}
 	}
 	if !dnsConfigured {
-		missing = append(missing, Prerequisite{
-			Name:   "DNS provider",
-			Detail: "no DNS provider is configured for automatic records",
-			Fix:    fmt.Sprintf("run `burrow config provider add <type>` (or point %s at the ingress address manually)", req.Host),
-		})
+		missing = append(missing, missingDNSProviderPrerequisite(req.Host))
 	}
 
 	return &MissingPrerequisitesError{Host: req.Host, TLS: req.TLS, Missing: missing}

@@ -62,6 +62,28 @@ func decodeStructured[T any](t *testing.T, res *sdk.CallToolResult) T {
 	return out
 }
 
+// TestServerInstructions confirms the server advertises non-empty, agent-orienting instructions at
+// connect (the MCP InitializeResult.instructions field), so the agent learns Burrow from
+// always-loaded guidance rather than a help tool. The instructions must anchor the load-bearing
+// cross-cutting rules: guardrails, confirmation, the human-only registry-login step, and that code
+// never travels over MCP.
+func TestServerInstructions(t *testing.T) {
+	cs := connect(t, func(http.ResponseWriter, *http.Request) {})
+	got := cs.InitializeResult().Instructions
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("server advertised no instructions: the agent gets no top-level orientation")
+	}
+	for _, anchor := range []string{"guardrail", "confirm", "burrow config registry login", "never travels over MCP"} {
+		if !strings.Contains(got, anchor) {
+			t.Errorf("instructions missing anchor %q; got:\n%s", anchor, got)
+		}
+	}
+	// The orientation must steer the agent to these tools, not the human's CLI.
+	if !strings.Contains(got, "these tools") {
+		t.Errorf("instructions should tell the agent to operate through these tools; got:\n%s", got)
+	}
+}
+
 func TestListTools(t *testing.T) {
 	cs := connect(t, func(http.ResponseWriter, *http.Request) {})
 	res, err := cs.ListTools(context.Background(), nil)

@@ -305,7 +305,9 @@ type ClusterCapabilities struct {
 	DNS          DNSCapability          `json:"dns"`
 }
 
-// IngressCapability reports the ingress-controller situation: present, and which IngressClass(es).
+// IngressCapability reports the ingress-controller situation. Present is true only when an ingress
+// controller is actually running (not merely when an IngressClass exists — a cluster-scoped class
+// can outlive its controller); Classes are the IngressClass names, reported independently of Present.
 type IngressCapability struct {
 	Present bool     `json:"present"`
 	Classes []string `json:"classes,omitempty"`

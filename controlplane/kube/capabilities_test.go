@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -18,6 +19,23 @@ import (
 
 func ingressClass(name string) *networkingv1.IngressClass {
 	return &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
+// ingressControllerDeployment builds an ingress-nginx controller Deployment carrying the standard
+// recommended labels the prober selects on, with readyReplicas set — the signal that a controller
+// is actually running (not just that an orphan IngressClass lingers).
+func ingressControllerDeployment(namespace string, readyReplicas int32) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ingress-nginx-controller",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "ingress-nginx",
+				"app.kubernetes.io/component": "controller",
+			},
+		},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: readyReplicas},
+	}
 }
 
 func storageClass(name string, isDefault bool) *storagev1.StorageClass {
@@ -39,6 +57,7 @@ func TestDetectCapabilitiesFullCluster(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset(
 		ingressClass("nginx"),
+		ingressControllerDeployment("ingress-nginx", 1),
 		storageClass("do-block-storage", true),
 		storageClass("legacy", false),
 		node("node-1", "digitalocean://12345"),
@@ -142,4 +161,76 @@ func TestDetectCapabilitiesEmptyCluster(t *testing.T) {
 	if caps.Ingress.Present || caps.Storage.DefaultPresent || caps.CertManager.Present || caps.Provider.Cloud != "" {
 		t.Errorf("an empty cluster should report no capabilities, got %+v", caps)
 	}
+}
+
+// TestDetectIngressOrphanClassNoController is the exact bug scenario: an IngressClass survives after
+// its controller (and namespace) were deleted. The class alone must NOT report ingress as usable —
+// Present is false — while the class name is still reported so an Ingress can name it.
+func TestDetectIngressOrphanClassNoController(t *testing.T) {
+	ctx := context.Background()
+	// The "nginx" IngressClass lingers, but there is no controller Deployment.
+	client := fake.NewSimpleClientset(ingressClass("nginx"))
+
+	caps, err := kube.DetectCapabilities(ctx, client)
+	if err != nil {
+		t.Fatalf("DetectCapabilities: %v", err)
+	}
+	if caps.Ingress.Present {
+		t.Errorf("an orphan IngressClass with no controller must not report ingress usable, got %+v", caps.Ingress)
+	}
+	if len(caps.Ingress.Classes) != 1 || caps.Ingress.Classes[0] != "nginx" {
+		t.Errorf("the orphan class name should still be reported, got %+v", caps.Ingress)
+	}
+}
+
+// TestDetectIngressControllerReadiness checks Present tracks a running controller, not the class:
+// a controller Deployment with zero ready replicas is not usable, and one with a ready replica is.
+func TestDetectIngressControllerReadiness(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("controller present but not ready", func(t *testing.T) {
+		client := fake.NewSimpleClientset(
+			ingressClass("nginx"),
+			ingressControllerDeployment("ingress-nginx", 0),
+		)
+		caps, err := kube.DetectCapabilities(ctx, client)
+		if err != nil {
+			t.Fatalf("DetectCapabilities: %v", err)
+		}
+		if caps.Ingress.Present {
+			t.Errorf("a controller with no ready replicas must not report ingress usable, got %+v", caps.Ingress)
+		}
+	})
+
+	t.Run("controller ready", func(t *testing.T) {
+		client := fake.NewSimpleClientset(
+			ingressClass("nginx"),
+			ingressControllerDeployment("ingress-nginx", 1),
+		)
+		caps, err := kube.DetectCapabilities(ctx, client)
+		if err != nil {
+			t.Fatalf("DetectCapabilities: %v", err)
+		}
+		if !caps.Ingress.Present {
+			t.Errorf("a ready controller must report ingress usable, got %+v", caps.Ingress)
+		}
+		if len(caps.Ingress.Classes) != 1 || caps.Ingress.Classes[0] != "nginx" {
+			t.Errorf("ingress classes = %+v, want [nginx]", caps.Ingress.Classes)
+		}
+	})
+
+	t.Run("controller ready in a non-conventional namespace", func(t *testing.T) {
+		// The controller Deployment is found wherever it lives, via its labels — not by namespace.
+		client := fake.NewSimpleClientset(
+			ingressClass("nginx"),
+			ingressControllerDeployment("platform", 2),
+		)
+		caps, err := kube.DetectCapabilities(ctx, client)
+		if err != nil {
+			t.Fatalf("DetectCapabilities: %v", err)
+		}
+		if !caps.Ingress.Present {
+			t.Errorf("a ready controller in any namespace must report ingress usable, got %+v", caps.Ingress)
+		}
+	})
 }

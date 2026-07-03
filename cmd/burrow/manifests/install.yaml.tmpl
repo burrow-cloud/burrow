@@ -217,12 +217,13 @@ type: kubernetes.io/service-account-token
 ---
 # The ONE cluster-scoped grant burrowd holds (ADR-0034). It is read-only — get/list only — on
 # non-sensitive cluster-capability metadata: nodes (to infer the cloud provider), storageclasses
-# (the default StorageClass), and ingressclasses (which ingress controller is installed). This is
-# what lets burrowd answer "what can this cluster do" live, so the agent sees capabilities even
-# after an out-of-band `kubectl apply`. Detecting cert-manager and other operators needs NO RBAC —
-# it is done via API-group discovery. There is NOTHING else here: no secrets, no writes, no other
-# resources, no other verbs. burrowd's write surface stays exactly as namespaced as before; this is
-# the only, measured, read-only exception to the otherwise-namespaced model.
+# (the default StorageClass), ingressclasses (which IngressClass names exist), and deployments (to
+# confirm an ingress-nginx controller is actually running, not just that an orphan IngressClass
+# lingers). This is what lets burrowd answer "what can this cluster do" live, so the agent sees
+# capabilities even after an out-of-band `kubectl apply`. Detecting cert-manager and other operators
+# needs NO RBAC — it is done via API-group discovery. There is NOTHING else here: no secrets, no
+# writes, no other resources, no other verbs. burrowd's write surface stays exactly as namespaced as
+# before; this is the only, measured, read-only exception to the otherwise-namespaced model.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -236,6 +237,9 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingressclasses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

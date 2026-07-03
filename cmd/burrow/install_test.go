@@ -401,7 +401,8 @@ func TestRenderManifests(t *testing.T) {
 		"name: burrowd-cluster-capabilities",         // ... its name
 		`resources: ["nodes"]`,                       // capability reads: nodes (provider inference)
 		`resources: ["storageclasses"]`,              // ... storageclasses (default StorageClass)
-		`resources: ["ingressclasses"]`,              // ... ingressclasses (ingress controller)
+		`resources: ["ingressclasses"]`,              // ... ingressclasses (IngressClass names)
+		`resources: ["deployments"]`,                 // ... deployments (ingress-nginx controller readiness)
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered manifests missing %q", want)
@@ -409,7 +410,7 @@ func TestRenderManifests(t *testing.T) {
 	}
 
 	// The capability ClusterRole is the ONLY cluster-scoped grant and it is strictly read-only
-	// (ADR-0034): exactly one ClusterRole/ClusterRoleBinding, get/list only, on exactly the three
+	// (ADR-0034): exactly one ClusterRole/ClusterRoleBinding, get/list only, on exactly the four
 	// non-sensitive capability resources — no secrets, no writes, no other resources.
 	// Anchor to a line start so the ClusterRoleBinding's roleRef (an indented `kind: ClusterRole`)
 	// is not miscounted as a second ClusterRole.
@@ -421,8 +422,8 @@ func TestRenderManifests(t *testing.T) {
 	}
 	clusterRole := out[strings.Index(out, "kind: ClusterRole\n"):]
 	clusterRole = clusterRole[:strings.Index(clusterRole, "kind: ClusterRoleBinding")]
-	if c := strings.Count(clusterRole, `verbs: ["get", "list"]`); c != 3 {
-		t.Errorf("the capability ClusterRole must be get/list-only on all three resources, found %d such rules", c)
+	if c := strings.Count(clusterRole, `verbs: ["get", "list"]`); c != 4 {
+		t.Errorf("the capability ClusterRole must be get/list-only on all four resources, found %d such rules", c)
 	}
 	for _, banned := range []string{"create", "update", "patch", "delete", "watch"} {
 		if strings.Contains(clusterRole, banned) {

@@ -56,15 +56,35 @@ func TestLoadBalancerGetsExternalIPE2E(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.CoreV1().Namespaces().Delete(context.Background(), nsName, metav1.DeleteOptions{}) })
 
+	// Diagnostic: k3s ships traefik as its own type=LoadBalancer Service, already backed by
+	// servicelb. If traefik already carries an external address, that is direct proof servicelb
+	// assigns LoadBalancer IPs in this environment — independent of our probe below. The name and
+	// namespace can differ across k3s versions, so this is logged (and asserted only when found),
+	// never hard-required.
+	if traefik, err := client.CoreV1().Services("kube-system").Get(ctx, "traefik", metav1.GetOptions{}); err == nil {
+		addr := loadBalancerAddress(&traefik.Status.LoadBalancer)
+		t.Logf("kube-system/traefik LoadBalancer address = %q (servicelb-backed; direct proof servicelb assigns IPs here)", addr)
+		if addr == "" {
+			t.Logf("kube-system/traefik has no LoadBalancer address yet; the probe below is the ground-truth check")
+		}
+	} else {
+		t.Logf("kube-system/traefik Service not found (%v); k3s version may differ — relying on the probe below", err)
+	}
+
 	const svcName = "lb-probe"
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: nsName},
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeLoadBalancer,
 			Selector: map[string]string{"app": "lb-probe"},
+			// Port 8080, not 80/443: servicelb implements a LoadBalancer by scheduling a svclb
+			// DaemonSet whose pods bind the Service's ports as hostPorts on the nodes. k3s already
+			// ships traefik as its own type=LoadBalancer Service on :80 and :443, so a probe on :80
+			// would leave the svclb pods unable to bind the host port (Pending) and no external IP
+			// would ever be assigned — a host-port collision, not a servicelb failure. :8080 is free.
 			Ports: []corev1.ServicePort{{
-				Port:       80,
-				TargetPort: intstr.FromInt(80),
+				Port:       8080,
+				TargetPort: intstr.FromInt(8080),
 				Protocol:   corev1.ProtocolTCP,
 			}},
 		},
@@ -104,13 +124,8 @@ func waitForLoadBalancerAddress(t *testing.T, ctx context.Context, client kubern
 	for {
 		svc, err := client.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
 		if err == nil {
-			for _, ing := range svc.Status.LoadBalancer.Ingress {
-				if ing.IP != "" {
-					return ing.IP
-				}
-				if ing.Hostname != "" {
-					return ing.Hostname
-				}
+			if addr := loadBalancerAddress(&svc.Status.LoadBalancer); addr != "" {
+				return addr
 			}
 		}
 		if time.Now().After(deadline) {
@@ -118,4 +133,18 @@ func waitForLoadBalancerAddress(t *testing.T, ctx context.Context, client kubern
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// loadBalancerAddress returns the first non-empty ingress IP or hostname from a Service's
+// LoadBalancer status, or "" if none is assigned yet.
+func loadBalancerAddress(status *corev1.LoadBalancerStatus) string {
+	for _, ing := range status.Ingress {
+		if ing.IP != "" {
+			return ing.IP
+		}
+		if ing.Hostname != "" {
+			return ing.Hostname
+		}
+	}
+	return ""
 }

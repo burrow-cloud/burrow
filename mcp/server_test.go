@@ -82,6 +82,18 @@ func TestServerInstructions(t *testing.T) {
 	if !strings.Contains(got, "these tools") {
 		t.Errorf("instructions should tell the agent to operate through these tools; got:\n%s", got)
 	}
+	// Human, CLI-only steps (credential and setup commands) must be run by the user in their own
+	// terminal, not via a Claude Code `!` prefix in the session: a `!` run is non-interactive and
+	// cannot answer the hidden secret prompts, and a credential must never route through the agent
+	// session. The guidance must say so and must not suggest an inline `!` run.
+	if !strings.Contains(strings.ToLower(got), "own terminal") {
+		t.Errorf("instructions should tell the agent to have the user run human steps in their own terminal; got:\n%s", got)
+	}
+	for _, inline := range []string{"! burrow", "!burrow"} {
+		if strings.Contains(got, inline) {
+			t.Errorf("instructions must not suggest running a human command via a %q inline `!` prefix; got:\n%s", inline, got)
+		}
+	}
 }
 
 // TestExposureGuidanceSteersToLoadBalancer confirms the agent-facing exposure guidance on the

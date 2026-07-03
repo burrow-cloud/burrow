@@ -54,7 +54,7 @@ func TestAudit(t *testing.T) {
 		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"entries": []map[string]any{
-				{"id": 2, "timestamp": "2026-06-23T12:00:01Z", "operation": "deploy", "target": "web", "outcome": "executed"},
+				{"id": 2, "timestamp": "2026-06-23T12:00:01Z", "operation": "deploy", "target": "web", "principal": "shared-agent", "outcome": "executed"},
 				{"id": 1, "timestamp": "2026-06-23T12:00:00Z", "operation": "deploy", "target": "web", "guardrail_code": "", "disposition": "allow", "outcome": "allowed"},
 			},
 		})
@@ -70,10 +70,26 @@ func TestAudit(t *testing.T) {
 			t.Errorf("query %q missing %q", gotQuery, want)
 		}
 	}
-	// Tabular output names the columns and the rows.
-	for _, want := range []string{"TIME", "OP", "TARGET", "OUTCOME", "GUARDRAIL", "deploy", "web", "executed", "allowed"} {
+	// Tabular output names the columns (including PRINCIPAL) and the rows; the principal cell
+	// carries the shared-agent actor (ADR-0038).
+	for _, want := range []string{"TIME", "OP", "TARGET", "PRINCIPAL", "OUTCOME", "GUARDRAIL", "deploy", "web", "shared-agent", "executed", "allowed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+	// The "allowed" row carries no principal, so its PRINCIPAL cell renders as a standalone dash
+	// (matching how other empty fields render). The "executed" row's "shared-agent" must not bleed
+	// onto it.
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "allowed") {
+			continue
+		}
+		fields := strings.Fields(line) // TIME(date) TIME(clock) OP TARGET PRINCIPAL OUTCOME GUARDRAIL
+		if len(fields) < 7 {
+			t.Fatalf("allowed row has too few columns: %q", line)
+		}
+		if principal := fields[4]; principal != "-" {
+			t.Errorf("allowed row PRINCIPAL cell = %q, want dash for empty principal", principal)
 		}
 	}
 }

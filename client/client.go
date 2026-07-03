@@ -250,6 +250,11 @@ type AuditEntry struct {
 	Outcome       string            `json:"outcome"`
 	Result        string            `json:"result,omitempty"`
 	Caller        string            `json:"caller,omitempty"`
+	// Principal is the acting identity (the actor), distinct from Caller (the control-plane
+	// boundary). The json tag must match the engine's AuditEntry.Principal tag exactly — the two
+	// structs serialize/deserialize across the API, and a mismatched tag would silently drop the
+	// field (ADR-0038).
+	Principal string `json:"principal,omitempty"`
 }
 
 // AuditFilter narrows an audit query. A zero value lists the latest rows across all apps.

@@ -267,8 +267,11 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	if installed, err := alreadyInstalled(ctx, cs, a.namespace); err != nil {
 		return err
 	} else if installed {
-		return fmt.Errorf("Burrow is already installed in namespace %q; run `burrow upgrade` to update it "+
-			"(re-running install would mint new secrets and break the existing control plane)", a.namespace)
+		// A populated control plane must not be re-minted (that would break the running install), so
+		// install performs the local JOIN instead of erroring: it reads the existing scoped agent
+		// credential and writes only this user's local config, making no cluster changes. This is the
+		// second-user and re-run path (ADR-0038 §4).
+		return joinExistingInstall(ctx, a, stdout)
 	}
 
 	if err := applyFn(ctx, a.kubeconfig, a.kubeContext, manifests, a.verbose, stdout, stderr); err != nil {
@@ -329,6 +332,19 @@ func recordEnvironment(ctx context.Context, a installArgs, cs kubernetes.Interfa
 			"The control plane is installed; re-run `burrow install` to provision it.\n", err)
 	}
 
+	if err := addAndPinEnvironment(a, name, agentKubeconfig, agentContext); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "\nInstalled. Environment %q is now your current environment.\n", name)
+	fmt.Fprintf(stdout, "Rename it any time:  burrow env rename %s <new-name>\n", name)
+	return nil
+}
+
+// addAndPinEnvironment registers the environment handle for the install target and pins it as
+// current (ADR-0036/0037), carrying the scoped agent credential (ADR-0038). It is shared by a fresh
+// install (recordEnvironment) and a join of an existing install (joinExistingInstall), so both
+// record a handle the same way.
+func addAndPinEnvironment(a installArgs, name, agentKubeconfig, agentContext string) error {
 	cfg, err := localconfig.Load()
 	if err != nil {
 		return err
@@ -348,10 +364,49 @@ func recordEnvironment(ctx context.Context, a installArgs, cs kubernetes.Interfa
 		return err
 	}
 	cfg.Current = name
-	if err := cfg.Save(); err != nil {
+	return cfg.Save()
+}
+
+// joinExistingInstall performs the local join of an already-installed cluster (ADR-0038 §4): it reads
+// the existing scoped agent credential with this user's own kubeconfig access and writes only their
+// local config — no cluster resources are minted or changed. This is the second-user path and the
+// re-run path. It is idempotent: a handle already registered for this context is updated in place
+// with the (possibly refreshed) credential rather than duplicated. A join that cannot read the agent
+// credential surfaces readAgentToken's actionable error.
+func joinExistingInstall(ctx context.Context, a installArgs, stdout io.Writer) error {
+	cfg, err := localconfig.Load()
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "\nInstalled. Environment %q is now your current environment.\n", name)
+
+	// Resolve the handle name before joining, since it names the local kubeconfig file: reuse an
+	// existing handle for this context, else the explicit --environment, else a generated name.
+	name := a.environment
+	existing, updateExisting := cfg.LookupByContext(a.kubeContext)
+	if updateExisting {
+		name = existing.Name
+	} else if name == "" {
+		name = friendlyName()
+	}
+
+	agentKubeconfig, agentContext, err := joinAgentCredentialFn(ctx, a.kubeconfig, a.kubeContext, a.namespace, name)
+	if err != nil {
+		return err
+	}
+
+	if updateExisting {
+		cfg.SetAgentCredential(name, agentKubeconfig, agentContext)
+		cfg.Current = name
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+	} else if err := addAndPinEnvironment(a, name, agentKubeconfig, agentContext); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(stdout, "\nJoined the existing Burrow install in namespace %q.\n", a.namespace)
+	fmt.Fprintln(stdout, "This wrote only your local config (~/.burrow); no cluster changes were made.")
+	fmt.Fprintf(stdout, "Environment %q is now your current environment.\n", name)
 	fmt.Fprintf(stdout, "Rename it any time:  burrow env rename %s <new-name>\n", name)
 	return nil
 }

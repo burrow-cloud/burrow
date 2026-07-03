@@ -31,6 +31,104 @@ func notFoundErr() error {
 	return apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "deployments"}, "burrowd")
 }
 
+// stubJoinAgentCredential replaces the scoped-agent join seam so `env scan` (and install/upgrade)
+// tests run without a real cluster or token Secret. join is called with the write-name (the handle
+// name); the stub records each call and returns whatever the provided func yields.
+func stubJoinAgentCredential(t *testing.T, join func(envName string) (string, string, error)) *[]string {
+	t.Helper()
+	orig := joinAgentCredentialFn
+	var calls []string
+	joinAgentCredentialFn = func(_ context.Context, _, _, _, envName string) (string, string, error) {
+		calls = append(calls, envName)
+		return join(envName)
+	}
+	t.Cleanup(func() { joinAgentCredentialFn = orig })
+	return &calls
+}
+
+// TestEnvScanBackfillsAgentCredential asserts a newly scan-registered handle gains the scoped agent
+// credential (ADR-0038 §4): scan runs the join for the installed context and records its kubeconfig
+// path and context on the handle.
+func TestEnvScanBackfillsAgentCredential(t *testing.T) {
+	tempConfig(t)
+	kc := kubeconfigWithCurrent(t, "dev", "dev")
+	stubScanProbe(t, func(string) (string, error) { return "ghcr.io/burrow-cloud/burrowd:v0.6.0", nil })
+	stubJoinAgentCredential(t, func(envName string) (string, string, error) {
+		return "/tmp/agents/" + envName, agentKubeContextName, nil
+	})
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "scan", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env scan: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	env, ok := cfg.Lookup("dev")
+	if !ok {
+		t.Fatalf("dev handle not registered: %+v", cfg.Environments)
+	}
+	if env.AgentKubeconfig != "/tmp/agents/dev" || env.AgentContext != agentKubeContextName {
+		t.Errorf("scan-registered handle did not gain the scoped credential: %+v", env)
+	}
+}
+
+// TestEnvScanRegistersWithoutCredentialWhenAbsent covers a pre-Phase-1 install with no agent
+// credential: scan registers the handle WITHOUT a scoped cred and does not fail (ADR-0038 §4).
+func TestEnvScanRegistersWithoutCredentialWhenAbsent(t *testing.T) {
+	tempConfig(t)
+	kc := kubeconfigWithCurrent(t, "dev", "dev")
+	stubScanProbe(t, func(string) (string, error) { return "ghcr.io/burrow-cloud/burrowd:v0.6.0", nil })
+	stubJoinAgentCredential(t, func(string) (string, string, error) {
+		return "", "", errAgentCredentialAbsent
+	})
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "scan", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env scan should not fail when the agent credential is absent: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	env, ok := cfg.Lookup("dev")
+	if !ok {
+		t.Fatalf("dev handle should still be registered without a cred: %+v", cfg.Environments)
+	}
+	if env.AgentKubeconfig != "" || env.AgentContext != "" {
+		t.Errorf("handle should carry no scoped cred when the credential is absent: %+v", env)
+	}
+}
+
+// TestEnvScanBackfillIdempotent asserts a second scan neither re-joins (no rewrite) nor duplicates
+// the handle: the already-registered context is skipped, so the join seam is not called again.
+func TestEnvScanBackfillIdempotent(t *testing.T) {
+	tempConfig(t)
+	kc := kubeconfigWithCurrent(t, "dev", "dev")
+	stubScanProbe(t, func(string) (string, error) { return "ghcr.io/burrow-cloud/burrowd:v0.6.0", nil })
+	calls := stubJoinAgentCredential(t, func(envName string) (string, string, error) {
+		return "/tmp/agents/" + envName, agentKubeContextName, nil
+	})
+
+	for i := 0; i < 2; i++ {
+		var out, errb bytes.Buffer
+		if err := run(context.Background(), []string{"env", "scan", "--kubeconfig", kc}, &out, &errb); err != nil {
+			t.Fatalf("env scan run %d: %v\n%s", i, err, errb.String())
+		}
+	}
+	if len(*calls) != 1 {
+		t.Errorf("join should run once (first scan only); got %d calls: %v", len(*calls), *calls)
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.Environments) != 1 {
+		t.Errorf("a re-scan must not duplicate the handle, got %+v", cfg.Environments)
+	}
+}
+
 // TestEnvScanListsAndRegisters confirms scan prints the probe table and registers only the
 // installed contexts that have no handle yet.
 func TestEnvScanListsAndRegisters(t *testing.T) {
@@ -46,6 +144,11 @@ func TestEnvScanListsAndRegisters(t *testing.T) {
 		default: // broken: an unreachable cluster
 			return "", &net.DNSError{Err: "no such host", Name: "broken.invalid", IsNotFound: true}
 		}
+	})
+	// The scoped-agent join needs a real cluster and token Secret; stub it so scan records the handle
+	// with a credential without a network dial.
+	stubJoinAgentCredential(t, func(envName string) (string, string, error) {
+		return "/tmp/agents/" + envName, agentKubeContextName, nil
 	})
 
 	var out, errb bytes.Buffer

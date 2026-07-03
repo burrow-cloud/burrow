@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 // dbSecretName holds the control-plane database credentials (rendered by the install
@@ -75,13 +76,52 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	}
 	if !wait {
 		fmt.Fprintf(stdout, "\nBurrow upgrade applied in namespace %q (not waiting for readiness).\n", namespace)
+		backfillAgentCredential(ctx, kubeconfig, namespace, stdout)
 		return nil
 	}
 	if err := waitForReady(ctx, kubeconfig, "", namespace, stdout); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "\n%s Burrow is upgraded and ready in namespace %q.\n", okMark(stdout), namespace)
+	backfillAgentCredential(ctx, kubeconfig, namespace, stdout)
 	return nil
+}
+
+// backfillAgentCredential provisions the local scoped agent kubeconfig for the operator's own
+// environment after an upgrade (ADR-0038 §4). The install manifests an upgrade re-applies mint the
+// agent ServiceAccount/Role/Secret cluster-side even for a pre-Phase-1 install; this is the matching
+// local-side backfill, so a control plane installed before the scoped credential existed gains the
+// local kubeconfig without a fresh install. It is best-effort: any failure warns and returns, never
+// failing the upgrade. It backfills only a handle already registered for the upgraded cluster's
+// context; if none is registered locally there is nothing to backfill (the operator can `burrow
+// install` to register and join).
+func backfillAgentCredential(ctx context.Context, kubeconfig, namespace string, stdout io.Writer) {
+	ctxName, err := connect.TargetContextName(kubeconfig, "")
+	if err != nil {
+		fmt.Fprintf(stdout, "\nWarning: could not resolve the current kube context to backfill the agent credential: %v\n", err)
+		return
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		fmt.Fprintf(stdout, "\nWarning: could not load the local config to backfill the agent credential: %v\n", err)
+		return
+	}
+	env, ok := cfg.LookupByContext(ctxName)
+	if !ok {
+		// No local handle for this cluster, so nothing to backfill onto.
+		return
+	}
+	path, agentContext, err := joinAgentCredentialFn(ctx, kubeconfig, ctxName, namespace, env.Name)
+	if err != nil {
+		fmt.Fprintf(stdout, "\nWarning: could not backfill the scoped agent credential for environment %q: %v\n", env.Name, err)
+		return
+	}
+	cfg.SetAgentCredential(env.Name, path, agentContext)
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(stdout, "\nWarning: backfilled the agent credential but could not save the local config: %v\n", err)
+		return
+	}
+	fmt.Fprintf(stdout, "Backfilled the scoped agent credential for environment %q.\n", env.Name)
 }
 
 // upgradeOptions reads the install state that an upgrade must preserve — the API token, the

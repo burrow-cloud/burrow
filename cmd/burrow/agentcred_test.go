@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,10 +15,14 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/burrow-cloud/burrow/localconfig"
@@ -29,6 +34,87 @@ func tokenSecret(namespace, name, token, ca string) *corev1.Secret {
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Type:       corev1.SecretTypeServiceAccountToken,
 		Data:       map[string][]byte{"token": []byte(token), "ca.crt": []byte(ca)},
+	}
+}
+
+// TestJoinAgentCredentialReadsExisting exercises the Phase 3 join path: joinAgentCredential reads the
+// EXISTING agent-token Secret (with the caller's own access, no polling), builds the same
+// self-contained scoped kubeconfig the fresh mint produces, and writes it locally. It shares the
+// serialization with mintAgentKubeconfig, so the joined kubeconfig carries the same token/CA/server.
+func TestJoinAgentCredentialReadsExisting(t *testing.T) {
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+	cs := fake.NewSimpleClientset(tokenSecret("burrow", "burrow-agent-token", "joined-tok", "joined-ca"))
+	restCfg := &rest.Config{Host: "https://api.example:6443"}
+
+	path, agentCtx, err := joinAgentCredential(context.Background(), cs, restCfg, "burrow", "my-prod")
+	if err != nil {
+		t.Fatalf("joinAgentCredential: %v", err)
+	}
+	if agentCtx != agentKubeContextName {
+		t.Errorf("agent context = %q, want %q", agentCtx, agentKubeContextName)
+	}
+	if filepath.Base(path) != "my-prod" {
+		t.Errorf("kubeconfig written to %q, want a file named for the environment (my-prod)", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading joined kubeconfig: %v", err)
+	}
+	cfg, err := clientcmd.Load(data)
+	if err != nil {
+		t.Fatalf("parsing joined kubeconfig: %v", err)
+	}
+	kc := cfg.Contexts[cfg.CurrentContext]
+	if kc == nil {
+		t.Fatalf("joined kubeconfig has no current context")
+	}
+	if auth := cfg.AuthInfos[kc.AuthInfo]; auth == nil || auth.Token != "joined-tok" {
+		t.Errorf("joined token = %+v, want the existing joined-tok", auth)
+	}
+	if cl := cfg.Clusters[kc.Cluster]; cl == nil || string(cl.CertificateAuthorityData) != "joined-ca" {
+		t.Errorf("joined CA = %v, want joined-ca from the existing Secret", cl)
+	}
+}
+
+// TestJoinAgentCredentialForbidden asserts that a joining user without read access to the agent token
+// Secret gets a clear, actionable error naming the missing access and the operator remedies (grant
+// `get` or hand over the scoped kubeconfig), and NOT the tolerant absent sentinel.
+func TestJoinAgentCredentialForbidden(t *testing.T) {
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "burrow-agent-token", errors.New("denied"))
+	})
+	restCfg := &rest.Config{Host: "https://api.example:6443"}
+
+	_, _, err := joinAgentCredential(context.Background(), cs, restCfg, "burrow", "my-prod")
+	if err == nil {
+		t.Fatal("join without read access should error")
+	}
+	if errors.Is(err, errAgentCredentialAbsent) {
+		t.Errorf("an RBAC denial must not be reported as an absent credential: %v", err)
+	}
+	for _, want := range []string{"read access", "operator", "~/.burrow/agents/"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("forbidden error missing %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestJoinAgentCredentialAbsent asserts that a cluster with no agent-token Secret (a pre-Phase-1
+// install) yields the errAgentCredentialAbsent sentinel, so tolerant callers (`env scan`, the
+// `upgrade` backfill) can skip it rather than fail, and it points the operator at `burrow upgrade`.
+func TestJoinAgentCredentialAbsent(t *testing.T) {
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+	cs := fake.NewSimpleClientset() // no agent-token Secret
+	restCfg := &rest.Config{Host: "https://api.example:6443"}
+
+	_, _, err := joinAgentCredential(context.Background(), cs, restCfg, "burrow", "my-prod")
+	if !errors.Is(err, errAgentCredentialAbsent) {
+		t.Fatalf("an absent credential should wrap errAgentCredentialAbsent, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "burrow upgrade") {
+		t.Errorf("absent-credential error should point at `burrow upgrade`, got: %v", err)
 	}
 }
 

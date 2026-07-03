@@ -250,43 +250,110 @@ func TestWriteIngressPlanNotices(t *testing.T) {
 	}
 }
 
+func TestConfirmInstallAutoResolvedGate(t *testing.T) {
+	ctx := context.Background()
+
+	// The gate keys off the resolved mode, so auto flows through resolveExpose first: a cloud
+	// provider resolves to the billable loadbalancer (gated, refused non-interactively), bare-metal
+	// resolves to the free nodeport (not gated, proceeds).
+	origTerm := stdinIsTerminal
+	t.Cleanup(func() { stdinIsTerminal = origTerm })
+	stdinIsTerminal = func(io.Reader) bool { return false } // non-interactive
+
+	cloud := fake.NewSimpleClientset(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Spec: corev1.NodeSpec{ProviderID: "digitalocean://123"}},
+	)
+	expose, err := resolveExpose(ctx, exposeAuto, cloud)
+	if err != nil {
+		t.Fatalf("resolveExpose cloud: %v", err)
+	}
+	var cb bytes.Buffer
+	if _, err := confirmInstall(ingressOptions{}, expose, strings.NewReader(""), &cb); err == nil {
+		t.Errorf("auto resolving to loadbalancer should be gated non-interactively without --approve")
+	}
+
+	bare := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}})
+	expose, err = resolveExpose(ctx, exposeAuto, bare)
+	if err != nil {
+		t.Fatalf("resolveExpose bare-metal: %v", err)
+	}
+	var bb bytes.Buffer
+	ok, err := confirmInstall(ingressOptions{}, expose, strings.NewReader(""), &bb)
+	if err != nil {
+		t.Fatalf("auto resolving to nodeport should not error: %v", err)
+	}
+	if !ok {
+		t.Errorf("auto resolving to nodeport should proceed without approval")
+	}
+}
+
 func TestConfirmInstall(t *testing.T) {
-	// --approve proceeds without prompting: returns true without reading stdin or printing "Proceed?".
-	// It never depends on whether stdin is a terminal.
+	// The gate keys off the RESOLVED expose mode: only the billable loadbalancer path is gated.
+
+	// loadbalancer + --approve proceeds without prompting: returns true without reading stdin or
+	// printing "Proceed?". It never depends on whether stdin is a terminal.
 	var out bytes.Buffer
-	ok, err := confirmInstall(ingressOptions{approve: true}, strings.NewReader("n\n"), &out)
+	ok, err := confirmInstall(ingressOptions{approve: true}, exposeLoadBalancer, strings.NewReader("n\n"), &out)
 	if err != nil {
 		t.Fatalf("confirmInstall approve: %v", err)
 	}
 	if !ok {
-		t.Errorf("--approve should proceed without prompting")
+		t.Errorf("loadbalancer + --approve should proceed without prompting")
 	}
 	if strings.Contains(out.String(), "Proceed?") {
 		t.Errorf("--approve should not print the prompt:\n%s", out.String())
 	}
 
-	// Non-interactive (no terminal) without --approve must refuse: an error, no prompt, no proceed.
-	// strings.Reader is not a terminal, so the default stdinIsTerminal seam already reports false.
+	// loadbalancer + non-interactive (no terminal) without --approve must refuse: an error, no
+	// prompt, no proceed. strings.Reader is not a terminal, so the default stdinIsTerminal seam
+	// already reports false.
 	var nb bytes.Buffer
-	ok, err = confirmInstall(ingressOptions{}, strings.NewReader(""), &nb)
+	ok, err = confirmInstall(ingressOptions{}, exposeLoadBalancer, strings.NewReader(""), &nb)
 	if err == nil {
-		t.Fatalf("non-interactive confirmInstall without --approve should error")
+		t.Fatalf("non-interactive loadbalancer confirmInstall without --approve should error")
 	}
 	if ok {
-		t.Errorf("non-interactive confirmInstall without --approve should not proceed")
+		t.Errorf("non-interactive loadbalancer confirmInstall without --approve should not proceed")
 	}
 	if !strings.Contains(err.Error(), "--approve") {
 		t.Errorf("the non-interactive error should point at --approve:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), "billable") {
+		t.Errorf("the non-interactive error should be about the billable load balancer:\n%v", err)
 	}
 	if strings.Contains(nb.String(), "Proceed?") {
 		t.Errorf("non-interactive confirmInstall should not prompt:\n%s", nb.String())
 	}
 
-	// On an interactive terminal (forced via the seam) and without --approve, the prompt is shown
-	// and the typed answer decides.
+	// The free nodeport path is NEVER gated: it proceeds with no error, no prompt, and no --approve,
+	// whether interactive or not (this is the bug being fixed — an agent-issued --expose nodeport ran
+	// non-interactively must not error asking for --approve).
 	origTerm := stdinIsTerminal
-	stdinIsTerminal = func(io.Reader) bool { return true }
 	t.Cleanup(func() { stdinIsTerminal = origTerm })
+	stdinIsTerminal = func(io.Reader) bool { return false } // non-interactive
+	for _, tc := range []struct {
+		name string
+		o    ingressOptions
+	}{
+		{"nodeport non-interactive without approve proceeds", ingressOptions{}},
+		{"nodeport with approve is a harmless no-op", ingressOptions{approve: true}},
+	} {
+		var b bytes.Buffer
+		ok, err := confirmInstall(tc.o, exposeNodePort, strings.NewReader(""), &b)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tc.name, err)
+		}
+		if !ok {
+			t.Errorf("%s: nodeport should proceed", tc.name)
+		}
+		if strings.Contains(b.String(), "Proceed?") {
+			t.Errorf("%s: nodeport should not prompt:\n%s", tc.name, b.String())
+		}
+	}
+
+	// loadbalancer on an interactive terminal (forced via the seam) and without --approve: the prompt
+	// is shown and the typed answer decides.
+	stdinIsTerminal = func(io.Reader) bool { return true }
 	for _, tc := range []struct {
 		in   string
 		want bool
@@ -298,7 +365,7 @@ func TestConfirmInstall(t *testing.T) {
 		{"", false},   // EOF
 	} {
 		var b bytes.Buffer
-		ok, err := confirmInstall(ingressOptions{}, strings.NewReader(tc.in), &b)
+		ok, err := confirmInstall(ingressOptions{}, exposeLoadBalancer, strings.NewReader(tc.in), &b)
 		if err != nil {
 			t.Fatalf("confirmInstall(%q): %v", tc.in, err)
 		}

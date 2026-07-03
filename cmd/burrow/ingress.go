@@ -141,7 +141,7 @@ func newIngressCmd() *cobra.Command {
 	install.Flags().BoolVar(&o.staging, "staging", false, "use the Let's Encrypt staging environment (untrusted certs, high rate limits) to test the flow")
 	install.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	install.Flags().StringVar(&o.expose, "expose", exposeAuto, "how to expose the controller: loadbalancer (billable cloud LB), nodeport (free, point DNS at a node IP), or auto (detect from the provider)")
-	install.Flags().BoolVar(&o.approve, "approve", false, "approve the plan (required non-interactively); the plan and cost notice are always printed. No shorthand: a cost approval should not be a single keystroke.")
+	install.Flags().BoolVar(&o.approve, "approve", false, "approve installing a billable LoadBalancer (required to install the loadbalancer path non-interactively); the free nodeport path needs no approval. The plan and cost notice always print. No shorthand: a cost approval should not be a single keystroke.")
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the plan (including the cost notice) instead of applying it")
 	install.Flags().BoolVar(&o.wait, "wait", true, "wait for cert-manager to become ready before creating the issuer")
 	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
@@ -194,10 +194,11 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 	}
 
 	// Always print the plan with the cost/SPOF notice before any write (ADR-0034 slice 2: nothing
-	// cluster-wide is installed without the operator seeing what it costs), then gate the write.
-	// Interactive → prompt (default No); non-interactive → require --approve.
+	// cluster-wide is installed without the operator seeing what it costs), then gate the write on
+	// the resolved mode. The billable loadbalancer path requires approval (interactive prompt, or
+	// --approve non-interactively); the free nodeport path proceeds after the plan, no approval needed.
 	writeIngressPlan(stdout, o, expose, manifest, hasNginx, hasCertManager)
-	ok, err := confirmInstall(o, stdin, stdout)
+	ok, err := confirmInstall(o, expose, stdin, stdout)
 	if err != nil {
 		return err
 	}
@@ -362,18 +363,24 @@ func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
 	}
 }
 
-// confirmInstall gates the install after the plan is printed (ADR-0034 slice 2). --approve is an
-// explicit approval and proceeds without a prompt. Otherwise, on an interactive terminal it prompts
-// (default No); with no terminal and no --approve it refuses rather than hang or apply, so a
-// billable cloud load balancer is never provisioned non-interactively without explicit approval.
-func confirmInstall(o ingressOptions, in io.Reader, out io.Writer) (bool, error) {
+// confirmInstall gates the install after the plan is printed (ADR-0034 slice 2), branching on the
+// resolved expose mode. Only the billable loadbalancer path is gated: --approve is an explicit
+// approval and proceeds without a prompt, otherwise an interactive terminal prompts (default No)
+// and with no terminal and no --approve it refuses rather than hang or apply, so a billable cloud
+// load balancer is never provisioned non-interactively without explicit approval. The free nodeport
+// path has no cost to approve, so it proceeds after the plan and node-IP notice — no prompt, no
+// --approve needed, interactive or not (a passed --approve is a harmless no-op there).
+func confirmInstall(o ingressOptions, expose string, in io.Reader, out io.Writer) (bool, error) {
+	if expose != exposeLoadBalancer {
+		return true, nil
+	}
 	if o.approve {
 		return true, nil
 	}
 	if !stdinIsTerminal(in) {
-		return false, errors.New("this installs cluster infrastructure and, on the loadbalancer path, " +
-			"creates a billable cloud load balancer; re-run with --approve to confirm (or --expose " +
-			"nodeport for the free option, or --dry-run to preview)")
+		return false, errors.New("installing the loadbalancer path creates a billable cloud load " +
+			"balancer; re-run with --approve to confirm non-interactively (or --expose nodeport for " +
+			"the free option, or --dry-run to preview)")
 	}
 	return confirmProceed(in, out)
 }

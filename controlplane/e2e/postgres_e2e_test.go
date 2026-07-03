@@ -23,7 +23,6 @@ import (
 	cp "github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/internal/fake"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
-	"github.com/burrow-cloud/burrow/controlplane/registry"
 )
 
 // TestPostgresAddonE2E drives the Postgres add-on through the real Kubernetes adapter and the real
@@ -65,7 +64,6 @@ func TestPostgresAddonE2E(t *testing.T) {
 	prov := kube.NewPostgresProvisioner(client, addonNS)
 	engine, err := cp.New(cp.Deps{
 		Kubernetes:          k8s,
-		Registry:            registry.New(),
 		Database:            fake.NewDatabase(),
 		Clock:               fake.NewClock(time.Now()),
 		IDs:                 fake.NewIDs(),
@@ -168,7 +166,6 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 	prov := kube.NewPostgresProvisioner(client, addonNS)
 	engine, err := cp.New(cp.Deps{
 		Kubernetes:          k8s,
-		Registry:            registry.New(),
 		Database:            fake.NewDatabase(),
 		Clock:               fake.NewClock(time.Now()),
 		IDs:                 fake.NewIDs(),

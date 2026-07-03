@@ -19,7 +19,7 @@ func newEnvEngine(t *testing.T, appNamespace string) (*cp.Engine, *fake.Database
 	t.Helper()
 	d := fake.NewDatabase()
 	e, err := cp.New(cp.Deps{
-		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
+		Kubernetes: fake.NewKubernetes(), Database: d,
 		Clock: fake.NewClock(time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)),
 		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),

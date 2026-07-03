@@ -60,7 +60,7 @@ func newAddonEngineFull(t *testing.T) (*cp.Engine, *fake.Database, *fake.Clock, 
 	mets := &stubMetrics{}
 	creds := fake.NewCredentials()
 	e, err := cp.New(cp.Deps{
-		Kubernetes: fake.NewKubernetes(), Registry: fake.NewRegistry(), Database: d,
+		Kubernetes: fake.NewKubernetes(), Database: d,
 		Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: creds, DNS: fake.NewDNSFactory(),
 		Logs:    map[string]cp.LogsQuerier{"victorialogs": logs, "loki": logs},

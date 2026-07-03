@@ -14,10 +14,9 @@ import (
 // TestDeleteApp tears down the workload, routing, and release history of an existing app and
 // succeeds with confirm, leaving the app unknown to both the cluster and the deploy record.
 func TestDeleteApp(t *testing.T) {
-	e, k, r, d, _ := newEngine(t, permissive())
+	e, k, d, _ := newEngine(t, permissive())
 	ctx := context.Background()
 
-	r.Add("img:1", "sha256:deadbeef")
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -43,7 +42,7 @@ func TestDeleteApp(t *testing.T) {
 // TestDeleteAppWorkloadOnly deletes an app that has a workload but was never exposed and has no
 // recorded releases — the already-absent routing is tolerated, not an error.
 func TestDeleteAppWorkloadOnly(t *testing.T) {
-	e, k, _, _, _ := newEngine(t, permissive())
+	e, k, _, _ := newEngine(t, permissive())
 	ctx := context.Background()
 
 	if err := k.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Kind: cp.WorkloadDeployment, Image: "img:1", Replicas: 1}); err != nil {
@@ -59,7 +58,7 @@ func TestDeleteAppWorkloadOnly(t *testing.T) {
 
 // TestDeleteAppUnknown reports ErrNotFound when the app has neither releases nor a live workload.
 func TestDeleteAppUnknown(t *testing.T) {
-	e, _, _, _, _ := newEngine(t, permissive())
+	e, _, _, _ := newEngine(t, permissive())
 	if err := e.DeleteApp(context.Background(), "web", "", true); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("DeleteApp unknown err = %v, want ErrNotFound", err)
 	}
@@ -69,7 +68,7 @@ func TestDeleteAppUnknown(t *testing.T) {
 // confirmation when not confirmed, and proceeds once confirmed.
 func TestDeleteAppGuardrailHolds(t *testing.T) {
 	policy := cp.DefaultPolicy().With(cp.GuardrailAppDelete, cp.DispositionConfirm)
-	e, k, _, _, _ := newEngine(t, policy)
+	e, k, _, _ := newEngine(t, policy)
 	ctx := context.Background()
 
 	if err := k.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Kind: cp.WorkloadDeployment, Image: "img:1", Replicas: 1}); err != nil {

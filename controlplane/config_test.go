@@ -13,7 +13,7 @@ import (
 
 func TestSetConfigPersistsAndLists(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _, _ := newEngine(t, permissive())
+	e, _, _, _ := newEngine(t, permissive())
 
 	// No running release yet: set still persists and is a no-op apply, not an error.
 	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", false); err != nil {
@@ -30,8 +30,7 @@ func TestSetConfigPersistsAndLists(t *testing.T) {
 
 func TestSetConfigRollsRunningWorkload(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -55,8 +54,7 @@ func TestSetConfigRollsRunningWorkload(t *testing.T) {
 
 func TestSetConfigNoRestartDoesNotRoll(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -76,7 +74,6 @@ func TestSetConfigNoRestartDoesNotRoll(t *testing.T) {
 	}
 
 	// The next deploy picks it up from the store.
-	r.Add("img:2", "sha256:2")
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy v2: %v", err)
 	}
@@ -88,8 +85,7 @@ func TestSetConfigNoRestartDoesNotRoll(t *testing.T) {
 
 func TestUnsetConfigRemovesAndRolls(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if err := e.SetConfig(ctx, "web", "", "A", "1", true); err != nil {
 		t.Fatalf("SetConfig A: %v", err)
 	}
@@ -122,7 +118,7 @@ func TestUnsetConfigRemovesAndRolls(t *testing.T) {
 
 func TestConfigInvalidKey(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _, _ := newEngine(t, permissive())
+	e, _, _, _ := newEngine(t, permissive())
 
 	if err := e.SetConfig(ctx, "web", "", "1BAD", "x", true); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetConfig bad key err = %v, want ErrInvalid", err)
@@ -140,9 +136,7 @@ func TestConfigInvalidKey(t *testing.T) {
 
 func TestRollbackRendersCurrentStoreConfig(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
-	r.Add("img:2", "sha256:2")
+	e, k, _, _ := newEngine(t, permissive())
 
 	if err := e.SetConfig(ctx, "web", "", "A", "1", true); err != nil {
 		t.Fatalf("SetConfig: %v", err)

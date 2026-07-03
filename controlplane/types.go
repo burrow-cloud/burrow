@@ -112,14 +112,6 @@ type LogLine struct {
 	Message   string    `json:"message"`
 }
 
-// ImageInfo is what a registry knows about an image reference.
-type ImageInfo struct {
-	// Reference is the reference that was resolved.
-	Reference string
-	// Digest is the content digest the reference resolves to (e.g. "sha256:...").
-	Digest string
-}
-
 // DNSRecordType is the kind of DNS record the control plane manages (ADR-0018). A host is
 // pointed at an IPv4 address with an A record or at another hostname with a CNAME; the engine
 // chooses based on the address it is given.

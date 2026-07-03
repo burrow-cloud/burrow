@@ -94,11 +94,12 @@ type backupCall struct {
 }
 
 type deployState struct {
-	spec          controlplane.WorkloadSpec
-	ready         int32
-	logs          []controlplane.LogLine
-	restartedAt   time.Time // last RestartWorkload timestamp; zero until rolled
-	waitingReason string    // injected blocking pod waiting reason (e.g. ImagePullBackOff); empty when healthy
+	spec           controlplane.WorkloadSpec
+	ready          int32
+	logs           []controlplane.LogLine
+	restartedAt    time.Time // last RestartWorkload timestamp; zero until rolled
+	waitingReason  string    // injected blocking pod waiting reason (e.g. ImagePullBackOff); empty when healthy
+	waitingMessage string    // injected kubelet waiting message, if any — distinguishes not-found from unauthorized
 }
 
 // status builds the observed WorkloadStatus for this deploy state, mirroring the real adapter:
@@ -116,7 +117,7 @@ func (d *deployState) status(app string) controlplane.WorkloadStatus {
 		Available:       d.spec.Replicas > 0 && d.ready >= d.spec.Replicas,
 	}
 	if !st.Available && controlplane.IsImagePullReason(d.waitingReason) {
-		st.Issue = controlplane.ImagePullIssue(d.spec.Image, d.waitingReason)
+		st.Issue = controlplane.ImagePullIssue(d.spec.Image, d.waitingReason, d.waitingMessage)
 		st.IssueReason = d.waitingReason
 	}
 	return st
@@ -293,11 +294,22 @@ func (k *Kubernetes) SetReady(app string, ready int32) {
 // genuine ImagePullBackOff. Pass a non-image-pull reason (or "") to clear it. It is a no-op if
 // app has no workload.
 func (k *Kubernetes) SetImagePullFailure(app, reason string) {
+	k.setImagePullFailure(app, reason, "")
+}
+
+// SetImagePullFailureMessage is SetImagePullFailure with the kubelet's waiting message attached,
+// so a test can drive the not-found vs unauthorized Issue distinction (ADR-0040).
+func (k *Kubernetes) SetImagePullFailureMessage(app, reason, message string) {
+	k.setImagePullFailure(app, reason, message)
+}
+
+func (k *Kubernetes) setImagePullFailure(app, reason, message string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if d := k.deploys[k.key(app)]; d != nil {
 		d.ready = 0
 		d.waitingReason = reason
+		d.waitingMessage = message
 	}
 }
 

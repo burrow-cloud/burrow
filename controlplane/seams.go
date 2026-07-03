@@ -196,16 +196,6 @@ type Kubernetes interface {
 	RunRestoreJob(ctx context.Context, app, backupID string) error
 }
 
-// Registry is the seam over the container registry — the conveyor belt that carries
-// image bytes the control plane never touches (ADR-0004). The control plane uses it
-// only to confirm a referenced image is pullable and to resolve it to a digest for the
-// deploy record.
-type Registry interface {
-	// Resolve returns the registry's view of reference, or ErrNotFound if the image
-	// is not present/pullable.
-	Resolve(ctx context.Context, reference string) (ImageInfo, error)
-}
-
 // Database is the seam over the control plane's own durable state (Postgres in
 // production): the deploy records that form the history and the rollback handles
 // (ADR-0007). It stores domain Releases; it is independent of cluster state.

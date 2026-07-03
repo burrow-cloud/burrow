@@ -111,8 +111,10 @@ type Release struct {
 	App string `json:"app"`
 	// Image is the pullable container image reference the deploy named (ADR-0007).
 	Image string `json:"image"`
-	// Digest is the content digest the registry resolved Image to, when known
-	// (e.g. "sha256:..."). It is what makes a rollback deterministic.
+	// Digest is the content digest of the running Image, when known (e.g. "sha256:...").
+	// burrowd never resolves it against the registry (ADR-0040); it is an observed value
+	// read back from Kubernetes, so it is empty until observed. Read-back is a deferred
+	// follow-up (ADR-0040 §3), so for now it is left unset.
 	Digest string `json:"digest,omitempty"`
 	// Env is the environment passed to the workload.
 	Env map[string]string `json:"env,omitempty"`

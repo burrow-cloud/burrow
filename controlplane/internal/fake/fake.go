@@ -36,7 +36,6 @@ const (
 	OpDeleteAutoscaler    Op = "DeleteAutoscaler"
 	OpMetricsAPIAvailable Op = "MetricsAPIAvailable"
 	OpAddonReady          Op = "AddonReady"
-	OpResolve             Op = "Resolve"
 	OpSaveAddon           Op = "SaveAddon"
 	OpAddon               Op = "Addon"
 	OpAddons              Op = "Addons"

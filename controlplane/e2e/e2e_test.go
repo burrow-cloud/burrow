@@ -17,15 +17,14 @@ import (
 	cp "github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/internal/fake"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
-	"github.com/burrow-cloud/burrow/controlplane/registry"
 )
 
-// TestEngineDeployRollbackE2E drives the engine through the real registry resolver and
-// the real Kubernetes adapter against a live cluster: deploy an image (the engine
-// resolves its digest from the registry and applies it), watch it become available,
-// deploy a second image, then roll back and confirm the prior image is running again.
-// The deploy record uses the in-memory fake — Postgres is covered separately; this test
-// is about the registry+cluster composition.
+// TestEngineDeployRollbackE2E drives the engine through the real Kubernetes adapter against
+// a live cluster: deploy an image by reference (burrowd never contacts the registry — the
+// kubelet resolves and pulls it, ADR-0040), watch it become available, deploy a second
+// image, then roll back and confirm the prior image is running again. The deploy record
+// uses the in-memory fake — Postgres is covered separately; this test is about the
+// cluster composition.
 func TestEngineDeployRollbackE2E(t *testing.T) {
 	kubeconfig := os.Getenv("BURROW_TEST_KUBECONFIG")
 	if kubeconfig == "" {
@@ -50,7 +49,6 @@ func TestEngineDeployRollbackE2E(t *testing.T) {
 
 	engine, err := cp.New(cp.Deps{
 		Kubernetes:  kube.New(client, nsName),
-		Registry:    registry.New(),
 		Database:    fake.NewDatabase(),
 		Clock:       fake.NewClock(time.Now()),
 		IDs:         fake.NewIDs(),
@@ -65,13 +63,9 @@ func TestEngineDeployRollbackE2E(t *testing.T) {
 	const app = "web"
 	keepRunning := []string{"sh", "-c", "sleep 3600"}
 
-	// Deploy v1 — the engine resolves the digest from the registry and applies it.
-	v1, err := engine.Deploy(ctx, cp.DeployRequest{App: app, Image: "busybox:1.36", Command: keepRunning, Replicas: 1})
-	if err != nil {
+	// Deploy v1 — applied by image reference; the kubelet resolves and pulls it (ADR-0040).
+	if _, err := engine.Deploy(ctx, cp.DeployRequest{App: app, Image: "busybox:1.36", Command: keepRunning, Replicas: 1}); err != nil {
 		t.Fatalf("deploy v1: %v", err)
-	}
-	if v1.Release.Digest == "" {
-		t.Errorf("v1 digest is empty — the registry resolver did not resolve it")
 	}
 	waitForImage(t, ctx, engine, app, "busybox:1.36")
 

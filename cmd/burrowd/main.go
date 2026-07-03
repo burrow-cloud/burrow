@@ -5,8 +5,8 @@
 // credentials, runs the deploy/rollout/rollback/logs/scale orchestration, enforces the
 // guardrails, and records who deployed what (ADR-0002). It connects to the in-cluster
 // Postgres (ADR-0012) and applies migrations, drives the cluster through the client-go
-// adapter (ADR-0011), resolves images through the registry resolver (ADR-0004), and
-// serves the authenticated control-plane HTTP API (ADR-0005).
+// adapter (ADR-0011), applies workloads by image reference without ever contacting a
+// registry (ADR-0040/0004), and serves the authenticated control-plane HTTP API (ADR-0005).
 package main
 
 import (
@@ -30,7 +30,6 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane/logs"
 	"github.com/burrow-cloud/burrow/controlplane/metrics"
 	"github.com/burrow-cloud/burrow/controlplane/postgres"
-	"github.com/burrow-cloud/burrow/controlplane/registry"
 	"github.com/burrow-cloud/burrow/controlplane/sys"
 )
 
@@ -171,11 +170,6 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	// Add-ons live in their own namespace, set by the install manifest (ADR-0025).
 	k8s.WithAddonNamespace(os.Getenv("BURROW_ADDON_NAMESPACE"))
 
-	var regOpts []registry.Option
-	if os.Getenv("BURROW_REGISTRY_INSECURE") == "true" {
-		regOpts = append(regOpts, registry.WithInsecure())
-	}
-
 	// Vendor tokens live in the burrow-credentials Secret in burrowd's own (control-plane)
 	// namespace — not the app namespace — read through a get scoped to that one object
 	// (ADR-0023).
@@ -205,7 +199,6 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	obsHTTP := &http.Client{Timeout: 20 * time.Second}
 	engine, err := controlplane.New(controlplane.Deps{
 		Kubernetes:  k8s,
-		Registry:    registry.New(regOpts...),
 		Database:    store,
 		Clock:       sys.Clock{},
 		IDs:         sys.IDs{},

@@ -15,18 +15,17 @@ import (
 )
 
 // newRoutingEngine builds an engine with a known app namespace and a permissive policy, returning the
-// engine, the fake cluster, the registry, and the database so a test can drive a per-app operation
-// into a named environment and inspect which namespace it landed in (ADR-0035 phase 2b).
-func newRoutingEngine(t *testing.T, appNamespace string) (*cp.Engine, *fake.Kubernetes, *fake.Registry, *fake.Database) {
+// engine, the fake cluster, and the database so a test can drive a per-app operation into a named
+// environment and inspect which namespace it landed in (ADR-0035 phase 2b).
+func newRoutingEngine(t *testing.T, appNamespace string) (*cp.Engine, *fake.Kubernetes, *fake.Database) {
 	t.Helper()
 	k := fake.NewKubernetes()
-	r := fake.NewRegistry()
 	d := fake.NewDatabase()
 	p := cp.DefaultPolicy()
 	p.MaxReplicas = 1000
 	d.SetPolicy(p.With(cp.GuardrailScaleToZero, cp.DispositionAllow))
 	e, err := cp.New(cp.Deps{
-		Kubernetes: k, Registry: r, Database: d,
+		Kubernetes: k, Database: d,
 		Clock: fake.NewClock(time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)),
 		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
@@ -35,7 +34,7 @@ func newRoutingEngine(t *testing.T, appNamespace string) (*cp.Engine, *fake.Kube
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return e, k, r, d
+	return e, k, d
 }
 
 // TestDeployRoutesToEnvironmentNamespace confirms a deploy targeting a registered environment lands
@@ -43,8 +42,7 @@ func newRoutingEngine(t *testing.T, appNamespace string) (*cp.Engine, *fake.Kube
 // phase 2b).
 func TestDeployRoutesToEnvironmentNamespace(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _ := newRoutingEngine(t, "burrow-apps")
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	e, k, _ := newRoutingEngine(t, "burrow-apps")
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
@@ -79,8 +77,7 @@ func TestDeployRoutesToEnvironmentNamespace(t *testing.T) {
 // with a clear ErrNotFound before any cluster write (ADR-0035 phase 2b).
 func TestUnknownEnvironmentIsAClearError(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _ := newRoutingEngine(t, "burrow-apps")
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	e, k, _ := newRoutingEngine(t, "burrow-apps")
 
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Env: "ghost", Image: "registry.example.com/web:1", Replicas: 1})
 	if !errors.Is(err, cp.ErrNotFound) {
@@ -114,7 +111,7 @@ func TestUnknownEnvironmentIsAClearError(t *testing.T) {
 // (ADR-0035 phase 2b).
 func TestSecretLandsInEnvironmentNamespace(t *testing.T) {
 	ctx := context.Background()
-	e, k, _, _ := newRoutingEngine(t, "burrow-apps")
+	e, k, _ := newRoutingEngine(t, "burrow-apps")
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
@@ -151,8 +148,7 @@ func TestSecretLandsInEnvironmentNamespace(t *testing.T) {
 // resolve to the engine's app namespace, the implicit default environment (ADR-0035 phase 2b).
 func TestDefaultEnvironmentResolvesToAppNamespace(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _ := newRoutingEngine(t, "burrow-apps")
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	e, k, _ := newRoutingEngine(t, "burrow-apps")
 
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "empty", Image: "registry.example.com/web:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy(empty env): %v", err)
@@ -174,8 +170,7 @@ func TestDefaultEnvironmentResolvesToAppNamespace(t *testing.T) {
 // same app in staging (allowed) and prod (denied).
 func TestPerEnvironmentGuardrailGatesOnlyThatEnv(t *testing.T) {
 	ctx := context.Background()
-	e, _, r, _ := newRoutingEngine(t, "burrow-apps")
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	e, _, _ := newRoutingEngine(t, "burrow-apps")
 	for _, env := range []string{"prod", "staging"} {
 		if _, err := e.AddEnvironment(ctx, env, "burrow-apps-"+env); err != nil {
 			t.Fatalf("AddEnvironment(%s): %v", env, err)
@@ -213,7 +208,7 @@ func TestPerEnvironmentGuardrailGatesOnlyThatEnv(t *testing.T) {
 // guardrail cannot be env-scoped (ADR-0035 phase 2c).
 func TestSetGuardrailEnvValidation(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _ := newRoutingEngine(t, "burrow-apps")
+	e, _, _ := newRoutingEngine(t, "burrow-apps")
 	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
@@ -262,7 +257,7 @@ func TestSetGuardrailEnvValidation(t *testing.T) {
 // evaluated with an empty env (ADR-0035 phase 2c).
 func TestClusterLevelGuardrailIgnoresEnv(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _ := newRoutingEngine(t, "burrow-apps")
+	e, _, _ := newRoutingEngine(t, "burrow-apps")
 	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
@@ -285,8 +280,7 @@ func TestClusterLevelGuardrailIgnoresEnv(t *testing.T) {
 // guardrail policy stays global until phase 2c (ADR-0035 phase 2b, ADR-0027).
 func TestGuardedOpRecordsEnvironment(t *testing.T) {
 	ctx := context.Background()
-	e, _, r, d := newRoutingEngine(t, "burrow-apps")
-	r.Add("registry.example.com/web:1", "sha256:web1")
+	e, _, d := newRoutingEngine(t, "burrow-apps")
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}

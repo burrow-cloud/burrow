@@ -134,7 +134,7 @@ func TestAddDomainDerivesAddressFromExposedApp(t *testing.T) {
 	d := fake.NewDatabase()
 	d.SetPolicy(permissive())
 	e, err := cp.New(cp.Deps{
-		Kubernetes: k, Registry: fake.NewRegistry(), Database: d,
+		Kubernetes: k, Database: d,
 		Clock: fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)),
 		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: creds, DNS: dnsF,

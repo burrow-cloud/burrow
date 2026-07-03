@@ -16,8 +16,7 @@ import (
 // requested band and CPU target, and a second call updates it in place.
 func TestAutoscaleCreatesAndUpdates(t *testing.T) {
 	ctx := context.Background()
-	e, k, r, _, _ := newEngine(t, permissive())
-	r.Add("img:1", "sha256:1")
+	e, k, _, _ := newEngine(t, permissive())
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -53,7 +52,7 @@ func TestAutoscaleCreatesAndUpdates(t *testing.T) {
 // TestAutoscaleValidation rejects malformed specs before any cluster call.
 func TestAutoscaleValidation(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _, _ := newEngine(t, permissive())
+	e, _, _, _ := newEngine(t, permissive())
 
 	cases := []struct {
 		name string
@@ -80,7 +79,7 @@ func TestAutoscaleValidation(t *testing.T) {
 func TestAutoscaleMaxBoundedByCeiling(t *testing.T) {
 	ctx := context.Background()
 	// Ceiling of 10; autoscale allowed by default.
-	e, k, _, _, _ := newEngine(t, cp.DefaultPolicy())
+	e, k, _, _ := newEngine(t, cp.DefaultPolicy())
 
 	_, err := e.Autoscale(ctx, "web", "", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 99, CPUPercent: 80}, false)
 	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
@@ -98,7 +97,7 @@ func TestAutoscaleMaxBoundedByCeiling(t *testing.T) {
 // per-environment deny blocks the operation in that environment.
 func TestAutoscaleGuardrail(t *testing.T) {
 	ctx := context.Background()
-	e, _, _, _, _ := newEngine(t, cp.DefaultPolicy())
+	e, _, _, _ := newEngine(t, cp.DefaultPolicy())
 
 	// Default is allow: an autoscale within the ceiling proceeds.
 	if _, err := e.Autoscale(ctx, "web", "", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false); err != nil {
@@ -123,7 +122,7 @@ func TestAutoscaleGuardrail(t *testing.T) {
 // TestDisableAutoscale removes the HPA and is idempotent.
 func TestDisableAutoscale(t *testing.T) {
 	ctx := context.Background()
-	e, k, _, _, _ := newEngine(t, permissive())
+	e, k, _, _ := newEngine(t, permissive())
 
 	if _, err := e.Autoscale(ctx, "web", "", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false); err != nil {
 		t.Fatalf("Autoscale: %v", err)
@@ -147,7 +146,7 @@ func TestDisableAutoscale(t *testing.T) {
 // the result carries the plain warning that it will not scale until it is installed.
 func TestAutoscaleMetricsAbsentWarns(t *testing.T) {
 	ctx := context.Background()
-	e, k, _, _, _ := newEngine(t, permissive())
+	e, k, _, _ := newEngine(t, permissive())
 	k.SetMetricsAvailable(false)
 
 	res, err := e.Autoscale(ctx, "web", "", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false)

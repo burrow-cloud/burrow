@@ -33,12 +33,32 @@ func IsImagePullReason(reason string) bool {
 }
 
 // ImagePullIssue builds the actionable Issue message for a workload whose pod cannot pull its
-// image: it names the image, the registry host the credentials are missing for, and the exact
-// `burrow config registry login` command the user runs to fix it. The credential step is human- and
-// CLI-only and never crosses MCP (ADR-0017), so the message points at the user's terminal.
-func ImagePullIssue(image, reason string) string {
+// image. burrowd no longer resolves the image before deploy (ADR-0040), so a bad tag or a
+// missing credential surfaces here, asynchronously, as the kubelet's pull failure. When the
+// kubelet's waiting message clearly reports the image is not present (a "manifest unknown" /
+// "not found"), the Issue names the tag as the likely fix; otherwise it defaults to the common,
+// human-fixable cause — a private registry with no pull credentials (ADR-0017) — and names the
+// exact `burrow config registry login` command. The credential step is human- and CLI-only and
+// never crosses MCP (ADR-0017), so the message points at the user's terminal.
+func ImagePullIssue(image, reason, message string) string {
+	if imagePullNotFound(message) {
+		return fmt.Sprintf("cannot pull image %q (%s): the registry has no such image — check the tag is correct and that it was pushed", image, reason)
+	}
 	host := RegistryHost(image)
 	return fmt.Sprintf("cannot pull image %q (%s): the cluster has no credentials for registry %q. If it is private, ask the user to run: burrow config registry login %s", image, reason, host, host)
+}
+
+// imagePullNotFound reports whether the kubelet's waiting message indicates the image itself is
+// absent from the registry (a wrong or unpushed tag) rather than an authentication failure. An
+// authentication signal ("unauthorized", "denied", …) always wins, so an ambiguous or empty
+// message falls through to the credential message — the safer default under ADR-0017.
+func imagePullNotFound(message string) bool {
+	m := strings.ToLower(message)
+	if strings.Contains(m, "unauthorized") || strings.Contains(m, "denied") ||
+		strings.Contains(m, "authentication") || strings.Contains(m, "forbidden") {
+		return false
+	}
+	return strings.Contains(m, "not found") || strings.Contains(m, "manifest unknown")
 }
 
 // RegistryHost returns the registry host of an image reference following the Docker convention:

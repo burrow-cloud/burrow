@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -46,6 +48,46 @@ type bootstrapArgs struct {
 	appNamespace string
 	image        string
 	wait         bool
+	yes          bool
+}
+
+// bootstrapWarning is the pre-flight warning shown before bootstrap mutates the machine. bootstrap is
+// meant for a fresh server, but run by accident (e.g. `curl -sfL <script> | sudo sh` on a laptop) it
+// would turn that machine into a k3s cluster node — so it is stated plainly before any destructive
+// action, and confirmed (see confirmBootstrap).
+const bootstrapWarning = "burrow cluster bootstrap installs k3s and turns THIS machine into a Burrow cluster node\n" +
+	"(a systemd k3s service, burrowd, and Postgres). Run it on a fresh server or VPS, not\n" +
+	"your laptop."
+
+// errNoTTY is returned by the confirmation reader when there is no controlling terminal to prompt on
+// (a truly non-interactive run, e.g. CI/automation). bootstrap turns it into a clear "pass --yes"
+// stop rather than hanging or silently proceeding.
+var errNoTTY = errors.New("no controlling terminal")
+
+// confirmFn prompts the user with prompt and reports whether they confirmed. It is a seam: the real
+// implementation reads the answer from /dev/tty (see ttyConfirm), and tests substitute a fake so the
+// confirmation is exercised without a real terminal.
+var confirmFn = ttyConfirm
+
+// ttyConfirm writes prompt to the controlling terminal and reads the answer from it. It deliberately
+// reads /dev/tty rather than stdin: under `curl -sfL <script> | sh` the process's stdin is the piped
+// install script, not the user's keyboard, so a stdin read would consume the script (or see EOF) and
+// never reach the person at the terminal. Anything but y / yes (case-insensitive) — including an empty
+// line or EOF — is a no. If /dev/tty cannot be opened there is no terminal to prompt on, reported as
+// errNoTTY.
+func ttyConfirm(prompt string) (bool, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false, errNoTTY
+	}
+	defer tty.Close()
+	fmt.Fprint(tty, prompt)
+	line, err := bufio.NewReader(tty).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("reading the confirmation from the terminal: %w", err)
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
 }
 
 // publicIPDetector resolves the VPS's own public IP when --public-ip is not given. It is a seam: the
@@ -240,6 +282,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&a.appNamespace, "app-namespace", connect.DefaultAppNamespace, "namespace to deploy applications into")
 	cmd.Flags().StringVar(&a.image, "burrowd-image", defaultBurrowdImage(), "burrowd container image to deploy (must be pullable by the cluster)")
 	cmd.Flags().BoolVar(&a.wait, "wait", true, "wait for the control plane to become ready before printing the join token")
+	cmd.Flags().BoolVar(&a.yes, "yes", false, "skip the confirmation prompt (for intentional automation)")
 	return cmd
 }
 
@@ -253,6 +296,25 @@ func runBootstrap(ctx context.Context, a bootstrapArgs, stdout, stderr io.Writer
 	fmt.Fprintf(stdout, "Public IP: %s\n", ip)
 
 	installer := newK3sInstaller(a.kubeconfig, stdout, stderr)
+
+	// Guard: bootstrap turns THIS machine into a cluster node, so confirm before any destructive
+	// action — unless k3s is already installed and answering (the whole run would be a no-op) or --yes
+	// was passed for automation. An accidental `curl | sh` on a laptop stops here.
+	running, err := installer.Running(ctx)
+	if err != nil {
+		return err
+	}
+	if !running {
+		proceed, err := confirmBootstrap(a.yes, stderr)
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			fmt.Fprintln(stderr, "Aborted; nothing was changed.")
+			return nil
+		}
+	}
+
 	if err := ensureK3sInstalled(ctx, installer, buildK3sInstallCommand(ip), stdout); err != nil {
 		return err
 	}
@@ -272,6 +334,28 @@ func runBootstrap(ctx context.Context, a bootstrapArgs, stdout, stderr io.Writer
 	}
 	printJoinInstructions(stdout, token)
 	return nil
+}
+
+// confirmBootstrap gates the destructive part of bootstrap behind an explicit confirmation and
+// reports whether to proceed. --yes skips the prompt for intentional automation. Otherwise it prints
+// the warning and reads a y/N answer from the controlling terminal (via confirmFn, which reads
+// /dev/tty so the prompt still reaches the user under `curl | sh`). The default is No: an empty line
+// or anything but y/yes declines. When there is no terminal to prompt on and --yes was not passed, it
+// refuses with guidance to pass --yes rather than hang or silently proceed.
+func confirmBootstrap(yes bool, stderr io.Writer) (bool, error) {
+	if yes {
+		return true, nil
+	}
+	fmt.Fprintf(stderr, "\n%s\n\n", bootstrapWarning)
+	confirmed, err := confirmFn("Continue? [y/N]: ")
+	if err != nil {
+		if errors.Is(err, errNoTTY) {
+			return false, errors.New("cannot prompt for confirmation: no controlling terminal is available. " +
+				"Re-run with --yes to bootstrap non-interactively (for CI or automation)")
+		}
+		return false, err
+	}
+	return confirmed, nil
 }
 
 // ensureK3sInstalled installs k3s unless it is already running (idempotent), waiting for the API

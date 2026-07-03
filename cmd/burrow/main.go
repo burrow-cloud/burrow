@@ -192,6 +192,13 @@ type target struct {
 	controlPlaneNamespace string
 	env                   string
 	display               string
+	// agentKubeconfig/agentContext carry the resolved handle's scoped, burrowd-only credential
+	// (ADR-0038 phase 2). resolveTarget sets them only for the operate path and only when the user
+	// overrode neither --kubeconfig nor --context nor --control-plane, so connect defaults to the
+	// scoped credential there; they stay empty for the privileged path (client) and for any explicit
+	// override, which both keep the ambient/admin kubeconfig.
+	agentKubeconfig string
+	agentContext    string
 }
 
 // resolveTarget decides which cluster + environment a per-app command targets (ADR-0036). With
@@ -232,12 +239,21 @@ func (o *commonOpts) resolveTarget() (target, error) {
 	if cpn == "" {
 		cpn = connect.DefaultNamespace
 	}
-	return target{
+	tgt := target{
 		context:               kubeContext,
 		controlPlaneNamespace: cpn,
 		env:                   env,
 		display:               targetLine(resolved, o.context, o.env, kubeContext, env),
-	}, nil
+	}
+	// Default the operate path to the scoped, burrowd-only agent credential (ADR-0038 phase 2) when
+	// the resolved handle carries one and the user overrode neither the kubeconfig nor the context.
+	// An explicit --kubeconfig or --context is a deliberate choice of the ambient/admin path, so it
+	// leaves the agent fields unset; --control-plane returns earlier and never reaches here.
+	if o.kubeconfig == "" && o.context == "" && resolved.AgentKubeconfig != "" {
+		tgt.agentKubeconfig = resolved.AgentKubeconfig
+		tgt.agentContext = resolved.AgentContext
+	}
+	return tgt, nil
 }
 
 // targetLine renders the one-line target shown on stderr before a per-app operation so a context
@@ -268,6 +284,7 @@ func (o *commonOpts) resolveAndConnect(ctx context.Context, stderr io.Writer) (*
 		return nil, "", err
 	}
 	fmt.Fprintln(stderr, tgt.display)
+	tgt = applyScopedFallback(tgt, stderr)
 	c, err := o.connect(ctx, tgt)
 	if err != nil {
 		return nil, "", err
@@ -275,10 +292,29 @@ func (o *commonOpts) resolveAndConnect(ctx context.Context, stderr io.Writer) (*
 	return c, tgt.env, nil
 }
 
+// applyScopedFallback keeps the resolved scoped agent credential only when its kubeconfig file is
+// present. If a handle recorded one but the file is gone (deleted, or a config synced to a machine
+// that never minted it), it clears the agent fields so connect falls back to the ambient kubeconfig
+// and prints a brief one-line note to stderr rather than failing hard (ADR-0038 phase 2; `burrow
+// install` re-creates the credential). It is a no-op when no scoped credential was resolved.
+func applyScopedFallback(tgt target, stderr io.Writer) target {
+	if tgt.agentKubeconfig == "" {
+		return tgt
+	}
+	if _, err := os.Stat(tgt.agentKubeconfig); err != nil {
+		fmt.Fprintf(stderr, "burrow: scoped agent kubeconfig %s is missing; using the ambient kubeconfig (run \"burrow install\" to re-create it)\n", tgt.agentKubeconfig)
+		tgt.agentKubeconfig = ""
+		tgt.agentContext = ""
+	}
+	return tgt
+}
+
 // connect builds a control-plane client for a target. With --control-plane set it talks to that
 // URL directly (e.g. an ingress) using --token. Otherwise it auto-connects through the Kubernetes
-// API-server proxy with the ambient kubeconfig, reading the token from the install Secret in the
-// target's control-plane namespace, so a developer with kubectl access configures nothing (ADR-0014).
+// API-server proxy, reading the token from the install Secret in the target's control-plane
+// namespace, so a developer with kubectl access configures nothing (ADR-0014). The operate path
+// defaults to the scoped, burrowd-only agent credential when the target carries one (ADR-0038
+// phase 2); the privileged path and any explicit override keep the ambient/admin kubeconfig.
 func (o *commonOpts) connect(ctx context.Context, tgt target) (*client.Client, error) {
 	if o.controlPlane != "" {
 		if o.token == "" {
@@ -286,7 +322,23 @@ func (o *commonOpts) connect(ctx context.Context, tgt target) (*client.Client, e
 		}
 		return client.NewClient(o.controlPlane, o.token), nil
 	}
-	return connect.Client(ctx, connect.Options{Kubeconfig: o.kubeconfig, Context: tgt.context, Namespace: tgt.controlPlaneNamespace})
+	return connect.Client(ctx, o.connectOptions(tgt))
+}
+
+// connectOptions builds the auto-connect options for a target. It uses the scoped, burrowd-only
+// agent kubeconfig recorded on the target when present (ADR-0038 phase 2), overriding both the
+// kubeconfig path and the context with the scoped credential's own; otherwise it uses --kubeconfig
+// (empty means ambient) and the target's context. resolveTarget sets the agent fields only for the
+// operate path with no --kubeconfig/--context override, so the privileged path (client) and any
+// explicit override fall through to the ambient/admin kubeconfig here.
+func (o *commonOpts) connectOptions(tgt target) connect.Options {
+	kubeconfig := o.kubeconfig
+	kubeContext := tgt.context
+	if tgt.agentKubeconfig != "" {
+		kubeconfig = tgt.agentKubeconfig
+		kubeContext = tgt.agentContext
+	}
+	return connect.Options{Kubeconfig: kubeconfig, Context: kubeContext, Namespace: tgt.controlPlaneNamespace}
 }
 
 // emit prints v as indented JSON when asJSON, otherwise the human-readable line.

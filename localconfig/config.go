@@ -201,9 +201,10 @@ func (c *Config) Lookup(name string) (Environment, bool) {
 	return Environment{}, false
 }
 
-// lookupByContext returns the handle registered for a kube context name, and whether one
-// matched. It backs follow-mode resolution, where the current context is matched to a handle.
-func (c *Config) lookupByContext(context string) (Environment, bool) {
+// LookupByContext returns the handle registered for a kube context name, and whether one
+// matched. It backs follow-mode resolution, where the current context is matched to a handle,
+// and the MCP server's per-context resolution of the scoped agent kubeconfig (ADR-0038).
+func (c *Config) LookupByContext(context string) (Environment, bool) {
 	for _, e := range c.Environments {
 		if e.Context == context {
 			return e, true

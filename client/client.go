@@ -320,11 +320,13 @@ type StorageCapability struct {
 	Classes        []string `json:"classes,omitempty"`
 }
 
-// LoadBalancerCapability reports whether Service type=LoadBalancer is likely supported (inferred
-// from the detected provider).
+// LoadBalancerCapability reports whether Service type=LoadBalancer is likely supported and by what:
+// a cloud provider (billable), k3s's servicelb, or MetalLB. Provider names the mechanism (a cloud
+// id, "servicelb", or "metallb"), empty when none is detected.
 type LoadBalancerCapability struct {
-	Supported bool `json:"supported"`
-	Inferred  bool `json:"inferred"`
+	Supported bool   `json:"supported"`
+	Inferred  bool   `json:"inferred"`
+	Provider  string `json:"provider,omitempty"`
 }
 
 // CertManagerCapability reports whether cert-manager is installed (detected via its API group).

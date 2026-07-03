@@ -28,12 +28,12 @@ import (
 // .status.loadBalancer.ingress carries a non-empty IP or hostname. It is gated on
 // BURROW_TEST_KUBECONFIG like the other e2e tests and adds no container image.
 //
-// It also records what Burrow's own capability detection reports on this cluster. Detection infers
-// LoadBalancer support from a recognized cloud providerID (controlplane/kube/capabilities.go) and
-// does not recognize servicelb, so on k3s it reports LoadBalancer.Supported=false even though the
-// ground-truth assertion above shows a LoadBalancer does get an address. That mismatch is a
-// detection gap, not a failure of this cluster, so it is logged rather than asserted — the
-// ground-truth address is the load-bearing proof.
+// It also asserts that Burrow's own capability detection agrees with the ground truth on this
+// cluster. Detection now recognizes k3s's built-in servicelb (controlplane/kube/capabilities.go), so
+// on k3s it must report LoadBalancer.Supported=true — closing the gap this test originally surfaced
+// (#193), where detection keyed only off a recognized cloud providerID and wrongly reported
+// Supported=false while a LoadBalancer in fact got an address. The ground-truth address is still the
+// load-bearing proof; the capability assertion locks in that detection matches it (ADR-0043).
 func TestLoadBalancerGetsExternalIPE2E(t *testing.T) {
 	kubeconfig := os.Getenv("BURROW_TEST_KUBECONFIG")
 	if kubeconfig == "" {
@@ -101,18 +101,18 @@ func TestLoadBalancerGetsExternalIPE2E(t *testing.T) {
 	}
 	t.Logf("LoadBalancer service %s/%s got external address %q from servicelb (no cloud provider)", nsName, svcName, addr)
 
-	// Record Burrow's capability detection on this same cluster. Detection keys LoadBalancer support
-	// off a recognized cloud providerID and does not recognize servicelb, so on k3s this is expected
-	// to report Supported=false despite the address assigned above — a detection gap to close, not a
-	// property of the cluster. Log it rather than asserting so the ground-truth proof stays green.
+	// Assert Burrow's capability detection agrees with the ground truth on this same cluster. A
+	// LoadBalancer Service just got a real external address from servicelb, so detection must report
+	// LoadBalancer.Supported=true — this is the #193 gap, now closed: detection recognizes k3s's
+	// built-in servicelb (via the "k3s" providerID scheme), not only a recognized cloud provider.
 	caps, err := kube.DetectCapabilities(ctx, client)
 	if err != nil {
 		t.Fatalf("DetectCapabilities: %v", err)
 	}
-	t.Logf("Burrow capability detection on this servicelb cluster: LoadBalancer.Supported=%t (provider cloud=%q); a LoadBalancer nonetheless received %q",
-		caps.LoadBalancer.Supported, caps.Provider.Cloud, addr)
+	t.Logf("Burrow capability detection on this servicelb cluster: LoadBalancer.Supported=%t (lb provider=%q, cloud=%q); a LoadBalancer received %q",
+		caps.LoadBalancer.Supported, caps.LoadBalancer.Provider, caps.Provider.Cloud, addr)
 	if !caps.LoadBalancer.Supported {
-		t.Logf("DETECTION GAP: a LoadBalancer Service got a real external address, but capability detection reports LoadBalancer.Supported=false because it infers support only from a recognized cloud provider and does not recognize k3s's built-in servicelb")
+		t.Errorf("capability detection reports LoadBalancer.Supported=false, but a LoadBalancer Service got external address %q on this servicelb cluster — servicelb detection should report support (ADR-0043, #193)", addr)
 	}
 }
 

@@ -196,6 +196,14 @@ func isTerminal(w io.Writer) bool {
 // with Force so Burrow's field manager takes ownership of the fields it sets. It reports whether the
 // object was created, configured, or left unchanged so the summary can count outcomes the way the
 // former kubectl output did.
+//
+// Force is force-conflicts: it makes a server-side apply take ownership of a field another manager
+// owns instead of returning a field-ownership conflict. This is what lets `burrow cluster ingress
+// install` adopt a pre-existing object left by a `kubectl apply` — for example an orphan "nginx"
+// IngressClass whose fields are owned by kubectl's client-side-apply field manager. Because every
+// manifest Burrow applies is a pinned, Burrow-owned artifact (the install/upgrade stacks and the
+// third-party ingress/cert-manager manifests it installs), taking ownership on apply is the intended
+// behavior for all callers, not a special case.
 func (ap *applier) applyOne(ctx context.Context, obj *unstructured.Unstructured, dryRun bool) (string, error) {
 	gvk := obj.GroupVersionKind()
 	mapping, err := ap.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)

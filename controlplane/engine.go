@@ -1238,6 +1238,14 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 		return ExposeResult{}, fmt.Errorf("expose %s: reading workload: %w", req.App, err)
 	}
 
+	// The cluster must be set up for public reachability (an ingress controller) and, when TLS is
+	// asked for, for certificate issuance (cert-manager and a ClusterIssuer). A missing prerequisite
+	// would leave a half-working exposure the agent then has to diagnose with raw kubectl, so detect
+	// it up front and return a structured checklist naming each gap and its burrow fix (ADR-0006).
+	if err := e.exposePrerequisites(ctx, req); err != nil {
+		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
+	}
+
 	if err := k.Expose(ctx, ExposeSpec{App: req.App, Host: req.Host, Port: req.Port, TLS: req.TLS, Issuer: req.Issuer}); err != nil {
 		e.recordExecution(ctx, auditOpExpose, req.App, args, err)
 		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
@@ -1248,6 +1256,75 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 		scheme = "https"
 	}
 	return ExposeResult{App: req.App, Host: req.Host, Port: req.Port, URL: scheme + "://" + req.Host}, nil
+}
+
+// exposePrerequisites checks the cluster is set up for the public, optionally TLS-terminated
+// reachability an expose request needs, and returns a MissingPrerequisitesError enumerating every
+// missing piece and the burrow command that provisions it (ADR-0006, ADR-0034). It reads capabilities
+// through the ClusterProber seam and the providers registry — never a raw cluster call — so it stays
+// unit-testable against a fake.
+//
+// It blocks only on prerequisites whose absence leaves the exposure non-functional: an ingress
+// controller (without one no Ingress ever gets an external address) and, when TLS is asked for,
+// cert-manager (without it the certificate is never issued). When one of those hard gaps is present it
+// also folds in the DNS-provider note so the agent gets the full remediation in one shot; a missing
+// DNS provider alone never blocks, because pointing DNS at the ingress address by hand is a valid path
+// and the reachability surface guides that. When no prober is wired it returns nil: detection is
+// best-effort and never blocks an expose on a build that cannot probe the cluster.
+func (e *Engine) exposePrerequisites(ctx context.Context, req ExposeRequest) error {
+	if e.prober == nil {
+		return nil
+	}
+	caps, err := e.prober.DetectCapabilities(ctx)
+	if err != nil {
+		return fmt.Errorf("checking cluster prerequisites: %w", err)
+	}
+
+	var missing []Prerequisite
+	blocking := false
+	if !caps.Ingress.Present {
+		blocking = true
+		missing = append(missing, Prerequisite{
+			Name:   "ingress controller",
+			Detail: "public reachability needs an ingress controller to route the host and assign an external address",
+			Fix:    "run `burrow cluster ingress install`",
+		})
+	}
+	if req.TLS && !caps.CertManager.Present {
+		blocking = true
+		missing = append(missing, Prerequisite{
+			Name:   "cert-manager",
+			Detail: "TLS needs cert-manager and a ClusterIssuer to issue the certificate",
+			Fix:    "run `burrow cluster ingress install`",
+		})
+	}
+	if !blocking {
+		return nil
+	}
+
+	// A hard gap is already blocking; fold in the DNS-provider note when no provider is configured so
+	// the agent sees the whole checklist at once. DNS is a control-plane registry fact, not a cluster
+	// read (ADR-0023), so it comes from the providers registry rather than the prober.
+	providers, err := e.db.Providers(ctx)
+	if err != nil {
+		return fmt.Errorf("checking DNS provider: %w", err)
+	}
+	dnsConfigured := false
+	for _, p := range providers {
+		if p.Serves(CapabilityDNS) {
+			dnsConfigured = true
+			break
+		}
+	}
+	if !dnsConfigured {
+		missing = append(missing, Prerequisite{
+			Name:   "DNS provider",
+			Detail: "no DNS provider is configured for automatic records",
+			Fix:    fmt.Sprintf("run `burrow config provider add <type>` (or point %s at the ingress address manually)", req.Host),
+		})
+	}
+
+	return &MissingPrerequisitesError{Host: req.Host, TLS: req.TLS, Missing: missing}
 }
 
 // Reachability reports, link by link, whether an app is reachable at its hostname (ADR-0018):

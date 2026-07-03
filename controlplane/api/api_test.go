@@ -490,6 +490,43 @@ func TestExposeGuardrailHolds(t *testing.T) {
 	}
 }
 
+// TestExposeMissingPrerequisitesEndpoint confirms an expose against a cluster missing its
+// prerequisites surfaces as a 422 with the machine-readable "missing_prerequisites" code and the
+// actionable checklist in the body (ADR-0006), so the agent gets the guidance over the API.
+func TestExposeMissingPrerequisitesEndpoint(t *testing.T) {
+	k, d := fake.NewKubernetes(), fake.NewDatabase()
+	d.SetPolicy(cp.DefaultPolicy().With(cp.GuardrailAppDeploy, cp.DispositionAllow).With(cp.GuardrailExposePublic, cp.DispositionAllow))
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Database: d,
+		Clock:       fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs:         fake.NewIDs(),
+		Resolver:    fake.NewResolver(),
+		Credentials: fake.NewCredentials(),
+		DNS:         fake.NewDNSFactory(),
+		// An empty capability report models a cluster with no ingress controller and no cert-manager.
+		ClusterProber: fake.NewClusterProber(cp.ClusterCapabilities{}),
+	})
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	h, err := api.New(api.Config{Engine: e, Token: token})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
+
+	rec := do(h, "POST", "/v1/apps/web/expose", token, `{"host":"web.example.com","port":8080,"tls":true,"issuer":"letsencrypt"}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expose code = %d, want 422; body %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"missing_prerequisites", "cert-manager", "ingress controller", "burrow cluster ingress install"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestRollback(t *testing.T) {
 	h, k, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)

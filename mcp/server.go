@@ -163,7 +163,7 @@ func NewServer(clientFor ClientForContext, kubeconfig, version string) *sdk.Serv
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_expose",
-		Description: "Make a deployed application reachable from outside the cluster at a hostname, by creating a Service and an Ingress. Public exposure is held for confirmation by a guardrail by default; when held, the error says so — ask the user, then retry with confirm set to true. Reachability also needs an ingress controller and DNS pointing the host at the cluster.",
+		Description: "Make a deployed application reachable from outside the cluster at a hostname, by creating a Service and an Ingress. Public exposure is held for confirmation by a guardrail by default; when held, the error says so — ask the user, then retry with confirm set to true. Reachability also needs an ingress controller and DNS pointing the host at the cluster. If the cluster is not set up for public reachability (no ingress controller, or no cert-manager when tls is set), the error names each missing prerequisite and the exact burrow command that provisions it; run that command rather than inspecting the cluster directly.",
 	}, exposeTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{

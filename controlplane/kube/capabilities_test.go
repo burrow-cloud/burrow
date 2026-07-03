@@ -53,6 +53,14 @@ func node(name, providerID string) *corev1.Node {
 	}
 }
 
+// metalLBController builds a MetalLB controller Deployment carrying the given labels, so a test can
+// seed either the Helm-chart or the static-manifest label scheme the prober matches.
+func metalLBController(namespace string, labels map[string]string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "controller", Namespace: namespace, Labels: labels},
+	}
+}
+
 func TestDetectCapabilitiesFullCluster(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset(
@@ -85,9 +93,9 @@ func TestDetectCapabilitiesFullCluster(t *testing.T) {
 	if caps.Provider.Cloud != "digitalocean" || caps.Provider.Name != "DigitalOcean" {
 		t.Errorf("provider = %+v, want digitalocean/DigitalOcean", caps.Provider)
 	}
-	// A known cloud → LoadBalancer support is inferred.
-	if !caps.LoadBalancer.Supported || !caps.LoadBalancer.Inferred {
-		t.Errorf("load balancer = %+v, want supported+inferred on a known cloud", caps.LoadBalancer)
+	// A known cloud → LoadBalancer support is inferred, and the LB provider names the cloud.
+	if !caps.LoadBalancer.Supported || !caps.LoadBalancer.Inferred || caps.LoadBalancer.Provider != "digitalocean" {
+		t.Errorf("load balancer = %+v, want supported+inferred with provider digitalocean on a known cloud", caps.LoadBalancer)
 	}
 	if !caps.CertManager.Present {
 		t.Errorf("cert-manager = %+v, want present (cert-manager.io group served)", caps.CertManager)
@@ -100,10 +108,11 @@ func TestDetectCapabilitiesFullCluster(t *testing.T) {
 
 func TestDetectCapabilitiesBareMetal(t *testing.T) {
 	ctx := context.Background()
-	// No IngressClass, no default StorageClass, a non-cloud providerID, no cert-manager group.
+	// A truly bare cluster: no IngressClass, no default StorageClass, an unrecognized/empty
+	// providerID (no cloud, no k3s), no MetalLB, no cert-manager group.
 	client := fake.NewSimpleClientset(
 		storageClass("local-path", false),
-		node("node-1", "k3s://k3d-burrow-server-0"),
+		node("node-1", ""),
 	)
 	client.Resources = []*metav1.APIResourceList{{GroupVersion: "apps/v1"}}
 
@@ -119,11 +128,14 @@ func TestDetectCapabilitiesBareMetal(t *testing.T) {
 		t.Errorf("storage default should be absent (none annotated), got %+v", caps.Storage)
 	}
 	if caps.Provider.Cloud != "" {
-		t.Errorf("provider should be unknown for a k3s node, got %+v", caps.Provider)
+		t.Errorf("provider should be unknown on a bare cluster, got %+v", caps.Provider)
 	}
-	// Not a known cloud → NodePort only.
+	// No LoadBalancer provider at all → unsupported.
 	if caps.LoadBalancer.Supported {
-		t.Errorf("load balancer should be unsupported on bare-metal, got %+v", caps.LoadBalancer)
+		t.Errorf("load balancer should be unsupported with no provider, got %+v", caps.LoadBalancer)
+	}
+	if caps.LoadBalancer.Provider != "" {
+		t.Errorf("load balancer provider should be empty when none is detected, got %+v", caps.LoadBalancer)
 	}
 	if !caps.LoadBalancer.Inferred {
 		t.Errorf("load balancer support is always an inference, got %+v", caps.LoadBalancer)
@@ -131,6 +143,73 @@ func TestDetectCapabilitiesBareMetal(t *testing.T) {
 	if caps.CertManager.Present {
 		t.Errorf("cert-manager should be absent, got %+v", caps.CertManager)
 	}
+}
+
+// TestDetectLoadBalancerServiceLB proves the gap fix for k3s: a k3s node (its "k3s" providerID
+// scheme) means k3s's built-in servicelb runs, so a LoadBalancer Service gets a real external IP even
+// with no cloud provider (proven on k3d by the e2e). Detection must report Supported=true with
+// provider "servicelb" — not the pre-fix Supported=false.
+func TestDetectLoadBalancerServiceLB(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(
+		storageClass("local-path", false),
+		node("node-1", "k3s://k3d-burrow-server-0"),
+	)
+	client.Resources = []*metav1.APIResourceList{{GroupVersion: "apps/v1"}}
+
+	caps, err := kube.DetectCapabilities(ctx, client)
+	if err != nil {
+		t.Fatalf("DetectCapabilities: %v", err)
+	}
+	// The cloud provider is still unknown (k3s is not a billable cloud)...
+	if caps.Provider.Cloud != "" {
+		t.Errorf("provider should be unknown for a k3s node, got %+v", caps.Provider)
+	}
+	// ...but servicelb services LoadBalancers, so support is detected and named.
+	if !caps.LoadBalancer.Supported || !caps.LoadBalancer.Inferred || caps.LoadBalancer.Provider != "servicelb" {
+		t.Errorf("load balancer = %+v, want supported+inferred with provider servicelb on k3s", caps.LoadBalancer)
+	}
+}
+
+// TestDetectLoadBalancerMetalLB proves detection on a non-cloud cluster running MetalLB: its
+// controller Deployment (either the Helm-chart or the static-manifest label scheme) means MetalLB
+// services LoadBalancers, so Supported=true with provider "metallb".
+func TestDetectLoadBalancerMetalLB(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("helm chart labels", func(t *testing.T) {
+		client := fake.NewSimpleClientset(
+			node("node-1", ""), // no cloud, no k3s
+			metalLBController("metallb-system", map[string]string{
+				"app.kubernetes.io/name":      "metallb",
+				"app.kubernetes.io/component": "controller",
+			}),
+		)
+		caps, err := kube.DetectCapabilities(ctx, client)
+		if err != nil {
+			t.Fatalf("DetectCapabilities: %v", err)
+		}
+		if !caps.LoadBalancer.Supported || !caps.LoadBalancer.Inferred || caps.LoadBalancer.Provider != "metallb" {
+			t.Errorf("load balancer = %+v, want supported+inferred with provider metallb", caps.LoadBalancer)
+		}
+	})
+
+	t.Run("static manifest labels", func(t *testing.T) {
+		client := fake.NewSimpleClientset(
+			node("node-1", ""),
+			metalLBController("metallb-system", map[string]string{
+				"app":       "metallb",
+				"component": "controller",
+			}),
+		)
+		caps, err := kube.DetectCapabilities(ctx, client)
+		if err != nil {
+			t.Fatalf("DetectCapabilities: %v", err)
+		}
+		if !caps.LoadBalancer.Supported || caps.LoadBalancer.Provider != "metallb" {
+			t.Errorf("load balancer = %+v, want supported with provider metallb", caps.LoadBalancer)
+		}
+	})
 }
 
 func TestDetectCapabilitiesBetaDefaultAnnotation(t *testing.T) {

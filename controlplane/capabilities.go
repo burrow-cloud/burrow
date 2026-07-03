@@ -21,8 +21,8 @@ type ClusterCapabilities struct {
 	Ingress IngressCapability `json:"ingress"`
 	// Storage is the default-StorageClass situation: whether a default exists and its name.
 	Storage StorageCapability `json:"storage"`
-	// LoadBalancer is whether Service type=LoadBalancer is likely supported, inferred from the
-	// detected cloud provider.
+	// LoadBalancer is whether Service type=LoadBalancer is likely supported, detected from whatever
+	// services LoadBalancers — a cloud provider, k3s's servicelb, or MetalLB.
 	LoadBalancer LoadBalancerCapability `json:"load_balancer"`
 	// CertManager is whether cert-manager is installed, detected via its API group (its CRDs).
 	CertManager CertManagerCapability `json:"cert_manager"`
@@ -58,13 +58,16 @@ type StorageCapability struct {
 	Classes        []string `json:"classes,omitempty"`
 }
 
-// LoadBalancerCapability reports whether Service type=LoadBalancer is likely supported. Supported
-// is inferred from the detected provider — a known cloud likely provisions a load balancer, while
-// bare-metal / single-node clusters are NodePort-only. Inferred is always true: this is an
-// inference from the provider, not a direct probe (provisioning a LoadBalancer is the real test).
+// LoadBalancerCapability reports whether Service type=LoadBalancer is likely supported, and by what
+// (ADR-0043). Supported is true when any LoadBalancer provider is present: a recognized cloud
+// provider (a billable cloud load balancer), k3s's built-in servicelb, or MetalLB. Provider names
+// which one — a cloud id (e.g. "digitalocean"), "servicelb", or "metallb" — empty when none is
+// detected; only a cloud provider is billable. Inferred is always true: this recognizes a provider,
+// not a direct probe (provisioning a LoadBalancer is the real test).
 type LoadBalancerCapability struct {
-	Supported bool `json:"supported"`
-	Inferred  bool `json:"inferred"`
+	Supported bool   `json:"supported"`
+	Inferred  bool   `json:"inferred"`
+	Provider  string `json:"provider,omitempty"`
 }
 
 // CertManagerCapability reports whether cert-manager is installed. Present is true when the
@@ -91,8 +94,9 @@ type DNSCapability struct {
 
 // ClusterProber detects a cluster's capabilities read-only (ADR-0034): it reads IngressClasses,
 // ingress-nginx controller Deployments, StorageClasses, and Nodes, and uses API-group discovery to
-// detect cert-manager, then infers
-// LoadBalancer support from the detected provider. It is the seam over those reads so the engine
+// detect cert-manager, then detects
+// LoadBalancer support from whatever services LoadBalancers (a cloud provider, servicelb, or
+// MetalLB). It is the seam over those reads so the engine
 // stays unit-testable against a fake; the production adapter (controlplane/kube) wraps a client-go
 // clientset, and the same detection runs whether driven by the kubeconfig client (install) or
 // burrowd's in-cluster client. It returns only the cluster-derived capabilities; the DNS field is

@@ -32,8 +32,9 @@ const certManagerAPIGroup = "cert-manager.io"
 
 // cloudProviders maps a providerID scheme (the part before "://" in a Node's spec.providerID) to a
 // human label for known clouds. A node on one of these is taken to support Service
-// type=LoadBalancer; anything else (bare-metal, k3s/k3d, kind, an empty providerID) is treated as
-// NodePort-only. The map is also the inference behind LoadBalancer support (ADR-0034).
+// type=LoadBalancer with a billable cloud load balancer. A recognized cloud is one — but no longer
+// the only — signal behind LoadBalancer support: k3s's built-in servicelb and MetalLB also service
+// LoadBalancers on non-cloud clusters and are detected separately (ADR-0034, ADR-0043).
 var cloudProviders = map[string]string{
 	"aws":          "AWS",
 	"azure":        "Azure",
@@ -79,11 +80,12 @@ func (p *Prober) DetectCapabilities(ctx context.Context) (controlplane.ClusterCa
 // DetectCapabilities reads a cluster's capabilities read-only over the given clientset (ADR-0034):
 // the ingress controller (a ready ingress-nginx controller Deployment) and its IngressClasses, the
 // default and all StorageClasses, the cloud
-// provider (from node providerIDs/labels), and cert-manager (via API-group discovery), and infers
-// LoadBalancer support from the provider. It performs only get/list reads and API-group discovery
-// — it never writes. It is a free function so the same detection runs whether driven by the
-// kubeconfig client (install) or burrowd's in-cluster client (live). The returned report omits the
-// DNS capability, which is a control-plane registry fact filled by the engine.
+// provider (from node providerIDs/labels), and cert-manager (via API-group discovery), and detects
+// LoadBalancer support from whatever actually services LoadBalancers — a recognized cloud provider,
+// k3s's built-in servicelb, or MetalLB (ADR-0043). It performs only get/list reads and API-group
+// discovery — it never writes. It is a free function so the same detection runs whether driven by
+// the kubeconfig client (install) or burrowd's in-cluster client (live). The returned report omits
+// the DNS capability, which is a control-plane registry fact filled by the engine.
 func DetectCapabilities(ctx context.Context, client kubernetes.Interface) (controlplane.ClusterCapabilities, error) {
 	var caps controlplane.ClusterCapabilities
 
@@ -104,10 +106,12 @@ func DetectCapabilities(ctx context.Context, client kubernetes.Interface) (contr
 		return controlplane.ClusterCapabilities{}, err
 	}
 	caps.Provider = provider
-	caps.LoadBalancer = controlplane.LoadBalancerCapability{
-		Supported: provider.Cloud != "",
-		Inferred:  true,
+
+	loadBalancer, err := detectLoadBalancer(ctx, client, provider)
+	if err != nil {
+		return controlplane.ClusterCapabilities{}, err
 	}
+	caps.LoadBalancer = loadBalancer
 
 	certManager, err := detectCertManager(client)
 	if err != nil {
@@ -230,6 +234,97 @@ func providerIDScheme(providerID string) string {
 		return ""
 	}
 	return providerID[:i]
+}
+
+// serviceLBProvider labels the k3s servicelb mechanism in the LoadBalancer capability.
+const serviceLBProvider = "servicelb"
+
+// metalLBProvider labels MetalLB in the LoadBalancer capability.
+const metalLBProvider = "metallb"
+
+// metalLBControllerSelector and metalLBLegacyControllerSelector match the MetalLB controller
+// Deployment. The Helm chart labels it with the recommended app.kubernetes.io/* keys; the upstream
+// static manifest uses the older app/component keys. Both are matched so either install method is
+// detected. The controller (not the speaker DaemonSet) is the allocator, so it is the definitive
+// "MetalLB is installed" signal.
+const (
+	metalLBControllerSelector       = "app.kubernetes.io/name=metallb,app.kubernetes.io/component=controller"
+	metalLBLegacyControllerSelector = "app=metallb,component=controller"
+)
+
+// detectLoadBalancer reports whether the cluster can service a Service type=LoadBalancer, and by what
+// (ADR-0043). Support is not cloud-only: it is true when ANY LoadBalancer provider is present — a
+// recognized cloud provider (a billable cloud load balancer), k3s's built-in servicelb, or MetalLB.
+// It reports which provider so the agent can reason about cost (only a cloud LB is billable) and so
+// a bare cluster with none can be guided to install MetalLB rather than told LoadBalancer is
+// impossible. Supported stays an inference (Inferred=true): detection recognizes a provider rather
+// than provisioning a real LoadBalancer, which is the only direct test.
+func detectLoadBalancer(ctx context.Context, client kubernetes.Interface, provider controlplane.ProviderCapability) (controlplane.LoadBalancerCapability, error) {
+	if provider.Cloud != "" {
+		return controlplane.LoadBalancerCapability{Supported: true, Inferred: true, Provider: provider.Cloud}, nil
+	}
+
+	serviceLB, err := clusterRunsServiceLB(ctx, client)
+	if err != nil {
+		return controlplane.LoadBalancerCapability{}, err
+	}
+	if serviceLB {
+		return controlplane.LoadBalancerCapability{Supported: true, Inferred: true, Provider: serviceLBProvider}, nil
+	}
+
+	metalLB, err := metalLBInstalled(ctx, client)
+	if err != nil {
+		return controlplane.LoadBalancerCapability{}, err
+	}
+	if metalLB {
+		return controlplane.LoadBalancerCapability{Supported: true, Inferred: true, Provider: metalLBProvider}, nil
+	}
+
+	return controlplane.LoadBalancerCapability{Supported: false, Inferred: true}, nil
+}
+
+// clusterRunsServiceLB reports whether the cluster runs k3s's built-in servicelb (klipper-lb) — the
+// load-balancer controller that assigns type=LoadBalancer Services a real external IP on k3s/k3d with
+// no cloud provider (proven on k3d by the LoadBalancer e2e). Detecting servicelb directly is awkward:
+// it runs in-process in the k3s server, so there is no standalone controller Deployment to look for,
+// and the per-Service svclb-* DaemonSets exist only AFTER a LoadBalancer Service is created, so
+// neither is a reliable pre-exposure signal. The robust, zero-extra-RBAC signal is the k3s providerID
+// scheme itself: the same k3s cloud-controller that stamps each Node's spec.providerID as
+// "k3s://<node>" is the one that runs servicelb, so a k3s node IS a servicelb cluster. It reuses the
+// nodes get/list grant the capability ClusterRole already holds. The accepted tradeoff is a possible
+// over-report only when servicelb was explicitly turned off (k3s --disable=servicelb), a rare
+// non-default — acceptable for a read-only capability survey, where provisioning a real LoadBalancer
+// is the only exact test.
+func clusterRunsServiceLB(ctx context.Context, client kubernetes.Interface) (bool, error) {
+	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, fmt.Errorf("kube: listing nodes for servicelb detection: %w", err)
+	}
+	for i := range nodes.Items {
+		if providerIDScheme(nodes.Items[i].Spec.ProviderID) == "k3s" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// metalLBInstalled reports whether MetalLB is installed by finding its controller Deployment via the
+// standard MetalLB labels, in any namespace. It reuses the apps/deployments get/list grant the
+// capability ClusterRole already holds for ingress-controller detection, so it needs NO new RBAC. It
+// matches both the Helm-chart and static-manifest label schemes.
+func metalLBInstalled(ctx context.Context, client kubernetes.Interface) (bool, error) {
+	for _, selector := range []string{metalLBControllerSelector, metalLBLegacyControllerSelector} {
+		deps, err := client.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
+			LabelSelector: selector,
+		})
+		if err != nil {
+			return false, fmt.Errorf("kube: listing metallb controller deployments: %w", err)
+		}
+		if len(deps.Items) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // detectCertManager reports whether cert-manager is installed by looking for its API group in

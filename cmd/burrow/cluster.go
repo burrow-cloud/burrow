@@ -23,7 +23,7 @@ func toClientCaps(c controlplane.ClusterCapabilities) client.ClusterCapabilities
 	return client.ClusterCapabilities{
 		Ingress:      client.IngressCapability{Present: c.Ingress.Present, Classes: c.Ingress.Classes},
 		Storage:      client.StorageCapability{DefaultPresent: c.Storage.DefaultPresent, DefaultClass: c.Storage.DefaultClass, Classes: c.Storage.Classes},
-		LoadBalancer: client.LoadBalancerCapability{Supported: c.LoadBalancer.Supported, Inferred: c.LoadBalancer.Inferred},
+		LoadBalancer: client.LoadBalancerCapability{Supported: c.LoadBalancer.Supported, Inferred: c.LoadBalancer.Inferred, Provider: c.LoadBalancer.Provider},
 		CertManager:  client.CertManagerCapability{Present: c.CertManager.Present},
 		Provider:     client.ProviderCapability{Cloud: c.Provider.Cloud, Name: c.Provider.Name},
 		DNS:          client.DNSCapability{Configured: c.DNS.Configured, Providers: c.DNS.Providers},
@@ -108,9 +108,18 @@ func storageLine(s client.StorageCapability) string {
 
 func loadBalancerLine(l client.LoadBalancerCapability) string {
 	if l.Supported {
-		return "supported (inferred from the provider)"
+		switch l.Provider {
+		case "servicelb":
+			return "supported (k3s servicelb, free)"
+		case "metallb":
+			return "supported (MetalLB, free)"
+		case "":
+			return "supported (inferred from the provider)"
+		default:
+			return "supported (" + l.Provider + " cloud load balancer, billable)"
+		}
 	}
-	return "NodePort only (no cloud load balancer inferred)"
+	return "not detected (no LoadBalancer provider; install MetalLB for a free public IP)"
 }
 
 func certManagerLine(c client.CertManagerCapability) string {

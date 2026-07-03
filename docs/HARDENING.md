@@ -26,6 +26,30 @@ kubeconfig is the real trust boundary — so the highest-value hardening step is
 credential the *only* kubeconfig the agent can reach (point its `KUBECONFIG` at the scoped file, or
 run it in a container/VM that carries only that credential).
 
+### Trust surfaces
+
+Four credentials reach this cluster, and they are deliberately unequal. The table maps each surface
+to the credential it carries, what that lets it do, and what it cannot:
+
+| Surface | Credential it uses | What it can do | What it cannot do |
+|---|---|---|---|
+| You, via `kubectl` | your admin kubeconfig (`~/.kube/config`) | Everything on the cluster: any resource, any namespace, cluster-scoped objects, exec, delete, RBAC. No Burrow guardrails. | Nothing restricts it. Full cluster admin, and it is what installs Burrow. |
+| You, via `burrow` (setup and governance): `install`, `upgrade`, `cluster ingress install`, `config registry`, `config provider`, `env add`/`scan`, `guard set`, `addon`, `domain`, `audit` | your admin kubeconfig | Install/upgrade Burrow, write its namespaces/RBAC/secrets, set the guardrail policy, configure registry and DNS-provider credentials, install add-ons, manage DNS, read the audit log. | These are admin operations. `guard set` lives here on purpose: only the human, with admin, changes guardrails. |
+| You, via `burrow` (operate an app): `app deploy`/`status`/`logs`/`scale`/`rollback`/`autoscale`, `app config`/`secret`, `publish` | the scoped agent kubeconfig (falls back to admin if none) | Operate apps through burrowd, with every action guardrail-checked and audited. | Reach the cluster around burrowd; the guardrails gate what is allowed. You still have kubectl for raw access. |
+| Your agent, via `burrow-mcp` | only the scoped kubeconfig (`~/.burrow/agents/<env>`), granting exactly: proxy to the `burrowd` Service, and `get` the `burrowd-api-token` Secret | The `burrow_*` MCP tools only (deploy, status, logs, scale, rollback, autoscale, config, secret list/unset, expose, addons, domains, reachability, metrics/logs query, guard read-only, audit read), every mutating tool guardrailed and audited. | Anything else on the cluster: no arbitrary kubectl, no other Secrets, no other namespaces, no cluster-scoped reads, no exec, and it cannot change guardrails. It cannot leave burrowd. |
+
+**Two independent layers.** The scoped credential is the wall that keeps the agent from going around
+burrowd (touching the cluster directly). The guardrails are the policy for what is allowed through
+burrowd. Different mechanisms; you need both.
+
+**One honest limitation, stated plainly.** Inside burrowd, authorization today is a single shared API
+token the agent can read, so the scoped credential confines the agent to burrowd but does not by
+itself enforce which burrowd operation it may call. The guardrails and the MCP tool surface do that
+(and the guard tool is read-only). Per-principal authorization inside burrowd, so an agent identity
+is denied specific endpoints regardless of tooling, is future work, and the `principal` seam added in
+ADR-0038 is the groundwork for it. A hardening-conscious operator should lean on the guardrails plus
+environment isolation, not assume the scope alone is a per-operation boundary.
+
 ### Joining an already-installed cluster (multi-user)
 
 A second person on an already-installed cluster does not re-install: `burrow install <context>`

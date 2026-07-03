@@ -319,6 +319,82 @@ func TestConfirmInstallAutoResolvedGate(t *testing.T) {
 	}
 }
 
+func TestApplyDetail(t *testing.T) {
+	// The captured non-verbose apply summary condenses to just the count phrase.
+	for _, tc := range []struct {
+		in, want string
+	}{
+		{"✓ Applied 19 resource(s): 13 created, 6 configured.\n", "13 created, 6 configured"},
+		{"✓ Applied 1 resource(s): 1 unchanged.\n", "1 unchanged"},
+		// An unexpected shape falls back to the trimmed text rather than an empty detail.
+		{"  something else  ", "something else"},
+	} {
+		if got := applyDetail(tc.in); got != tc.want {
+			t.Errorf("applyDetail(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestIngressReporterDone(t *testing.T) {
+	// A bytes.Buffer is non-terminal, so the reporter prints only the final aligned line with a plain
+	// ✓ (no ANSI, no carriage return) and pads the component name into a column so lines scan.
+	var b bytes.Buffer
+	r := ingressReporter{w: &b}
+	r.working("ingress-nginx", "installing") // no-op on non-terminal
+	r.done("ingress-nginx", "installed (13 created, 6 configured), controller ready")
+	r.done("cert-manager", "already present, webhook ready")
+	r.done("ClusterIssuer", `"letsencrypt" applied (Let's Encrypt production)`)
+	s := b.String()
+
+	if strings.ContainsAny(s, "\r\x1b") {
+		t.Errorf("non-terminal reporter output must have no carriage return or ANSI escape:\n%q", s)
+	}
+	for _, want := range []string{
+		"  ✓ ingress-nginx  installed (13 created, 6 configured), controller ready\n",
+		"  ✓ cert-manager   already present, webhook ready\n",
+		`  ✓ ClusterIssuer  "letsencrypt" applied (Let's Encrypt production)` + "\n",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("reporter output missing per-component line %q:\n%s", want, s)
+		}
+	}
+	// The status text starts at the same column on every line (names aligned).
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	col := strings.Index(lines[0], "installed")
+	if col <= 0 || strings.Index(lines[1], "already") != col {
+		t.Errorf("component status columns are not aligned:\n%s", s)
+	}
+}
+
+func TestWriteIngressDone(t *testing.T) {
+	// Without --email the done block carries the actionable note that names how to add one later, plus
+	// the next-step hints.
+	var noEmail bytes.Buffer
+	writeIngressDone(&noEmail, ingressOptions{})
+	s := noEmail.String()
+	for _, want := range []string{
+		"Ingress and TLS are set up.",
+		"no --email set",
+		"burrow cluster ingress install --email <you@example.com>",
+		"burrow app publish <app> --host <name> --port <n> --tls",
+		"burrow app reachability <app>",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("done block missing %q:\n%s", want, s)
+		}
+	}
+
+	// With --email the note is suppressed; the next-step hints still print.
+	var withEmail bytes.Buffer
+	writeIngressDone(&withEmail, ingressOptions{email: "me@example.com"})
+	if strings.Contains(withEmail.String(), "no --email set") {
+		t.Errorf("the no-email note must not print when --email is given:\n%s", withEmail.String())
+	}
+	if !strings.Contains(withEmail.String(), "burrow app publish") {
+		t.Errorf("done block should still print the next-step hints with --email:\n%s", withEmail.String())
+	}
+}
+
 func TestConfirmInstall(t *testing.T) {
 	// The gate keys off the RESOLVED expose mode: only the billable loadbalancer path is gated.
 

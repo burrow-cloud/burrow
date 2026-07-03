@@ -55,6 +55,36 @@ func (e *MissingPrerequisitesError) Error() string {
 	return b.String()
 }
 
+// dnsProviderTypesList returns the supported provider types that can serve DNS as a
+// comma-separated list for user-facing guidance, sourced from the in-process provider registry
+// (ADR-0023) so it stays in step with the vendors Burrow actually supports.
+func dnsProviderTypesList() string {
+	var names []string
+	for _, t := range SupportedProviderTypes() {
+		for _, c := range t.Capabilities() {
+			if c == CapabilityDNS {
+				names = append(names, string(t))
+				break
+			}
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+// missingDNSProviderPrerequisite builds the DNS-provider prerequisite for host: no provider is
+// configured to automate the record. It names the supported provider types so the agent can ask
+// the user which vendor hosts the domain and offer to configure a supported one, instead of
+// defaulting to a manual registrar step; it still falls back to pointing DNS by hand when the
+// vendor is unsupported (ADR-0018, ADR-0023). This string surfaces to users, so it stays plain
+// (no em-dashes).
+func missingDNSProviderPrerequisite(host string) Prerequisite {
+	return Prerequisite{
+		Name:   "DNS provider",
+		Detail: "no DNS provider is configured; Burrow can automate the record for a supported provider (" + dnsProviderTypesList() + ")",
+		Fix:    fmt.Sprintf("ask the user which hosts %s, then have them run \"burrow config provider add <type>\". If their provider is not supported, point %s at the ingress address manually.", host, host),
+	}
+}
+
 // AsMissingPrerequisites reports whether err is (or wraps) a MissingPrerequisitesError and returns
 // it, mirroring AsGuardrail so a front end (the HTTP API, the MCP server) can surface the structured
 // checklist without parsing prose.

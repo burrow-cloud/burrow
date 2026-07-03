@@ -26,6 +26,8 @@ const (
 // send with the operation (empty means the cluster's default namespace and global guardrails);
 // it is what burrowd resolves, not a raw namespace. In follow mode Name (and Env) are empty
 // when the current context matches no registered handle (an "unregistered" current context).
+// AgentKubeconfig/AgentContext carry the resolved handle's scoped, burrowd-only credential
+// (ADR-0038) so the operate path can default to it; both are empty when the handle records none.
 type Resolved struct {
 	Name                  string
 	Context               string
@@ -33,6 +35,8 @@ type Resolved struct {
 	ControlPlaneNamespace string
 	Env                   string
 	Mode                  Mode
+	AgentKubeconfig       string
+	AgentContext          string
 }
 
 // Resolve decides which environment a command targets (ADR-0036).
@@ -58,6 +62,8 @@ func Resolve(cfg *Config, kubeconfigPath string) (Resolved, error) {
 			ControlPlaneNamespace: env.controlPlaneNamespaceOrDefault(),
 			Env:                   env.Env,
 			Mode:                  ModePinned,
+			AgentKubeconfig:       env.AgentKubeconfig,
+			AgentContext:          env.AgentContext,
 		}, nil
 	}
 
@@ -72,9 +78,11 @@ func Resolve(cfg *Config, kubeconfigPath string) (Resolved, error) {
 		Mode:                  ModeFollowing,
 	}
 	if cfg != nil {
-		if env, ok := cfg.lookupByContext(context); ok {
+		if env, ok := cfg.LookupByContext(context); ok {
 			resolved.Name = env.Name
 			resolved.Env = env.Env
+			resolved.AgentKubeconfig = env.AgentKubeconfig
+			resolved.AgentContext = env.AgentContext
 		}
 	}
 	return resolved, nil

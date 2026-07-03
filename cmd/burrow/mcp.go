@@ -276,7 +276,7 @@ func (t cliTool) preview() string {
 	return fmt.Sprintf("Connect Burrow to %s.\n\n"+
 		"This will run:\n"+
 		"  %s\n\n"+
-		"burrow-mcp is a stdio MCP server that uses your kubeconfig and active environment, so no extra config is needed.\n\n"+
+		"burrow-mcp is a stdio MCP server that uses the scoped, burrowd-only credential Burrow mints at install and your active environment, so no extra config is needed and the agent reaches only the control plane.\n\n"+
 		"Run `burrow mcp %s install` to apply.\n", t.display, t.addCommand(), t.key)
 }
 
@@ -387,7 +387,7 @@ func (t claudeTool) preview() string {
 		}
 	}
 
-	b.WriteString("burrow-mcp is a stdio MCP server that uses your kubeconfig and active environment, so no extra config is needed.\n\n")
+	b.WriteString("burrow-mcp is a stdio MCP server that uses the scoped, burrowd-only credential Burrow mints at install and your active environment, so no extra config is needed and the agent reaches only the control plane.\n\n")
 	fmt.Fprintf(&b, "Run `burrow mcp %s install` to apply.\n", t.cli.key)
 	return b.String()
 }

@@ -7,16 +7,36 @@ they only govern operations that go **through the control plane**. They are a re
 only when the control plane is your agent's **only** path to the cluster
 ([ADR-0021](adr/0021-guardrails-require-control-plane-only-agent-access.md)).
 
-A coding agent (Claude Code, Cursor, …) runs with a shell. Unless you restrict it, it can:
+## The scoped agent credential is the boundary
+
+At `burrow install` Burrow mints a **scoped, burrowd-only credential** for the agent
+([ADR-0038](adr/0038-scoped-agent-credential.md)): a `burrow-agent` ServiceAccount with a narrow
+Role granting only what the client needs to reach burrowd (proxy access to the burrowd Service and
+`get` on the API-token Secret) and nothing else — no pods, no other secrets, no other namespaces,
+no cluster-wide read. It writes a self-contained kubeconfig for that credential under
+`~/.burrow/agents/` (never into `~/.kube/config`). The human keeps their own admin kubeconfig for
+privileged setup and governance (`install`, `upgrade`, `guard set`, `env add`, registry/provider
+credentials).
+
+`burrow-mcp` and the CLI operate path (`deploy`, `status`, `logs`, `rollback`, `scale`, …) default
+to that scoped kubeconfig, so **the agent's reachable credential is confined to the control plane**:
+even a shelled-out `kubectl` pointed at it is denied everything except reaching burrowd, and the
+guardrails become binding by construction rather than resting only on the shell-denies below. The
+kubeconfig is the real trust boundary — so the highest-value hardening step is to make the scoped
+credential the *only* kubeconfig the agent can reach (point its `KUBECONFIG` at the scoped file, or
+run it in a container/VM that carries only that credential).
+
+A coding agent (Claude Code, Cursor, …) still runs with a shell, so the shell-denies below are
+defense in depth on top of that boundary. Unless you restrict it, it can:
 
 - run the `burrow` CLI directly — including `burrow guard set`, changing the very guardrails
   meant to constrain it; and
-- use `kubectl` with your kubeconfig to operate the cluster directly, bypassing Burrow
-  entirely.
+- use `kubectl` with a broader kubeconfig — if one is still reachable in its environment — to
+  operate the cluster directly, bypassing Burrow entirely.
 
-Burrow can't prevent this from the inside — it has no control over your agent's other tools.
-**You** close the gap, in your agent's permission settings. The principle, whatever agent you
-use:
+Burrow can't fully prevent this from the inside — it has no control over your agent's other tools or
+which kubeconfig its environment exposes. **You** close the gap, in your agent's permission settings
+and by confining its kubeconfig to the scoped credential. The principle, whatever agent you use:
 
 - **Deny the `burrow` CLI** → the agent can't `guard set` and can't shell around the guarded
   tools; it uses Burrow's MCP tools (`burrow_deploy`, `burrow_scale`, …), where the guardrails
@@ -64,8 +84,9 @@ denies.
 permission-bypass mode (e.g. `--dangerously-skip-permissions` / `bypassPermissions`). This
 posture is a real boundary for a *cooperative* agent that honors its configuration — the
 realistic threat is an over-eager assistant, not a hostile one — not an escape-proof jail. For
-stronger isolation, run the agent in a container or VM whose only reachable credential is
-Burrow's.
+stronger isolation, run the agent in a container or VM whose only reachable credential is the
+scoped agent kubeconfig Burrow mints (above), so a bypass still reaches nothing but the control
+plane.
 
 > The permission/deny-rule system shown here is specific to Claude Code. Other agent CLIs
 > (Cursor and others) have their own permission models — apply the same principle (deny the

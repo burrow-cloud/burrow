@@ -241,7 +241,7 @@ func runSQLJob(t *testing.T, ctx context.Context, client kubernetes.Interface, a
 					RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{{
 						Name:    "psql",
-						Image:   "postgres:17.4",
+						Image:   "postgres:17-alpine",
 						Command: []string{"sh", "-c", "set -e\n" + script},
 						EnvFrom: []corev1.EnvFromSource{{
 							SecretRef: &corev1.SecretEnvSource{
@@ -287,7 +287,7 @@ psql "$DATABASE_URL" -tAc "SELECT id FROM t WHERE id = 42;" | grep -q 42`
 					RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{{
 						Name:    "psql",
-						Image:   "postgres:17.4",
+						Image:   "postgres:17-alpine",
 						Command: []string{"sh", "-c", script},
 						// DATABASE_URL comes from the app's per-app Secret, exactly as the app reads it.
 						EnvFrom: []corev1.EnvFromSource{{

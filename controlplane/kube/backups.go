@@ -30,7 +30,7 @@ const (
 	// backupImage is the image the backup/restore Jobs run: the official postgres image carries
 	// pg_dump and pg_restore. It matches the add-on instance image (ADR-0031/0032) and is already on
 	// the CI preload list, so e2e adds no new image.
-	backupImage = "postgres:17.4"
+	backupImage = "postgres:17-alpine"
 	// backupJobTimeout caps how long burrowd waits for a backup/restore Job to complete.
 	backupJobTimeout = 10 * time.Minute
 	// backupJobPoll is the interval between Job-status reads while waiting.

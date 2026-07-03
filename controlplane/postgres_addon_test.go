@@ -44,8 +44,8 @@ func TestPostgresCatalogEntry(t *testing.T) {
 	if !ok {
 		t.Fatal("AddonPostgres is not in the catalog")
 	}
-	if spec.Image != "postgres:17.4" {
-		t.Errorf("image = %q, want postgres:17.4", spec.Image)
+	if spec.Image != "postgres:17-alpine" {
+		t.Errorf("image = %q, want postgres:17-alpine", spec.Image)
 	}
 	if spec.Port != 5432 {
 		t.Errorf("port = %d, want 5432", spec.Port)

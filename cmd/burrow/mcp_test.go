@@ -344,6 +344,120 @@ func TestMcpClaudeInstallAddsMcpAndHardens(t *testing.T) {
 	}
 }
 
+// TestMcpClaudeInstallDenyKubectlAddsBothRules confirms --deny-kubectl writes BOTH the burrow-CLI and
+// the kubectl deny rules, records both in the output, and does not print the recommendation to enable
+// what is already enabled.
+func TestMcpClaudeInstallDenyKubectlAddsBothRules(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	fakeCLI(t, true, false) // on PATH, mcp not yet configured
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude", "install", "--deny-kubectl"}, &out, &out); err != nil {
+		t.Fatalf("claude install --deny-kubectl: %v", err)
+	}
+
+	deny := claudeDeny(t, settings)
+	if countRule(deny, "Bash(burrow *)") != 1 || countRule(deny, "Bash(kubectl *)") != 1 {
+		t.Errorf("deny rules = %v, want exactly one each of Bash(burrow *) and Bash(kubectl *)", deny)
+	}
+	if !strings.Contains(out.String(), "Bash(burrow *) and Bash(kubectl *)") {
+		t.Errorf("output should record both rules were added:\n%s", out.String())
+	}
+	// The recommendation only nudges users who did NOT pass the flag.
+	if strings.Contains(out.String(), "--deny-kubectl") {
+		t.Errorf("output should not recommend a flag that was already passed:\n%s", out.String())
+	}
+}
+
+// TestMcpClaudeInstallRecommendsDenyKubectl confirms the default install (no --deny-kubectl) adds only
+// the burrow rule but prints the recommendation to also block kubectl.
+func TestMcpClaudeInstallRecommendsDenyKubectl(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	fakeCLI(t, true, false)
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude", "install"}, &out, &out); err != nil {
+		t.Fatalf("claude install: %v", err)
+	}
+	deny := claudeDeny(t, settings)
+	if countRule(deny, "Bash(burrow *)") != 1 || countRule(deny, "Bash(kubectl *)") != 0 {
+		t.Errorf("deny rules = %v, want only Bash(burrow *)", deny)
+	}
+	for _, want := range []string{
+		"Recommended: keep every cluster change flowing through Burrow's guardrails and audit log",
+		"burrow mcp claude install --deny-kubectl",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("default install missing the recommendation %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestMcpClaudeInstallDenyKubectlIdempotent runs --deny-kubectl twice: the second run adds no
+// duplicate of either rule and preserves the pre-existing unrelated deny/allow rules.
+func TestMcpClaudeInstallDenyKubectlIdempotent(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pre := `{
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf *)"
+    ],
+    "allow": [
+      "Bash(docker *)"
+    ]
+  }
+}
+`
+	if err := os.WriteFile(settings, []byte(pre), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeCLI(t, true, true) // mcp already configured, so only the harden step can act
+
+	for i := 0; i < 2; i++ {
+		var out bytes.Buffer
+		if err := run(context.Background(), []string{"mcp", "claude", "install", "--deny-kubectl"}, &out, &out); err != nil {
+			t.Fatalf("claude install --deny-kubectl (run %d): %v", i+1, err)
+		}
+	}
+
+	deny := claudeDeny(t, settings)
+	if countRule(deny, "Bash(burrow *)") != 1 || countRule(deny, "Bash(kubectl *)") != 1 {
+		t.Errorf("deny rules = %v, want exactly one each after two runs", deny)
+	}
+	if countRule(deny, "Bash(rm -rf *)") != 1 {
+		t.Errorf("pre-existing deny rule dropped: %v", deny)
+	}
+	root := readCursor(t, settings)
+	perms, _ := root["permissions"].(map[string]any)
+	allow, _ := perms["allow"].([]any)
+	if len(allow) != 1 || allow[0] != "Bash(docker *)" {
+		t.Errorf("allow rules dropped: %#v", perms["allow"])
+	}
+}
+
+// TestMcpClaudeInstallNoHardenBeatsDenyKubectl confirms --no-harden wins over --deny-kubectl: neither
+// rule is written, the settings file is never created, and the ignored-flag note is printed.
+func TestMcpClaudeInstallNoHardenBeatsDenyKubectl(t *testing.T) {
+	settings := mcpTempClaudeSettings(t)
+	fakeCLI(t, true, false)
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"mcp", "claude", "install", "--no-harden", "--deny-kubectl"}, &out, &out); err != nil {
+		t.Fatalf("claude install --no-harden --deny-kubectl: %v", err)
+	}
+	assertNoFile(t, settings)
+	assertNoFile(t, settings+".bak")
+	if !strings.Contains(out.String(), "--deny-kubectl was ignored because hardening is off") {
+		t.Errorf("expected the ignored-flag note:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "Bash(kubectl *)") || strings.Contains(out.String(), "added Bash(burrow *)") {
+		t.Errorf("no rule should be reported added:\n%s", out.String())
+	}
+}
+
 // TestMcpClaudeInstallPreservesAndBacksUp confirms the harden merge keeps unrelated settings and a
 // pre-existing deny rule, and backs the original up byte-for-byte.
 func TestMcpClaudeInstallPreservesAndBacksUp(t *testing.T) {

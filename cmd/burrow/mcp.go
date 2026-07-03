@@ -90,10 +90,33 @@ const (
 // but not a differently named tool like `burrowctl`. docs/HARDENING.md documents the same string.
 const claudeDenyRule = "Bash(burrow *)"
 
-// claudeHardenNote is printed after an install that added the deny rule, pointing the user at the
-// fuller lockdown (kubectl/helm) they may also want. No em-dashes: it is user-facing output.
+// claudeDenyKubectlRule blocks the agent from running kubectl directly, so every cluster change goes
+// through Burrow's guarded path rather than around it. It is opt-in (--deny-kubectl): kubectl is a
+// general tool Burrow does not own, so denying it by default would be overreach.
+const claudeDenyKubectlRule = "Bash(kubectl *)"
+
+// claudeHardenNote is printed after an install that added only the burrow-CLI deny rule, pointing the
+// user at the fuller lockdown (kubectl/helm) they may also want. No em-dashes: it is user-facing output.
 const claudeHardenNote = "Blocked the agent from running the burrow CLI directly (added Bash(burrow *) to " +
 	"~/.claude/settings.json). To also stop it bypassing Burrow with kubectl or helm, see docs/HARDENING.md.\n"
+
+// claudeHardenKubectlNote replaces claudeHardenNote when --deny-kubectl was passed: it records that
+// both the burrow-CLI and the kubectl deny rules were added, keeping every cluster change on Burrow's
+// guarded, audited path. No em-dashes: it is user-facing output.
+const claudeHardenKubectlNote = "Blocked the agent from running the burrow CLI and kubectl directly (added " +
+	"Bash(burrow *) and Bash(kubectl *) to ~/.claude/settings.json), so every cluster change flows through " +
+	"Burrow's guardrails and audit log.\n"
+
+// claudeDenyKubectlRecommendation is printed after the (burrow-only) harden note when --deny-kubectl
+// was NOT passed: it nudges the user toward the fuller lockdown without forcing it. No em-dashes.
+const claudeDenyKubectlRecommendation = "Recommended: keep every cluster change flowing through Burrow's " +
+	"guardrails and audit log by also blocking the agent from running kubectl directly. Enable it with:\n" +
+	"  burrow mcp claude install --deny-kubectl\n"
+
+// claudeDenyKubectlIgnoredNote is printed when both --no-harden and --deny-kubectl were passed:
+// --no-harden wins (Burrow manages no permissions), so --deny-kubectl has nothing to act on. No em-dashes.
+const claudeDenyKubectlIgnoredNote = "Note: --deny-kubectl was ignored because hardening is off " +
+	"(--no-harden means you manage permissions yourself).\n"
 
 // mcpTryPrompt is appended after any successful install, giving the user a concrete first thing to
 // ask their agent. It leads with a blank line so it sits below the success line. No em-dashes.
@@ -153,6 +176,7 @@ const mcpBuiltinTools = "claude, cursor, codex, copilot, opencode"
 
 func newMcpCmd() *cobra.Command {
 	var noHarden bool
+	var denyKubectl bool
 	cmd := &cobra.Command{
 		Use:   "mcp [tool] [install]",
 		Short: "Connect Burrow to your AI agent",
@@ -163,10 +187,12 @@ func newMcpCmd() *cobra.Command {
 		Example: "  # See what connecting Claude Code will add\n" +
 			"  burrow mcp claude\n\n" +
 			"  # Apply it\n" +
-			"  burrow mcp claude install",
+			"  burrow mcp claude install\n\n" +
+			"  # Apply it and also block the agent from running kubectl directly\n" +
+			"  burrow mcp claude install --deny-kubectl",
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runMcp(args, cmd.OutOrStdout(), noHarden)
+			return runMcp(args, cmd.OutOrStdout(), noHarden, denyKubectl)
 		},
 	}
 	// Connecting Claude Code also denies the burrow CLI in its shell so the agent cannot bypass the
@@ -174,13 +200,18 @@ func newMcpCmd() *cobra.Command {
 	// flag is a no-op for every other tool. No em-dashes in the help string: it is user-facing.
 	cmd.Flags().BoolVar(&noHarden, "no-harden", false,
 		"For Claude Code, skip adding the burrow CLI deny rule to ~/.claude/settings.json (manage permissions yourself)")
+	// --deny-kubectl additionally denies kubectl in the agent's shell so every cluster change goes
+	// through Burrow's guarded, audited path. Opt-in: kubectl is a general tool Burrow does not own, so
+	// blocking it by default would be overreach. --no-harden wins over it (it skips all Burrow denies).
+	cmd.Flags().BoolVar(&denyKubectl, "deny-kubectl", false,
+		"For Claude Code, also add the kubectl deny rule to ~/.claude/settings.json (keep every cluster change on Burrow's guarded path)")
 	return cmd
 }
 
 // runMcp routes the positional args: none prints the overview, one previews a tool, and two applies
 // it when the second arg is the literal `install`. It mutates nothing except on the two-arg install
 // path.
-func runMcp(args []string, w io.Writer, noHarden bool) error {
+func runMcp(args []string, w io.Writer, noHarden, denyKubectl bool) error {
 	if len(args) == 0 {
 		fmt.Fprint(w, mcpOverview)
 		return nil
@@ -192,10 +223,12 @@ func runMcp(args []string, w io.Writer, noHarden bool) error {
 		fmt.Fprintf(w, mcpUnknownToolMessage, args[0])
 		return nil
 	}
-	// Claude's install can also harden Claude Code's settings (the burrow-CLI deny rule); --no-harden
-	// turns that off. The flag is a no-op for every other tool, so it only touches the claude adapter.
+	// Claude's install can also harden Claude Code's settings (the burrow-CLI deny rule, plus kubectl
+	// when --deny-kubectl is set); --no-harden turns all of it off. These flags are no-ops for every
+	// other tool, so they only touch the claude adapter.
 	if ct, ok := tool.(claudeTool); ok {
 		ct.harden = !noHarden
+		ct.denyKubectl = denyKubectl
 		tool = ct
 	}
 	if len(args) == 1 {
@@ -296,13 +329,24 @@ func (t cliTool) install(w io.Writer) error {
 // cannot run the burrow CLI directly and shell around the control-plane guardrails (e.g. `burrow guard
 // set`). The harden step is idempotent and preserves every other setting; `--no-harden` turns it off.
 type claudeTool struct {
-	cli    cliTool // the generic mcp-add adapter, reused rather than duplicated
-	harden bool    // whether install also writes the deny rule (default true; --no-harden turns off)
+	cli         cliTool // the generic mcp-add adapter, reused rather than duplicated
+	harden      bool    // whether install also writes the deny rules (default true; --no-harden turns off)
+	denyKubectl bool    // whether hardening also denies kubectl (opt-in via --deny-kubectl)
+}
+
+// hardenRules is the set of deny rules the harden step writes: always the burrow-CLI rule, plus the
+// kubectl rule when --deny-kubectl was passed. Order is stable so appended rules read predictably.
+func (t claudeTool) hardenRules() []string {
+	rules := []string{claudeDenyRule}
+	if t.denyKubectl {
+		rules = append(rules, claudeDenyKubectlRule)
+	}
+	return rules
 }
 
 func (t claudeTool) preview() string {
 	mcpDone := t.cli.configured()
-	hardenDone := claudeHardened()
+	hardenDone := claudeHardened(t.hardenRules())
 	// Both parts settled (harden off counts the harden part as settled): nothing to do.
 	if mcpDone && (!t.harden || hardenDone) {
 		return fmt.Sprintf("Burrow is already configured in %s. Nothing to do.\n", t.cli.display)
@@ -319,14 +363,28 @@ func (t claudeTool) preview() string {
 
 	if t.harden {
 		if hardenDone {
-			fmt.Fprintf(&b, "The %s deny rule is already in %s.\n\n", claudeDenyRule, claudeSettingsDisplay)
+			if t.denyKubectl {
+				fmt.Fprintf(&b, "The %s and %s deny rules are already in %s.\n\n", claudeDenyRule, claudeDenyKubectlRule, claudeSettingsDisplay)
+			} else {
+				fmt.Fprintf(&b, "The %s deny rule is already in %s.\n\n", claudeDenyRule, claudeSettingsDisplay)
+			}
+		} else if t.denyKubectl {
+			fmt.Fprintf(&b, "It will also add %s and %s to %s deny rules, so the agent cannot run the\n"+
+				"burrow CLI or kubectl directly (either would let it bypass the control-plane guardrails), keeping\n"+
+				"every cluster change on Burrow's guarded, audited path. Pass --no-harden to skip this and manage\n"+
+				"permissions yourself.\n\n", claudeDenyRule, claudeDenyKubectlRule, claudeSettingsDisplay)
 		} else {
 			fmt.Fprintf(&b, "It will also add %s to %s deny rules, so the agent cannot run the burrow CLI\n"+
 				"directly (which would let it bypass the control-plane guardrails). Pass --no-harden to skip\n"+
-				"this and manage permissions yourself.\n\n", claudeDenyRule, claudeSettingsDisplay)
+				"this and manage permissions yourself.\n\n"+
+				"Recommended: also pass --deny-kubectl to block the agent from running kubectl directly, so every\n"+
+				"cluster change flows through Burrow's guardrails and audit log.\n\n", claudeDenyRule, claudeSettingsDisplay)
 		}
 	} else {
 		fmt.Fprintf(&b, "Hardening is off (--no-harden), so the %s deny rule will not be added.\n\n", claudeDenyRule)
+		if t.denyKubectl {
+			b.WriteString("--deny-kubectl is ignored because hardening is off.\n\n")
+		}
 	}
 
 	b.WriteString("burrow-mcp is a stdio MCP server that uses your kubeconfig and active environment, so no extra config is needed.\n\n")
@@ -340,9 +398,15 @@ func (t claudeTool) install(w io.Writer) error {
 		return err
 	}
 
+	// --no-harden wins over --deny-kubectl: it skips every Burrow-managed deny, so there is nothing for
+	// --deny-kubectl to act on. Say so rather than silently dropping the flag.
+	if !t.harden && t.denyKubectl {
+		fmt.Fprint(w, claudeDenyKubectlIgnoredNote)
+	}
+
 	hardenChanged := false
 	if t.harden {
-		if hardenChanged, err = ensureClaudeDenyRule(); err != nil {
+		if hardenChanged, err = ensureClaudeDenyRules(t.hardenRules()); err != nil {
 			return err
 		}
 	}
@@ -358,7 +422,13 @@ func (t claudeTool) install(w io.Writer) error {
 		fmt.Fprintf(w, "Added Burrow to %s. Restart %s to pick it up.\n", t.cli.display, t.cli.display)
 	}
 	if hardenChanged {
-		fmt.Fprint(w, claudeHardenNote)
+		if t.denyKubectl {
+			fmt.Fprint(w, claudeHardenKubectlNote)
+		} else {
+			// Denied only the burrow CLI: nudge the user toward the fuller lockdown they did not opt into.
+			fmt.Fprint(w, claudeHardenNote)
+			fmt.Fprint(w, claudeDenyKubectlRecommendation)
+		}
 	}
 	if outcome == addDone || hardenChanged {
 		fmt.Fprint(w, mcpTryPrompt)
@@ -366,8 +436,8 @@ func (t claudeTool) install(w io.Writer) error {
 	return nil
 }
 
-// claudeHardened reports whether ~/.claude/settings.json already denies the burrow CLI.
-func claudeHardened() bool {
+// claudeHardened reports whether ~/.claude/settings.json already denies every rule in rules.
+func claudeHardened(rules []string) bool {
 	path, err := claudeSettingsPath()
 	if err != nil {
 		return false
@@ -380,27 +450,40 @@ func claudeHardened() bool {
 	if json.Unmarshal(data, &root) != nil {
 		return false
 	}
-	return claudeDenyPresent(root)
+	return claudeDenyPresent(root, rules)
 }
 
-// claudeDenyPresent reports whether the settings tree already lists the burrow-CLI deny rule under
-// permissions.deny.
-func claudeDenyPresent(root map[string]any) bool {
+// claudeDenySet reads permissions.deny into a set of the rule strings present, so membership tests do
+// not rescan the slice.
+func claudeDenySet(root map[string]any) map[string]bool {
 	perms, _ := root["permissions"].(map[string]any)
 	deny, _ := perms["deny"].([]any)
+	set := make(map[string]bool, len(deny))
 	for _, r := range deny {
-		if s, _ := r.(string); s == claudeDenyRule {
-			return true
+		if s, ok := r.(string); ok {
+			set[s] = true
 		}
 	}
-	return false
+	return set
 }
 
-// ensureClaudeDenyRule merges the burrow-CLI deny rule into ~/.claude/settings.json, preserving every
-// other key (other permissions, allow rules, unrelated settings) and backing up an existing file
-// first. It reports whether it changed anything, returning false (and writing nothing) when the rule
-// is already present, so a repeat install is idempotent.
-func ensureClaudeDenyRule() (bool, error) {
+// claudeDenyPresent reports whether every rule in rules is already listed under permissions.deny.
+func claudeDenyPresent(root map[string]any, rules []string) bool {
+	have := claudeDenySet(root)
+	for _, rule := range rules {
+		if !have[rule] {
+			return false
+		}
+	}
+	return true
+}
+
+// ensureClaudeDenyRules merges each rule into ~/.claude/settings.json's permissions.deny, preserving
+// every other key (other permissions, allow rules, unrelated settings) and backing up an existing
+// file once before it writes. It adds only the rules not already present (so no rule is duplicated)
+// and reports whether it changed anything, returning false (and writing nothing) when every rule is
+// already there, so a repeat install is idempotent.
+func ensureClaudeDenyRules(rules []string) (bool, error) {
 	path, err := claudeSettingsPath()
 	if err != nil {
 		return false, err
@@ -418,7 +501,14 @@ func ensureClaudeDenyRule() (bool, error) {
 		return false, fmt.Errorf("reading %s: %w", claudeSettingsDisplay, err)
 	}
 
-	if claudeDenyPresent(root) {
+	have := claudeDenySet(root)
+	var toAdd []string
+	for _, rule := range rules {
+		if !have[rule] {
+			toAdd = append(toAdd, rule)
+		}
+	}
+	if len(toAdd) == 0 {
 		return false, nil
 	}
 
@@ -427,7 +517,9 @@ func ensureClaudeDenyRule() (bool, error) {
 		perms = map[string]any{}
 	}
 	deny, _ := perms["deny"].([]any)
-	deny = append(deny, claudeDenyRule)
+	for _, rule := range toAdd {
+		deny = append(deny, rule)
+	}
 	perms["deny"] = deny
 	root["permissions"] = perms
 

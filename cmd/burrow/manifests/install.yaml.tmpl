@@ -153,6 +153,68 @@ subjects:
     name: burrowd
     namespace: {{.Namespace}}
 ---
+# The scoped agent credential (ADR-0038): a ServiceAccount whose reachable capability is EXACTLY
+# "the guardrailed control plane" and nothing else. `burrow install` mints a long-lived token for
+# it (the Secret below) and writes a self-contained, burrowd-only kubeconfig under ~/.burrow/; the
+# agent — and any `kubectl` it shells out to — is confined to reaching burrowd by this Role. The
+# human keeps their own admin kubeconfig for privileged and governance work. All users' agents
+# share this one ServiceAccount for now; per-user ServiceAccounts are a deliberate, additive future
+# step tied to SSO (ADR-0038 §5).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{.AgentServiceAccount}}
+  namespace: {{.Namespace}}
+---
+# The agent's ENTIRE grant: proxy access to the burrowd Service (so the client reaches burrowd
+# through the Kubernetes API-server proxy, ADR-0014) and `get` on the burrowd-api-token Secret so
+# it can read the control-plane API token. Both are resourceNames-scoped to exactly those objects.
+# There is nothing else: no pods, no other services, no other secrets, no list/watch, no other
+# namespace, no cluster-scoped read — so the guardrails in burrowd become binding by construction
+# (ADR-0021), not merely by shell-denies.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{.AgentServiceAccount}}
+  namespace: {{.Namespace}}
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames: ["burrowd", "burrowd:{{.Port}}", "http:burrowd:", "https:burrowd:"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["burrowd-api-token"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{.AgentServiceAccount}}
+  namespace: {{.Namespace}}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{.AgentServiceAccount}}
+subjects:
+  - kind: ServiceAccount
+    name: {{.AgentServiceAccount}}
+    namespace: {{.Namespace}}
+---
+# A long-lived ServiceAccount token for the agent (ADR-0038 §3). The token controller populates
+# .data.token and .data["ca.crt"] once this Secret exists; `burrow install` polls for that and mints
+# the scoped kubeconfig from it. A long-lived token is acceptable because the RBAC narrowness above
+# is the real control and the token is revocable by deleting this Secret or the ServiceAccount; a
+# bound short-lived token (TokenRequest) or a client certificate are noted future tightenings.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: burrow-agent-token
+  namespace: {{.Namespace}}
+  annotations:
+    kubernetes.io/service-account.name: {{.AgentServiceAccount}}
+type: kubernetes.io/service-account-token
+---
 # The ONE cluster-scoped grant burrowd holds (ADR-0034). It is read-only — get/list only — on
 # non-sensitive cluster-capability metadata: nodes (to infer the cloud provider), storageclasses
 # (the default StorageClass), and ingressclasses (which ingress controller is installed). This is

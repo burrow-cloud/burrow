@@ -15,6 +15,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/burrow-cloud/burrow/localconfig"
 )
@@ -221,12 +223,18 @@ func TestTargetLinePrintsToStderrJSONStdoutClean(t *testing.T) {
 // guardrails (ADR-0036).
 func TestRecordEnvironmentRecordsEmptyEnv(t *testing.T) {
 	tempConfig(t)
-	if err := recordEnvironment(installArgs{
+	// The scoped-agent mint (ADR-0038) needs a real cluster; stub it to a no-op for this handle test.
+	origMint := mintAgentCredentialFn
+	mintAgentCredentialFn = func(_ context.Context, _ installArgs, _ string, _ kubernetes.Interface, _ io.Writer) (string, string, error) {
+		return "", "", nil
+	}
+	t.Cleanup(func() { mintAgentCredentialFn = origMint })
+	if err := recordEnvironment(context.Background(), installArgs{
 		environment:  "prod",
 		kubeContext:  "do-nyc1-prod",
 		namespace:    "burrow",
 		appNamespace: "burrow-apps",
-	}, io.Discard); err != nil {
+	}, fake.NewSimpleClientset(), io.Discard); err != nil {
 		t.Fatalf("recordEnvironment: %v", err)
 	}
 	cfg, err := localconfig.Load()

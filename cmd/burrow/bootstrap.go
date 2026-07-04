@@ -40,6 +40,14 @@ const ipifyURL = "https://api.ipify.org"
 // k3sInstallScriptURL is the upstream k3s install script the real installer pipes to a shell.
 const k3sInstallScriptURL = "https://get.k3s.io"
 
+// defaultK3sAPIReadyBudget is how long bootstrap polls the freshly installed k3s API for readiness
+// before giving up. It is deliberately generous: on a small VPS k3s's FIRST start is slow (image
+// unpack, datastore init) and the upstream installer's `systemctl start k3s` can time out systemd's
+// readiness wait and exit non-zero even though k3s comes up fine moments later. The k3s API answering
+// — not the installer's exit code — is bootstrap's success criterion, so the budget must sit well past
+// a slow first-start. Configurable via --k3s-api-timeout.
+const defaultK3sAPIReadyBudget = 4 * time.Minute
+
 // bootstrapArgs are the resolved inputs to a `burrow cluster bootstrap` run on the VPS.
 type bootstrapArgs struct {
 	publicIP     string
@@ -49,6 +57,8 @@ type bootstrapArgs struct {
 	image        string
 	wait         bool
 	yes          bool
+	// apiReadyBudget is how long to poll the freshly installed k3s API for readiness before failing.
+	apiReadyBudget time.Duration
 }
 
 // bootstrapWarning is the pre-flight warning shown before bootstrap mutates the machine. bootstrap is
@@ -138,10 +148,13 @@ type k3sInstaller interface {
 	// Running reports whether k3s is already installed and its API answering, so bootstrap is
 	// idempotent and skips the install.
 	Running(ctx context.Context) (bool, error)
-	// Install runs the upstream k3s installer with cmd's flags.
+	// Install runs the upstream k3s installer with cmd's flags. It returns the installer's exit
+	// error (if any); a non-zero exit is NOT on its own fatal — a slow first-start can time out
+	// systemd's readiness wait while k3s still comes up — so the caller polls WaitForAPI to decide.
 	Install(ctx context.Context, cmd k3sInstallCommand) error
-	// WaitForAPI blocks until the freshly installed k3s API server answers, or ctx is done.
-	WaitForAPI(ctx context.Context) error
+	// WaitForAPI polls until the freshly installed k3s API server answers, giving up after budget
+	// (or when ctx is done). The API answering within the budget is bootstrap's success criterion.
+	WaitForAPI(ctx context.Context, budget time.Duration) error
 }
 
 // newK3sInstaller builds the k3s installer for the given local admin kubeconfig path. It is a package
@@ -217,15 +230,16 @@ func (i *execK3sInstaller) Install(ctx context.Context, cmd k3sInstallCommand) e
 }
 
 // WaitForAPI polls the local k3s API through the admin kubeconfig until a version probe succeeds or
-// the deadline passes. Bounded so a wedged install fails clearly instead of hanging forever.
-func (i *execK3sInstaller) WaitForAPI(ctx context.Context) error {
-	deadline := time.Now().Add(2 * time.Minute)
+// budget elapses. Bounded so a wedged install fails clearly instead of hanging forever; the budget is
+// generous enough to outlast a slow first-start (see defaultK3sAPIReadyBudget).
+func (i *execK3sInstaller) WaitForAPI(ctx context.Context, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
 	for {
 		if err := i.probeAPI(ctx); err == nil {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("k3s API did not become reachable within 2m; check `systemctl status k3s`")
+			return fmt.Errorf("the k3s API did not answer within %s", budget)
 		}
 		select {
 		case <-ctx.Done():
@@ -283,6 +297,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&a.image, "burrowd-image", defaultBurrowdImage(), "burrowd container image to deploy (must be pullable by the cluster)")
 	cmd.Flags().BoolVar(&a.wait, "wait", true, "wait for the control plane to become ready before printing the join token")
 	cmd.Flags().BoolVar(&a.yes, "yes", false, "skip the confirmation prompt (for intentional automation)")
+	cmd.Flags().DurationVar(&a.apiReadyBudget, "k3s-api-timeout", defaultK3sAPIReadyBudget, "how long to wait for the k3s API to answer after install (a slow first-start on a small VPS needs a generous budget)")
 	return cmd
 }
 
@@ -315,7 +330,11 @@ func runBootstrap(ctx context.Context, a bootstrapArgs, stdout, stderr io.Writer
 		}
 	}
 
-	if err := ensureK3sInstalled(ctx, installer, buildK3sInstallCommand(ip), stdout); err != nil {
+	budget := a.apiReadyBudget
+	if budget <= 0 {
+		budget = defaultK3sAPIReadyBudget
+	}
+	if err := ensureK3sInstalled(ctx, installer, buildK3sInstallCommand(ip), budget, stdout, stderr); err != nil {
 		return err
 	}
 
@@ -358,9 +377,14 @@ func confirmBootstrap(yes bool, stderr io.Writer) (bool, error) {
 	return confirmed, nil
 }
 
-// ensureK3sInstalled installs k3s unless it is already running (idempotent), waiting for the API
-// after a fresh install.
-func ensureK3sInstalled(ctx context.Context, inst k3sInstaller, cmd k3sInstallCommand, stdout io.Writer) error {
+// ensureK3sInstalled installs k3s unless it is already running (idempotent), then makes the k3s API
+// answering — not the installer's exit code — the success criterion (ADR-0044). On a small VPS k3s's
+// slow first start can make the upstream installer's `systemctl start k3s` time out systemd's
+// readiness wait and exit non-zero even though k3s comes up moments later; aborting on that exit is a
+// false failure. So a non-zero installer exit is held, not returned: bootstrap polls the API for up to
+// budget and proceeds if it answers (logging the exit as a warning), failing only if the API never
+// answers — and then the error carries the installer's exit and points at journalctl.
+func ensureK3sInstalled(ctx context.Context, inst k3sInstaller, cmd k3sInstallCommand, budget time.Duration, stdout, stderr io.Writer) error {
 	running, err := inst.Running(ctx)
 	if err != nil {
 		return err
@@ -370,12 +394,21 @@ func ensureK3sInstalled(ctx context.Context, inst k3sInstaller, cmd k3sInstallCo
 		return nil
 	}
 	fmt.Fprintf(stdout, "Installing k3s (tls-san %s, node-external-ip %s, traefik disabled)...\n", cmd.PublicIP, cmd.PublicIP)
-	if err := inst.Install(ctx, cmd); err != nil {
-		return err
+	// Hold the installer's exit rather than abort on it: the API probe below decides success.
+	installErr := inst.Install(ctx, cmd)
+
+	fmt.Fprintf(stdout, "Waiting up to %s for the k3s API to answer...\n", budget)
+	if err := inst.WaitForAPI(ctx, budget); err != nil {
+		if installErr != nil {
+			return fmt.Errorf("k3s did not become ready: the installer exited with an error (%v) and %w. "+
+				"Diagnose with `journalctl -xeu k3s.service` and `systemctl status k3s`", installErr, err)
+		}
+		return fmt.Errorf("k3s did not become ready: %w. "+
+			"Diagnose with `journalctl -xeu k3s.service` and `systemctl status k3s`", err)
 	}
-	fmt.Fprintln(stdout, "Waiting for the k3s API to answer...")
-	if err := inst.WaitForAPI(ctx); err != nil {
-		return err
+	if installErr != nil {
+		fmt.Fprintf(stderr, "warning: the k3s installer reported a non-zero exit (a slow first-start can time out "+
+			"systemd's readiness wait); the k3s API came up, continuing. Installer exit: %v\n", installErr)
 	}
 	return nil
 }

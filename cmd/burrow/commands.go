@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -165,11 +166,26 @@ func newLogsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			out := cmd.OutOrStdout()
+			// Print the source note and a divider to stderr up front — after the targeting line
+			// resolveAndConnect already emitted and before the logs — so the metadata leads and the
+			// log lines are the last, uninterrupted thing (a bottom note would be missed, and never
+			// appear at all once these logs are streamed/followed). `app logs` reads live Kubernetes
+			// pod logs (current pods only, lost on restart/reschedule), which is easy to mistake for
+			// a durable history, so it points at the logs add-on for retained, queryable logs. Stderr
+			// keeps it off a piped or redirected log stream; skipped for --json (metadata-free result).
+			if !o.json {
+				stderr := cmd.ErrOrStderr()
+				fmt.Fprintln(stderr,
+					"Source: live Kubernetes pod logs — current pods only, not retained across restarts. "+
+						"For durable, queryable history across replicas, install the logs add-on "+
+						"(`burrow addon install logs`), then query with `burrow addon logs`.")
+				fmt.Fprintln(stderr, strings.Repeat("─", 60))
+			}
 			lines, err := c.Logs(ctx, args[0], env, tail)
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
 			if o.json {
 				return emit(out, true, lines, "")
 			}
@@ -180,14 +196,6 @@ func newLogsCmd() *cobra.Command {
 					fmt.Fprintf(out, "%s  %s\n", l.Pod, l.Message)
 				}
 			}
-			// Tell the user where these came from. `app logs` reads live Kubernetes pod logs
-			// (current pods only, lost on restart/reschedule), which is easy to mistake for a
-			// durable history — so point them at the logs add-on for retained, queryable logs.
-			// Stderr so it never pollutes a piped or redirected log stream.
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"\nSource: live Kubernetes pod logs — current pods only, not retained across restarts. "+
-					"For durable, queryable history across replicas, install the logs add-on "+
-					"(`burrow addon install logs`), then query with `burrow addon logs`.")
 			return nil
 		},
 	}

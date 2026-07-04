@@ -712,7 +712,7 @@ func TestHelpLayoutKubectlStyle(t *testing.T) {
 		{"config", "provider", "add", "-h"},
 		{"env", "-h"},
 		{"env", "add", "-h"},
-		{"env", "scan", "-h"},
+		{"env", "list", "-h"},
 		{"app", "-h"},
 		{"app", "deploy", "-h"},
 		{"app", "secret", "set", "-h"},

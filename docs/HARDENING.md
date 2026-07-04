@@ -34,7 +34,7 @@ to the credential it carries, what that lets it do, and what it cannot:
 | Surface | Credential it uses | What it can do | What it cannot do |
 |---|---|---|---|
 | You, via `kubectl` | your admin kubeconfig (`~/.kube/config`) | Everything on the cluster: any resource, any namespace, cluster-scoped objects, exec, delete, RBAC. No Burrow guardrails. | Nothing restricts it. Full cluster admin, and it is what installs Burrow. |
-| You, via `burrow` (setup and governance): `install`, `upgrade`, `cluster ingress install`, `config registry`, `config provider`, `env add`/`scan`, `guard set`, `addon`, `domain`, `audit` | your admin kubeconfig | Install/upgrade Burrow, write its namespaces/RBAC/secrets, set the guardrail policy, configure registry and DNS-provider credentials, install add-ons, manage DNS, read the audit log. | These are admin operations. `guard set` lives here on purpose: only the human, with admin, changes guardrails. |
+| You, via `burrow` (setup and governance): `install`, `upgrade`, `cluster ingress install`, `config registry`, `config provider`, `env add`, `env list --discover`, `guard set`, `addon`, `domain`, `audit` | your admin kubeconfig | Install/upgrade Burrow, write its namespaces/RBAC/secrets, set the guardrail policy, configure registry and DNS-provider credentials, install add-ons, manage DNS, read the audit log. | These are admin operations. `guard set` lives here on purpose: only the human, with admin, changes guardrails. |
 | You, via `burrow` (operate an app): `app deploy`/`status`/`logs`/`scale`/`rollback`/`autoscale`, `app config`/`secret`, `publish` | the scoped agent kubeconfig (falls back to admin if none) | Operate apps through burrowd, with every action guardrail-checked and audited. | Reach the cluster around burrowd; the guardrails gate what is allowed. You still have kubectl for raw access. |
 | Your agent, via `burrow-mcp` | only the scoped kubeconfig (`~/.burrow/agents/<env>`), granting exactly: proxy to the `burrowd` Service, and `get` the `burrowd-api-token` Secret | The `burrow_*` MCP tools only (deploy, status, logs, scale, rollback, autoscale, config, secret list/unset, expose, addons, domains, reachability, metrics/logs query, guard read-only, audit read), every mutating tool guardrailed and audited. | Anything else on the cluster: no arbitrary kubectl, no other Secrets, no other namespaces, no cluster-scoped reads, no exec, and it cannot change guardrails. It cannot leave burrowd. |
 
@@ -55,7 +55,7 @@ environment isolation, not assume the scope alone is a per-operation boundary.
 A second person on an already-installed cluster does not re-install: `burrow install <context>`
 detects the existing control plane and performs a **local join** — it reads the existing
 `burrow-agent` credential and writes only their own `~/.burrow` scoped kubeconfig, making no cluster
-changes. `burrow env scan` and `burrow upgrade` do the same backfill for handles and for clusters
+changes. `burrow env list --discover` and `burrow upgrade` do the same backfill for handles and for clusters
 installed before the scoped credential existed.
 
 The join reads the `burrow-agent-token` Secret in the control-plane namespace, so a joining user

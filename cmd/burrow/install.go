@@ -462,7 +462,7 @@ func errNoCluster() error {
 // probes whether Burrow is already installed, so a user picking a cluster to install into can see at
 // a glance which contexts already run Burrow and which are free. It instructs re-running install
 // with a context that has none; it does not install and does not prompt (ADR-0037). Probing is
-// sequential and bounded per context by connect.ProbeTimeout, matching `burrow env scan`.
+// sequential and bounded per context by connect.ProbeTimeout, matching `burrow env list --discover`.
 func writeInstallContextHint(ctx context.Context, w io.Writer, kubeconfig, namespace string, contexts []connect.Context) {
 	fmt.Fprint(w, "Install the Burrow control plane into your cluster.\n\n")
 	fmt.Fprintf(w, "The control plane installs into a namespace (default %q); your apps deploy into the\n"+
@@ -484,11 +484,11 @@ func writeInstallContextHint(ctx context.Context, w io.Writer, kubeconfig, names
 }
 
 // installStatusFor probes one context for an installed burrowd and renders its BURROWD cell:
-// "installed (<tag>)", "not installed", or "unreachable (<reason>)". It reuses the scan probe seam
-// and classifyProbe so the install listing and `burrow env scan` cannot diverge.
+// "installed (<tag>)", "not installed", or "unreachable (<reason>)". It reuses the discovery probe
+// seam and classifyProbe so the install listing and `burrow env list --discover` cannot diverge.
 func installStatusFor(ctx context.Context, kubeconfig, kubeContext, namespace string) string {
 	probeCtx, cancel := context.WithTimeout(ctx, connect.ProbeTimeout)
-	img, perr := scanProbeFn(probeCtx, kubeconfig, kubeContext, namespace)
+	img, perr := probeContextFn(probeCtx, kubeconfig, kubeContext, namespace)
 	cancel()
 	status, version, _ := classifyProbe(img, perr)
 	switch status {

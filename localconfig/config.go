@@ -72,7 +72,7 @@ type Environment struct {
 	// ~/.kube/config). AgentContext names the single context inside it. Both are empty for handles
 	// created before the scoped credential existed or joined out of band; consumers fall back to
 	// the ambient kubeconfig then. The operate path (`burrow-mcp` and the CLI) reads them to reach
-	// burrowd with the scoped credential; `install` (fresh mint or join), `env scan`, and `upgrade`
+	// burrowd with the scoped credential; `install` (fresh mint or join), `env list --discover`, and `upgrade`
 	// write them.
 	AgentKubeconfig string `yaml:"agentKubeconfig,omitempty"`
 	AgentContext    string `yaml:"agentContext,omitempty"`

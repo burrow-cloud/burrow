@@ -102,7 +102,7 @@ func TestJoinAgentCredentialForbidden(t *testing.T) {
 }
 
 // TestJoinAgentCredentialAbsent asserts that a cluster with no agent-token Secret (a pre-Phase-1
-// install) yields the errAgentCredentialAbsent sentinel, so tolerant callers (`env scan`, the
+// install) yields the errAgentCredentialAbsent sentinel, so tolerant callers (`env list --discover`, the
 // `upgrade` backfill) can skip it rather than fail, and it points the operator at `burrow upgrade`.
 func TestJoinAgentCredentialAbsent(t *testing.T) {
 	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))

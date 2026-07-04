@@ -70,43 +70,58 @@ func newEnvCmd() *cobra.Command {
 			"current kube context.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runEnvList(cmd.OutOrStdout(), o)
+			return runEnvList(cmd.Context(), cmd.OutOrStdout(), o)
 		},
 	}
 	bindEnvListFlags(cmd.Flags(), o)
-	cmd.AddCommand(newEnvListCmd(), newEnvUseCmd(), newEnvFollowCmd(), newEnvRenameCmd(), newEnvAddCmd(), newEnvScanCmd())
+	cmd.AddCommand(newEnvListCmd(), newEnvUseCmd(), newEnvFollowCmd(), newEnvRenameCmd(), newEnvAddCmd())
 	return cmd
 }
 
 // envListOpts are the inputs to listing handles: which kubeconfig to resolve the active target
-// against, and whether to print JSON. Listing reads no cluster.
+// against, and whether to print JSON. Bare listing reads no cluster; discover adds the networked
+// probe-and-register pass (namespace is the control-plane namespace it probes, used only then).
 type envListOpts struct {
 	kubeconfig string
 	json       bool
+	discover   bool
+	namespace  string
 }
 
-// bindEnvListFlags registers the listing flags, shared by the bare `burrow env` and `burrow env
-// list` so both accept --kubeconfig and --json.
+// bindEnvListFlags registers the listing flags shared by the bare `burrow env` and `burrow env
+// list` so both accept --kubeconfig and --json. The discover-only flags (--discover, --namespace)
+// are bound separately, on `list` alone.
 func bindEnvListFlags(flags *pflag.FlagSet, o *envListOpts) {
 	flags.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig used to resolve the followed context (default: ambient)")
 	flags.BoolVar(&o.json, "json", false, "print the raw JSON result")
 }
 
-// newEnvListCmd lists the local handles, kubectx-style, marking the active one and its mode. It
-// reads ~/.burrow/config and the kubeconfig only; it never contacts a cluster.
+// newEnvListCmd lists the local handles, kubectx-style, marking the active one and its mode. By
+// default it reads ~/.burrow/config and the kubeconfig only and contacts no cluster. With
+// --discover it first probes every kube context for an installed Burrow and registers a handle for
+// each installed context that has none yet, then prints the now-updated list.
 func newEnvListCmd() *cobra.Command {
 	o := &envListOpts{}
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List the environment handles and mark the active one",
 		Long: "list reads ~/.burrow/config and prints the environment handles, marking the active one\n" +
-			"and whether it is pinned or following the current kube context. It contacts no cluster.",
+			"and whether it is pinned or following the current kube context. By default it contacts no\n" +
+			"cluster and mutates nothing.\n\n" +
+			"With --discover it first walks every context in your kubeconfig and probes each cluster for\n" +
+			"an installed Burrow control plane (in the control-plane namespace, default \"burrow\"; override\n" +
+			"with --namespace). It prints what it finds, registers a local handle for each installed\n" +
+			"context that does not have one yet, then prints the updated list. Discovery reads clusters\n" +
+			"but changes only ~/.burrow/config (override with $BURROW_CONFIG); it never modifies a cluster.\n" +
+			"To install Burrow into a cluster that has none, use `burrow install`.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runEnvList(cmd.OutOrStdout(), o)
+			return runEnvList(cmd.Context(), cmd.OutOrStdout(), o)
 		},
 	}
 	bindEnvListFlags(cmd.Flags(), o)
+	cmd.Flags().BoolVar(&o.discover, "discover", false, "probe every kube context for an installed Burrow and register the ones it finds")
+	cmd.Flags().StringVar(&o.namespace, "namespace", connect.DefaultNamespace, "control-plane namespace to probe for burrowd (only with --discover)")
 	return cmd
 }
 
@@ -120,7 +135,22 @@ type envListResult struct {
 	Namespace    string                    `json:"namespace"`
 }
 
-func runEnvList(w io.Writer, o *envListOpts) error {
+func runEnvList(ctx context.Context, w io.Writer, o *envListOpts) error {
+	// --discover turns list into the networked probe-and-register pass: walk every context, probe
+	// each for an installed Burrow, and register a handle for any installed context without one. The
+	// human form prints the probe report ahead of the list; JSON stays quiet and reflects only the
+	// registered result. Without --discover, list stays offline and read-only.
+	if o.discover {
+		rows, added, err := discoverEnvironments(ctx, o.kubeconfig, o.namespace)
+		if err != nil {
+			return err
+		}
+		if !o.json {
+			writeDiscoverReport(w, rows, added, o.namespace)
+			fmt.Fprintln(w)
+		}
+	}
+
 	cfg, err := localconfig.Load()
 	if err != nil {
 		return err
@@ -189,7 +219,7 @@ func writeEnvEmptyState(w io.Writer, resolved localconfig.Resolved) {
 	fmt.Fprintf(w, "  following kubectl context: %s   (no handle registered)\n\n", resolved.Context)
 	fmt.Fprintln(w, "No environments registered yet:")
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "  burrow env scan\tdiscover and register an existing Burrow")
+	fmt.Fprintln(tw, "  burrow env list --discover\tdiscover and register an existing Burrow")
 	fmt.Fprintln(tw, "  burrow install <context>\tinstall Burrow into a cluster")
 	fmt.Fprintln(tw, "  burrow env add <name>\tcreate a namespace-scoped environment")
 	_ = tw.Flush()

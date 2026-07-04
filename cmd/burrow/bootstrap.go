@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,56 @@ const k3sInstallScriptURL = "https://get.k3s.io"
 // — not the installer's exit code — is bootstrap's success criterion, so the budget must sit well past
 // a slow first-start. Configurable via --k3s-api-timeout.
 const defaultK3sAPIReadyBudget = 4 * time.Minute
+
+// RAM preflight thresholds (ADR-0044). From live dogfooding on a DigitalOcean droplet: a 512MB box
+// FAILED (k3s never stabilized), a 1GB box worked but was tight (k3s + burrowd + Postgres came up with
+// almost no headroom for an app), and 2GB was comfortable. So bootstrap checks total RAM up front and
+// steers the user instead of letting an undersized box fail cryptically mid-install.
+const (
+	// minBootstrapRAM is the floor below which bootstrap refuses (unless --yes). It sits a little under
+	// a nominal "1GB" so a real 1GB box — whose usable RAM is under 1 GiB once the kernel reserves its
+	// share — still passes; a 512MB box lands well below it.
+	minBootstrapRAM = 960 * (1 << 20) // 960 MiB
+	// recommendedBootstrapRAM is the comfortable floor: at or above it bootstrap proceeds silently.
+	// Between minBootstrapRAM and this, bootstrap warns that there is little headroom for the app.
+	recommendedBootstrapRAM = 2 * (1 << 30) // 2 GiB
+)
+
+// readTotalMemory reports the machine's total physical RAM in bytes. It is a seam: the real
+// implementation parses /proc/meminfo (Linux — the real bootstrap target), and tests inject a fixed
+// value. On a platform without a readable /proc/meminfo (a non-Linux dev box) it returns an error and
+// the RAM preflight is skipped rather than blocking bootstrap.
+var readTotalMemory = readTotalMemoryLinux
+
+// readTotalMemoryLinux parses MemTotal from /proc/meminfo and returns it in bytes.
+func readTotalMemoryLinux() (uint64, error) {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, fmt.Errorf("reading /proc/meminfo: %w", err)
+	}
+	return parseMemTotal(b)
+}
+
+// parseMemTotal extracts the MemTotal value (reported in kibibytes) from /proc/meminfo contents and
+// returns it in bytes. It is split out from the file read so the parsing is unit-testable without a
+// real /proc.
+func parseMemTotal(meminfo []byte) (uint64, error) {
+	for _, line := range strings.Split(string(meminfo), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		fields := strings.Fields(line) // ["MemTotal:", "<value>", "kB"]
+		if len(fields) < 2 {
+			return 0, fmt.Errorf("malformed MemTotal line in /proc/meminfo: %q", line)
+		}
+		kib, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parsing MemTotal %q from /proc/meminfo: %w", fields[1], err)
+		}
+		return kib * 1024, nil
+	}
+	return 0, errors.New("no MemTotal line in /proc/meminfo")
+}
 
 // bootstrapArgs are the resolved inputs to a `burrow cluster bootstrap` run on the VPS.
 type bootstrapArgs struct {
@@ -320,6 +371,13 @@ func runBootstrap(ctx context.Context, a bootstrapArgs, stdout, stderr io.Writer
 		return err
 	}
 	if !running {
+		// RAM preflight before the confirmation so an undersized box is caught (and the warning is
+		// visible) before the user confirms. When k3s is already running the run is a no-op, so the
+		// preflight is moot and skipped along with the confirmation.
+		if !preflightRAM(a.yes, stderr) {
+			fmt.Fprintln(stderr, "Aborted; nothing was changed.")
+			return nil
+		}
 		proceed, err := confirmBootstrap(a.yes, stderr)
 		if err != nil {
 			return err
@@ -375,6 +433,40 @@ func confirmBootstrap(yes bool, stderr io.Writer) (bool, error) {
 		return false, err
 	}
 	return confirmed, nil
+}
+
+// preflightRAM checks the machine's total RAM before the destructive k3s install and steers the user
+// away from an undersized box (ADR-0044 dogfooding: a 512MB box fails k3s, 1GB is tight, 2GB is
+// comfortable). Below minBootstrapRAM (~1GB) it refuses unless yes is set — reusing --yes, which already
+// means "I know what I'm doing" — printing the warning and proceeding when --yes is passed. Between
+// minBootstrapRAM and recommendedBootstrapRAM (2GB) it warns about thin headroom but proceeds. At or
+// above recommendedBootstrapRAM it is silent. If total RAM cannot be determined (a non-Linux dev box,
+// or an unreadable /proc/meminfo) the check is skipped rather than blocking bootstrap. It reports
+// whether to proceed.
+func preflightRAM(yes bool, stderr io.Writer) bool {
+	total, err := readTotalMemory()
+	if err != nil {
+		// The real target is Linux; on anything else don't block bootstrap on an unreadable meminfo.
+		return true
+	}
+	mib := total / (1 << 20)
+	switch {
+	case total < minBootstrapRAM:
+		fmt.Fprintf(stderr, "This machine has %d MiB of RAM. k3s needs about 1GB just to start "+
+			"(512MB will not work), and Burrow adds burrowd and Postgres; 2GB is recommended.\n", mib)
+		if !yes {
+			fmt.Fprintln(stderr, "Re-run with --yes to bootstrap anyway.")
+			return false
+		}
+		fmt.Fprintln(stderr, "Proceeding anyway because --yes was set.")
+		return true
+	case total < recommendedBootstrapRAM:
+		fmt.Fprintf(stderr, "This machine has %d MiB of RAM. Burrow will fit (k3s + burrowd + Postgres), "+
+			"but there is little headroom for your app; 2GB or more is recommended.\n", mib)
+		return true
+	default:
+		return true
+	}
 }
 
 // ensureK3sInstalled installs k3s unless it is already running (idempotent), then makes the k3s API

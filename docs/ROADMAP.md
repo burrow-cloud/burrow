@@ -1,6 +1,6 @@
 # Burrow Roadmap
 
-> **Status: v0.1 through v0.7 shipped.** These are version milestones; each unshipped one is
+> **Status: v0.1 through v0.9 shipped.** These are version milestones; each unshipped one is
 > a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
 > [README](../README.md) status table is the authoritative shipped/in-progress/planned
 > surface. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the current
@@ -152,6 +152,31 @@ active environment, with prod gated while staging stays permissive.
 - **Surface cleanups**: the `app env`→`app config` rename, plus a cleaner `burrow version` and
   connection errors that name the targeted context.
 
+## v0.8 — Autoscaling and deploy-safety hardening ✅ shipped
+
+Application autoscaling plus a batch of least-privilege and deploy-safety hardening. `burrow app
+autoscale` applies a HorizontalPodAutoscaler bounded by the replica-ceiling guardrail; install mints a
+scoped `burrow-agent` credential ([ADR-0038](adr/0038-scoped-agent-credential.md)) and `burrow-mcp`
+fails closed without it; an `app.deploy` guardrail gates deploys and every deploy rolls the workload
+while preserving replicas; a client-version header makes CLI/control-plane skew actionable
+([ADR-0039](adr/0039-cli-control-plane-version-skew.md)); burrowd no longer contacts the registry
+([ADR-0040](adr/0040-burrowd-never-contacts-the-registry.md)); and `ingress install` gates a billable
+LoadBalancer behind `--approve`.
+
+## v0.9 — The single-VPS, cheap-self-hoster on-ramp ✅ shipped
+
+Turns a bare VPS into a Burrow cluster with no cloud LoadBalancer cost, so a solo developer can
+self-host the whole thing on one cheap box. A one-time on-VPS `curl | sh` runs `burrow cluster
+bootstrap` (installs k3s + burrowd, prints a `burrow join <token>`), and after that single SSH bootstrap
+every operation runs from the laptop ([ADR-0044](adr/0044-single-vps-k3s-cluster.md)); Burrow never
+SSHes. servicelb and MetalLB are detected as real LoadBalancer providers, so a single node's public IP
+serves a `type=LoadBalancer` Service for free
+([ADR-0043](adr/0043-public-reachability-is-a-loadbalancer.md)); publish reuses the cluster's existing
+ingress controller ([ADR-0042](adr/0042-use-existing-ingress-controller.md)) on a flatter path to a
+reachable app ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md)). Bootstrap preflights RAM (a 2GB
+minimum with a memory breakdown), Postgres runs lean on small clusters, and the cost framing calls
+servicelb free. Proven end to end by dogfooding on a 2GB droplet.
+
 ## Deferred until requested
 
 - **Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) — a
@@ -161,13 +186,14 @@ active environment, with prod gated while staging stays permissive.
 ## Later — candidate themes (unsequenced)
 
 - **Richer guardrails / blast-radius limits** for destructive operations.
-- **Audit log** ([ADR-0027](adr/0027-audit-log.md)) — an append-only Postgres record of agent
-  operations and guardrail decisions (allowed / held / denied / executed), read via `burrow
-  audit`; the accountability surface for "what did the agent do," with per-principal identity
-  following a future auth model.
 - **Database provisioning** — managed Postgres (and friends) as a first-class deploy
   dependency (a heavier building block than the cache/metrics blocks above).
-- **Autoscaling** — horizontal/vertical scaling driven by load.
+- **Vertical autoscaling / right-sizing** — driven by observed load (horizontal autoscaling
+  via the HorizontalPodAutoscaler shipped in v0.8).
+- **Registry onboarding** — reduce the friction of getting an image into a registry, per
+  ADR-0046 (Proposed); held pending a user signal that onboarding is painful.
+- **The OSS/enterprise transport seam** — the one refactor ADR-0045 names: make the CLI's
+  control-plane transport an explicit interface before it accretes more coupled call sites.
 - **Cost controls and caps** — visibility and limits on cluster spend.
 - **Optional passive deploy mode** — GitOps-style tag-watching as an *option* layered on the
   explicit path, never replacing it ([ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)).

@@ -144,16 +144,19 @@ const costNoticeMarker = "a LoadBalancer is billable"
 const spofNoticeMarker = "single point of failure"
 
 func TestIngressInstallDryRunExpose(t *testing.T) {
-	// loadbalancer: the plan names the cloud (LoadBalancer) manifest and carries the cost/HA notice.
+	// loadbalancer: dry-run has no live provider, so the plan frames the cost honestly — billable on a
+	// cloud, free on servicelb / MetalLB — rather than asserting the current always-billable note.
 	var lb bytes.Buffer
 	if err := run(context.Background(), []string{"cluster", "ingress", "install", "--dry-run", "--expose", "loadbalancer"}, &lb, &lb); err != nil {
 		t.Fatalf("dry-run loadbalancer: %v", err)
 	}
-	if !strings.Contains(lb.String(), costNoticeMarker) {
-		t.Errorf("loadbalancer dry-run should include the cost notice %q:\n%s", costNoticeMarker, lb.String())
+	if strings.Contains(lb.String(), costNoticeMarker) {
+		t.Errorf("loadbalancer dry-run should not assert the always-billable note (provider is unknown until apply):\n%s", lb.String())
 	}
-	if !strings.Contains(lb.String(), "high availability") {
-		t.Errorf("loadbalancer dry-run should explain the HA benefit:\n%s", lb.String())
+	for _, want := range []string{"billable", "free", "servicelb", "MetalLB"} {
+		if !strings.Contains(lb.String(), want) {
+			t.Errorf("loadbalancer dry-run notice should mention %q so cost framing is honest before the probe:\n%s", want, lb.String())
+		}
 	}
 	if strings.Contains(lb.String(), spofNoticeMarker) {
 		t.Errorf("loadbalancer dry-run should not print the nodeport SPOF notice:\n%s", lb.String())
@@ -185,33 +188,66 @@ func TestIngressInstallDryRunExpose(t *testing.T) {
 func TestResolveExposeAuto(t *testing.T) {
 	ctx := context.Background()
 
-	// A known cloud provider (DigitalOcean) supports LoadBalancer, so auto picks loadbalancer and
-	// ingressManifestFor returns the cloud manifest.
+	// A known cloud provider (DigitalOcean) supports LoadBalancer, so auto picks loadbalancer, reports
+	// the cloud provider (a billable LB), and ingressManifestFor returns the cloud manifest.
 	cloud := fake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Spec: corev1.NodeSpec{ProviderID: "digitalocean://123"}},
 	)
-	expose, err := resolveExpose(ctx, exposeAuto, cloud)
+	expose, provider, err := resolveExpose(ctx, exposeAuto, cloud)
 	if err != nil {
 		t.Fatalf("resolveExpose cloud: %v", err)
 	}
 	if expose != exposeLoadBalancer {
 		t.Errorf("auto on a cloud provider should pick loadbalancer, got %q", expose)
 	}
+	if provider != "digitalocean" {
+		t.Errorf("auto on DigitalOcean should report the digitalocean provider, got %q", provider)
+	}
+	if !billableLoadBalancer(provider) {
+		t.Errorf("a cloud provider LoadBalancer should be billable, got provider %q", provider)
+	}
 	if got := ingressManifestFor(expose); got != ingressNginxManifest {
 		t.Errorf("loadbalancer should use the cloud manifest, got %q", got)
 	}
 
-	// Bare-metal (no recognized providerID) has no inferred LoadBalancer support, so auto picks
-	// nodeport and ingressManifestFor returns the baremetal manifest.
+	// k3s (servicelb) also supports LoadBalancer, so auto picks loadbalancer but reports the free
+	// servicelb provider — no cloud LB to pay for. The manifest is still the cloud one (servicelb backs
+	// a type: LoadBalancer Service just the same).
+	k3s := fake.NewSimpleClientset(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Spec: corev1.NodeSpec{ProviderID: "k3s://n1"}},
+	)
+	expose, provider, err = resolveExpose(ctx, exposeAuto, k3s)
+	if err != nil {
+		t.Fatalf("resolveExpose k3s: %v", err)
+	}
+	if expose != exposeLoadBalancer {
+		t.Errorf("auto on k3s (servicelb) should pick loadbalancer, got %q", expose)
+	}
+	if provider != lbProviderServiceLB {
+		t.Errorf("auto on k3s should report the servicelb provider, got %q", provider)
+	}
+	if billableLoadBalancer(provider) {
+		t.Errorf("a servicelb LoadBalancer must not be billable, got provider %q", provider)
+	}
+	if got := ingressManifestFor(expose); got != ingressNginxManifest {
+		t.Errorf("loadbalancer should use the cloud manifest even under servicelb, got %q", got)
+	}
+
+	// Bare-metal (no recognized providerID, no servicelb, no MetalLB) has no inferred LoadBalancer
+	// support, so auto picks nodeport (empty provider) and ingressManifestFor returns the baremetal
+	// manifest.
 	bare := fake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}},
 	)
-	expose, err = resolveExpose(ctx, exposeAuto, bare)
+	expose, provider, err = resolveExpose(ctx, exposeAuto, bare)
 	if err != nil {
 		t.Fatalf("resolveExpose bare-metal: %v", err)
 	}
 	if expose != exposeNodePort {
 		t.Errorf("auto on bare-metal should pick nodeport, got %q", expose)
+	}
+	if provider != "" {
+		t.Errorf("nodeport should report no LoadBalancer provider, got %q", provider)
 	}
 	if got := ingressManifestFor(expose); got != ingressNginxBaremetalManifest {
 		t.Errorf("nodeport should use the baremetal manifest, got %q", got)
@@ -255,22 +291,54 @@ func ingressInstallCmd(t *testing.T) *cobra.Command {
 func TestWriteIngressPlanNotices(t *testing.T) {
 	o := ingressOptions{issuerName: "letsencrypt"}
 
-	// The loadbalancer plan is printed and carries the billable/HA cost notice, not the SPOF notice.
+	// A cloud-provider loadbalancer plan is printed and carries the billable/HA cost notice, not the
+	// SPOF notice, and its manifest-variant line reads "cloud".
 	var lb bytes.Buffer
-	writeIngressPlan(&lb, o, exposeLoadBalancer, ingressManifestFor(exposeLoadBalancer), false, false)
+	writeIngressPlan(&lb, o, exposeLoadBalancer, "digitalocean", ingressManifestFor(exposeLoadBalancer), false, false)
 	if !strings.Contains(lb.String(), "Plan (expose: loadbalancer)") {
 		t.Errorf("loadbalancer plan should be printed:\n%s", lb.String())
 	}
 	if !strings.Contains(lb.String(), costNoticeMarker) || !strings.Contains(lb.String(), "high availability") {
-		t.Errorf("loadbalancer plan should carry the cost/HA notice:\n%s", lb.String())
+		t.Errorf("cloud loadbalancer plan should carry the cost/HA notice:\n%s", lb.String())
+	}
+	if !strings.Contains(lb.String(), "cloud, LoadBalancer Service") {
+		t.Errorf("cloud loadbalancer plan should label the cloud LoadBalancer variant:\n%s", lb.String())
 	}
 	if strings.Contains(lb.String(), spofNoticeMarker) {
 		t.Errorf("loadbalancer plan should not carry the SPOF notice:\n%s", lb.String())
 	}
 
+	// An explicit --expose loadbalancer with no probe (empty provider) is treated conservatively as a
+	// billable cloud LB: the cost notice still prints so the cost gate is not silently dropped.
+	var unprobed bytes.Buffer
+	writeIngressPlan(&unprobed, o, exposeLoadBalancer, "", ingressManifestFor(exposeLoadBalancer), false, false)
+	if !strings.Contains(unprobed.String(), costNoticeMarker) {
+		t.Errorf("an unprobed loadbalancer should keep the billable cost notice:\n%s", unprobed.String())
+	}
+
+	// A servicelb (k3s) loadbalancer plan says FREE, names servicelb, and omits the billable cost note.
+	var slb bytes.Buffer
+	writeIngressPlan(&slb, o, exposeLoadBalancer, lbProviderServiceLB, ingressManifestFor(exposeLoadBalancer), false, false)
+	if strings.Contains(slb.String(), costNoticeMarker) {
+		t.Errorf("a servicelb loadbalancer plan must not carry the billable cost notice:\n%s", slb.String())
+	}
+	if !strings.Contains(slb.String(), "free") || !strings.Contains(slb.String(), "servicelb") {
+		t.Errorf("a servicelb loadbalancer plan should say it is free and name servicelb:\n%s", slb.String())
+	}
+
+	// A MetalLB loadbalancer plan says FREE, names MetalLB, and omits the billable cost note.
+	var mlb bytes.Buffer
+	writeIngressPlan(&mlb, o, exposeLoadBalancer, lbProviderMetalLB, ingressManifestFor(exposeLoadBalancer), false, false)
+	if strings.Contains(mlb.String(), costNoticeMarker) {
+		t.Errorf("a MetalLB loadbalancer plan must not carry the billable cost notice:\n%s", mlb.String())
+	}
+	if !strings.Contains(mlb.String(), "free") || !strings.Contains(mlb.String(), "MetalLB") {
+		t.Errorf("a MetalLB loadbalancer plan should say it is free and name MetalLB:\n%s", mlb.String())
+	}
+
 	// The nodeport plan is printed and carries the single-point-of-failure notice, not the cost one.
 	var np bytes.Buffer
-	writeIngressPlan(&np, o, exposeNodePort, ingressManifestFor(exposeNodePort), false, false)
+	writeIngressPlan(&np, o, exposeNodePort, "", ingressManifestFor(exposeNodePort), false, false)
 	if !strings.Contains(np.String(), "Plan (expose: nodeport)") {
 		t.Errorf("nodeport plan should be printed:\n%s", np.String())
 	}
@@ -295,22 +363,41 @@ func TestConfirmInstallAutoResolvedGate(t *testing.T) {
 	cloud := fake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Spec: corev1.NodeSpec{ProviderID: "digitalocean://123"}},
 	)
-	expose, err := resolveExpose(ctx, exposeAuto, cloud)
+	expose, provider, err := resolveExpose(ctx, exposeAuto, cloud)
 	if err != nil {
 		t.Fatalf("resolveExpose cloud: %v", err)
 	}
 	var cb bytes.Buffer
-	if _, err := confirmInstall(ingressOptions{}, expose, strings.NewReader(""), &cb); err == nil {
-		t.Errorf("auto resolving to loadbalancer should be gated non-interactively without --approve")
+	if _, err := confirmInstall(ingressOptions{}, expose, provider, strings.NewReader(""), &cb); err == nil {
+		t.Errorf("auto resolving to a billable cloud loadbalancer should be gated non-interactively without --approve")
+	}
+
+	// k3s (servicelb) auto-resolves to loadbalancer but the LB is free, so the install must NOT be
+	// gated: it proceeds non-interactively with no --approve (the dogfooding bug — a free servicelb LB
+	// was wrongly gated behind --approve).
+	k3s := fake.NewSimpleClientset(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Spec: corev1.NodeSpec{ProviderID: "k3s://n1"}},
+	)
+	expose, provider, err = resolveExpose(ctx, exposeAuto, k3s)
+	if err != nil {
+		t.Fatalf("resolveExpose k3s: %v", err)
+	}
+	var kb bytes.Buffer
+	ok, err := confirmInstall(ingressOptions{}, expose, provider, strings.NewReader(""), &kb)
+	if err != nil {
+		t.Fatalf("auto resolving to a free servicelb loadbalancer should not error: %v", err)
+	}
+	if !ok {
+		t.Errorf("auto resolving to a free servicelb loadbalancer should proceed without approval")
 	}
 
 	bare := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}})
-	expose, err = resolveExpose(ctx, exposeAuto, bare)
+	expose, provider, err = resolveExpose(ctx, exposeAuto, bare)
 	if err != nil {
 		t.Fatalf("resolveExpose bare-metal: %v", err)
 	}
 	var bb bytes.Buffer
-	ok, err := confirmInstall(ingressOptions{}, expose, strings.NewReader(""), &bb)
+	ok, err = confirmInstall(ingressOptions{}, expose, provider, strings.NewReader(""), &bb)
 	if err != nil {
 		t.Fatalf("auto resolving to nodeport should not error: %v", err)
 	}
@@ -398,10 +485,10 @@ func TestWriteIngressDone(t *testing.T) {
 func TestConfirmInstall(t *testing.T) {
 	// The gate keys off the RESOLVED expose mode: only the billable loadbalancer path is gated.
 
-	// loadbalancer + --approve proceeds without prompting: returns true without reading stdin or
-	// printing "Proceed?". It never depends on whether stdin is a terminal.
+	// A billable cloud loadbalancer + --approve proceeds without prompting: returns true without reading
+	// stdin or printing "Proceed?". It never depends on whether stdin is a terminal.
 	var out bytes.Buffer
-	ok, err := confirmInstall(ingressOptions{approve: true}, exposeLoadBalancer, strings.NewReader("n\n"), &out)
+	ok, err := confirmInstall(ingressOptions{approve: true}, exposeLoadBalancer, "digitalocean", strings.NewReader("n\n"), &out)
 	if err != nil {
 		t.Fatalf("confirmInstall approve: %v", err)
 	}
@@ -412,11 +499,11 @@ func TestConfirmInstall(t *testing.T) {
 		t.Errorf("--approve should not print the prompt:\n%s", out.String())
 	}
 
-	// loadbalancer + non-interactive (no terminal) without --approve must refuse: an error, no
-	// prompt, no proceed. strings.Reader is not a terminal, so the default stdinIsTerminal seam
-	// already reports false.
+	// A billable cloud loadbalancer + non-interactive (no terminal) without --approve must refuse: an
+	// error, no prompt, no proceed. strings.Reader is not a terminal, so the default stdinIsTerminal
+	// seam already reports false.
 	var nb bytes.Buffer
-	ok, err = confirmInstall(ingressOptions{}, exposeLoadBalancer, strings.NewReader(""), &nb)
+	ok, err = confirmInstall(ingressOptions{}, exposeLoadBalancer, "digitalocean", strings.NewReader(""), &nb)
 	if err == nil {
 		t.Fatalf("non-interactive loadbalancer confirmInstall without --approve should error")
 	}
@@ -433,34 +520,39 @@ func TestConfirmInstall(t *testing.T) {
 		t.Errorf("non-interactive confirmInstall should not prompt:\n%s", nb.String())
 	}
 
-	// The free nodeport path is NEVER gated: it proceeds with no error, no prompt, and no --approve,
-	// whether interactive or not (this is the bug being fixed — an agent-issued --expose nodeport ran
-	// non-interactively must not error asking for --approve).
+	// The free paths are NEVER gated: they proceed with no error, no prompt, and no --approve, whether
+	// interactive or not. This covers the free nodeport path and a free servicelb / MetalLB
+	// LoadBalancer (the dogfooding bug — a free servicelb LB installed non-interactively must not error
+	// asking for --approve).
 	origTerm := stdinIsTerminal
 	t.Cleanup(func() { stdinIsTerminal = origTerm })
 	stdinIsTerminal = func(io.Reader) bool { return false } // non-interactive
 	for _, tc := range []struct {
-		name string
-		o    ingressOptions
+		name     string
+		o        ingressOptions
+		expose   string
+		provider string
 	}{
-		{"nodeport non-interactive without approve proceeds", ingressOptions{}},
-		{"nodeport with approve is a harmless no-op", ingressOptions{approve: true}},
+		{"nodeport non-interactive without approve proceeds", ingressOptions{}, exposeNodePort, ""},
+		{"nodeport with approve is a harmless no-op", ingressOptions{approve: true}, exposeNodePort, ""},
+		{"servicelb loadbalancer is free, not gated", ingressOptions{}, exposeLoadBalancer, lbProviderServiceLB},
+		{"metallb loadbalancer is free, not gated", ingressOptions{}, exposeLoadBalancer, lbProviderMetalLB},
 	} {
 		var b bytes.Buffer
-		ok, err := confirmInstall(tc.o, exposeNodePort, strings.NewReader(""), &b)
+		ok, err := confirmInstall(tc.o, tc.expose, tc.provider, strings.NewReader(""), &b)
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", tc.name, err)
 		}
 		if !ok {
-			t.Errorf("%s: nodeport should proceed", tc.name)
+			t.Errorf("%s: should proceed", tc.name)
 		}
 		if strings.Contains(b.String(), "Proceed?") {
-			t.Errorf("%s: nodeport should not prompt:\n%s", tc.name, b.String())
+			t.Errorf("%s: should not prompt:\n%s", tc.name, b.String())
 		}
 	}
 
-	// loadbalancer on an interactive terminal (forced via the seam) and without --approve: the prompt
-	// is shown and the typed answer decides.
+	// A billable cloud loadbalancer on an interactive terminal (forced via the seam) and without
+	// --approve: the prompt is shown and the typed answer decides.
 	stdinIsTerminal = func(io.Reader) bool { return true }
 	for _, tc := range []struct {
 		in   string
@@ -473,7 +565,7 @@ func TestConfirmInstall(t *testing.T) {
 		{"", false},   // EOF
 	} {
 		var b bytes.Buffer
-		ok, err := confirmInstall(ingressOptions{}, exposeLoadBalancer, strings.NewReader(tc.in), &b)
+		ok, err := confirmInstall(ingressOptions{}, exposeLoadBalancer, "digitalocean", strings.NewReader(tc.in), &b)
 		if err != nil {
 			t.Fatalf("confirmInstall(%q): %v", tc.in, err)
 		}

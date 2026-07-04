@@ -22,8 +22,9 @@ type Transport interface {
 	Connect(ctx context.Context) (*Client, error)
 }
 
-// tokenRoundTripper adds the X-Burrow-Token header to every request, wrapping an inner
-// RoundTripper that performs the actual transport (a plain transport for the direct path, or
+// tokenRoundTripper adds Burrow's per-request headers — the X-Burrow-Token credential and, when
+// set, the X-Burrow-Client-Version handshake header (ADR-0039) — to every request, wrapping an
+// inner RoundTripper that performs the actual transport (a plain transport for the direct path, or
 // client-go's kubeconfig-authenticated proxy transport for the in-cluster path).
 //
 // The token rides X-Burrow-Token only — never Authorization. On the API-server proxy path the
@@ -31,32 +32,40 @@ type Transport interface {
 // Authorization header, and client-go does not overwrite an Authorization header that is
 // already set, so setting the token there would block the kubeconfig credential and the API
 // server would reject the request. burrowd reads X-Burrow-Token, which the proxy forwards
-// untouched; the direct/ingress path works the same way (ADR-0015).
+// untouched; the direct/ingress path works the same way (ADR-0015). The client-version header
+// rides alongside it and is likewise forwarded untouched by the proxy.
 type tokenRoundTripper struct {
-	token string
-	inner http.RoundTripper
+	token         string
+	clientVersion string
+	inner         http.RoundTripper
 }
 
-// NewTokenRoundTripper returns an http.RoundTripper that sets X-Burrow-Token to token before
-// delegating to inner. A nil inner uses http.DefaultTransport. Both the kubeconfig transport
-// and the direct-URL transport wrap their http.Client's transport with this so self-host
-// requests carry the same header on the wire (ADR-0015).
+// NewTokenRoundTripper returns an http.RoundTripper that sets X-Burrow-Token to token — and, when
+// clientVersion is non-empty, X-Burrow-Client-Version to it (ADR-0039) — before delegating to
+// inner. A nil inner uses http.DefaultTransport. Both the kubeconfig transport and the direct-URL
+// transport wrap their http.Client's transport with this so every self-host request carries the
+// same headers on the wire (ADR-0015, ADR-0039).
 //
-// ADR-0039's X-Burrow-Client-Version header belongs here too — this is the single place every
-// outbound control-plane request passes through — but wiring it is intentionally out of scope
-// for the ADR-0045 transport-seam refactor.
-func NewTokenRoundTripper(token string, inner http.RoundTripper) http.RoundTripper {
+// This is the single place every outbound control-plane request passes through, which is why the
+// client-version handshake header lives here alongside the credential. An empty clientVersion omits
+// the header, so a transport that does not know its version (or a test) sends no handshake rather
+// than a misleading empty one; burrowd treats an absent header as a pre-handshake client and serves
+// it (ADR-0039).
+func NewTokenRoundTripper(token, clientVersion string, inner http.RoundTripper) http.RoundTripper {
 	if inner == nil {
 		inner = http.DefaultTransport
 	}
-	return &tokenRoundTripper{token: token, inner: inner}
+	return &tokenRoundTripper{token: token, clientVersion: clientVersion, inner: inner}
 }
 
-// RoundTrip sets the token header on a clone of req (a RoundTripper must not mutate the request
+// RoundTrip sets the Burrow headers on a clone of req (a RoundTripper must not mutate the request
 // it is given) and delegates to the inner transport.
 func (t *tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
 	r.Header.Set("X-Burrow-Token", t.token)
+	if t.clientVersion != "" {
+		r.Header.Set("X-Burrow-Client-Version", t.clientVersion)
+	}
 	return t.inner.RoundTrip(r)
 }
 
@@ -71,10 +80,13 @@ func (t *tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 type DirectTransport struct {
 	BaseURL string
 	Token   string
+	// Version is this client's release version, sent as X-Burrow-Client-Version so burrowd can make
+	// version skew legible instead of opaque (ADR-0039). Empty omits the header.
+	Version string
 }
 
 // Connect returns a client for the configured URL and token. It needs no context because the
 // direct path resolves no credential; the parameter satisfies the Transport interface.
 func (t DirectTransport) Connect(_ context.Context) (*Client, error) {
-	return NewClient(t.BaseURL, t.Token), nil
+	return NewClientVersion(t.BaseURL, t.Token, t.Version), nil
 }

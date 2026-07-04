@@ -65,6 +65,30 @@ func TestDeployPostgresCreatesSuperuserSecretBeforeDeployment(t *testing.T) {
 		t.Fatalf("deployment: %v", err)
 	}
 	c := dep.Spec.Template.Spec.Containers[0]
+
+	// The add-on Postgres is tuned for a low-traffic store with the same lean settings as the
+	// control-plane Postgres: `-c key=value` args the official image forwards to the server.
+	argline := strings.Join(c.Args, " ")
+	for _, want := range LeanPostgresSettings {
+		if !strings.Contains(argline, "-c "+want) {
+			t.Errorf("postgres args missing tuning setting %q; got %v", want, c.Args)
+		}
+	}
+	// It declares a memory footprint (request + limit) so it fits a small VPS predictably.
+	if got := c.Resources.Requests.Memory().String(); got != "96Mi" {
+		t.Errorf("postgres memory request = %q, want 96Mi", got)
+	}
+	if got := c.Resources.Limits.Memory().String(); got != "320Mi" {
+		t.Errorf("postgres memory limit = %q, want 320Mi", got)
+	}
+	if got := c.Resources.Requests.Cpu().String(); got != "50m" {
+		t.Errorf("postgres cpu request = %q, want 50m", got)
+	}
+	// No CPU limit — throttling a database hurts latency.
+	if _, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
+		t.Errorf("postgres should declare no CPU limit, got %v", c.Resources.Limits.Cpu())
+	}
+
 	var sawUser, sawPasswordRef bool
 	for _, ev := range c.Env {
 		switch ev.Name {

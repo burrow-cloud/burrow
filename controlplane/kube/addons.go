@@ -82,11 +82,15 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 	// pod can be "running" for several seconds before it serves — a TCP probe on its port becomes
 	// ready only when the real server is up.
 	var readiness *corev1.Probe
+	// Postgres declares a memory footprint (request + limit) so it fits a small VPS predictably;
+	// other add-ons keep the cluster's defaults for now.
+	var resources corev1.ResourceRequirements
 	if spec.Type == controlplane.AddonPostgres {
 		var err error
 		if env, err = a.ensurePostgresSuperuserEnv(ctx, labels); err != nil {
 			return controlplane.AddonInfo{}, err
 		}
+		resources = postgresResources()
 		readiness = &corev1.Probe{
 			ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(spec.Port)}},
 			InitialDelaySeconds: 3,
@@ -117,6 +121,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 						Ports:          []corev1.ContainerPort{{ContainerPort: spec.Port}},
 						VolumeMounts:   mounts,
 						ReadinessProbe: readiness,
+						Resources:      resources,
 					}},
 					Volumes: volumes,
 				},
@@ -487,7 +492,55 @@ func addonArgs(spec controlplane.AddonSpec) []string {
 	case controlplane.AddonMetrics:
 		// -retentionPeriod=1 keeps one month of samples (VictoriaMetrics' default unit is months).
 		return []string{fmt.Sprintf("-httpListenAddr=:%d", spec.Port), "-storageDataPath=" + addonDataPath(spec.Type), "-retentionPeriod=1"}
+	case controlplane.AddonPostgres:
+		// Run the shared Postgres instance with lean server settings suited to a low-traffic
+		// metadata store (see LeanPostgresSettings). The official image's entrypoint forwards args
+		// beginning with `-` to the postgres server, so these `-c key=value` pairs tune it with no
+		// custom config file.
+		return postgresTuningArgs()
 	default:
 		return nil
+	}
+}
+
+// LeanPostgresSettings are the server settings Burrow runs its Postgres instances with — both the
+// control-plane state database (ADR-0012, rendered into cmd/burrow/manifests/install.yaml.tmpl) and
+// the shared Postgres add-on. Burrow's databases are low-traffic control-plane/metadata stores, so
+// the stock postgres defaults (128MB shared_buffers, 100 max_connections, default work_mem) are
+// wildly generous; these lean values let the whole stack (k3s + burrowd + Postgres) fit a 1-2GB VPS
+// with real headroom. The install manifest hard-codes the SAME values as postgres args — keep the
+// two in step.
+var LeanPostgresSettings = []string{
+	"shared_buffers=64MB",
+	"max_connections=30",
+	"work_mem=4MB",
+	"maintenance_work_mem=32MB",
+	"effective_cache_size=256MB",
+}
+
+// postgresTuningArgs renders LeanPostgresSettings as `postgres` container args (`-c key=value`).
+func postgresTuningArgs() []string {
+	args := make([]string, 0, len(LeanPostgresSettings)*2)
+	for _, s := range LeanPostgresSettings {
+		args = append(args, "-c", s)
+	}
+	return args
+}
+
+// postgresResources is the memory footprint declared on every Burrow Postgres pod (control-plane and
+// add-on). With the lean settings above, steady-state RSS sits around 100-150MB; the 320Mi limit
+// leaves genuine headroom so normal and moderate load never OOMKills the database (a control-plane DB
+// OOMKill is bad), while the 96Mi request reflects its true idle footprint for the scheduler. A small
+// CPU request keeps it schedulable and there is deliberately NO CPU limit — CPU throttling a database
+// hurts latency, and the memory limit is the footprint that matters on a small box.
+func postgresResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("50m"),
+			corev1.ResourceMemory: resource.MustParse("96Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceMemory: resource.MustParse("320Mi"),
+		},
 	}
 }

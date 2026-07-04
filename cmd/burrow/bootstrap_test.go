@@ -391,6 +391,10 @@ func stubBootstrapFullFlow(t *testing.T, inst k3sInstaller) string {
 	clientsetFn = func(string, string) (kubernetes.Interface, error) { return fake.NewSimpleClientset(), nil }
 	origApply := applyFn
 	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+	// A comfortable RAM reading by default so the RAM preflight is silent and the flow reaches install;
+	// the RAM-preflight tests override this after calling the helper.
+	origMem := readTotalMemory
+	readTotalMemory = func() (uint64, error) { return 4 * (1 << 30), nil }
 
 	t.Cleanup(func() {
 		newIPDetector = origIP
@@ -398,6 +402,7 @@ func stubBootstrapFullFlow(t *testing.T, inst k3sInstaller) string {
 		listContexts = origList
 		clientsetFn = origCS
 		applyFn = origApply
+		readTotalMemory = origMem
 	})
 	return kcPath
 }
@@ -578,6 +583,146 @@ func TestBootstrapFailsWhenAPINeverReady(t *testing.T) {
 	}
 	if strings.Contains(out, "burrow join "+prefixForTest) {
 		t.Errorf("a failed bootstrap must not print a join token, stdout:\n%s", out)
+	}
+}
+
+// TestBootstrapRefusesUndersizedRAMWithoutYes asserts that a box below ~1GB with no --yes is refused:
+// bootstrap prints the "re-run with --yes" refusal and aborts before touching the machine — the k3s
+// installer seam is never called and no join token is printed.
+func TestBootstrapRefusesUndersizedRAMWithoutYes(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 512 * (1 << 20), nil } // 512 MiB
+
+	// The RAM refusal happens before the confirmation, so confirmFn must never be consulted.
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) {
+		t.Fatal("confirmFn must not be called when the RAM preflight refuses")
+		return false, nil
+	}
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, out, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("a RAM refusal should abort cleanly, got: %v", err)
+	}
+	if inst.installedWith != nil {
+		t.Error("Install must NOT run when the RAM preflight refuses")
+	}
+	if !strings.Contains(errb, "512 MiB") {
+		t.Errorf("refusal should report the machine's RAM, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "--yes") {
+		t.Errorf("refusal should tell the user to re-run with --yes, stderr:\n%s", errb)
+	}
+	if strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("a refused bootstrap must not print a join token, stdout:\n%s", out)
+	}
+}
+
+// TestBootstrapProceedsUndersizedRAMWithYes asserts that --yes overrides the RAM refusal: the warning
+// is shown but the install is reached (the flag already means "I know what I'm doing").
+func TestBootstrapProceedsUndersizedRAMWithYes(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 512 * (1 << 20), nil } // 512 MiB
+
+	err, _, errb := runBootstrapCLI(kcPath, "--yes")
+	if err != nil {
+		t.Fatalf("cluster bootstrap --yes on a small box: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run when --yes overrides the RAM refusal")
+	}
+	// The warning is still shown even though --yes lets it proceed.
+	if !strings.Contains(errb, "512 MiB") {
+		t.Errorf("the RAM warning should still be shown under --yes, stderr:\n%s", errb)
+	}
+}
+
+// TestBootstrapWarnsTightRAM asserts that a box in the ~1-2GB range proceeds but is warned about thin
+// headroom.
+func TestBootstrapWarnsTightRAM(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 1536 * (1 << 20), nil } // 1.5 GiB
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, _, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("a tight-but-sufficient box should proceed, got: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run on a tight-but-sufficient box")
+	}
+	if !strings.Contains(errb, "little headroom") {
+		t.Errorf("a tight box should be warned about headroom, stderr:\n%s", errb)
+	}
+}
+
+// TestBootstrapComfortableRAMNoWarning asserts that a box at or above 2GB proceeds silently — no RAM
+// warning is printed.
+func TestBootstrapComfortableRAMNoWarning(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 2 * (1 << 30), nil } // 2 GiB
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, _, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("a comfortable box should proceed, got: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run on a comfortable box")
+	}
+	if strings.Contains(errb, "of RAM") {
+		t.Errorf("a comfortable box should get no RAM warning, stderr:\n%s", errb)
+	}
+}
+
+// TestBootstrapSkipsRAMCheckWhenUnreadable asserts that when total RAM cannot be determined (e.g. a
+// non-Linux dev box, or an unreadable /proc/meminfo) the preflight is skipped rather than blocking
+// bootstrap: the install is reached and no RAM message is printed.
+func TestBootstrapSkipsRAMCheckWhenUnreadable(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 0, errors.New("no /proc/meminfo") }
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, _, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("an unreadable meminfo must not block bootstrap, got: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run when the RAM check is skipped")
+	}
+	if strings.Contains(errb, "of RAM") {
+		t.Errorf("a skipped RAM check should print no RAM message, stderr:\n%s", errb)
+	}
+}
+
+// TestParseMemTotal asserts MemTotal (reported in kibibytes) is parsed to bytes, and that a meminfo
+// without a MemTotal line errors so the caller skips the check.
+func TestParseMemTotal(t *testing.T) {
+	const meminfo = "MemTotal:        2048000 kB\nMemFree:          123456 kB\n"
+	got, err := parseMemTotal([]byte(meminfo))
+	if err != nil {
+		t.Fatalf("parseMemTotal: %v", err)
+	}
+	if want := uint64(2048000) * 1024; got != want {
+		t.Errorf("parseMemTotal = %d bytes, want %d", got, want)
+	}
+	if _, err := parseMemTotal([]byte("MemFree: 100 kB\n")); err == nil {
+		t.Error("parseMemTotal should error when there is no MemTotal line")
 	}
 }
 

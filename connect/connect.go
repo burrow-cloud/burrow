@@ -99,7 +99,11 @@ func Client(ctx context.Context, o Options) (*client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect: building HTTP client: %w", err)
 	}
-	return client.NewClientWithHTTP(proxyBaseURL(cfg.Host, o.Namespace, o.Service, o.Port), token, hc), nil
+	// The kubeconfig transport authenticates to the API server; wrap it so every request also
+	// carries the burrowd API token in X-Burrow-Token, which the proxy forwards untouched
+	// (ADR-0015, ADR-0045). The Client itself stays auth-agnostic.
+	hc.Transport = client.NewTokenRoundTripper(token, hc.Transport)
+	return client.NewClientWithHTTP(proxyBaseURL(cfg.Host, o.Namespace, o.Service, o.Port), hc), nil
 }
 
 // proxyBaseURL is the API-server service-proxy prefix for the service. A client request to

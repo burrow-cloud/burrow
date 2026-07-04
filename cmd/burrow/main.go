@@ -317,13 +317,26 @@ func applyScopedFallback(tgt target, stderr io.Writer) target {
 // defaults to the scoped, burrowd-only agent credential when the target carries one (ADR-0038
 // phase 2); the privileged path and any explicit override keep the ambient/admin kubeconfig.
 func (o *commonOpts) connect(ctx context.Context, tgt target) (*client.Client, error) {
+	tr, err := o.transport(tgt)
+	if err != nil {
+		return nil, err
+	}
+	return tr.Connect(ctx)
+}
+
+// transport selects the control-plane transport for a target (ADR-0045). With --control-plane set
+// it returns a directTransport for that URL and --token; otherwise the default kubeconfig API-server
+// proxy transport, carrying the scoped-credential and namespace choices connectOptions resolves. The
+// direct-vs-kubeconfig branch stays here so command files stay unchanged; a private module can plug a
+// different Transport in without touching them.
+func (o *commonOpts) transport(tgt target) (client.Transport, error) {
 	if o.controlPlane != "" {
 		if o.token == "" {
 			return nil, errors.New("--token (or BURROW_API_TOKEN) is required with --control-plane")
 		}
-		return client.NewClient(o.controlPlane, o.token), nil
+		return directTransport{baseURL: o.controlPlane, token: o.token}, nil
 	}
-	return connect.Client(ctx, o.connectOptions(tgt))
+	return kubeconfigTransport{opts: o.connectOptions(tgt)}, nil
 }
 
 // connectOptions builds the auto-connect options for a target. It uses the scoped, burrowd-only

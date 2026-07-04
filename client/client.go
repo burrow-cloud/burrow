@@ -22,28 +22,37 @@ import (
 // API's JSON contract; the MCP layer deliberately does not import the
 // control-plane packages, so it stays a decoupled client across the module
 // boundary (LICENSING.md).
+//
+// The Client is auth-agnostic (ADR-0045): it holds no credential and sets no auth header.
+// Authentication is the job of the supplied *http.Client's RoundTripper — for self-host that
+// is NewTokenRoundTripper, which adds X-Burrow-Token (ADR-0015). This lets a Transport swap in
+// a different credential scheme while reusing the request methods unchanged.
 type Client struct {
 	baseURL string
-	token   string
 	http    *http.Client
 }
 
-// NewClient returns a control-plane API client for baseURL authenticating with token,
-// using a default HTTP client.
+// NewClient returns a control-plane API client for baseURL authenticating with token over
+// X-Burrow-Token, using a default HTTP client whose transport is NewTokenRoundTripper. It is
+// the convenience constructor for the direct-URL path and the MCP server.
 func NewClient(baseURL, token string) *Client {
-	return NewClientWithHTTP(baseURL, token, nil)
+	hc := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: NewTokenRoundTripper(token, nil),
+	}
+	return NewClientWithHTTP(baseURL, hc)
 }
 
-// NewClientWithHTTP is like NewClient but uses the supplied *http.Client. The connect
-// package uses this to route requests through the Kubernetes API-server proxy with a
-// kubeconfig-authenticated transport (ADR-0014). A nil hc gets a default client.
-func NewClientWithHTTP(baseURL, token string, hc *http.Client) *Client {
+// NewClientWithHTTP builds a client on the supplied *http.Client, which owns authentication
+// through its RoundTripper. The connect package uses this to route requests through the
+// Kubernetes API-server proxy with a kubeconfig-authenticated transport wrapped in
+// NewTokenRoundTripper (ADR-0014). A nil hc gets a default, unauthenticated client.
+func NewClientWithHTTP(baseURL string, hc *http.Client) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
 		http:    hc,
 	}
 }
@@ -844,13 +853,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return err
 	}
-	// Authenticate with X-Burrow-Token only — never Authorization. On the API-server
-	// proxy path the kubeconfig transport authenticates to the API server via the
-	// Authorization header, and client-go does not overwrite an Authorization header that
-	// is already set, so setting it here would block the kubeconfig credential and the API
-	// server would reject the request. burrowd reads X-Burrow-Token, which the proxy
-	// forwards untouched; the direct/ingress path works the same way (ADR-0015).
-	req.Header.Set("X-Burrow-Token", c.token)
+	// Authentication is the http.Client's RoundTripper's job (ADR-0045): the self-host
+	// transport wraps it in NewTokenRoundTripper, which adds X-Burrow-Token (ADR-0015). do
+	// stays auth-agnostic and sets no credential header.
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

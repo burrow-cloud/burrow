@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -111,30 +112,36 @@ func assertFlagValue(t *testing.T, args []string, flag, want string) {
 	t.Errorf("flag %s not found in %v", flag, args)
 }
 
-// fakeK3sInstaller records whether Install/WaitForAPI were called and with what command.
+// fakeK3sInstaller records whether Install/WaitForAPI were called and with what command. installErr
+// simulates a non-zero installer exit (e.g. systemd's readiness wait timing out on a slow first
+// start); waitErr simulates the k3s API never answering within the budget.
 type fakeK3sInstaller struct {
 	running       bool
 	installedWith *k3sInstallCommand
+	installErr    error
 	waited        bool
+	waitBudget    time.Duration
+	waitErr       error
 }
 
 func (f *fakeK3sInstaller) Running(context.Context) (bool, error) { return f.running, nil }
 
 func (f *fakeK3sInstaller) Install(_ context.Context, cmd k3sInstallCommand) error {
 	f.installedWith = &cmd
-	return nil
+	return f.installErr
 }
 
-func (f *fakeK3sInstaller) WaitForAPI(context.Context) error {
+func (f *fakeK3sInstaller) WaitForAPI(_ context.Context, budget time.Duration) error {
 	f.waited = true
-	return nil
+	f.waitBudget = budget
+	return f.waitErr
 }
 
 // TestEnsureK3sInstalledSkipsWhenRunning asserts an already-running k3s is not reinstalled.
 func TestEnsureK3sInstalledSkipsWhenRunning(t *testing.T) {
 	f := &fakeK3sInstaller{running: true}
 	var out discardWriter
-	if err := ensureK3sInstalled(context.Background(), f, buildK3sInstallCommand("203.0.113.10"), out); err != nil {
+	if err := ensureK3sInstalled(context.Background(), f, buildK3sInstallCommand("203.0.113.10"), defaultK3sAPIReadyBudget, out, out); err != nil {
 		t.Fatalf("ensureK3sInstalled: %v", err)
 	}
 	if f.installedWith != nil {
@@ -146,12 +153,12 @@ func TestEnsureK3sInstalledSkipsWhenRunning(t *testing.T) {
 }
 
 // TestEnsureK3sInstalledRunsInstaller asserts a fresh box installs k3s (with the built command) and
-// waits for the API.
+// waits for the API with the given budget.
 func TestEnsureK3sInstalledRunsInstaller(t *testing.T) {
 	f := &fakeK3sInstaller{running: false}
 	var out discardWriter
 	cmd := buildK3sInstallCommand("203.0.113.10")
-	if err := ensureK3sInstalled(context.Background(), f, cmd, out); err != nil {
+	if err := ensureK3sInstalled(context.Background(), f, cmd, 90*time.Second, out, out); err != nil {
 		t.Fatalf("ensureK3sInstalled: %v", err)
 	}
 	if f.installedWith == nil {
@@ -160,6 +167,49 @@ func TestEnsureK3sInstalledRunsInstaller(t *testing.T) {
 	assertFlagValue(t, f.installedWith.Args, "--tls-san", "203.0.113.10")
 	if !f.waited {
 		t.Error("WaitForAPI was not called after a fresh install")
+	}
+	if f.waitBudget != 90*time.Second {
+		t.Errorf("WaitForAPI budget = %s, want 90s (the budget must be threaded through)", f.waitBudget)
+	}
+}
+
+// TestEnsureK3sInstalledProceedsOnInstallerExitWhenAPIReady is the exact regression from dogfooding on
+// a small VPS: the installer exits non-zero (systemd's readiness wait times out on k3s's slow first
+// start) but the k3s API answers within the budget. bootstrap must NOT abort — the API answering is
+// the success criterion — and must log the installer's exit as a warning.
+func TestEnsureK3sInstalledProceedsOnInstallerExitWhenAPIReady(t *testing.T) {
+	f := &fakeK3sInstaller{running: false, installErr: errors.New("installing k3s: exit status 1")}
+	var out, errb bytes.Buffer
+	if err := ensureK3sInstalled(context.Background(), f, buildK3sInstallCommand("203.0.113.10"), defaultK3sAPIReadyBudget, &out, &errb); err != nil {
+		t.Fatalf("a non-zero installer exit with a ready API must not abort, got: %v", err)
+	}
+	if !f.waited {
+		t.Error("WaitForAPI must be polled even after a non-zero installer exit")
+	}
+	if !strings.Contains(errb.String(), "warning") || !strings.Contains(errb.String(), "exit status 1") {
+		t.Errorf("a tolerated installer exit should be logged as a warning carrying the exit, stderr:\n%s", errb.String())
+	}
+}
+
+// TestEnsureK3sInstalledFailsWhenAPINeverReady asserts that when the API never answers within the
+// budget bootstrap fails, and the error carries the installer's exit and points at journalctl and
+// systemctl status for diagnosis.
+func TestEnsureK3sInstalledFailsWhenAPINeverReady(t *testing.T) {
+	f := &fakeK3sInstaller{
+		running:    false,
+		installErr: errors.New("installing k3s: exit status 1"),
+		waitErr:    errors.New("the k3s API did not answer within 4m0s"),
+	}
+	var out, errb bytes.Buffer
+	err := ensureK3sInstalled(context.Background(), f, buildK3sInstallCommand("203.0.113.10"), defaultK3sAPIReadyBudget, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error when the k3s API never answers")
+	}
+	msg := err.Error()
+	for _, want := range []string{"exit status 1", "journalctl -xeu k3s.service", "systemctl status k3s"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("failure message missing %q, got: %v", want, msg)
+		}
 	}
 }
 
@@ -469,6 +519,65 @@ func TestBootstrapAlreadyRunningSkipsPrompt(t *testing.T) {
 	}
 	if inst.installedWith != nil {
 		t.Error("Install must not run when k3s is already running")
+	}
+}
+
+// TestBootstrapProceedsWhenInstallerExitsButAPIReady drives the full `burrow cluster bootstrap` flow
+// with a fake installer that returns a non-zero exit while the API answers — the exact false-failure
+// seen on a slow VPS. bootstrap must reach the deploy step and print the join-token block rather than
+// abort with `installing k3s: exit status 1`.
+func TestBootstrapProceedsWhenInstallerExitsButAPIReady(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false, installErr: errors.New("installing k3s: exit status 1")}
+	kcPath := stubBootstrapFullFlow(t, inst)
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, out, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("bootstrap must proceed when the API is ready despite a non-zero installer exit, got: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must have run")
+	}
+	if !inst.waited {
+		t.Error("WaitForAPI must have been polled")
+	}
+	// The deploy step is reached: the join-token block is printed for the laptop.
+	if !strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("bootstrap must reach the deploy step and print the join line, stdout:\n%s", out)
+	}
+	if !strings.Contains(errb, "warning") {
+		t.Errorf("the tolerated installer exit should be logged as a warning, stderr:\n%s", errb)
+	}
+}
+
+// TestBootstrapFailsWhenAPINeverReady drives the full flow with the API never answering: bootstrap
+// must fail (not print a join token) and the error must point at journalctl and systemctl status.
+func TestBootstrapFailsWhenAPINeverReady(t *testing.T) {
+	inst := &fakeK3sInstaller{
+		running:    false,
+		installErr: errors.New("installing k3s: exit status 1"),
+		waitErr:    errors.New("the k3s API did not answer within 4m0s"),
+	}
+	kcPath := stubBootstrapFullFlow(t, inst)
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, out, _ := runBootstrapCLI(kcPath)
+	if err == nil {
+		t.Fatal("bootstrap must fail when the k3s API never answers")
+	}
+	for _, want := range []string{"journalctl -xeu k3s.service", "systemctl status k3s"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("failure should point at %q, got: %v", want, err)
+		}
+	}
+	if strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("a failed bootstrap must not print a join token, stdout:\n%s", out)
 	}
 }
 

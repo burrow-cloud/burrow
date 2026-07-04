@@ -281,6 +281,22 @@ spec:
       containers:
         - name: postgres
           image: postgres:18
+          # Lean server settings for a low-traffic control-plane state store (ADR-0012): the stock
+          # defaults (128MB shared_buffers, 100 max_connections) are wildly generous here and leave
+          # no headroom on a 1-2GB VPS. The official image's entrypoint forwards these -c args to
+          # the postgres server. Keep these in step with LeanPostgresSettings in
+          # controlplane/kube/addons.go, which tunes the Postgres add-on identically.
+          args:
+            - "-c"
+            - "shared_buffers=64MB"
+            - "-c"
+            - "max_connections=30"
+            - "-c"
+            - "work_mem=4MB"
+            - "-c"
+            - "maintenance_work_mem=32MB"
+            - "-c"
+            - "effective_cache_size=256MB"
           env:
             - { name: POSTGRES_USER, value: burrow }
             - { name: POSTGRES_DB, value: burrow }
@@ -288,6 +304,12 @@ spec:
               valueFrom: { secretKeyRef: { name: burrowd-db, key: password } }
             - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
           ports: [ { containerPort: 5432 } ]
+          # Declared footprint: with the lean settings above, steady-state RSS is ~100-150MB. The
+          # 320Mi limit leaves real headroom so normal/moderate load never OOMKills the database; a
+          # small CPU request keeps it schedulable and there is no CPU limit (throttling a DB hurts).
+          resources:
+            requests: { cpu: 50m, memory: 96Mi }
+            limits: { memory: 320Mi }
           readinessProbe:
             exec: { command: ["pg_isready", "-U", "burrow", "-d", "burrow"] }
             initialDelaySeconds: 5
@@ -336,6 +358,11 @@ spec:
             - name: BURROW_DATABASE_URL
               valueFrom: { secretKeyRef: { name: burrowd-db, key: url } }
           ports: [ { containerPort: {{.Port}} } ]
+          # burrowd is a lean Go control-plane API server; a 192Mi limit is ample and a small CPU
+          # request keeps it schedulable, with no CPU limit so request handling is not throttled.
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 192Mi }
           readinessProbe:
             httpGet: { path: /healthz, port: {{.Port}} }
             initialDelaySeconds: 3

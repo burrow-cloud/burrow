@@ -272,7 +272,7 @@ func TestStatus(t *testing.T) {
 }
 
 func TestLogs(t *testing.T) {
-	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+	out, errOut, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("tail"); got != "2" {
 			t.Errorf("tail query = %q, want 2", got)
 		}
@@ -281,8 +281,25 @@ func TestLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
+	// The log lines go to stdout, clean of any metadata so `burrow app logs web | grep` stays usable.
 	if !strings.Contains(out, "web-1  hello") {
-		t.Errorf("output = %q", out)
+		t.Errorf("stdout = %q, want the log line", out)
+	}
+	if strings.Contains(out, "Source:") || strings.Contains(out, "targeting") || strings.Contains(out, "───") {
+		t.Errorf("stdout = %q, want no metadata (source/targeting/divider) on stdout", out)
+	}
+	// The metadata leads on stderr: targeting, then the source note, then a divider — all before
+	// the logs so it is never missed and would still appear ahead of a stream.
+	divider := strings.Repeat("─", 60)
+	targetIdx := strings.Index(errOut, "targeting")
+	sourceIdx := strings.Index(errOut, "Source: live Kubernetes pod logs")
+	dividerIdx := strings.Index(errOut, divider)
+	if targetIdx < 0 || sourceIdx < 0 || dividerIdx < 0 {
+		t.Fatalf("stderr = %q, want targeting, source note, and divider", errOut)
+	}
+	if !(targetIdx < sourceIdx && sourceIdx < dividerIdx) {
+		t.Errorf("stderr order = targeting@%d source@%d divider@%d, want targeting < source < divider in %q",
+			targetIdx, sourceIdx, dividerIdx, errOut)
 	}
 }
 
@@ -695,7 +712,7 @@ func TestHelpLayoutKubectlStyle(t *testing.T) {
 		{"config", "provider", "add", "-h"},
 		{"env", "-h"},
 		{"env", "add", "-h"},
-		{"env", "scan", "-h"},
+		{"env", "list", "-h"},
 		{"app", "-h"},
 		{"app", "deploy", "-h"},
 		{"app", "secret", "set", "-h"},

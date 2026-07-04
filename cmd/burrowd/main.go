@@ -16,8 +16,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -280,20 +282,109 @@ func controlPlaneNamespace() string {
 	return "burrow"
 }
 
-// openWithRetry waits for the database to accept connections, retrying for up to timeout
-// rather than crashing — so burrowd comes up gracefully alongside an in-cluster Postgres
-// that is still starting, instead of crash-looping until it is ready.
-func openWithRetry(ctx context.Context, dsn string, timeout time.Duration) (*postgres.Store, error) {
-	deadline := time.Now().Add(timeout)
+// Database-wait tuning. Each connect/ping attempt is bounded by dbAttemptTimeout so a hung or
+// slow dial fails fast (rather than blocking on the OS default TCP dial timeout, ~2 min) and the
+// loop retries on the dbWaitBackoff cadence — all within the overall budget the caller passes.
+// The log is throttled to at most one line per dbWaitLogInterval so a fast retry loop stays
+// readable instead of printing a line every couple of seconds for the whole budget.
+const (
+	dbAttemptTimeout  = 5 * time.Second
+	dbWaitBackoff     = 2 * time.Second
+	dbWaitLogInterval = 15 * time.Second
+)
+
+// pinger performs one bounded attempt to connect to (and ping) the database. The retry loop
+// gives each call its own timeout via ctx; a slow dial aborts when ctx expires and the loop
+// retries, so a single attempt never hangs on the OS default TCP dial timeout.
+type pinger func(ctx context.Context) error
+
+// dbWait bounds how burrowd waits for the database at startup: each attempt gets its own
+// per-attempt timeout so it fails fast, the loop pauses backoff between attempts, and the whole
+// wait is bounded by budget. Every field is set explicitly so a test can drive the loop with
+// tiny durations, deterministically and without real network.
+type dbWait struct {
+	attempt     time.Duration // per-attempt timeout
+	backoff     time.Duration // pause between attempts
+	budget      time.Duration // overall deadline for the whole wait
+	logInterval time.Duration // throttle: log the first failure, then at most this often
+}
+
+// run retries ping until it succeeds or the budget is exhausted. Each attempt runs under a
+// context bounded by w.attempt, so a hung or slow attempt is cancelled and the loop retries on
+// its backoff cadence rather than blocking on one stuck dial. It returns nil on the first
+// success, or the last error (wrapped with the budget) once the deadline passes.
+func (w dbWait) run(ctx context.Context, ping pinger) error {
+	deadline := time.Now().Add(w.budget)
+	var lastLogged time.Time
 	for attempt := 1; ; attempt++ {
-		store, err := postgres.Open(ctx, dsn)
+		attemptCtx, cancel := context.WithTimeout(ctx, w.attempt)
+		err := ping(attemptCtx)
+		cancel()
 		if err == nil {
-			return store, nil
+			return nil
 		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("connecting to the database after %s: %w", timeout, err)
+		now := time.Now()
+		if !now.Before(deadline) {
+			return fmt.Errorf("connecting to the database after %s: %w", w.budget, err)
 		}
-		log.Printf("waiting for the database (attempt %d): %v", attempt, err)
-		time.Sleep(2 * time.Second)
+		if attempt == 1 || now.Sub(lastLogged) >= w.logInterval {
+			log.Printf("waiting for the database (attempt %d): %v", attempt, err)
+			lastLogged = now
+		}
+		// Back off before the next attempt, but honor an outer cancellation so the wait does
+		// not sit blocked past a shutdown signal.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("connecting to the database: %w", ctx.Err())
+		case <-time.After(w.backoff):
+		}
 	}
+}
+
+// openWithRetry waits for the database to accept connections, retrying for up to budget rather
+// than crashing — so burrowd comes up gracefully alongside an in-cluster Postgres that is still
+// starting, instead of crash-looping until it is ready. Each attempt is bounded (see dbWait) so a
+// single connect/ping never hangs on the OS default dial timeout and the loop retries fast.
+func openWithRetry(ctx context.Context, dsn string, budget time.Duration) (*postgres.Store, error) {
+	dsn = withConnectTimeout(dsn, dbAttemptTimeout)
+	var store *postgres.Store
+	ping := func(attemptCtx context.Context) error {
+		s, err := postgres.Open(attemptCtx, dsn)
+		if err != nil {
+			return err
+		}
+		store = s
+		return nil
+	}
+	w := dbWait{attempt: dbAttemptTimeout, backoff: dbWaitBackoff, budget: budget, logInterval: dbWaitLogInterval}
+	if err := w.run(ctx, ping); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// withConnectTimeout adds a libpq connect_timeout (in whole seconds) to dsn as a second bound on
+// a hung dial, alongside the per-attempt context. It is a no-op if the DSN already sets one or if
+// the timeout is under a second. Both the URL form (postgres://…?connect_timeout=5) and the
+// keyword form (host=… connect_timeout=5) are handled; an unparseable URL is returned unchanged,
+// since the per-attempt context still bounds the dial.
+func withConnectTimeout(dsn string, timeout time.Duration) string {
+	secs := int(timeout / time.Second)
+	if secs < 1 || strings.Contains(dsn, "connect_timeout") {
+		return dsn
+	}
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return dsn
+		}
+		q := u.Query()
+		q.Set("connect_timeout", strconv.Itoa(secs))
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	if strings.TrimSpace(dsn) == "" {
+		return dsn
+	}
+	return strings.TrimSpace(dsn) + " connect_timeout=" + strconv.Itoa(secs)
 }

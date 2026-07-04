@@ -266,7 +266,7 @@ func TestInstallNoArgListsContextsAndDoesNotInstall(t *testing.T) {
 	targeted := stubInstall(t, contexts, nil)
 	// Probe outcomes spanning all three install statuses, so the BURROWD column is exercised end
 	// to end without a real cluster.
-	stubScanProbe(t, func(kubeContext string) (string, error) {
+	stubProbe(t, func(kubeContext string) (string, error) {
 		switch kubeContext {
 		case "dev":
 			return "ghcr.io/burrow-cloud/burrowd:v0.7.0", nil
@@ -384,6 +384,18 @@ func TestRenderManifests(t *testing.T) {
 		`postgres://burrow:pw-456@postgres:5432/burrow`,
 		"image: postgres:18",
 		"image: registry.example.com/burrowd:1",
+		// The control-plane Postgres runs with lean server settings for a low-traffic metadata
+		// store (matching LeanPostgresSettings in controlplane/kube/addons.go) and declares a
+		// memory footprint so the stack fits a small VPS predictably.
+		`"shared_buffers=64MB"`,
+		`"max_connections=30"`,
+		`"work_mem=4MB"`,
+		`"maintenance_work_mem=32MB"`,
+		`"effective_cache_size=256MB"`,
+		"limits: { memory: 320Mi }",               // Postgres memory limit (headroom over ~100-150MB steady state)
+		"requests: { cpu: 50m, memory: 96Mi }",    // Postgres request
+		"limits: { memory: 192Mi }",               // burrowd memory limit
+		"requests: { cpu: 25m, memory: 64Mi }",    // burrowd request
 		"{ name: BURROW_NAMESPACE, value: apps }", // burrowd deploys apps into the app namespace
 		"-listen=:8080",
 		"path: /healthz",

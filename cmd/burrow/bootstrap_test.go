@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -111,30 +112,36 @@ func assertFlagValue(t *testing.T, args []string, flag, want string) {
 	t.Errorf("flag %s not found in %v", flag, args)
 }
 
-// fakeK3sInstaller records whether Install/WaitForAPI were called and with what command.
+// fakeK3sInstaller records whether Install/WaitForAPI were called and with what command. installErr
+// simulates a non-zero installer exit (e.g. systemd's readiness wait timing out on a slow first
+// start); waitErr simulates the k3s API never answering within the budget.
 type fakeK3sInstaller struct {
 	running       bool
 	installedWith *k3sInstallCommand
+	installErr    error
 	waited        bool
+	waitBudget    time.Duration
+	waitErr       error
 }
 
 func (f *fakeK3sInstaller) Running(context.Context) (bool, error) { return f.running, nil }
 
 func (f *fakeK3sInstaller) Install(_ context.Context, cmd k3sInstallCommand) error {
 	f.installedWith = &cmd
-	return nil
+	return f.installErr
 }
 
-func (f *fakeK3sInstaller) WaitForAPI(context.Context) error {
+func (f *fakeK3sInstaller) WaitForAPI(_ context.Context, budget time.Duration) error {
 	f.waited = true
-	return nil
+	f.waitBudget = budget
+	return f.waitErr
 }
 
 // TestEnsureK3sInstalledSkipsWhenRunning asserts an already-running k3s is not reinstalled.
 func TestEnsureK3sInstalledSkipsWhenRunning(t *testing.T) {
 	f := &fakeK3sInstaller{running: true}
 	var out discardWriter
-	if err := ensureK3sInstalled(context.Background(), f, buildK3sInstallCommand("203.0.113.10"), out); err != nil {
+	if err := ensureK3sInstalled(context.Background(), f, buildK3sInstallCommand("203.0.113.10"), defaultK3sAPIReadyBudget, out, out); err != nil {
 		t.Fatalf("ensureK3sInstalled: %v", err)
 	}
 	if f.installedWith != nil {
@@ -146,12 +153,12 @@ func TestEnsureK3sInstalledSkipsWhenRunning(t *testing.T) {
 }
 
 // TestEnsureK3sInstalledRunsInstaller asserts a fresh box installs k3s (with the built command) and
-// waits for the API.
+// waits for the API with the given budget.
 func TestEnsureK3sInstalledRunsInstaller(t *testing.T) {
 	f := &fakeK3sInstaller{running: false}
 	var out discardWriter
 	cmd := buildK3sInstallCommand("203.0.113.10")
-	if err := ensureK3sInstalled(context.Background(), f, cmd, out); err != nil {
+	if err := ensureK3sInstalled(context.Background(), f, cmd, 90*time.Second, out, out); err != nil {
 		t.Fatalf("ensureK3sInstalled: %v", err)
 	}
 	if f.installedWith == nil {
@@ -160,6 +167,49 @@ func TestEnsureK3sInstalledRunsInstaller(t *testing.T) {
 	assertFlagValue(t, f.installedWith.Args, "--tls-san", "203.0.113.10")
 	if !f.waited {
 		t.Error("WaitForAPI was not called after a fresh install")
+	}
+	if f.waitBudget != 90*time.Second {
+		t.Errorf("WaitForAPI budget = %s, want 90s (the budget must be threaded through)", f.waitBudget)
+	}
+}
+
+// TestEnsureK3sInstalledProceedsOnInstallerExitWhenAPIReady is the exact regression from dogfooding on
+// a small VPS: the installer exits non-zero (systemd's readiness wait times out on k3s's slow first
+// start) but the k3s API answers within the budget. bootstrap must NOT abort — the API answering is
+// the success criterion — and must log the installer's exit as a warning.
+func TestEnsureK3sInstalledProceedsOnInstallerExitWhenAPIReady(t *testing.T) {
+	f := &fakeK3sInstaller{running: false, installErr: errors.New("installing k3s: exit status 1")}
+	var out, errb bytes.Buffer
+	if err := ensureK3sInstalled(context.Background(), f, buildK3sInstallCommand("203.0.113.10"), defaultK3sAPIReadyBudget, &out, &errb); err != nil {
+		t.Fatalf("a non-zero installer exit with a ready API must not abort, got: %v", err)
+	}
+	if !f.waited {
+		t.Error("WaitForAPI must be polled even after a non-zero installer exit")
+	}
+	if !strings.Contains(errb.String(), "warning") || !strings.Contains(errb.String(), "exit status 1") {
+		t.Errorf("a tolerated installer exit should be logged as a warning carrying the exit, stderr:\n%s", errb.String())
+	}
+}
+
+// TestEnsureK3sInstalledFailsWhenAPINeverReady asserts that when the API never answers within the
+// budget bootstrap fails, and the error carries the installer's exit and points at journalctl and
+// systemctl status for diagnosis.
+func TestEnsureK3sInstalledFailsWhenAPINeverReady(t *testing.T) {
+	f := &fakeK3sInstaller{
+		running:    false,
+		installErr: errors.New("installing k3s: exit status 1"),
+		waitErr:    errors.New("the k3s API did not answer within 4m0s"),
+	}
+	var out, errb bytes.Buffer
+	err := ensureK3sInstalled(context.Background(), f, buildK3sInstallCommand("203.0.113.10"), defaultK3sAPIReadyBudget, &out, &errb)
+	if err == nil {
+		t.Fatal("expected an error when the k3s API never answers")
+	}
+	msg := err.Error()
+	for _, want := range []string{"exit status 1", "journalctl -xeu k3s.service", "systemctl status k3s"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("failure message missing %q, got: %v", want, msg)
+		}
 	}
 }
 
@@ -341,6 +391,10 @@ func stubBootstrapFullFlow(t *testing.T, inst k3sInstaller) string {
 	clientsetFn = func(string, string) (kubernetes.Interface, error) { return fake.NewSimpleClientset(), nil }
 	origApply := applyFn
 	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+	// A comfortable RAM reading by default so the RAM preflight is silent and the flow reaches install;
+	// the RAM-preflight tests override this after calling the helper.
+	origMem := readTotalMemory
+	readTotalMemory = func() (uint64, error) { return 4 * (1 << 30), nil }
 
 	t.Cleanup(func() {
 		newIPDetector = origIP
@@ -348,6 +402,7 @@ func stubBootstrapFullFlow(t *testing.T, inst k3sInstaller) string {
 		listContexts = origList
 		clientsetFn = origCS
 		applyFn = origApply
+		readTotalMemory = origMem
 	})
 	return kcPath
 }
@@ -469,6 +524,264 @@ func TestBootstrapAlreadyRunningSkipsPrompt(t *testing.T) {
 	}
 	if inst.installedWith != nil {
 		t.Error("Install must not run when k3s is already running")
+	}
+}
+
+// TestBootstrapProceedsWhenInstallerExitsButAPIReady drives the full `burrow cluster bootstrap` flow
+// with a fake installer that returns a non-zero exit while the API answers — the exact false-failure
+// seen on a slow VPS. bootstrap must reach the deploy step and print the join-token block rather than
+// abort with `installing k3s: exit status 1`.
+func TestBootstrapProceedsWhenInstallerExitsButAPIReady(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false, installErr: errors.New("installing k3s: exit status 1")}
+	kcPath := stubBootstrapFullFlow(t, inst)
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, out, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("bootstrap must proceed when the API is ready despite a non-zero installer exit, got: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must have run")
+	}
+	if !inst.waited {
+		t.Error("WaitForAPI must have been polled")
+	}
+	// The deploy step is reached: the join-token block is printed for the laptop.
+	if !strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("bootstrap must reach the deploy step and print the join line, stdout:\n%s", out)
+	}
+	if !strings.Contains(errb, "warning") {
+		t.Errorf("the tolerated installer exit should be logged as a warning, stderr:\n%s", errb)
+	}
+}
+
+// TestBootstrapFailsWhenAPINeverReady drives the full flow with the API never answering: bootstrap
+// must fail (not print a join token) and the error must point at journalctl and systemctl status.
+func TestBootstrapFailsWhenAPINeverReady(t *testing.T) {
+	inst := &fakeK3sInstaller{
+		running:    false,
+		installErr: errors.New("installing k3s: exit status 1"),
+		waitErr:    errors.New("the k3s API did not answer within 4m0s"),
+	}
+	kcPath := stubBootstrapFullFlow(t, inst)
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, out, _ := runBootstrapCLI(kcPath)
+	if err == nil {
+		t.Fatal("bootstrap must fail when the k3s API never answers")
+	}
+	for _, want := range []string{"journalctl -xeu k3s.service", "systemctl status k3s"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("failure should point at %q, got: %v", want, err)
+		}
+	}
+	if strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("a failed bootstrap must not print a join token, stdout:\n%s", out)
+	}
+}
+
+// TestBootstrapRefusesSubGiBRAMWithoutYes asserts that a box below ~1GB with no --yes is refused:
+// bootstrap prints the 2GB-minimum refusal with the memory breakdown and the k3s-won't-start reason,
+// and aborts before touching the machine — the k3s installer seam is never called and no join token is
+// printed.
+func TestBootstrapRefusesSubGiBRAMWithoutYes(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 512 * (1 << 20), nil } // 512 MiB
+
+	// The RAM refusal happens before the confirmation, so confirmFn must never be consulted.
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) {
+		t.Fatal("confirmFn must not be called when the RAM preflight refuses")
+		return false, nil
+	}
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, out, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("a RAM refusal should abort cleanly, got: %v", err)
+	}
+	if inst.installedWith != nil {
+		t.Error("Install must NOT run when the RAM preflight refuses")
+	}
+	if !strings.Contains(errb, "512 MiB") {
+		t.Errorf("refusal should report the machine's RAM, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "minimum is 2GB") {
+		t.Errorf("refusal should state the 2GB minimum, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "cert-manager") {
+		t.Errorf("refusal should show the memory breakdown, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "k3s itself likely will not start") {
+		t.Errorf("a sub-1GB box should be told k3s will not start, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "--yes") {
+		t.Errorf("refusal should tell the user to re-run with --yes, stderr:\n%s", errb)
+	}
+	if strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("a refused bootstrap must not print a join token, stdout:\n%s", out)
+	}
+}
+
+// TestBootstrapRefusesTightRAMWithoutYes asserts that a box in the ~1-2GB range with no --yes now
+// refuses (changed from the old "warn and proceed"): it runs the control plane but a public site (the
+// ingress controller and cert-manager) exhausts it, so bootstrap refuses with that reason and the
+// breakdown, and does not install.
+func TestBootstrapRefusesTightRAMWithoutYes(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 1536 * (1 << 20), nil } // 1.5 GiB
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) {
+		t.Fatal("confirmFn must not be called when the RAM preflight refuses")
+		return false, nil
+	}
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, out, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("a tight-box RAM refusal should abort cleanly, got: %v", err)
+	}
+	if inst.installedWith != nil {
+		t.Error("Install must NOT run when a 1-2GB box is refused")
+	}
+	if !strings.Contains(errb, "1536 MiB") {
+		t.Errorf("refusal should report the machine's RAM, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "minimum is 2GB") {
+		t.Errorf("refusal should state the 2GB minimum, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "cert-manager") {
+		t.Errorf("refusal should show the memory breakdown, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "public site") {
+		t.Errorf("a 1-2GB box should be told a public site will exhaust it, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "--yes") {
+		t.Errorf("refusal should tell the user to re-run with --yes, stderr:\n%s", errb)
+	}
+	if strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("a refused bootstrap must not print a join token, stdout:\n%s", out)
+	}
+}
+
+// TestBootstrapProceedsUndersizedRAMWithYes asserts that --yes overrides the RAM refusal for a box
+// below the 2GB minimum: the warning and breakdown are shown but the install is reached (the flag
+// already means "I know what I'm doing").
+func TestBootstrapProceedsUndersizedRAMWithYes(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 512 * (1 << 20), nil } // 512 MiB
+
+	err, _, errb := runBootstrapCLI(kcPath, "--yes")
+	if err != nil {
+		t.Fatalf("cluster bootstrap --yes on a small box: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run when --yes overrides the RAM refusal")
+	}
+	// The warning and breakdown are still shown even though --yes lets it proceed.
+	if !strings.Contains(errb, "512 MiB") {
+		t.Errorf("the RAM warning should still be shown under --yes, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "cert-manager") {
+		t.Errorf("the memory breakdown should still be shown under --yes, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "Proceeding anyway because --yes") {
+		t.Errorf("--yes should be acknowledged as the reason for proceeding, stderr:\n%s", errb)
+	}
+}
+
+// TestBootstrapProceedsTightRAMWithYes asserts that --yes also overrides the refusal for a 1-2GB box:
+// the public-site warning and breakdown are shown but the install is reached.
+func TestBootstrapProceedsTightRAMWithYes(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 1536 * (1 << 20), nil } // 1.5 GiB
+
+	err, _, errb := runBootstrapCLI(kcPath, "--yes")
+	if err != nil {
+		t.Fatalf("cluster bootstrap --yes on a 1-2GB box: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run when --yes overrides the RAM refusal")
+	}
+	if !strings.Contains(errb, "public site") {
+		t.Errorf("the public-site warning should still be shown under --yes, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "cert-manager") {
+		t.Errorf("the memory breakdown should still be shown under --yes, stderr:\n%s", errb)
+	}
+}
+
+// TestBootstrapComfortableRAMNoWarning asserts that a box at or above 2GB proceeds silently — no RAM
+// warning is printed.
+func TestBootstrapComfortableRAMNoWarning(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 2 * (1 << 30), nil } // 2 GiB
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, _, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("a comfortable box should proceed, got: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run on a comfortable box")
+	}
+	if strings.Contains(errb, "of RAM") {
+		t.Errorf("a comfortable box should get no RAM warning, stderr:\n%s", errb)
+	}
+}
+
+// TestBootstrapSkipsRAMCheckWhenUnreadable asserts that when total RAM cannot be determined (e.g. a
+// non-Linux dev box, or an unreadable /proc/meminfo) the preflight is skipped rather than blocking
+// bootstrap: the install is reached and no RAM message is printed.
+func TestBootstrapSkipsRAMCheckWhenUnreadable(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 0, errors.New("no /proc/meminfo") }
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, _, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("an unreadable meminfo must not block bootstrap, got: %v\n%s", err, errb)
+	}
+	if inst.installedWith == nil {
+		t.Error("Install must run when the RAM check is skipped")
+	}
+	if strings.Contains(errb, "of RAM") {
+		t.Errorf("a skipped RAM check should print no RAM message, stderr:\n%s", errb)
+	}
+}
+
+// TestParseMemTotal asserts MemTotal (reported in kibibytes) is parsed to bytes, and that a meminfo
+// without a MemTotal line errors so the caller skips the check.
+func TestParseMemTotal(t *testing.T) {
+	const meminfo = "MemTotal:        2048000 kB\nMemFree:          123456 kB\n"
+	got, err := parseMemTotal([]byte(meminfo))
+	if err != nil {
+		t.Fatalf("parseMemTotal: %v", err)
+	}
+	if want := uint64(2048000) * 1024; got != want {
+		t.Errorf("parseMemTotal = %d bytes, want %d", got, want)
+	}
+	if _, err := parseMemTotal([]byte("MemFree: 100 kB\n")); err == nil {
+		t.Error("parseMemTotal should error when there is no MemTotal line")
 	}
 }
 

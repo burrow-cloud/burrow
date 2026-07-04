@@ -111,10 +111,11 @@ func New(cfg Config) (http.Handler, error) {
 
 	root := http.NewServeMux()
 	// Authenticate first, then apply the client-version handshake (ADR-0039): the too-old gate wraps
-	// the mux, and v1NotFound turns a route this server lacks into a structured "upgrade the control
-	// plane" error. Only authenticated callers reach the version machinery, so it never leaks the
-	// server version to an anonymous request.
-	root.Handle("/v1/", requireToken(cfg.Token, versionGate(cfg.Version, v1NotFound(cfg.Version, v1))))
+	// the mux, clientVersionContext records the acting client's version onto the request context for
+	// the audit log, and v1NotFound turns a route this server lacks into a structured "upgrade the
+	// control plane" error. Only authenticated callers reach the version machinery, so it never leaks
+	// the server version to an anonymous request.
+	root.Handle("/v1/", requireToken(cfg.Token, versionGate(cfg.Version, clientVersionContext(v1NotFound(cfg.Version, v1)))))
 	root.HandleFunc("GET /healthz", health)
 	return root, nil
 }

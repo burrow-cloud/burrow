@@ -11,6 +11,8 @@ import (
 
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
+
+	"github.com/burrow-cloud/burrow/controlplane"
 )
 
 // The client-version handshake (ADR-0039). burrowd is the compatibility anchor: it serves any
@@ -80,6 +82,20 @@ func versionGate(serverVersion string, next http.Handler) http.Handler {
 				Code:  "client_too_old",
 			})
 			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clientVersionContext puts the request's X-Burrow-Client-Version on the context so the engine can
+// record which client drove a guarded operation in the audit log, next to the principal (ADR-0039).
+// It runs inside the version gate — on an authenticated, in-window request — so an audited operation
+// carries the acting client's version whenever the client sent one; a pre-handshake request (no
+// header) leaves the context untouched and records no version.
+func clientVersionContext(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cv := r.Header.Get(clientVersionHeader); cv != "" {
+			r = r.WithContext(controlplane.ContextWithClientVersion(r.Context(), cv))
 		}
 		next.ServeHTTP(w, r)
 	})

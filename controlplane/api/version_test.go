@@ -106,6 +106,28 @@ func TestUnknownOperationPreservesMethodNotAllowed(t *testing.T) {
 	}
 }
 
+// TestClientVersionRecordedInAudit confirms the X-Burrow-Client-Version header rides all the way into
+// the audit log: a guarded operation driven by a versioned client records that version on its audit
+// rows, next to the principal (ADR-0039). It exercises the full path — header → request context →
+// engine → audit row.
+func TestClientVersionRecordedInAudit(t *testing.T) {
+	h, _, d := newAPIVersion(t, "v0.9.1")
+
+	rec := doVersion(h, "POST", "/v1/apps/web/deploy", token, "v0.9.0", `{"image":"registry.example.com/web:1","replicas":2}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	rows := d.AuditRows()
+	if len(rows) == 0 {
+		t.Fatal("no audit rows recorded for the deploy")
+	}
+	for i, r := range rows {
+		if r.ClientVersion != "v0.9.0" {
+			t.Errorf("audit row[%d] (%s/%s) client version = %q, want v0.9.0", i, r.Operation, r.Outcome, r.ClientVersion)
+		}
+	}
+}
+
 // TestVersionHandshakePermissiveWithoutServerVersion confirms a burrowd with no version set (a local
 // or e2e build) enforces no window: even an ancient client is served (ADR-0039).
 func TestVersionHandshakePermissiveWithoutServerVersion(t *testing.T) {

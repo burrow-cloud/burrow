@@ -266,7 +266,7 @@ func TestInstallNoArgListsContextsAndDoesNotInstall(t *testing.T) {
 	targeted := stubInstall(t, contexts, nil)
 	// Probe outcomes spanning all three install statuses, so the BURROWD column is exercised end
 	// to end without a real cluster.
-	stubScanProbe(t, func(kubeContext string) (string, error) {
+	stubProbe(t, func(kubeContext string) (string, error) {
 		switch kubeContext {
 		case "dev":
 			return "ghcr.io/burrow-cloud/burrowd:v0.7.0", nil

@@ -64,7 +64,7 @@ const firstRunBanner = rootShortDesc + "\n\n" +
 	"⚠️  Burrow is not set up yet. Point it at a cluster to get started:\n\n" +
 	"  burrow install <context>\n\n" +
 	"Use \"burrow install\" to list your contexts and install into one.\n" +
-	"Use \"burrow env scan\" to find an existing Burrow in your clusters.\n" +
+	"Use \"burrow env list --discover\" to find an existing Burrow in your clusters.\n" +
 	"Use \"burrow -h\" to see all commands.\n"
 
 // newAppCmd groups the operations on a deployed application.

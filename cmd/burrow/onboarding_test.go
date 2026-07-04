@@ -75,7 +75,7 @@ func TestBareBurrowFirstRunShowsBanner(t *testing.T) {
 		"burrow install <context>",
 		// The `Use "..."` pointers guide the next step.
 		`Use "burrow install" to list your contexts and install into one.`,
-		`Use "burrow env scan" to find an existing Burrow in your clusters.`,
+		`Use "burrow env list --discover" to find an existing Burrow in your clusters.`,
 		`Use "burrow -h" to see all commands.`,
 	} {
 		if !strings.Contains(s, want) {

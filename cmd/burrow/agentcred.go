@@ -115,12 +115,12 @@ func assembleAgentKubeconfig(restCfg *rest.Config, namespace, token string, caFr
 
 // errAgentCredentialAbsent marks the case where the scoped agent credential is simply not present on
 // the cluster yet — a pre-Phase-1 install, or a token Secret the controller has not populated. It is
-// a sentinel so callers that tolerate a missing credential (`burrow env scan`, the `upgrade`
+// a sentinel so callers that tolerate a missing credential (`burrow env list --discover`, the `upgrade`
 // backfill) can distinguish it from an access-denied failure via errors.Is and record a handle
 // without a scoped cred instead of failing.
 var errAgentCredentialAbsent = errors.New("the scoped agent credential is not present on this cluster")
 
-// joinAgentCredentialFn is the seam install, `env scan`, and `upgrade` use to read the existing
+// joinAgentCredentialFn is the seam install, `env list --discover`, and `upgrade` use to read the existing
 // scoped agent credential from a cluster and write the local kubeconfig for it (ADR-0038 §4). It is a
 // package var so tests substitute it without a real REST config or token Secret; the real path is
 // joinAgentCredentialForContext.
@@ -145,7 +145,7 @@ func joinAgentCredentialForContext(ctx context.Context, kubeconfig, kubeContext,
 // token and ca.crt — with the caller's own (admin or ambient) access, builds the self-contained
 // kubeconfig via the shared assembleAgentKubeconfig, and writes it locally via writeAgentKubeconfig
 // (ADR-0038 §4). It mints no cluster resources: a second user joining an already-installed cluster,
-// and the upgrade/scan backfills, all read the one credential `install` already provisioned. envName
+// and the upgrade and discover backfills, all read the one credential `install` already provisioned. envName
 // names the local kubeconfig file. If the token Secret cannot be read it returns a clear, actionable
 // error (see readAgentToken); a merely-absent credential wraps errAgentCredentialAbsent so tolerant
 // callers can skip it.

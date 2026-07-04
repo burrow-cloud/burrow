@@ -492,7 +492,7 @@ func TestWriteEnvList(t *testing.T) {
 	for _, want := range []string{
 		"No environments registered yet:",
 		"following kubectl context: ctx-dev", "(no handle registered)",
-		"burrow env scan", "burrow install <context>", "burrow env add <name>",
+		"burrow env list --discover", "burrow install <context>", "burrow env add <name>",
 		"Run `burrow env -h` for all environment commands.",
 	} {
 		if !strings.Contains(es, want) {

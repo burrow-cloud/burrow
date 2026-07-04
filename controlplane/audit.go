@@ -76,6 +76,13 @@ type AuditEntry struct {
 	// where a future TokenReview→SSO identity resolution fills in a real per-user value, so
 	// attribution becomes additive rather than a migration of past rows' meaning.
 	Principal string `json:"principal,omitempty"`
+	// ClientVersion is the release version of the client (CLI or MCP server) that drove the
+	// operation, read from the X-Burrow-Client-Version handshake header (ADR-0039). It records which
+	// client acted, next to the principal (who) and the server's own version — so version skew is
+	// legible after the fact. Empty for a pre-handshake client that sent no version. The json tag must
+	// match the client-side AuditEntry tag exactly (the struct crosses the API), or the field would
+	// silently drop.
+	ClientVersion string `json:"client_version,omitempty"`
 }
 
 // AuditFilter narrows an audit query. A zero value matches everything (subject to Limit).
@@ -112,6 +119,30 @@ const auditPrincipal = "shared-agent"
 // or the managed product can substitute a resolver without touching call sites.
 var principalFromContext = func(ctx context.Context) string {
 	return auditPrincipal
+}
+
+// clientVersionContextKey keys the acting client's version on a request context. It is an unexported
+// type so no other package can collide with it.
+type clientVersionContextKey struct{}
+
+// ContextWithClientVersion returns a context carrying the acting client's release version for the
+// audit record (ADR-0039). The API layer sets it from the X-Burrow-Client-Version header; the engine
+// reads it back via clientVersionFromContext when it records a guarded operation. An empty version
+// leaves the context unchanged, so a pre-handshake client records no version.
+func ContextWithClientVersion(ctx context.Context, version string) context.Context {
+	if version == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, clientVersionContextKey{}, version)
+}
+
+// clientVersionFromContext returns the acting client's version placed on ctx by
+// ContextWithClientVersion, or empty when none was set (a pre-handshake client, or a code path that
+// does not carry one, such as an internal reconcile). Unlike principalFromContext this is a real
+// resolver, not a stub — the client version is available today via the handshake header.
+func clientVersionFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(clientVersionContextKey{}).(string)
+	return v
 }
 
 // The audit operation names, referenced symbolically rather than as scattered string literals.
@@ -155,6 +186,9 @@ func (e *Engine) recordAudit(ctx context.Context, entry AuditEntry) {
 	}
 	if entry.Principal == "" {
 		entry.Principal = principalFromContext(ctx)
+	}
+	if entry.ClientVersion == "" {
+		entry.ClientVersion = clientVersionFromContext(ctx)
 	}
 	if err := e.db.AppendAudit(ctx, entry); err != nil {
 		slog.WarnContext(ctx, "audit append failed",

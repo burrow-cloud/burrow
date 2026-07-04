@@ -28,6 +28,53 @@ func auditRows(t *testing.T, d *fake.Database, op string) []cp.AuditEntry {
 	return out
 }
 
+// TestAuditRecordsClientVersion: an operation whose context carries a client version (as the API
+// middleware sets it from X-Burrow-Client-Version) records that version on every audit row, next to
+// the principal; an operation without one records an empty version — a pre-handshake client
+// (ADR-0039).
+func TestAuditRecordsClientVersion(t *testing.T) {
+	e, _, d, _ := newEngine(t, permissive())
+
+	ctx := cp.ContextWithClientVersion(context.Background(), "v0.9.1")
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
+		t.Fatalf("Deploy (with client version): %v", err)
+	}
+	rows := targetRows(auditRows(t, d, "deploy"), "web")
+	if len(rows) == 0 {
+		t.Fatal("no deploy audit rows for the versioned op")
+	}
+	for i, r := range rows {
+		if r.ClientVersion != "v0.9.1" {
+			t.Errorf("row[%d] client version = %q, want v0.9.1", i, r.ClientVersion)
+		}
+	}
+
+	// A pre-handshake client carries no version on the context: the rows record an empty version.
+	if _, err := e.Deploy(context.Background(), cp.DeployRequest{App: "api", Image: "img:2", Replicas: 1, Confirm: true}); err != nil {
+		t.Fatalf("Deploy (no client version): %v", err)
+	}
+	bare := targetRows(auditRows(t, d, "deploy"), "api")
+	if len(bare) == 0 {
+		t.Fatal("no deploy audit rows for the pre-handshake op")
+	}
+	for i, r := range bare {
+		if r.ClientVersion != "" {
+			t.Errorf("pre-handshake row[%d] client version = %q, want empty", i, r.ClientVersion)
+		}
+	}
+}
+
+// targetRows filters audit rows to one target, so a test can separate two operations' trails.
+func targetRows(rows []cp.AuditEntry, target string) []cp.AuditEntry {
+	var out []cp.AuditEntry
+	for _, r := range rows {
+		if r.Target == target {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // TestAuditDeployAllowedRecordsExecuted: a normal allowed deploy records an allowed decision
 // row and an executed row, and never executes a denied or held variant.
 func TestAuditDeployAllowedRecordsExecuted(t *testing.T) {

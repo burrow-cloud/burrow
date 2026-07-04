@@ -273,6 +273,10 @@ type AuditEntry struct {
 	// structs serialize/deserialize across the API, and a mismatched tag would silently drop the
 	// field (ADR-0038).
 	Principal string `json:"principal,omitempty"`
+	// ClientVersion is the release version of the client that drove the operation, from the
+	// X-Burrow-Client-Version handshake (ADR-0039). Empty for a pre-handshake client. The json tag
+	// must match the engine's AuditEntry.ClientVersion tag exactly, or the field would silently drop.
+	ClientVersion string `json:"client_version,omitempty"`
 }
 
 // AuditFilter narrows an audit query. A zero value lists the latest rows across all apps.

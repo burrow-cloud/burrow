@@ -23,6 +23,12 @@ import (
 const token = "secret-token"
 
 func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Database) {
+	return newAPIVersion(t, "")
+}
+
+// newAPIVersion is newAPI with an explicit burrowd version for the client-version handshake tests
+// (ADR-0039). An empty version keeps the handshake permissive, which is what every other test wants.
+func newAPIVersion(t *testing.T, version string) (http.Handler, *fake.Kubernetes, *fake.Database) {
 	t.Helper()
 	k, d := fake.NewKubernetes(), fake.NewDatabase()
 	// A restrictive baseline (empty dispositions → deny) so guardrail tests opt in explicitly,
@@ -42,7 +48,7 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Database) {
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
-	h, err := api.New(api.Config{Engine: e, Token: token})
+	h, err := api.New(api.Config{Engine: e, Token: token, Version: version})
 	if err != nil {
 		t.Fatalf("api.New: %v", err)
 	}

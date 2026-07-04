@@ -122,6 +122,42 @@ func TestKubeconfigTransportConnect(t *testing.T) {
 	}
 }
 
+// TestKubeconfigTransportSendsClientVersion confirms Options.ClientVersion is forwarded as
+// X-Burrow-Client-Version on the control-plane requests the kubeconfig transport builds (ADR-0039).
+// The real API-server proxy hop is exercised by TestProxyForwardsCustomHeader against a cluster;
+// this light test covers the wiring from Options through NewTokenRoundTripper onto the wire.
+func TestKubeconfigTransportSendsClientVersion(t *testing.T) {
+	var gotVersion string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The token-resolution Get carries no handshake header; the follow-up control-plane call does.
+		// Record only a non-empty value so the token Get does not clobber it.
+		if v := r.Header.Get("X-Burrow-Client-Version"); v != "" {
+			gotVersion = v
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&corev1.Secret{
+			TypeMeta:   metav1.TypeMeta{Kind: "Secret", APIVersion: "v1"},
+			ObjectMeta: metav1.ObjectMeta{Name: "burrowd-api-token", Namespace: "burrow"},
+			Data:       map[string][]byte{"token": []byte("s3cr3t")},
+		})
+	}))
+	defer srv.Close()
+
+	path := writeKubeconfig(t, twoContextConfig(srv.URL, "https://unused.invalid:6443"))
+	c, err := Client(context.Background(), Options{Kubeconfig: path, Context: "ctx-one", Namespace: "burrow", ClientVersion: "v4.5.6"})
+	if err != nil {
+		t.Fatalf("Client: %v", err)
+	}
+	// One control-plane call so the transport emits the handshake header. The fake echoes a Secret
+	// body, which decodes to an empty environment list without error — enough to observe the header.
+	if _, err := c.ListEnvironments(context.Background()); err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if gotVersion != "v4.5.6" {
+		t.Errorf("X-Burrow-Client-Version = %q, want v4.5.6 (Options.ClientVersion, ADR-0039)", gotVersion)
+	}
+}
+
 // notInstalledServer is a fake API server that answers the token Secret Get with a Kubernetes
 // NotFound, standing in for a cluster where burrowd has not been installed.
 func notInstalledServer() *httptest.Server {

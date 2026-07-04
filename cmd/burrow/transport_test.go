@@ -25,6 +25,9 @@ func TestTransportSelectionDirectURL(t *testing.T) {
 	if dt.BaseURL != "https://cp.example" || dt.Token != "tok" {
 		t.Errorf("DirectTransport = %+v, want the --control-plane URL and --token", dt)
 	}
+	if dt.Version != cliVersion() {
+		t.Errorf("DirectTransport.Version = %q, want the CLI version %q (ADR-0039)", dt.Version, cliVersion())
+	}
 }
 
 // TestTransportSelectionDirectURLRequiresToken confirms --control-plane without a token is an
@@ -52,5 +55,8 @@ func TestTransportSelectionKubeconfig(t *testing.T) {
 	}
 	if kt.Options.Context != "prod" || kt.Options.Namespace != "burrow" {
 		t.Errorf("kubeconfig opts = %+v, want context prod namespace burrow", kt.Options)
+	}
+	if kt.Options.ClientVersion != cliVersion() {
+		t.Errorf("kubeconfig opts ClientVersion = %q, want the CLI version %q (ADR-0039)", kt.Options.ClientVersion, cliVersion())
 	}
 }

@@ -55,6 +55,9 @@ type Options struct {
 	Port        int
 	TokenSecret string
 	TokenKey    string
+	// ClientVersion is this client's release version, forwarded as X-Burrow-Client-Version so
+	// burrowd can make version skew legible (ADR-0039). Empty omits the header.
+	ClientVersion string
 }
 
 func (o *Options) setDefaults() {
@@ -117,7 +120,7 @@ func Client(ctx context.Context, o Options) (*client.Client, error) {
 	// The kubeconfig transport authenticates to the API server; wrap it so every request also
 	// carries the burrowd API token in X-Burrow-Token, which the proxy forwards untouched
 	// (ADR-0015, ADR-0045). The Client itself stays auth-agnostic.
-	hc.Transport = client.NewTokenRoundTripper(token, hc.Transport)
+	hc.Transport = client.NewTokenRoundTripper(token, o.ClientVersion, hc.Transport)
 	return client.NewClientWithHTTP(proxyBaseURL(cfg.Host, o.Namespace, o.Service, o.Port), hc), nil
 }
 

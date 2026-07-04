@@ -33,12 +33,21 @@ type Client struct {
 }
 
 // NewClient returns a control-plane API client for baseURL authenticating with token over
-// X-Burrow-Token, using a default HTTP client whose transport is NewTokenRoundTripper. It is
-// the convenience constructor for the direct-URL path and the MCP server.
+// X-Burrow-Token, using a default HTTP client whose transport is NewTokenRoundTripper. It sends no
+// client-version header; use NewClientVersion to include the ADR-0039 handshake.
 func NewClient(baseURL, token string) *Client {
+	return NewClientVersion(baseURL, token, "")
+}
+
+// NewClientVersion is NewClient plus the ADR-0039 client-version handshake: it sends clientVersion
+// in X-Burrow-Client-Version on every request so burrowd can turn version skew into an actionable
+// error rather than an opaque one. An empty clientVersion behaves exactly like NewClient. It is the
+// constructor the direct-URL transport and the MCP server's direct path use, passing the binary's
+// own release version.
+func NewClientVersion(baseURL, token, clientVersion string) *Client {
 	hc := &http.Client{
 		Timeout:   60 * time.Second,
-		Transport: NewTokenRoundTripper(token, nil),
+		Transport: NewTokenRoundTripper(token, clientVersion, nil),
 	}
 	return NewClientWithHTTP(baseURL, hc)
 }

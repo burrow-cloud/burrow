@@ -75,7 +75,7 @@ func clientFactory(ctx context.Context, stderr io.Writer) (burrowmcp.ClientForCo
 		if token == "" {
 			return nil, errors.New("BURROW_API_TOKEN is required with BURROW_CONTROL_PLANE_URL")
 		}
-		c := client.NewClient(baseURL, token)
+		c := client.NewClientVersion(baseURL, token, version)
 		return func(string) (*client.Client, error) { return c, nil }, nil
 	}
 
@@ -94,6 +94,7 @@ func clientFactory(ctx context.Context, stderr io.Writer) (burrowmcp.ClientForCo
 		if err != nil {
 			return nil, err
 		}
+		opts.ClientVersion = version // ADR-0039: forward this binary's version as X-Burrow-Client-Version
 		// Route through the same kubeconfig transport the CLI uses, so MCP and the CLI share one
 		// seam (ADR-0045). The transport stays credential-free here: it reads the burrowd API token
 		// from the install Secret over the human's proxy, holding no cluster-operating credential

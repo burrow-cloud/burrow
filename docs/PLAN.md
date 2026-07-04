@@ -144,22 +144,75 @@ environment, with prod gated while staging stays permissive.
 - **Surface cleanups**: the `app env`→`app config` rename, a cleaner `burrow version`, and connection
   errors that name the targeted context.
 
-**Next:**
+## Shipped: v0.8 — autoscaling and deploy-safety hardening ✅
 
-- **v0.8 lead — application autoscaling.** `burrow app autoscale <app>` applies an autoscaling/v2
-  HorizontalPodAutoscaler on the app's Deployment with sane defaults (1..10 replicas at 80% CPU),
-  its max bounded by the replica-ceiling guardrail, and `burrow app autoscale <app> off` removes it.
-  It warns when metrics-server is absent (the HPA is set but will not scale until it is installed).
-- Add-on RBAC is now staged per-add-on by the CLI at install time (least privilege): the base install
-  no longer carries the metrics vmagent grant, `burrow addon install metrics` applies it kubeconfig-side
-  before the API call, and burrowd verifies it (read-only) and fails cleanly on the agent path if absent.
-- **Scheduled backups + retention** — the [ADR-0032](adr/0032-postgres-backups.md) follow-on (a CronJob
-  or a burrowd in-process scheduler).
-- **Credentials follow-on** — the registry pull secret ([ADR-0017](adr/0017-private-registry-authentication.md))
-  through burrowd too; richer per-principal identity with an auth ADR.
-- Unsequenced themes — reliability legibility, database-provisioning depth, autoscaling, cost controls,
-  a frictionless cluster on-ramp — live in [ROADMAP.md](ROADMAP.md). **Deferred until requested:**
-  server-side build from a git reference ([ADR-0008](adr/0008-two-build-paths.md)).
+Released as **v0.8.0**. Application autoscaling, plus a batch of least-privilege and deploy-safety
+hardening.
+
+- **Autoscaling** — `burrow app autoscale <app>` applies an autoscaling/v2 HorizontalPodAutoscaler
+  (1..10 replicas at 80% CPU by default), its max bounded by the replica-ceiling guardrail;
+  `app autoscale <app> off` removes it, and an `app.autoscale` guardrail gates it. Warns when
+  metrics-server is absent.
+- **Scoped agent credential** ([ADR-0038](adr/0038-scoped-agent-credential.md)) — install mints a
+  `burrow-agent` ServiceAccount with narrow RBAC and writes a burrowd-only kubeconfig; the human keeps
+  the admin kubeconfig, and `burrow-mcp` fails closed if the scoped credential is missing.
+- **Deploy safety** — an `app.deploy` guardrail (gate or require sign-off per environment); every
+  deploy rolls the workload (release-stamped, so a re-deploy or a pull-credential fix always takes
+  effect) while preserving the running replica count.
+- **Version skew** ([ADR-0039](adr/0039-cli-control-plane-version-skew.md)) — a client-version header
+  turns a new CLI against an old control plane into an actionable "run `burrow upgrade`".
+- **Burrowd never contacts the registry** ([ADR-0040](adr/0040-burrowd-never-contacts-the-registry.md))
+  — the pre-deploy image resolve is gone; Kubernetes resolves and pulls via the imagePullSecret and the
+  digest is read back from pod status.
+- **Registry / credentials UX** — a secure token prompt for private-registry credentials, agent guidance
+  toward durable credentials and versioned tags, and actionable errors for an unknown environment or a
+  failed pull.
+- **Ingress cost-approval** — `--approve` before Burrow stands up a billable LoadBalancer, honest
+  capability detection, clean adoption of an orphaned IngressClass, and public exposure steered toward a
+  LoadBalancer over NodePort.
+- **Add-on RBAC staged per-add-on** by the CLI at install time (least privilege): the base install no
+  longer carries the metrics vmagent grant; `addon install metrics` applies it kubeconfig-side and
+  burrowd verifies it read-only, failing cleanly on the agent path if absent.
+
+## Shipped: v0.9 — the single-VPS, cheap-self-hoster on-ramp ✅
+
+Released as **v0.9.0**. Turns a bare VPS into a Burrow cluster with no cloud LoadBalancer cost, so a
+solo developer can self-host the whole thing on one cheap box. Proven end to end by dogfooding: a public
+app served over the node's own IP through servicelb and the ingress on a 2GB droplet.
+
+- **Single-VPS bootstrap** ([ADR-0044](adr/0044-single-vps-k3s-cluster.md)) — a one-time on-VPS
+  `curl | sh` runs `burrow cluster bootstrap`, which installs k3s + burrowd and prints a
+  `burrow join <token>`; running join on the laptop lands both admin and scoped credentials, so after
+  the single SSH bootstrap every operation runs from the laptop. Burrow never SSHes.
+- **Free LoadBalancer detection** ([ADR-0043](adr/0043-public-reachability-is-a-loadbalancer.md)) —
+  servicelb and MetalLB are detected as real LoadBalancer providers, so a single node's public IP serves
+  a `type=LoadBalancer` Service at no cloud cost; public reachability is a LoadBalancer, not NodePort.
+- **Existing ingress controller** ([ADR-0042](adr/0042-use-existing-ingress-controller.md)) and a flatter
+  path to a reachable app ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md)).
+- **Bootstrap safety** — a 2GB RAM preflight with a memory breakdown that steers away from undersized
+  boxes, a wait for the k3s API instead of trusting the installer exit, and a confirm before turning a
+  machine into a cluster node.
+- **Small-cluster tuning** — lean Postgres config and memory limits, and bounded database-wait attempts
+  so burrowd startup retries fast.
+- **Honest surfaces** — `ingress install` frames servicelb / MetalLB LoadBalancers as free (not
+  billable); `app logs` prints the source note and context above the logs; `env scan` folds into
+  `env list --discover`.
+
+**Next: the v0.10 theme is not yet chosen.** v0.9 proved the cheap-self-hoster on-ramp; the following
+milestone is open. Live candidates:
+
+- **Self-hoster day-2 hardening** — scheduled Postgres backups + retention (the
+  [ADR-0032](adr/0032-postgres-backups.md) follow-on, a CronJob or a burrowd in-process scheduler),
+  richer guardrails / blast-radius limits, and cost visibility.
+- **Managed-product groundwork** — the one refactor ADR-0045 names (make the CLI's control-plane
+  transport an explicit interface before it accretes more coupled call sites), plus richer per-principal
+  identity with an auth ADR.
+- **Database-provisioning depth** — managed Postgres as a first-class deploy dependency, heavier than the
+  current attach model.
+
+**Deferred until requested:** registry onboarding (ADR-0046, Proposed, held pending a user signal that
+onboarding is painful); server-side build from a git reference
+([ADR-0008](adr/0008-two-build-paths.md)).
 
 Shipped in **v0.7.1** (patch): a `burrow mcp <tool> [install]` command that connects Burrow's MCP
 server to Claude Code, Cursor, Codex, Copilot, or OpenCode (preview by default, idempotent, and it

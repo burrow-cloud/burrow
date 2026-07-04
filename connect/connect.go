@@ -75,6 +75,21 @@ func (o *Options) setDefaults() {
 	}
 }
 
+// KubeconfigTransport reaches the in-cluster control plane through the Kubernetes API-server
+// service proxy, authenticated by the developer's kubeconfig, with the burrowd API token read
+// from the install Secret (ADR-0014). Its Connect wraps Client, so requests carry the token on
+// the wire in X-Burrow-Token (ADR-0015). It is the default open-source transport (ADR-0045),
+// shared by the CLI and the MCP server so both reach burrowd over one seam. It lives with the
+// kubeconfig logic it wraps and is importable by both binaries and a private module.
+type KubeconfigTransport struct {
+	Options Options
+}
+
+// Connect resolves the token from the install Secret and returns a proxy-routed client.
+func (t KubeconfigTransport) Connect(ctx context.Context) (*client.Client, error) {
+	return Client(ctx, t.Options)
+}
+
 // Client returns a control-plane API client that reaches burrowd through the API-server
 // service proxy, authenticated by the kubeconfig, with the API token read from the install
 // Secret.

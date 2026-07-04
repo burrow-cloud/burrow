@@ -59,3 +59,22 @@ func (t *tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	r.Header.Set("X-Burrow-Token", t.token)
 	return t.inner.RoundTrip(r)
 }
+
+// DirectTransport talks to a control-plane URL directly (e.g. an ingress) with an API token,
+// selected by --control-plane/--token (or BURROW_CONTROL_PLANE_URL/BURROW_API_TOKEN). NewClient
+// wires the X-Burrow-Token RoundTripper, so the direct path sends the same header as the
+// kubeconfig proxy path (ADR-0015, ADR-0045).
+//
+// It lives here rather than in the connect package because it needs only NewClient and no
+// client-go, keeping this package client-go-free while remaining importable by both binaries and
+// a private module (ADR-0045).
+type DirectTransport struct {
+	BaseURL string
+	Token   string
+}
+
+// Connect returns a client for the configured URL and token. It needs no context because the
+// direct path resolves no credential; the parameter satisfies the Transport interface.
+func (t DirectTransport) Connect(_ context.Context) (*Client, error) {
+	return NewClient(t.BaseURL, t.Token), nil
+}

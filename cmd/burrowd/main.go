@@ -224,7 +224,7 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		return err
 	}
 
-	handler, err := api.New(api.Config{Engine: engine, Token: token})
+	handler, err := api.New(api.Config{Engine: engine, Token: token, Version: version})
 	if err != nil {
 		return err
 	}

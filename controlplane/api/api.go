@@ -30,6 +30,11 @@ type Config struct {
 	// Token is the bearer token clients must present on every /v1 request
 	// (ADR-0005). Required — the control plane authenticates its callers.
 	Token string
+	// Version is burrowd's own release version, the compatibility anchor for the client-version
+	// handshake (ADR-0039): a client more than one minor behind is refused with an actionable error,
+	// and an unknown route reports this version so a newer client learns to upgrade the control
+	// plane. Optional — empty (a local or e2e build) makes the handshake permissive.
+	Version string
 }
 
 // New builds the control-plane HTTP handler. The /v1 routes require the bearer token;
@@ -105,7 +110,11 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/cluster", s.cluster)
 
 	root := http.NewServeMux()
-	root.Handle("/v1/", requireToken(cfg.Token, v1))
+	// Authenticate first, then apply the client-version handshake (ADR-0039): the too-old gate wraps
+	// the mux, and v1NotFound turns a route this server lacks into a structured "upgrade the control
+	// plane" error. Only authenticated callers reach the version machinery, so it never leaks the
+	// server version to an anonymous request.
+	root.Handle("/v1/", requireToken(cfg.Token, versionGate(cfg.Version, v1NotFound(cfg.Version, v1))))
 	root.HandleFunc("GET /healthz", health)
 	return root, nil
 }

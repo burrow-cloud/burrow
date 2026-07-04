@@ -59,3 +59,26 @@ func TestClientWithoutTokenTransportSendsNoToken(t *testing.T) {
 		t.Fatalf("server was not reached")
 	}
 }
+
+// TestDirectTransportConnect confirms the direct-URL transport (ADR-0045) returns a client for its
+// URL that carries the token in X-Burrow-Token, the same header the kubeconfig proxy path sends
+// (ADR-0015). It resolves no credential, so Connect ignores its context.
+func TestDirectTransportConnect(t *testing.T) {
+	var gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.Header.Get("X-Burrow-Token")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+
+	c, err := client.DirectTransport{BaseURL: srv.URL, Token: "s3cr3t"}.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.ListEnvironments(context.Background()); err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if gotToken != "s3cr3t" {
+		t.Errorf("X-Burrow-Token = %q, want s3cr3t", gotToken)
+	}
+}

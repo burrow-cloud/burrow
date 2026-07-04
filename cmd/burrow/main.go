@@ -334,9 +334,9 @@ func (o *commonOpts) transport(tgt target) (client.Transport, error) {
 		if o.token == "" {
 			return nil, errors.New("--token (or BURROW_API_TOKEN) is required with --control-plane")
 		}
-		return directTransport{baseURL: o.controlPlane, token: o.token}, nil
+		return client.DirectTransport{BaseURL: o.controlPlane, Token: o.token}, nil
 	}
-	return kubeconfigTransport{opts: o.connectOptions(tgt)}, nil
+	return connect.KubeconfigTransport{Options: o.connectOptions(tgt)}, nil
 }
 
 // connectOptions builds the auto-connect options for a target. It uses the scoped, burrowd-only

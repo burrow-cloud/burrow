@@ -94,7 +94,11 @@ func clientFactory(ctx context.Context, stderr io.Writer) (burrowmcp.ClientForCo
 		if err != nil {
 			return nil, err
 		}
-		c, err := connect.Client(ctx, opts)
+		// Route through the same kubeconfig transport the CLI uses, so MCP and the CLI share one
+		// seam (ADR-0045). The transport stays credential-free here: it reads the burrowd API token
+		// from the install Secret over the human's proxy, holding no cluster-operating credential
+		// of its own (ADR-0005).
+		c, err := connect.KubeconfigTransport{Options: opts}.Connect(ctx)
 		if err != nil {
 			return nil, err
 		}

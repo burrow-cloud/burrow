@@ -5,6 +5,9 @@ package main
 
 import (
 	"testing"
+
+	"github.com/burrow-cloud/burrow/client"
+	"github.com/burrow-cloud/burrow/connect"
 )
 
 // TestTransportSelectionDirectURL confirms that --control-plane (with --token) selects the
@@ -15,12 +18,12 @@ func TestTransportSelectionDirectURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transport: %v", err)
 	}
-	dt, ok := tr.(directTransport)
+	dt, ok := tr.(client.DirectTransport)
 	if !ok {
-		t.Fatalf("transport = %T, want directTransport", tr)
+		t.Fatalf("transport = %T, want client.DirectTransport", tr)
 	}
-	if dt.baseURL != "https://cp.example" || dt.token != "tok" {
-		t.Errorf("directTransport = %+v, want the --control-plane URL and --token", dt)
+	if dt.BaseURL != "https://cp.example" || dt.Token != "tok" {
+		t.Errorf("DirectTransport = %+v, want the --control-plane URL and --token", dt)
 	}
 }
 
@@ -43,11 +46,11 @@ func TestTransportSelectionKubeconfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transport: %v", err)
 	}
-	kt, ok := tr.(kubeconfigTransport)
+	kt, ok := tr.(connect.KubeconfigTransport)
 	if !ok {
-		t.Fatalf("transport = %T, want kubeconfigTransport", tr)
+		t.Fatalf("transport = %T, want connect.KubeconfigTransport", tr)
 	}
-	if kt.opts.Context != "prod" || kt.opts.Namespace != "burrow" {
-		t.Errorf("kubeconfig opts = %+v, want context prod namespace burrow", kt.opts)
+	if kt.Options.Context != "prod" || kt.Options.Namespace != "burrow" {
+		t.Errorf("kubeconfig opts = %+v, want context prod namespace burrow", kt.Options)
 	}
 }

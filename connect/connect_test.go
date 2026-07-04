@@ -99,6 +99,29 @@ func TestClientContextSelectsCluster(t *testing.T) {
 	}
 }
 
+// TestKubeconfigTransportConnect confirms the kubeconfig transport (ADR-0045) delegates to Client:
+// it resolves the token over the API-server proxy for the options it holds and returns a client for
+// that cluster. It is the seam the CLI and the MCP server share.
+func TestKubeconfigTransportConnect(t *testing.T) {
+	var hit bool
+	srv := tokenServer(&hit)
+	defer srv.Close()
+
+	path := writeKubeconfig(t, twoContextConfig(srv.URL, "https://unused.invalid:6443"))
+
+	tr := KubeconfigTransport{Options: Options{Kubeconfig: path, Context: "ctx-one", Namespace: "burrow"}}
+	c, err := tr.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if c == nil {
+		t.Fatal("Connect returned a nil client")
+	}
+	if !hit {
+		t.Errorf("transport did not resolve the token over the API-server proxy")
+	}
+}
+
 // notInstalledServer is a fake API server that answers the token Secret Get with a Kubernetes
 // NotFound, standing in for a cluster where burrowd has not been installed.
 func notInstalledServer() *httptest.Server {

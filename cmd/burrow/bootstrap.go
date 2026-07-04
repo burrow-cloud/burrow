@@ -50,17 +50,19 @@ const k3sInstallScriptURL = "https://get.k3s.io"
 const defaultK3sAPIReadyBudget = 4 * time.Minute
 
 // RAM preflight thresholds (ADR-0044). From live dogfooding on a DigitalOcean droplet: a 512MB box
-// FAILED (k3s never stabilized), a 1GB box worked but was tight (k3s + burrowd + Postgres came up with
-// almost no headroom for an app), and 2GB was comfortable. So bootstrap checks total RAM up front and
-// steers the user instead of letting an undersized box fail cryptically mid-install.
+// FAILED (k3s never stabilized), a 1GB box ran the control plane fine but was exhausted the moment a
+// PUBLIC site added the ingress controller and cert-manager (kswapd thrashing, k3s API TLS-handshake
+// timeouts), and 2GB was comfortable. So the honest minimum for a usable public site is 2GB: bootstrap
+// checks total RAM up front and refuses below it instead of letting an undersized box fail cryptically.
 const (
-	// minBootstrapRAM is the floor below which bootstrap refuses (unless --yes). It sits a little under
-	// a nominal "1GB" so a real 1GB box — whose usable RAM is under 1 GiB once the kernel reserves its
-	// share — still passes; a 512MB box lands well below it.
-	minBootstrapRAM = 960 * (1 << 20) // 960 MiB
-	// recommendedBootstrapRAM is the comfortable floor: at or above it bootstrap proceeds silently.
-	// Between minBootstrapRAM and this, bootstrap warns that there is little headroom for the app.
-	recommendedBootstrapRAM = 2 * (1 << 30) // 2 GiB
+	// k3sMinRAM is the level below which k3s itself is unlikely to even start — a 512MB box failed
+	// outright in dogfooding. Under it the refusal names k3s as the reason; between it and the 2GB
+	// minimum the box runs the control plane but a public site will exhaust it.
+	k3sMinRAM = 960 * (1 << 20) // 960 MiB
+	// minBootstrapRAM is the 2GB honest minimum below which bootstrap refuses (unless --yes). It sits a
+	// little under a nominal "2GB" so a real 2GB box — whose usable RAM is under 2 GiB once the kernel
+	// reserves its share — still passes; at or above it bootstrap proceeds silently.
+	minBootstrapRAM = 1900 * (1 << 20) // 1900 MiB
 )
 
 // readTotalMemory reports the machine's total physical RAM in bytes. It is a seam: the real
@@ -436,37 +438,42 @@ func confirmBootstrap(yes bool, stderr io.Writer) (bool, error) {
 }
 
 // preflightRAM checks the machine's total RAM before the destructive k3s install and steers the user
-// away from an undersized box (ADR-0044 dogfooding: a 512MB box fails k3s, 1GB is tight, 2GB is
-// comfortable). Below minBootstrapRAM (~1GB) it refuses unless yes is set — reusing --yes, which already
-// means "I know what I'm doing" — printing the warning and proceeding when --yes is passed. Between
-// minBootstrapRAM and recommendedBootstrapRAM (2GB) it warns about thin headroom but proceeds. At or
-// above recommendedBootstrapRAM it is silent. If total RAM cannot be determined (a non-Linux dev box,
-// or an unreadable /proc/meminfo) the check is skipped rather than blocking bootstrap. It reports
-// whether to proceed.
+// away from an undersized box. The honest minimum is 2GB (ADR-0044 dogfooding: 1GB ran the control
+// plane fine but was exhausted the moment a public site added the ingress controller and cert-manager,
+// and a 512MB box never started k3s at all). Below minBootstrapRAM (~2GB) it refuses unless yes is set —
+// reusing --yes, which already means "I know what I'm doing" — printing a breakdown of what uses the
+// memory plus a tier-specific reason, and proceeding when --yes is passed. At or above minBootstrapRAM
+// it is silent. If total RAM cannot be determined (a non-Linux dev box, or an unreadable /proc/meminfo)
+// the check is skipped rather than blocking bootstrap. It reports whether to proceed.
 func preflightRAM(yes bool, stderr io.Writer) bool {
 	total, err := readTotalMemory()
 	if err != nil {
 		// The real target is Linux; on anything else don't block bootstrap on an unreadable meminfo.
 		return true
 	}
-	mib := total / (1 << 20)
-	switch {
-	case total < minBootstrapRAM:
-		fmt.Fprintf(stderr, "This machine has %d MiB of RAM. k3s needs about 1GB just to start "+
-			"(512MB will not work), and Burrow adds burrowd and Postgres; 2GB is recommended.\n", mib)
-		if !yes {
-			fmt.Fprintln(stderr, "Re-run with --yes to bootstrap anyway.")
-			return false
-		}
-		fmt.Fprintln(stderr, "Proceeding anyway because --yes was set.")
-		return true
-	case total < recommendedBootstrapRAM:
-		fmt.Fprintf(stderr, "This machine has %d MiB of RAM. Burrow will fit (k3s + burrowd + Postgres), "+
-			"but there is little headroom for your app; 2GB or more is recommended.\n", mib)
-		return true
-	default:
+	if total >= minBootstrapRAM {
 		return true
 	}
+	mib := total / (1 << 20)
+	// The memory breakdown: what actually consumes the RAM, so an undersized box is a clear, honest
+	// refusal rather than a cryptic mid-install failure. Figures are ballpark ("roughly"/"~").
+	fmt.Fprintf(stderr, "Burrow's minimum is 2GB of RAM. This machine has %d MiB.\n"+
+		"Roughly: k3s ~500MB, Postgres ~150MB, burrowd ~100MB — plus, for a public site,\n"+
+		"ingress-nginx ~100MB and cert-manager ~200MB — before any headroom for your app.\n", mib)
+	// Tier-specific reason: a truly tiny box will not start k3s at all; a 1-2GB box runs the control
+	// plane but a public site will exhaust it.
+	if total < k3sMinRAM {
+		fmt.Fprintln(stderr, "Below ~1GB, k3s itself likely will not start (512MB is known to fail).")
+	} else {
+		fmt.Fprintln(stderr, "1-2GB runs the control plane and internal apps, but a public site "+
+			"(the ingress controller and cert-manager) will exhaust it.")
+	}
+	if !yes {
+		fmt.Fprintln(stderr, "Re-run with --yes to bootstrap anyway.")
+		return false
+	}
+	fmt.Fprintln(stderr, "Proceeding anyway because --yes was set.")
+	return true
 }
 
 // ensureK3sInstalled installs k3s unless it is already running (idempotent), then makes the k3s API

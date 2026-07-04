@@ -586,10 +586,11 @@ func TestBootstrapFailsWhenAPINeverReady(t *testing.T) {
 	}
 }
 
-// TestBootstrapRefusesUndersizedRAMWithoutYes asserts that a box below ~1GB with no --yes is refused:
-// bootstrap prints the "re-run with --yes" refusal and aborts before touching the machine — the k3s
-// installer seam is never called and no join token is printed.
-func TestBootstrapRefusesUndersizedRAMWithoutYes(t *testing.T) {
+// TestBootstrapRefusesSubGiBRAMWithoutYes asserts that a box below ~1GB with no --yes is refused:
+// bootstrap prints the 2GB-minimum refusal with the memory breakdown and the k3s-won't-start reason,
+// and aborts before touching the machine — the k3s installer seam is never called and no join token is
+// printed.
+func TestBootstrapRefusesSubGiBRAMWithoutYes(t *testing.T) {
 	inst := &fakeK3sInstaller{running: false}
 	kcPath := stubBootstrapFullFlow(t, inst)
 	readTotalMemory = func() (uint64, error) { return 512 * (1 << 20), nil } // 512 MiB
@@ -612,6 +613,15 @@ func TestBootstrapRefusesUndersizedRAMWithoutYes(t *testing.T) {
 	if !strings.Contains(errb, "512 MiB") {
 		t.Errorf("refusal should report the machine's RAM, stderr:\n%s", errb)
 	}
+	if !strings.Contains(errb, "minimum is 2GB") {
+		t.Errorf("refusal should state the 2GB minimum, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "cert-manager") {
+		t.Errorf("refusal should show the memory breakdown, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "k3s itself likely will not start") {
+		t.Errorf("a sub-1GB box should be told k3s will not start, stderr:\n%s", errb)
+	}
 	if !strings.Contains(errb, "--yes") {
 		t.Errorf("refusal should tell the user to re-run with --yes, stderr:\n%s", errb)
 	}
@@ -620,8 +630,52 @@ func TestBootstrapRefusesUndersizedRAMWithoutYes(t *testing.T) {
 	}
 }
 
-// TestBootstrapProceedsUndersizedRAMWithYes asserts that --yes overrides the RAM refusal: the warning
-// is shown but the install is reached (the flag already means "I know what I'm doing").
+// TestBootstrapRefusesTightRAMWithoutYes asserts that a box in the ~1-2GB range with no --yes now
+// refuses (changed from the old "warn and proceed"): it runs the control plane but a public site (the
+// ingress controller and cert-manager) exhausts it, so bootstrap refuses with that reason and the
+// breakdown, and does not install.
+func TestBootstrapRefusesTightRAMWithoutYes(t *testing.T) {
+	inst := &fakeK3sInstaller{running: false}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	readTotalMemory = func() (uint64, error) { return 1536 * (1 << 20), nil } // 1.5 GiB
+
+	origConfirm := confirmFn
+	confirmFn = func(string) (bool, error) {
+		t.Fatal("confirmFn must not be called when the RAM preflight refuses")
+		return false, nil
+	}
+	t.Cleanup(func() { confirmFn = origConfirm })
+
+	err, out, errb := runBootstrapCLI(kcPath)
+	if err != nil {
+		t.Fatalf("a tight-box RAM refusal should abort cleanly, got: %v", err)
+	}
+	if inst.installedWith != nil {
+		t.Error("Install must NOT run when a 1-2GB box is refused")
+	}
+	if !strings.Contains(errb, "1536 MiB") {
+		t.Errorf("refusal should report the machine's RAM, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "minimum is 2GB") {
+		t.Errorf("refusal should state the 2GB minimum, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "cert-manager") {
+		t.Errorf("refusal should show the memory breakdown, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "public site") {
+		t.Errorf("a 1-2GB box should be told a public site will exhaust it, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "--yes") {
+		t.Errorf("refusal should tell the user to re-run with --yes, stderr:\n%s", errb)
+	}
+	if strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("a refused bootstrap must not print a join token, stdout:\n%s", out)
+	}
+}
+
+// TestBootstrapProceedsUndersizedRAMWithYes asserts that --yes overrides the RAM refusal for a box
+// below the 2GB minimum: the warning and breakdown are shown but the install is reached (the flag
+// already means "I know what I'm doing").
 func TestBootstrapProceedsUndersizedRAMWithYes(t *testing.T) {
 	inst := &fakeK3sInstaller{running: false}
 	kcPath := stubBootstrapFullFlow(t, inst)
@@ -634,32 +688,37 @@ func TestBootstrapProceedsUndersizedRAMWithYes(t *testing.T) {
 	if inst.installedWith == nil {
 		t.Error("Install must run when --yes overrides the RAM refusal")
 	}
-	// The warning is still shown even though --yes lets it proceed.
+	// The warning and breakdown are still shown even though --yes lets it proceed.
 	if !strings.Contains(errb, "512 MiB") {
 		t.Errorf("the RAM warning should still be shown under --yes, stderr:\n%s", errb)
 	}
+	if !strings.Contains(errb, "cert-manager") {
+		t.Errorf("the memory breakdown should still be shown under --yes, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "Proceeding anyway because --yes") {
+		t.Errorf("--yes should be acknowledged as the reason for proceeding, stderr:\n%s", errb)
+	}
 }
 
-// TestBootstrapWarnsTightRAM asserts that a box in the ~1-2GB range proceeds but is warned about thin
-// headroom.
-func TestBootstrapWarnsTightRAM(t *testing.T) {
+// TestBootstrapProceedsTightRAMWithYes asserts that --yes also overrides the refusal for a 1-2GB box:
+// the public-site warning and breakdown are shown but the install is reached.
+func TestBootstrapProceedsTightRAMWithYes(t *testing.T) {
 	inst := &fakeK3sInstaller{running: false}
 	kcPath := stubBootstrapFullFlow(t, inst)
 	readTotalMemory = func() (uint64, error) { return 1536 * (1 << 20), nil } // 1.5 GiB
 
-	origConfirm := confirmFn
-	confirmFn = func(string) (bool, error) { return true, nil }
-	t.Cleanup(func() { confirmFn = origConfirm })
-
-	err, _, errb := runBootstrapCLI(kcPath)
+	err, _, errb := runBootstrapCLI(kcPath, "--yes")
 	if err != nil {
-		t.Fatalf("a tight-but-sufficient box should proceed, got: %v\n%s", err, errb)
+		t.Fatalf("cluster bootstrap --yes on a 1-2GB box: %v\n%s", err, errb)
 	}
 	if inst.installedWith == nil {
-		t.Error("Install must run on a tight-but-sufficient box")
+		t.Error("Install must run when --yes overrides the RAM refusal")
 	}
-	if !strings.Contains(errb, "little headroom") {
-		t.Errorf("a tight box should be warned about headroom, stderr:\n%s", errb)
+	if !strings.Contains(errb, "public site") {
+		t.Errorf("the public-site warning should still be shown under --yes, stderr:\n%s", errb)
+	}
+	if !strings.Contains(errb, "cert-manager") {
+		t.Errorf("the memory breakdown should still be shown under --yes, stderr:\n%s", errb)
 	}
 }
 

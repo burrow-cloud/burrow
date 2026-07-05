@@ -1,6 +1,6 @@
 # Burrow Roadmap
 
-> **Status: v0.1 through v0.9 shipped.** These are version milestones; each unshipped one is
+> **Status: v0.1 through v0.10 shipped.** These are version milestones; each unshipped one is
 > a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
 > [README](../README.md) status table is the authoritative shipped/in-progress/planned
 > surface. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the current
@@ -158,8 +158,7 @@ Application autoscaling plus a batch of least-privilege and deploy-safety harden
 autoscale` applies a HorizontalPodAutoscaler bounded by the replica-ceiling guardrail; install mints a
 scoped `burrow-agent` credential ([ADR-0038](adr/0038-scoped-agent-credential.md)) and `burrow-mcp`
 fails closed without it; an `app.deploy` guardrail gates deploys and every deploy rolls the workload
-while preserving replicas; a client-version header makes CLI/control-plane skew actionable
-([ADR-0039](adr/0039-cli-control-plane-version-skew.md)); burrowd no longer contacts the registry
+while preserving replicas; burrowd no longer contacts the registry
 ([ADR-0040](adr/0040-burrowd-never-contacts-the-registry.md)); and `ingress install` gates a billable
 LoadBalancer behind `--approve`.
 
@@ -177,6 +176,18 @@ reachable app ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md)). Bootstr
 minimum with a memory breakdown), Postgres runs lean on small clusters, and the cost framing calls
 servicelb free. Proven end to end by dogfooding on a 2GB droplet.
 
+## v0.10 — Internal: version-skew handshake and the OSS/enterprise transport seam ✅ shipped
+
+Internal groundwork with no new user-facing surface. A **client-version handshake**
+([ADR-0039](adr/0039-cli-control-plane-version-skew.md)): every client sends its version, burrowd
+serves any client within one minor and never hard-blocks on a version difference alone, and it turns
+genuine skew into an actionable error — a client too old is told to `brew upgrade`, and a newer client
+calling a route this control plane lacks is told to `burrow upgrade` — instead of an opaque failure;
+the acting client version is recorded in the audit log next to the principal. And the CLI's
+control-plane transport is extracted into an explicit interface shared by both binaries
+([ADR-0045](adr/0045-oss-enterprise-boundary.md)), so an alternate transport (for a private managed
+layer) slots in without forking the request methods.
+
 ## Deferred until requested
 
 - **Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) — a
@@ -192,8 +203,6 @@ servicelb free. Proven end to end by dogfooding on a 2GB droplet.
   via the HorizontalPodAutoscaler shipped in v0.8).
 - **Registry onboarding** — reduce the friction of getting an image into a registry, per
   ADR-0046 (Proposed); held pending a user signal that onboarding is painful.
-- **The OSS/enterprise transport seam** — the one refactor ADR-0045 names: make the CLI's
-  control-plane transport an explicit interface before it accretes more coupled call sites.
 - **Cost controls and caps** — visibility and limits on cluster spend.
 - **Optional passive deploy mode** — GitOps-style tag-watching as an *option* layered on the
   explicit path, never replacing it ([ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)).

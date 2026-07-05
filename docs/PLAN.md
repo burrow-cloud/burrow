@@ -159,8 +159,6 @@ hardening.
 - **Deploy safety** — an `app.deploy` guardrail (gate or require sign-off per environment); every
   deploy rolls the workload (release-stamped, so a re-deploy or a pull-credential fix always takes
   effect) while preserving the running replica count.
-- **Version skew** ([ADR-0039](adr/0039-cli-control-plane-version-skew.md)) — a client-version header
-  turns a new CLI against an old control plane into an actionable "run `burrow upgrade`".
 - **Burrowd never contacts the registry** ([ADR-0040](adr/0040-burrowd-never-contacts-the-registry.md))
   — the pre-deploy image resolve is gone; Kubernetes resolves and pulls via the imagePullSecret and the
   digest is read back from pod status.
@@ -198,17 +196,38 @@ app served over the node's own IP through servicelb and the ingress on a 2GB dro
   billable); `app logs` prints the source note and context above the logs; `env scan` folds into
   `env list --discover`.
 
-**Next: the v0.10 theme is not yet chosen.** v0.9 proved the cheap-self-hoster on-ramp; the following
-milestone is open. Live candidates:
+## Shipped: v0.10 — internal: the version-skew handshake and the transport seam ✅
+
+Released as **v0.10.0**. Internal groundwork with no new user-facing surface — it hardens how the CLI,
+the MCP server, and burrowd get along across versions, and prepares the OSS/enterprise boundary.
+
+- **Version-skew handshake** ([ADR-0039](adr/0039-cli-control-plane-version-skew.md)) — every client
+  sends its release version in `X-Burrow-Client-Version`; burrowd is the compatibility anchor: it serves
+  any client within one minor and never hard-blocks on a version difference alone, but turns genuine skew
+  into an actionable error. A client too old is told to `brew upgrade burrow`; a newer client calling a
+  route this control plane lacks is told to ask an operator to run `burrow upgrade`, instead of an opaque
+  404. The acting client version is recorded in the audit log next to the principal (migration 00012).
+- **Control-plane transport seam** ([ADR-0045](adr/0045-oss-enterprise-boundary.md)) — the CLI's
+  control-plane transport/auth is an explicit `client.Transport` interface (a direct-URL transport and
+  the kubeconfig API-server proxy), importable by both `burrow` and `burrow-mcp`; the `Client`'s request
+  methods are auth-agnostic, so a private managed layer can add an SSO transport without forking them.
+  One of the three seams ADR-0045 names for keeping the managed product a thin layer over the OSS core.
+
+**Next: the v0.11 theme is not yet chosen.** v0.10 was internal; the next milestone should be user-facing.
+Live candidates, weighted toward the shipped self-hoster:
 
 - **Self-hoster day-2 hardening** — scheduled Postgres backups + retention (the
   [ADR-0032](adr/0032-postgres-backups.md) follow-on, a CronJob or a burrowd in-process scheduler),
   richer guardrails / blast-radius limits, and cost visibility.
-- **Managed-product groundwork** — the one refactor ADR-0045 names (make the CLI's control-plane
-  transport an explicit interface before it accretes more coupled call sites), plus richer per-principal
-  identity with an auth ADR.
+- **More building-block add-ons** — broaden the catalog of installable/connectable backing services
+  ([ADR-0025](adr/0025-building-block-addons.md)) beyond Postgres / cache / logs / metrics.
 - **Database-provisioning depth** — managed Postgres as a first-class deploy dependency, heavier than the
   current attach model.
+
+**Teed up but parked:** per-principal identity + an auth ADR — the natural continuation of the v0.10
+transport seam and the ADR-0039 audit trail (which now records a real slot for the principal), but it
+serves the managed/enterprise direction more than the current self-hoster, so it waits until that
+product needs it.
 
 **Deferred until requested:** registry onboarding (ADR-0046, Proposed, held pending a user signal that
 onboarding is painful); server-side build from a git reference

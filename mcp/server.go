@@ -281,7 +281,7 @@ type deployOutput struct {
 
 func deployTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[deployInput, deployOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in deployInput) (*sdk.CallToolResult, deployOutput, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, deployOutput{}, err
 		}
@@ -328,7 +328,7 @@ type configOutput struct {
 
 func configSetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[configSetInput, keyAck] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in configSetInput) (*sdk.CallToolResult, keyAck, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, keyAck{}, err
 		}
@@ -345,7 +345,7 @@ func configSetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[
 
 func configUnsetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[configUnsetInput, keyAck] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in configUnsetInput) (*sdk.CallToolResult, keyAck, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, keyAck{}, err
 		}
@@ -411,7 +411,7 @@ func secretListTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor
 
 func secretUnsetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[secretUnsetInput, keyAck] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in secretUnsetInput) (*sdk.CallToolResult, keyAck, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, keyAck{}, err
 		}
@@ -482,7 +482,7 @@ type rollbackOutput struct {
 
 func rollbackTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[rollbackInput, rollbackOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in rollbackInput) (*sdk.CallToolResult, rollbackOutput, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, rollbackOutput{}, err
 		}
@@ -506,7 +506,7 @@ type scaleOutput struct {
 
 func scaleTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[scaleInput, scaleOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in scaleInput) (*sdk.CallToolResult, scaleOutput, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, scaleOutput{}, err
 		}
@@ -559,7 +559,7 @@ type autoscaleOutput struct {
 
 func autoscaleTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[autoscaleInput, autoscaleOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in autoscaleInput) (*sdk.CallToolResult, autoscaleOutput, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, autoscaleOutput{}, err
 		}
@@ -603,7 +603,7 @@ type exposeOutput struct {
 
 func exposeTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[exposeInput, exposeOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in exposeInput) (*sdk.CallToolResult, exposeOutput, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, exposeOutput{}, err
 		}
@@ -628,7 +628,7 @@ type unexposeOutput struct {
 
 func unexposeTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appInput, unexposeOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, unexposeOutput, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, unexposeOutput{}, err
 		}
@@ -860,7 +860,7 @@ type appDeleteOutput struct {
 
 func appDeleteTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appDeleteInput, appDeleteOutput] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in appDeleteInput) (*sdk.CallToolResult, appDeleteOutput, error) {
-		tgt, err := sel.resolve(in.Env, in.Context)
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
 		if err != nil {
 			return nil, appDeleteOutput{}, err
 		}

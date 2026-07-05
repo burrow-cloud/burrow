@@ -5,6 +5,8 @@ package mcp
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/burrow-cloud/burrow/localconfig"
 )
@@ -58,6 +60,45 @@ func (s selector) resolve(envHandle, contextOverride string) (target, error) {
 		return target{name: env.Name, context: env.Context, env: env.Env}, nil
 	}
 	return target{context: contextOverride}, nil
+}
+
+// resolveMutating is resolve with the ADR-0047 forcing function for a state-changing operation: when
+// the call names no target — neither env nor context — and more than one environment handle is
+// registered, it refuses with a structured, alternatives-listing error instead of routing the change
+// to whatever kube context is current. With zero or one handle registered there is no ambiguity, so it
+// behaves exactly like resolve. The check is on registration, not reachability (ADR-0047 §1): the
+// agent must name the target before a change lands, so a deploy meant for one environment never
+// silently lands on another.
+func (s selector) resolveMutating(envHandle, contextOverride string) (target, error) {
+	if envHandle == "" && contextOverride == "" {
+		cfg, err := localconfig.Load()
+		if err != nil {
+			return target{}, err
+		}
+		if len(cfg.Environments) > 1 {
+			return target{}, ambiguousEnvError(cfg.Environments)
+		}
+	}
+	return s.resolve(envHandle, contextOverride)
+}
+
+// ambiguousEnvError is the refusal resolveMutating returns when a mutating call named no target and
+// more than one environment is registered (ADR-0047 §1). It names the handles and their clusters so
+// the agent re-issues the call with an explicit env, rather than letting a change land on whichever
+// cluster happens to be current; burrow_environments carries the full detail. The listing is sorted so
+// the message is deterministic.
+func ambiguousEnvError(envs []localconfig.Environment) error {
+	listed := make([]string, 0, len(envs))
+	names := make([]string, 0, len(envs))
+	for _, e := range envs {
+		listed = append(listed, fmt.Sprintf("%s (context %s)", e.Name, e.Context))
+		names = append(names, e.Name)
+	}
+	sort.Strings(listed)
+	sort.Strings(names)
+	return fmt.Errorf(
+		"this operation changes state and more than one environment is registered — %s. Name the target with the env argument (e.g. env: %s); Burrow will not choose an environment for a mutating operation. Use burrow_environments to see each handle's cluster and namespace.",
+		strings.Join(listed, ", "), names[0])
 }
 
 // actedIn is the environment a mutating tool operated against, echoed in its result so the target is

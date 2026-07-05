@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,10 @@ func newSession(t *testing.T, server *sdk.Server) *sdk.ClientSession {
 // separately in TestEnvHandleRoutesAndSendsName.
 func connect(t *testing.T, apiHandler http.HandlerFunc) *sdk.ClientSession {
 	t.Helper()
+	// Isolate from the developer's real ~/.burrow/config: point BURROW_CONFIG at a non-existent file
+	// so the ADR-0047 mutating-op ambiguity guard sees an empty handle set here (no environments →
+	// no ambiguity). Tests that want registered handles call writeHandleConfig, which overrides this.
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
 	api := httptest.NewServer(apiHandler)
 	t.Cleanup(api.Close)
 

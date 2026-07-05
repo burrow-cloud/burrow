@@ -172,6 +172,82 @@ environments:
 	}
 }
 
+// TestMutatingRefusesAmbiguousEnv confirms the ADR-0047 forcing function: with more than one
+// environment registered, a mutating tool called with no env/context is refused with a structured
+// error that names the handles, instead of silently routing the change to whatever context is
+// current. The client is never even built — the refusal happens before routing.
+func TestMutatingRefusesAmbiguousEnv(t *testing.T) {
+	writeHandleConfig(t, `apiVersion: burrow.dev/v1
+kind: Config
+environments:
+  - name: prod
+    context: do-nyc1-prod
+    appNamespace: apps
+    env: production
+  - name: jolly-marmot
+    context: burrow-vps
+    appNamespace: burrow-apps
+`)
+	clientFor := func(string) (*client.Client, error) {
+		t.Error("clientFor must not be called: an ambiguous mutating call must be refused before it routes")
+		return nil, nil
+	}
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_deploy",
+		Arguments: map[string]any{"app": "web", "image": "img:1", "replicas": 1},
+	})
+	if err != nil {
+		t.Fatalf("CallTool transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected a tool error: a mutating deploy with no env and more than one environment must be refused")
+	}
+	var text strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*sdk.TextContent); ok {
+			text.WriteString(tc.Text)
+		}
+	}
+	for _, want := range []string{"prod", "jolly-marmot", "more than one environment", "env argument"} {
+		if !strings.Contains(text.String(), want) {
+			t.Errorf("refusal = %q, want it to contain %q", text.String(), want)
+		}
+	}
+}
+
+// TestReadOnlyToolIgnoresAmbiguity confirms the guard is scoped to mutating operations: a read-only
+// tool with no env still routes (to the current context) even with several environments registered,
+// so the agent can survey before it acts (ADR-0047 §3).
+func TestReadOnlyToolIgnoresAmbiguity(t *testing.T) {
+	writeHandleConfig(t, `apiVersion: burrow.dev/v1
+kind: Config
+environments:
+  - name: prod
+    context: do-nyc1-prod
+  - name: jolly-marmot
+    context: burrow-vps
+`)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web"})
+	}))
+	t.Cleanup(api.Close)
+	clientFor := func(string) (*client.Client, error) { return client.NewClient(api.URL, "tok"), nil }
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_status",
+		Arguments: map[string]any{"app": "web"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("read-only status must not be refused for ambiguity; got: %v", res.Content)
+	}
+}
+
 // TestEnvArgDefaultsEmpty confirms omitting the env argument sends no env selector and routes to the
 // current kube context (the empty string), so the server applies the default environment without
 // reading the handle config (ADR-0036 slice 5b).

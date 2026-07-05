@@ -78,6 +78,14 @@ func TestServerInstructions(t *testing.T) {
 			t.Errorf("instructions missing anchor %q; got:\n%s", anchor, got)
 		}
 	}
+	// The environment guidance must make the target explicit and sticky (ADR-0036): tell the agent to
+	// name the env, and never to switch environments to work around a failure — a transient error on
+	// one environment must never become an operation against another.
+	for _, anchor := range []string{"burrow_environments", "env argument explicitly", "different environment"} {
+		if !strings.Contains(got, anchor) {
+			t.Errorf("instructions missing environment-safety anchor %q; got:\n%s", anchor, got)
+		}
+	}
 	// The orientation must steer the agent to these tools, not the human's CLI.
 	if !strings.Contains(got, "these tools") {
 		t.Errorf("instructions should tell the agent to operate through these tools; got:\n%s", got)

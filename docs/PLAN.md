@@ -213,16 +213,34 @@ the MCP server, and burrowd get along across versions, and prepares the OSS/ente
   methods are auth-agnostic, so a private managed layer can add an SSO transport without forking them.
   One of the three seams ADR-0045 names for keeping the managed product a thin layer over the OSS core.
 
-**Next: the v0.11 theme is not yet chosen.** v0.10 was internal; the next milestone should be user-facing.
-Live candidates, weighted toward the shipped self-hoster:
+## Next: v0.11 — agent environment safety
 
-- **Self-hoster day-2 hardening** — scheduled Postgres backups + retention (the
-  [ADR-0032](adr/0032-postgres-backups.md) follow-on, a CronJob or a burrowd in-process scheduler),
-  richer guardrails / blast-radius limits, and cost visibility.
-- **More building-block add-ons** — broaden the catalog of installable/connectable backing services
-  ([ADR-0025](adr/0025-building-block-addons.md)) beyond Postgres / cache / logs / metrics.
-- **Database-provisioning depth** — managed Postgres as a first-class deploy dependency, heavier than the
-  current attach model.
+The v0.11 theme, chosen after a wrong-environment incident: make the agent's environment target
+**explicit and sticky** so a mutating operation never lands on — or wanders to — the wrong cluster.
+Designed in [ADR-0047](adr/0047-agent-environment-safety.md). The v0.10 MCP-instructions hardening is
+the guidance half; this milestone adds the code-level forcing function, in phases:
+
+- **Phase 1 — refuse an implicit mutating target in the MCP selector (cluster-per-env).** A mutating
+  tool called with no `env`/`context` is refused with a structured error listing the registered local
+  handles when more than one is registered; a single handle proceeds without ceremony. No silent
+  fall-back to the ambient context (ADR-0047 §1–2). This is the axis the incident lived on.
+- **Phase 2 — the same guard in burrowd (namespace-per-env).** A mutating request with no environment
+  is refused when burrowd's registry holds more than one environment (the implicit `default` plus any
+  named one), rather than defaulting to `default`; the sole-`default` case proceeds unchanged
+  (ADR-0047 §1–2).
+- **Phase 3 — unreachable errors name the alternatives.** When a target's control plane is unreachable
+  or a call errors, the result names the other registered environments (and, where cheap, their
+  reachability) so the human can redirect — without the system ever switching or retrying elsewhere
+  (ADR-0047 §4).
+- **Phase 4 — reconcile the default and the echo.** Scope the ambient-context default to the
+  read-only survey path and the single-environment case so the selector's contract holds in code, and
+  ensure every tool echoes the environment it acted in (ADR-0047 §3, §5).
+
+Later candidates, unsequenced: **self-hoster day-2 hardening** (scheduled Postgres backups + retention
+— the [ADR-0032](adr/0032-postgres-backups.md) follow-on — richer blast-radius guardrails, cost
+visibility); **more building-block add-ons** ([ADR-0025](adr/0025-building-block-addons.md)) beyond
+Postgres / cache / logs / metrics; **database-provisioning depth** (managed Postgres as a first-class
+deploy dependency).
 
 **Teed up but parked:** per-principal identity + an auth ADR — the natural continuation of the v0.10
 transport seam and the ADR-0039 audit trail (which now records a real slot for the principal), but it

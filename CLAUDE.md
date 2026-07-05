@@ -161,6 +161,15 @@ the v0.1 slice ([docs/PLAN.md](docs/PLAN.md)).
 - **Work in phases: one branch and one pull request per phase.** Each phase ends green
   (`go build`, `go vet`, `gofmt`, `go test ./...`, and the SPDX check all pass) before its PR
   is opened against `main`. Keep pull requests small and focused: one issue, one concern.
+- **Do the coding work in a sub-agent, not the main thread.** For any non-trivial change,
+  delegate the whole loop to a sub-agent: it explores, implements, writes tests, runs
+  `task check`, opens the PR, then **watches the PR through the merge queue and re-kicks it when
+  the heavy k3d/Postgres suite flakes** (the transient "apiserver not ready"), and reports back a
+  **concise** result (what changed and why, test outcome, PR number, merge status). The main
+  thread **reviews that result** — pulling the diff only when needed — and does not hand-edit
+  files or run its own background polling loops to watch PRs: those loops are unreliable (the main
+  loop misses the merge) and burn context. Reserve direct main-thread edits for tiny, mechanical
+  fixes. This keeps the main context lean and review deliberate.
 - **Semver from v0.1 toward v1.0.**
 - **Sign every commit with `git commit -s`** (Developer Certificate of Origin, required on
   all commits for provenance — [ADR-0001](docs/adr/0001-license-and-dco.md)).

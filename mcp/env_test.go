@@ -17,8 +17,24 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/burrow-cloud/burrow/client"
+	connectpkg "github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/mcp"
 )
+
+// toolErrorText joins the text content of a tool result, for asserting on an error message.
+func toolErrorText(t *testing.T, res *sdk.CallToolResult) string {
+	t.Helper()
+	if !res.IsError {
+		t.Fatalf("expected a tool error, got success: %v", res.Content)
+	}
+	var text strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*sdk.TextContent); ok {
+			text.WriteString(tc.Text)
+		}
+	}
+	return text.String()
+}
 
 // writeHandleConfig writes the given localconfig YAML to a temp file and points $BURROW_CONFIG at
 // it, so the MCP server resolves env handles against this config (ADR-0036 slice 5b).
@@ -245,6 +261,128 @@ environments:
 	}
 	if res.IsError {
 		t.Fatalf("read-only status must not be refused for ambiguity; got: %v", res.Content)
+	}
+}
+
+// TestUnreachableNamesOtherEnvironments confirms the ADR-0047 §4 stickiness enrichment: when a
+// per-app tool's target control plane is unreachable and other environments are registered, the
+// tool error still conveys the failure AND names the OTHER registered handles (each as
+// "name (context <context>)") so the human can be told where to redirect — while making clear
+// Burrow did not switch targets. The failed environment itself is not offered as an alternative.
+func TestUnreachableNamesOtherEnvironments(t *testing.T) {
+	writeHandleConfig(t, `apiVersion: burrow.dev/v1
+kind: Config
+environments:
+  - name: prod
+    context: do-nyc1-prod
+    env: production
+  - name: staging
+    context: do-nyc1-staging
+    env: stg
+  - name: jolly-marmot
+    context: burrow-vps
+`)
+	// The target (prod) is unreachable; the classifier returns the same typed error connect.Client
+	// produces on a dial failure, so the enrichment keys off the real signal, not a message match.
+	clientFor := func(kubeContext string) (*client.Client, error) {
+		return nil, &connectpkg.UnreachableError{Context: kubeContext, Reason: "connection refused"}
+	}
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_deploy",
+		Arguments: map[string]any{"app": "web", "image": "img:1", "env": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool transport error: %v", err)
+	}
+	msg := toolErrorText(t, res)
+	// (a) still conveys the underlying unreachable failure, naming the failed context.
+	if !strings.Contains(msg, "control plane unreachable") || !strings.Contains(msg, "do-nyc1-prod") {
+		t.Errorf("error = %q, want it to still convey the unreachable failure on do-nyc1-prod", msg)
+	}
+	// (b) names the OTHER registered handles as name (context <context>).
+	for _, want := range []string{"other registered environments", "staging (context do-nyc1-staging)", "jolly-marmot (context burrow-vps)"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want it to contain %q", msg, want)
+		}
+	}
+	// The failed environment is not offered back as an alternative to redirect to.
+	if _, alternatives, found := strings.Cut(msg, "other registered environments:"); found {
+		if strings.Contains(alternatives, "prod (context") {
+			t.Errorf("alternatives %q offered the failed environment prod back as a redirect target", alternatives)
+		}
+	}
+	// And it never claims to have switched or retried elsewhere.
+	if !strings.Contains(msg, "did not switch") {
+		t.Errorf("error = %q, want it to state Burrow did not switch targets", msg)
+	}
+}
+
+// TestUnreachableSingleHandleNoAlternatives confirms that with only the failed handle registered
+// there is nothing to suggest, so the error is the plain unreachable message with no alternatives
+// appended.
+func TestUnreachableSingleHandleNoAlternatives(t *testing.T) {
+	writeHandleConfig(t, `apiVersion: burrow.dev/v1
+kind: Config
+environments:
+  - name: prod
+    context: do-nyc1-prod
+    env: production
+`)
+	clientFor := func(kubeContext string) (*client.Client, error) {
+		return nil, &connectpkg.UnreachableError{Context: kubeContext, Reason: "connection refused"}
+	}
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_deploy",
+		Arguments: map[string]any{"app": "web", "image": "img:1", "env": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool transport error: %v", err)
+	}
+	msg := toolErrorText(t, res)
+	if !strings.Contains(msg, "control plane unreachable") {
+		t.Errorf("error = %q, want the plain unreachable message", msg)
+	}
+	if strings.Contains(msg, "other registered environments") {
+		t.Errorf("error = %q, want no alternatives with a single registered handle", msg)
+	}
+}
+
+// TestNonConnectivityErrorNotEnriched confirms the enrichment is scoped to the genuinely-unreachable
+// case: a normal control-plane error (here a 4xx from the API) is returned untouched even when other
+// environments are registered, so an operation that reached the target and failed on its own terms is
+// not mislabeled as a routing problem.
+func TestNonConnectivityErrorNotEnriched(t *testing.T) {
+	writeHandleConfig(t, `apiVersion: burrow.dev/v1
+kind: Config
+environments:
+  - name: prod
+    context: do-nyc1-prod
+    env: production
+  - name: staging
+    context: do-nyc1-staging
+    env: stg
+`)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "app not found", http.StatusNotFound)
+	}))
+	t.Cleanup(api.Close)
+	clientFor := func(string) (*client.Client, error) { return client.NewClient(api.URL, "tok"), nil }
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_status",
+		Arguments: map[string]any{"app": "web", "env": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool transport error: %v", err)
+	}
+	msg := toolErrorText(t, res)
+	if strings.Contains(msg, "other registered environments") {
+		t.Errorf("error = %q, a non-connectivity control-plane error must not be enriched with alternatives", msg)
 	}
 }
 

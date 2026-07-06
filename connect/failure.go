@@ -69,17 +69,34 @@ func isUnreachable(err error) bool {
 	return errors.As(err, &netErr)
 }
 
+// UnreachableError classifies a connect failure as the targeted cluster's control plane being
+// unreachable — a dial/DNS/timeout/refused failure — as distinct from a NotFound (burrowd not
+// installed) or another API error the server actually returned. It carries the concise, URL-free
+// rendering connectError already produced, so its Error() message is byte-for-byte what the flat
+// error used to be (existing renderings and tests are unaffected). It exists so a caller can detect
+// the unreachable case with errors.As and enrich it — the MCP server, for one, names the other
+// registered environments so a human can redirect (ADR-0047 §4) — without matching on message text.
+type UnreachableError struct {
+	Context string // the kube context the connection targeted
+	Reason  string // the concise FailureReason (no dialed URL)
+}
+
+func (e *UnreachableError) Error() string {
+	return fmt.Sprintf("control plane unreachable via context %q (%s)", e.Context, e.Reason)
+}
+
 // connectError turns a failure reaching the control plane through context o into an actionable,
 // context-named message, suppressing the raw Kubernetes error. A NotFound on the token Secret
-// means burrowd is not installed; a dial/DNS/timeout error means the cluster is unreachable;
-// anything else is reported with the context name and a trimmed reason.
+// means burrowd is not installed; a dial/DNS/timeout error means the cluster is unreachable
+// (returned as a typed *UnreachableError so callers can enrich it); anything else is reported with
+// the context name and a trimmed reason.
 func connectError(o Options, err error) error {
 	ctxName, _ := TargetContextName(o.Kubeconfig, o.Context)
 	switch {
 	case apierrors.IsNotFound(err):
 		return fmt.Errorf(`burrow is not installed in context %q (namespace %q); run "burrow install"`, ctxName, o.Namespace)
 	case isUnreachable(err):
-		return fmt.Errorf("control plane unreachable via context %q (%s)", ctxName, FailureReason(err))
+		return &UnreachableError{Context: ctxName, Reason: FailureReason(err)}
 	default:
 		return fmt.Errorf("connecting via context %q: %s", ctxName, FailureReason(err))
 	}

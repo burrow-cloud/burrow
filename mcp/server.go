@@ -287,7 +287,7 @@ func deployTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[dep
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, deployOutput{}, err
+			return nil, deployOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		res, err := c.Deploy(ctx, in.App, client.DeployRequest{Env: tgt.env, Image: in.Image, Command: in.Command, MetricsPort: in.MetricsPort, Replicas: in.Replicas, Confirm: in.Confirm})
 		if err != nil {
@@ -334,7 +334,7 @@ func configSetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, keyAck{}, err
+			return nil, keyAck{}, sel.enrichUnreachable(tgt, err)
 		}
 		if err := c.SetConfig(ctx, in.App, tgt.env, in.Key, in.Value, in.NoRestart); err != nil {
 			return nil, keyAck{}, err
@@ -351,7 +351,7 @@ func configUnsetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFo
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, keyAck{}, err
+			return nil, keyAck{}, sel.enrichUnreachable(tgt, err)
 		}
 		if err := c.UnsetConfig(ctx, in.App, tgt.env, in.Key, in.NoRestart); err != nil {
 			return nil, keyAck{}, err
@@ -368,7 +368,7 @@ func configListTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, configOutput{}, err
+			return nil, configOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		cfg, err := c.Config(ctx, in.App, tgt.env)
 		if err != nil {
@@ -399,7 +399,7 @@ func secretListTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, secretsOutput{}, err
+			return nil, secretsOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		keys, err := c.Secrets(ctx, in.App, tgt.env)
 		if err != nil {
@@ -417,7 +417,7 @@ func secretUnsetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFo
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, keyAck{}, err
+			return nil, keyAck{}, sel.enrichUnreachable(tgt, err)
 		}
 		if err := c.UnsetSecret(ctx, in.App, tgt.env, in.Key, in.NoRestart); err != nil {
 			return nil, keyAck{}, err
@@ -434,7 +434,7 @@ func statusTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[app
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, client.StatusResult{}, err
+			return nil, client.StatusResult{}, sel.enrichUnreachable(tgt, err)
 		}
 		res, err := c.Status(ctx, in.App, tgt.env)
 		if err != nil {
@@ -457,7 +457,7 @@ func logsTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[logsI
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, logsOutput{}, err
+			return nil, logsOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		lines, err := c.Logs(ctx, in.App, tgt.env, in.Tail)
 		if err != nil {
@@ -488,7 +488,7 @@ func rollbackTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[r
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, rollbackOutput{}, err
+			return nil, rollbackOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		res, err := c.Rollback(ctx, in.App, tgt.env, in.Confirm)
 		if err != nil {
@@ -512,7 +512,7 @@ func scaleTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[scal
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, scaleOutput{}, err
+			return nil, scaleOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		res, err := c.Scale(ctx, in.App, tgt.env, in.Replicas, in.Confirm)
 		if err != nil {
@@ -565,7 +565,7 @@ func autoscaleTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, autoscaleOutput{}, err
+			return nil, autoscaleOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		if in.Off {
 			if err := c.DisableAutoscale(ctx, in.App, tgt.env, in.Confirm); err != nil {
@@ -609,7 +609,7 @@ func exposeTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[exp
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, exposeOutput{}, err
+			return nil, exposeOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		res, err := c.Expose(ctx, in.App, tgt.env, in.Host, in.Port, in.TLS, in.Issuer, in.Confirm)
 		if err != nil {
@@ -634,7 +634,7 @@ func unexposeTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[a
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, unexposeOutput{}, err
+			return nil, unexposeOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		if err := c.Unexpose(ctx, in.App, tgt.env); err != nil {
 			return nil, unexposeOutput{}, err
@@ -663,7 +663,7 @@ func reachabilityTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerF
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, client.ReachabilityResult{}, err
+			return nil, client.ReachabilityResult{}, sel.enrichUnreachable(tgt, err)
 		}
 		reach := func(ctx context.Context, app string) (client.ReachabilityResult, error) {
 			return c.Reachability(ctx, app, tgt.env)
@@ -768,7 +768,7 @@ func appsTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appsI
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, appsOutput{}, err
+			return nil, appsOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		apps, err := c.Apps(ctx, tgt.env)
 		if err != nil {
@@ -866,7 +866,7 @@ func appDeleteTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, appDeleteOutput{}, err
+			return nil, appDeleteOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		if err := c.DeleteApp(ctx, in.App, tgt.env, in.Confirm); err != nil {
 			return nil, appDeleteOutput{}, err

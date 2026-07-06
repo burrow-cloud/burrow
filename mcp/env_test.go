@@ -151,6 +151,87 @@ environments:
 	}
 }
 
+// TestReadOnlyToolEchoesEnv confirms the ADR-0047 §3 legibility property: a read-only per-app tool
+// called with an explicit env handle echoes the environment it read (the handle name, its kube
+// context, and the registered env NAME) in its structured result, alongside the tool's own
+// top-level fields, so a survey never silently conflates two environments. It exercises status
+// (which embeds the raw client result) and apps (which embeds a wrapper output struct).
+func TestReadOnlyToolEchoesEnv(t *testing.T) {
+	writeHandleConfig(t, `apiVersion: burrow.dev/v1
+kind: Config
+environments:
+  - name: prod
+    context: do-nyc1-prod
+    appNamespace: apps
+    env: production
+`)
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/apps") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"apps": []map[string]any{{"app": "web", "image": "img:1"}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web"})
+	}))
+	t.Cleanup(api.Close)
+	clientFor := func(string) (*client.Client, error) { return client.NewClient(api.URL, "tok"), nil }
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
+
+	type envEcho struct {
+		Name    string `json:"name"`
+		Context string `json:"context"`
+		Env     string `json:"env"`
+	}
+	wantEcho := func(t *testing.T, got envEcho) {
+		t.Helper()
+		if got.Name != "prod" || got.Context != "do-nyc1-prod" || got.Env != "production" {
+			t.Errorf("echoed environment = %+v, want prod/do-nyc1-prod/production", got)
+		}
+	}
+
+	// status embeds the raw client.StatusResult; its "app" field stays top-level and the echo is added.
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_status",
+		Arguments: map[string]any{"app": "web", "env": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool status: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("status returned error: %v", res.Content)
+	}
+	statusOut := decodeStructured[struct {
+		App         string  `json:"app"`
+		Environment envEcho `json:"environment"`
+	}](t, res)
+	if statusOut.App != "web" {
+		t.Errorf("status app = %q, want web (the raw result is still top-level)", statusOut.App)
+	}
+	wantEcho(t, statusOut.Environment)
+
+	// apps embeds the wrapper appsOutput; its "apps" list stays and the echo is added.
+	res, err = cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_apps",
+		Arguments: map[string]any{"env": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool apps: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("apps returned error: %v", res.Content)
+	}
+	appsOut := decodeStructured[struct {
+		Apps []struct {
+			App string `json:"app"`
+		} `json:"apps"`
+		Environment envEcho `json:"environment"`
+	}](t, res)
+	if len(appsOut.Apps) != 1 || appsOut.Apps[0].App != "web" {
+		t.Errorf("apps = %+v, want the web app (the listing is still present)", appsOut.Apps)
+	}
+	wantEcho(t, appsOut.Environment)
+}
+
 // TestEnvHandleUnknownErrors confirms an env argument naming a handle not in the config produces a
 // clear, not-registered error (ADR-0036 slice 5b).
 func TestEnvHandleUnknownErrors(t *testing.T) {

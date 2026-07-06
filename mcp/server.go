@@ -322,8 +322,12 @@ type keyAck struct {
 	targeted
 }
 
+// configOutput is an app's non-secret config store plus the environment it was read from (ADR-0047
+// §3): the config map is joined by an "environment" echo so a read never silently conflates two
+// environments.
 type configOutput struct {
 	Config map[string]string `json:"config"`
+	targeted
 }
 
 func configSetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[configSetInput, keyAck] {
@@ -374,7 +378,7 @@ func configListTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor
 		if err != nil {
 			return nil, configOutput{}, err
 		}
-		return nil, configOutput{Config: cfg}, nil
+		return nil, configOutput{Config: cfg, targeted: tgt.echo()}, nil
 	}
 }
 
@@ -386,9 +390,11 @@ type secretUnsetInput struct {
 	NoRestart bool   `json:"no_restart,omitempty" jsonschema:"true to persist the removal without rolling the running app; the change lands on the next deploy"`
 }
 
-// secretsOutput is an app's secret KEYS only — never the values (ADR-0028/0004).
+// secretsOutput is an app's secret KEYS only — never the values (ADR-0028/0004) — plus the
+// environment they were read from (ADR-0047 §3), so a survey never conflates two environments.
 type secretsOutput struct {
 	Keys []string `json:"keys"`
+	targeted
 }
 
 func secretListTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appInput, secretsOutput] {
@@ -405,7 +411,7 @@ func secretListTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor
 		if err != nil {
 			return nil, secretsOutput{}, err
 		}
-		return nil, secretsOutput{Keys: keys}, nil
+		return nil, secretsOutput{Keys: keys, targeted: tgt.echo()}, nil
 	}
 }
 
@@ -426,27 +432,37 @@ func secretUnsetTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFo
 	}
 }
 
-func statusTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appInput, client.StatusResult] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, client.StatusResult, error) {
+// statusOutput is the status result plus the environment it was read from (ADR-0047 §3): the
+// client.StatusResult fields are promoted alongside an "environment" echo, so the top-level JSON is
+// unchanged and only the echo is added.
+type statusOutput struct {
+	client.StatusResult
+	targeted
+}
+
+func statusTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appInput, statusOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in appInput) (*sdk.CallToolResult, statusOutput, error) {
 		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
-			return nil, client.StatusResult{}, err
+			return nil, statusOutput{}, err
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, client.StatusResult{}, sel.enrichUnreachable(tgt, err)
+			return nil, statusOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		res, err := c.Status(ctx, in.App, tgt.env)
 		if err != nil {
-			return nil, client.StatusResult{}, err
+			return nil, statusOutput{}, err
 		}
-		return nil, res, nil
+		return nil, statusOutput{StatusResult: res, targeted: tgt.echo()}, nil
 	}
 }
 
-// logsOutput wraps the lines so the tool has a structured object output.
+// logsOutput wraps the lines so the tool has a structured object output, plus the environment they
+// were read from (ADR-0047 §3), so a survey never conflates two environments' logs.
 type logsOutput struct {
 	Lines []client.LogLine `json:"lines"`
+	targeted
 }
 
 func logsTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[logsInput, logsOutput] {
@@ -463,7 +479,7 @@ func logsTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[logsI
 		if err != nil {
 			return nil, logsOutput{}, err
 		}
-		return nil, logsOutput{Lines: lines}, nil
+		return nil, logsOutput{Lines: lines, targeted: tgt.echo()}, nil
 	}
 }
 
@@ -655,15 +671,23 @@ type reachabilityInput struct {
 // the thin client layer (ADR-0034 slice 3).
 const reachabilityWaitTimeout = 3 * time.Minute
 
-func reachabilityTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[reachabilityInput, client.ReachabilityResult] {
-	return func(ctx context.Context, _ *sdk.CallToolRequest, in reachabilityInput) (*sdk.CallToolResult, client.ReachabilityResult, error) {
+// reachabilityOutput is the reachability result plus the environment it was read from (ADR-0047 §3):
+// the client.ReachabilityResult fields are promoted alongside an "environment" echo, so the
+// top-level JSON is unchanged and only the echo is added.
+type reachabilityOutput struct {
+	client.ReachabilityResult
+	targeted
+}
+
+func reachabilityTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[reachabilityInput, reachabilityOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in reachabilityInput) (*sdk.CallToolResult, reachabilityOutput, error) {
 		tgt, err := sel.resolve(in.Env, in.Context)
 		if err != nil {
-			return nil, client.ReachabilityResult{}, err
+			return nil, reachabilityOutput{}, err
 		}
 		c, err := clientFor(tgt.context)
 		if err != nil {
-			return nil, client.ReachabilityResult{}, sel.enrichUnreachable(tgt, err)
+			return nil, reachabilityOutput{}, sel.enrichUnreachable(tgt, err)
 		}
 		reach := func(ctx context.Context, app string) (client.ReachabilityResult, error) {
 			return c.Reachability(ctx, app, tgt.env)
@@ -675,9 +699,9 @@ func reachabilityTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerF
 		}
 		res, err := reach(ctx, in.App)
 		if err != nil {
-			return nil, client.ReachabilityResult{}, err
+			return nil, reachabilityOutput{}, err
 		}
-		return nil, res, nil
+		return nil, reachabilityOutput{ReachabilityResult: res, targeted: tgt.echo()}, nil
 	}
 }
 
@@ -756,8 +780,11 @@ type appInfo struct {
 	Available       bool   `json:"available"`
 }
 
+// appsOutput lists the apps in an environment plus the environment they were read from (ADR-0047
+// §3), so a survey never conflates two environments' apps.
 type appsOutput struct {
 	Apps []appInfo `json:"apps"`
+	targeted
 }
 
 func appsTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appsInput, appsOutput] {
@@ -774,7 +801,7 @@ func appsTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[appsI
 		if err != nil {
 			return nil, appsOutput{}, err
 		}
-		out := appsOutput{Apps: make([]appInfo, 0, len(apps))}
+		out := appsOutput{Apps: make([]appInfo, 0, len(apps)), targeted: tgt.echo()}
 		for _, a := range apps {
 			out.Apps = append(out.Apps, appInfo{
 				App: a.App, Image: a.Image,

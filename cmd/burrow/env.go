@@ -6,8 +6,12 @@ package main
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"text/template"
@@ -74,7 +78,7 @@ func newEnvCmd() *cobra.Command {
 		},
 	}
 	bindEnvListFlags(cmd.Flags(), o)
-	cmd.AddCommand(newEnvListCmd(), newEnvUseCmd(), newEnvFollowCmd(), newEnvRenameCmd(), newEnvAddCmd())
+	cmd.AddCommand(newEnvListCmd(), newEnvUseCmd(), newEnvFollowCmd(), newEnvRenameCmd(), newEnvAddCmd(), newEnvRemoveCmd())
 	return cmd
 }
 
@@ -311,6 +315,91 @@ func newEnvRenameCmd() *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+// newEnvRemoveCmd drops a local environment handle from ~/.burrow/config (ADR-0036), completing the
+// env surface alongside list/use/follow/rename/add. It is local-only: removing the pinned handle
+// clears the pin (back to following the kube context), and any scoped agent kubeconfig Burrow minted
+// for the handle under ~/.burrow/ is deleted too. It does NOT unregister a namespace-per-environment
+// from burrowd nor delete any cluster namespace or RBAC — that teardown is a separate, guarded
+// operation and the cluster may be unreachable anyway.
+func newEnvRemoveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "remove <name>",
+		Aliases: []string{"rm"},
+		Short:   "Remove a local environment handle",
+		Long: "remove drops the named environment handle from your local config (~/.burrow/config, or\n" +
+			"$BURROW_CONFIG). If the removed handle was the pinned one, the pin is cleared and commands\n" +
+			"return to following your current kube context. Any scoped agent kubeconfig Burrow minted for\n" +
+			"the handle under ~/.burrow/ is deleted along with it.\n\n" +
+			"This removes only the LOCAL handle. It does not unregister a namespace-per-environment from\n" +
+			"the control plane, nor delete any Kubernetes namespace or RBAC on the cluster — that teardown\n" +
+			"is done separately. The handle is re-creatable with `burrow env add` or `burrow join`.",
+		Args: exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runEnvRemove(args[0], cmd.OutOrStdout())
+		},
+	}
+	return cmd
+}
+
+func runEnvRemove(name string, stdout io.Writer) error {
+	cfg, err := localconfig.Load()
+	if err != nil {
+		return err
+	}
+	env, ok := cfg.Lookup(name)
+	if !ok {
+		return fmt.Errorf("environment %q is not a registered handle; see `burrow env list`", name)
+	}
+	wasCurrent := cfg.Current == name
+	if err := cfg.Remove(name); err != nil {
+		return err
+	}
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Removed environment %q.\n", name)
+	if wasCurrent {
+		fmt.Fprintln(stdout, "It was the pinned environment; now following your current kube context. Pin another with `burrow env use <name>`.")
+	}
+	return cleanupAgentKubeconfig(env.AgentKubeconfig, stdout)
+}
+
+// cleanupAgentKubeconfig deletes the scoped agent kubeconfig a handle carried, but only when the
+// file lives inside Burrow's own managed agent directory (~/.burrow/agents/) — the credential
+// install/join minted for that handle, now dead cruft. It never touches a path the user pointed
+// elsewhere, and a file that is already gone is not an error. It reports what it removed.
+func cleanupAgentKubeconfig(path string, stdout io.Writer) error {
+	if path == "" {
+		return nil
+	}
+	dir, err := agentDir()
+	if err != nil {
+		return err
+	}
+	if !isWithinDir(dir, path) {
+		return nil
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("removing scoped agent kubeconfig %s: %w", path, err)
+	}
+	fmt.Fprintf(stdout, "Deleted its scoped agent kubeconfig %s.\n", path)
+	return nil
+}
+
+// isWithinDir reports whether path is inside dir (or is dir itself), guarding the agent-kubeconfig
+// cleanup so it only ever deletes under ~/.burrow/agents/. A path on another volume or one that
+// escapes via ".." is treated as outside.
+func isWithinDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // newEnvAddCmd creates a namespace-per-environment environment: it applies the environment's

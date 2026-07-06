@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -332,6 +333,138 @@ func TestEnvRename(t *testing.T) {
 	}
 	if cfg.Current != "dev-new" {
 		t.Errorf("current = %q, want the pin to follow the rename to dev-new", cfg.Current)
+	}
+}
+
+// TestEnvRemove drops a handle from the saved config and prints what it removed.
+func TestEnvRemove(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "remove", "nonprod"}, &out, &errb); err != nil {
+		t.Fatalf("env remove: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, ok := cfg.Lookup("nonprod"); ok {
+		t.Errorf("removed handle nonprod should be gone from the config")
+	}
+	if _, ok := cfg.Lookup("dev"); !ok {
+		t.Errorf("unrelated handle dev should remain")
+	}
+	if !strings.Contains(out.String(), `Removed environment "nonprod".`) {
+		t.Errorf("missing removal confirmation\n%s", out.String())
+	}
+}
+
+// TestEnvRemoveAliasRm confirms `rm` works as an alias for `remove`.
+func TestEnvRemoveAliasRm(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "rm", "dev"}, &out, &errb); err != nil {
+		t.Fatalf("env rm: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, ok := cfg.Lookup("dev"); ok {
+		t.Errorf("`env rm dev` should have removed the dev handle")
+	}
+}
+
+// TestEnvRemoveClearsPin confirms removing the pinned handle clears Current (back to follow) and
+// tells the user so.
+func TestEnvRemoveClearsPin(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "dev")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "remove", "dev"}, &out, &errb); err != nil {
+		t.Fatalf("env remove: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Current != "" {
+		t.Errorf("removing the pinned handle should clear the pin, current = %q", cfg.Current)
+	}
+	if !strings.Contains(out.String(), "now following your current kube context") {
+		t.Errorf("removal of the pinned handle should report the pin was cleared\n%s", out.String())
+	}
+}
+
+// TestEnvRemoveUnknown errors on a name that is not registered, pointing at `burrow env list`.
+func TestEnvRemoveUnknown(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "")
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"env", "remove", "ghost"}, &out, &errb)
+	if err == nil {
+		t.Fatalf("env remove of an unregistered handle should error")
+	}
+	if !strings.Contains(err.Error(), "ghost") || !strings.Contains(err.Error(), "burrow env list") {
+		t.Errorf("error should name the handle and point at `burrow env list`, got: %v", err)
+	}
+}
+
+// TestEnvRemoveDeletesManagedAgentKubeconfig confirms a scoped agent kubeconfig living under
+// Burrow's managed ~/.burrow/agents/ dir is deleted when its handle is removed, while a kubeconfig
+// pointed outside that dir is left untouched.
+func TestEnvRemoveDeletesManagedAgentKubeconfig(t *testing.T) {
+	cfgPath := tempConfig(t)
+	agentsDir := filepath.Join(filepath.Dir(cfgPath), "agents")
+	if err := os.MkdirAll(agentsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(agentsDir, "scoped")
+	if err := os.WriteFile(managed, []byte("kubeconfig"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A second kubeconfig outside the managed dir must never be touched.
+	outside := filepath.Join(t.TempDir(), "user-kubeconfig")
+	if err := os.WriteFile(outside, []byte("kubeconfig"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &localconfig.Config{
+		Environments: []localconfig.Environment{
+			{Name: "scoped", Context: "ctx-scoped", AgentKubeconfig: managed},
+			{Name: "byo", Context: "ctx-byo", AgentKubeconfig: outside},
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "remove", "scoped"}, &out, &errb); err != nil {
+		t.Fatalf("env remove scoped: %v\n%s", err, errb.String())
+	}
+	if _, err := os.Stat(managed); !os.IsNotExist(err) {
+		t.Errorf("managed agent kubeconfig should have been deleted, stat err = %v", err)
+	}
+	if !strings.Contains(out.String(), "Deleted its scoped agent kubeconfig") {
+		t.Errorf("removal should report the deleted scoped kubeconfig\n%s", out.String())
+	}
+
+	out.Reset()
+	errb.Reset()
+	if err := run(context.Background(), []string{"env", "remove", "byo"}, &out, &errb); err != nil {
+		t.Fatalf("env remove byo: %v\n%s", err, errb.String())
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("a kubeconfig outside ~/.burrow/agents/ must not be deleted, stat err = %v", err)
+	}
+	if strings.Contains(out.String(), "Deleted its scoped agent kubeconfig") {
+		t.Errorf("removal must not report deleting a kubeconfig outside the managed dir\n%s", out.String())
 	}
 }
 

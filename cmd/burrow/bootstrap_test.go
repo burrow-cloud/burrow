@@ -785,6 +785,104 @@ func TestParseMemTotal(t *testing.T) {
 	}
 }
 
+// ingressInstallRecorder captures a call to the ingress-install seam so a bootstrap test can assert
+// whether --with-ingress reached it and with which options, without touching a real cluster.
+type ingressInstallRecorder struct {
+	called bool
+	opts   ingressOptions
+	err    error
+}
+
+// stubIngressInstall substitutes the ingress-install seam with a recorder (returning rec.err) and
+// restores the real one on cleanup. It returns the recorder so the test can inspect the call.
+func stubIngressInstall(t *testing.T, err error) *ingressInstallRecorder {
+	t.Helper()
+	rec := &ingressInstallRecorder{err: err}
+	orig := runIngressInstallFn
+	runIngressInstallFn = func(_ context.Context, o ingressOptions, _ io.Reader, _, _ io.Writer) error {
+		rec.called = true
+		rec.opts = o
+		return rec.err
+	}
+	t.Cleanup(func() { runIngressInstallFn = orig })
+	return rec
+}
+
+// TestBootstrapWithIngressInstallsStack asserts that --with-ingress reaches the ingress-install seam
+// against the local k3s admin kubeconfig, passing the ACME email and staging choice through and
+// defaulting to auto expose (servicelb's free LoadBalancer on a single VPS), and still prints the
+// join-token block for the laptop.
+func TestBootstrapWithIngressInstallsStack(t *testing.T) {
+	inst := &fakeK3sInstaller{running: true}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	rec := stubIngressInstall(t, nil)
+
+	err, out, errb := runBootstrapCLI(kcPath, "--with-ingress", "--acme-email", "ops@example.com", "--ingress-staging")
+	if err != nil {
+		t.Fatalf("cluster bootstrap --with-ingress: %v\n%s", err, errb)
+	}
+	if !rec.called {
+		t.Fatal("the ingress-install path must be invoked when --with-ingress is set")
+	}
+	if rec.opts.kubeconfig != kcPath {
+		t.Errorf("ingress install kubeconfig = %q, want the local k3s admin kubeconfig %q", rec.opts.kubeconfig, kcPath)
+	}
+	if rec.opts.email != "ops@example.com" {
+		t.Errorf("ingress install email = %q, want the passed-through --acme-email", rec.opts.email)
+	}
+	if !rec.opts.staging {
+		t.Error("--ingress-staging must pass through to the ingress-install staging option")
+	}
+	if rec.opts.expose != exposeAuto {
+		t.Errorf("ingress install expose = %q, want auto (servicelb's free LoadBalancer on a single VPS)", rec.opts.expose)
+	}
+	if !strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("bootstrap --with-ingress must still print the join line, stdout:\n%s", out)
+	}
+}
+
+// TestBootstrapWithoutIngressSkipsStack asserts that by default (no --with-ingress) the ingress-install
+// path is never invoked — the flag is strictly opt-in.
+func TestBootstrapWithoutIngressSkipsStack(t *testing.T) {
+	inst := &fakeK3sInstaller{running: true}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	rec := stubIngressInstall(t, errors.New("ingress install must not be called without --with-ingress"))
+
+	if err, _, errb := runBootstrapCLI(kcPath); err != nil {
+		t.Fatalf("cluster bootstrap: %v\n%s", err, errb)
+	}
+	if rec.called {
+		t.Error("the ingress-install path must NOT be invoked without --with-ingress")
+	}
+}
+
+// TestBootstrapIngressFailureStillPrintsJoinToken asserts that when the ingress step fails, bootstrap
+// makes it obvious the cluster and control plane are already up: it prints the join token, reports the
+// failure clearly with the retry command, and returns an error carrying the ingress failure.
+func TestBootstrapIngressFailureStillPrintsJoinToken(t *testing.T) {
+	inst := &fakeK3sInstaller{running: true}
+	kcPath := stubBootstrapFullFlow(t, inst)
+	stubIngressInstall(t, errors.New("cert-manager webhook never became ready"))
+
+	err, out, errb := runBootstrapCLI(kcPath, "--with-ingress", "--acme-email", "ops@example.com")
+	if err == nil {
+		t.Fatal("bootstrap must report an error when the ingress step fails")
+	}
+	if !strings.Contains(err.Error(), "ingress stack") {
+		t.Errorf("the error should name the ingress stack, got: %v", err)
+	}
+	// The join token is still printed: the cluster and control plane are up and joinable.
+	if !strings.Contains(out, "burrow join "+prefixForTest) {
+		t.Errorf("a failed ingress step must still print the join token, stdout:\n%s", out)
+	}
+	// The failure is framed so the user knows the cluster is up and how to retry.
+	for _, want := range []string{"cluster and control plane are up", "burrow cluster ingress install", "--email ops@example.com"} {
+		if !strings.Contains(errb, want) {
+			t.Errorf("ingress-failure guidance missing %q, stderr:\n%s", want, errb)
+		}
+	}
+}
+
 // TestRewriteServerHost asserts the loopback API server URL is rewritten to the public IP while the
 // port is preserved.
 func TestRewriteServerHost(t *testing.T) {

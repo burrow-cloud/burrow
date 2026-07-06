@@ -909,6 +909,14 @@ func writeEngineError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	// An ambiguous environment target is a structured, actionable refusal (ADR-0047 §1): the mutating
+	// request named no environment while more than one is registered, so burrowd refuses to pick one.
+	// The listing of environments rides in the error text so the agent re-issues the call naming a
+	// target, without a separate probe. It is an unprocessable request, not a system failure.
+	if a, ok := controlplane.AsAmbiguousEnvironment(err); ok {
+		writeError(w, http.StatusUnprocessableEntity, a.Error(), "ambiguous_environment")
+		return
+	}
 	// Missing cluster prerequisites is a structured, actionable outcome (ADR-0006): the request was
 	// valid but the cluster is not set up for it. The full checklist rides in the error text so the
 	// agent gets each missing piece and its burrow fix over MCP without inspecting the cluster.

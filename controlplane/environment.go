@@ -4,7 +4,9 @@
 package controlplane
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -30,6 +32,50 @@ type Environment struct {
 	// CreatedAt is when the environment was registered, read from the injected clock. It is the
 	// zero time for the synthesized default environment.
 	CreatedAt time.Time `json:"created_at,omitempty"`
+}
+
+// AmbiguousEnvironmentError reports that a mutating operation arrived with no environment named while
+// more than one environment is registered, so burrowd refuses to pick one rather than silently
+// defaulting to the implicit `default` environment (ADR-0047 §1). It is a structured outcome, not a
+// system failure: the request was understood, but its target is ambiguous — an unanswered question,
+// not a held operation. It lists the registered environments (the implicit default first, then the
+// named ones) with their namespaces so the caller re-issues the operation naming an explicit
+// environment, rather than letting a state change land on the default by accident. The check is on
+// registration, not reachability: ambiguity is a static fact about how many environments exist, with
+// no network probe (ADR-0047 §1). Callers distinguish it with AsAmbiguousEnvironment; the HTTP API
+// maps it to a 4xx with the machine-readable "ambiguous_environment" code.
+type AmbiguousEnvironmentError struct {
+	// Environments are the registered environments the caller must choose among (the implicit
+	// `default` first, then the named ones in name order, as ListEnvironments returns them).
+	Environments []Environment
+}
+
+func (e *AmbiguousEnvironmentError) Error() string {
+	listed := make([]string, 0, len(e.Environments))
+	example := ""
+	for _, env := range e.Environments {
+		listed = append(listed, fmt.Sprintf("%s (namespace %s)", env.Name, env.Namespace))
+		if example == "" && !env.Default {
+			example = env.Name
+		}
+	}
+	if example == "" && len(e.Environments) > 0 {
+		example = e.Environments[0].Name
+	}
+	return fmt.Sprintf(
+		"this operation changes state and more than one environment is registered — %s. Name the target environment (e.g. env: %s); Burrow will not choose an environment for a mutating operation.",
+		strings.Join(listed, ", "), example)
+}
+
+// AsAmbiguousEnvironment reports whether err is (or wraps) an AmbiguousEnvironmentError and returns
+// it, mirroring AsGuardrail and AsMissingPrerequisites so a front end (the HTTP API, the MCP server)
+// can surface the structured refusal without parsing prose.
+func AsAmbiguousEnvironment(err error) (*AmbiguousEnvironmentError, bool) {
+	var a *AmbiguousEnvironmentError
+	if errors.As(err, &a) {
+		return a, true
+	}
+	return nil, false
 }
 
 // validateEnvironmentName reports whether name is a usable environment handle: a non-empty,

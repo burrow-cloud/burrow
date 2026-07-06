@@ -17,9 +17,15 @@ import (
 // (localconfig) and lists the handles for burrow_environments (ADR-0036 slice 5b). It reads the
 // handle config ($BURROW_CONFIG, else ~/.burrow/config) on each call so it always reflects the
 // human's current handles. kubeconfig is the path used to find the current kube context when marking
-// which handle is current in a listing (empty means the ambient kubeconfig); it never selects an
-// agent's target, since the agent targets explicitly and never rides the human's pin or ambient
-// context.
+// which handle is current in a listing (empty means the ambient kubeconfig).
+//
+// The agent never rides the human's PIN: resolve does not consult cfg.Current, so an agent's target
+// is never the human's CLI selection (ADR-0047 §5). But for a read-only survey (ADR-0047 §3) and the
+// unambiguous single-environment case (ADR-0047 §2) an empty env/context call DOES default to the
+// current kube context, so the agent can look before it acts and the common single-environment
+// self-hoster is unaffected. A MUTATING call with an ambiguous target — no env/context and more than
+// one environment registered — is refused instead (resolveMutating, ADR-0047 §1). So a read-only
+// tool always echoes the environment it read (§3) while a mutating one is forced to name it.
 type selector struct {
 	kubeconfig string
 }
@@ -148,25 +154,27 @@ func (s selector) enrichUnreachable(tgt target, err error) error {
 		err, strings.Join(others, ", "))
 }
 
-// actedIn is the environment a mutating tool operated against, echoed in its result so the target is
-// legible to the agent and to anyone reviewing the audit trail (ADR-0036). Name is the local handle
-// that selected it (empty when the call named a raw context or defaulted to the current one);
-// Context is the kube context the call routed to (empty means the current context); Env is the
-// burrowd-registered environment NAME sent with the operation (empty means the default environment).
+// actedIn is the environment a tool operated in — the one a mutating tool acted against or a
+// read-only tool read from — echoed in its result so the target is legible to the agent and to
+// anyone reviewing the audit trail (ADR-0036, ADR-0047 §3). Name is the local handle that selected
+// it (empty when the call named a raw context or defaulted to the current one); Context is the kube
+// context the call routed to (empty means the current context); Env is the burrowd-registered
+// environment NAME sent with the operation (empty means the default environment).
 type actedIn struct {
 	Name    string `json:"name,omitempty"`
 	Context string `json:"context,omitempty"`
 	Env     string `json:"env,omitempty"`
 }
 
-// targeted is embedded in every environment-scoped mutating tool's result to echo the environment
-// it acted in (ADR-0036). Its single field is promoted into the tool's generated output schema as an
-// "environment" property.
+// targeted is embedded in every environment-scoped tool's result — mutating tools echo the
+// environment they acted in (ADR-0036), and read-only per-app tools echo the environment they read
+// so a survey never silently conflates two (ADR-0047 §3). Its single field is promoted into the
+// tool's generated output schema as an "environment" property.
 type targeted struct {
 	Environment actedIn `json:"environment"`
 }
 
-// echo renders the target as the environment a result reports it acted in.
+// echo renders the target as the environment a result reports it acted in or read from.
 func (t target) echo() targeted {
 	return targeted{Environment: actedIn{Name: t.name, Context: t.context, Env: t.env}}
 }

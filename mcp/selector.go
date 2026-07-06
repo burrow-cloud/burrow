@@ -4,10 +4,12 @@
 package mcp
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -99,6 +101,51 @@ func ambiguousEnvError(envs []localconfig.Environment) error {
 	return fmt.Errorf(
 		"this operation changes state and more than one environment is registered — %s. Name the target with the env argument (e.g. env: %s); Burrow will not choose an environment for a mutating operation. Use burrow_environments to see each handle's cluster and namespace.",
 		strings.Join(listed, ", "), names[0])
+}
+
+// enrichUnreachable makes a per-app tool's client-resolution failure actionable when its cause is
+// the target's control plane being unreachable (a connect.UnreachableError): it appends the OTHER
+// registered local environment handles — each rendered "name (context <context>)" — so the agent
+// can tell the human where the real target might be, e.g. "prod is unreachable; other registered
+// environments: staging (context ...)" (ADR-0047 §4).
+//
+// It is keyed strictly on the unreachable classification. Any other error — an unknown-handle
+// refusal, a "burrowd not installed" NotFound, a control-plane 4xx — already carries its own
+// actionable message and is returned unchanged, so the enrichment never clobbers it. Consistent
+// with the ADR-0047 §1 registration-not-reachability posture, the alternatives are drawn from what
+// is REGISTERED and are never probed: naming them costs no network, and they may themselves be down.
+// Burrow never switches targets, retries elsewhere, or auto-fails-over — the operation still stops;
+// the enrichment only names where a human might redirect. With no other handle registered (or a
+// config that cannot be read) the original error is returned unchanged, since there is nothing to
+// suggest.
+func (s selector) enrichUnreachable(tgt target, err error) error {
+	var unreachable *connect.UnreachableError
+	if !errors.As(err, &unreachable) {
+		return err
+	}
+	cfg, cfgErr := localconfig.Load()
+	if cfgErr != nil {
+		return err
+	}
+	others := make([]string, 0, len(cfg.Environments))
+	for _, e := range cfg.Environments {
+		// Exclude the environment that just failed, identified by whichever axis named it (its
+		// handle name, or a raw context override); everything else is a genuine alternative.
+		if tgt.name != "" && e.Name == tgt.name {
+			continue
+		}
+		if tgt.context != "" && e.Context == tgt.context {
+			continue
+		}
+		others = append(others, fmt.Sprintf("%s (context %s)", e.Name, e.Context))
+	}
+	if len(others) == 0 {
+		return err
+	}
+	sort.Strings(others)
+	return fmt.Errorf(
+		"%w — other registered environments: %s. Burrow did not switch targets or retry elsewhere; choosing a different environment is a deliberate act that needs the user's go-ahead. Use burrow_environments for each handle's cluster and namespace.",
+		err, strings.Join(others, ", "))
 }
 
 // actedIn is the environment a mutating tool operated against, echoed in its result so the target is

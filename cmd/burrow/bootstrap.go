@@ -110,9 +110,26 @@ type bootstrapArgs struct {
 	image        string
 	wait         bool
 	yes          bool
+	// withIngress, when set, installs the public-HTTPS stack (ingress-nginx + cert-manager + a Let's
+	// Encrypt ClusterIssuer) after the control plane, by reusing `burrow cluster ingress install`
+	// against the same local k3s admin kubeconfig (ADR-0018/0034/0042/0043). Opt-in; default off.
+	withIngress bool
+	// acmeEmail is the optional ACME registration email passed through to the Let's Encrypt issuer
+	// when --with-ingress is set. Optional, matching `burrow cluster ingress install --email`: empty
+	// still creates the issuer, only Let's Encrypt expiry/renewal notices are off.
+	acmeEmail string
+	// ingressStaging routes the Let's Encrypt issuer at the staging environment (untrusted certs, high
+	// rate limits) to validate the flow, matching `burrow cluster ingress install --staging`.
+	ingressStaging bool
 	// apiReadyBudget is how long to poll the freshly installed k3s API for readiness before failing.
 	apiReadyBudget time.Duration
 }
+
+// runIngressInstallFn is the ingress-install entry point bootstrap calls when --with-ingress is set.
+// It is a package var so a test can substitute a fake that records the invocation without reaching a
+// real cluster; the real implementation is runIngressInstall (cmd/burrow/ingress.go), reused verbatim
+// so bootstrap never duplicates the ingress-nginx/cert-manager/issuer manifest-apply logic.
+var runIngressInstallFn = runIngressInstall
 
 // bootstrapWarning is the pre-flight warning shown before bootstrap mutates the machine. bootstrap is
 // meant for a fresh server, but run by accident (e.g. `curl -sfL <script> | sudo sh` on a laptop) it
@@ -330,6 +347,13 @@ func newBootstrapCmd() *cobra.Command {
 			"IP your laptop connects through, and traefik disabled so Burrow's ingress-nginx owns\n" +
 			"ingress), deploys the Burrow control plane, and prints a `burrow join <token>` line to run\n" +
 			"on your laptop.\n\n" +
+			"With --with-ingress it also installs the public-HTTPS stack — ingress-nginx, cert-manager,\n" +
+			"and a Let's Encrypt ClusterIssuer (reusing `burrow cluster ingress install`) — so a single\n" +
+			"command turns a bare VPS into a cluster that can serve a public HTTPS site. On a single-node\n" +
+			"k3s box the controller is fronted by servicelb (the free built-in LoadBalancer, ADR-0043),\n" +
+			"so there is no billable cloud load balancer to approve. Add --acme-email to receive Let's\n" +
+			"Encrypt expiry notices, and --ingress-staging to validate the flow against Let's Encrypt\n" +
+			"staging first.\n\n" +
 			"Run this once, on the VPS, over your own SSH session — Burrow never SSHes anywhere. After\n" +
 			"it prints the join token, every operation runs from your laptop.\n\n" +
 			"The printed token is admin-grade: treat it like a kubeconfig (never paste it into agent\n" +
@@ -337,7 +361,9 @@ func newBootstrapCmd() *cobra.Command {
 		Example: "  # On the VPS, letting Burrow detect the public IP\n" +
 			"  burrow cluster bootstrap\n\n" +
 			"  # On the VPS, naming the public IP explicitly\n" +
-			"  burrow cluster bootstrap --public-ip 203.0.113.10",
+			"  burrow cluster bootstrap --public-ip 203.0.113.10\n\n" +
+			"  # The full public-HTTPS stack (ingress-nginx + cert-manager + Let's Encrypt) in one command\n" +
+			"  burrow cluster bootstrap --with-ingress --acme-email you@example.com",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runBootstrap(cmd.Context(), a, cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -350,6 +376,9 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&a.image, "burrowd-image", defaultBurrowdImage(), "burrowd container image to deploy (must be pullable by the cluster)")
 	cmd.Flags().BoolVar(&a.wait, "wait", true, "wait for the control plane to become ready before printing the join token")
 	cmd.Flags().BoolVar(&a.yes, "yes", false, "skip the confirmation prompt (for intentional automation)")
+	cmd.Flags().BoolVar(&a.withIngress, "with-ingress", false, "also install the public-HTTPS stack (ingress-nginx, cert-manager, and a Let's Encrypt issuer) so the cluster can serve a public site")
+	cmd.Flags().StringVar(&a.acmeEmail, "acme-email", "", "ACME registration email for the Let's Encrypt issuer when --with-ingress is set (optional; recommended to receive expiry notices)")
+	cmd.Flags().BoolVar(&a.ingressStaging, "ingress-staging", false, "with --with-ingress, use the Let's Encrypt staging environment (untrusted certs, high rate limits) to test the flow")
 	cmd.Flags().DurationVar(&a.apiReadyBudget, "k3s-api-timeout", defaultK3sAPIReadyBudget, "how long to wait for the k3s API to answer after install (a slow first-start on a small VPS needs a generous budget)")
 	return cmd
 }
@@ -405,14 +434,68 @@ func runBootstrap(ctx context.Context, a bootstrapArgs, stdout, stderr io.Writer
 		return err
 	}
 
-	// Emit the join token: the local k3s admin kubeconfig with its server rewritten to the public IP,
-	// encoded via the ADR-0044 codec.
+	// Assemble the join token now (before the optional ingress step): the local k3s admin kubeconfig
+	// with its server rewritten to the public IP, encoded via the ADR-0044 codec. Assembling it up
+	// front means that if the ingress step later fails, the token is still in hand to print — the
+	// cluster and control plane are already up and joinable.
 	token, err := assembleJoinToken(a.kubeconfig, ip, a.namespace, k3sJoinContextName)
 	if err != nil {
 		return err
 	}
+
+	// Optional public-HTTPS stack: with --with-ingress, install ingress-nginx, cert-manager, and a
+	// Let's Encrypt issuer against the same local k3s admin kubeconfig, reusing the ingress-install
+	// path (ADR-0018/0034/0042/0043). If it fails, the cluster and control plane are already up, so
+	// print the join token first — the user can join and retry the ingress step — then report the
+	// failure clearly rather than leaving the run looking wholly failed.
+	if a.withIngress {
+		if err := installIngressOnK3s(ctx, a, stdout, stderr); err != nil {
+			printJoinInstructions(stdout, token)
+			fmt.Fprintf(stderr, "\nThe cluster and control plane are up and the join token above is valid, but the\n"+
+				"ingress stack (ingress-nginx, cert-manager, and the Let's Encrypt issuer) did not finish\n"+
+				"installing. Join the cluster, then re-run just that step from your laptop:\n"+
+				"  burrow cluster ingress install%s\n", ingressRetryFlags(a))
+			return fmt.Errorf("installing the ingress stack: %w", err)
+		}
+	}
+
 	printJoinInstructions(stdout, token)
 	return nil
+}
+
+// installIngressOnK3s installs the public-HTTPS stack (ingress-nginx, cert-manager, and a Let's
+// Encrypt ClusterIssuer) against the local k3s admin kubeconfig by reusing runIngressInstall — the
+// same path `burrow cluster ingress install` drives — so bootstrap never duplicates the manifest-apply
+// logic (ADR-0018/0034/0042/0043). It runs unattended on the VPS: --expose auto resolves to k3s's free
+// servicelb LoadBalancer (ADR-0043), so no billable cloud load balancer is provisioned and no approval
+// is needed; stdin is a non-terminal reader so the free path proceeds without a prompt (and, defensively,
+// a would-be billable LB would error clearly rather than hang). The email and staging choice pass
+// through from the bootstrap flags, and the ingress readiness waits reuse bootstrap's --wait.
+func installIngressOnK3s(ctx context.Context, a bootstrapArgs, stdout, stderr io.Writer) error {
+	o := ingressOptions{
+		email:      a.acmeEmail,
+		issuerName: defaultIssuerName,
+		staging:    a.ingressStaging,
+		kubeconfig: a.kubeconfig,
+		expose:     exposeAuto,
+		wait:       a.wait,
+	}
+	return runIngressInstallFn(ctx, o, strings.NewReader(""), stdout, stderr)
+}
+
+// ingressRetryFlags renders the flags to append to the `burrow cluster ingress install` retry hint so
+// it mirrors what bootstrap attempted (the ACME email and the staging choice). The kubeconfig is left
+// off deliberately: the retry runs from the laptop against the joined environment, not the VPS's local
+// admin kubeconfig.
+func ingressRetryFlags(a bootstrapArgs) string {
+	var b strings.Builder
+	if a.acmeEmail != "" {
+		fmt.Fprintf(&b, " --email %s", a.acmeEmail)
+	}
+	if a.ingressStaging {
+		b.WriteString(" --staging")
+	}
+	return b.String()
 }
 
 // confirmBootstrap gates the destructive part of bootstrap behind an explicit confirmation and

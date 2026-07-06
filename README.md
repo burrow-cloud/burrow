@@ -118,7 +118,7 @@ For a deeper look at the architecture, see [Architecture](docs/ARCHITECTURE.md).
 
 ## Try it
 
-You need a cluster you can reach with `kubectl`. Three
+Burrow works with any Kubernetes cluster you can reach with `kubectl`. Three
 commands get you from nothing to an agent operating your cluster:
 
 ```sh
@@ -129,6 +129,11 @@ burrow mcp claude install                # connect your agent (or: cursor, codex
 
 Then just talk to your agent ("deploy this and serve it at example.com over HTTPS"), or drive
 Burrow directly with `burrow app deploy web --image nginx:alpine` and `burrow app status web`.
+
+**Don't have a cluster yet?** You can
+[spin one up on DigitalOcean](https://www.digitalocean.com/?refcode=660ab5db49e9&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=burrow_readme)
+in a few minutes — a managed cluster, or a single droplet the VPS bootstrap can use.
+_(Referral link — you get free signup credit, and it helps support Burrow.)_
 
 See [docs/getting-started.md](docs/getting-started.md) for the full walkthrough, including the
 complete list of supported agents and how to connect any other MCP-capable tool.

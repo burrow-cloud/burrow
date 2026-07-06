@@ -186,7 +186,7 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	}
 	// Resolve the target environment to its namespace up front so an unknown environment fails fast,
 	// before the guardrail decision or any cluster write (ADR-0035 phase 2b).
-	ns, err := e.resolveNamespace(ctx, req.Env)
+	ns, err := e.resolveMutatingNamespace(ctx, req.Env)
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
 	}
@@ -288,7 +288,7 @@ func (e *Engine) SetConfig(ctx context.Context, app, env, key, value string, noR
 	if err := validateEnvKey(key); err != nil {
 		return fmt.Errorf("set config %s: %w: %w", app, ErrInvalid, err)
 	}
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return fmt.Errorf("set config %s: %w", app, err)
 	}
@@ -311,7 +311,7 @@ func (e *Engine) UnsetConfig(ctx context.Context, app, env, key string, noRestar
 	if err := validateEnvKey(key); err != nil {
 		return fmt.Errorf("unset config %s: %w: %w", app, ErrInvalid, err)
 	}
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return fmt.Errorf("unset config %s: %w", app, err)
 	}
@@ -405,7 +405,7 @@ func (e *Engine) SetSecret(ctx context.Context, app, env, key, value string, noR
 	if err := validateEnvKey(key); err != nil {
 		return fmt.Errorf("set secret %s: %w: %w", app, ErrInvalid, err)
 	}
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return fmt.Errorf("set secret %s: %w", app, err)
 	}
@@ -440,7 +440,7 @@ func (e *Engine) UnsetSecret(ctx context.Context, app, env, key string, noRestar
 	if err := validateEnvKey(key); err != nil {
 		return fmt.Errorf("unset secret %s: %w: %w", app, ErrInvalid, err)
 	}
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return fmt.Errorf("unset secret %s: %w", app, err)
 	}
@@ -829,7 +829,7 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("delete app: %w: %w", ErrInvalid, err)
 	}
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return fmt.Errorf("delete app %s: %w", app, err)
 	}
@@ -1066,7 +1066,7 @@ func (e *Engine) Scale(ctx context.Context, app, env string, replicas int32, con
 	if replicas < 0 {
 		return ScaleResult{}, fmt.Errorf("scale %s: replicas %d is negative: %w", app, replicas, ErrInvalid)
 	}
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return ScaleResult{}, fmt.Errorf("scale %s: %w", app, err)
 	}
@@ -1117,7 +1117,7 @@ func (e *Engine) Autoscale(ctx context.Context, app, env string, spec AutoscaleS
 	if err := spec.validate(); err != nil {
 		return AutoscaleResult{}, fmt.Errorf("autoscale %s: %w: %w", app, err, ErrInvalid)
 	}
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return AutoscaleResult{}, fmt.Errorf("autoscale %s: %w", app, err)
 	}
@@ -1175,7 +1175,7 @@ func (e *Engine) DisableAutoscale(ctx context.Context, app, env string, confirm 
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("autoscale off: %w: %w", ErrInvalid, err)
 	}
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return fmt.Errorf("autoscale off %s: %w", app, err)
 	}
@@ -1214,7 +1214,7 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 		return ExposeResult{}, fmt.Errorf("expose %s: TLS requires an issuer: %w", req.App, ErrInvalid)
 	}
 
-	ns, err := e.resolveNamespace(ctx, req.Env)
+	ns, err := e.resolveMutatingNamespace(ctx, req.Env)
 	if err != nil {
 		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
 	}
@@ -1435,7 +1435,7 @@ func (e *Engine) Unexpose(ctx context.Context, app, env string) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("unexpose: %w: %w", ErrInvalid, err)
 	}
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return fmt.Errorf("unexpose %s: %w", app, err)
 	}
@@ -1507,7 +1507,7 @@ func (e *Engine) SetGuardrail(ctx context.Context, env string, code GuardrailCod
 // superseded, and records the rollback as a new release. It returns ErrNotFound when
 // there is nothing to roll back from or to.
 func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (RollbackResult, error) {
-	ns, err := e.resolveNamespace(ctx, env)
+	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
 	}
@@ -1629,6 +1629,29 @@ func (e *Engine) ListEnvironments(ctx context.Context) ([]Environment, error) {
 	out = append(out, Environment{Name: DefaultEnvironment, Namespace: e.appNamespace, Default: true})
 	out = append(out, registered...)
 	return out, nil
+}
+
+// resolveMutatingNamespace maps a mutating operation's environment name to its namespace, first
+// applying the ADR-0047 forcing function: when the operation names no environment (an empty env) and
+// more than one environment is registered — the implicit `default` plus at least one named
+// environment — it refuses with a structured AmbiguousEnvironmentError that lists the environments
+// and tells the caller to name one, rather than silently defaulting to `default`. With only the
+// implicit default registered there is no ambiguity, so it resolves exactly like resolveNamespace and
+// the common single-environment self-hoster is unaffected (ADR-0047 §2). The check is on
+// registration, not reachability (ADR-0047 §1). Every env-scoped mutating engine method routes its
+// namespace through this; read-only methods call resolveNamespace directly and are not guarded
+// (ADR-0047 §3).
+func (e *Engine) resolveMutatingNamespace(ctx context.Context, env string) (string, error) {
+	if env == "" {
+		envs, err := e.ListEnvironments(ctx)
+		if err != nil {
+			return "", err
+		}
+		if len(envs) > 1 {
+			return "", &AmbiguousEnvironmentError{Environments: envs}
+		}
+	}
+	return e.resolveNamespace(ctx, env)
 }
 
 // resolveNamespace maps an environment name to the namespace its apps operate in (ADR-0035 phase

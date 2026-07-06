@@ -113,8 +113,9 @@ func TestAutoscaleGuardrail(t *testing.T) {
 	}
 	_, err := e.Autoscale(ctx, "web", "prod", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false)
 	mustGuardrail(t, err, cp.GuardrailAutoscale)
-	// The default environment is unaffected.
-	if _, err := e.Autoscale(ctx, "web", "", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false); err != nil {
+	// The default environment is unaffected. With prod also registered the target is ambiguous, so
+	// the default must be named explicitly (ADR-0047 §1).
+	if _, err := e.Autoscale(ctx, "web", cp.DefaultEnvironment, cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false); err != nil {
 		t.Fatalf("default env still allowed: %v", err)
 	}
 }

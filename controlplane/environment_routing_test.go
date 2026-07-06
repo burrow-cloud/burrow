@@ -59,8 +59,9 @@ func TestDeployRoutesToEnvironmentNamespace(t *testing.T) {
 		t.Errorf("workload unexpectedly present in the default app namespace burrow-apps")
 	}
 
-	// The same app name deploys independently into the default environment.
-	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/web:1", Replicas: 2}); err != nil {
+	// The same app name deploys independently into the default environment. With staging also
+	// registered the target is ambiguous, so the default must be named explicitly (ADR-0047 §1).
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Env: cp.DefaultEnvironment, Image: "registry.example.com/web:1", Replicas: 2}); err != nil {
 		t.Fatalf("Deploy(default): %v", err)
 	}
 	def, ok := k.SpecInNamespace("burrow-apps", "web")

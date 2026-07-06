@@ -1,6 +1,6 @@
 # Burrow Roadmap
 
-> **Status: v0.1 through v0.10 shipped.** These are version milestones; each unshipped one is
+> **Status: v0.1 through v0.11 shipped.** These are version milestones; each unshipped one is
 > a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
 > [README](../README.md) status table is the authoritative shipped/in-progress/planned
 > surface. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the current
@@ -187,6 +187,18 @@ the acting client version is recorded in the audit log next to the principal. An
 control-plane transport is extracted into an explicit interface shared by both binaries
 ([ADR-0045](adr/0045-oss-enterprise-boundary.md)), so an alternate transport (for a private managed
 layer) slots in without forking the request methods.
+
+## v0.11 — Agent environment safety ✅ shipped
+
+Make the agent's environment target **explicit and sticky** so a mutating operation never lands on —
+or wanders to — the wrong cluster ([ADR-0047](adr/0047-agent-environment-safety.md)). A deploy /
+scale / rollback / delete that names no environment is refused with a structured, alternatives-listing
+error whenever more than one is registered — at both the MCP handle layer (cluster-per-env) and
+burrowd's own registry (namespace-per-env), judged by registration not reachability — while a single
+environment proceeds without ceremony. An unreachable target names the other registered environments
+so a human can redirect, but Burrow never switches, retries elsewhere, or auto-fails-over. Read-only
+tools echo the environment they read. And `burrow env remove` finally lets a user drop a stale local
+handle (clearing the pin and its scoped credential), closing the ADR-0036 gap.
 
 ## Deferred until requested
 

@@ -213,12 +213,13 @@ the MCP server, and burrowd get along across versions, and prepares the OSS/ente
   methods are auth-agnostic, so a private managed layer can add an SSO transport without forking them.
   One of the three seams ADR-0045 names for keeping the managed product a thin layer over the OSS core.
 
-## Next: v0.11 — agent environment safety
+## Shipped: v0.11 — agent environment safety ✅
 
-The v0.11 theme, chosen after a wrong-environment incident: make the agent's environment target
-**explicit and sticky** so a mutating operation never lands on — or wanders to — the wrong cluster.
-Designed in [ADR-0047](adr/0047-agent-environment-safety.md). The v0.10 MCP-instructions hardening is
-the guidance half; this milestone adds the code-level forcing function, in phases:
+Released as **v0.11.0**. The agent's environment target is now **explicit and sticky** so a mutating
+operation never lands on — or wanders to — the wrong cluster. Designed in
+[ADR-0047](adr/0047-agent-environment-safety.md); the v0.10 MCP-instructions hardening was the
+guidance half, and this milestone added the code-level forcing function across four phases, plus a
+command to drop a stale environment:
 
 - **Phase 1 — refuse an implicit mutating target in the MCP selector (cluster-per-env).** A mutating
   tool called with no `env`/`context` is refused with a structured error listing the registered local
@@ -235,8 +236,11 @@ the guidance half; this milestone adds the code-level forcing function, in phase
 - **Phase 4 — reconcile the default and the echo.** Scope the ambient-context default to the
   read-only survey path and the single-environment case so the selector's contract holds in code, and
   ensure every tool echoes the environment it acted in (ADR-0047 §3, §5).
+- **`burrow env remove`** — drop a stale local environment handle (ADR-0036 gap), clearing the pin if
+  it was current and deleting the handle's orphaned scoped credential under `~/.burrow/`. Local-only:
+  it does not tear down a namespace-per-env registration or any cluster namespace/RBAC.
 
-Later candidates, unsequenced: **self-hoster day-2 hardening** (scheduled Postgres backups + retention
+**Next: the v0.12 theme is not yet chosen.** Live candidates, unsequenced: **self-hoster day-2 hardening** (scheduled Postgres backups + retention
 — the [ADR-0032](adr/0032-postgres-backups.md) follow-on — richer blast-radius guardrails, cost
 visibility); **more building-block add-ons** ([ADR-0025](adr/0025-building-block-addons.md)) beyond
 Postgres / cache / logs / metrics; **database-provisioning depth** (managed Postgres as a first-class

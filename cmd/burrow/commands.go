@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -262,6 +263,97 @@ func newScaleCmd() *cobra.Command {
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
+}
+
+func newRunCmd() *cobra.Command {
+	o := &commonOpts{}
+	var confirm bool
+	var ttl time.Duration
+	cmd := &cobra.Command{
+		Use:   "run <app> -- command args...",
+		Short: "Run a one-off command in an app's own image and environment",
+		Long: "Run a one-off command inside an app's own current image, in its namespace, with its\n" +
+			"config and secrets injected exactly as the running app sees them. Use it for the tasks\n" +
+			"that belong in the app's runtime: database migrations, seed and fixture loads, data\n" +
+			"backfills, a maintenance script.\n\n" +
+			"Pass the command after a -- separator, like kubectl run:\n" +
+			"  burrow app run web -- npm run migrate\n\n" +
+			"The run is synchronous: Burrow launches the command, waits for it to finish, and reports\n" +
+			"the exit code and the command's combined stdout+stderr output (Kubernetes interleaves the\n" +
+			"two into one stream). A non-zero exit code is a normal outcome, not a CLI failure.\n\n" +
+			"The finished Job is garbage-collected after --ttl (default 1h; 0 deletes it as soon as the\n" +
+			"output is captured), which only bounds the window to inspect a failure by hand.\n\n" +
+			"Running is gated by the app.run guardrail (confirm by default), which gates whether the\n" +
+			"command runs, not what it does: this is a command runner, not a SQL firewall, so a\n" +
+			"command can still make destructive changes. For risky data changes, back up first.",
+		// Exactly one positional (the app name) before any --; everything after -- is the command.
+		Args: func(cmd *cobra.Command, args []string) error {
+			n := len(args)
+			if d := cmd.ArgsLenAtDash(); d >= 0 {
+				n = d
+			}
+			if n != 1 {
+				return fmt.Errorf("expected exactly one app name before --, got %d", n)
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			app := args[0]
+			var command []string
+			if d := cmd.ArgsLenAtDash(); d >= 0 {
+				command = args[d:]
+			}
+			if len(command) == 0 {
+				return errors.New("a command is required after --, e.g. `burrow app run web -- npm run migrate`")
+			}
+			req := client.RunRequest{Command: command, Confirm: confirm}
+			// An omitted --ttl leaves TTLSeconds nil so the server applies its default (1h); a supplied
+			// duration (including 0, delete immediately) is sent as seconds. A negative is rejected here.
+			if cmd.Flags().Changed("ttl") {
+				if ttl < 0 {
+					return fmt.Errorf("--ttl must not be negative, got %s", ttl)
+				}
+				secs := int32(ttl.Seconds())
+				req.TTLSeconds = &secs
+			}
+			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			req.Env = env
+			res, err := c.Run(ctx, app, req)
+			if err != nil {
+				return err
+			}
+			return emit(cmd.OutOrStdout(), o.json, res, formatRunResult(app, res))
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	cmd.Flags().DurationVar(&ttl, "ttl", 0, "how long to keep the finished Job before it is garbage-collected (e.g. 30m; 0 = delete immediately; omit to keep the default of 1h)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a run a guardrail holds for confirmation")
+	return cmd
+}
+
+// formatRunResult renders a one-off command's outcome for a human: the exit code, then the captured
+// output under a single "output" heading. The output is the COMBINED stdout+stderr stream (Kubernetes
+// interleaves the two), so it is not split into separate sections that would imply a distinction that
+// does not exist (ADR-0048, ADR-0009). No em-dashes: it is user-facing CLI output.
+func formatRunResult(app string, r client.RunResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "ran command in %s: exit code %d", app, r.ExitCode)
+	if r.TimedOut {
+		b.WriteString(" (timed out before the command finished)")
+	}
+	// Stdout carries the combined stream; Stderr is reserved and currently always empty, but append
+	// it defensively so a future separation is never dropped from the human view.
+	out := r.Stdout + r.Stderr
+	if out != "" {
+		b.WriteString("\noutput (combined stdout+stderr):\n")
+		b.WriteString(out)
+	}
+	return b.String()
 }
 
 func newAutoscaleCmd() *cobra.Command {

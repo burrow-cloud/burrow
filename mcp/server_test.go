@@ -156,7 +156,7 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_autoscale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_environments"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_run", "burrow_autoscale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_environments"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
@@ -494,6 +494,146 @@ func TestDeployToolRoundTrip(t *testing.T) {
 	}
 	if gotPath != "/v1/apps/web/deploy" {
 		t.Errorf("API path = %q, want /v1/apps/web/deploy", gotPath)
+	}
+}
+
+// TestRunToolRoundTrip confirms burrow_run posts the command to the app's run endpoint with the
+// confirm and ttl_seconds pass-through, echoes the environment it acted in, and surfaces the
+// structured exit code and captured (combined stdout+stderr) output (ADR-0048).
+func TestRunToolRoundTrip(t *testing.T) {
+	writeHandleConfig(t, `apiVersion: burrow.dev/v1
+kind: Config
+environments:
+  - name: prod
+    context: do-nyc1-prod
+    appNamespace: apps
+    env: production
+`)
+
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "exit_code": 3, "stdout": "migrating...\nfailed: table locked\n",
+		})
+	}))
+	t.Cleanup(api.Close)
+	clientFor := func(string) (*client.Client, error) { return client.NewClient(api.URL, "tok"), nil }
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_run",
+		Arguments: map[string]any{"app": "web", "command": []string{"npm", "run", "migrate"}, "ttl_seconds": 0, "confirm": true, "env": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	if gotMethod != "POST" || gotPath != "/v1/apps/web/run" {
+		t.Errorf("request = %s %s, want POST /v1/apps/web/run", gotMethod, gotPath)
+	}
+	// The command, the confirm acknowledgement, and the explicit ttl_seconds=0 all reach the API.
+	if cmd, ok := gotBody["command"].([]any); !ok || len(cmd) != 3 || cmd[0] != "npm" || cmd[2] != "migrate" {
+		t.Errorf("command in body = %#v, want [npm run migrate]", gotBody["command"])
+	}
+	if c, _ := gotBody["confirm"].(bool); !c {
+		t.Errorf("confirm in body = %#v, want true", gotBody["confirm"])
+	}
+	if ttl, ok := gotBody["ttl_seconds"].(float64); !ok || ttl != 0 {
+		t.Errorf("ttl_seconds in body = %#v, want 0 (present, delete immediately)", gotBody["ttl_seconds"])
+	}
+
+	out := decodeStructured[struct {
+		client.RunResult
+		Environment struct {
+			Name    string `json:"name"`
+			Context string `json:"context"`
+			Env     string `json:"env"`
+		} `json:"environment"`
+	}](t, res)
+	if out.ExitCode != 3 || !strings.Contains(out.Stdout, "table locked") {
+		t.Errorf("result = %+v, want exit code 3 and the captured output", out.RunResult)
+	}
+	if out.Environment.Name != "prod" || out.Environment.Context != "do-nyc1-prod" || out.Environment.Env != "production" {
+		t.Errorf("echoed environment = %+v, want prod/do-nyc1-prod/production", out.Environment)
+	}
+}
+
+// TestRunToolHeldSurfaces confirms a run the app.run guardrail holds for confirmation comes back as a
+// tool error the agent reads (naming the guardrail), rather than executing — the standard held flow,
+// with no special client handling (ADR-0048, ADR-0020).
+func TestRunToolHeldSurfaces(t *testing.T) {
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "run held for confirmation", "code": "app.run"})
+	})
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_run",
+		Arguments: map[string]any{"app": "web", "command": []string{"psql", "-c", "DROP TABLE users"}},
+	})
+	if err != nil {
+		t.Fatalf("CallTool transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected a tool error result for a held run")
+	}
+	var text strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*sdk.TextContent); ok {
+			text.WriteString(tc.Text)
+		}
+	}
+	if !strings.Contains(text.String(), "app.run") {
+		t.Errorf("error content = %q, want it to name the app.run guardrail", text.String())
+	}
+}
+
+// TestRunToolRefusesAmbiguousEnv confirms burrow_run is a mutating tool under the ADR-0047 forcing
+// function: with more than one environment registered and no env named, the run is refused before it
+// routes, so a command never lands on whichever context happens to be current.
+func TestRunToolRefusesAmbiguousEnv(t *testing.T) {
+	writeHandleConfig(t, `apiVersion: burrow.dev/v1
+kind: Config
+environments:
+  - name: prod
+    context: do-nyc1-prod
+    appNamespace: apps
+    env: production
+  - name: staging
+    context: do-nyc1-staging
+    appNamespace: staging
+`)
+	clientFor := func(string) (*client.Client, error) {
+		t.Error("clientFor must not be called: an ambiguous mutating run must be refused before it routes")
+		return nil, nil
+	}
+	cs := newSession(t, mcp.NewServer(clientFor, "", "test"))
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "burrow_run",
+		Arguments: map[string]any{"app": "web", "command": []string{"echo", "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("CallTool transport error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected a tool error: an ambiguous run with no env and more than one environment must be refused")
+	}
+	var text strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*sdk.TextContent); ok {
+			text.WriteString(tc.Text)
+		}
+	}
+	for _, want := range []string{"prod", "staging", "more than one environment", "env argument"} {
+		if !strings.Contains(text.String(), want) {
+			t.Errorf("refusal = %q, want it to mention %q", text.String(), want)
+		}
 	}
 }
 

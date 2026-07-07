@@ -315,6 +315,114 @@ func TestScale(t *testing.T) {
 	}
 }
 
+func TestRun(t *testing.T) {
+	// The connection flags sit before the -- separator, as they must on a real command line (-- consumes
+	// everything after it), so run() is called directly rather than through runCLI (which appends them).
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "exit_code": 0, "stdout": "migrated 3 files\n"})
+	}))
+	defer srv.Close()
+	var outb, errb bytes.Buffer
+	if err := run(context.Background(), []string{"app", "run", "web", "--control-plane", srv.URL, "--token", "x", "--", "npm", "run", "migrate"}, &outb, &errb); err != nil {
+		t.Fatalf("run: %v\n%s", err, errb.String())
+	}
+	out := outb.String()
+	if gotMethod != "POST" || gotPath != "/v1/apps/web/run" {
+		t.Errorf("request = %s %s, want POST /v1/apps/web/run", gotMethod, gotPath)
+	}
+	cmd, ok := gotBody["command"].([]any)
+	if !ok || len(cmd) != 3 || cmd[0] != "npm" || cmd[1] != "run" || cmd[2] != "migrate" {
+		t.Errorf("command in body = %#v, want [npm run migrate]", gotBody["command"])
+	}
+	// The exit code and the captured output land under a single combined-output heading (no split
+	// stdout/stderr sections, since Kubernetes interleaves the two).
+	if !strings.Contains(out, "exit code 0") || !strings.Contains(out, "migrated 3 files") {
+		t.Errorf("output = %q, want the exit code and the captured output", out)
+	}
+	if !strings.Contains(out, "combined stdout+stderr") {
+		t.Errorf("output = %q, want the honest combined-output heading", out)
+	}
+}
+
+// runBody runs `app run` against a mock control plane and returns the decoded request body. It calls
+// run() directly (not runCLI) so the connection flags sit before the -- separator — as they must on a
+// real command line, since -- consumes everything after it.
+func runBody(t *testing.T, flags []string, command ...string) map[string]any {
+	t.Helper()
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "exit_code": 0})
+	}))
+	defer srv.Close()
+	full := append([]string{"app", "run", "web", "--control-plane", srv.URL, "--token", "x"}, flags...)
+	full = append(full, "--")
+	full = append(full, command...)
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), full, &out, &errb); err != nil {
+		t.Fatalf("run: %v\n%s", err, errb.String())
+	}
+	return gotBody
+}
+
+func TestRunTTL(t *testing.T) {
+	body := runBody(t, []string{"--ttl", "30m"}, "echo", "hi")
+	if ttl, ok := body["ttl_seconds"].(float64); !ok || int(ttl) != 1800 {
+		t.Errorf("ttl_seconds in body = %#v, want 1800 (30m)", body["ttl_seconds"])
+	}
+}
+
+func TestRunTTLImmediate(t *testing.T) {
+	body := runBody(t, []string{"--ttl", "0"}, "echo", "hi")
+	// ttl=0 is an explicit "delete immediately", so it must be present (not omitted) and zero.
+	if ttl, present := body["ttl_seconds"]; !present || ttl.(float64) != 0 {
+		t.Errorf("ttl_seconds in body = %#v, want an explicit 0", body["ttl_seconds"])
+	}
+}
+
+func TestRunNoTTLOmitsIt(t *testing.T) {
+	body := runBody(t, nil, "echo", "hi") // no --ttl flag
+	if _, present := body["ttl_seconds"]; present {
+		t.Errorf("ttl_seconds should be omitted when --ttl is unset (server default applies), got %#v", body["ttl_seconds"])
+	}
+}
+
+func TestRunNegativeTTLRejected(t *testing.T) {
+	// --ttl=-1s uses the =form so the leading dash is not read as a new flag.
+	_, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the control plane must not be called: a negative --ttl is rejected before connecting")
+	}, "app", "run", "web", "--ttl=-1s", "--", "echo", "hi")
+	if err == nil || !strings.Contains(err.Error(), "--ttl must not be negative") {
+		t.Fatalf("err = %v, want a negative-ttl rejection", err)
+	}
+}
+
+func TestRunRequiresCommand(t *testing.T) {
+	_, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the control plane must not be called when no command is given")
+	}, "app", "run", "web")
+	if err == nil || !strings.Contains(err.Error(), "command is required after --") {
+		t.Fatalf("err = %v, want a missing-command error", err)
+	}
+}
+
+func TestRunGuardrailErrorSurfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "run held for confirmation", "code": "app.run"})
+	}))
+	defer srv.Close()
+	var outb, errb bytes.Buffer
+	err := run(context.Background(), []string{"app", "run", "web", "--control-plane", srv.URL, "--token", "x", "--", "psql", "-c", "DROP TABLE users"}, &outb, &errb)
+	if err == nil || !strings.Contains(err.Error(), "app.run") {
+		t.Fatalf("err = %v, want it to surface the app.run guardrail", err)
+	}
+}
+
 func TestConfigSet(t *testing.T) {
 	var gotMethod, gotPath string
 	var gotBody map[string]any

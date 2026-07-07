@@ -97,7 +97,7 @@ the running app sees them, with no separate wiring and no secret value crossing 
 ([ADR-0029](0029-secrets-through-the-control-plane.md)). The caller supplies only the command to run
 (and its arguments); the environment comes from the app.
 
-### 3. Synchronous: launch → wait → capture → return → reap
+### 3. Synchronous: launch → wait → capture → return
 
 The operation is request/response. burrowd builds the Job, launches it, and waits for it to finish,
 then returns a **structured result carrying stdout, stderr, and the exit code**. A non-zero exit is
@@ -105,10 +105,15 @@ a normal structured outcome the agent reasons over, not a transport error. There
 — Burrow has no streaming primitive today, and a one-off command does not need one; a long-running
 job that wants progress can revisit this later.
 
-A **10-minute timeout** bounds the wait. On success the Job is reaped, matching the backup pattern.
-On failure — non-zero exit or timeout — the Job is **left in place** for diagnosis, exactly as
-[ADR-0032](0032-postgres-backups.md) leaves a failed backup Job, so the operator (or the agent, via
-`logs`) can inspect what happened.
+A **10-minute timeout** bounds the wait. Because the result — stdout, stderr, and the exit code — is
+captured into the structured response **before** burrowd returns, the persisted Job and its pod are
+never the source of the agent's answer; they are only an out-of-band window for a human to inspect a
+failure by hand (`kubectl describe`, events). Cleanup is therefore uniform across both terminal
+states, driven by TTL rather than an imperative reap (§7). This is a deliberate divergence from the
+[ADR-0032](0032-postgres-backups.md) backup pattern, which leaves a failed Job in place indefinitely:
+a backup Job's outcome must be read back from the Job, whereas `burrow_run`'s outcome is already in
+hand, so a TTL that garbage-collects both success and failure is safe here and avoids accumulating
+finished Jobs.
 
 ### 4. A new `app.run` guardrail
 
@@ -150,13 +155,24 @@ of which is content inspection:
 
 `burrow_run` is assembled from machinery that already exists. It reuses the
 [ADR-0032](0032-postgres-backups.md) Job lifecycle behind the kube seam — build a Job, launch it,
-poll to completion, reap it — and the deploy path's current-image resolution and per-app-Secret
-`envFrom` injection ([ADR-0028](0028-app-config-and-secrets.md)). The one genuinely new capability
-is **capturing a finished Job pod's stdout/stderr and exit code**: pod lookup already exists for
+poll it to completion — and the deploy path's current-image resolution and per-app-Secret `envFrom`
+injection ([ADR-0028](0028-app-config-and-secrets.md)). The one genuinely new capability is
+**capturing a finished Job pod's stdout/stderr and exit code**: pod lookup already exists for
 backups, and log retrieval already exists for `logs`; `burrow_run` combines them and adds the exit
 code. No new dependency and no new credential boundary — the Job runs under the same namespace-scoped
 grants the add-on Jobs use, and the agent reaches it only through the guarded control plane
 ([ADR-0038](0038-scoped-agent-credential.md)).
+
+### 7. Job cleanup (TTL)
+
+The Job is garbage-collected by Kubernetes' native `ttlSecondsAfterFinished`, which applies uniformly
+to **both** terminal states — `Complete` and `Failed` — so a finished Job and its pod are removed a
+set time after they finish, with no imperative reap and no indefinite accumulation of failed Jobs.
+The TTL **defaults to 1 hour**: long enough to inspect a failure by hand, short enough that finished
+Jobs do not pile up. It is **configurable per invocation** through a `ttl` duration parameter on the
+tool and CLI, including **`ttl=0`** to delete the Job immediately once the output is captured. Because
+the result is already in the structured response before the Job is cleaned up (§3), a short or zero
+TTL never costs the agent its answer — it only shortens the human forensics window.
 
 ## Consequences
 
@@ -169,9 +185,10 @@ grants the add-on Jobs use, and the agent reaches it only through the guarded co
   ([ADR-0020](0020-guardrails-as-configurable-policy.md), [ADR-0035](0035-environments.md)).
 - **A new audit operation.** Each run — held, denied, or executed — is recorded with the command
   through the redacting allowlist ([ADR-0027](0027-audit-log.md)).
-- **New surface:** the `burrow_run` MCP tool and the `burrow app run <app> -- <cmd>` CLI, the
-  `app.run` guardrail entry and its seeded default, and the finished-Job stdout/stderr/exit-code
-  capture behind the kube seam (faked in unit tests, exercised in a k3d e2e).
+- **New surface:** the `burrow_run` MCP tool and the `burrow app run <app> -- <cmd>` CLI (both taking
+  a per-call `ttl` parameter), the `app.run` guardrail entry and its seeded default, the
+  `ttlSecondsAfterFinished`-based Job cleanup, and the finished-Job stdout/stderr/exit-code capture
+  behind the kube seam (faked in unit tests, exercised in a k3d e2e).
 - **The opaque-command limitation is a stated, honest boundary,** not a hidden gap: `burrow_run`
   gates the operation, not its contents. Content-aware SQL guardrails are deferred and named, so no
   reader mistakes command gating for statement-level data protection

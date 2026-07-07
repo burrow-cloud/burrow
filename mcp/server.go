@@ -55,6 +55,8 @@ Code never travels over MCP. To ship an app from source, build a container image
 
 Typical flow: infer the app from the working directory unless the user names one; build and push a uniquely, incrementing-semver-tagged image (never reuse a tag); set any non-secret config with burrow_config_set and have the user set secrets first; deploy by reference with burrow_deploy; check burrow_status and read logs (burrow_logs, burrow_logs_query) or metrics (burrow_metrics_query) to diagnose; roll back with burrow_rollback if needed. Deploying no longer resets the replica count — scaling is a separate concern handled by burrow_scale and burrow_autoscale.
 
+One-off commands: burrow_run runs a single command from an app's own current image with the app's env and secrets — migrations, seeds, backfills, one-off scripts, console-style diagnostics. It is synchronous and returns the exit code and the command's combined stdout+stderr output; a non-zero exit is a normal outcome to reason over, not an error. It is gated by the app.run guardrail and may be held for confirmation — ask the user and retry with confirm=true only on their explicit approval, never self-confirm. Honest limitation: app.run gates whether the command runs, not what it does — it is not a SQL firewall, so a command run through it can still make destructive changes (e.g. DROP TABLE); for risky data changes prefer taking a backup first.
+
 Guardrails: risky operations (delete, expose publicly, DNS writes, add-on install/remove, and deploy where an operator has locked it down, e.g. prod) are gated by policy in the control plane and may be held for confirmation or denied. When an operation is held, the tool result says so — ask the user, and retry with confirm=true ONLY after they explicitly approve. NEVER self-confirm. Use burrow_guard to see the current dispositions before acting.
 
 Human, CLI-only steps never go over MCP: relay the exact command and ask the USER to run it in their OWN terminal — never via a ` + "`!`" + ` prefix in this session, because a ` + "`!`" + ` run is non-interactive and cannot answer these commands' hidden secret prompts, and a credential must never route through the agent session. Never ask the user to paste a secret value into the conversation. These are: registry pull credentials for a private image (` + "`burrow config registry login <host> -u <user>`" + `, which prompts for the token with input hidden); app secrets like DB URLs and API keys (` + "`burrow app secret set <app> KEY=VALUE`" + `); DNS/cloud provider credentials (` + "`burrow config provider add <type>`" + `); and cluster setup (` + "`burrow install`" + `, ` + "`burrow upgrade`" + `, ` + "`burrow cluster ingress install`" + `). When a tool result says a prerequisite is missing, relay the exact command it names; after the user confirms they have run it, verify the result with the read-only tools (e.g. burrow_cluster, burrow_providers, burrow_status) instead of needing the command's output.
@@ -174,6 +176,11 @@ func NewServer(clientFor ClientForContext, kubeconfig, version string) *sdk.Serv
 		Name:        "burrow_scale",
 		Description: "Change an application's replica count. A guardrail may refuse it (e.g. above the replica ceiling) or hold it for confirmation (e.g. scaling to zero); when held, the error says so — ask the user, then retry with confirm set to true.",
 	}, scaleTool(clientFor, sel))
+
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_run",
+		Description: "Run a one-off command inside an application's OWN current image and environment: the currently-deployed release's image, in the app's namespace, with the app's config vars and its secrets injected exactly as the running app sees them (so DATABASE_URL and every secret resolve without extra wiring). Use it for the tasks that belong in the app's runtime — database migrations, seed and fixture loads, data backfills, a maintenance script, a console-style diagnostic. You supply only the command to run (its argv); the environment comes from the app. It is synchronous: Burrow launches the command, waits for it to finish, and returns a structured result with the exit code and the command's captured output. A non-zero exit code is a NORMAL structured outcome to reason over, not a transport error. The output is the COMBINED stdout+stderr stream (Kubernetes interleaves them into one), returned in the stdout field; there is no separate stderr capture. The finished Job is garbage-collected after ttl_seconds (default 3600 = one hour; set 0 to delete it as soon as the output is captured) — this never costs you the answer, which is already in the result, it only shortens the window for a human to inspect a failure by hand. Gated by the app.run guardrail (confirm by default; an operator may deny it in prod): when held, the error says so — ask the user, then retry with confirm set to true ONLY after they explicitly approve, never on your own. Honest limitation: app.run gates WHETHER the command runs, not what it does — this is a command runner, not a SQL firewall, so a migration or script run through it can still make destructive changes (DROP TABLE, DELETE) that the guardrail will not detect. For risky data changes, prefer taking a database backup first (burrow_addon_backup). Pass env to target a local environment handle such as staging or prod; use burrow_environments to see the handles.",
+	}, runTool(clientFor, sel))
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_autoscale",
@@ -535,6 +542,42 @@ func scaleTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[scal
 			return nil, scaleOutput{}, err
 		}
 		return nil, scaleOutput{ScaleResult: res, targeted: tgt.echo()}, nil
+	}
+}
+
+type runInput struct {
+	contextArg
+	envArg
+	App        string   `json:"app" jsonschema:"the application name"`
+	Command    []string `json:"command" jsonschema:"the command to run as an argv array (e.g. [\"npm\", \"run\", \"migrate\"]); it runs from the app's own current image with the app's config and secrets"`
+	TTLSeconds *int32   `json:"ttl_seconds,omitempty" jsonschema:"optional: seconds to keep the finished Job before Kubernetes garbage-collects it, default 3600 (one hour); 0 deletes it as soon as the output is captured; must not be negative"`
+	Confirm    bool     `json:"confirm,omitempty" jsonschema:"set true ONLY after the user has explicitly confirmed a run a guardrail held for confirmation; do not self-confirm"`
+}
+
+// runOutput is the run result plus the environment it acted in (ADR-0036, ADR-0048). The
+// client.RunResult fields are promoted alongside an "environment" echo. Its stdout field carries the
+// command's COMBINED stdout+stderr stream (Kubernetes interleaves them); the reserved stderr field is
+// always empty and, being omitempty, never appears in the result.
+type runOutput struct {
+	client.RunResult
+	targeted
+}
+
+func runTool(clientFor ClientForContext, sel selector) sdk.ToolHandlerFor[runInput, runOutput] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in runInput) (*sdk.CallToolResult, runOutput, error) {
+		tgt, err := sel.resolveMutating(in.Env, in.Context)
+		if err != nil {
+			return nil, runOutput{}, err
+		}
+		c, err := clientFor(tgt.context)
+		if err != nil {
+			return nil, runOutput{}, sel.enrichUnreachable(tgt, err)
+		}
+		res, err := c.Run(ctx, in.App, client.RunRequest{Env: tgt.env, Command: in.Command, TTLSeconds: in.TTLSeconds, Confirm: in.Confirm})
+		if err != nil {
+			return nil, runOutput{}, err
+		}
+		return nil, runOutput{RunResult: res, targeted: tgt.echo()}, nil
 	}
 }
 

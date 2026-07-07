@@ -199,6 +199,16 @@ type Kubernetes interface {
 	// blocks until the Job completes, errors on failure or timeout, and reaps the Job on success.
 	// app is validated before any Job is built.
 	RunRestoreJob(ctx context.Context, app, backupID string) error
+
+	// RunJob runs spec.Command as a one-shot Job in the app namespace (this seam view's namespace),
+	// built from the app's own current image (spec.Image) and its config env plus per-app Secret via
+	// envFrom, so DATABASE_URL and every secret resolve as the app sees them (ADR-0048 §2). It blocks
+	// until the Job finishes, then captures the pod's output and the container's exit code into a
+	// RunResult and returns it. A non-zero exit is a NORMAL structured outcome, not an error: the
+	// error return is reserved for a launch, poll, or timeout failure (ADR-0048 §3). The finished Job
+	// is garbage-collected by Kubernetes' native ttlSecondsAfterFinished, set from spec.TTLSeconds, so
+	// there is no imperative reap (ADR-0048 §7). spec.App is validated before any Job is built.
+	RunJob(ctx context.Context, spec RunSpec) (RunResult, error)
 }
 
 // Database is the seam over the control plane's own durable state (Postgres in

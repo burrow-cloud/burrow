@@ -42,6 +42,39 @@ type DeployResult struct {
 	SupersededReleaseID string `json:"superseded_release_id,omitempty"`
 }
 
+// RunRequest is a one-off command to run in an app's own current image and environment (ADR-0048).
+// It carries only the command (and its arguments) — the image, config, and secrets come from the
+// app, resolved server-side. No code travels here (ADR-0004): the command names an entrypoint that
+// already exists in the app's image.
+type RunRequest struct {
+	App string `json:"app"`
+	// Env is the environment whose namespace the command runs in (ADR-0035): empty or "default"
+	// targets the default environment, a registered name targets that environment.
+	Env string `json:"env,omitempty"`
+	// Command is the command and its arguments to run, as an argv. It must be non-empty.
+	Command []string `json:"command"`
+	// TTLSeconds overrides how long the finished Job lingers before Kubernetes garbage-collects it
+	// (ttlSecondsAfterFinished; ADR-0048 §7). Nil applies the default (one hour); a value — including
+	// 0, delete as soon as the output is captured — overrides it. A negative value is rejected.
+	TTLSeconds *int32 `json:"ttl_seconds,omitempty"`
+	// Confirm acknowledges the app.run guardrail whose disposition is confirm, letting the command
+	// proceed past it (ADR-0020). It has no effect on a guardrail set to deny.
+	Confirm bool `json:"confirm,omitempty"`
+}
+
+// RunResult reports the outcome of a one-off command (ADR-0048 §3). A non-zero ExitCode is a normal
+// structured outcome the agent reasons over, not a transport failure. Stdout carries the command's
+// captured output — Kubernetes returns a pod's stdout and stderr as one interleaved stream, so the
+// output lands in Stdout; Stderr is reserved for a future separation.
+type RunResult struct {
+	App      string `json:"app"`
+	ExitCode int    `json:"exit_code"`
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	// TimedOut reports the command did not finish within the run window (10 minutes).
+	TimedOut bool `json:"timed_out,omitempty"`
+}
+
 // StatusResult is the combined control-plane and cluster view of an app.
 type StatusResult struct {
 	App string `json:"app"`

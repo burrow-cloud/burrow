@@ -19,6 +19,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # A one-off command runs as a short-lived Job in the app namespace, from the app's own image and
+  # environment (ADR-0048): burrowd creates it, polls it to completion, reads its pod for the exit
+  # code and logs (via the pods and pods/log grants above), and lets Kubernetes' ttlSecondsAfterFinished
+  # garbage-collect it. delete lets a ttl=0 request reap immediately. Scoped to the app namespace.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "delete"]
   # Exposing an app creates a Service and an Ingress routing a host to it (ADR-0018).
   - apiGroups: [""]
     resources: ["services"]

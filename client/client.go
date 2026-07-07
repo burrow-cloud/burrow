@@ -104,6 +104,28 @@ type DeployRequest struct {
 	Confirm     bool     `json:"confirm,omitempty"`
 }
 
+// RunRequest is a one-off command to run in an app's own current image and environment (ADR-0048).
+// Command is the argv (non-empty); TTLSeconds overrides the finished-Job TTL (nil applies the
+// default of one hour, 0 deletes it as soon as the output is captured); Confirm acknowledges the
+// app.run guardrail so a held run proceeds.
+type RunRequest struct {
+	Env        string   `json:"env,omitempty"`
+	Command    []string `json:"command"`
+	TTLSeconds *int32   `json:"ttl_seconds,omitempty"`
+	Confirm    bool     `json:"confirm,omitempty"`
+}
+
+// RunResult reports the outcome of a one-off command (ADR-0048). A non-zero ExitCode is a normal
+// structured outcome, not a transport error. Stdout carries the command's captured output (Kubernetes
+// interleaves stdout and stderr into one stream); Stderr is reserved for a future separation.
+type RunResult struct {
+	App      string `json:"app"`
+	ExitCode int    `json:"exit_code"`
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	TimedOut bool   `json:"timed_out,omitempty"`
+}
+
 type Release struct {
 	ID         string            `json:"id"`
 	App        string            `json:"app"`
@@ -385,6 +407,17 @@ func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (Dep
 func (c *Client) Status(ctx context.Context, app, env string) (StatusResult, error) {
 	var out StatusResult
 	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "status"), env), nil, &out)
+	return out, err
+}
+
+// Run executes a one-off command in an app's own current image and environment (ADR-0048). It returns
+// a structured result carrying the command's captured output and exit code; a non-zero exit is a
+// normal outcome, not an error. It is gated by the app.run guardrail (confirm by default): a held run
+// returns a guardrail error the caller surfaces for confirmation, re-invoking with Confirm set only
+// on explicit human approval.
+func (c *Client) Run(ctx context.Context, app string, req RunRequest) (RunResult, error) {
+	var out RunResult
+	err := c.do(ctx, http.MethodPost, c.appPath(app, "run"), req, &out)
 	return out, err
 }
 

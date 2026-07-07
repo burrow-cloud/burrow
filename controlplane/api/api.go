@@ -56,6 +56,8 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/logs", s.logs)
 	v1.HandleFunc("POST /v1/apps/{app}/rollback", s.rollback)
 	v1.HandleFunc("POST /v1/apps/{app}/scale", s.scale)
+	// run executes a one-off command in the app's own current image and environment (ADR-0048).
+	v1.HandleFunc("POST /v1/apps/{app}/run", s.run)
 	// autoscale applies (POST) or removes (DELETE) an app's HorizontalPodAutoscaler (ADR-0006).
 	v1.HandleFunc("POST /v1/apps/{app}/autoscale", s.autoscale)
 	v1.HandleFunc("DELETE /v1/apps/{app}/autoscale", s.disableAutoscale)
@@ -141,6 +143,24 @@ func (s *server) deploy(w http.ResponseWriter, r *http.Request) {
 	}
 	req.App = r.PathValue("app") // the path is authoritative for the app name
 	res, err := s.engine.Deploy(r.Context(), req)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// run executes a one-off command in the app's own current image and environment (ADR-0048). The
+// command's captured output and exit code come back as a structured result; a non-zero exit is a
+// normal outcome, not an error. It is gated by the app.run guardrail (confirm by default) — a held
+// run maps to 422 with needs_confirmation, like the other guarded operations.
+func (s *server) run(w http.ResponseWriter, r *http.Request) {
+	var req controlplane.RunRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	req.App = r.PathValue("app") // the path is authoritative for the app name
+	res, err := s.engine.Run(r.Context(), req)
 	if err != nil {
 		writeEngineError(w, err)
 		return

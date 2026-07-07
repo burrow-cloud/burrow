@@ -39,6 +39,8 @@ type Kubernetes struct {
 	autoscalers  map[string]controlplane.AutoscaleSpec // app -> applied HPA spec (namespace-keyed)
 	backups      *[]backupCall                         // RunBackupJob calls, in order
 	restores     *[]backupCall                         // RunRestoreJob calls, in order
+	runs         *[]runCall                            // RunJob calls, in order
+	runResult    *controlplane.RunResult               // canned result RunJob returns
 	backupSiz    *int64                                // size RunBackupJob reports
 	metricsAvail *bool                                 // whether metrics-server is reported present
 	errs         map[Op]error
@@ -93,6 +95,16 @@ type backupCall struct {
 	BackupID string
 }
 
+// runCall records one RunJob invocation so a test can assert the engine drove the one-off command
+// Job with the right app, image, command, TTL, and namespace (ADR-0048).
+type runCall struct {
+	App        string
+	Image      string
+	Command    []string
+	TTLSeconds int32
+	Namespace  string
+}
+
 type deployState struct {
 	spec           controlplane.WorkloadSpec
 	ready          int32
@@ -141,6 +153,8 @@ func NewKubernetes() *Kubernetes {
 		autoscalers:  make(map[string]controlplane.AutoscaleSpec),
 		backups:      &[]backupCall{},
 		restores:     &[]backupCall{},
+		runs:         &[]runCall{},
+		runResult:    &controlplane.RunResult{},
 		backupSiz:    new(int64),
 		metricsAvail: &metricsAvail,
 		errs:         make(map[Op]error),
@@ -631,4 +645,31 @@ func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, backupID string) er
 	}
 	*k.restores = append(*k.restores, backupCall{App: app, BackupID: backupID})
 	return nil
+}
+
+// SetRunResult sets the canned RunResult the next RunJob calls return, modelling a command's captured
+// output and exit code (ADR-0048). A test seeds a non-zero ExitCode to assert it surfaces as a
+// structured result rather than a transport error.
+func (k *Kubernetes) SetRunResult(res controlplane.RunResult) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	*k.runResult = res
+}
+
+// RunJobs returns the recorded RunJob invocations, in order, so a test can assert the engine drove
+// the one-off command Job with the app's current image, command, TTL, and target namespace.
+func (k *Kubernetes) RunJobs() []runCall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]runCall(nil), *k.runs...)
+}
+
+func (k *Kubernetes) RunJob(ctx context.Context, spec controlplane.RunSpec) (controlplane.RunResult, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpRunJob]; err != nil {
+		return controlplane.RunResult{}, err
+	}
+	*k.runs = append(*k.runs, runCall{App: spec.App, Image: spec.Image, Command: append([]string(nil), spec.Command...), TTLSeconds: spec.TTLSeconds, Namespace: k.ns})
+	return *k.runResult, nil
 }

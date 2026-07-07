@@ -45,6 +45,26 @@ type WorkloadSpec struct {
 	ReleaseID string
 }
 
+// RunSpec is the desired one-off command Job the kube seam builds for RunJob (ADR-0048): the app's
+// own current image and config env, plus the caller's command and the finished-Job TTL. The per-app
+// Secret is injected by the adapter via envFrom, not carried here, so no secret value crosses this
+// seam. No code travels here (ADR-0004) — the command names an entrypoint already in the image.
+type RunSpec struct {
+	App string
+	// ID is the unique run identifier the Job name derives from (burrow-run-<ID>), minted by the
+	// engine's ID seam so the Job name is deterministic in tests.
+	ID string
+	// Image is the app's currently-deployed image the command runs in (ADR-0048 §2).
+	Image string
+	// Command is the command and its arguments run as the container's command.
+	Command []string
+	// Env is the app's non-secret config, sourced as container env alongside the per-app Secret.
+	Env map[string]string
+	// TTLSeconds is the Job's ttlSecondsAfterFinished — how long the finished Job lingers before
+	// Kubernetes garbage-collects it (ADR-0048 §7). Zero deletes it as soon as it finishes.
+	TTLSeconds int32
+}
+
 // ExposeSpec describes how to make an app reachable at a hostname (ADR-0018). v0.2 routes
 // HTTP to the app's Service via an Ingress, optionally with TLS issued by cert-manager.
 type ExposeSpec struct {

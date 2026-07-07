@@ -83,6 +83,12 @@ const (
 	// (GuardrailReplicaCeiling). An operator can raise it to confirm or deny per environment, e.g.
 	// deny in prod so only a human sets the scaling shape there.
 	GuardrailAutoscale GuardrailCode = "app.autoscale"
+	// GuardrailAppRun: the operation would run a caller-provided one-off command inside the app's own
+	// current image and environment (ADR-0048) — a migration, seed, backfill, or maintenance script.
+	// Held for confirmation by default: a command runs opaquely and may make destructive changes, so
+	// the human sees and approves the exact command before it runs, and prod is the environment to
+	// keep gated. The guardrail gates whether the command runs, not what it does (ADR-0048 §5).
+	GuardrailAppRun GuardrailCode = "app.run"
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through
@@ -114,6 +120,7 @@ var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailAppDelete, Description: "delete an app entirely (its workload, routing, and release history)"},
 	{Code: GuardrailRollback, Description: "roll an application back to its previous release"},
 	{Code: GuardrailAutoscale, Description: "configure autoscaling for an application"},
+	{Code: GuardrailAppRun, Description: "run a one-off command inside an application's own image and environment"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.

@@ -189,6 +189,11 @@ func DefaultPolicy() Policy {
 			GuardrailAddonDetach:    DispositionConfirm,
 			GuardrailAddonRestore:   DispositionConfirm,
 			GuardrailAppDelete:      DispositionConfirm,
+			// Running a one-off command inside the app's own image is held for confirmation by default
+			// (ADR-0048 §4): a command runs opaquely and may make destructive changes, so the human sees
+			// and approves the exact command before it runs. An operator can relax it to allow in a safe
+			// environment (e.g. staging) or harden it to deny in prod with `guard set --env prod app.run`.
+			GuardrailAppRun: DispositionConfirm,
 			// Rollback is a recovery action, so it is allowed by default — an agent should be
 			// able to restore a broken app without friction. An operator who wants sign-off can
 			// raise it to confirm or deny with `guard set app.rollback ...`.

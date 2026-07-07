@@ -76,8 +76,9 @@ func TestEngineRunE2E(t *testing.T) {
 	}
 
 	// A confirmed run of a command that prints to stdout and exits 0: output and exit code captured.
-	ttl := int32(600)
-	res, err := engine.Run(ctx, cp.RunRequest{App: app, Command: []string{"sh", "-c", "echo hello-from-run; exit 0"}, Confirm: true, TTLSeconds: &ttl})
+	// (The Job's ttlSecondsAfterFinished — ADR-0048 §7 — is asserted precisely against the built Job
+	// spec in the kube-adapter unit test; a post-hoc list here would race the TTL garbage collector.)
+	res, err := engine.Run(ctx, cp.RunRequest{App: app, Command: []string{"sh", "-c", "echo hello-from-run; exit 0"}, Confirm: true})
 	if err != nil {
 		t.Fatalf("run exit 0: %v", err)
 	}
@@ -86,22 +87,6 @@ func TestEngineRunE2E(t *testing.T) {
 	}
 	if !strings.Contains(res.Stdout, "hello-from-run") {
 		t.Errorf("stdout = %q, want to contain hello-from-run", res.Stdout)
-	}
-
-	// The finished Job carries the requested ttlSecondsAfterFinished so Kubernetes garbage-collects it
-	// (ADR-0048 §7). It is still present here — the TTL window has not elapsed.
-	jobs, err := client.BatchV1().Jobs(nsName).List(ctx, metav1.ListOptions{LabelSelector: "app.kubernetes.io/managed-by=burrow"})
-	if err != nil {
-		t.Fatalf("list jobs: %v", err)
-	}
-	foundTTL := false
-	for _, j := range jobs.Items {
-		if strings.HasPrefix(j.Name, "burrow-run-") && j.Spec.TTLSecondsAfterFinished != nil && *j.Spec.TTLSecondsAfterFinished == 600 {
-			foundTTL = true
-		}
-	}
-	if !foundTTL {
-		t.Errorf("no run Job carried ttlSecondsAfterFinished=600 (jobs: %d)", len(jobs.Items))
 	}
 
 	// A confirmed run of a command that exits non-zero: captured as a structured result, not an error.

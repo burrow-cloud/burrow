@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+✅ Accepted
 
 ## TL;DR
 
@@ -20,8 +20,10 @@ credential-boundary principle is preserved and migrated to `burrow-agent`. Build
 echoes [ADR-0007](0007-explicit-deploy-by-image-reference.md) (the scoped CLI is the spine;
 MCP, if kept, is an optional layer). Does **not** supersede
 [ADR-0004](0004-code-never-over-mcp.md) (the code-never-over-MCP invariant survives,
-transport-independent) or [ADR-0002](0002-four-layer-architecture.md) (the thin client layer
-simply becomes the scoped CLI). Supersedes ADR-0005.
+transport-independent), [ADR-0003](0003-agent-neutral-mcp-control-surface.md) (a CLI any agent
+can run is at least as agent-neutral as an MCP server), or
+[ADR-0002](0002-four-layer-architecture.md) (the thin client layer simply becomes the scoped
+CLI).
 
 ## Context
 
@@ -111,24 +113,31 @@ lowest-common-denominator: every runtime that can allow or deny a command can al
 and deny `burrow`. The design commits to the portable argument — a separate executable — rather
 than to any one runtime's precise rule syntax.
 
-### 4. `burrow connect <tool>` wires the agent's permissions
+### 4. `burrow agent <tool> install` wires the agent's permissions
 
 The current `burrow mcp <tool> install` command — which installs the MCP server and writes a
-`burrow` deny rule into the agent's configuration — is superseded by a **`burrow connect <tool>`**
-(and `burrow connect <tool> install`) command whose sole job is to write the agent's permission
-rules: **allow `burrow-agent`, deny `burrow`**, and optionally deny `kubectl` and other cluster
-CLIs. It keeps the existing preview → idempotent-apply → backup UX: show the user the rules it will
-write, apply them idempotently, and back up what it replaced. (This ADR records the command's job;
-it does not implement it.)
+`burrow` deny rule into the agent's configuration — is superseded by a **`burrow agent <tool>
+install`** command (with the preview form `burrow agent <tool>`, e.g. `burrow agent claude
+install`) whose sole job is to write the agent's permission rules: **allow `burrow-agent`, deny
+`burrow`**, and optionally deny `kubectl` and other cluster CLIs. It keeps the existing preview →
+idempotent-apply → backup UX: show the user the rules it will write, apply them idempotently, and
+back up what it replaced. (This ADR records the command's job; it does not implement it.)
+
+`burrow agent <tool> install` is a **subcommand of the human `burrow` admin CLI**, run **once, by a
+person**, to wire an integration — it is distinct from `burrow-agent`, the agent's runtime binary
+(§1). There is no contradiction with the rejected `burrow agent …` control channel below: the
+portability argument in §3 concerns using `burrow agent …` as the *agent's runtime channel*, where
+executable-level allow/deny must hold across untrusted runtimes. It does not apply to a human's own
+trusted `burrow` CLI, where a subcommand a person invokes by hand carries no such constraint.
 
 ### 5. Capability discovery without MCP tool schemas
 
 MCP handed the agent a machine-readable tool list; a CLI must answer the same "what can I do here?"
 question by its own means. `burrow-agent` provides discovery through **rich `--help` and
 self-description** on every command and subcommand, and a **concise instructions surface** — the
-bare `burrow-agent` invocation with no arguments prints an orientation, and `burrow connect` can
-install an instructions document into the agent's context, analogous to the `instructions` the MCP
-server exposes today. The agent discovers the surface by reading help and instructions, not by
+bare `burrow-agent` invocation with no arguments prints an orientation, and `burrow agent <tool>
+install` can install an instructions document into the agent's context, analogous to the
+`instructions` the MCP server exposes today. The agent discovers the surface by reading help and instructions, not by
 loading a schema.
 
 ### 6. Relationship to the load-bearing invariants
@@ -146,6 +155,9 @@ loading a schema.
 - **Does not supersede [ADR-0002](0002-four-layer-architecture.md).** The four layers stand; layer
   2 — the thin, credential-free client — is simply the scoped CLI (`burrow-agent`) rather than an
   MCP server. The control plane is still the product and the only Kubernetes-credentialed layer.
+- **Does not supersede [ADR-0003](0003-agent-neutral-mcp-control-surface.md).** The agent-neutral
+  principle is preserved and even reinforced: a CLI any agent can run is at least as neutral as an
+  MCP server, so nothing in the control channel is specialized to a particular agent.
 - **Echoes [ADR-0007](0007-explicit-deploy-by-image-reference.md).** The scoped CLI is the spine of
   the agent's control channel, where the guardrails run and the structured result is produced. MCP,
   if kept at all, is an optional layer beside it — never the other way round.
@@ -170,7 +182,7 @@ loading a schema.
 - **The agent gains composition.** Piping, filtering, and chaining `--json` output is the day-one
   capability that the tool-call channel could not provide; it is the reason for the change.
 - **One fewer thing to install.** The getting-started path drops the MCP-server setup step: install
-  one CLI, run `burrow connect <tool>`, and the agent is wired.
+  one CLI, run `burrow agent <tool> install`, and the agent is wired.
 - **The agent-layer boundary gets structurally stronger.** Capability-reduction moves from a
   runtime deny list to the shape of the binary, backed by scoped RBAC and server-side guardrails.
 - **Loses MCP-ecosystem positioning and discoverability.** Burrow no longer advertises as an MCP
@@ -190,9 +202,9 @@ loading a schema.
   through the registry). This ADR names that reconciliation as a consequence; it does not make the
   edit.
 - **New surface follows:** the `burrow-agent` binary and its capability-reduced command set, the
-  `burrow connect <tool>` wiring command that replaces `burrow mcp <tool> install`, the JSON-first
-  output mode across the operate-verbs, and the instructions surface for discovery. (Named here as a
-  decision; built with its slice.)
+  `burrow agent <tool> install` wiring command that replaces `burrow mcp <tool> install`, the
+  JSON-first output mode across the operate-verbs, and the instructions surface for discovery.
+  (Named here as a decision; built with its slice.)
 
 ## Rejected alternatives
 
@@ -203,10 +215,13 @@ loading a schema.
   this decision removes, and shipping two co-equal surfaces sends a split message about which is the
   real interface. If MCP is kept at all it is an optional layer, not a co-equal spine
   ([ADR-0007](0007-explicit-deploy-by-image-reference.md)).
-- **A `burrow agent …` subcommand carve-out instead of a separate binary.** Rejected: agent
-  runtimes match permissions on the executable and let a deny take precedence over an allow, so
-  allowing a subcommand while denying its parent is fragile, and the subcommand-matching semantics
-  are not portable across runtimes. Two binary names are the portable lowest common denominator.
+- **A `burrow agent …` subcommand carve-out as the agent's runtime control channel, instead of a
+  separate binary.** Rejected: agent runtimes match permissions on the executable and let a deny
+  take precedence over an allow, so allowing a subcommand while denying its parent is fragile, and
+  the subcommand-matching semantics are not portable across runtimes. Two binary names are the
+  portable lowest common denominator. (This concerns the *agent's runtime channel* only; the
+  human-invoked `burrow agent <tool> install` wiring subcommand of §4 is a different thing — a
+  person's own trusted CLI, not an untrusted-runtime permission surface — and stands.)
 - **Give the agent the full `burrow` binary and rely only on a deny list.** Rejected: a deny list is
   a runtime convention that must be honored at call time, weaker than a binary that structurally
   lacks the dangerous verbs. Capability-reduction belongs in the shape of the artifact, not in a

@@ -59,7 +59,7 @@ func TestBareRootPrintsOrientation(t *testing.T) {
 		t.Fatalf("run(): %v", err)
 	}
 	combined := out.String() + errb.String()
-	if !strings.Contains(combined, "read-only control channel") {
+	if !strings.Contains(combined, "control channel to Burrow") {
 		t.Errorf("bare output = %q, want the orientation text", combined)
 	}
 }

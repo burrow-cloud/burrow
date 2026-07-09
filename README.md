@@ -130,6 +130,10 @@ Burrow directly with `burrow app deploy web --image nginx:alpine` and `burrow ap
 in a few minutes — a managed cluster, or a single droplet the VPS bootstrap can use.
 _(Referral link — you get free signup credit, and it helps support Burrow.)_
 
+**Want to try it with no cloud at all?** [docs/QUICKSTART.md](docs/QUICKSTART.md) takes you from
+nothing to your agent deploying an app to a local [k3d](https://k3d.io) cluster — and getting
+blocked trying to delete it — on your laptop in about 5–10 minutes.
+
 See [docs/getting-started.md](docs/getting-started.md) for the full walkthrough, including the
 complete list of supported agents and how to wire any other agent by hand.
 
@@ -174,6 +178,8 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code.
 
 ## Documentation
 
+- [docs/QUICKSTART.md](docs/QUICKSTART.md): a validated laptop walkthrough — your agent deploys
+  an app to a local k3d cluster and hits the delete guardrail, no cloud, in about 5–10 minutes.
 - [docs/getting-started.md](docs/getting-started.md): set up Burrow on your cluster and connect
   your agent, start to finish.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the system design, its four layers,

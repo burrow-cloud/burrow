@@ -40,21 +40,21 @@ func claudeAllow(t *testing.T, path string) []string {
 }
 
 // TestAgentRuleStringsAreExact pins the load-bearing permission strings: the allow of the scoped
-// binary, the word-boundary deny of the human CLI, the bare-`burrow` deny that closes the end-of-input
-// gap, and the opt-in kubectl deny. A regression here would silently weaken the security boundary.
+// binary and the word-boundary deny of the human CLI, plus the opt-in kubectl deny. A regression here
+// would silently weaken the security boundary. There is deliberately no no-wildcard `Bash(burrow)`
+// rule: a bare `burrow` only prints help, and an exact rule's match semantics against `burrow-agent`
+// are undocumented while deny takes precedence, so a false match would catastrophically break wiring.
 func TestAgentRuleStringsAreExact(t *testing.T) {
 	cases := map[string]string{
 		"allow (with args)": agentAllowRule,
 		"allow (bare)":      agentAllowBareRule,
 		"deny (with args)":  agentDenyRule,
-		"deny (bare)":       agentDenyBareRule,
 		"deny kubectl":      agentDenyKubectlRule,
 	}
 	want := map[string]string{
 		"allow (with args)": "Bash(burrow-agent *)",
 		"allow (bare)":      "Bash(burrow-agent)",
 		"deny (with args)":  "Bash(burrow *)", // the SPACE before * is the word boundary
-		"deny (bare)":       "Bash(burrow)",   // covers a bare `burrow` (no args, end of input)
 		"deny kubectl":      "Bash(kubectl *)",
 	}
 	for name, got := range cases {
@@ -62,13 +62,10 @@ func TestAgentRuleStringsAreExact(t *testing.T) {
 			t.Errorf("%s rule = %q, want %q", name, got, want[name])
 		}
 	}
-	// The deny rules must never catch the scoped binary: `burrow-agent` has no space after `burrow`, so
-	// `Bash(burrow *)` cannot match it, and it is not the exact string `burrow`.
+	// The deny rule must never catch the scoped binary: `burrow-agent` has no space after `burrow`, so
+	// the word-boundary `Bash(burrow *)` cannot match it.
 	if strings.HasPrefix("burrow-agent", "burrow ") {
 		t.Fatal("burrow-agent unexpectedly has a `burrow ` prefix; the deny would catch it")
-	}
-	if "burrow-agent" == "burrow" {
-		t.Fatal("burrow-agent equals burrow; the bare deny would catch it")
 	}
 }
 
@@ -106,7 +103,7 @@ func TestAgentUnknownToolFallback(t *testing.T) {
 	for _, want := range []string{
 		`Burrow has no built-in agent wiring for "cursor" yet.`,
 		"ALLOW `Bash(burrow-agent *)`",
-		"DENY `Bash(burrow)` and `Bash(burrow *)`",
+		"DENY `Bash(burrow *)`",
 		"Bash(kubectl *)",
 		"Built-in wiring: claude.",
 	} {
@@ -139,7 +136,6 @@ func TestAgentClaudePreviewMutatesNothing(t *testing.T) {
 		"Wire Claude Code to burrow-agent.",
 		"Bash(burrow-agent *)",
 		"Bash(burrow *)",
-		"Bash(burrow)",
 		"~/.claude/settings.json",
 		"~/.claude/CLAUDE.md",
 		"--deny-kubectl",
@@ -173,8 +169,13 @@ func TestAgentClaudeInstallWritesRules(t *testing.T) {
 		t.Errorf("allow rules = %v, want the two burrow-agent rules", allow)
 	}
 	deny := claudeDeny(t, settings)
-	if countRule(deny, "Bash(burrow *)") != 1 || countRule(deny, "Bash(burrow)") != 1 {
-		t.Errorf("deny rules = %v, want both Bash(burrow *) and Bash(burrow)", deny)
+	if countRule(deny, "Bash(burrow *)") != 1 {
+		t.Errorf("deny rules = %v, want exactly one Bash(burrow *)", deny)
+	}
+	// A bare `burrow` is intentionally NOT denied (help screen only; an exact rule risks a false match
+	// on burrow-agent), so no no-wildcard rule is written.
+	if countRule(deny, "Bash(burrow)") != 0 {
+		t.Errorf("deny rules must not include a no-wildcard Bash(burrow): %v", deny)
 	}
 	// The scoped binary must never be denied: neither deny form may appear in the deny list.
 	if countRule(deny, "Bash(burrow-agent *)") != 0 || countRule(deny, "Bash(burrow-agent)") != 0 {
@@ -223,8 +224,11 @@ func TestAgentClaudeInstallDenyKubectl(t *testing.T) {
 		t.Fatalf("agent claude install --deny-kubectl: %v", err)
 	}
 	deny := claudeDeny(t, settings)
-	if countRule(deny, "Bash(burrow *)") != 1 || countRule(deny, "Bash(burrow)") != 1 || countRule(deny, "Bash(kubectl *)") != 1 {
-		t.Errorf("deny rules = %v, want the two burrow rules and kubectl", deny)
+	if countRule(deny, "Bash(burrow *)") != 1 || countRule(deny, "Bash(kubectl *)") != 1 {
+		t.Errorf("deny rules = %v, want the burrow rule and kubectl", deny)
+	}
+	if countRule(deny, "Bash(burrow)") != 0 {
+		t.Errorf("deny rules must not include a no-wildcard Bash(burrow): %v", deny)
 	}
 	if !strings.Contains(out.String(), "kubectl") {
 		t.Errorf("output should record the kubectl deny:\n%s", out.String())
@@ -259,8 +263,8 @@ func TestAgentClaudeInstallIsIdempotent(t *testing.T) {
 		t.Errorf("allow rules = %v, want exactly one of each after two runs", allow)
 	}
 	deny := claudeDeny(t, settings)
-	if countRule(deny, "Bash(burrow *)") != 1 || countRule(deny, "Bash(burrow)") != 1 {
-		t.Errorf("deny rules = %v, want exactly one of each after two runs", deny)
+	if countRule(deny, "Bash(burrow *)") != 1 {
+		t.Errorf("deny rules = %v, want exactly one Bash(burrow *) after two runs", deny)
 	}
 	// The orientation block appears exactly once.
 	mem, err := os.ReadFile(memory)

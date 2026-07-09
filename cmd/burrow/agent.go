@@ -51,13 +51,15 @@ const (
 	agentAllowBareRule = "Bash(burrow-agent)"
 	// agentDenyRule blocks the human `burrow` admin CLI in the agent's shell. The space before `*` is a
 	// WORD BOUNDARY: it matches `burrow deploy …` but NOT `burrow-agent …` (there is no space after
-	// `burrow` in `burrow-agent`). Deny takes absolute precedence over allow, which is exactly why two
-	// distinct binaries are used — the allow of burrow-agent cannot carve a hole in this deny.
+	// `burrow` in `burrow-agent`, so the space cannot match). Deny takes absolute precedence over allow,
+	// which is exactly why two distinct binaries are used — the allow of burrow-agent cannot carve a
+	// hole in this deny. Every DANGEROUS `burrow` invocation takes arguments (`burrow install`,
+	// `burrow guard set`, …), so this one rule covers them all. A bare `burrow` (no arguments) is
+	// deliberately NOT denied: it only prints a help screen, and a no-wildcard exact rule like
+	// `Bash(burrow)` is avoided because its match semantics against `burrow-agent` are undocumented and,
+	// with deny taking precedence, a false prefix match would silently break the whole setup — an
+	// unacceptable risk for blocking a harmless help screen.
 	agentDenyRule = "Bash(burrow *)"
-	// agentDenyBareRule closes the gap the space form leaves: prefix matching needs the trailing space,
-	// so a bare `burrow` (no arguments, end of input) would slip past `Bash(burrow *)`. This exact-match
-	// rule denies it too, so BOTH `burrow` and `burrow <args>` are blocked.
-	agentDenyBareRule = "Bash(burrow)"
 	// agentDenyKubectlRule blocks the agent from running kubectl directly, so every cluster change goes
 	// through Burrow's guarded path rather than around it. Opt-in via --deny-kubectl: kubectl is a
 	// general tool Burrow does not own, so denying it by default would be overreach.
@@ -88,8 +90,8 @@ const agentOverview = "Wire your AI agent to burrow-agent, its scoped control ch
 // the tool the user named; the rule placeholders follow. No em-dashes: it is user-facing output.
 const agentUnknownToolMessage = "Burrow has no built-in agent wiring for %q yet.\n\n" +
 	"burrow-agent is a single binary on the agent's PATH. To wire another agent by hand, set its\n" +
-	"permission rules to ALLOW `%s` and DENY `%s` and `%s` (and optionally `%s`), so the agent may run\n" +
-	"the scoped binary but not the human `burrow` admin CLI.\n\n" +
+	"permission rules to ALLOW `%s` and DENY `%s` (and optionally `%s`), so the agent may run the\n" +
+	"scoped binary but not the human `burrow` admin CLI.\n\n" +
 	"Built-in wiring: claude.\n" +
 	"Request support: " + mcpIssuesURL + "\n"
 
@@ -134,7 +136,7 @@ func runAgent(args []string, w io.Writer, denyKubectl bool) error {
 		return nil
 	}
 	if args[0] != "claude" {
-		fmt.Fprintf(w, agentUnknownToolMessage, args[0], agentAllowRule, agentDenyBareRule, agentDenyRule, agentDenyKubectlRule)
+		fmt.Fprintf(w, agentUnknownToolMessage, args[0], agentAllowRule, agentDenyRule, agentDenyKubectlRule)
 		return nil
 	}
 	tool := claudeAgentTool{denyKubectl: denyKubectl}
@@ -161,11 +163,13 @@ func (t claudeAgentTool) allowRules() []string {
 	return []string{agentAllowRule, agentAllowBareRule}
 }
 
-// denyRules is the set of deny rules the wiring writes: always the two burrow-CLI rules (bare and
-// with-args, so neither form of the human admin CLI slips through), plus the kubectl rule when
-// --deny-kubectl was passed. Order is stable so appended rules read predictably.
+// denyRules is the set of deny rules the wiring writes: always the word-boundary burrow-CLI rule
+// (which covers every dangerous, argument-taking `burrow` invocation while sparing burrow-agent), plus
+// the kubectl rule when --deny-kubectl was passed. A bare `burrow` (help screen only) is intentionally
+// left un-denied; see agentDenyRule for why a no-wildcard exact rule is avoided. Order is stable so
+// appended rules read predictably.
 func (t claudeAgentTool) denyRules() []string {
-	rules := []string{agentDenyRule, agentDenyBareRule}
+	rules := []string{agentDenyRule}
 	if t.denyKubectl {
 		rules = append(rules, agentDenyKubectlRule)
 	}
@@ -190,12 +194,13 @@ func (t claudeAgentTool) preview() string {
 	for _, r := range t.denyRules() {
 		fmt.Fprintf(&b, "    %s\n", r)
 	}
-	b.WriteString("\nThe allow rule lets the agent run the scoped burrow-agent binary; the deny rules block the\n")
-	b.WriteString("human `burrow` admin CLI (both bare `burrow` and `burrow <args>`)")
+	b.WriteString("\nThe allow rule lets the agent run the scoped burrow-agent binary; the deny rule blocks the\n")
+	b.WriteString("human `burrow` admin CLI (`burrow <args>`; the space is a word boundary, so burrow-agent is\n")
+	b.WriteString("spared)")
 	if t.denyKubectl {
 		b.WriteString(" and kubectl")
 	}
-	b.WriteString(", so every cluster\nchange stays on Burrow's guarded, audited path.\n")
+	b.WriteString(", so every cluster change stays on Burrow's guarded, audited path.\n")
 	if !t.denyKubectl {
 		b.WriteString("\nRecommended: also pass --deny-kubectl to block the agent from running kubectl directly.\n")
 	}
@@ -223,11 +228,11 @@ func (t claudeAgentTool) install(w io.Writer) error {
 
 	if permsChanged {
 		if t.denyKubectl {
-			fmt.Fprintf(w, "Wired Claude Code to burrow-agent: allowed %s and denied the burrow admin CLI (%s and %s) "+
-				"and kubectl (%s) in %s.\n", agentAllowRule, agentDenyBareRule, agentDenyRule, agentDenyKubectlRule, claudeSettingsDisplay)
+			fmt.Fprintf(w, "Wired Claude Code to burrow-agent: allowed %s and denied the burrow admin CLI (%s) "+
+				"and kubectl (%s) in %s.\n", agentAllowRule, agentDenyRule, agentDenyKubectlRule, claudeSettingsDisplay)
 		} else {
-			fmt.Fprintf(w, "Wired Claude Code to burrow-agent: allowed %s and denied the burrow admin CLI (%s and %s) "+
-				"in %s.\n", agentAllowRule, agentDenyBareRule, agentDenyRule, claudeSettingsDisplay)
+			fmt.Fprintf(w, "Wired Claude Code to burrow-agent: allowed %s and denied the burrow admin CLI (%s) "+
+				"in %s.\n", agentAllowRule, agentDenyRule, claudeSettingsDisplay)
 		}
 	}
 	if instrChanged {

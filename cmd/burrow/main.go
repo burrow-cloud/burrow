@@ -124,6 +124,7 @@ func newRootCmd() *cobra.Command {
 		grouped(newJoinCmd(), groupGetStarted),
 		grouped(newUpgradeCmd(), groupGetStarted),
 		grouped(newMcpCmd(), groupGetStarted),
+		grouped(newAgentCmd(), groupGetStarted),
 		grouped(newClusterCmd(), groupGetStarted),
 		grouped(newConfigCmd(), groupGetStarted),
 		// Environments: select which cluster/namespace commands target.

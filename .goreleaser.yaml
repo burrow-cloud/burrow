@@ -1,8 +1,10 @@
-# GoReleaser builds the Burrow CLIs (burrow, burrow-mcp) for macOS and Linux, creates the
-# GitHub release with the archives and auto-generated notes, and publishes the `burrow`
-# Homebrew formula to burrow-cloud/homebrew-tap so `brew install burrow-cloud/tap/burrow`
-# works after each tagged release. The burrowd image is built separately with ko in the
-# release workflow — GoReleaser owns the CLI release, not the control-plane image.
+# GoReleaser builds the Burrow CLI (burrow) for macOS and Linux, creates the GitHub release
+# with the archives and auto-generated notes, and publishes the `burrow` Homebrew formula to
+# burrow-cloud/homebrew-tap so `brew install burrow-cloud/tap/burrow` works after each tagged
+# release. The agent's control channel is the `burrow-agent` binary (ADR-0049); the retired
+# `burrow-mcp` server is no longer built or shipped, though its code stays in the tree for now.
+# The burrowd image is built separately with ko in the release workflow — GoReleaser owns the
+# CLI release, not the control-plane image.
 version: 2
 
 project_name: burrow
@@ -22,14 +24,15 @@ builds:
     goos: [darwin, linux]
     goarch: [amd64, arm64]
 
-  - id: burrow-mcp
-    main: ./cmd/burrow-mcp
-    binary: burrow-mcp
+  - id: burrow-agent
+    main: ./cmd/burrow-agent
+    binary: burrow-agent
     env:
       - CGO_ENABLED=0
     flags:
       - -trimpath
-    # burrow-mcp's package main also carries a `version` var (reported to MCP clients).
+    # burrow-agent is the agent's scoped control channel (ADR-0049); its package main also
+    # carries a `version` var stamped with the release tag.
     ldflags:
       - -X main.version={{ .Tag }}
     goos: [darwin, linux]
@@ -40,7 +43,7 @@ archives:
     # Bundle both CLIs into a single tar.gz per platform.
     ids:
       - burrow
-      - burrow-mcp
+      - burrow-agent
     formats:
       - tar.gz
     name_template: >-
@@ -65,11 +68,11 @@ brews:
     license: "Apache-2.0"
     install: |
       bin.install "burrow"
-      bin.install "burrow-mcp"
+      bin.install "burrow-agent"
     caveats: |
-      burrow-mcp was updated. Restart any open agent session so it loads the new
-      MCP server. You can resume your previous one (for example, `claude --resume`).
-      Your `burrow` CLI in the terminal is already up to date.
+      burrow-agent (the agent's control channel) was updated. Restart any open agent
+      session so it picks up the new binary. You can resume your previous one (for
+      example, `claude --resume`). Your `burrow` CLI in the terminal is already up to date.
 
 release:
   github:

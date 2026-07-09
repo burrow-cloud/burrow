@@ -1,6 +1,6 @@
 name: Release
 
-# A release is a single git push of a v* tag. GoReleaser builds the CLIs (burrow, burrow-mcp),
+# A release is a single git push of a v* tag. GoReleaser builds the CLIs (burrow, burrow-agent),
 # creates the GitHub release with their archives and auto-generated notes, and publishes the
 # Homebrew formula to burrow-cloud/homebrew-tap. ko then builds the burrowd control-plane image
 # and pushes it to GHCR — it does not touch the release, so the release is created exactly once.

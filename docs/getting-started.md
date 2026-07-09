@@ -18,8 +18,8 @@ you.
 brew install burrow-cloud/tap/burrow
 ```
 
-This installs two binaries: `burrow` (the CLI) and `burrow-mcp` (the MCP server your agent talks
-to).
+This installs two binaries: `burrow` (the human admin CLI) and `burrow-agent` (the scoped control
+channel your agent drives).
 
 ### 2. Install Burrow into your cluster
 
@@ -38,30 +38,29 @@ tells you it is ready.
 
 ## Part 2 - Connect your agent
 
-Burrow is driven by your AI agent over MCP: the agent talks to `burrow-mcp`, a stdio server that
-uses your kubeconfig and active environment, so there is nothing extra to configure. Add Burrow to
-your agent with one command.
+Your AI agent drives Burrow through `burrow-agent`, a single scoped binary already on your PATH
+(installed alongside `burrow` in step 1). It is capability-reduced — it carries the safe
+operate-verbs (deploy, status, logs, rollback, scale, and their read-only siblings) and holds no
+cluster credentials — so pointing an agent at it is safe. Connecting your agent means writing its
+permission rules so it may run `burrow-agent` but not the human `burrow` admin CLI, which is why
+the two are separate binaries.
 
-Preview what will be added first with `burrow mcp <tool>`, then apply it with
-`burrow mcp <tool> install`. The change is idempotent, and any file Burrow edits is backed up first.
+Preview what will be written first with `burrow agent <tool>`, then apply it with
+`burrow agent <tool> install`. The change is idempotent, and any file Burrow edits is backed up first.
 
-| Agent | Command | How it is configured |
-|-------|---------|----------------------|
-| Claude Code | `burrow mcp claude install` | its own `claude mcp add` |
-| Codex | `burrow mcp codex install` | its own `codex mcp add` |
-| Copilot | `burrow mcp copilot install` | its own `copilot mcp add` |
-| Cursor | `burrow mcp cursor install` | edits `~/.cursor/mcp.json` |
-| OpenCode | `burrow mcp opencode install` | edits `~/.config/opencode/opencode.json` |
-| Aider | not supported | Aider has no MCP support; use an MCP bridge pointed at `burrow-mcp` |
-| Any other agent | `burrow mcp` | add `burrow-mcp` (stdio) to that agent's MCP config |
+| Agent | Command | How it is wired |
+|-------|---------|-----------------|
+| Claude Code | `burrow agent claude install` | writes the allow/deny permission rules and a burrow-agent orientation into `~/.claude` |
+| Any other agent | `burrow agent <tool>` | prints the exact rules to set by hand: allow `burrow-agent`, deny `burrow` |
 
-After it is added, restart your agent (or reload its MCP servers) so it picks up Burrow.
+After it is wired, restart your agent so it picks up the new permissions.
 
 ### Do not see your agent?
 
-`burrow-mcp` is a plain stdio server that any MCP-capable tool can use, so you can add it to any
-agent's MCP config by hand. If you would like first-class `burrow mcp` support for your agent,
-please open an issue to request it:
+`burrow-agent` is a single binary on the agent's PATH, so any agent that can run a command can use
+it. Wire another agent by hand: in its permission config, allow `Bash(burrow-agent *)` and deny
+`Bash(burrow *)`, so it may run the scoped binary but not the human `burrow` admin CLI. If you would
+like first-class `burrow agent` support for your agent, please open an issue to request it:
 [github.com/burrow-cloud/burrow/issues/new](https://github.com/burrow-cloud/burrow/issues/new).
 
 ## First use
@@ -98,7 +97,7 @@ Make the token long-lived. Burrow stores it as-is in your cluster and does not r
 ephemeral or CI token (such as an Actions `GITHUB_TOKEN`) will break future pulls once it expires.
 
 This is a one-time credential step you run yourself at your terminal. The credential is stored in
-your cluster and never travels over MCP, so the agent cannot do it for you. Without it, a private
+your cluster and never travels over the agent control channel, so the agent cannot do it for you. Without it, a private
 image lands in `ImagePullBackOff`, and `burrow status` (or the agent's status check) reports the
 missing registry and this exact fix.
 

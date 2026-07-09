@@ -30,8 +30,9 @@ func noConfig(t *testing.T) {
 	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
 }
 
-// TestRootHelpShowsGroups confirms `burrow --help` renders the labeled command groups and lists no
-// retired `system`/`context` command (ADR-0037).
+// TestRootHelpShowsGroups confirms `burrow --help` renders the labeled command groups, lists the
+// `agent` wiring command, hides the deprecated `mcp` command (ADR-0049), and lists no retired
+// `system`/`context` command (ADR-0037).
 func TestRootHelpShowsGroups(t *testing.T) {
 	configWithEnv(t) // config present so the first-run banner is suppressed
 
@@ -43,11 +44,18 @@ func TestRootHelpShowsGroups(t *testing.T) {
 
 	for _, want := range []string{
 		"Get started:", "Environments:", "Operate:", "Govern:",
-		"install", "upgrade", "mcp", "cluster", "config", "env", "app", "addon", "guard", "audit",
+		"install", "upgrade", "agent", "cluster", "config", "env", "app", "addon", "guard", "audit",
 		"version", "completion", "help",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("help missing %q\n%s", want, s)
+		}
+	}
+
+	// The deprecated `mcp` command is hidden (ADR-0049): it must not appear as a command line in help.
+	for _, line := range strings.Split(s, "\n") {
+		if f := strings.Fields(line); len(f) > 0 && f[0] == "mcp" {
+			t.Errorf("help lists the hidden deprecated %q command: %q", f[0], line)
 		}
 	}
 

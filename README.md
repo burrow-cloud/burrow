@@ -8,9 +8,9 @@
 
 **Production grade self hosting for your apps, operated by your AI agent, with guardrails.**
 Point [Claude Code](https://claude.com/claude-code), Cursor, Codex, or bring your own at your
-Kubernetes cluster. It deploys, scales, debugs, and ships your apps to a URL over
-[MCP](https://modelcontextprotocol.io). You own the infrastructure and everything that drives
-it, and every risky move (deploying to prod, deleting an app, rolling back, exposing to the
+Kubernetes cluster. It deploys, scales, debugs, and ships your apps to a URL through
+`burrow-agent`, a scoped CLI your agent drives. You own the infrastructure and everything that
+drives it, and every risky move (deploying to prod, deleting an app, rolling back, exposing to the
 internet, DNS and add-on changes) can be gated by a guardrail you set, so the agent proposes
 and you decide.
 
@@ -122,9 +122,9 @@ Burrow works with any Kubernetes cluster you can reach with `kubectl`. Three
 commands get you from nothing to an agent operating your cluster:
 
 ```sh
-brew install burrow-cloud/tap/burrow     # installs burrow and burrow-mcp
+brew install burrow-cloud/tap/burrow     # installs burrow and burrow-agent
 burrow install <context>                 # installs Burrow into the named kube context (run `burrow install` to list them)
-burrow mcp claude install                # connect your agent (or: cursor, codex, copilot, opencode)
+burrow agent claude install              # wire your agent to burrow-agent (or another supported agent)
 ```
 
 Then just talk to your agent ("deploy this and serve it at example.com over HTTPS"), or drive
@@ -136,9 +136,9 @@ in a few minutes — a managed cluster, or a single droplet the VPS bootstrap ca
 _(Referral link — you get free signup credit, and it helps support Burrow.)_
 
 See [docs/getting-started.md](docs/getting-started.md) for the full walkthrough, including the
-complete list of supported agents and how to connect any other MCP-capable tool.
+complete list of supported agents and how to wire any other agent by hand.
 
-Prefer to build from source? `go build -o burrow ./cmd/burrow && go build -o burrow-mcp ./cmd/burrow-mcp`.
+Prefer to build from source? `go build -o burrow ./cmd/burrow && go build -o burrow-agent ./cmd/burrow-agent`.
 
 Upgrading later? See [Upgrade](docs/getting-started.md#upgrade).
 
@@ -195,8 +195,9 @@ Burrow follows semver from v0.1 toward v1.0. This table never lags the code.
 
 How the code is licensed ([LICENSING.md](LICENSING.md)):
 
-- All of Burrow's code in this repository is Apache-2.0: the CLI, the MCP server, and the
-  software that runs in your cluster. Read, modify, self-host, and integrate against it freely.
+- All of Burrow's code in this repository is Apache-2.0: the `burrow` CLI, the `burrow-agent`
+  control channel, and the software that runs in your cluster. Read, modify, self-host, and
+  integrate against it freely.
 
 Burrow is open source. Need enterprise features such as SSO? Reach out at
 [hi@burrow-cloud.dev](mailto:hi@burrow-cloud.dev).

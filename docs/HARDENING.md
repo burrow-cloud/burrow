@@ -18,7 +18,7 @@ no cluster-wide read. It writes a self-contained kubeconfig for that credential 
 privileged setup and governance (`install`, `upgrade`, `guard set`, `env add`, registry/provider
 credentials).
 
-`burrow-mcp` and the CLI operate path (`deploy`, `status`, `logs`, `rollback`, `scale`, …) default
+`burrow-agent` and the human CLI operate path (`deploy`, `status`, `logs`, `rollback`, `scale`, …) default
 to that scoped kubeconfig, so **the agent's reachable credential is confined to the control plane**:
 even a shelled-out `kubectl` pointed at it is denied everything except reaching burrowd, and the
 guardrails become binding by construction rather than resting only on the shell-denies below. The
@@ -36,7 +36,7 @@ to the credential it carries, what that lets it do, and what it cannot:
 | You, via `kubectl` | your admin kubeconfig (`~/.kube/config`) | Everything on the cluster: any resource, any namespace, cluster-scoped objects, exec, delete, RBAC. No Burrow guardrails. | Nothing restricts it. Full cluster admin, and it is what installs Burrow. |
 | You, via `burrow` (setup and governance): `install`, `upgrade`, `cluster ingress install`, `config registry`, `config provider`, `env add`, `env list --discover`, `guard set`, `addon`, `domain`, `audit` | your admin kubeconfig | Install/upgrade Burrow, write its namespaces/RBAC/secrets, set the guardrail policy, configure registry and DNS-provider credentials, install add-ons, manage DNS, read the audit log. | These are admin operations. `guard set` lives here on purpose: only the human, with admin, changes guardrails. |
 | You, via `burrow` (operate an app): `app deploy`/`status`/`logs`/`scale`/`rollback`/`autoscale`, `app config`/`secret`, `publish` | the scoped agent kubeconfig (falls back to admin if none) | Operate apps through burrowd, with every action guardrail-checked and audited. | Reach the cluster around burrowd; the guardrails gate what is allowed. You still have kubectl for raw access. |
-| Your agent, via `burrow-mcp` | only the scoped kubeconfig (`~/.burrow/agents/<env>`), granting exactly: proxy to the `burrowd` Service, and `get` the `burrowd-api-token` Secret | The `burrow_*` MCP tools only (deploy, status, logs, scale, rollback, autoscale, config, secret list/unset, expose, addons, domains, reachability, metrics/logs query, guard read-only, audit read), every mutating tool guardrailed and audited. | Anything else on the cluster: no arbitrary kubectl, no other Secrets, no other namespaces, no cluster-scoped reads, no exec, and it cannot change guardrails. It cannot leave burrowd. |
+| Your agent, via `burrow-agent` | only the scoped kubeconfig (`~/.burrow/agents/<env>`), granting exactly: proxy to the `burrowd` Service, and `get` the `burrowd-api-token` Secret | The `burrow-agent` operate-verbs only (deploy, status, logs, scale, rollback, autoscale, config, secret list/unset, expose, addons, domains, reachability, metrics/logs query, guard read-only, audit read), every mutating verb guardrailed and audited. | Anything else on the cluster: no arbitrary kubectl, no other Secrets, no other namespaces, no cluster-scoped reads, no exec, and it cannot change guardrails. It cannot leave burrowd. |
 
 **Two independent layers.** The scoped credential is the wall that keeps the agent from going around
 burrowd (touching the cluster directly). The guardrails are the policy for what is allowed through
@@ -44,8 +44,8 @@ burrowd. Different mechanisms; you need both.
 
 **One honest limitation, stated plainly.** Inside burrowd, authorization today is a single shared API
 token the agent can read, so the scoped credential confines the agent to burrowd but does not by
-itself enforce which burrowd operation it may call. The guardrails and the MCP tool surface do that
-(and the guard tool is read-only). Per-principal authorization inside burrowd, so an agent identity
+itself enforce which burrowd operation it may call. The guardrails and the `burrow-agent` verb
+surface do that (and the guard verb is read-only). Per-principal authorization inside burrowd, so an agent identity
 is denied specific endpoints regardless of tooling, is future work, and the `principal` seam added in
 ADR-0038 is the groundwork for it. A hardening-conscious operator should lean on the guardrails plus
 environment isolation, not assume the scope alone is a per-operation boundary.
@@ -99,16 +99,16 @@ operator applies deliberately; Burrow never applies it for you. (The agents shar
 ServiceAccount today; per-user credentials keyed on an identity come with the later SSO work,
 ADR-0038 §5.)
 
-### Make `burrow-mcp` fail closed: `BURROW_MCP_REQUIRE_SCOPED=1`
+### Make `burrow-agent` fail closed: `BURROW_AGENT_REQUIRE_SCOPED=1`
 
-`burrow-mcp` fails closed around the scoped credential, so a missing credential never silently
+`burrow-agent` fails closed around the scoped credential, so a missing credential never silently
 re-grants the agent full cluster access. Two behaviors matter:
 
-- A handle that records a scoped credential whose file is gone is always an error. `burrow-mcp`
+- A handle that records a scoped credential whose file is gone is always an error. `burrow-agent`
   refuses to fall back to the ambient (admin) kubeconfig and tells the operator to re-mint the
   credential with `burrow upgrade` (or `burrow install`). This holds even without the strict mode
   below.
-- Set `BURROW_MCP_REQUIRE_SCOPED=1` in the agent's environment and `burrow-mcp` refuses the ambient
+- Set `BURROW_AGENT_REQUIRE_SCOPED=1` in the agent's environment and `burrow-agent` refuses the ambient
   fallback entirely. A context with no scoped credential at all (an unregistered context, or a
   cluster installed before the scoped credential existed) becomes an error too, instead of falling
   back to whatever ambient kubeconfig the agent can reach. This is the recommended setting for an
@@ -120,7 +120,7 @@ control-plane URL (`BURROW_CONTROL_PLANE_URL`, which is not cluster admin) and a
 `true`, or `yes` (case-insensitive); empty or unset leaves strict mode off.
 
 The human CLI keeps its graceful ambient fallback for a recorded-but-missing or absent scoped
-credential; only `burrow-mcp`, the agent's surface, fails closed.
+credential; only `burrow-agent`, the agent's surface, fails closed.
 
 A coding agent (Claude Code, Cursor, …) still runs with a shell, so the shell-denies below are
 defense in depth on top of that boundary. Unless you restrict it, it can:
@@ -135,8 +135,8 @@ which kubeconfig its environment exposes. **You** close the gap, in your agent's
 and by confining its kubeconfig to the scoped credential. The principle, whatever agent you use:
 
 - **Deny the `burrow` CLI** → the agent can't `guard set` and can't shell around the guarded
-  tools; it uses Burrow's MCP tools (`burrow_deploy`, `burrow_scale`, …), where the guardrails
-  apply.
+  path; it uses `burrow-agent` (`burrow-agent deploy`, `burrow-agent scale`, …), where the
+  guardrails apply.
 - **Deny direct cluster tooling** (`kubectl`, `helm`, anything that uses the kubeconfig) → a
   `deny` / `confirm` guardrail can't be sidestepped.
 - **Allow `docker`** → the agent still builds and pushes images (the client-side build path,
@@ -144,10 +144,10 @@ and by confining its kubeconfig to the scoped credential. The principle, whateve
 
 ## Example: Claude Code
 
-`burrow mcp claude install` does the first step for you: alongside adding the MCP server, it
-merges the `Bash(burrow *)` deny rule into your user-wide `~/.claude/settings.json` (preserving
-everything else, backing the file up first). So denying the `burrow` CLI is handled
-automatically. Pass `--no-harden` to skip it if you manage permissions yourself.
+`burrow agent claude install` does the first step for you: alongside allowing the scoped
+`burrow-agent` binary, it merges the `Bash(burrow *)` deny rule into your user-wide
+`~/.claude/settings.json` (preserving everything else, backing the file up first). So denying the
+`burrow` CLI is handled automatically.
 
 The manual JSON below is still useful for the fuller lockdown: denying `kubectl` and `helm`
 (still your call, since Burrow does not know which cluster tools you want blocked), pinning the
@@ -166,15 +166,19 @@ or `~/.claude/settings.json` (user-wide):
       "Bash(helm *)"
     ],
     "allow": [
+      "Bash(burrow-agent *)",
+      "Bash(burrow-agent)",
       "Bash(docker *)"
     ]
   }
 }
 ```
 
-The space before `*` is a word boundary — `Bash(burrow *)` matches `burrow guard set …` but
-not a tool named `burrowctl`. Because deny beats allow, the `docker` allow does not weaken the
-denies.
+The space before `*` is a word boundary — `Bash(burrow *)` matches `burrow guard set …` but not
+the scoped `burrow-agent` binary (no space follows `burrow` in `burrow-agent`) and not a tool named
+`burrowctl`. Because deny beats allow, the `docker` and `burrow-agent` allows do not weaken the
+denies — they let the agent run the scoped control channel while the human `burrow` CLI stays
+blocked.
 
 **Caveat — defense-in-depth, not a sandbox.** A user can still override these rules with a
 permission-bypass mode (e.g. `--dangerously-skip-permissions` / `bypassPermissions`). This

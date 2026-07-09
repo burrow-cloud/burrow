@@ -5,12 +5,13 @@
 > the [README](../README.md) status table ([ADR-0009](adr/0009-honest-status.md)).
 
 Burrow is an agent-native cloud platform. It lets an AI coding agent deploy and operate
-real applications on a Kubernetes cluster by driving Burrow through an MCP server. The
-agent says "deploy this," "roll it back," "show me the logs," "scale it," and Burrow does
+real applications on a Kubernetes cluster by driving Burrow through the `burrow-agent` CLI,
+its scoped control channel ([ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md)).
+The agent says "deploy this," "roll it back," "show me the logs," "scale it," and Burrow does
 it safely on the user's own cluster.
 
-This repository is **open source**: the single-tenant control plane, the MCP server, and
-the CLI, packaged so a developer can self-host the whole thing. The multi-tenant managed
+This repository is **open source**: the single-tenant control plane, the `burrow-agent`
+control channel, and the `burrow` CLI, packaged so a developer can self-host the whole thing. The multi-tenant managed
 cloud (billing, teams, dashboard, SSO) is a separate product and does not live
 here.
 
@@ -22,12 +23,12 @@ Burrow is four layers; the line between "ours" and "not ours" is sharp
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │ 1. The agent          Claude Code / Cursor / Codex / Cowork / …   │  not ours
-│                       any MCP client                              │
+│                        any agent that can run a command           │
 └───────────────┬──────────────────────────────────────────────────┘
-                │  MCP  (tool calls + small metadata only — no code)
+                │  burrow-agent  (verbs + small metadata only — no code)
 ┌───────────────▼──────────────────────────────────────────────────┐
-│ 2. The MCP server     thin · agent-neutral · NO cluster creds     │  ours (thin)
-│                       translates tool calls → control-plane calls │
+│ 2. The agent CLI       burrow-agent · agent-neutral · NO creds    │  ours (thin)
+│                        translates verbs → control-plane calls     │
 └───────────────┬──────────────────────────────────────────────────┘
                 │  control-plane API  (authenticated)
 ┌───────────────▼──────────────────────────────────────────────────┐
@@ -42,14 +43,17 @@ Burrow is four layers; the line between "ours" and "not ours" is sharp
 │ 4. Kubernetes         the runtime Burrow operates on top of       │  not ours
 └──────────────────────────────────────────────────────────────────┘
 
-   the registry — the conveyor belt — runs alongside, not through MCP:
+   the registry — the conveyor belt — runs alongside the channel, not through it:
    builder ──push image──▶ container registry ──pull──▶ Kubernetes nodes
 ```
 
-1. **The agent** — not ours. Any MCP client. Burrow is agent-neutral and assumes nothing
-   about which agent drives it ([ADR-0003](adr/0003-agent-neutral-mcp-control-surface.md)).
-2. **The MCP server** — thin. Exposes Burrow's tools and translates agent calls into
-   control-plane calls. Holds **no cluster credentials**
+1. **The agent** — not ours. Any agent that can run a command. Burrow is agent-neutral and
+   assumes nothing about which agent drives it
+   ([ADR-0003](adr/0003-agent-neutral-mcp-control-surface.md)).
+2. **The agent control channel** — `burrow-agent`, a thin, capability-reduced CLI the agent
+   invokes directly ([ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md)). It
+   carries the operate-verbs, outputs JSON first so the agent can compose the result, and
+   translates each verb into a control-plane call. Holds **no cluster credentials**
    ([ADR-0005](adr/0005-mcp-server-holds-no-cluster-credentials.md)) and contains no
    orchestration logic. The remote control, not the engine.
 3. **The control plane** — **the product.** Deploy orchestration, the build-to-image
@@ -58,25 +62,29 @@ Burrow is four layers; the line between "ours" and "not ours" is sharp
    deployed what. Holds the cluster credentials; the only layer that talks to Kubernetes.
 4. **Kubernetes** — not ours. The runtime Burrow targets.
 
-The CLI is a fourth-wall client: it talks to the same control-plane API the MCP server
-does, for the human who wants to drive Burrow directly or build-and-push an image.
+The human `burrow` CLI is a fourth-wall client: it talks to the same control-plane API
+`burrow-agent` does, for the human who wants to drive Burrow directly or build-and-push an
+image.
 
 ## Load-bearing invariants
 
 These are the decisions everything else rests on. Each has an ADR.
 
-1. **Code never travels over MCP** ([ADR-0004](adr/0004-code-never-over-mcp.md)). MCP
-   carries tool calls and small metadata (an image reference, env vars, a command). The
-   built image moves through a **container registry**, never the MCP connection. *MCP is
-   the remote control; the registry is the conveyor belt.*
-2. **The MCP server holds no cluster credentials; the control plane does**
-   ([ADR-0005](adr/0005-mcp-server-holds-no-cluster-credentials.md)). The security
-   boundary is the control plane, not the thin MCP layer.
+1. **Code never travels over the agent control channel**
+   ([ADR-0004](adr/0004-code-never-over-mcp.md); its "over MCP" wording is generalized to any
+   control channel by [ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md)). The
+   channel carries verbs and small metadata (an image reference, env vars, a command). The
+   built image moves through a **container registry**, never the control channel. *The control
+   channel is the remote control; the registry is the conveyor belt.*
+2. **The agent control channel holds no cluster credentials; the control plane does**
+   ([ADR-0005](adr/0005-mcp-server-holds-no-cluster-credentials.md), migrated to `burrow-agent`
+   by [ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md)). The security boundary is
+   the control plane, not the thin `burrow-agent` client.
 3. **Guardrails live in the control plane**
    ([ADR-0006](adr/0006-guardrails-in-the-control-plane.md)), between agent and cluster.
    Dangerous operations are gated or refused there, and every operation returns a
    structured result the agent can reason over.
-4. **Deploy is an explicit MCP call by image reference**
+4. **Deploy is an explicit call by image reference**
    ([ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)). Passive image-tag
    watching (GitOps auto-deploy) may exist later as an optional mode but is never the
    spine — the explicit call is where the guardrails, the structured feedback, and the
@@ -94,11 +102,11 @@ These are the decisions everything else rests on. Each has an ADR.
 
 1. The image is already built and pushed to a registry the cluster can pull from — by the
    agent or CLI in v0.1 ([ADR-0008](adr/0008-two-build-paths.md)). The bytes rode the
-   conveyor belt, not MCP.
-2. The agent calls the `deploy` tool over MCP with an **image reference** plus small
+   conveyor belt, not the control channel.
+2. The agent runs `burrow-agent deploy` with an **image reference** plus small
    metadata (env vars, command, replica count) — no code
    ([ADR-0004](adr/0004-code-never-over-mcp.md)).
-3. The MCP server forwards the call to the control plane over the authenticated
+3. `burrow-agent` forwards the call to the control plane over the authenticated
    control-plane API. It holds no cluster credentials and makes no cluster calls itself.
 4. The control plane runs the guardrails
    ([ADR-0006](adr/0006-guardrails-in-the-control-plane.md)), then — using the cluster
@@ -110,7 +118,7 @@ These are the decisions everything else rests on. Each has an ADR.
 
 ### Status, logs, scale
 
-The agent calls the corresponding tool; the MCP server forwards it; the control plane
+The agent runs the corresponding `burrow-agent` verb; it forwards the call; the control plane
 queries or mutates Kubernetes through its credentials, applies guardrails to mutating
 operations (e.g. scale), and returns a structured result.
 
@@ -127,9 +135,12 @@ All code is licensed Apache-2.0 ([ADR-0033](adr/0033-relicense-to-apache.md),
 `internal/` so the separate private managed module can import their public API — a module
 boundary, not a license boundary.
 
-- **Client surface:** `cmd/burrow` — the **CLI**; `mcp` (with binary
-  `cmd/burrow-mcp`) — the thin, agent-neutral, credential-free **MCP server** that translates
-  tool calls into control-plane API calls; `internal` — module-private shared helpers only.
+- **Client surface:** `cmd/burrow` — the human **admin CLI**; `cmd/burrow-agent` — the thin,
+  agent-neutral, credential-free **agent control channel**
+  ([ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md)), a capability-reduced,
+  JSON-first CLI the agent invokes directly; `mcp` (with binary `cmd/burrow-mcp`) — the agent's
+  former MCP server, **retired** by ADR-0049 and no longer shipped, kept in-tree for now
+  (ADR-0049 §7); `internal` — module-private shared helpers only.
 - **The product:** `controlplane` (public API) with `controlplane/internal`
   (guts) and binary `cmd/burrowd` — the **control plane** that holds cluster credentials, runs
   orchestration and guardrails, and owns the deploy record and its database state; `operator`
@@ -160,7 +171,7 @@ nothing can write to or alter it.
 
 ## What is in scope, and when
 
-The v0.1 vertical slice — install into an existing cluster, connect an agent over MCP,
+The v0.1 vertical slice — install into an existing cluster, wire an agent to `burrow-agent`,
 deploy an image by reference, then status, logs, rollback, and scale — and everything
 explicitly out of scope for it, are defined in [PLAN.md](PLAN.md). The version milestones
 toward v1.0 are in [ROADMAP.md](ROADMAP.md). This document describes the shape; those two

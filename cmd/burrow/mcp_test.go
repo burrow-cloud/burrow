@@ -81,12 +81,13 @@ func TestMcpOverviewMutatesNothing(t *testing.T) {
 		t.Fatalf("mcp: %v", err)
 	}
 	for _, want := range []string{
-		"Connect Burrow to your AI agent",
+		// The command is deprecated (ADR-0049): it steers the user to `burrow agent` first.
+		"Deprecated: use `burrow agent <tool> install` instead.",
+		"burrow agent <tool> install",
 		"claude    Claude Code", "cursor    Cursor", "codex     Codex", "copilot   Copilot",
 		"opencode  OpenCode",
 		"burrow mcp <tool>", "burrow mcp <tool> install",
-		// The fallback and contribution pointer sit at the bottom.
-		"Burrow's MCP server is `burrow-mcp` (stdio, no arguments). Any MCP-capable tool can use it.",
+		// The contribution pointer sits at the bottom.
 		"Request support: https://github.com/burrow-cloud/burrow/issues/new",
 	} {
 		if !strings.Contains(out.String(), want) {

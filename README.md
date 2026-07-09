@@ -6,13 +6,7 @@
 
 > For developers moving fast with AI who don't want to break things
 
-**Production grade self hosting for your apps, operated by your AI agent, with guardrails.**
-Point [Claude Code](https://claude.com/claude-code), Cursor, Codex, or bring your own at your
-Kubernetes cluster. It deploys, scales, debugs, and ships your apps to a URL through
-`burrow-agent`, a scoped CLI your agent drives. You own the infrastructure and everything that
-drives it, and every risky move (deploying to prod, deleting an app, rolling back, exposing to the
-internet, DNS and add-on changes) can be gated by a guardrail you set, so the agent proposes
-and you decide.
+**Production grade self hosting for your apps, operated by the AI agent you already use.** Point [Claude Code](https://claude.com/claude-code), Cursor, Codex, or your own agent at your Kubernetes cluster and it deploys, scales, debugs, and rolls back your apps. It drives `burrow-agent`, a scoped CLI, but the credentials and the guardrails live in a control plane you own. Every risky move (deploying to prod, deleting an app, exposing to the internet, DNS and add-on changes) is gated by a policy you set: the agent proposes, you decide, and the boundary is enforced in code the agent can't reach past, not an instruction it might ignore.
 
 Burrow runs its own site on Burrow, live at [burrow-cloud.dev](https://burrow-cloud.dev).
 
@@ -23,9 +17,10 @@ service behind the same guardrails.
 
 ## Why Burrow
 
-- **Own your infrastructure, no lock-in.** Burrow self-hosts in your own cluster. It is open source (Apache-2.0), and there is no vendor platform in the path to migrate off later.
-- **Production grade by default.** Real Kubernetes done right, controlled by your agent: self-healing workloads, rolling deploys, ingress and TLS, in-place upgrades, all with sane defaults.
-- **Guardrails you control.** You decide what the agent can and cannot do, per environment. Lock prod down while staging stays free.
+- **Bring the agent you already use.** Claude Code, Cursor, Codex, or your own. Burrow is not another agent to adopt or a dashboard to learn, and there is no MCP server to stand up: put one binary on the agent's PATH and it can operate real infrastructure, safely.
+- **The boundary is enforced, not instructed.** The agent holds no cluster credentials. A control plane you own holds them and gates every dangerous operation, so a bad prompt or a confused step can't cross a line you drew. "Be careful with prod" is a wish; a guardrail is a control.
+- **Own your infrastructure, no lock-in.** Burrow self-hosts in your own cluster. Open source (Apache-2.0), one binary, no vendor platform in the path to migrate off later.
+- **Production grade by default.** Real Kubernetes done right: self-healing workloads, rolling deploys, ingress and TLS, in-place upgrades, sane defaults.
 
 ## Talk to your agent
 

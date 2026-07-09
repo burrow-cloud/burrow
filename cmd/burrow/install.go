@@ -325,11 +325,11 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	return nil
 }
 
-// postInstallGuidance is the tail a successful `install --wait` prints: Burrow is driven by an AI
-// agent over MCP, not by CLI deploys, so it points the user at connecting their agent rather than at
-// a `burrow app deploy` command. No em-dashes: it is user-facing CLI output.
-const postInstallGuidance = "Burrow is ready. Connect your AI agent to operate it:\n" +
-	"  burrow mcp claude        (or: cursor, codex, copilot)\n\n" +
+// postInstallGuidance is the tail a successful `install --wait` prints: Burrow is operated by an AI
+// agent through the scoped `burrow-agent` CLI, not by CLI deploys, so it points the user at wiring
+// their agent rather than at a `burrow app deploy` command. No em-dashes: it is user-facing CLI output.
+const postInstallGuidance = "Burrow is ready. Wire your AI agent to operate it:\n" +
+	"  burrow agent claude install\n\n" +
 	"Then open your agent and ask it to deploy your app.\n"
 
 // recordEnvironment writes the just-installed environment into the local config as a handle and

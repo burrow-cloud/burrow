@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Superseded by [ADR-0049](0049-burrow-agent-scoped-cli-control-channel.md).
 
 ## Context
 

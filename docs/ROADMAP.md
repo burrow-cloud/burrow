@@ -220,6 +220,11 @@ handle (clearing the pin and its scoped credential), closing the ADR-0036 gap.
   explicit path, never replacing it ([ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)).
 - **Self-host dashboard** — an HTMX dashboard over the control-plane API, if and when a
   self-host UI is warranted.
+- **App-runtime API and capability envelopes** *(exploratory)* — a programmatic control-plane
+  API a deployed app can call at runtime to provision infrastructure for its own users, bounded
+  by an operator-granted capability envelope, per [ADR-0050](adr/0050-app-runtime-api-and-capability-envelopes.md)
+  (Proposed); a captured direction, not a committed milestone, deferred behind the compute-first
+  core.
 
 ## v1.0 — Production self-host
 

@@ -15,25 +15,37 @@ import (
 
 // rootLong orients the agent to burrow-agent as a whole: what it is, that output is JSON, and how it
 // authenticates. It is the discovery surface (ADR-0049 §5) — the bare invocation prints it.
-const rootLong = `burrow-agent is your read-only control channel to Burrow: it reports the state of the user's
-applications on their Kubernetes cluster so you can survey, diagnose, and reason before acting.
+const rootLong = `burrow-agent is your control channel to Burrow: it reports the state of the user's applications
+on their Kubernetes cluster so you can survey and diagnose, and it carries the compute operate-verbs
+— deploy, rollback, scale, autoscale, and run — so you can act.
 
 Every command prints its result as indented JSON, so you can pipe, grep, and jq it
 (e.g. burrow-agent logs web | jq '.lines[] | select(.message | test("error"))').
 
-It authenticates to the control plane with a scoped, burrowd-only credential and holds no cluster
-credentials — the control plane behind it holds those and enforces the guardrails. This binary
-carries only the read-only operate-verbs; the mutating and admin verbs are deliberately not part of
-it. Run -h on any command to see what it does and the flags it takes.`
+A mutating verb prints a structured outcome envelope with a top-level "outcome" field:
+  executed              — the operation ran; "result" carries its result.
+  held_for_confirmation — a guardrail holds it; "code" and "message" say what needs approval.
+                          Relay it to the human and, ONLY once they approve, re-run with --confirm.
+                          Never self-confirm.
+  denied                — a guardrail refused it outright; no --confirm will help.
+  error                 — an actual failure (launch, transport, a not-found app).
+Exit code: executed 0, error 1, held_for_confirmation 2, denied 3.
 
-// newRootCmd builds the burrow-agent command tree: the read-only operate-verbs only. The mutating and
-// admin verbs are structurally absent — never registered here — so this binary cannot express them
-// (ADR-0049 §2a).
+It authenticates to the control plane with a scoped, burrowd-only credential and holds no cluster
+credentials — the control plane behind it holds those and enforces the guardrails. It builds and
+pushes no images: deploy names an image reference already on a registry the cluster can pull from,
+never code. The dangerous admin verbs (install, bootstrap, cluster setup, guard set, credential
+writes, app delete) are deliberately not part of this binary. Run -h on any command to see what it
+does and the flags it takes.`
+
+// newRootCmd builds the burrow-agent command tree: the read-only operate-verbs and the mutating
+// compute verbs (deploy, rollback, scale, autoscale, run). The dangerous ADMIN verbs are structurally
+// absent — never registered here — so this binary cannot express them (ADR-0049 §2a).
 func newRootCmd() *cobra.Command {
 	cobra.EnableCommandSorting = false
 	root := &cobra.Command{
 		Use:           "burrow-agent",
-		Short:         "The coding agent's read-only control channel to Burrow",
+		Short:         "The coding agent's control channel to Burrow",
 		Long:          rootLong,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -54,6 +66,13 @@ func newRootCmd() *cobra.Command {
 		newAuditCmd(),
 		newProvidersCmd(),
 		newEnvironmentsCmd(),
+		// The mutating compute operate-verbs (ADR-0049 Phase 2a). Each funnels through the confirm
+		// flow in mutate.go and prints an outcome envelope.
+		newDeployCmd(),
+		newRollbackCmd(),
+		newScaleCmd(),
+		newAutoscaleCmd(),
+		newRunCmd(),
 	)
 	return root
 }

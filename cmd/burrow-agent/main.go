@@ -2,19 +2,23 @@
 // Copyright 2026 Nicholas Phillips
 
 // Command burrow-agent is the coding agent's control channel to Burrow: a capability-reduced,
-// JSON-first command-line surface the agent invokes directly (ADR-0049). It carries only the
-// READ-ONLY operate-verbs (Phase 1) — the mutating and admin verbs are STRUCTURALLY ABSENT, not
-// compiled into this binary, a stronger boundary than a runtime deny list. It authenticates to the
-// control plane with the scoped control-plane credential (ADR-0038) and holds no cluster credentials
-// (ADR-0005): in self-host it reaches the in-cluster control plane through the scoped, burrowd-only
-// agent kubeconfig `burrow install` mints and the Kubernetes API-server proxy (ADR-0014). Every
-// command prints its result as indented JSON so the agent can pipe, grep, and jq it. Setting
+// JSON-first command-line surface the agent invokes directly (ADR-0049). It carries the operate-verbs
+// — the read-only siblings plus the mutating compute verbs (deploy, rollback, scale, autoscale, run) —
+// while the ADMIN verbs (install, bootstrap, cluster setup, guard set, credential writes) are
+// STRUCTURALLY ABSENT, not compiled into this binary, a stronger boundary than a runtime deny list.
+// It authenticates to the control plane with the scoped control-plane credential (ADR-0038) and holds
+// no cluster credentials (ADR-0005): in self-host it reaches the in-cluster control plane through the
+// scoped, burrowd-only agent kubeconfig `burrow install` mints and the Kubernetes API-server proxy
+// (ADR-0014). Every command prints its result as indented JSON so the agent can pipe, grep, and jq it;
+// a mutating verb prints a structured outcome envelope (executed, held_for_confirmation, denied, or
+// error) the agent can branch on and relay to the human (ADR-0020). Setting
 // BURROW_AGENT_REQUIRE_SCOPED refuses the ambient-kubeconfig fallback entirely.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +38,14 @@ var version = "v0.1.0"
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		// A mutating verb that resolved to a non-executed outcome (held, denied, or an operation
+		// error) has already printed its JSON envelope to stdout and returns an *exitError carrying
+		// only the process exit code — no stderr line, so the JSON stays the sole machine-readable
+		// output. Every other error is a genuine failure printed for a human.
+		var ee *exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
 		fmt.Fprintln(os.Stderr, "burrow-agent:", err)
 		os.Exit(1)
 	}

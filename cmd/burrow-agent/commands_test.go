@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -155,27 +156,49 @@ environments:
 	}
 }
 
-// TestMutatingVerbsAbsent is the structural capability-reduction assertion (ADR-0049 §2a): the
-// dangerous verbs are not compiled into this binary, so invoking one is an unknown-command error.
-func TestMutatingVerbsAbsent(t *testing.T) {
+// TestAdminVerbsAbsent is the structural capability-reduction assertion (ADR-0049 §2a): the dangerous
+// ADMIN verbs are not compiled into this binary, so invoking one is an unknown-command error. The
+// compute mutating verbs (deploy, rollback, scale, autoscale, run) are now PRESENT (Phase 2a) and so
+// are deliberately not listed here; TestMutatingVerbsPresent asserts they exist. What must remain
+// absent is the admin surface — install/bootstrap/cluster setup, guard set, app delete, the
+// registry/provider credential writes, and the `burrow agent <tool> install` wiring command.
+func TestAdminVerbsAbsent(t *testing.T) {
 	absent := [][]string{
-		{"deploy", "web", "--image", "img:1"},
-		{"rollback", "web"},
-		{"scale", "web", "3"},
-		{"run", "web", "--", "echo", "hi"},
-		{"delete", "web"},
-		{"expose", "web"},
 		{"install"},
 		{"bootstrap"},
-		{"guard", "set", "app.deploy", "deny"},
-		{"config", "set", "web", "K=V"},
-		{"secret", "set", "web", "K=V"},
+		{"cluster", "bootstrap"},
+		{"cluster", "ingress", "install"},
+		{"upgrade"},
+		{"delete", "web"},                      // app delete → Phase 2b, still absent
+		{"expose", "web"},                      // expose → Phase 2b
+		{"unexpose", "web"},                    // unexpose → Phase 2b
+		{"guard", "set", "app.deploy", "deny"}, // guardrail policy write (operator only)
+		{"config", "set", "web", "K=V"},        // config write → Phase 2b
+		{"secret", "set", "web", "K=V"},        // secret write (never over the agent channel)
+		{"provider", "add", "digitalocean"},    // provider credential write
+		{"registry", "login", "ghcr.io"},       // registry credential write
+		{"agent", "claude", "install"},         // the wiring command → Phase 3
+		{"env", "add", "prod"},                 // environment registration (operator)
 	}
 	for _, args := range absent {
 		var out, errb bytes.Buffer
 		err := run(context.Background(), args, &out, &errb)
 		if err == nil {
-			t.Errorf("run(%v) succeeded, want an error — the mutating verb must be structurally absent", args)
+			t.Errorf("run(%v) succeeded, want an error — the admin verb must be structurally absent", args)
 		}
+	}
+}
+
+// TestStructuralReduction asserts the property behind the capability reduction still holds: the
+// binary imports the thin client and its own package, never cmd/burrow (the human admin CLI), so the
+// admin verbs cannot leak in through a shared command tree. It is a coarser, compile-independent guard
+// than enumerating verbs.
+func TestStructuralReduction(t *testing.T) {
+	pkgs, err := exec.Command("go", "list", "-deps", "./.").Output()
+	if err != nil {
+		t.Fatalf("go list -deps: %v", err)
+	}
+	if strings.Contains(string(pkgs), "burrow/cmd/burrow\n") {
+		t.Error("burrow-agent imports cmd/burrow (the human admin CLI); the agent binary must not pull the admin command tree")
 	}
 }

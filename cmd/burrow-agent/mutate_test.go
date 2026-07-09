@@ -254,9 +254,9 @@ func TestRunNonZeroExitIsExecuted(t *testing.T) {
 	}
 }
 
-// TestMutatingVerbsPresent confirms the Phase 2a compute verbs are compiled in: each resolves to a
-// valid outcome envelope rather than an unknown-command error. It is the positive counterpart to
-// TestAdminVerbsAbsent.
+// TestMutatingVerbsPresent confirms the mutating verbs are compiled in — the Phase 2a compute verbs
+// and the Phase 2b routing/add-on/config/delete verbs — each resolving to a valid outcome envelope
+// rather than an unknown-command error. It is the positive counterpart to TestAdminVerbsAbsent.
 func TestMutatingVerbsPresent(t *testing.T) {
 	f := newFakeCP(t)
 	f.handler = func(w http.ResponseWriter, _ *http.Request) {
@@ -267,11 +267,27 @@ func TestMutatingVerbsPresent(t *testing.T) {
 		})
 	}
 	present := [][]string{
+		// Phase 2a compute verbs.
 		{"deploy", "web", "--image", "img:1"},
 		{"rollback", "web"},
 		{"scale", "web", "3"},
 		{"autoscale", "web"},
 		{"run", "web", "--", "echo", "hi"},
+		// Phase 2b routing verbs.
+		{"expose", "web", "--host", "web.example.com", "--port", "8080"},
+		{"unexpose", "web"},
+		{"domain", "add", "web.example.com", "--address", "203.0.113.5"},
+		{"domain", "remove", "web.example.com"},
+		// Phase 2b add-on operations.
+		{"addon", "install", "logs"},
+		{"addon", "remove", "logs"},
+		{"addon", "attach", "postgres", "web"},
+		{"addon", "backup", "postgres", "web"},
+		// Phase 2b config writes, secret-key removal, and the guarded delete.
+		{"config", "set", "web", "K=V"},
+		{"config", "unset", "web", "K"},
+		{"secret", "unset", "web", "K"},
+		{"delete", "web"},
 	}
 	for _, args := range present {
 		out, _ := runMutate(t, f, args...)
@@ -281,6 +297,143 @@ func TestMutatingVerbsPresent(t *testing.T) {
 		}
 		if oc.Outcome == outcomeError {
 			t.Errorf("run(%v) errored, want the verb present and executing: %q", args, out)
+		}
+	}
+}
+
+// TestDeleteHeldThenConfirm exercises the guarded destructive delete through the confirm flow: without
+// --confirm the app.delete guardrail holds it (outcome held_for_confirmation, exit 2) and the binary
+// does NOT self-confirm; after the human approves, re-running with --confirm reaches the control plane
+// with confirm=true and executes. Delete carries confirm as a query parameter (?confirm=true), so the
+// handler reads it there, not from the body.
+func TestDeleteHeldThenConfirm(t *testing.T) {
+	f := newFakeCP(t)
+	var sawConfirm []bool
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		confirm := r.URL.Query().Get("confirm") == "true"
+		sawConfirm = append(sawConfirm, confirm)
+		if !confirm {
+			held(w, "delete", "app.delete", "deleting the app \"web\" (its workload, routing, and release history) requires confirmation")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+
+	// First invocation: no --confirm. Held for the human's approval.
+	out, code := runMutate(t, f, "delete", "web")
+	oc := decodeOutcome(t, out)
+	if oc.Outcome != outcomeHeld {
+		t.Fatalf("outcome = %q, want held_for_confirmation", oc.Outcome)
+	}
+	if oc.Code != "app.delete" {
+		t.Errorf("code = %q, want app.delete", oc.Code)
+	}
+	if !oc.ConfirmRequired {
+		t.Error("held delete must set confirm_required")
+	}
+	if code != exitCodeHeld {
+		t.Errorf("exit code = %d, want %d", code, exitCodeHeld)
+	}
+
+	// Second invocation: the human approved, so a human re-runs with --confirm. Executes.
+	out, code = runMutate(t, f, "delete", "web", "--confirm")
+	oc = decodeOutcome(t, out)
+	if oc.Outcome != outcomeExecuted {
+		t.Fatalf("after --confirm, outcome = %q, want executed", oc.Outcome)
+	}
+	if code != exitCodeExecuted {
+		t.Errorf("after --confirm, exit code = %d, want 0", code)
+	}
+
+	// The binary never self-confirmed: the first request carried confirm=false, the second true.
+	if len(sawConfirm) != 2 || sawConfirm[0] != false || sawConfirm[1] != true {
+		t.Errorf("confirm flags the control plane saw = %v, want [false true]", sawConfirm)
+	}
+}
+
+// TestExposeHeldThenConfirm covers a guarded routing verb (app.expose_public) end to end: held without
+// --confirm, executed with it. Expose carries confirm in the request body, like the compute verbs.
+func TestExposeHeldThenConfirm(t *testing.T) {
+	f := newFakeCP(t)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Confirm bool `json:"confirm"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !body.Confirm {
+			held(w, "expose", "app.expose_public", "exposing \"web\" to the public internet requires confirmation")
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "host": "web.example.com", "url": "http://web.example.com"})
+	}
+
+	out, code := runMutate(t, f, "expose", "web", "--host", "web.example.com", "--port", "8080")
+	oc := decodeOutcome(t, out)
+	if oc.Outcome != outcomeHeld || oc.Code != "app.expose_public" {
+		t.Fatalf("outcome = %q code = %q, want held_for_confirmation app.expose_public", oc.Outcome, oc.Code)
+	}
+	if code != exitCodeHeld {
+		t.Errorf("exit code = %d, want %d", code, exitCodeHeld)
+	}
+
+	out, code = runMutate(t, f, "expose", "web", "--host", "web.example.com", "--port", "8080", "--confirm")
+	oc = decodeOutcome(t, out)
+	if oc.Outcome != outcomeExecuted {
+		t.Fatalf("after --confirm, outcome = %q, want executed", oc.Outcome)
+	}
+	if code != exitCodeExecuted {
+		t.Errorf("after --confirm, exit code = %d, want 0", code)
+	}
+}
+
+// TestDomainRemoveDenied covers a guarded verb resolving to denied (not held): a dns.delete guardrail
+// set to deny prints outcome "denied", exit 3, with no confirm_required — no --confirm will help. It
+// confirms the Phase 2b routing verbs reuse the exact classification the compute verbs do.
+func TestDomainRemoveDenied(t *testing.T) {
+	f := newFakeCP(t)
+	f.handler = func(w http.ResponseWriter, _ *http.Request) {
+		denied(w, "domain remove", "dns.delete", "deleting public DNS records is denied in this environment")
+	}
+	out, code := runMutate(t, f, "domain", "remove", "web.example.com")
+	oc := decodeOutcome(t, out)
+	if oc.Outcome != outcomeDenied || oc.Code != "dns.delete" {
+		t.Fatalf("outcome = %q code = %q, want denied dns.delete", oc.Outcome, oc.Code)
+	}
+	if oc.ConfirmRequired {
+		t.Error("denied outcome must not set confirm_required")
+	}
+	if code != exitCodeDenied {
+		t.Errorf("exit code = %d, want %d", code, exitCodeDenied)
+	}
+}
+
+// TestUnguardedVerbsExecute covers the Phase 2b verbs that are NOT guarded — unexpose, addon attach,
+// addon backup, config set/unset, secret unset — each executing straight through the envelope with the
+// result the control plane returns. These carry no --confirm flag by design.
+func TestUnguardedVerbsExecute(t *testing.T) {
+	f := newFakeCP(t)
+	f.handler = func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "addon": "postgres", "secret_key": "DATABASE_URL",
+			"backup": map[string]any{"id": "b1", "app": "web", "status": "completed"},
+		})
+	}
+	cases := [][]string{
+		{"unexpose", "web"},
+		{"addon", "attach", "postgres", "web"},
+		{"addon", "backup", "postgres", "web"},
+		{"config", "set", "web", "LOG_LEVEL=debug"},
+		{"config", "unset", "web", "LOG_LEVEL"},
+		{"secret", "unset", "web", "OLD_KEY"},
+	}
+	for _, args := range cases {
+		out, code := runMutate(t, f, args...)
+		oc := decodeOutcome(t, out)
+		if oc.Outcome != outcomeExecuted {
+			t.Errorf("run(%v) outcome = %q, want executed: %q", args, oc.Outcome, out)
+		}
+		if code != exitCodeExecuted {
+			t.Errorf("run(%v) exit code = %d, want 0", args, code)
 		}
 	}
 }

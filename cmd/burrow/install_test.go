@@ -786,13 +786,14 @@ func TestWaitForDeploymentMarksTimeout(t *testing.T) {
 	}
 }
 
-// TestPostInstallGuidancePointsAtMcp confirms the post-install tail routes the user to connect their
-// agent over MCP (Burrow is agent-driven, not CLI-deploy-driven) rather than at the old
-// `burrow app deploy` message, and stays free of em-dashes as user-facing copy.
-func TestPostInstallGuidancePointsAtMcp(t *testing.T) {
+// TestPostInstallGuidancePointsAtAgent confirms the post-install tail routes the user to wire their
+// agent to the scoped `burrow-agent` CLI (Burrow is agent-driven, not CLI-deploy-driven) rather than
+// at the old `burrow app deploy` message or the retired MCP server (ADR-0049), and stays free of
+// em-dashes as user-facing copy.
+func TestPostInstallGuidancePointsAtAgent(t *testing.T) {
 	for _, want := range []string{
-		"Burrow is ready. Connect your AI agent to operate it:",
-		"burrow mcp claude",
+		"Burrow is ready. Wire your AI agent to operate it:",
+		"burrow agent claude install",
 		"Then open your agent and ask it to deploy your app.",
 	} {
 		if !strings.Contains(postInstallGuidance, want) {
@@ -801,6 +802,9 @@ func TestPostInstallGuidancePointsAtMcp(t *testing.T) {
 	}
 	if strings.Contains(postInstallGuidance, "burrow app deploy") {
 		t.Errorf("post-install guidance should no longer point at `burrow app deploy`:\n%s", postInstallGuidance)
+	}
+	if strings.Contains(postInstallGuidance, "burrow mcp") {
+		t.Errorf("post-install guidance should no longer point at the retired MCP server (ADR-0049):\n%s", postInstallGuidance)
 	}
 	if strings.Contains(postInstallGuidance, "—") {
 		t.Errorf("post-install guidance must not contain an em-dash:\n%s", postInstallGuidance)

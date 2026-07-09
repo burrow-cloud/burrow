@@ -47,12 +47,12 @@ func grouped(cmd *cobra.Command, id string) *cobra.Command {
 const rootShortDesc = "Run your apps on your own Kubernetes cluster, operated by an AI agent under guardrails."
 
 // rootLongDesc is the root command's full description, shown at the top of `burrow -h`. It names the
-// two surfaces: the agent operates apps through the MCP server, and a person uses this CLI to install
-// Burrow, manage environments and credentials, and set the guardrail policy. It is hard-wrapped at
-// roughly 90 columns so it reads as a few tidy lines. No em-dashes: it is user-facing CLI output.
+// two surfaces: the agent operates apps through the scoped `burrow-agent` CLI, and a person uses this
+// CLI to install Burrow, manage environments and credentials, and set the guardrail policy. It is
+// hard-wrapped at roughly 90 columns so it reads as a few tidy lines. No em-dashes: it is user-facing.
 const rootLongDesc = "Burrow runs your apps on your own Kubernetes cluster, operated by an AI agent under\n" +
-	"guardrails you control. The agent deploys, scales, and debugs through Burrow's MCP server;\n" +
-	"you use this CLI to install Burrow, manage environments and credentials, and set the\n" +
+	"guardrails you control. The agent deploys, scales, and debugs through the scoped `burrow-agent`\n" +
+	"CLI; you use this CLI to install Burrow, manage environments and credentials, and set the\n" +
 	"guardrail policy the agent runs under."
 
 // firstRunBanner is what bare `burrow` prints when no local config exists yet, routing a brand-new

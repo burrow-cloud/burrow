@@ -157,11 +157,13 @@ environments:
 }
 
 // TestAdminVerbsAbsent is the structural capability-reduction assertion (ADR-0049 §2a): the dangerous
-// ADMIN verbs are not compiled into this binary, so invoking one is an unknown-command error. The
-// compute mutating verbs (deploy, rollback, scale, autoscale, run) are now PRESENT (Phase 2a) and so
-// are deliberately not listed here; TestMutatingVerbsPresent asserts they exist. What must remain
-// absent is the admin surface — install/bootstrap/cluster setup, guard set, app delete, the
-// registry/provider credential writes, and the `burrow agent <tool> install` wiring command.
+// ADMIN verbs are not compiled into this binary, so invoking one is an error (an unknown command, or a
+// bad-arg refusal where no such subcommand exists). The mutating verbs — the Phase 2a compute verbs
+// (deploy, rollback, scale, autoscale, run) and the Phase 2b routing/add-on/config/delete verbs — are
+// now PRESENT and so are deliberately not listed here; TestMutatingVerbsPresent asserts they exist.
+// What must remain absent is the admin surface — install/bootstrap/cluster setup, guard set, the
+// registry/provider credential writes, the `burrow agent <tool> install` wiring command, and — the
+// standing project rule — SETTING a secret value, which never routes through the agent channel.
 func TestAdminVerbsAbsent(t *testing.T) {
 	absent := [][]string{
 		{"install"},
@@ -169,12 +171,8 @@ func TestAdminVerbsAbsent(t *testing.T) {
 		{"cluster", "bootstrap"},
 		{"cluster", "ingress", "install"},
 		{"upgrade"},
-		{"delete", "web"},                      // app delete → Phase 2b, still absent
-		{"expose", "web"},                      // expose → Phase 2b
-		{"unexpose", "web"},                    // unexpose → Phase 2b
 		{"guard", "set", "app.deploy", "deny"}, // guardrail policy write (operator only)
-		{"config", "set", "web", "K=V"},        // config write → Phase 2b
-		{"secret", "set", "web", "K=V"},        // secret write (never over the agent channel)
+		{"secret", "set", "web", "K=V"},        // secret VALUE write — NEVER over the agent channel (ADR-0029)
 		{"provider", "add", "digitalocean"},    // provider credential write
 		{"registry", "login", "ghcr.io"},       // registry credential write
 		{"agent", "claude", "install"},         // the wiring command → Phase 3
@@ -185,6 +183,25 @@ func TestAdminVerbsAbsent(t *testing.T) {
 		err := run(context.Background(), args, &out, &errb)
 		if err == nil {
 			t.Errorf("run(%v) succeeded, want an error — the admin verb must be structurally absent", args)
+		}
+	}
+}
+
+// TestSecretSetStructurallyAbsent pins the standing project rule (ADR-0029): there is no `secret set`
+// verb — a secret VALUE must never route through the agent channel. The `secret` command carries only
+// the read-only key list and the value-free `unset` subcommand, so `secret set` has no handler: it
+// falls to the list verb, which refuses the extra args. `secret unset` and the secret LIST remain the
+// only secret surfaces the agent can express.
+func TestSecretSetStructurallyAbsent(t *testing.T) {
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"secret", "set", "web", "K=V"}, &out, &errb); err == nil {
+		t.Fatal("run(secret set web K=V) succeeded, want an error — setting a secret value must be structurally absent")
+	}
+	// The subcommand tree confirms it: `set` is not registered under `secret`; only `unset` is.
+	secret := newSecretCmd()
+	for _, sub := range secret.Commands() {
+		if sub.Name() == "set" {
+			t.Error("the secret command has a `set` subcommand; a secret value must never route through the agent")
 		}
 	}
 }

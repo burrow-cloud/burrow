@@ -16,8 +16,10 @@ import (
 // rootLong orients the agent to burrow-agent as a whole: what it is, that output is JSON, and how it
 // authenticates. It is the discovery surface (ADR-0049 §5) — the bare invocation prints it.
 const rootLong = `burrow-agent is your control channel to Burrow: it reports the state of the user's applications
-on their Kubernetes cluster so you can survey and diagnose, and it carries the compute operate-verbs
-— deploy, rollback, scale, autoscale, and run — so you can act.
+on their Kubernetes cluster so you can survey and diagnose, and it carries the operate-verbs so you
+can act — the compute verbs (deploy, rollback, scale, autoscale, run), the routing verbs (expose,
+unexpose, domain add/remove), the add-on operations (addon install/remove/attach/backup), the config
+writes (config set/unset), secret unset, and the guarded destructive delete.
 
 Every command prints its result as indented JSON, so you can pipe, grep, and jq it
 (e.g. burrow-agent logs web | jq '.lines[] | select(.message | test("error"))').
@@ -34,9 +36,10 @@ Exit code: executed 0, error 1, held_for_confirmation 2, denied 3.
 It authenticates to the control plane with a scoped, burrowd-only credential and holds no cluster
 credentials — the control plane behind it holds those and enforces the guardrails. It builds and
 pushes no images: deploy names an image reference already on a registry the cluster can pull from,
-never code. The dangerous admin verbs (install, bootstrap, cluster setup, guard set, credential
-writes, app delete) are deliberately not part of this binary. Run -h on any command to see what it
-does and the flags it takes.`
+never code. A destructive verb like delete is still available, but it is guarded — held for the
+human's confirmation, never self-confirmed. The dangerous ADMIN verbs (install, bootstrap, cluster
+setup, guard set, credential writes, and — deliberately — setting a secret VALUE) are not part of
+this binary at all. Run -h on any command to see what it does and the flags it takes.`
 
 // newRootCmd builds the burrow-agent command tree: the read-only operate-verbs and the mutating
 // compute verbs (deploy, rollback, scale, autoscale, run). The dangerous ADMIN verbs are structurally
@@ -73,6 +76,14 @@ func newRootCmd() *cobra.Command {
 		newScaleCmd(),
 		newAutoscaleCmd(),
 		newRunCmd(),
+		// The remaining agent-exposed mutating verbs (ADR-0049 Phase 2b): routing, add-on, and the
+		// guarded destructive delete. Each funnels through the same confirm flow in mutate.go. (config
+		// set/unset and secret unset are attached as subcommands of the config/secret list verbs above.)
+		newExposeCmd(),
+		newUnexposeCmd(),
+		newDomainCmd(),
+		newAddonCmd(),
+		newDeleteCmd(),
 	)
 	return root
 }
@@ -149,7 +160,7 @@ func newConfigCmd() *cobra.Command {
 	o := &connOpts{}
 	cmd := &cobra.Command{
 		Use:   "config <app>",
-		Short: "List an application's non-secret config vars",
+		Short: "List an application's non-secret config vars (set/unset are subcommands)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
@@ -159,6 +170,10 @@ func newConfigCmd() *cobra.Command {
 	}
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	// The mutating config writes (ADR-0049 Phase 2b) hang off the list verb as subcommands, so
+	// `config web` lists and `config set web K=V` writes. They funnel through the confirm flow in
+	// mutate.go like every mutating verb.
+	cmd.AddCommand(newConfigSetCmd(), newConfigUnsetCmd())
 	return cmd
 }
 
@@ -166,7 +181,7 @@ func newSecretCmd() *cobra.Command {
 	o := &connOpts{}
 	cmd := &cobra.Command{
 		Use:   "secret <app>",
-		Short: "List the KEYS of an application's secrets (never the values)",
+		Short: "List the KEYS of an application's secrets (never the values); unset is a subcommand",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
@@ -180,6 +195,10 @@ func newSecretCmd() *cobra.Command {
 	}
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	// `secret unset` (removing a key carries no value) hangs off the list verb as a subcommand. There
+	// is deliberately NO `secret set`: a secret VALUE never routes through the agent channel (ADR-0029),
+	// so the agent binary cannot express it — the human sets secrets with the `burrow` CLI.
+	cmd.AddCommand(newSecretUnsetCmd())
 	return cmd
 }
 

@@ -71,6 +71,11 @@ tasks:
     cmds:
       - bash scripts/with-k3d.sh go test ./controlplane/kube/ -run TestIntegration -v -timeout 300s
 
+  test:quickstart:
+    desc: "HEAVY (Docker): pin docs/QUICKSTART.md's fast path against a disposable k3d cluster"
+    cmds:
+      - bash test/e2e/quickstart.sh
+
   test:integration:
     desc: "HEAVY: all integration tests (Postgres + k3d/Docker)"
     cmds:

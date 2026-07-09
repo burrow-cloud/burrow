@@ -163,6 +163,14 @@ jobs:
         run: bash test/e2e/install-and-deploy.sh
         env:
           K3D_CLUSTER: burrow-ci
+      # Pins the fast path of docs/QUICKSTART.md so the doc cannot rot: build + import the
+      # examples/hello image, deploy it, confirm it runs, and assert `app delete` is HELD for
+      # confirmation. Reuses the burrow-ci cluster above (K3D_CLUSTER), so it adds no second
+      # cluster bring-up and leaves teardown to the delete step below.
+      - name: quickstart e2e (the doc's fast path, ending in the delete guardrail)
+        run: bash test/e2e/quickstart.sh
+        env:
+          K3D_CLUSTER: burrow-ci
       - name: delete cluster
         if: always()
         run: k3d cluster delete burrow-ci

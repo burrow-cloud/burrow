@@ -200,6 +200,17 @@ so a human can redirect, but Burrow never switches, retries elsewhere, or auto-f
 tools echo the environment they read. And `burrow env remove` finally lets a user drop a stale local
 handle (clearing the pin and its scoped credential), closing the ADR-0036 gap.
 
+## Landed since v0.11 (unreleased) — the burrow-agent CLI pivot
+
+The agent's control channel is now **`burrow-agent`**, a scoped, capability-reduced, JSON-first CLI
+the agent invokes directly ([ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md)),
+superseding the MCP server: the agent composes its `--json` output with pipes, `grep`, and `jq`, and
+its dangerous admin verbs are absent by construction. `burrow agent <tool> install` wires an agent to
+it (allow `burrow-agent`, deny the human `burrow` CLI), replacing `burrow mcp <tool> install`. The
+`burrow-mcp` server is retired from releases (its code stays in-tree for now, ADR-0049 §7). The
+version this ships under is a separate maintainer decision; the execution detail is in
+[PLAN.md](PLAN.md).
+
 ## Deferred until requested
 
 - **Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) — a

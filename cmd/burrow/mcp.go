@@ -16,11 +16,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Burrow is driven by an AI agent talking to its MCP server (ADR-0002/0003), so getting connected
-// means pointing a coding agent at the `burrow-mcp` stdio server. `burrow mcp` does that without the
-// user hand-editing a config file. It previews by default and mutates only when the user appends
-// `install`, so it never surprises them: `burrow mcp <tool>` shows exactly what will change, and
-// `burrow mcp <tool> install` applies it (idempotently, backing up any file it edits).
+// `burrow mcp` connected a coding agent to Burrow's `burrow-mcp` stdio server. It is DEPRECATED
+// (ADR-0049): the agent's control channel is now the scoped `burrow-agent` binary, wired with
+// `burrow agent <tool> install`, and `burrow-mcp` is no longer shipped in releases. The command is
+// kept in-tree, hidden from help, and non-breaking — it still previews by default and mutates only
+// on `install` — but it steers the user to `burrow agent` and should not be relied on.
 
 // runCommand runs an external command with its output wired to the terminal. It is a package var so
 // a test can fake the agent-CLI invocations without a real CLI on PATH.
@@ -125,18 +125,20 @@ const mcpTryPrompt = "\nThen open your agent and try:\n" +
 
 // mcpOverview is what bare `burrow mcp` prints: what it does, the supported tools, and how to
 // preview then apply. No em-dashes: it is user-facing CLI output.
-const mcpOverview = "Connect Burrow to your AI agent so it can operate your cluster.\n\n" +
-	"Supported tools:\n" +
+const mcpOverview = "Deprecated: use `burrow agent <tool> install` instead.\n\n" +
+	"The agent's control channel is now the scoped `burrow-agent` binary, not the `burrow-mcp`\n" +
+	"server, which is no longer shipped in releases. Wire your agent with:\n" +
+	"  burrow agent <tool> install\n\n" +
+	"This deprecated command configures the retired MCP server. Supported tools:\n" +
 	"  claude    Claude Code\n" +
 	"  cursor    Cursor\n" +
 	"  codex     Codex\n" +
 	"  copilot   Copilot\n" +
 	"  opencode  OpenCode\n\n" +
-	"Preview what will be added:\n" +
+	"Preview what would be added:\n" +
 	"  burrow mcp <tool>\n\n" +
-	"Apply it:\n" +
+	"Apply it (deprecated):\n" +
 	"  burrow mcp <tool> install\n\n" +
-	"Burrow's MCP server is `burrow-mcp` (stdio, no arguments). Any MCP-capable tool can use it.\n" +
 	"Using another agent? Request support: " + mcpIssuesURL + "\n"
 
 // mcpIssuesURL is where a user whose agent has no built-in setup can request first-class support.
@@ -179,18 +181,21 @@ func newMcpCmd() *cobra.Command {
 	var denyKubectl bool
 	cmd := &cobra.Command{
 		Use:   "mcp [tool] [install]",
-		Short: "Connect Burrow to your AI agent",
-		Long: "Connect Burrow to your AI agent so it can operate your cluster.\n\n" +
-			"Preview what a tool needs with `burrow mcp <tool>`, then apply it with\n" +
-			"`burrow mcp <tool> install`. The change is idempotent, so a second run is safe, and any\n" +
-			"file it edits is backed up first. Supported tools: " + mcpBuiltinTools + ".",
-		Example: "  # See what connecting Claude Code will add\n" +
-			"  burrow mcp claude\n\n" +
-			"  # Apply it\n" +
-			"  burrow mcp claude install\n\n" +
-			"  # Apply it and also block the agent from running kubectl directly\n" +
-			"  burrow mcp claude install --deny-kubectl",
-		Args: cobra.MaximumNArgs(2),
+		Short: "Deprecated: use `burrow agent <tool> install` instead",
+		Long: "Deprecated: connect your AI agent with `burrow agent <tool> install` instead.\n\n" +
+			"The agent's control channel is now the scoped `burrow-agent` binary, not the `burrow-mcp`\n" +
+			"server, which is no longer shipped in releases. This command still previews by default and\n" +
+			"applies on `install`, backing up any file it edits, but it configures the retired MCP server\n" +
+			"and should not be relied on. Supported tools: " + mcpBuiltinTools + ".",
+		Example: "  # Preferred: wire Claude Code to burrow-agent\n" +
+			"  burrow agent claude install\n\n" +
+			"  # Deprecated MCP path (kept for now)\n" +
+			"  burrow mcp claude install",
+		// Cobra prints this to stderr on every use, steering the user to the replacement. Hidden keeps
+		// it out of the main help listing, retiring MCP from the recommended path.
+		Deprecated: "use `burrow agent <tool> install` instead; burrow-mcp is no longer shipped.",
+		Hidden:     true,
+		Args:       cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runMcp(args, cmd.OutOrStdout(), noHarden, denyKubectl)
 		},

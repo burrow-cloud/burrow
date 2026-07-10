@@ -240,22 +240,7 @@ command to drop a stale environment:
   it was current and deleting the handle's orphaned scoped credential under `~/.burrow/`. Local-only:
   it does not tear down a namespace-per-env registration or any cluster namespace/RBAC.
 
-## Landed (unreleased): the burrow-agent CLI pivot — ADR-0049
-
-The agent's control channel is now **`burrow-agent`**, a scoped, capability-reduced, JSON-first CLI
-the agent invokes directly ([ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md)),
-superseding the MCP server as the primary interface — the agent can pipe, `grep`, and `jq` its
-`--json` output, and its dangerous admin verbs are absent by construction, not a runtime deny. Landed
-across four phases: the read-only operate-verbs and the scoped-CLI foundation; the mutating verbs and
-the `--confirm` flow; routing, add-on, config, and delete verbs; and `burrow agent <tool> install`,
-the human wiring command that allows `burrow-agent` and denies the human `burrow` CLI in the agent's
-permission config (replacing `burrow mcp <tool> install`). Phase 4 retired `burrow-mcp` from releases
-(the GoReleaser build target is gone, replaced by `burrow-agent`; the MCP code stays in-tree per
-ADR-0049 §7 and still compiles) and swept the docs onto `burrow-agent`. A later cleanup can
-consolidate `burrow-mcp`'s connection logic onto `internal/agentconn` and remove the MCP packages
-outright; the release-vs-version decision is the maintainer's.
-
-**Next: the v0.12 theme is not yet chosen.** Live candidates, unsequenced: **self-hoster day-2 hardening** (scheduled Postgres backups + retention
+**Next: the theme after v0.12 is not yet chosen.** Live candidates, unsequenced: **self-hoster day-2 hardening** (scheduled Postgres backups + retention
 — the [ADR-0032](adr/0032-postgres-backups.md) follow-on — richer blast-radius guardrails, cost
 visibility); **more building-block add-ons** ([ADR-0025](adr/0025-building-block-addons.md)) beyond
 Postgres / cache / logs / metrics; **database-provisioning depth** (managed Postgres as a first-class

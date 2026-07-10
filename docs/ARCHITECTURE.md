@@ -1,8 +1,12 @@
 # Burrow Architecture
 
-> **Status: pre-implementation.** This document describes the design being built, not
-> shipped behavior. Everything here is a goal until it ships and is marked accordingly in
-> the [README](../README.md) status table ([ADR-0009](adr/0009-honest-status.md)).
+> **Status:** the core is built and runs on a real cluster — install, deploy, rollout and
+> rollback, logs, status, scaling, and the guardrails — as the [validated
+> quickstart](QUICKSTART.md) exercises end to end. Earlier slices ship in tagged releases;
+> recent work like the `burrow-agent` control channel is on `main` ahead of its release.
+> Not every capability described here has shipped, so the [README](../README.md) status
+> table stays the authoritative record of what is released, what is on `main`, and what is
+> still planned ([ADR-0009](adr/0009-honest-status.md)).
 
 Burrow is an agent-native cloud platform. It lets an AI coding agent deploy and operate
 real applications on a Kubernetes cluster by driving Burrow through the `burrow-agent` CLI,

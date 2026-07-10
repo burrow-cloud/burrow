@@ -17,11 +17,14 @@ control channel, and the `burrow` CLI, packaged so a developer can self-host the
 cloud (billing, teams, dashboard, SSO) is a separate product and does not live
 here.
 
-> **Status: pre-implementation.** No feature code has shipped. The foundations (module,
-> layout, docs, ADRs) are in place; the v0.1 scope is proposed in
-> [docs/PLAN.md](docs/PLAN.md) and awaits maintainer approval. Keep all documentation
-> honest about this — features are goals until they ship
-> ([ADR-0009](docs/adr/0009-honest-status.md)).
+> **Status: built and shipping.** The core runs on a real cluster — install, deploy,
+> rollback, logs, status, scaling, and the guardrails — with a [validated
+> quickstart](docs/QUICKSTART.md) that exercises it end to end. Earlier slices are in
+> tagged releases; recent work (the `burrow-agent` control channel, `burrow_run`) sits on
+> `main` ahead of release. Not everything is shipped: keep docs honest and treat the
+> [README](README.md) status table and [docs/PLAN.md](docs/PLAN.md) as the authoritative
+> record of what is released, on `main`, or still planned — features are goals until they
+> ship ([ADR-0009](docs/adr/0009-honest-status.md)).
 
 ## Critical invariants — never violate these
 

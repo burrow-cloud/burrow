@@ -1,6 +1,6 @@
 # Burrow Roadmap
 
-> **Status: v0.1 through v0.11 shipped.** These are version milestones; each unshipped one is
+> **Status: v0.1 through v0.12 shipped.** These are version milestones; each unshipped one is
 > a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
 > [README](../README.md) status table is the authoritative shipped/in-progress/planned
 > surface. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the current
@@ -200,16 +200,18 @@ so a human can redirect, but Burrow never switches, retries elsewhere, or auto-f
 tools echo the environment they read. And `burrow env remove` finally lets a user drop a stale local
 handle (clearing the pin and its scoped credential), closing the ADR-0036 gap.
 
-## Landed since v0.11 (unreleased) — the burrow-agent CLI pivot
+## v0.12 — The scoped agent CLI and one-off commands ✅ shipped
 
 The agent's control channel is now **`burrow-agent`**, a scoped, capability-reduced, JSON-first CLI
 the agent invokes directly ([ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md)),
 superseding the MCP server: the agent composes its `--json` output with pipes, `grep`, and `jq`, and
 its dangerous admin verbs are absent by construction. `burrow agent <tool> install` wires an agent to
-it (allow `burrow-agent`, deny the human `burrow` CLI), replacing `burrow mcp <tool> install`. The
-`burrow-mcp` server is retired from releases (its code stays in-tree for now, ADR-0049 §7). The
-version this ships under is a separate maintainer decision; the execution detail is in
-[PLAN.md](PLAN.md).
+it (allow `burrow-agent`, deny the human `burrow` CLI), replacing `burrow mcp <tool> install`, and the
+`burrow-mcp` server is retired from releases (its code stays in-tree for now, ADR-0049 §7). Alongside
+it, **`burrow_run`** ([ADR-0048](adr/0048-one-off-command-runner.md)) runs a one-off command
+(migrations, seeds, tasks) in the app's own image, gated by an `app.run` guardrail; and a **validated
+laptop quickstart** on k3d, pinned by a CI e2e, takes a user from nothing to their agent deploying an
+app — and hitting the delete guardrail — on their own machine.
 
 ## Deferred until requested
 

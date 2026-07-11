@@ -214,6 +214,36 @@ func TestMetricsRBACTemplateRenders(t *testing.T) {
 			t.Errorf("metrics RBAC must be read-only on pods but mentions %q:\n%s", banned, s)
 		}
 	}
+	// With distinct app and add-on namespaces, vmagent also gets pod discovery in the add-on
+	// namespace (where the Postgres exporter runs) — so a Role/RoleBinding pair lands in each
+	// namespace (ADR-0051): two RoleBindings total, and a Role bound in addons-ns.
+	if got := strings.Count(s, "kind: RoleBinding"); got != 2 {
+		t.Errorf("expected 2 RoleBindings (app ns + add-on ns), got %d:\n%s", got, s)
+	}
+}
+
+// TestMetricsRBACTemplateOmitsAddonRoleWhenNamespacesEqual asserts that when the app and add-on
+// namespaces are the same, only ONE pod-discovery Role/RoleBinding is emitted — the app-namespace
+// Role already covers the add-on namespace, and two identically-named Roles in one namespace would
+// collide on apply (ADR-0051).
+func TestMetricsRBACTemplateOmitsAddonRoleWhenNamespacesEqual(t *testing.T) {
+	var sb strings.Builder
+	if err := metricsRBACTemplate.Execute(&sb, struct {
+		AddonNamespace        string
+		AppNamespace          string
+		ControlPlaneNamespace string
+	}{AddonNamespace: "shared-ns", AppNamespace: "shared-ns", ControlPlaneNamespace: "cp-ns"}); err != nil {
+		t.Fatalf("rendering metrics RBAC template: %v", err)
+	}
+	s := sb.String()
+	if got := strings.Count(s, "kind: RoleBinding"); got != 1 {
+		t.Errorf("expected exactly 1 RoleBinding when namespaces are equal, got %d:\n%s", got, s)
+	}
+	// "kind: Role\nmetadata:" matches only a Role resource header, not a RoleBinding's roleRef
+	// (which also reads "kind: Role").
+	if got := strings.Count(s, "kind: Role\nmetadata:"); got != 1 {
+		t.Errorf("expected exactly 1 Role when namespaces are equal, got %d:\n%s", got, s)
+	}
 }
 
 // lineHasCols reports whether some line in s contains both col1 and col2 (in that order) — used to

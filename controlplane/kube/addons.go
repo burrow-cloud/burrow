@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -85,6 +86,11 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 	// Postgres declares a memory footprint (request + limit) so it fits a small VPS predictably;
 	// other add-ons keep the cluster's defaults for now.
 	var resources corev1.ResourceRequirements
+	// The Postgres pod runs an always-on metrics-exporter sidecar and carries scrape annotations so
+	// the metrics add-on (whenever it is installed, before or after Postgres) discovers and scrapes
+	// it (ADR-0051); other add-ons add neither.
+	var extraContainers []corev1.Container
+	var podAnnotations map[string]string
 	if spec.Type == controlplane.AddonPostgres {
 		var err error
 		if env, err = a.ensurePostgresSuperuserEnv(ctx, labels); err != nil {
@@ -99,6 +105,27 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 			// ~90s of grace for initdb on a cold first boot before the pod is marked unready.
 			FailureThreshold: 30,
 		}
+
+		// Always export metrics: a postgres_exporter sidecar connects to the local server as the
+		// superuser and exposes Prometheus metrics on :9187, including pg_stat_statements slow-query
+		// stats. The password is wired via secretKeyRef into burrow-postgres, never inlined (ADR-0031).
+		extraContainers = append(extraContainers, postgresExporterContainer())
+		// Annotate the pod so the metrics add-on's vmagent scrapes the exporter's /metrics on :9187 —
+		// the same annotation style app pods use (adapter.go buildDeployment). Discovery is namespace
+		// based, so install order (metrics before or after Postgres) does not matter (ADR-0051).
+		podAnnotations = map[string]string{
+			"prometheus.io/scrape": "true",
+			"prometheus.io/port":   strconv.Itoa(int(postgresExporterPort)),
+			"prometheus.io/path":   "/metrics",
+		}
+		// Create the pg_stat_statements extension on first boot via an init script the official image
+		// runs during initdb; shared_preload_libraries (set in addonArgs) loads the module itself.
+		initVol, initMount, ierr := a.ensurePostgresInitScript(ctx, labels)
+		if ierr != nil {
+			return controlplane.AddonInfo{}, ierr
+		}
+		volumes = append(volumes, initVol)
+		mounts = append(mounts, initMount)
 	}
 
 	replicas := int32(1)
@@ -111,9 +138,9 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 			// would deadlock — recreate instead.
 			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
+					Containers: append([]corev1.Container{{
 						Name:           string(spec.Type),
 						Image:          spec.Image,
 						Args:           addonArgs(spec),
@@ -122,7 +149,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 						VolumeMounts:   mounts,
 						ReadinessProbe: readiness,
 						Resources:      resources,
-					}},
+					}}, extraContainers...),
 					Volumes: volumes,
 				},
 			},
@@ -256,6 +283,70 @@ func (a *Adapter) ensurePostgresSuperuserEnv(ctx context.Context, labels map[str
 	}, nil
 }
 
+// postgresExporterImage is the pinned Postgres metrics exporter (prometheus-community, Apache-2.0).
+// It runs as an always-on sidecar on the Postgres add-on pod, connects to the local server as the
+// superuser, and exposes Prometheus metrics — including pg_stat_statements slow-query stats — so the
+// metrics add-on's vmagent can scrape database health when it is installed (ADR-0051).
+const postgresExporterImage = "quay.io/prometheuscommunity/postgres-exporter:v0.20.1"
+
+// postgresExporterPort is the port postgres_exporter listens on (its documented default).
+const postgresExporterPort int32 = 9187
+
+// PostgresInitConfigMap is the ConfigMap whose first-boot SQL the official postgres image runs
+// during initdb (mounted into /docker-entrypoint-initdb.d). It creates the pg_stat_statements
+// extension so the metrics exporter's slow-query collector has data (ADR-0051). It lives in the
+// add-on namespace and is removed with the add-on.
+const PostgresInitConfigMap = "burrow-postgres-init"
+
+// postgresExporterContainer builds the always-on postgres_exporter sidecar. It connects to the local
+// server over localhost as the Burrow superuser, with the password sourced by secretKeyRef from the
+// burrow-postgres Secret — never inlined into the pod spec (ADR-0031) — and enables the
+// stat_statements collector so slow-query metrics are exported. Its footprint is tiny (32Mi request,
+// 64Mi limit) so the always-on cost is negligible.
+func postgresExporterContainer() corev1.Container {
+	return corev1.Container{
+		Name:  "metrics-exporter",
+		Image: postgresExporterImage,
+		// Enable the pg_stat_statements collector (disabled by default) so slow-query stats export.
+		Args: []string{"--collector.stat_statements"},
+		Env: []corev1.EnvVar{
+			// The exporter connects over the pod loopback to the co-located server; sslmode=disable
+			// because the traffic never leaves the pod. The "postgres" maintenance database always
+			// exists, and pg_stat_statements is a shared, cluster-wide view reachable from it.
+			{Name: "DATA_SOURCE_URI", Value: "localhost:5432/postgres?sslmode=disable"},
+			{Name: "DATA_SOURCE_USER", Value: PostgresSuperuser},
+			{Name: "DATA_SOURCE_PASS", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: PostgresSecretName},
+					Key:                  PostgresPasswordKey,
+				},
+			}},
+		},
+		Ports: []corev1.ContainerPort{{ContainerPort: postgresExporterPort}},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("32Mi")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
+		},
+	}
+}
+
+// ensurePostgresInitScript creates (idempotently) the ConfigMap holding the first-boot SQL that
+// creates the pg_stat_statements extension, and returns the pod volume + mount that hands it to the
+// official image's /docker-entrypoint-initdb.d hook. The script runs only on a fresh initdb; on a
+// re-install over an existing volume it is a harmless no-op (CREATE EXTENSION IF NOT EXISTS).
+func (a *Adapter) ensurePostgresInitScript(ctx context.Context, labels map[string]string) (corev1.Volume, corev1.VolumeMount, error) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: PostgresInitConfigMap, Namespace: a.addonNamespace, Labels: labels},
+		Data:       map[string]string{"10-pg-stat-statements.sql": "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\n"},
+	}
+	if _, err := a.client.CoreV1().ConfigMaps(a.addonNamespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("kube: creating postgres init config %q: %w", PostgresInitConfigMap, err)
+	}
+	vol := corev1.Volume{Name: "init", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: PostgresInitConfigMap}}}}
+	mount := corev1.VolumeMount{Name: "init", MountPath: "/docker-entrypoint-initdb.d"}
+	return vol, mount, nil
+}
+
 // fluentBitImage is the pinned log collector (Apache-2.0). It ships pod logs to the store.
 const fluentBitImage = "fluent/fluent-bit:3.2.10"
 
@@ -338,9 +429,11 @@ const vmagentImage = "victoriametrics/vmagent:v1.115.0"
 const vmagentPort = 8429
 
 // vmagentConfig is vmagent's Prometheus-style scrape config. It self-scrapes (so the metrics
-// pipeline has a guaranteed series) and discovers pods in the app namespace, keeping only those
-// annotated prometheus.io/scrape: "true" and scraping them on their prometheus.io/port. %s is the
-// app namespace.
+// pipeline has a guaranteed series) and discovers pods in both the app namespace and the add-on
+// namespace, keeping only those annotated prometheus.io/scrape: "true" and scraping them on their
+// prometheus.io/port. Discovering the add-on namespace is what picks up the Postgres exporter (and
+// any future exporting add-on) regardless of install order (ADR-0051). %s is the comma-separated
+// namespace list, deduped when the two namespaces are the same.
 const vmagentConfig = `global:
   scrape_interval: 15s
 scrape_configs:
@@ -382,7 +475,7 @@ func (a *Adapter) deployMetricsCollector(ctx context.Context, store string, labe
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: cmLabels},
-		Data:       map[string]string{"scrape.yml": fmt.Sprintf(vmagentConfig, a.namespace)},
+		Data:       map[string]string{"scrape.yml": fmt.Sprintf(vmagentConfig, a.scrapeNamespaces())},
 	}
 	if _, err := a.client.CoreV1().ConfigMaps(a.addonNamespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("kube: creating collector config %q: %w", name, err)
@@ -424,6 +517,17 @@ func (a *Adapter) deployMetricsCollector(ctx context.Context, store string, labe
 	return nil
 }
 
+// scrapeNamespaces is the comma-separated namespace list vmagent discovers pods in: the app
+// namespace (app-pod metrics) and the add-on namespace (the always-on Postgres exporter and any
+// future exporting add-on). When the two are the same it lists the namespace once, so a single-
+// namespace install does not double-scrape (ADR-0051).
+func (a *Adapter) scrapeNamespaces() string {
+	if a.addonNamespace == a.namespace {
+		return a.namespace
+	}
+	return a.namespace + ", " + a.addonNamespace
+}
+
 // AddonReady reports whether the named add-on's backing Deployment is available (ADR-0025).
 // Readiness is a live property of the cluster — the registry of what add-ons exist lives in the
 // database — so this is a cheap single-Deployment probe. A missing Deployment is reported as not
@@ -463,6 +567,8 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string) error {
 	// uninstall. The name is fixed, so this is a harmless no-op for any other add-on type.
 	if name == addonName(controlplane.AddonPostgres) {
 		_ = a.client.CoreV1().Secrets(a.addonNamespace).Delete(ctx, PostgresSecretName, metav1.DeleteOptions{})
+		// And the pg_stat_statements init-script ConfigMap the exporter setup added (ADR-0051).
+		_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, PostgresInitConfigMap, metav1.DeleteOptions{})
 	}
 	return nil
 }
@@ -494,10 +600,15 @@ func addonArgs(spec controlplane.AddonSpec) []string {
 		return []string{fmt.Sprintf("-httpListenAddr=:%d", spec.Port), "-storageDataPath=" + addonDataPath(spec.Type), "-retentionPeriod=1"}
 	case controlplane.AddonPostgres:
 		// Run the shared Postgres instance with lean server settings suited to a low-traffic
-		// metadata store (see LeanPostgresSettings). The official image's entrypoint forwards args
-		// beginning with `-` to the postgres server, so these `-c key=value` pairs tune it with no
-		// custom config file.
-		return postgresTuningArgs()
+		// metadata store (see LeanPostgresSettings), plus pg_stat_statements preloaded so the
+		// always-on metrics exporter can read slow-query stats (ADR-0051). The official image's
+		// entrypoint forwards args beginning with `-` to the postgres server, so these `-c key=value`
+		// pairs tune it with no custom config file. shared_preload_libraries must be set at server
+		// start (it cannot be loaded later), and the extension itself is created by the init script.
+		return append(postgresTuningArgs(),
+			"-c", "shared_preload_libraries=pg_stat_statements",
+			"-c", "pg_stat_statements.track=top",
+		)
 	default:
 		return nil
 	}

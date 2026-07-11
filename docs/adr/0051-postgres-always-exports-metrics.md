@@ -53,7 +53,11 @@ always-on cost is negligible.
 The exporter enables the `stat_statements` collector. For that data to exist, Postgres itself runs
 with `shared_preload_libraries=pg_stat_statements` (a server-start setting), and the extension is
 created on first boot by an init script mounted into the official image's
-`/docker-entrypoint-initdb.d` (`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`).
+`/docker-entrypoint-initdb.d` (`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`). The extension
+is created in the `postgres` maintenance database — the one the exporter reads and the control plane
+connects to — by pinning `POSTGRES_DB=postgres`, so the init script, the exporter, and the control
+plane all agree on one database (the image would otherwise default the database to the
+`POSTGRES_USER` name and strand the extension where nothing reads it).
 
 The pod carries the standard scrape annotations (`prometheus.io/scrape: "true"`,
 `prometheus.io/port: "9187"`, `prometheus.io/path: "/metrics"`) — the same contract app pods use —

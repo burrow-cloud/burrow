@@ -179,6 +179,21 @@ func TestDeployPostgresAlwaysExportsMetrics(t *testing.T) {
 	if !strings.Contains(strings.Join(main.Args, " "), "-c shared_preload_libraries=pg_stat_statements") {
 		t.Errorf("postgres args missing shared_preload_libraries=pg_stat_statements; got %v", main.Args)
 	}
+	// POSTGRES_DB=postgres pins the maintenance database so the init script creates the extension in
+	// the same database the exporter and control plane read; without it the image would default the
+	// database to the POSTGRES_USER name and the extension would land in the wrong place (ADR-0051).
+	var sawDB bool
+	for _, ev := range main.Env {
+		if ev.Name == "POSTGRES_DB" {
+			if ev.Value != "postgres" {
+				t.Errorf("POSTGRES_DB = %q, want postgres", ev.Value)
+			}
+			sawDB = true
+		}
+	}
+	if !sawDB {
+		t.Errorf("postgres env missing POSTGRES_DB=postgres: %+v", main.Env)
+	}
 	// It mounts the init-script ConfigMap at the official image's initdb hook directory.
 	var sawInitMount bool
 	for _, m := range main.VolumeMounts {

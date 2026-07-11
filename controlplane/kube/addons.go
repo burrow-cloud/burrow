@@ -277,6 +277,13 @@ func (a *Adapter) ensurePostgresSuperuserEnv(ctx context.Context, labels map[str
 				Key:                  PostgresPasswordKey,
 			},
 		}},
+		// The add-on standardizes on the "postgres" maintenance database: it is what the control
+		// plane connects to (postgres.go connectAdmin), what the metrics exporter reads, and where the
+		// init script must create pg_stat_statements — so setting POSTGRES_DB=postgres runs the init
+		// script against "postgres" and keeps all three in agreement (ADR-0051). The image otherwise
+		// defaults POSTGRES_DB to the POSTGRES_USER name (burrow_admin), which would leave the
+		// extension in the wrong database. "postgres" always exists from initdb, so this adds no db.
+		{Name: "POSTGRES_DB", Value: "postgres"},
 		// The official image refuses to initialize a non-empty data directory (a mounted PVC has a
 		// lost+found), so put PGDATA in a subdirectory of the mount.
 		{Name: "PGDATA", Value: addonDataPath(controlplane.AddonPostgres) + "/pgdata"},

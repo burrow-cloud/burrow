@@ -229,8 +229,14 @@ app — and hitting the delete guardrail — on their own machine.
 - **Registry onboarding** — reduce the friction of getting an image into a registry, per
   ADR-0046 (Proposed); held pending a user signal that onboarding is painful.
 - **Cost controls and caps** — visibility and limits on cluster spend.
-- **Optional passive deploy mode** — GitOps-style tag-watching as an *option* layered on the
-  explicit path, never replacing it ([ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)).
+- **Optional passive deploy mode** — a pull-based, semver-scoped registry watcher layered on
+  the explicit path, never replacing it, specified in
+  [ADR-0052](adr/0052-pull-based-passive-deploy.md) (realizing
+  [ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)'s optional mode). burrowd polls
+  the registry and auto-applies upgrades within a per-environment level (`burrow app auto-deploy
+  <app> [patch|minor|major|off]`), on by default at `minor` for every app; a version above the
+  level is surfaced as an available upgrade the operator takes explicitly. Outbound-only, so it
+  serves the private/NAT'd clusters push-from-CI cannot reach.
 - **Self-host dashboard** — an HTMX dashboard over the control-plane API, if and when a
   self-host UI is warranted.
 - **App-runtime API and capability envelopes** *(exploratory)* — a programmatic control-plane

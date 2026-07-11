@@ -410,6 +410,18 @@ func (c *Client) Status(ctx context.Context, app, env string) (StatusResult, err
 	return out, err
 }
 
+// History returns an app's deploy timeline: the releases recorded for it, newest first — what
+// versions the app has been rolled to, when, and whether each landed (the release Status conveys
+// success or failure). It is read-only; the release records have no write or delete path through
+// this client. env names the target environment (ADR-0035 phase 2b); empty is the default.
+func (c *Client) History(ctx context.Context, app, env string) ([]Release, error) {
+	var out struct {
+		Releases []Release `json:"releases"`
+	}
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "history"), env), nil, &out)
+	return out.Releases, err
+}
+
 // Run executes a one-off command in an app's own current image and environment (ADR-0048). It returns
 // a structured result carrying the command's captured output and exit code; a non-zero exit is a
 // normal outcome, not an error. It is gated by the app.run guardrail (confirm by default): a held run

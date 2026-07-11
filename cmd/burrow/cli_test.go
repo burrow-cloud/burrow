@@ -124,6 +124,67 @@ func TestAuditEmpty(t *testing.T) {
 	}
 }
 
+func TestHistory(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"releases": []map[string]any{
+				{"id": "r2", "app": "web", "image": "img:2", "status": "deployed", "created_at": "2026-06-23T12:00:01Z"},
+				{"id": "r1", "app": "web", "image": "img:1", "status": "superseded", "created_at": "2026-06-23T12:00:00Z"},
+			},
+		})
+	}, "app", "history", "web", "--env", "prod")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "GET" || gotPath != "/v1/apps/web/history" {
+		t.Errorf("request = %s %s", gotMethod, gotPath)
+	}
+	if !strings.Contains(gotQuery, "env=prod") {
+		t.Errorf("query %q missing env=prod", gotQuery)
+	}
+	// Tabular output names the columns and both rows, newest first.
+	for _, want := range []string{"VERSION", "WHEN", "STATUS", "img:2", "deployed", "img:1", "superseded"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+	if strings.Index(out, "img:2") > strings.Index(out, "img:1") {
+		t.Errorf("output not newest-first: %q", out)
+	}
+}
+
+func TestHistoryJSON(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"releases": []map[string]any{{"id": "r1", "app": "web", "image": "img:1", "status": "deployed"}},
+		})
+	}, "app", "history", "web", "--json")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var releases []map[string]any
+	if err := json.Unmarshal([]byte(out), &releases); err != nil {
+		t.Fatalf("--json output is not JSON: %v\n%s", err, out)
+	}
+	if len(releases) != 1 || releases[0]["image"] != "img:1" {
+		t.Errorf("json releases = %v", releases)
+	}
+}
+
+func TestHistoryEmpty(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"releases": []any{}})
+	}, "app", "history", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "No releases recorded for web.") {
+		t.Errorf("output = %q, want the empty message", out)
+	}
+}
+
 func TestDeployJSON(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"release": map[string]any{"id": "r1", "app": "web", "image": "img:1", "status": "deployed", "replicas": 1}})

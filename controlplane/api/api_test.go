@@ -314,6 +314,51 @@ func TestAuditEndpoint(t *testing.T) {
 	}
 }
 
+// TestHistoryEndpoint exercises GET /v1/apps/{app}/history: two deploys produce a two-entry timeline,
+// newest first, and an app with no releases returns an empty list rather than an error. An unknown
+// environment is a 404.
+func TestHistoryEndpoint(t *testing.T) {
+	h, _, _ := newAPI(t)
+	for _, img := range []string{"registry.example.com/web:1", "registry.example.com/web:2"} {
+		if rr := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"`+img+`","replicas":1}`); rr.Code != 200 {
+			t.Fatalf("deploy %s = %d %s", img, rr.Code, rr.Body.String())
+		}
+	}
+
+	rec := do(h, "GET", "/v1/apps/web/history", token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history = %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Releases []cp.Release `json:"releases"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Releases) != 2 {
+		t.Fatalf("history releases = %d, want 2", len(out.Releases))
+	}
+	// Newest first: the second deploy (web:2, deployed) precedes the first (web:1, superseded).
+	if out.Releases[0].Image != "registry.example.com/web:2" || out.Releases[0].Status != cp.ReleaseDeployed {
+		t.Errorf("newest = %+v, want the deployed web:2", out.Releases[0])
+	}
+	if out.Releases[1].Image != "registry.example.com/web:1" || out.Releases[1].Status != cp.ReleaseSuperseded {
+		t.Errorf("oldest = %+v, want the superseded web:1", out.Releases[1])
+	}
+
+	// An app with no releases is an empty timeline, not a 404.
+	rec = do(h, "GET", "/v1/apps/ghost/history", token, "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if rec.Code != http.StatusOK || len(out.Releases) != 0 {
+		t.Errorf("history(ghost) = %d %s, want 200 with an empty list", rec.Code, rec.Body.String())
+	}
+
+	// An unknown environment is a 404 (the engine resolves it before reading).
+	if rr := do(h, "GET", "/v1/apps/web/history?env=nope", token, ""); rr.Code != http.StatusNotFound {
+		t.Errorf("history(unknown env) = %d, want 404", rr.Code)
+	}
+}
+
 // TestAuditPrincipalCrossStructRoundTrip guards the json-tag-must-match contract (ADR-0038): the
 // engine marshals cp.AuditEntry on the wire and the client decodes into its own AuditEntry, so a
 // mismatched `principal` tag on either struct would silently drop the field. The engine records

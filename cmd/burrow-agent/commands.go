@@ -56,6 +56,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(
 		newAppsCmd(),
 		newStatusCmd(),
+		newHistoryCmd(),
 		newLogsCmd(),
 		newConfigCmd(),
 		newSecretCmd(),
@@ -129,6 +130,30 @@ func newStatusCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
 				return c.Status(ctx, args[0], env)
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	return cmd
+}
+
+// newHistoryCmd reports an app's deploy timeline: the releases recorded for it, newest first — what
+// versions it has been rolled to, when, and whether each landed (the release status conveys success
+// or failure). It is READ-ONLY: it reads the deploy records the control plane already writes and
+// changes nothing, so it funnels through withClient (never the mutate path) and prints the release
+// array as JSON, like the other read verbs (ADR-0049, ADR-0052 §6 — the agent observes). ADR-0052 §5
+// will enrich each release with its deploy provenance (auto-update vs. manual, the level); this
+// surfaces it automatically once the record carries it, with no change here.
+func newHistoryCmd() *cobra.Command {
+	o := &connOpts{}
+	cmd := &cobra.Command{
+		Use:   "history <app>",
+		Short: "Report an app's deploy timeline: the versions it has been rolled to, when, and whether each landed",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.History(ctx, args[0], env)
 			})
 		},
 	}

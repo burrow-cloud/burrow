@@ -27,6 +27,12 @@ func cannedControlPlane(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/v1/apps/web/status", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "has_release": true, "running": true})
 	})
+	mux.HandleFunc("/v1/apps/web/history", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"releases": []map[string]any{
+			{"id": "r2", "app": "web", "image": "img:2", "status": "deployed"},
+			{"id": "r1", "app": "web", "image": "img:1", "status": "superseded"},
+		}})
+	})
 	mux.HandleFunc("/v1/apps/web/logs", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"lines": []map[string]any{{"pod": "web-1", "message": "hello"}}})
 	})
@@ -87,6 +93,7 @@ func TestReadOnlyVerbsWiring(t *testing.T) {
 	}{
 		{"apps", []string{"apps"}, `"web"`},
 		{"status", []string{"status", "web"}, `"has_release": true`},
+		{"history", []string{"history", "web"}, `"img:2"`},
 		{"logs", []string{"logs", "web", "--tail", "5"}, `"hello"`},
 		{"secret", []string{"secret", "web"}, `"DATABASE_URL"`},
 		{"guard", []string{"guard"}, `"app.deploy"`},
@@ -108,6 +115,26 @@ func TestReadOnlyVerbsWiring(t *testing.T) {
 				t.Errorf("output is not valid JSON: %q", out)
 			}
 		})
+	}
+}
+
+// TestHistoryIsReadOnly confirms `history` is a read verb, not a mutating one: it prints the release
+// array straight through withClient, never the outcome envelope the mutate path wraps a result in. A
+// deploy timeline observes; it never changes anything (ADR-0052 §6 — the agent observes).
+func TestHistoryIsReadOnly(t *testing.T) {
+	srv := cannedControlPlane(t)
+	out := runAgent(t, srv, "history", "web")
+	// The read path emits the bare release array; the mutate path would emit an object with a
+	// top-level "outcome" field. Assert we got the array and not the envelope.
+	var releases []map[string]any
+	if err := json.Unmarshal([]byte(out), &releases); err != nil {
+		t.Fatalf("history output is not a JSON array: %v (out=%q)", err, out)
+	}
+	if len(releases) != 2 || releases[0]["image"] != "img:2" {
+		t.Errorf("releases = %v, want the two-entry timeline newest first", releases)
+	}
+	if strings.Contains(out, `"outcome"`) {
+		t.Errorf("history emitted a mutation outcome envelope; it must be a read-only verb: %q", out)
 	}
 }
 

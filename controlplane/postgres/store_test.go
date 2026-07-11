@@ -128,6 +128,43 @@ func TestStoreOverwriteKeepsOrder(t *testing.T) {
 	}
 }
 
+// TestStoreListReleases reads the deploy timeline: every release for an app, newest first,
+// isolated per app, and empty for an app with none. It is the read behind `app history`.
+func TestStoreListReleases(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-web"
+	other := t.Name() + "-api"
+
+	r1 := cp.Release{ID: t.Name() + "-r1", App: app, Image: "img:1", Status: cp.ReleaseSuperseded}
+	r2 := cp.Release{ID: t.Name() + "-r2", App: app, Image: "img:2", Supersedes: r1.ID, Status: cp.ReleaseSuperseded}
+	r3 := cp.Release{ID: t.Name() + "-r3", App: app, Image: "img:3", Supersedes: r2.ID, Status: cp.ReleaseDeployed}
+	o1 := cp.Release{ID: t.Name() + "-o1", App: other, Image: "api:1", Status: cp.ReleaseDeployed}
+	for _, r := range []cp.Release{r1, r2, r3, o1} {
+		if err := s.SaveRelease(ctx, r); err != nil {
+			t.Fatalf("SaveRelease(%s): %v", r.ID, err)
+		}
+	}
+
+	// Newest first: r3, r2, r1 — the reverse of Releases' oldest-first order.
+	got, err := s.ListReleases(ctx, app)
+	if err != nil || len(got) != 3 || got[0].ID != r3.ID || got[1].ID != r2.ID || got[2].ID != r1.ID {
+		t.Fatalf("ListReleases = %+v, err=%v, want [%s %s %s] newest first", got, err, r3.ID, r2.ID, r1.ID)
+	}
+	if got[0].Status != cp.ReleaseDeployed || got[0].Image != "img:3" {
+		t.Errorf("newest release = %+v, want the deployed img:3", got[0])
+	}
+
+	// Per-app isolation: the other app's timeline holds only its own release.
+	if oth, err := s.ListReleases(ctx, other); err != nil || len(oth) != 1 || oth[0].ID != o1.ID {
+		t.Errorf("ListReleases(other) = %+v, err=%v, want just %s", oth, err, o1.ID)
+	}
+	// An app with no releases yields an empty slice and no error.
+	if none, err := s.ListReleases(ctx, t.Name()+"-nobody"); err != nil || len(none) != 0 {
+		t.Errorf("ListReleases(nobody) = %+v, err=%v, want empty", none, err)
+	}
+}
+
 // TestStoreDeleteReleases removes every release for an app and leaves no rows behind; deleting
 // an app that has no releases is a no-op, not an error.
 func TestStoreDeleteReleases(t *testing.T) {

@@ -32,6 +32,7 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane/logs"
 	"github.com/burrow-cloud/burrow/controlplane/metrics"
 	"github.com/burrow-cloud/burrow/controlplane/postgres"
+	"github.com/burrow-cloud/burrow/controlplane/registry"
 	"github.com/burrow-cloud/burrow/controlplane/sys"
 )
 
@@ -217,6 +218,14 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		},
 		DatabaseProvisioner: dbProvisioner,
 		ClusterProber:       prober,
+		// RegistryClient lists an image repository's tags for the auto-deploy read/watch (ADR-0052).
+		// It lists anonymously in this read-only phase — public GHCR (the reference registry), public
+		// Docker Hub, DO, and GCR-token registries all list without credentials. Authenticated
+		// private-repo listing needs a deliberate burrowd RBAC grant to read the client-side
+		// burrow-registry pull secret, withheld today under the least-privilege boundary
+		// (ADR-0017/ADR-0040); it lands with the Phase 4 poller, for which the adapter is already
+		// ready via RegistryAuth. It reaches the registry outbound over its own bounded-timeout client.
+		RegistryClient: registry.NewClient(&http.Client{Timeout: 20 * time.Second}),
 		// The app namespace is the implicit `default` environment (ADR-0035 phase 2).
 		AppNamespace: namespace,
 	})

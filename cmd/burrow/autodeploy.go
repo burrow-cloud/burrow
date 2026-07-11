@@ -5,9 +5,11 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
@@ -31,8 +33,11 @@ func newAutoDeployCmd() *cobra.Command {
 			"(e.g. patch in prod, major in staging).\n\n" +
 			"With one argument this shows the current level; with two it sets it. Setting the level is\n" +
 			"a human action and is not available to the agent.\n\n" +
-			"Note: surfacing an available upgrade above the level (a held 2.0.0 under minor) arrives\n" +
-			"with the registry poller in a later phase; for now this shows and sets the level only.",
+			"The show also reports, read-only, the current running version, the version auto-deploy\n" +
+			"would move to within the level, and any higher version available above the level with the\n" +
+			"exact deploy command to take it. If the registry cannot be listed (unreachable, a private\n" +
+			"repo, or a non-semver running tag) the level is still shown with a short note. The poller\n" +
+			"that actually deploys those upgrades arrives in a later phase.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -53,8 +58,7 @@ func newAutoDeployCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				human := fmt.Sprintf("%s: auto-deploy %s in environment %q", res.App, res.Level, res.Env)
-				return emit(cmd.OutOrStdout(), o.json, res, human)
+				return emit(cmd.OutOrStdout(), o.json, res, autoDeployShowHuman(res))
 			}
 			res, err := c.SetAutoDeploy(ctx, app, env, args[1])
 			if err != nil {
@@ -67,4 +71,33 @@ func newAutoDeployCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	return cmd
+}
+
+// autoDeployShowHuman renders the enriched auto-deploy show (ADR-0052 §2/§3): the level, the current
+// running version, the version auto-deploy would move to within the level (or "up to date"), and any
+// higher available upgrade above the level with the exact deploy command to take it. When the
+// registry upgrade check could not run, it reports the level with a short note instead.
+func autoDeployShowHuman(res client.AutoDeployResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: auto-deploy %s in environment %q", res.App, res.Level, res.Env)
+	if res.Current != "" {
+		fmt.Fprintf(&b, "\n  running: %s", res.Current)
+	}
+	switch {
+	case res.Checked && res.Target != "":
+		fmt.Fprintf(&b, "\n  auto-deploys to: %s (within the %s level)", res.Target, res.Level)
+	case res.Checked:
+		b.WriteString("\n  up to date within the level")
+	case res.Note != "":
+		fmt.Fprintf(&b, "\n  upgrade check unavailable: %s", res.Note)
+	}
+	if res.Upgrade != "" {
+		image := res.Upgrade
+		if res.Repository != "" {
+			image = res.Repository + ":" + res.Upgrade
+		}
+		fmt.Fprintf(&b, "\n  available upgrade: %s (above the %s level) — take it with: burrow app deploy %s --image %s",
+			res.Upgrade, res.Level, res.App, image)
+	}
+	return b.String()
 }

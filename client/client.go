@@ -821,11 +821,21 @@ func (c *Client) SetGuardrail(ctx context.Context, env, code, disposition string
 }
 
 // AutoDeployResult is the auto-deploy configuration for an app in one environment (ADR-0052 §2):
-// the app, the canonical environment name, and the effective auto-deploy level.
+// the app, the canonical environment name, and the effective auto-deploy level, plus the enriched
+// read-only upgrade view a show returns (ADR-0052 §3) — the current running version, the tag
+// auto-deploy would move to within the level, the highest available upgrade above the level's cap,
+// whether the registry upgrade check ran, and a short note when it could not. The upgrade fields are
+// omitempty, so a set (which reports the level only) carries just app/env/level.
 type AutoDeployResult struct {
-	App   string `json:"app"`
-	Env   string `json:"env"`
-	Level string `json:"level"`
+	App        string `json:"app"`
+	Env        string `json:"env"`
+	Level      string `json:"level"`
+	Repository string `json:"repository,omitempty"`
+	Current    string `json:"current,omitempty"`
+	Target     string `json:"target,omitempty"`
+	Upgrade    string `json:"upgrade,omitempty"`
+	Checked    bool   `json:"checked,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 // AutoDeploy returns the auto-deploy level configured for app in env (ADR-0052 §2). An empty env

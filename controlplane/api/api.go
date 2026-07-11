@@ -432,18 +432,31 @@ func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, guardResponse{Guardrails: gs})
 }
 
-// getAutoDeploy returns the auto-deploy level configured for an app in the selected environment
-// (ADR-0052 §2). The optional env query selects a named environment; empty is the default
-// environment. A missing configuration reads as the default level (minor).
+// getAutoDeploy returns the enriched, read-only auto-deploy view for an app in the selected
+// environment (ADR-0052 §2/§3): the level plus, when the registry could be listed, the current
+// running version, the tag auto-deploy would move to within the level, and any higher available
+// upgrade above the cap. The optional env query selects a named environment; empty is the default
+// environment. A registry failure degrades to the level alone (checked=false with a note) and never
+// errors the call, keeping this path independent of registry reachability (ADR-0040).
 func (s *server) getAutoDeploy(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("app")
 	env := r.URL.Query().Get("env")
-	level, err := s.engine.AutoDeploy(r.Context(), app, env)
+	st, err := s.engine.AutoDeployStatus(r.Context(), app, env)
 	if err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, autoDeployResponse{App: app, Env: envName(env), Level: string(level)})
+	writeJSON(w, http.StatusOK, autoDeployResponse{
+		App:        st.App,
+		Env:        st.Env,
+		Level:      string(st.Level),
+		Repository: st.Repository,
+		Current:    st.Current,
+		Target:     st.Target,
+		Upgrade:    st.Upgrade,
+		Checked:    st.Checked,
+		Note:       st.Note,
+	})
 }
 
 // setAutoDeploy sets an app's auto-deploy level for the selected environment (ADR-0052 §6). The level
@@ -874,11 +887,21 @@ type guardResponse struct {
 }
 
 // autoDeployResponse is the body of an auto-deploy get/set call: the app, the canonical environment
-// name, and the effective auto-deploy level (ADR-0052 §2).
+// name, and the effective auto-deploy level (ADR-0052 §2), plus the enriched read-only upgrade view
+// a get returns (ADR-0052 §3) — the current running version, the tag auto-deploy would move to
+// within the level, the highest version above the level's cap surfaced as an available upgrade,
+// whether the registry upgrade check ran, and a short note when it could not. The upgrade fields are
+// omitempty so a set response (which reports the level only) stays the same shape as before.
 type autoDeployResponse struct {
-	App   string `json:"app"`
-	Env   string `json:"env"`
-	Level string `json:"level"`
+	App        string `json:"app"`
+	Env        string `json:"env"`
+	Level      string `json:"level"`
+	Repository string `json:"repository,omitempty"`
+	Current    string `json:"current,omitempty"`
+	Target     string `json:"target,omitempty"`
+	Upgrade    string `json:"upgrade,omitempty"`
+	Checked    bool   `json:"checked,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 // autoDeploySetRequest is the body of an auto-deploy set call (the app comes from the path, the

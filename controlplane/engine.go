@@ -39,6 +39,11 @@ type Engine struct {
 	// prober detects the cluster's read-only capabilities (ADR-0034). Optional: a capabilities
 	// read errors cleanly (ErrNotImplemented) when it is nil.
 	prober ClusterProber
+	// registry lists an image repository's tags for the auto-deploy read/watch (ADR-0052).
+	// Optional: nil is allowed, and the auto-deploy show degrades to reporting the level alone
+	// when it is not wired. It is OUTBOUND-only and never touched on the core deploy path, which
+	// stays independent of registry reachability (ADR-0040).
+	registry RegistryClient
 	// appNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace
 	// of the implicit `default` environment (ADR-0035 phase 2). It mirrors the kube Adapter's
 	// namespace so the engine can synthesize the default environment in ListEnvironments.
@@ -75,6 +80,10 @@ type Deps struct {
 	// allowed, and the engine errors cleanly (ErrNotImplemented) on a capabilities read when it is
 	// not wired.
 	ClusterProber ClusterProber
+	// RegistryClient lists an image repository's tags for the auto-deploy read/watch (ADR-0052).
+	// Optional — nil is allowed, and the auto-deploy show degrades to reporting the level alone
+	// when it is not wired. It is OUTBOUND-only and never used on the core deploy path (ADR-0040).
+	RegistryClient RegistryClient
 	// AppNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace of
 	// the implicit `default` environment (ADR-0035 phase 2). Optional — an empty value defaults to
 	// "default", matching the kube Adapter.
@@ -117,6 +126,7 @@ func New(d Deps) (*Engine, error) {
 		metrics:       d.Metrics,
 		dbProvisioner: d.DatabaseProvisioner,
 		prober:        d.ClusterProber,
+		registry:      d.RegistryClient,
 		appNamespace:  appNamespace,
 	}, nil
 }

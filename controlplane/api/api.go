@@ -55,6 +55,11 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/status", s.status)
 	v1.HandleFunc("GET /v1/apps/{app}/logs", s.logs)
 	v1.HandleFunc("POST /v1/apps/{app}/rollback", s.rollback)
+	// auto-deploy: GET reads an app's per-environment auto-deploy level, PUT sets it (ADR-0052 §6).
+	// Setting is a human operator action, so it is exposed on this admin API but never as an agent
+	// verb — burrow-agent may read the level but not change it.
+	v1.HandleFunc("GET /v1/apps/{app}/auto-deploy", s.getAutoDeploy)
+	v1.HandleFunc("PUT /v1/apps/{app}/auto-deploy", s.setAutoDeploy)
 	v1.HandleFunc("POST /v1/apps/{app}/scale", s.scale)
 	// run executes a one-off command in the app's own current image and environment (ADR-0048).
 	v1.HandleFunc("POST /v1/apps/{app}/run", s.run)
@@ -425,6 +430,58 @@ func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, guardResponse{Guardrails: gs})
+}
+
+// getAutoDeploy returns the auto-deploy level configured for an app in the selected environment
+// (ADR-0052 §2). The optional env query selects a named environment; empty is the default
+// environment. A missing configuration reads as the default level (minor).
+func (s *server) getAutoDeploy(w http.ResponseWriter, r *http.Request) {
+	app := r.PathValue("app")
+	env := r.URL.Query().Get("env")
+	level, err := s.engine.AutoDeploy(r.Context(), app, env)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, autoDeployResponse{App: app, Env: envName(env), Level: string(level)})
+}
+
+// setAutoDeploy sets an app's auto-deploy level for the selected environment (ADR-0052 §6). The level
+// is validated at the boundary with ParseAutoDeployLevel so an unknown value is a clean 400 before
+// the engine is touched. Setting the level is a human operator action; there is deliberately no agent
+// verb for it, so the agent cannot change what deploys unattended (ADR-0038).
+func (s *server) setAutoDeploy(w http.ResponseWriter, r *http.Request) {
+	var req autoDeploySetRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	level, err := controlplane.ParseAutoDeployLevel(req.Level)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid")
+		return
+	}
+	app := r.PathValue("app")
+	env := r.URL.Query().Get("env")
+	if err := s.engine.SetAutoDeploy(r.Context(), app, env, level); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	effective, err := s.engine.AutoDeploy(r.Context(), app, env)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, autoDeployResponse{App: app, Env: envName(env), Level: string(effective)})
+}
+
+// envName canonicalizes an environment name for a response body: an empty name reads as the reserved
+// default environment, any other name passes through. It mirrors the engine's own canonicalization so
+// the recorded environment is legible on both sides.
+func envName(env string) string {
+	if env == "" {
+		return controlplane.DefaultEnvironment
+	}
+	return env
 }
 
 // addProvider decodes a provider registration — including the token VALUE — from the POST body and
@@ -814,6 +871,20 @@ type environmentsResponse struct {
 // guardResponse is the body of a guard list/set call: the full guardrail policy.
 type guardResponse struct {
 	Guardrails []controlplane.GuardrailInfo `json:"guardrails"`
+}
+
+// autoDeployResponse is the body of an auto-deploy get/set call: the app, the canonical environment
+// name, and the effective auto-deploy level (ADR-0052 §2).
+type autoDeployResponse struct {
+	App   string `json:"app"`
+	Env   string `json:"env"`
+	Level string `json:"level"`
+}
+
+// autoDeploySetRequest is the body of an auto-deploy set call (the app comes from the path, the
+// environment from the query).
+type autoDeploySetRequest struct {
+	Level string `json:"level"`
 }
 
 // guardSetRequest is the body of a guard set call (the guardrail code comes from the path).

@@ -55,6 +55,46 @@ func TestClientDeploy(t *testing.T) {
 	}
 }
 
+func TestClientAutoDeploy(t *testing.T) {
+	var gotMethod, gotPath, gotQuery, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "env": "prod", "level": "patch"})
+	}))
+	defer srv.Close()
+
+	c := client.NewClient(srv.URL, "tok")
+
+	// Get carries no body and routes to the app's auto-deploy path.
+	res, err := c.AutoDeploy(context.Background(), "web", "")
+	if err != nil {
+		t.Fatalf("AutoDeploy: %v", err)
+	}
+	if res.App != "web" || res.Level != "patch" {
+		t.Errorf("result = %+v", res)
+	}
+	if gotMethod != "GET" || gotPath != "/v1/apps/web/auto-deploy" {
+		t.Errorf("get request = %s %s", gotMethod, gotPath)
+	}
+
+	// Set carries the level in the body and the environment in the query.
+	res, err = c.SetAutoDeploy(context.Background(), "web", "prod", "patch")
+	if err != nil {
+		t.Fatalf("SetAutoDeploy: %v", err)
+	}
+	if res.Env != "prod" {
+		t.Errorf("result env = %q, want prod", res.Env)
+	}
+	if gotMethod != "PUT" || gotPath != "/v1/apps/web/auto-deploy" || gotQuery != "env=prod" {
+		t.Errorf("set request = %s %s?%s", gotMethod, gotPath, gotQuery)
+	}
+	if !strings.Contains(gotBody, `"level":"patch"`) {
+		t.Errorf("set body = %s, want it to carry the level", gotBody)
+	}
+}
+
 func TestClientErrorMapping(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)

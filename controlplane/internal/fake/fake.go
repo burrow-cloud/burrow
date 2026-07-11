@@ -51,6 +51,8 @@ const (
 	OpUnsetAppEnv         Op = "UnsetAppEnv"
 	OpPolicy              Op = "Policy"
 	OpSetGuardrail        Op = "SetGuardrail"
+	OpAutoDeployLevel     Op = "AutoDeployLevel"
+	OpSetAutoDeployLevel  Op = "SetAutoDeployLevel"
 	OpSaveProvider        Op = "SaveProvider"
 	OpProvider            Op = "Provider"
 	OpProviders           Op = "Providers"

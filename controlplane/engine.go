@@ -1502,6 +1502,43 @@ func (e *Engine) SetGuardrail(ctx context.Context, env string, code GuardrailCod
 	return e.db.SetGuardrail(ctx, stored, d)
 }
 
+// AutoDeploy returns the auto-deploy level configured for app in env (ADR-0052 §2). A missing
+// configuration resolves to the built-in default (DefaultAutoDeployLevel, minor): auto-deploy is on
+// by default for every app, so an app need not have a stored level to have one. The environment is
+// resolved so an unknown name is a clear error, and the level is keyed by the canonical environment
+// name. This is a read: the agent may observe it over burrow-agent, but only a human sets it (§6).
+func (e *Engine) AutoDeploy(ctx context.Context, app, env string) (AutoDeployLevel, error) {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return "", fmt.Errorf("auto-deploy: %w: %w", ErrInvalid, err)
+	}
+	if _, err := e.resolveNamespace(ctx, env); err != nil {
+		return "", fmt.Errorf("auto-deploy %s: %w", app, err)
+	}
+	level, err := e.db.AutoDeployLevel(ctx, app, envName(env))
+	if err != nil {
+		return "", fmt.Errorf("auto-deploy %s: %w", app, err)
+	}
+	return level, nil
+}
+
+// SetAutoDeploy sets the auto-deploy level for app in env (ADR-0052 §2, §6). Choosing the level is a
+// governance decision, so it is a human operator action exposed only through the `burrow` CLI and
+// never to the agent — what deploys unattended stays a human decision (ADR-0038). It rejects an
+// invalid level as ErrInvalid and an unknown or ambiguous environment like every other per-app
+// mutation, and stores the level under the canonical environment name.
+func (e *Engine) SetAutoDeploy(ctx context.Context, app, env string, level AutoDeployLevel) error {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return fmt.Errorf("set auto-deploy: %w: %w", ErrInvalid, err)
+	}
+	if !level.Valid() {
+		return fmt.Errorf("set auto-deploy %s: invalid level %q (want off, patch, minor, or major): %w", app, level, ErrInvalid)
+	}
+	if _, err := e.resolveMutatingNamespace(ctx, env); err != nil {
+		return fmt.Errorf("set auto-deploy %s: %w", app, err)
+	}
+	return e.db.SetAutoDeployLevel(ctx, app, envName(env), level)
+}
+
 // Rollback restores the app's previously running release by redeploying its reference
 // (ADR-0007). It finds the current running release, re-applies the release that one
 // superseded, and records the rollback as a new release. It returns ErrNotFound when

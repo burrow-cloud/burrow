@@ -82,6 +82,7 @@ func newAppCmd() *cobra.Command {
 		newStatusCmd(),
 		newLogsCmd(),
 		newRollbackCmd(),
+		newAutoDeployCmd(),
 		newScaleCmd(),
 		newRunCmd(),
 		newAutoscaleCmd(),

@@ -107,6 +107,53 @@ func TestGuardEndpointsEnvScoped(t *testing.T) {
 	}
 }
 
+// TestAutoDeployEndpoints covers the auto-deploy get/set API (ADR-0052 §6): the default reads back
+// with no row, a set is reflected, an unknown level is a 400, the optional env query routes through to
+// the engine, and an unknown environment is a 404.
+func TestAutoDeployEndpoints(t *testing.T) {
+	h, _, d := newAPI(t)
+
+	// A brand-new app reads the built-in default, keyed to the default environment.
+	rr := do(h, "GET", "/v1/apps/web/auto-deploy", token, "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"level":"minor"`) || !strings.Contains(rr.Body.String(), `"env":"default"`) {
+		t.Fatalf("auto-deploy get = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// A valid set is reflected in the response.
+	rr = do(h, "PUT", "/v1/apps/web/auto-deploy", token, `{"level":"off"}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"level":"off"`) {
+		t.Fatalf("auto-deploy set = %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := do(h, "GET", "/v1/apps/web/auto-deploy", token, ""); !strings.Contains(rr.Body.String(), `"level":"off"`) {
+		t.Errorf("auto-deploy get after set = %s", rr.Body.String())
+	}
+
+	// An unknown level is a 400 (ParseAutoDeployLevel rejects it at the boundary).
+	if rr := do(h, "PUT", "/v1/apps/web/auto-deploy", token, `{"level":"sometimes"}`); rr.Code != 400 {
+		t.Errorf("unknown level code = %d, want 400", rr.Code)
+	}
+
+	// The optional env query routes through to a registered environment, independent of the default.
+	if err := d.CreateEnvironment(context.Background(), "prod", "burrow-apps-prod"); err != nil {
+		t.Fatalf("CreateEnvironment: %v", err)
+	}
+	rr = do(h, "PUT", "/v1/apps/web/auto-deploy?env=prod", token, `{"level":"patch"}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"level":"patch"`) || !strings.Contains(rr.Body.String(), `"env":"prod"`) {
+		t.Fatalf("env-scoped auto-deploy set = %d %s", rr.Code, rr.Body.String())
+	}
+	// The default environment is untouched by the prod set.
+	if rr := do(h, "GET", "/v1/apps/web/auto-deploy", token, ""); !strings.Contains(rr.Body.String(), `"level":"off"`) {
+		t.Errorf("default env level after prod set = %s", rr.Body.String())
+	}
+	// An unknown environment is a 404.
+	if rr := do(h, "PUT", "/v1/apps/web/auto-deploy?env=ghost", token, `{"level":"patch"}`); rr.Code != 404 {
+		t.Errorf("unknown env code = %d, want 404", rr.Code)
+	}
+	if rr := do(h, "GET", "/v1/apps/web/auto-deploy?env=ghost", token, ""); rr.Code != 404 {
+		t.Errorf("unknown env get code = %d, want 404", rr.Code)
+	}
+}
+
 // newProviderAPI builds an API whose engine exposes the credential store and DNS factory, so
 // the provider-endpoint test can seed the token the CLI would have written and control the
 // vendor's verdict.

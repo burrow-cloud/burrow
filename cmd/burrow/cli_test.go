@@ -593,6 +593,73 @@ func TestExposeCommand(t *testing.T) {
 	}
 }
 
+// TestAutoDeployShow confirms `app auto-deploy <app>` with one positional reads the level (GET) and
+// prints it, sending no env selector without --env (ADR-0052 §6).
+func TestAutoDeployShow(t *testing.T) {
+	var gotMethod, gotPath, gotEnv string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotEnv = r.Method, r.URL.Path, r.URL.Query().Get("env")
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "env": "default", "level": "minor"})
+	}, "app", "auto-deploy", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "GET" || gotPath != "/v1/apps/web/auto-deploy" {
+		t.Errorf("request = %s %s, want GET /v1/apps/web/auto-deploy", gotMethod, gotPath)
+	}
+	if gotEnv != "" {
+		t.Errorf("env query = %q, want empty", gotEnv)
+	}
+	if !strings.Contains(out, "web: auto-deploy minor") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+// TestAutoDeploySet confirms `app auto-deploy <app> <level> --env` sets the level (PUT), carries the
+// level in the body and the environment in the query, and names the environment in the confirmation.
+func TestAutoDeploySet(t *testing.T) {
+	var gotMethod, gotPath, gotEnv string
+	var gotBody map[string]any
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotEnv = r.Method, r.URL.Path, r.URL.Query().Get("env")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "env": "prod", "level": "patch"})
+	}, "app", "auto-deploy", "web", "patch", "--env", "prod")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "PUT" || gotPath != "/v1/apps/web/auto-deploy" {
+		t.Errorf("request = %s %s, want PUT /v1/apps/web/auto-deploy", gotMethod, gotPath)
+	}
+	if gotEnv != "prod" {
+		t.Errorf("env query = %q, want prod", gotEnv)
+	}
+	if gotBody["level"] != "patch" {
+		t.Errorf("body level = %v, want patch", gotBody["level"])
+	}
+	if !strings.Contains(out, `set web auto-deploy to patch in environment "prod"`) {
+		t.Errorf("output = %q, want it to name the environment", out)
+	}
+}
+
+// TestAutoDeploySetInvalidLevel confirms an unknown level is rejected client-side, before any request
+// reaches the control plane (ADR-0052 §6, ParseAutoDeployLevel).
+func TestAutoDeploySetInvalidLevel(t *testing.T) {
+	called := false
+	_, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}, "app", "auto-deploy", "web", "sometimes")
+	if err == nil {
+		t.Fatalf("run: expected an error for an invalid level")
+	}
+	if !strings.Contains(err.Error(), "not valid") {
+		t.Errorf("error = %v, want it to explain the level is not valid", err)
+	}
+	if called {
+		t.Errorf("an invalid level should be rejected before any request reaches the server")
+	}
+}
+
 func TestGuardList(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.URL.Path != "/v1/guard" {

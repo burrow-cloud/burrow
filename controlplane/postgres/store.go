@@ -234,6 +234,36 @@ ON CONFLICT (code) DO UPDATE SET disposition = EXCLUDED.disposition`
 	return nil
 }
 
+// AutoDeployLevel returns app's auto-deploy level in env (ADR-0052 §2). A missing row resolves to
+// DefaultAutoDeployLevel: the table holds only overrides, so an app runs at the default level with no
+// row (auto-deploy is on by default).
+func (s *Store) AutoDeployLevel(ctx context.Context, app, env string) (controlplane.AutoDeployLevel, error) {
+	const q = `SELECT level FROM app_autodeploy WHERE app = $1 AND environment = $2`
+	var level string
+	err := s.db.QueryRowContext(ctx, q, app, env).Scan(&level)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return controlplane.DefaultAutoDeployLevel, nil
+		}
+		return "", fmt.Errorf("postgres: auto-deploy level for %q in %q: %w", app, env, err)
+	}
+	return controlplane.AutoDeployLevel(level), nil
+}
+
+// SetAutoDeployLevel upserts app's auto-deploy level in env, keyed by (app, environment).
+func (s *Store) SetAutoDeployLevel(ctx context.Context, app, env string, level controlplane.AutoDeployLevel) error {
+	if !level.Valid() {
+		return fmt.Errorf("postgres: set auto-deploy level for %q in %q: invalid level %q", app, env, level)
+	}
+	const q = `
+INSERT INTO app_autodeploy (app, environment, level) VALUES ($1, $2, $3)
+ON CONFLICT (app, environment) DO UPDATE SET level = EXCLUDED.level`
+	if _, err := s.db.ExecContext(ctx, q, app, env, string(level)); err != nil {
+		return fmt.Errorf("postgres: set auto-deploy level for %q in %q: %w", app, env, err)
+	}
+	return nil
+}
+
 // auditColumns is the audit_log projection in a stable order shared by the scanner.
 const auditColumns = `id, ts, operation, target, args, guardrail_code, disposition, outcome, result, caller, principal, client_version`
 

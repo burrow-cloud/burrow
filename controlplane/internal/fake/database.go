@@ -19,32 +19,34 @@ var _ controlplane.Database = (*Database)(nil)
 // copied in and out, so callers never share Env/Command memory with the store — the
 // same isolation a real database gives. Errors can be injected per operation.
 type Database struct {
-	mu        sync.Mutex
-	byID      map[string]controlplane.Release
-	order     map[string][]string // app -> release IDs, save order, deduplicated
-	providers map[string]controlplane.Provider
-	addons    map[string]controlplane.AddonInfo
-	appEnv    map[string]map[string]string // app -> key -> value
-	audit     []controlplane.AuditEntry    // append-only, in append order
-	backups   map[string]controlplane.Backup
-	backupSeq []string                            // backup IDs in record order, for deterministic newest-first listing
-	envs      map[string]controlplane.Environment // registered environments by name
-	errs      map[Op]error
-	policy    controlplane.Policy
+	mu         sync.Mutex
+	byID       map[string]controlplane.Release
+	order      map[string][]string // app -> release IDs, save order, deduplicated
+	providers  map[string]controlplane.Provider
+	addons     map[string]controlplane.AddonInfo
+	appEnv     map[string]map[string]string                       // app -> key -> value
+	autoDeploy map[string]map[string]controlplane.AutoDeployLevel // app -> env -> level
+	audit      []controlplane.AuditEntry                          // append-only, in append order
+	backups    map[string]controlplane.Backup
+	backupSeq  []string                            // backup IDs in record order, for deterministic newest-first listing
+	envs       map[string]controlplane.Environment // registered environments by name
+	errs       map[Op]error
+	policy     controlplane.Policy
 }
 
 // NewDatabase returns an empty fake database with the default guardrail policy.
 func NewDatabase() *Database {
 	return &Database{
-		byID:      make(map[string]controlplane.Release),
-		order:     make(map[string][]string),
-		providers: make(map[string]controlplane.Provider),
-		addons:    make(map[string]controlplane.AddonInfo),
-		appEnv:    make(map[string]map[string]string),
-		backups:   make(map[string]controlplane.Backup),
-		envs:      make(map[string]controlplane.Environment),
-		errs:      make(map[Op]error),
-		policy:    controlplane.DefaultPolicy(),
+		byID:       make(map[string]controlplane.Release),
+		order:      make(map[string][]string),
+		providers:  make(map[string]controlplane.Provider),
+		addons:     make(map[string]controlplane.AddonInfo),
+		appEnv:     make(map[string]map[string]string),
+		autoDeploy: make(map[string]map[string]controlplane.AutoDeployLevel),
+		backups:    make(map[string]controlplane.Backup),
+		envs:       make(map[string]controlplane.Environment),
+		errs:       make(map[Op]error),
+		policy:     controlplane.DefaultPolicy(),
 	}
 }
 
@@ -77,6 +79,37 @@ func (d *Database) SetGuardrail(ctx context.Context, code controlplane.Guardrail
 		return fmt.Errorf("database: set guardrail: invalid disposition %q", disp)
 	}
 	d.policy = d.policy.With(code, disp)
+	return nil
+}
+
+// AutoDeployLevel returns app's auto-deploy level in env, or DefaultAutoDeployLevel when none is
+// set — a missing configuration resolves to the default, matching the store (ADR-0052 §2).
+func (d *Database) AutoDeployLevel(ctx context.Context, app, env string) (controlplane.AutoDeployLevel, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAutoDeployLevel]; err != nil {
+		return "", err
+	}
+	if lvl, ok := d.autoDeploy[app][env]; ok {
+		return lvl, nil
+	}
+	return controlplane.DefaultAutoDeployLevel, nil
+}
+
+// SetAutoDeployLevel upserts app's auto-deploy level in env, keyed by (app, env).
+func (d *Database) SetAutoDeployLevel(ctx context.Context, app, env string, level controlplane.AutoDeployLevel) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpSetAutoDeployLevel]; err != nil {
+		return err
+	}
+	if !level.Valid() {
+		return fmt.Errorf("database: set auto-deploy level: invalid level %q", level)
+	}
+	if d.autoDeploy[app] == nil {
+		d.autoDeploy[app] = make(map[string]controlplane.AutoDeployLevel)
+	}
+	d.autoDeploy[app][env] = level
 	return nil
 }
 

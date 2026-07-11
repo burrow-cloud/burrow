@@ -820,6 +820,32 @@ func (c *Client) SetGuardrail(ctx context.Context, env, code, disposition string
 	return out.Guardrails, err
 }
 
+// AutoDeployResult is the auto-deploy configuration for an app in one environment (ADR-0052 §2):
+// the app, the canonical environment name, and the effective auto-deploy level.
+type AutoDeployResult struct {
+	App   string `json:"app"`
+	Env   string `json:"env"`
+	Level string `json:"level"`
+}
+
+// AutoDeploy returns the auto-deploy level configured for app in env (ADR-0052 §2). An empty env
+// reads the default environment. A missing configuration reads as the default level (minor).
+func (c *Client) AutoDeploy(ctx context.Context, app, env string) (AutoDeployResult, error) {
+	var out AutoDeployResult
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "auto-deploy"), env), nil, &out)
+	return out, err
+}
+
+// SetAutoDeploy sets the auto-deploy level for app in env and returns the updated configuration
+// (ADR-0052 §6). Setting the level is a human operator action, so it lives on this admin client
+// only — there is no agent verb for it.
+func (c *Client) SetAutoDeploy(ctx context.Context, app, env, level string) (AutoDeployResult, error) {
+	var out AutoDeployResult
+	body := map[string]string{"level": level}
+	err := c.do(ctx, http.MethodPut, withEnv(c.appPath(app, "auto-deploy"), env), body, &out)
+	return out, err
+}
+
 // AddProvider registers a vendor credential in the control-plane registry and returns the
 // recorded provider (ADR-0023).
 func (c *Client) AddProvider(ctx context.Context, req AddProviderRequest) (Provider, error) {

@@ -249,6 +249,15 @@ type Database interface {
 	// `guard set`. It rejects an invalid disposition.
 	SetGuardrail(ctx context.Context, code GuardrailCode, d Disposition) error
 
+	// AutoDeployLevel returns the auto-deploy level configured for app in the named environment
+	// (ADR-0052 §2). A missing configuration resolves to DefaultAutoDeployLevel (minor): auto-deploy
+	// is on by default, so an app need not have a stored row to have a level. env is the canonical
+	// environment name (the reserved "default" for the implicit default environment).
+	AutoDeployLevel(ctx context.Context, app, env string) (AutoDeployLevel, error)
+	// SetAutoDeployLevel upserts the auto-deploy level for app in the named environment — the write
+	// behind `burrow app auto-deploy <app> <level>`. It rejects an invalid level.
+	SetAutoDeployLevel(ctx context.Context, app, env string, level AutoDeployLevel) error
+
 	// SaveProvider upserts a provider in the registry by name (ADR-0023). It stores only
 	// the non-secret registry entry — type, capabilities, and the key under which the token
 	// lives in the burrow-credentials Secret — never the token itself.

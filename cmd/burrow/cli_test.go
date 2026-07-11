@@ -615,6 +615,52 @@ func TestAutoDeployShow(t *testing.T) {
 	}
 }
 
+// TestAutoDeployShowEnriched confirms the show renders the read-only upgrade view (ADR-0052 §3): the
+// running version, the version auto-deploy would move to within the level, and the higher available
+// upgrade above the level with the exact deploy command to take it.
+func TestAutoDeployShowEnriched(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "env": "default", "level": "minor",
+			"repository": "ghcr.io/u/web", "current": "1.2.5",
+			"target": "1.3.0", "upgrade": "2.0.0", "checked": true,
+		})
+	}, "app", "auto-deploy", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, want := range []string{
+		"running: 1.2.5",
+		"auto-deploys to: 1.3.0",
+		"burrow app deploy web --image ghcr.io/u/web:2.0.0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+}
+
+// TestAutoDeployShowDegraded confirms that when the registry upgrade check could not run, the show
+// still reports the level and surfaces the note rather than failing (ADR-0040).
+func TestAutoDeployShowDegraded(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "env": "default", "level": "minor",
+			"current": "1.2.5", "checked": false,
+			"note": "registry tag listing unavailable: 401 unauthorized",
+		})
+	}, "app", "auto-deploy", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "web: auto-deploy minor") {
+		t.Errorf("output = %q, want the level line", out)
+	}
+	if !strings.Contains(out, "upgrade check unavailable: registry tag listing unavailable: 401 unauthorized") {
+		t.Errorf("output = %q, want the degrade note", out)
+	}
+}
+
 // TestAutoDeploySet confirms `app auto-deploy <app> <level> --env` sets the level (PUT), carries the
 // level in the body and the environment in the query, and names the environment in the confirmation.
 func TestAutoDeploySet(t *testing.T) {

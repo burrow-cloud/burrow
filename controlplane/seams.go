@@ -68,6 +68,26 @@ type MetricsQuerier interface {
 	QueryMetrics(ctx context.Context, endpoint, query string, token string) ([]MetricSample, error)
 }
 
+// RegistryAuth carries optional basic-auth credentials for listing a private repo's tags
+// (ADR-0052 §7). The zero value lists anonymously — the case for public GHCR/Docker Hub.
+type RegistryAuth struct {
+	Username string
+	Password string
+}
+
+// RegistryClient lists the tags of a container image repository so burrowd can see which
+// versions exist and compute what auto-deploy would take (ADR-0052). It is OUTBOUND-only and
+// used only for the optional auto-deploy read/watch — never on the core deploy path, which
+// stays independent of registry reachability (ADR-0040). It is an OPTIONAL seam: when it is
+// not wired the auto-deploy show degrades to reporting the level alone.
+type RegistryClient interface {
+	// ListTags returns the tags available in the repository named by imageRef (a reference
+	// like "ghcr.io/user/app:1.2.3" or the bare repo). auth carries optional basic-auth
+	// credentials for a private repo; the zero value lists anonymously. It follows the Docker
+	// Registry HTTP API v2 tag-list pagination and the standard Bearer-token auth flow.
+	ListTags(ctx context.Context, imageRef string, auth RegistryAuth) ([]string, error)
+}
+
 // DatabaseProvisioner is the seam over the installed Postgres add-on's admin surface (ADR-0031).
 // burrowd connects to the shared instance as the superuser and gives each app its own database and
 // login role inside it; the engine calls this on attach/detach. It is an optional seam — present

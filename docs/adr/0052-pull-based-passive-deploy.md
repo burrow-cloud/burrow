@@ -65,8 +65,10 @@ adds **no inbound surface**; it is outbound-only, so it works where push-from-CI
 ### 2. A semver-scoped auto-update policy — the control the mutable-tag model lacks
 
 Per app, per environment, an auto-update **level** sets how far the watcher may move the app.
-Every level deploys **upgrades only** (never a lower version), always to the newest tag within
-the level's cap, measured against the running release. For an app on `1.2.5`:
+Every level deploys **upgrades only** — it moves to the **highest semver version within the
+level's cap that is greater than the running release**, compared by version order, never by
+push time. A tag that is a lower version than what is running (a backport, a re-push) is never
+taken, so the watcher can only ever move an app forward. For an app on `1.2.5`:
 
 - **`off`** — nothing auto-deploys; explicit CLI or agent deploy only. The explicit call stays
   canonical ([ADR-0007](0007-explicit-deploy-by-image-reference.md)).
@@ -110,11 +112,22 @@ incrementing semver tags (the agent guidance and MCP instructions already steer 
 ### 5. Safety, provenance, and no thrashing
 
 Auto-update defaults on at `minor` and can be dialed down or turned `off` per app; a version can
-be pinned by setting `off` and deploying it explicitly. A passive deploy
+be pinned by setting `off` and deploying it explicitly.
+
+**A rollback disables auto-deploy.** A rollback — or any manual deploy that moves the app to a
+*lower* version than it is running — sets the app's auto-deploy level to `off`. Otherwise the
+watcher would fight a deliberate downgrade: minutes after you roll back off a bad `1.5.0`, it
+would re-apply `1.5.0` (or jump to a `1.6.0` that may carry the same defect). Disabling is
+predictable (an explicit `off`, not a timed pause that silently resumes) and is surfaced with
+its reason — `status` and the agent show "auto-deploy: off (disabled by rollback)". Re-enabling
+is a deliberate human action (§6): the agent *can* roll back, which safely stops auto-deploy,
+but a human decides when to turn it back on with `burrow app auto-deploy <app> <level>`.
+
+A passive deploy
 that fails to roll out uses the same warm rollback (the `Supersedes` chain), and the watcher
 **stops re-attempting that tag** so a bad image cannot become a redeploy crash-loop; the
 failure is surfaced. The poll interval is bounded and configurable. Every passive deploy is
-recorded with its trigger provenance (auto-update, the policy scope, the tag and digest),
+recorded with its trigger provenance (auto-update, the level, the tag and digest),
 distinct from an explicit deploy, so the deploy record and audit log stay legible.
 
 ### 6. Setting the level is an operator action; the agent observes

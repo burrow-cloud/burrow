@@ -45,6 +45,7 @@ const (
 	OpRelease             Op = "Release"
 	OpLatestRelease       Op = "LatestRelease"
 	OpReleases            Op = "Releases"
+	OpListReleases        Op = "ListReleases"
 	OpDeleteReleases      Op = "DeleteReleases"
 	OpAppEnv              Op = "AppEnv"
 	OpSetAppEnv           Op = "SetAppEnv"

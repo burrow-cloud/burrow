@@ -247,6 +247,12 @@ type Database interface {
 	// Releases returns all releases for app, oldest first. An app with no releases
 	// yields an empty slice and no error.
 	Releases(ctx context.Context, app string) ([]Release, error)
+	// ListReleases returns all releases for app, NEWEST first — the deploy timeline the
+	// history surface reads (the same rows deploys already write, read the other way round
+	// from Releases). An app with no releases yields an empty slice and no error. Releases are
+	// recorded app-globally, not per environment (the release row carries no environment; see
+	// the deploy write path), so this reads by app just as LatestRelease/Releases do.
+	ListReleases(ctx context.Context, app string) ([]Release, error)
 	// DeleteReleases removes all release records for app — the durable side of an app
 	// teardown. Deleting the releases of an app that has none is a no-op, not an error.
 	DeleteReleases(ctx context.Context, app string) error

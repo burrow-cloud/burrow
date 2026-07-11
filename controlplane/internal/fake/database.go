@@ -180,6 +180,22 @@ func (d *Database) Releases(ctx context.Context, app string) ([]controlplane.Rel
 	return out, nil
 }
 
+// ListReleases returns every release for app, newest first (reverse save order) — the deploy
+// timeline the history surface reads. An app with no releases yields an empty slice and no error.
+func (d *Database) ListReleases(ctx context.Context, app string) ([]controlplane.Release, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpListReleases]; err != nil {
+		return nil, err
+	}
+	ids := d.order[app]
+	out := make([]controlplane.Release, 0, len(ids))
+	for i := len(ids) - 1; i >= 0; i-- {
+		out = append(out, cloneRelease(d.byID[ids[i]]))
+	}
+	return out, nil
+}
+
 // DeleteReleases removes every release record for app, including its save-order tracking.
 // Deleting the releases of an app that has none is a no-op, not an error.
 func (d *Database) DeleteReleases(ctx context.Context, app string) error {

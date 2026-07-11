@@ -53,6 +53,9 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("DELETE /v1/apps/{app}", s.deleteApp)
 	v1.HandleFunc("POST /v1/apps/{app}/deploy", s.deploy)
 	v1.HandleFunc("GET /v1/apps/{app}/status", s.status)
+	// history is the read-only deploy timeline: the releases recorded for an app, newest first
+	// (ADR-0007). The optional env query validates a named environment; empty is the default.
+	v1.HandleFunc("GET /v1/apps/{app}/history", s.history)
 	v1.HandleFunc("GET /v1/apps/{app}/logs", s.logs)
 	v1.HandleFunc("POST /v1/apps/{app}/rollback", s.rollback)
 	// auto-deploy: GET reads an app's per-environment auto-deploy level, PUT sets it (ADR-0052 §6).
@@ -195,6 +198,22 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// history returns an app's deploy timeline: the releases recorded for it, newest first (ADR-0007).
+// It is read-only and moves no secret value. The optional env query validates a named environment.
+func (s *server) history(w http.ResponseWriter, r *http.Request) {
+	releases, err := s.engine.History(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, historyResponse{Releases: releases})
+}
+
+// historyResponse wraps the release timeline so the shape can grow without breaking object decoders.
+type historyResponse struct {
+	Releases []controlplane.Release `json:"releases"`
 }
 
 func (s *server) logs(w http.ResponseWriter, r *http.Request) {

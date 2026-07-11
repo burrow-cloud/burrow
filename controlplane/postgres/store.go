@@ -142,6 +142,31 @@ func (s *Store) Releases(ctx context.Context, app string) ([]controlplane.Releas
 	return out, nil
 }
 
+// ListReleases returns every release for app, newest first (by insertion order) — the deploy
+// timeline the history surface reads. It reads the same rows deploys write, ordered the opposite
+// way from Releases. Releases are recorded app-globally, so it selects by app just as Releases does.
+func (s *Store) ListReleases(ctx context.Context, app string) ([]controlplane.Release, error) {
+	const q = `SELECT ` + columns + ` FROM releases WHERE app = $1 ORDER BY seq DESC`
+	rows, err := s.db.QueryContext(ctx, q, app)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list releases for app %q: %w", app, err)
+	}
+	defer rows.Close()
+
+	out := make([]controlplane.Release, 0)
+	for rows.Next() {
+		r, err := scanRelease(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: list releases for app %q: %w", app, err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list releases for app %q: %w", app, err)
+	}
+	return out, nil
+}
+
 // DeleteReleases removes every release record for app. Deleting the releases of an app that
 // has none is a no-op (no RowsAffected check) — absence is fine.
 func (s *Store) DeleteReleases(ctx context.Context, app string) error {

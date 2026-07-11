@@ -233,10 +233,10 @@ app — and hitting the delete guardrail — on their own machine.
   the explicit path, never replacing it, specified in
   [ADR-0052](adr/0052-pull-based-passive-deploy.md) (realizing
   [ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)'s optional mode). burrowd polls
-  the registry and auto-applies bumps within a per-environment scope (default `minor`; `off`,
-  `patch`, and `major` selectable); a bump above the scope is surfaced as an available upgrade
-  the operator takes explicitly. Outbound-only, so it serves the private/NAT'd clusters
-  push-from-CI cannot reach.
+  the registry and auto-applies upgrades within a per-environment level (`burrow app auto-deploy
+  <app> [patch|minor|major|off]`), on by default at `minor` for every app; a version above the
+  level is surfaced as an available upgrade the operator takes explicitly. Outbound-only, so it
+  serves the private/NAT'd clusters push-from-CI cannot reach.
 - **Self-host dashboard** — an HTMX dashboard over the control-plane API, if and when a
   self-host UI is warranted.
 - **App-runtime API and capability envelopes** *(exploratory)* — a programmatic control-plane

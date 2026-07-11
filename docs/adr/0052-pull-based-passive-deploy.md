@@ -9,13 +9,14 @@ Accepted. Realizes the optional passive mode anticipated by
 
 ## TL;DR
 
-Give an app a **per-environment auto-update scope** (default **`minor`**; `off`, `patch`, and
-`major` also available) and have burrowd **poll the registry** for new tags of that app's
-image. When a new tag is within scope, burrowd fires the **same explicit, guarded deploy** it
-would run for a CLI call — same rollout, same deploy record, same rollback handle, same audit
-entry. A tag above the scope (for example a major bump under the default `minor`) is **not**
-deployed silently: it is surfaced as an *available upgrade* to take with an explicit `burrow
-app deploy`, or the operator raises the scope to `major` for fully hands-off updates. The
+Every app auto-deploys new versions of its own image, up to a **per-environment level** set by
+`burrow app auto-deploy <app> [patch|minor|major|off]` — default **`minor`**, on by default for
+every app, new or already deployed. burrowd **polls the registry** for new tags; when one is
+within the level, it fires the **same explicit, guarded deploy** it would run for a CLI call —
+same rollout, same deploy record, same rollback handle, same audit entry. A tag above the level
+(a `1.3.0` under `patch`, a `2.0.0` under `minor`) is **not** deployed silently: it is surfaced
+as an *available upgrade* to take with an explicit `burrow app deploy`, or the operator raises
+the level. The
 watcher is **outbound-only**, so it works on the private, NAT'd, firewalled clusters Burrow's
 ICP actually runs, which a push-from-CI model cannot reach. Polling is conservative (default
 ~5 min) because the explicit deploy is always the immediate path.
@@ -63,33 +64,40 @@ adds **no inbound surface**; it is outbound-only, so it works where push-from-CI
 
 ### 2. A semver-scoped auto-update policy — the control the mutable-tag model lacks
 
-Per app, per environment, an auto-update **scope** sets the largest bump the watcher may
-auto-apply, measured against the running release's version:
+Per app, per environment, an auto-update **level** sets how far the watcher may move the app.
+Every level deploys **upgrades only** (never a lower version), always to the newest tag within
+the level's cap, measured against the running release. For an app on `1.2.5`:
 
-- **`off`** — never auto-deploy; explicit CLI or agent deploy only. The explicit call stays
+- **`off`** — nothing auto-deploys; explicit CLI or agent deploy only. The explicit call stays
   canonical ([ADR-0007](0007-explicit-deploy-by-image-reference.md)).
-- **`patch`** — auto-apply patch bumps only (`1.2.3` → `1.2.4`).
-- **`minor`** (the default) — auto-apply minor and patch bumps (`1.2.3` → `1.3.0`).
-- **`major`** — auto-apply any newer version, including a breaking major (`1.2.3` → `2.0.0`).
+- **`patch`** — patches within the *current* minor only: `1.2.6`, `1.2.7`. It does not cross to
+  `1.3.0`. You move between minors by hand; after a manual deploy of, say, `1.5.0`, it then
+  auto-patches `1.5.x` (never `1.6.0`).
+- **`minor`** (the default) — any patch or minor upgrade: `1.2.6`, `1.3.0`, `1.4.0`. Never a
+  major.
+- **`major`** — anything newer, including a breaking major (`2.0.0`).
 
-The default is **`minor`**: patch and minor updates land automatically, and a major is held
-(see §3) until the operator opts up to `major`. `major` is deliberately available — not
-forbidden — for the operator who wants fully hands-off updates and accepts the breaking-change
-risk; it is simply not the default, because a major is the breaking-change class most operators
-want to take deliberately. The scope lives in the same policy system as the other guardrails
+So `patch` means "keep me current within my minor, I choose the minors," and `minor` means
+"keep me current within my major." The default is **`minor`**, and it applies to **every app,
+new or already deployed** — auto-deploy is on by default, not something to switch on; set an
+app to `off` to disable it. `major` is deliberately available — not forbidden — for the operator
+who wants fully hands-off updates and accepts the breaking-change risk; it is simply not the
+default, because a major is the breaking-change class most operators want to take deliberately.
+The level is per app and per environment
 ([ADR-0020](0020-guardrails-as-configurable-policy.md)), so `prod` can sit at `patch` while
-`staging` runs `major`, set per environment through the CLI (§6). Auto-update is still
-configured per app (the watcher must be pointed at the app's image repository); `minor` is the
-scope it takes once active.
+`staging` runs `major`, set through the CLI (§6). Defaulting on means that the day this ships,
+existing apps begin auto-taking minors; that rollout is called out in the release notes so it is
+not a surprise.
 
 ### 3. An out-of-scope bump is surfaced, not silently ignored
 
-When a newer tag exists that exceeds the policy (a `2.0.0` under a `minor` policy), burrowd
-does **not** deploy it. It records it as an **available upgrade** on the app and surfaces it
-in `status`/history and to the agent, together with the exact explicit command to take it
-(`burrow app deploy <app> --image <ref>:2.0.0`). The operator upgrades a major deliberately,
-through the CLI, on the explicit guarded path. *Held, and you are told* — the same shape as a
-confirm guardrail, where the "confirmation" for a major is running the explicit deploy.
+When a newer tag exists above the level's cap (a `1.3.0` under `patch`, or a `2.0.0` under
+`minor`), burrowd does **not** deploy it. It records it as an **available upgrade** on the app
+and surfaces it in `status`/history and to the agent, with the exact command to take it
+(`burrow app deploy <app> --image <ref>:2.0.0`). The operator takes the bigger jump
+deliberately, through the CLI, on the explicit guarded path — and if it is a line they now want
+tracked, they raise the level. *Held, and you are told* — the same shape as a confirm guardrail,
+where the "confirmation" is running the explicit deploy.
 
 ### 4. Semver tags required; floating tags are out of scope
 
@@ -101,20 +109,21 @@ incrementing semver tags (the agent guidance and MCP instructions already steer 
 
 ### 5. Safety, provenance, and no thrashing
 
-Auto-update is opt-in and pausable per app, and a version can be pinned. A passive deploy
+Auto-update defaults on at `minor` and can be dialed down or turned `off` per app; a version can
+be pinned by setting `off` and deploying it explicitly. A passive deploy
 that fails to roll out uses the same warm rollback (the `Supersedes` chain), and the watcher
 **stops re-attempting that tag** so a bad image cannot become a redeploy crash-loop; the
 failure is surfaced. The poll interval is bounded and configurable. Every passive deploy is
 recorded with its trigger provenance (auto-update, the policy scope, the tag and digest),
 distinct from an explicit deploy, so the deploy record and audit log stay legible.
 
-### 6. Setting the policy is an operator action; the agent observes
+### 6. Setting the level is an operator action; the agent observes
 
-Enabling auto-update and choosing its scope is a governance decision, so it is a human
-operator action through the `burrow` CLI (e.g. `burrow app autoupdate <app> --scope
-off|patch|minor|major [--env prod]` to set; `burrow app autoupdate <app>` to show the scope,
-the last check, and any held available upgrade). Choosing `major` — fully hands-off updates —
-is exactly the kind of decision that belongs to a human, which is why the scope is set through
+Choosing the auto-deploy level is a governance decision, so it is a human operator action
+through the `burrow` CLI: `burrow app auto-deploy <app> [patch|minor|major|off] [--env prod]`
+sets it, and `burrow app auto-deploy <app>` shows the current level, the last check, and any
+held available upgrade. Choosing `major` — fully hands-off updates — is exactly the kind of
+decision that belongs to a human, which is why the level is set through
 this CLI. The agent, over `burrow-agent`, can **read** the policy and see available upgrades,
 but not set what deploys without a human — consistent with the credential split
 ([ADR-0038](0038-scoped-agent-credential.md)) that keeps "what may happen unattended" a human

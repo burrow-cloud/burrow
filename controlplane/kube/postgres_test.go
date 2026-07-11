@@ -149,6 +149,173 @@ func TestDeployPostgresReusesExistingSecret(t *testing.T) {
 	}
 }
 
+// TestDeployPostgresAlwaysExportsMetrics asserts the Postgres add-on ships an always-on
+// postgres_exporter sidecar on :9187, carries the prometheus.io scrape annotations, preloads
+// pg_stat_statements, mounts the extension init script, and wires the exporter's password via
+// secretKeyRef — never inlining it (ADR-0051, ADR-0031).
+func TestDeployPostgresAlwaysExportsMetrics(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
+	if _, err := a.DeployAddon(ctx, spec); err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+
+	dep, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-postgres", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("deployment: %v", err)
+	}
+	pod := dep.Spec.Template
+
+	// The scrape annotations point vmagent at the exporter's /metrics on :9187.
+	ann := pod.ObjectMeta.Annotations
+	if ann["prometheus.io/scrape"] != "true" || ann["prometheus.io/port"] != "9187" || ann["prometheus.io/path"] != "/metrics" {
+		t.Errorf("pod scrape annotations = %v, want scrape=true port=9187 path=/metrics", ann)
+	}
+
+	// The main postgres container preloads pg_stat_statements (must be set at server start).
+	main := pod.Spec.Containers[0]
+	if !strings.Contains(strings.Join(main.Args, " "), "-c shared_preload_libraries=pg_stat_statements") {
+		t.Errorf("postgres args missing shared_preload_libraries=pg_stat_statements; got %v", main.Args)
+	}
+	// POSTGRES_DB=postgres pins the maintenance database so the init script creates the extension in
+	// the same database the exporter and control plane read; without it the image would default the
+	// database to the POSTGRES_USER name and the extension would land in the wrong place (ADR-0051).
+	var sawDB bool
+	for _, ev := range main.Env {
+		if ev.Name == "POSTGRES_DB" {
+			if ev.Value != "postgres" {
+				t.Errorf("POSTGRES_DB = %q, want postgres", ev.Value)
+			}
+			sawDB = true
+		}
+	}
+	if !sawDB {
+		t.Errorf("postgres env missing POSTGRES_DB=postgres: %+v", main.Env)
+	}
+	// It mounts the init-script ConfigMap at the official image's initdb hook directory.
+	var sawInitMount bool
+	for _, m := range main.VolumeMounts {
+		if m.MountPath == "/docker-entrypoint-initdb.d" {
+			sawInitMount = true
+		}
+	}
+	if !sawInitMount {
+		t.Errorf("postgres container is missing the /docker-entrypoint-initdb.d init mount; got %v", main.VolumeMounts)
+	}
+	cm, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, PostgresInitConfigMap, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("init configmap: %v", err)
+	}
+	var sawCreateExtension bool
+	for _, sql := range cm.Data {
+		if strings.Contains(sql, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements") {
+			sawCreateExtension = true
+		}
+	}
+	if !sawCreateExtension {
+		t.Errorf("init configmap does not create the pg_stat_statements extension; got %v", cm.Data)
+	}
+
+	// The exporter sidecar is present, on :9187, with the stat_statements collector enabled.
+	if len(pod.Spec.Containers) < 2 {
+		t.Fatalf("expected an exporter sidecar alongside postgres; got %d container(s)", len(pod.Spec.Containers))
+	}
+	exp := pod.Spec.Containers[1]
+	if exp.Image != postgresExporterImage {
+		t.Errorf("exporter image = %q, want %q", exp.Image, postgresExporterImage)
+	}
+	if len(exp.Ports) != 1 || exp.Ports[0].ContainerPort != postgresExporterPort {
+		t.Errorf("exporter ports = %v, want a single :%d", exp.Ports, postgresExporterPort)
+	}
+	if !strings.Contains(strings.Join(exp.Args, " "), "--collector.stat_statements") {
+		t.Errorf("exporter args missing --collector.stat_statements; got %v", exp.Args)
+	}
+
+	// The exporter password comes from the burrow-postgres Secret via secretKeyRef, never inlined.
+	sec, _ := client.CoreV1().Secrets(addonNS).Get(ctx, PostgresSecretName, metav1.GetOptions{})
+	pw := string(sec.Data[PostgresPasswordKey])
+	var sawUser, sawPassRef bool
+	for _, ev := range exp.Env {
+		switch ev.Name {
+		case "DATA_SOURCE_USER":
+			if ev.Value != PostgresSuperuser {
+				t.Errorf("DATA_SOURCE_USER = %q, want %q", ev.Value, PostgresSuperuser)
+			}
+			sawUser = true
+		case "DATA_SOURCE_PASS":
+			if ev.Value != "" {
+				t.Errorf("DATA_SOURCE_PASS is inlined (%q) — it must use secretKeyRef", ev.Value)
+			}
+			if ev.ValueFrom == nil || ev.ValueFrom.SecretKeyRef == nil ||
+				ev.ValueFrom.SecretKeyRef.Name != PostgresSecretName || ev.ValueFrom.SecretKeyRef.Key != PostgresPasswordKey {
+				t.Errorf("DATA_SOURCE_PASS valueFrom = %+v, want secretKeyRef into %s/%s", ev.ValueFrom, PostgresSecretName, PostgresPasswordKey)
+			}
+			sawPassRef = true
+		}
+		if pw != "" && ev.Value == pw {
+			t.Errorf("exporter env %q inlines the generated superuser password", ev.Name)
+		}
+	}
+	if !sawUser || !sawPassRef {
+		t.Errorf("exporter env missing DATA_SOURCE_USER and/or DATA_SOURCE_PASS secretKeyRef: %+v", exp.Env)
+	}
+
+	// DeleteAddon removes the init ConfigMap too.
+	if err := a.DeleteAddon(ctx, "burrow-postgres"); err != nil {
+		t.Fatalf("DeleteAddon: %v", err)
+	}
+	if _, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, PostgresInitConfigMap, metav1.GetOptions{}); err == nil {
+		t.Error("the init configmap should be removed on uninstall")
+	}
+}
+
+// TestMetricsCollectorDiscoversAppAndAddonNamespaces asserts vmagent's scrape config discovers pods
+// in both the app namespace and the add-on namespace, so the always-on Postgres exporter is scraped
+// whichever add-on is installed first (ADR-0051).
+func TestMetricsCollectorDiscoversAppAndAddonNamespaces(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(&corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: vmagentServiceAccount, Namespace: addonNS},
+	})
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
+	if _, err := a.DeployAddon(ctx, spec); err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+	cm, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("collector config: %v", err)
+	}
+	scrape := cm.Data["scrape.yml"]
+	if !strings.Contains(scrape, "names: [apps, "+addonNS+"]") {
+		t.Errorf("scrape config namespace list does not cover both app and add-on namespaces:\n%s", scrape)
+	}
+}
+
+// TestMetricsCollectorDedupesWhenNamespacesEqual asserts a single-namespace install lists that one
+// namespace once (no double-scrape) — the dedupe branch of scrapeNamespaces (ADR-0051).
+func TestMetricsCollectorDedupesWhenNamespacesEqual(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(&corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: vmagentServiceAccount, Namespace: addonNS},
+	})
+	a := New(client, addonNS).WithAddonNamespace(addonNS)
+	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
+	if _, err := a.DeployAddon(ctx, spec); err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+	cm, _ := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
+	scrape := cm.Data["scrape.yml"]
+	if !strings.Contains(scrape, "names: ["+addonNS+"]") {
+		t.Errorf("scrape config should list the single namespace once:\n%s", scrape)
+	}
+	if strings.Count(scrape, addonNS) != 1 {
+		t.Errorf("namespace %q appears %d times, want exactly once (deduped):\n%s", addonNS, strings.Count(scrape, addonNS), scrape)
+	}
+}
+
 // TestProvisionerRejectsBadIdentifiers asserts both EnsureAppDatabase and DropAppDatabase reject
 // SQL-injection-shaped and malformed names as ErrInvalid BEFORE any connection/SQL (ADR-0031).
 func TestProvisionerRejectsBadIdentifiers(t *testing.T) {

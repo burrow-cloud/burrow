@@ -4,10 +4,13 @@
 # (which has the kubeconfig) applies this before calling the install API. Server-side apply is
 # idempotent, so re-running install re-applies it harmlessly.
 #
-# vmagent (the metrics add-on's scraper) needs read-only pod discovery in the app namespace. The
-# ServiceAccount lives in the add-on namespace (vmagent runs there), the Role grants nothing but
-# get/list/watch on pods, and the RoleBinding in the app namespace binds that Role to the
-# add-on-namespace ServiceAccount.
+# vmagent (the metrics add-on's scraper) needs read-only pod discovery in the app namespace (app-pod
+# metrics) AND in the add-on namespace (the Postgres add-on's always-on metrics exporter, and any
+# future exporting add-on — ADR-0051). The ServiceAccount lives in the add-on namespace (vmagent runs
+# there), each Role grants nothing but get/list/watch on pods, and each RoleBinding binds that Role to
+# the add-on-namespace ServiceAccount. When the app and add-on namespaces are the same, the app-
+# namespace Role already covers the add-on namespace, so the add-on-namespace Role/RoleBinding are
+# omitted to avoid applying two identically-named Roles in one namespace.
 #
 # .AddonNamespace is where add-ons (and vmagent) run; .AppNamespace is where app pods are discovered.
 apiVersion: v1
@@ -39,3 +42,29 @@ subjects:
   - kind: ServiceAccount
     name: burrow-vmagent
     namespace: {{.AddonNamespace}}
+{{- if ne .AppNamespace .AddonNamespace}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burrow-vmagent
+  namespace: {{.AddonNamespace}}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burrow-vmagent
+  namespace: {{.AddonNamespace}}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: burrow-vmagent
+subjects:
+  - kind: ServiceAccount
+    name: burrow-vmagent
+    namespace: {{.AddonNamespace}}
+{{- end}}

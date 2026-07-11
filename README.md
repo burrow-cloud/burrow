@@ -71,6 +71,8 @@ Building something new, or adding a capability? Ask your agent to stand up a bac
 
 Available today: **Postgres** (a cluster-shared database), **logs** (VictoriaLogs), **metrics** (VictoriaMetrics), and **cache** (ValKey).
 
+Postgres always exports its own metrics, so once you install the metrics addon your database is scraped automatically (connection and transaction health plus `pg_stat_statements` slow-query stats) — install the two in either order. Now when a page feels slow the agent can rule the database in or out instead of guessing.
+
 By default the agent asks before standing anything up: it proposes, you approve. Make it hands-off with `burrow guard set addon.install allow`, or install it yourself with `burrow addon install postgres`.
 
 Want an addon we do not have yet? [Request one](https://github.com/burrow-cloud/burrow/issues/new?labels=addon).

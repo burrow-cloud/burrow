@@ -148,6 +148,37 @@ func (d *Database) AutoDeployReason(ctx context.Context, app, env string) (strin
 	return d.reason[app][env], nil
 }
 
+// AutoDeployCandidates returns the distinct (app, environment) pairs that have at least one recorded
+// release, ordered by app then environment for a deterministic reconcile order — the set the
+// pull-based watcher may reconcile (ADR-0052 Phase 4b). An empty stored Environment reads as the
+// canonical "default", matching LatestRelease.
+func (d *Database) AutoDeployCandidates(ctx context.Context) ([]controlplane.AppEnvRef, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAutoDeployCandidates]; err != nil {
+		return nil, err
+	}
+	seen := make(map[controlplane.AppEnvRef]bool)
+	for _, r := range d.byID {
+		env := r.Environment
+		if env == "" {
+			env = controlplane.DefaultEnvironment
+		}
+		seen[controlplane.AppEnvRef{App: r.App, Env: env}] = true
+	}
+	out := make([]controlplane.AppEnvRef, 0, len(seen))
+	for ref := range seen {
+		out = append(out, ref)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].App != out[j].App {
+			return out[i].App < out[j].App
+		}
+		return out[i].Env < out[j].Env
+	})
+	return out, nil
+}
+
 // SetError makes op return err until cleared with SetError(op, nil).
 func (d *Database) SetError(op Op, err error) {
 	d.mu.Lock()

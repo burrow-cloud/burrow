@@ -38,6 +38,14 @@ const (
 // a breaking major (ADR-0052 §2). Auto-deploy is on by default; set an app to off to disable it.
 const DefaultAutoDeployLevel = AutoDeployMinor
 
+// AppEnvRef names one (app, environment) pair — a unit the pull-based watcher reconciles
+// (ADR-0052 Phase 4b). Env is the canonical environment name (the reserved "default" for the
+// implicit default environment).
+type AppEnvRef struct {
+	App string `json:"app"`
+	Env string `json:"env"`
+}
+
 // Valid reports whether l is a known auto-deploy level.
 func (l AutoDeployLevel) Valid() bool {
 	switch l {

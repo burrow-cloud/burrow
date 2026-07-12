@@ -240,7 +240,41 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	apiHandler.Store(&handler)
 	ready.Store(true)
 	log.Printf("burrowd %s ready", version)
+
+	// Start the pull-based passive-deploy watcher (ADR-0052 Phase 4b): it polls the registry for new
+	// in-scope tags and drives the same guarded deploy an explicit call runs. It is outbound-only and
+	// optional — with no registry seam or a non-positive interval it does nothing. A non-positive
+	// BURROW_AUTODEPLOY_INTERVAL turns the watcher off entirely, leaving the explicit deploy as the
+	// only path (ADR-0052 §7). It runs for the life of the process on ctx.
+	interval := autoDeployInterval()
+	if interval < 0 {
+		log.Printf("burrowd: auto-deploy poller disabled (BURROW_AUTODEPLOY_INTERVAL <= 0)")
+	} else {
+		poller := engine.NewAutoDeployPoller(controlplane.AutoDeployConfig{Interval: interval})
+		go poller.Run(ctx)
+	}
 	return nil
+}
+
+// autoDeployInterval reads the auto-deploy poll cadence from BURROW_AUTODEPLOY_INTERVAL, a Go
+// duration (e.g. "5m", "30s"). It returns 0 when unset — the poller applies its conservative
+// default (~5 min, ADR-0052 §7) — and a negative sentinel when set to a non-positive value, which
+// turns the watcher off. An unparseable value is a non-fatal misconfiguration: it logs and falls
+// back to the default.
+func autoDeployInterval() time.Duration {
+	v := strings.TrimSpace(os.Getenv("BURROW_AUTODEPLOY_INTERVAL"))
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Printf("burrowd: ignoring invalid BURROW_AUTODEPLOY_INTERVAL %q: %v", v, err)
+		return 0
+	}
+	if d <= 0 {
+		return -1 // an explicit off
+	}
+	return d
 }
 
 // serve runs the HTTP server and shuts it down gracefully on SIGINT/SIGTERM.

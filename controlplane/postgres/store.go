@@ -338,6 +338,32 @@ func (s *Store) AutoDeployReason(ctx context.Context, app, env string) (string, 
 	return reason, nil
 }
 
+// AutoDeployCandidates returns the distinct (app, environment) pairs that have at least one recorded
+// release — the set the pull-based watcher may reconcile (ADR-0052 Phase 4b). Auto-deploy is on by
+// default, so candidacy is "has a running release" (a version to compare a registry tag against),
+// not "has an app_autodeploy row"; the poller reads each pair's level and skips those set to off.
+// Rows are ordered by app then environment for a deterministic reconcile order.
+func (s *Store) AutoDeployCandidates(ctx context.Context) ([]controlplane.AppEnvRef, error) {
+	const q = `SELECT DISTINCT app, environment FROM releases ORDER BY app, environment`
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: auto-deploy candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []controlplane.AppEnvRef
+	for rows.Next() {
+		var ref controlplane.AppEnvRef
+		if err := rows.Scan(&ref.App, &ref.Env); err != nil {
+			return nil, fmt.Errorf("postgres: auto-deploy candidates: %w", err)
+		}
+		out = append(out, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: auto-deploy candidates: %w", err)
+	}
+	return out, nil
+}
+
 // auditColumns is the audit_log projection in a stable order shared by the scanner.
 const auditColumns = `id, ts, operation, target, args, guardrail_code, disposition, outcome, result, caller, principal, client_version`
 

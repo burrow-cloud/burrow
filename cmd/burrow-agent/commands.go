@@ -57,6 +57,7 @@ func newRootCmd() *cobra.Command {
 		newAppsCmd(),
 		newStatusCmd(),
 		newHistoryCmd(),
+		newNextTagCmd(),
 		newLogsCmd(),
 		newConfigCmd(),
 		newSecretCmd(),
@@ -154,6 +155,29 @@ func newHistoryCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
 				return c.History(ctx, args[0], env)
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	return cmd
+}
+
+// newNextTagCmd suggests the app's next semver release tags from its current running tag (ADR-0052 §8).
+// It turns "please use semver" into concrete numbers the agent applies to its build: the current tag
+// plus the next patch/minor/major. It is READ-ONLY guidance — it reads the running tag the control
+// plane already knows and computes nothing on the cluster — so it funnels through withClient and
+// prints JSON like the other read verbs. A missing release or a non-semver current tag degrades to a
+// note rather than erroring (ADR-0040), so the agent always gets a usable answer.
+func newNextTagCmd() *cobra.Command {
+	o := &connOpts{}
+	cmd := &cobra.Command{
+		Use:   "next-tag <app>",
+		Short: "Suggest the next semver release tag (patch/minor/major) from the app's current running tag",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.NextTag(ctx, args[0], env)
 			})
 		},
 	}

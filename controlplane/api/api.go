@@ -63,6 +63,9 @@ func New(cfg Config) (http.Handler, error) {
 	// verb — burrow-agent may read the level but not change it.
 	v1.HandleFunc("GET /v1/apps/{app}/auto-deploy", s.getAutoDeploy)
 	v1.HandleFunc("PUT /v1/apps/{app}/auto-deploy", s.setAutoDeploy)
+	// next-tag suggests the app's next semver release tags from its current running tag (ADR-0052 §8).
+	// It is read-only guidance the agent applies to its own build; there is no mutating counterpart.
+	v1.HandleFunc("GET /v1/apps/{app}/next-tag", s.nextTag)
 	v1.HandleFunc("POST /v1/apps/{app}/scale", s.scale)
 	// run executes a one-off command in the app's own current image and environment (ADR-0048).
 	v1.HandleFunc("POST /v1/apps/{app}/run", s.run)
@@ -505,6 +508,19 @@ func (s *server) setAutoDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, autoDeployResponse{App: app, Env: envName(env), Level: string(effective)})
+}
+
+// nextTag returns the app's suggested next semver release tags from its current running tag
+// (ADR-0052 §8): the current tag plus the next patch/minor/major. It is read-only guidance the agent
+// applies to its build. A missing release or a non-semver current tag degrades to a note with no
+// suggestion and never errors the call, keeping this guidance best-effort (ADR-0040).
+func (s *server) nextTag(w http.ResponseWriter, r *http.Request) {
+	res, err := s.engine.NextTag(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // envName canonicalizes an environment name for a response body: an empty name reads as the reserved

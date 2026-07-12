@@ -208,6 +208,89 @@ func (e *Engine) AutoDeployStatus(ctx context.Context, app, env string) (AutoDep
 	return status, nil
 }
 
+// NextTags are the suggested next release tags after a current semver tag (ADR-0052 §8): the next
+// patch, minor, and major version, each preserving the current tag's leading "v" style. They turn
+// "please use semver" into concrete numbers the agent applies to its build.
+type NextTags struct {
+	Patch string `json:"patch"`
+	Minor string `json:"minor"`
+	Major string `json:"major"`
+}
+
+// NextTagResult is the read-only suggestion of an app's next semver release tags in one environment
+// (ADR-0052 §8). Current is the app's running tag; Next carries the suggested patch/minor/major tags
+// when that tag is stable semver. When there is no running release or the current tag is not semver,
+// Next is nil and Note carries a short human reason — this degrades gracefully rather than erroring
+// (ADR-0040), matching how AutoDeployStatus reports Checked=false with a Note.
+type NextTagResult struct {
+	App     string    `json:"app"`
+	Env     string    `json:"env"`
+	Current string    `json:"current,omitempty"`
+	Next    *NextTags `json:"next,omitempty"`
+	Note    string    `json:"note,omitempty"`
+}
+
+// NextTag suggests the next semver release tags for app in env, read from its current running tag
+// (ADR-0052 §8). It reads the current tag exactly as AutoDeployStatus does (the latest release's
+// image), and when that tag parses as stable semver returns the next patch, minor, and major tags.
+// A missing release or a non-semver current tag degrades to a Note with no suggestion and no error,
+// so the guidance is best-effort and never blocks the agent (ADR-0040). It changes nothing.
+func (e *Engine) NextTag(ctx context.Context, app, env string) (NextTagResult, error) {
+	if err := (App{Name: app}).Validate(); err != nil {
+		return NextTagResult{}, fmt.Errorf("next tag: %w: %w", ErrInvalid, err)
+	}
+	if _, err := e.resolveNamespace(ctx, env); err != nil {
+		return NextTagResult{}, fmt.Errorf("next tag %s: %w", app, err)
+	}
+	res := NextTagResult{App: app, Env: envName(env)}
+	rel, err := e.db.LatestRelease(ctx, app, envName(env))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			res.Note = "no running release yet; deploy a major.minor.patch tag to enable a suggestion"
+			return res, nil
+		}
+		return NextTagResult{}, fmt.Errorf("next tag %s: reading current release: %w", app, err)
+	}
+	res.Current = imageTag(rel.Image)
+	patch, minor, major, ok := nextSemverTags(res.Current)
+	if !ok {
+		res.Note = fmt.Sprintf("current tag %q is not semver; tag releases major.minor.patch to enable a suggestion", res.Current)
+		return res, nil
+	}
+	res.Next = &NextTags{Patch: patch, Minor: minor, Major: major}
+	return res, nil
+}
+
+// nextSemverTags computes the next patch, minor, and major release tags after a current tag, or
+// ok=false when current is not a stable semver tag (ADR-0052 §8). The suggestions preserve the
+// current tag's leading "v" style (a "v1.2.3" suggests "v1.2.4"; a "1.2.3" suggests "1.2.4") so they
+// match the app's own convention, and they are always three-part (a "1.2" tag suggests "1.2.1").
+func nextSemverTags(current string) (patch, minor, major string, ok bool) {
+	canon := stableSemver(current)
+	if canon == "" {
+		return "", "", "", false
+	}
+	// canon is "vMAJOR.MINOR.PATCH": stable (no prerelease), with build metadata dropped.
+	var maj, min, pat int
+	if _, err := fmt.Sscanf(canon, "v%d.%d.%d", &maj, &min, &pat); err != nil {
+		return "", "", "", false
+	}
+	prefix := ""
+	if strings.HasPrefix(current, "v") {
+		prefix = "v"
+	}
+	patch = fmt.Sprintf("%s%d.%d.%d", prefix, maj, min, pat+1)
+	minor = fmt.Sprintf("%s%d.%d.0", prefix, maj, min+1)
+	major = fmt.Sprintf("%s%d.0.0", prefix, maj+1)
+	return patch, minor, major, true
+}
+
+// nonSemverDeployHint is the non-blocking hint attached to a deploy result when the deployed image's
+// tag does not parse as stable semver (ADR-0052 §8). It nudges toward semver without gating the
+// deploy: any reference still deploys (ADR-0007), it just does not get auto-update until it adopts
+// semver.
+const nonSemverDeployHint = "auto-update cannot classify this tag: it is not semver. Tag releases major.minor.patch (never a bare git SHA or latest) so Burrow can auto-deploy new versions of this app safely."
+
 // imageTag extracts the tag from a pullable image reference (e.g. "1.2.3" from
 // "ghcr.io/user/app:1.2.3"), or "" when the reference carries no tag. A digest reference
 // (repo@sha256:...) has its digest stripped first; the tag is the last ':'-separated segment after

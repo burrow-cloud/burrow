@@ -79,7 +79,13 @@ func newAutoDeployCmd() *cobra.Command {
 // registry upgrade check could not run, it reports the level with a short note instead.
 func autoDeployShowHuman(res client.AutoDeployResult) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: auto-deploy %s in environment %q", res.App, res.Level, res.Env)
+	// When the safety stop turned auto-deploy off (a rollback or a manual downgrade), show the reason
+	// next to the off level (ADR-0052 §5), e.g. "auto-deploy off (disabled by rollback)".
+	if res.Level == "off" && res.DisabledReason != "" {
+		fmt.Fprintf(&b, "%s: auto-deploy off (%s) in environment %q", res.App, res.DisabledReason, res.Env)
+	} else {
+		fmt.Fprintf(&b, "%s: auto-deploy %s in environment %q", res.App, res.Level, res.Env)
+	}
 	if res.Current != "" {
 		fmt.Fprintf(&b, "\n  running: %s", res.Current)
 	}

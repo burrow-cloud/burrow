@@ -77,27 +77,32 @@ func TestStoreSaveAndQuery(t *testing.T) {
 		t.Fatalf("Release(r1) = %+v, err=%v", got, err)
 	}
 
-	latest, err := s.LatestRelease(ctx, app)
+	latest, err := s.LatestRelease(ctx, app, "default")
 	if err != nil || latest.ID != r2.ID {
 		t.Fatalf("LatestRelease = %+v, err=%v, want %s", latest, err, r2.ID)
 	}
 
-	all, err := s.Releases(ctx, app)
+	all, err := s.Releases(ctx, app, "default")
 	if err != nil || len(all) != 2 || all[0].ID != r1.ID || all[1].ID != r2.ID {
 		t.Fatalf("Releases = %+v, err=%v, want [%s %s] oldest first", all, err, r1.ID, r2.ID)
 	}
 	if all[1].Supersedes != r1.ID {
 		t.Errorf("r2.Supersedes = %q, want %q", all[1].Supersedes, r1.ID)
 	}
+	// A save with no Environment reads back under the canonical default environment (the migration
+	// backfills existing rows and SaveRelease defaults an empty Environment to "default").
+	if latest.Environment != "default" {
+		t.Errorf("Environment = %q, want default (backfilled)", latest.Environment)
+	}
 
 	// Not-found cases map to controlplane.ErrNotFound.
 	if _, err := s.Release(ctx, t.Name()+"-missing"); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("Release(missing) err = %v, want ErrNotFound", err)
 	}
-	if _, err := s.LatestRelease(ctx, t.Name()+"-nobody"); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := s.LatestRelease(ctx, t.Name()+"-nobody", "default"); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("LatestRelease(nobody) err = %v, want ErrNotFound", err)
 	}
-	if none, err := s.Releases(ctx, t.Name()+"-nobody"); err != nil || len(none) != 0 {
+	if none, err := s.Releases(ctx, t.Name()+"-nobody", "default"); err != nil || len(none) != 0 {
 		t.Errorf("Releases(nobody) = %+v, err=%v, want empty", none, err)
 	}
 }
@@ -119,7 +124,7 @@ func TestStoreOverwriteKeepsOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	all, err := s.Releases(ctx, app)
+	all, err := s.Releases(ctx, app, "default")
 	if err != nil || len(all) != 2 || all[0].ID != id1 || all[1].ID != id2 {
 		t.Fatalf("Releases after overwrite = %+v (err=%v), want [%s %s]", all, err, id1, id2)
 	}
@@ -147,7 +152,7 @@ func TestStoreListReleases(t *testing.T) {
 	}
 
 	// Newest first: r3, r2, r1 — the reverse of Releases' oldest-first order.
-	got, err := s.ListReleases(ctx, app)
+	got, err := s.ListReleases(ctx, app, "default")
 	if err != nil || len(got) != 3 || got[0].ID != r3.ID || got[1].ID != r2.ID || got[2].ID != r1.ID {
 		t.Fatalf("ListReleases = %+v, err=%v, want [%s %s %s] newest first", got, err, r3.ID, r2.ID, r1.ID)
 	}
@@ -156,11 +161,11 @@ func TestStoreListReleases(t *testing.T) {
 	}
 
 	// Per-app isolation: the other app's timeline holds only its own release.
-	if oth, err := s.ListReleases(ctx, other); err != nil || len(oth) != 1 || oth[0].ID != o1.ID {
+	if oth, err := s.ListReleases(ctx, other, "default"); err != nil || len(oth) != 1 || oth[0].ID != o1.ID {
 		t.Errorf("ListReleases(other) = %+v, err=%v, want just %s", oth, err, o1.ID)
 	}
 	// An app with no releases yields an empty slice and no error.
-	if none, err := s.ListReleases(ctx, t.Name()+"-nobody"); err != nil || len(none) != 0 {
+	if none, err := s.ListReleases(ctx, t.Name()+"-nobody", "default"); err != nil || len(none) != 0 {
 		t.Errorf("ListReleases(nobody) = %+v, err=%v, want empty", none, err)
 	}
 }
@@ -181,12 +186,118 @@ func TestStoreDeleteReleases(t *testing.T) {
 	if err := s.DeleteReleases(ctx, app); err != nil {
 		t.Fatalf("DeleteReleases: %v", err)
 	}
-	if all, err := s.Releases(ctx, app); err != nil || len(all) != 0 {
+	if all, err := s.Releases(ctx, app, "default"); err != nil || len(all) != 0 {
 		t.Fatalf("Releases after delete = %+v (err=%v), want empty", all, err)
 	}
 	// Deleting again (no releases) is a no-op.
 	if err := s.DeleteReleases(ctx, app); err != nil {
 		t.Errorf("DeleteReleases on empty: %v", err)
+	}
+}
+
+// TestStoreReleasesPerEnvironment proves releases are keyed per (app, environment) in the store: the
+// same app saved in staging and prod reads back isolated per environment, and the not-found LatestRelease
+// respects the environment (ADR-0052 Phase 4a).
+func TestStoreReleasesPerEnvironment(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-web"
+
+	staging := cp.Release{ID: t.Name() + "-s1", App: app, Environment: "staging", Image: "img:1", Status: cp.ReleaseDeployed}
+	prod1 := cp.Release{ID: t.Name() + "-p1", App: app, Environment: "prod", Image: "img:1", Status: cp.ReleaseSuperseded}
+	prod2 := cp.Release{ID: t.Name() + "-p2", App: app, Environment: "prod", Image: "img:2", Supersedes: prod1.ID, Status: cp.ReleaseDeployed}
+	for _, r := range []cp.Release{staging, prod1, prod2} {
+		if err := s.SaveRelease(ctx, r); err != nil {
+			t.Fatalf("SaveRelease(%s): %v", r.ID, err)
+		}
+	}
+
+	// prod has two releases; LatestRelease/Releases/ListReleases return only prod's rows.
+	if latest, err := s.LatestRelease(ctx, app, "prod"); err != nil || latest.ID != prod2.ID {
+		t.Fatalf("LatestRelease(prod) = %+v, err=%v, want %s", latest, err, prod2.ID)
+	}
+	if all, err := s.Releases(ctx, app, "prod"); err != nil || len(all) != 2 || all[0].ID != prod1.ID || all[1].ID != prod2.ID {
+		t.Fatalf("Releases(prod) = %+v, err=%v, want [%s %s]", all, err, prod1.ID, prod2.ID)
+	}
+	if list, err := s.ListReleases(ctx, app, "prod"); err != nil || len(list) != 2 || list[0].ID != prod2.ID {
+		t.Fatalf("ListReleases(prod) = %+v, err=%v, want prod2 newest", list, err)
+	}
+	// staging has exactly one, isolated from prod.
+	if all, err := s.Releases(ctx, app, "staging"); err != nil || len(all) != 1 || all[0].ID != staging.ID {
+		t.Fatalf("Releases(staging) = %+v, err=%v, want [%s]", all, err, staging.ID)
+	}
+	// An environment with no rows for this app: empty list, ErrNotFound from LatestRelease.
+	if all, err := s.Releases(ctx, app, "default"); err != nil || len(all) != 0 {
+		t.Fatalf("Releases(default) = %+v, err=%v, want empty", all, err)
+	}
+	if _, err := s.LatestRelease(ctx, app, "default"); !errors.Is(err, cp.ErrNotFound) {
+		t.Fatalf("LatestRelease(default) err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestStoreReleaseProvenance proves the deploy-record provenance fields round-trip: an auto deploy
+// carries its trigger, level, and tag, and a manual deploy (empty Trigger) reads back as "manual"
+// (ADR-0052 §5).
+func TestStoreReleaseProvenance(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-web"
+
+	auto := cp.Release{
+		ID: t.Name() + "-a1", App: app, Environment: "default", Image: "img:1.3.0",
+		Status: cp.ReleaseDeployed, Trigger: cp.TriggerAuto, AutoLevel: cp.AutoDeployMinor, AutoTag: "1.3.0",
+	}
+	manual := cp.Release{ID: t.Name() + "-m1", App: app, Environment: "default", Image: "img:1.2.0", Status: cp.ReleaseDeployed}
+	for _, r := range []cp.Release{auto, manual} {
+		if err := s.SaveRelease(ctx, r); err != nil {
+			t.Fatalf("SaveRelease(%s): %v", r.ID, err)
+		}
+	}
+
+	gotAuto, err := s.Release(ctx, auto.ID)
+	if err != nil {
+		t.Fatalf("Release(auto): %v", err)
+	}
+	if gotAuto.Trigger != cp.TriggerAuto || gotAuto.AutoLevel != cp.AutoDeployMinor || gotAuto.AutoTag != "1.3.0" {
+		t.Errorf("auto provenance = trigger %q level %q tag %q, want auto/minor/1.3.0", gotAuto.Trigger, gotAuto.AutoLevel, gotAuto.AutoTag)
+	}
+	// A manual deploy saved with an empty Trigger defaults to "manual" and carries no auto fields.
+	gotManual, err := s.Release(ctx, manual.ID)
+	if err != nil {
+		t.Fatalf("Release(manual): %v", err)
+	}
+	if gotManual.Trigger != cp.TriggerManual || gotManual.AutoLevel != "" || gotManual.AutoTag != "" {
+		t.Errorf("manual provenance = trigger %q level %q tag %q, want manual and no auto fields", gotManual.Trigger, gotManual.AutoLevel, gotManual.AutoTag)
+	}
+}
+
+// TestStoreDisableAutoDeploy exercises the rollback/downgrade safety stop against a real database:
+// DisableAutoDeploy sets the level to off with a reason, AutoDeployReason returns it, and
+// SetAutoDeployLevel (the human re-enable) clears it (ADR-0052 §5).
+func TestStoreDisableAutoDeploy(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-web"
+
+	if err := s.DisableAutoDeploy(ctx, app, "default", "disabled by rollback"); err != nil {
+		t.Fatalf("DisableAutoDeploy: %v", err)
+	}
+	if lvl, err := s.AutoDeployLevel(ctx, app, "default"); err != nil || lvl != cp.AutoDeployOff {
+		t.Fatalf("level after disable = %q, err=%v, want off", lvl, err)
+	}
+	if reason, err := s.AutoDeployReason(ctx, app, "default"); err != nil || reason != "disabled by rollback" {
+		t.Fatalf("reason = %q, err=%v, want disabled by rollback", reason, err)
+	}
+	// An environment with no row has no reason.
+	if reason, err := s.AutoDeployReason(ctx, app, "prod"); err != nil || reason != "" {
+		t.Fatalf("prod reason = %q, err=%v, want empty", reason, err)
+	}
+	// A human re-enable clears the reason.
+	if err := s.SetAutoDeployLevel(ctx, app, "default", cp.AutoDeployMinor); err != nil {
+		t.Fatalf("SetAutoDeployLevel: %v", err)
+	}
+	if reason, err := s.AutoDeployReason(ctx, app, "default"); err != nil || reason != "" {
+		t.Fatalf("reason after re-enable = %q, err=%v, want empty", reason, err)
 	}
 }
 

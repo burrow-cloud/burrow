@@ -466,15 +466,16 @@ func (s *server) getAutoDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, autoDeployResponse{
-		App:        st.App,
-		Env:        st.Env,
-		Level:      string(st.Level),
-		Repository: st.Repository,
-		Current:    st.Current,
-		Target:     st.Target,
-		Upgrade:    st.Upgrade,
-		Checked:    st.Checked,
-		Note:       st.Note,
+		App:            st.App,
+		Env:            st.Env,
+		Level:          string(st.Level),
+		Repository:     st.Repository,
+		Current:        st.Current,
+		Target:         st.Target,
+		Upgrade:        st.Upgrade,
+		Checked:        st.Checked,
+		Note:           st.Note,
+		DisabledReason: st.DisabledReason,
 	})
 }
 
@@ -921,6 +922,8 @@ type autoDeployResponse struct {
 	Upgrade    string `json:"upgrade,omitempty"`
 	Checked    bool   `json:"checked,omitempty"`
 	Note       string `json:"note,omitempty"`
+	// DisabledReason is why auto-deploy is off when the safety stop turned it off (ADR-0052 §5).
+	DisabledReason string `json:"disabled_reason,omitempty"`
 }
 
 // autoDeploySetRequest is the body of an auto-deploy set call (the app comes from the path, the

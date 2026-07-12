@@ -30,7 +30,10 @@ import (
 
 var _ controlplane.Database = (*Store)(nil)
 
-const columns = `id, app, image, digest, env, command, metrics_port, replicas, status, supersedes, created_at`
+// columns is the releases projection in a stable order shared by the INSERT, the scanner, and every
+// SELECT. `trigger` is a Postgres reserved word, so it is quoted here and everywhere it is read or
+// written (ADR-0052 §5).
+const columns = `id, app, image, digest, env, command, metrics_port, replicas, status, supersedes, created_at, environment, "trigger", auto_level, auto_tag`
 
 // Store is a Postgres-backed controlplane.Database.
 type Store struct {
@@ -68,6 +71,17 @@ func (s *Store) SaveRelease(ctx context.Context, r controlplane.Release) error {
 	if cmd == nil {
 		cmd = []string{}
 	}
+	// A release always stores a canonical environment and a trigger: an empty Environment is the
+	// implicit default environment, and an empty Trigger is a manual (explicit) deploy — the default
+	// for every deploy today (ADR-0052 §5).
+	environment := r.Environment
+	if environment == "" {
+		environment = controlplane.DefaultEnvironment
+	}
+	trigger := r.Trigger
+	if trigger == "" {
+		trigger = controlplane.TriggerManual
+	}
 	envJSON, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("postgres: save release %s: encoding env: %w", r.ID, err)
@@ -81,15 +95,17 @@ func (s *Store) SaveRelease(ctx context.Context, r controlplane.Release) error {
 	// stored as jsonb regardless of how the driver encodes a parameter.
 	const q = `
 INSERT INTO releases (` + columns + `)
-VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)
+VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 ON CONFLICT (id) DO UPDATE SET
     app = EXCLUDED.app, image = EXCLUDED.image, digest = EXCLUDED.digest,
     env = EXCLUDED.env, command = EXCLUDED.command, metrics_port = EXCLUDED.metrics_port,
     replicas = EXCLUDED.replicas, status = EXCLUDED.status, supersedes = EXCLUDED.supersedes,
-    created_at = EXCLUDED.created_at`
+    created_at = EXCLUDED.created_at, environment = EXCLUDED.environment,
+    "trigger" = EXCLUDED."trigger", auto_level = EXCLUDED.auto_level, auto_tag = EXCLUDED.auto_tag`
 
 	_, err = s.db.ExecContext(ctx, q,
-		r.ID, r.App, r.Image, r.Digest, string(envJSON), string(cmdJSON), r.MetricsPort, r.Replicas, string(r.Status), r.Supersedes, r.CreatedAt)
+		r.ID, r.App, r.Image, r.Digest, string(envJSON), string(cmdJSON), r.MetricsPort, r.Replicas, string(r.Status), r.Supersedes, r.CreatedAt,
+		environment, string(trigger), string(r.AutoLevel), r.AutoTag)
 	if err != nil {
 		return fmt.Errorf("postgres: save release %s: %w", r.ID, err)
 	}
@@ -108,23 +124,26 @@ func (s *Store) Release(ctx context.Context, id string) (controlplane.Release, e
 	return r, nil
 }
 
-func (s *Store) LatestRelease(ctx context.Context, app string) (controlplane.Release, error) {
-	const q = `SELECT ` + columns + ` FROM releases WHERE app = $1 ORDER BY seq DESC LIMIT 1`
-	r, err := scanRelease(s.db.QueryRowContext(ctx, q, app))
+// LatestRelease returns the most recently saved release for app in env, keyed per
+// (app, environment) — env is the canonical environment name (ADR-0052 Phase 4a).
+func (s *Store) LatestRelease(ctx context.Context, app, env string) (controlplane.Release, error) {
+	const q = `SELECT ` + columns + ` FROM releases WHERE app = $1 AND environment = $2 ORDER BY seq DESC LIMIT 1`
+	r, err := scanRelease(s.db.QueryRowContext(ctx, q, app, env))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return controlplane.Release{}, fmt.Errorf("postgres: latest release for app %q: %w", app, controlplane.ErrNotFound)
+			return controlplane.Release{}, fmt.Errorf("postgres: latest release for app %q in %q: %w", app, env, controlplane.ErrNotFound)
 		}
-		return controlplane.Release{}, fmt.Errorf("postgres: latest release for app %q: %w", app, err)
+		return controlplane.Release{}, fmt.Errorf("postgres: latest release for app %q in %q: %w", app, env, err)
 	}
 	return r, nil
 }
 
-func (s *Store) Releases(ctx context.Context, app string) ([]controlplane.Release, error) {
-	const q = `SELECT ` + columns + ` FROM releases WHERE app = $1 ORDER BY seq ASC`
-	rows, err := s.db.QueryContext(ctx, q, app)
+// Releases returns every release for app in env, oldest first, keyed per (app, environment).
+func (s *Store) Releases(ctx context.Context, app, env string) ([]controlplane.Release, error) {
+	const q = `SELECT ` + columns + ` FROM releases WHERE app = $1 AND environment = $2 ORDER BY seq ASC`
+	rows, err := s.db.QueryContext(ctx, q, app, env)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: releases for app %q: %w", app, err)
+		return nil, fmt.Errorf("postgres: releases for app %q in %q: %w", app, env, err)
 	}
 	defer rows.Close()
 
@@ -132,24 +151,24 @@ func (s *Store) Releases(ctx context.Context, app string) ([]controlplane.Releas
 	for rows.Next() {
 		r, err := scanRelease(rows)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: releases for app %q: %w", app, err)
+			return nil, fmt.Errorf("postgres: releases for app %q in %q: %w", app, env, err)
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: releases for app %q: %w", app, err)
+		return nil, fmt.Errorf("postgres: releases for app %q in %q: %w", app, env, err)
 	}
 	return out, nil
 }
 
-// ListReleases returns every release for app, newest first (by insertion order) — the deploy
-// timeline the history surface reads. It reads the same rows deploys write, ordered the opposite
-// way from Releases. Releases are recorded app-globally, so it selects by app just as Releases does.
-func (s *Store) ListReleases(ctx context.Context, app string) ([]controlplane.Release, error) {
-	const q = `SELECT ` + columns + ` FROM releases WHERE app = $1 ORDER BY seq DESC`
-	rows, err := s.db.QueryContext(ctx, q, app)
+// ListReleases returns every release for app in env, newest first (by insertion order) — the deploy
+// timeline the history surface reads. It reads the same rows deploys write, ordered the opposite way
+// from Releases. Releases are keyed per (app, environment) (ADR-0052 Phase 4a), so it selects by both.
+func (s *Store) ListReleases(ctx context.Context, app, env string) ([]controlplane.Release, error) {
+	const q = `SELECT ` + columns + ` FROM releases WHERE app = $1 AND environment = $2 ORDER BY seq DESC`
+	rows, err := s.db.QueryContext(ctx, q, app, env)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list releases for app %q: %w", app, err)
+		return nil, fmt.Errorf("postgres: list releases for app %q in %q: %w", app, env, err)
 	}
 	defer rows.Close()
 
@@ -157,12 +176,12 @@ func (s *Store) ListReleases(ctx context.Context, app string) ([]controlplane.Re
 	for rows.Next() {
 		r, err := scanRelease(rows)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: list releases for app %q: %w", app, err)
+			return nil, fmt.Errorf("postgres: list releases for app %q in %q: %w", app, env, err)
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: list releases for app %q: %w", app, err)
+		return nil, fmt.Errorf("postgres: list releases for app %q in %q: %w", app, env, err)
 	}
 	return out, nil
 }
@@ -275,18 +294,48 @@ func (s *Store) AutoDeployLevel(ctx context.Context, app, env string) (controlpl
 	return controlplane.AutoDeployLevel(level), nil
 }
 
-// SetAutoDeployLevel upserts app's auto-deploy level in env, keyed by (app, environment).
+// SetAutoDeployLevel upserts app's auto-deploy level in env, keyed by (app, environment). It CLEARS
+// any stored disable reason: a human setting the level (the re-enable path) removes the rollback or
+// downgrade note, because re-enabling is a deliberate human action (ADR-0052 §5).
 func (s *Store) SetAutoDeployLevel(ctx context.Context, app, env string, level controlplane.AutoDeployLevel) error {
 	if !level.Valid() {
 		return fmt.Errorf("postgres: set auto-deploy level for %q in %q: invalid level %q", app, env, level)
 	}
 	const q = `
-INSERT INTO app_autodeploy (app, environment, level) VALUES ($1, $2, $3)
-ON CONFLICT (app, environment) DO UPDATE SET level = EXCLUDED.level`
+INSERT INTO app_autodeploy (app, environment, level, reason) VALUES ($1, $2, $3, '')
+ON CONFLICT (app, environment) DO UPDATE SET level = EXCLUDED.level, reason = ''`
 	if _, err := s.db.ExecContext(ctx, q, app, env, string(level)); err != nil {
 		return fmt.Errorf("postgres: set auto-deploy level for %q in %q: %w", app, env, err)
 	}
 	return nil
+}
+
+// DisableAutoDeploy sets app's auto-deploy level in env to off and records why (e.g. "disabled by
+// rollback") — the safety stop of ADR-0052 §5, so the watcher does not fight a deliberate downgrade.
+// It is keyed by (app, environment) and upserts, overwriting any prior level and reason.
+func (s *Store) DisableAutoDeploy(ctx context.Context, app, env, reason string) error {
+	const q = `
+INSERT INTO app_autodeploy (app, environment, level, reason) VALUES ($1, $2, 'off', $3)
+ON CONFLICT (app, environment) DO UPDATE SET level = 'off', reason = EXCLUDED.reason`
+	if _, err := s.db.ExecContext(ctx, q, app, env, reason); err != nil {
+		return fmt.Errorf("postgres: disable auto-deploy for %q in %q: %w", app, env, err)
+	}
+	return nil
+}
+
+// AutoDeployReason returns the stored disable reason for app in env, or "" when the level was
+// human-set or is the default (no row) — the reason surfaced next to an off level (ADR-0052 §5).
+func (s *Store) AutoDeployReason(ctx context.Context, app, env string) (string, error) {
+	const q = `SELECT reason FROM app_autodeploy WHERE app = $1 AND environment = $2`
+	var reason string
+	err := s.db.QueryRowContext(ctx, q, app, env).Scan(&reason)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("postgres: auto-deploy reason for %q in %q: %w", app, env, err)
+	}
+	return reason, nil
 }
 
 // auditColumns is the audit_log projection in a stable order shared by the scanner.
@@ -454,8 +503,10 @@ func scanRelease(sc scanner) (controlplane.Release, error) {
 		cmdJSON []byte
 		status  string
 		created time.Time
+		trigger string
+		autoLvl string
 	)
-	if err := sc.Scan(&r.ID, &r.App, &r.Image, &r.Digest, &envJSON, &cmdJSON, &r.MetricsPort, &r.Replicas, &status, &r.Supersedes, &created); err != nil {
+	if err := sc.Scan(&r.ID, &r.App, &r.Image, &r.Digest, &envJSON, &cmdJSON, &r.MetricsPort, &r.Replicas, &status, &r.Supersedes, &created, &r.Environment, &trigger, &autoLvl, &r.AutoTag); err != nil {
 		return controlplane.Release{}, err
 	}
 	if err := json.Unmarshal(envJSON, &r.Env); err != nil {
@@ -466,5 +517,7 @@ func scanRelease(sc scanner) (controlplane.Release, error) {
 	}
 	r.Status = controlplane.ReleaseStatus(status)
 	r.CreatedAt = created
+	r.Trigger = controlplane.ReleaseTrigger(trigger)
+	r.AutoLevel = controlplane.AutoDeployLevel(autoLvl)
 	return r, nil
 }

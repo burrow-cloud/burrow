@@ -99,6 +99,30 @@ func (s ReleaseStatus) Valid() bool {
 	}
 }
 
+// ReleaseTrigger records how a deploy was triggered — its provenance (ADR-0052 §5), so the
+// deploy record and audit log distinguish an explicit deploy from an unattended auto-update.
+type ReleaseTrigger string
+
+const (
+	// TriggerManual is an explicit deploy driven by a human or an agent through the CLI or the
+	// control-plane API. It is the default for every deploy today: nothing auto-deploys until the
+	// Phase 4b watcher lands.
+	TriggerManual ReleaseTrigger = "manual"
+	// TriggerAuto is an unattended deploy the pull-based passive watcher performed on its own
+	// (ADR-0052 §1). An auto release also records the level that applied and the tag it took.
+	TriggerAuto ReleaseTrigger = "auto"
+)
+
+// Valid reports whether t is a known release trigger.
+func (t ReleaseTrigger) Valid() bool {
+	switch t {
+	case TriggerManual, TriggerAuto:
+		return true
+	default:
+		return false
+	}
+}
+
 // Release is one immutable deploy of an App: the unit recorded in the deploy history
 // and the handle rollback redeploys. It captures exactly what was asked for — the
 // pullable image, the resolved digest, and the small metadata that travels over MCP
@@ -109,6 +133,10 @@ type Release struct {
 	ID string `json:"id"`
 	// App is the name of the App this release belongs to.
 	App string `json:"app"`
+	// Environment is the canonical environment this release was deployed into (ADR-0052 §5):
+	// a named environment, or "default" for the implicit default environment. Releases are
+	// keyed per (app, environment), so an app can have an independent history in each.
+	Environment string `json:"environment,omitempty"`
 	// Image is the pullable container image reference the deploy named (ADR-0007).
 	Image string `json:"image"`
 	// Digest is the content digest of the running Image, when known (e.g. "sha256:...").
@@ -131,6 +159,16 @@ type Release struct {
 	// Supersedes is the ID of the release this one replaced, if any — the chain that
 	// lets rollback walk back to a prior known-good release.
 	Supersedes string `json:"supersedes,omitempty"`
+	// Trigger is how this deploy was triggered (ADR-0052 §5): "manual" for an explicit CLI or
+	// agent deploy — the default for every deploy today — or "auto" for the pull-based passive
+	// watcher (Phase 4b). Empty on rows written before provenance existed.
+	Trigger ReleaseTrigger `json:"trigger,omitempty"`
+	// AutoLevel is the auto-deploy level that applied when the watcher took this release
+	// (ADR-0052 §5). Set only for an auto trigger; empty for a manual deploy.
+	AutoLevel AutoDeployLevel `json:"auto_level,omitempty"`
+	// AutoTag is the resolved tag the watcher moved to when it took this release (ADR-0052 §5).
+	// Set only for an auto trigger; empty for a manual deploy.
+	AutoTag string `json:"auto_tag,omitempty"`
 	// CreatedAt is when the control plane recorded this release, read from the
 	// injected clock (never from ambient time).
 	CreatedAt time.Time `json:"created_at"`

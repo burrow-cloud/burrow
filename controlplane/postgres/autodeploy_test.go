@@ -63,3 +63,48 @@ func TestStoreAutoDeployLevel(t *testing.T) {
 		t.Fatalf("SetAutoDeployLevel with invalid level should error")
 	}
 }
+
+// TestStoreAutoDeployCandidates proves the poller's candidate enumeration against a real database
+// (ADR-0052 Phase 4b): it returns the distinct (app, environment) pairs that have a recorded release
+// — regardless of whether an app_autodeploy row exists, since auto-deploy is on by default — and
+// includes the queried pairs.
+func TestStoreAutoDeployCandidates(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-web"
+	api := t.Name() + "-api"
+
+	// Two apps: web has two releases in default (one distinct pair) and one in prod; api has one in
+	// default. Distinct pairs: (web, default), (web, prod), (api, default).
+	rels := []cp.Release{
+		{ID: app + "-r1", App: app, Image: "ghcr.io/u/web:1.0.0", Environment: "default", Status: cp.ReleaseSuperseded},
+		{ID: app + "-r2", App: app, Image: "ghcr.io/u/web:1.1.0", Environment: "default", Status: cp.ReleaseDeployed},
+		{ID: app + "-p1", App: app, Image: "ghcr.io/u/web:1.1.0", Environment: "prod", Status: cp.ReleaseDeployed},
+		{ID: api + "-r1", App: api, Image: "ghcr.io/u/api:2.0.0", Environment: "default", Status: cp.ReleaseDeployed},
+	}
+	for _, r := range rels {
+		if err := s.SaveRelease(ctx, r); err != nil {
+			t.Fatalf("SaveRelease(%s): %v", r.ID, err)
+		}
+	}
+
+	got, err := s.AutoDeployCandidates(ctx)
+	if err != nil {
+		t.Fatalf("AutoDeployCandidates: %v", err)
+	}
+	want := map[cp.AppEnvRef]bool{
+		{App: app, Env: "default"}: false,
+		{App: app, Env: "prod"}:    false,
+		{App: api, Env: "default"}: false,
+	}
+	for _, ref := range got {
+		if _, ok := want[ref]; ok {
+			want[ref] = true
+		}
+	}
+	for ref, seen := range want {
+		if !seen {
+			t.Errorf("candidate %+v missing from %v", ref, got)
+		}
+	}
+}

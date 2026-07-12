@@ -291,6 +291,13 @@ type Database interface {
 	// "disabled by rollback") — the safety stop of ADR-0052 §5, so the watcher does not fight a
 	// deliberate downgrade. It upserts, overwriting any prior level and reason.
 	DisableAutoDeploy(ctx context.Context, app, env, reason string) error
+	// AutoDeployCandidates returns the distinct (app, environment) pairs the pull-based watcher may
+	// reconcile: every app that has a recorded release, paired with the environment it was released
+	// into (ADR-0052 Phase 4b). Auto-deploy is on by default, so candidacy is "has a running
+	// release" — the set the poller can compare a registry tag against — not "has a stored level
+	// row"; the poller reads each pair's level and skips those set to off. None yields an empty
+	// slice and no error.
+	AutoDeployCandidates(ctx context.Context) ([]AppEnvRef, error)
 	// AutoDeployReason returns the stored disable reason for app in the named environment, or ""
 	// when the level was human-set or is the default (no stored override) — the reason surfaced
 	// next to an off level (ADR-0052 §5).

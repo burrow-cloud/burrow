@@ -47,6 +47,12 @@ func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("registry: rate limited (http 429), retry after %s", e.RetryAfter)
 }
 
+// RetryAfterHint returns the raw Retry-After value the registry returned (seconds or an HTTP date,
+// empty if none). It satisfies the controlplane's rate-limit hint interface so the auto-deploy
+// poller can back off honoring the registry's pushback (ADR-0052 §7) without importing this adapter
+// (which would cycle: this package imports controlplane).
+func (e *RateLimitError) RetryAfterHint() string { return e.RetryAfter }
+
 // Client lists an image repository's tags over the Docker Registry HTTP API v2. The caller injects
 // an *http.Client with a bounded timeout so tests are deterministic and a poll never hangs on an
 // unresponsive registry.

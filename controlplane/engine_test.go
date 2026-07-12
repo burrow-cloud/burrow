@@ -120,7 +120,7 @@ func TestDeployHappyPath(t *testing.T) {
 		t.Errorf("cluster spec env = %+v, want K=V from the store", spec.Env)
 	}
 	// Recorded in the database.
-	saved, err := d.LatestRelease(ctx, "web")
+	saved, err := d.LatestRelease(ctx, "web", "default")
 	if err != nil || saved.Status != cp.ReleaseDeployed {
 		t.Errorf("saved release = %+v err=%v", saved, err)
 	}

@@ -55,7 +55,7 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	// The command runs in the app's currently-deployed image (ADR-0048 §2): resolve it the same way
 	// deploy and rollback do. An app with nothing deployed has no image to run a command in.
-	releases, err := e.db.Releases(ctx, req.App)
+	releases, err := e.db.Releases(ctx, req.App, envName(req.Env))
 	if err != nil {
 		return RunResult{}, fmt.Errorf("run %s: reading release history: %w", req.App, err)
 	}

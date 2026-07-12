@@ -241,20 +241,22 @@ type Database interface {
 	SaveRelease(ctx context.Context, r Release) error
 	// Release returns the release with the given ID, or ErrNotFound.
 	Release(ctx context.Context, id string) (Release, error)
-	// LatestRelease returns the most recently saved release for app, or ErrNotFound
-	// if the app has no releases.
-	LatestRelease(ctx context.Context, app string) (Release, error)
-	// Releases returns all releases for app, oldest first. An app with no releases
-	// yields an empty slice and no error.
-	Releases(ctx context.Context, app string) ([]Release, error)
-	// ListReleases returns all releases for app, NEWEST first — the deploy timeline the
-	// history surface reads (the same rows deploys already write, read the other way round
-	// from Releases). An app with no releases yields an empty slice and no error. Releases are
-	// recorded app-globally, not per environment (the release row carries no environment; see
-	// the deploy write path), so this reads by app just as LatestRelease/Releases do.
-	ListReleases(ctx context.Context, app string) ([]Release, error)
-	// DeleteReleases removes all release records for app — the durable side of an app
-	// teardown. Deleting the releases of an app that has none is a no-op, not an error.
+	// LatestRelease returns the most recently saved release for app in env, or ErrNotFound if
+	// the app has no releases there. Releases are keyed per (app, environment) (ADR-0052 Phase 4a):
+	// env is the canonical environment name (the reserved "default" for the implicit default
+	// environment).
+	LatestRelease(ctx context.Context, app, env string) (Release, error)
+	// Releases returns all releases for app in env, oldest first, keyed per (app, environment).
+	// An app with no releases there yields an empty slice and no error.
+	Releases(ctx context.Context, app, env string) ([]Release, error)
+	// ListReleases returns all releases for app in env, NEWEST first — the deploy timeline the
+	// history surface reads (the same rows deploys already write, read the other way round from
+	// Releases). Releases are keyed per (app, environment) (ADR-0052 Phase 4a). An app with no
+	// releases there yields an empty slice and no error.
+	ListReleases(ctx context.Context, app, env string) ([]Release, error)
+	// DeleteReleases removes all release records for app across every environment — the durable
+	// side of an app teardown, which removes the whole app. Deleting the releases of an app that
+	// has none is a no-op, not an error.
 	DeleteReleases(ctx context.Context, app string) error
 
 	// AppEnv returns the non-secret environment store for app: the app-global current
@@ -281,8 +283,18 @@ type Database interface {
 	// environment name (the reserved "default" for the implicit default environment).
 	AutoDeployLevel(ctx context.Context, app, env string) (AutoDeployLevel, error)
 	// SetAutoDeployLevel upserts the auto-deploy level for app in the named environment — the write
-	// behind `burrow app auto-deploy <app> <level>`. It rejects an invalid level.
+	// behind `burrow app auto-deploy <app> <level>`. It rejects an invalid level. It CLEARS any
+	// stored disable reason: a human setting the level is the deliberate re-enable action that
+	// removes a rollback or downgrade note (ADR-0052 §5).
 	SetAutoDeployLevel(ctx context.Context, app, env string, level AutoDeployLevel) error
+	// DisableAutoDeploy sets app's level to off in the named environment AND records why (e.g.
+	// "disabled by rollback") — the safety stop of ADR-0052 §5, so the watcher does not fight a
+	// deliberate downgrade. It upserts, overwriting any prior level and reason.
+	DisableAutoDeploy(ctx context.Context, app, env, reason string) error
+	// AutoDeployReason returns the stored disable reason for app in the named environment, or ""
+	// when the level was human-set or is the default (no stored override) — the reason surfaced
+	// next to an off level (ADR-0052 §5).
+	AutoDeployReason(ctx context.Context, app, env string) (string, error)
 
 	// SaveProvider upserts a provider in the registry by name (ADR-0023). It stores only
 	// the non-secret registry entry — type, capabilities, and the key under which the token

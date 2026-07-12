@@ -127,16 +127,22 @@ type RunResult struct {
 }
 
 type Release struct {
-	ID         string            `json:"id"`
-	App        string            `json:"app"`
-	Image      string            `json:"image"`
-	Digest     string            `json:"digest,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	Command    []string          `json:"command,omitempty"`
-	Replicas   int32             `json:"replicas"`
-	Status     string            `json:"status"`
-	Supersedes string            `json:"supersedes,omitempty"`
-	CreatedAt  time.Time         `json:"created_at"`
+	ID          string            `json:"id"`
+	App         string            `json:"app"`
+	Environment string            `json:"environment,omitempty"`
+	Image       string            `json:"image"`
+	Digest      string            `json:"digest,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Command     []string          `json:"command,omitempty"`
+	Replicas    int32             `json:"replicas"`
+	Status      string            `json:"status"`
+	Supersedes  string            `json:"supersedes,omitempty"`
+	// Trigger is how the deploy was triggered (ADR-0052 §5): "manual" for an explicit CLI or agent
+	// deploy, "auto" for the pull-based passive watcher. AutoLevel and AutoTag are set only for auto.
+	Trigger   string    `json:"trigger,omitempty"`
+	AutoLevel string    `json:"auto_level,omitempty"`
+	AutoTag   string    `json:"auto_tag,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type WorkloadStatus struct {
@@ -848,6 +854,9 @@ type AutoDeployResult struct {
 	Upgrade    string `json:"upgrade,omitempty"`
 	Checked    bool   `json:"checked,omitempty"`
 	Note       string `json:"note,omitempty"`
+	// DisabledReason is why auto-deploy is off when the safety stop turned it off (ADR-0052 §5):
+	// "disabled by rollback" or "disabled by downgrade". Empty when the level was human-set or is not off.
+	DisabledReason string `json:"disabled_reason,omitempty"`
 }
 
 // AutoDeploy returns the auto-deploy level configured for app in env (ADR-0052 §2). An empty env

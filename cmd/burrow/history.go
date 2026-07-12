@@ -43,9 +43,15 @@ func newHistoryCmd() *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "VERSION\tWHEN\tSTATUS")
+			fmt.Fprintln(tw, "VERSION\tWHEN\tSTATUS\tTRIGGER")
 			for _, r := range releases {
-				fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Image, r.CreatedAt.Format("2006-01-02 15:04:05"), r.Status)
+				// An auto deploy (ADR-0052 §5) shows the level it ran under, e.g. "auto (minor)"; a
+				// manual deploy shows "manual". Rows written before provenance existed render blank.
+				trigger := r.Trigger
+				if r.Trigger == "auto" && r.AutoLevel != "" {
+					trigger = fmt.Sprintf("auto (%s)", r.AutoLevel)
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Image, r.CreatedAt.Format("2006-01-02 15:04:05"), r.Status, trigger)
 			}
 			return tw.Flush()
 		},

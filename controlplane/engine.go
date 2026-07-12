@@ -178,13 +178,38 @@ func currentReplicas(ctx context.Context, k Kubernetes, app string) (replicas in
 	return st.DesiredReplicas, true, nil
 }
 
+// deployProvenance records how a deploy was triggered, so the release and audit row carry it
+// (ADR-0052 §5). Public Deploy stamps a manual provenance; the Phase 4b pull-based watcher will call
+// the unexported deploy with an auto provenance carrying the level and the resolved tag.
+type deployProvenance struct {
+	trigger ReleaseTrigger
+	level   AutoDeployLevel // set only for an auto trigger
+	tag     string          // the resolved tag the watcher took, set only for an auto trigger
+}
+
+// manualProvenance is the provenance of an explicit CLI or agent deploy — the default for every
+// deploy today (ADR-0052 §5).
+func manualProvenance() deployProvenance { return deployProvenance{trigger: TriggerManual} }
+
 // Deploy rolls out an image by reference (ADR-0007). It validates the request, applies
 // the guardrails, records a new release, applies it to the cluster, and records the
 // outcome — superseding the previously running release on success. burrowd never contacts
 // the registry: the workload is applied by image reference and the kubelet resolves and
 // pulls it with the imagePullSecret (ADR-0040). The image bytes never pass through here;
 // only the reference does (ADR-0004).
+//
+// Deploy is the explicit, human- or agent-triggered path (ADR-0007): it records a manual
+// provenance. The Phase 4b pull-based watcher (ADR-0052) will drive the same rollout through the
+// unexported deploy with an auto provenance.
 func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, error) {
+	return e.deploy(ctx, req, manualProvenance())
+}
+
+// deploy is the shared rollout path behind the explicit Deploy and the Phase 4b auto-update watcher.
+// prov records how the deploy was triggered (ADR-0052 §5): it stamps the release and audit row, and
+// a manual deploy that moves the app to a strictly lower semver than it is running disables
+// auto-deploy so the watcher does not fight the deliberate downgrade (§5).
+func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProvenance) (DeployResult, error) {
 	if err := (App{Name: req.App}).Validate(); err != nil {
 		return DeployResult{}, fmt.Errorf("deploy: %w: %w", ErrInvalid, err)
 	}
@@ -214,13 +239,19 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
 	}
-	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(replicas)), "env": envName(req.Env)}
+	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(replicas)), "env": envName(req.Env), "trigger": string(prov.trigger)}
+	// An auto deploy records the level that applied and the tag the watcher took, so the audit trail
+	// distinguishes an unattended update from an explicit one (ADR-0052 §5).
+	if prov.trigger == TriggerAuto {
+		args["auto_level"] = string(prov.level)
+		args["auto_tag"] = prov.tag
+	}
 	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, GuardrailAppDeploy,
 		pol.evaluateDeploy(req.Env, replicas, req.Confirm)); err != nil {
 		return DeployResult{}, err
 	}
 
-	releases, err := e.db.Releases(ctx, req.App)
+	releases, err := e.db.Releases(ctx, req.App, envName(req.Env))
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: reading release history: %w", req.App, err)
 	}
@@ -237,13 +268,19 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 	rel := Release{
 		ID:          e.ids.NewID(),
 		App:         req.App,
+		Environment: envName(req.Env),
 		Image:       req.Image,
 		Env:         env,
 		Command:     req.Command,
 		MetricsPort: req.MetricsPort,
 		Replicas:    replicas,
 		Status:      ReleasePending,
+		Trigger:     prov.trigger,
 		CreatedAt:   e.clock.Now(),
+	}
+	if prov.trigger == TriggerAuto {
+		rel.AutoLevel = prov.level
+		rel.AutoTag = prov.tag
 	}
 	if hasPrev {
 		rel.Supersedes = prev.ID
@@ -283,6 +320,17 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 		superseded = prev.ID
 	}
 	e.recordExecution(ctx, auditOpDeploy, req.App, args, nil)
+
+	// A manual deploy that moves the app to a strictly lower semver than it was running is a
+	// deliberate downgrade: disable auto-deploy so the watcher does not re-apply the higher version
+	// the operator just backed away from (ADR-0052 §5). A forward manual deploy leaves the level
+	// untouched, and an auto deploy never disables. The deploy has landed and is recorded, so a
+	// disable failure is surfaced by returning it wrapped.
+	if prov.trigger == TriggerManual && hasPrev && isDowngrade(imageTag(prev.Image), imageTag(req.Image)) {
+		if err := e.db.DisableAutoDeploy(ctx, req.App, envName(req.Env), reasonDisabledByDowngrade); err != nil {
+			return DeployResult{}, fmt.Errorf("deploy %s: disabling auto-deploy after downgrade: %w", req.App, err)
+		}
+	}
 	return DeployResult{Release: rel, SupersededReleaseID: superseded}, nil
 }
 
@@ -308,7 +356,7 @@ func (e *Engine) SetConfig(ctx context.Context, app, env, key, value string, noR
 	if noRestart {
 		return nil
 	}
-	return e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app)
+	return e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app, envName(env))
 }
 
 // UnsetConfig removes one config var for an app from the config store (ADR-0028). Like SetConfig it
@@ -331,7 +379,7 @@ func (e *Engine) UnsetConfig(ctx context.Context, app, env, key string, noRestar
 	if noRestart {
 		return nil
 	}
-	return e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app)
+	return e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app, envName(env))
 }
 
 // ListConfig returns the app's non-secret config store (ADR-0028). An app with no config yields an
@@ -357,8 +405,8 @@ func (e *Engine) ListConfig(ctx context.Context, app, env string) (map[string]st
 // Deployment (ADR-0028). It reconstructs the WorkloadSpec from the app's currently running release
 // and the store. With no running release there is nothing to roll: the change is persisted and
 // will land on the next deploy, so this is a no-op, not an error.
-func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app string) error {
-	releases, err := e.db.Releases(ctx, app)
+func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app, env string) error {
+	releases, err := e.db.Releases(ctx, app, env)
 	if err != nil {
 		return fmt.Errorf("set env %s: reading release history: %w", app, err)
 	}
@@ -366,7 +414,7 @@ func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app string) error
 	if !ok {
 		return nil // no running workload yet; the change lands on the next deploy
 	}
-	env, err := e.db.AppEnv(ctx, app)
+	cfg, err := e.db.AppEnv(ctx, app)
 	if err != nil {
 		return fmt.Errorf("set env %s: reading env: %w", app, err)
 	}
@@ -376,7 +424,7 @@ func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app string) error
 	if err != nil {
 		return fmt.Errorf("set env %s: %w", app, err)
 	}
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: env, Command: cur.Command, MetricsPort: cur.MetricsPort, Replicas: replicas, ReleaseID: cur.ID}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: cfg, Command: cur.Command, MetricsPort: cur.MetricsPort, Replicas: replicas, ReleaseID: cur.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		return fmt.Errorf("set env %s: applying to cluster: %w", app, err)
 	}
@@ -847,7 +895,7 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 
 	// Existence: an app exists if it has releases OR a live workload. Determine this before
 	// evaluating the guardrail so an unknown app is ErrNotFound rather than a confirm prompt.
-	releases, err := e.db.Releases(ctx, app)
+	releases, err := e.db.Releases(ctx, app, envName(env))
 	if err != nil {
 		return fmt.Errorf("delete app %s: reading release history: %w", app, err)
 	}
@@ -1026,7 +1074,7 @@ func (e *Engine) Status(ctx context.Context, app, env string) (StatusResult, err
 		return StatusResult{}, fmt.Errorf("status %s: %w", app, err)
 	}
 
-	latest, errL := e.db.LatestRelease(ctx, app)
+	latest, errL := e.db.LatestRelease(ctx, app, envName(env))
 	if errL != nil && !errors.Is(errL, ErrNotFound) {
 		return StatusResult{}, fmt.Errorf("status %s: reading release: %w", app, errL)
 	}
@@ -1553,12 +1601,17 @@ func (e *Engine) SetAutoDeploy(ctx context.Context, app, env string, level AutoD
 // (ADR-0007). It finds the current running release, re-applies the release that one
 // superseded, and records the rollback as a new release. It returns ErrNotFound when
 // there is nothing to roll back from or to.
+//
+// A rollback disables auto-deploy in the target environment (ADR-0052 §5): once landed it sets the
+// app's level to off with the reason "disabled by rollback", so the pull-based watcher does not fight
+// the deliberate downgrade by re-applying the version just backed away from. Re-enabling is a
+// deliberate human action (`burrow app auto-deploy <app> <level>`).
 func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (RollbackResult, error) {
 	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
 	}
-	releases, err := e.db.Releases(ctx, app)
+	releases, err := e.db.Releases(ctx, app, envName(env))
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: reading release history: %w", app, err)
 	}
@@ -1609,12 +1662,14 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	rel := Release{
 		ID:          e.ids.NewID(),
 		App:         app,
+		Environment: envName(env),
 		Image:       target.Image,
 		Env:         cfg,
 		Command:     target.Command,
 		MetricsPort: target.MetricsPort,
 		Replicas:    replicas,
 		Status:      ReleasePending,
+		Trigger:     TriggerManual,
 		Supersedes:  cur.ID,
 		CreatedAt:   e.clock.Now(),
 	}
@@ -1641,6 +1696,13 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 		return RollbackResult{}, fmt.Errorf("rollback %s: superseding release %s: %w", app, cur.ID, err)
 	}
 	e.recordExecution(ctx, auditOpRollback, app, args, nil)
+
+	// The rollback has landed and is recorded; now disable auto-deploy so the watcher does not
+	// re-apply the version just backed away from (ADR-0052 §5). Surfacing a disable failure still
+	// matters, so return it wrapped even though the rollback itself succeeded.
+	if err := e.db.DisableAutoDeploy(ctx, app, envName(env), reasonDisabledByRollback); err != nil {
+		return RollbackResult{}, fmt.Errorf("rollback %s: disabling auto-deploy after rollback: %w", app, err)
+	}
 	return RollbackResult{Release: rel, RolledBackToReleaseID: target.ID, SupersededReleaseID: cur.ID}, nil
 }
 

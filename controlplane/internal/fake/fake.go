@@ -54,6 +54,8 @@ const (
 	OpSetGuardrail        Op = "SetGuardrail"
 	OpAutoDeployLevel     Op = "AutoDeployLevel"
 	OpSetAutoDeployLevel  Op = "SetAutoDeployLevel"
+	OpDisableAutoDeploy   Op = "DisableAutoDeploy"
+	OpAutoDeployReason    Op = "AutoDeployReason"
 	OpSaveProvider        Op = "SaveProvider"
 	OpProvider            Op = "Provider"
 	OpProviders           Op = "Providers"

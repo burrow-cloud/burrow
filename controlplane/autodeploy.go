@@ -128,6 +128,10 @@ type AutoDeployStatus struct {
 	Upgrade    string          `json:"upgrade,omitempty"`    // highest version above the level's cap, surfaced as an available upgrade, "" if none
 	Checked    bool            `json:"checked"`              // whether the registry upgrade check actually ran
 	Note       string          `json:"note,omitempty"`       // when Checked is false, a short human reason
+	// DisabledReason is why auto-deploy is off, when it was turned off by the safety stop rather than
+	// by a human (ADR-0052 §5): "disabled by rollback" or "disabled by downgrade". Empty when the
+	// level was human-set or is not off.
+	DisabledReason string `json:"disabled_reason,omitempty"`
 }
 
 // AutoDeployStatus returns the enriched, read-only auto-deploy view for app in env (ADR-0052
@@ -154,9 +158,17 @@ func (e *Engine) AutoDeployStatus(ctx context.Context, app, env string) (AutoDep
 	}
 	status := AutoDeployStatus{App: app, Env: envName(env), Level: level}
 
+	// When the level was turned off by the safety stop (a rollback or a manual downgrade), surface
+	// why (ADR-0052 §5). A store error here is a real failure, unlike the best-effort registry check.
+	reason, err := e.db.AutoDeployReason(ctx, app, envName(env))
+	if err != nil {
+		return AutoDeployStatus{}, fmt.Errorf("auto-deploy status %s: reading disable reason: %w", app, err)
+	}
+	status.DisabledReason = reason
+
 	// Find the current running release for its image reference. A missing release degrades (no
 	// version to compare against); a genuine store error is a real failure and is returned.
-	rel, err := e.db.LatestRelease(ctx, app)
+	rel, err := e.db.LatestRelease(ctx, app, envName(env))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			status.Note = "no running release to compare against"
@@ -217,6 +229,24 @@ func imageRepository(ref string) string {
 		return ref[:colon]
 	}
 	return ref
+}
+
+// The reasons recorded when the safety stop turns auto-deploy off (ADR-0052 §5), surfaced next to
+// the off level in status and to the agent.
+const (
+	reasonDisabledByRollback  = "disabled by rollback"
+	reasonDisabledByDowngrade = "disabled by downgrade"
+)
+
+// isDowngrade reports whether moving from fromTag to toTag is a strict semver downgrade. Both must
+// parse as stable semver (via stableSemver); otherwise it is not a downgrade — a non-semver move is
+// never treated as one (ADR-0052 §5).
+func isDowngrade(fromTag, toTag string) bool {
+	f, t := stableSemver(fromTag), stableSemver(toTag)
+	if f == "" || t == "" {
+		return false
+	}
+	return semver.Compare(t, f) < 0
 }
 
 // withinCap reports whether upgrading from cur to v stays within level's cap. Both cur and v

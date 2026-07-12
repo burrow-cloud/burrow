@@ -34,7 +34,7 @@ func TestDeleteApp(t *testing.T) {
 	if err := k.Unexpose(ctx, "web"); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("routing after delete: err = %v, want ErrNotFound", err)
 	}
-	if rels, err := d.Releases(ctx, "web"); err != nil || len(rels) != 0 {
+	if rels, err := d.Releases(ctx, "web", "default"); err != nil || len(rels) != 0 {
 		t.Errorf("releases after delete = %v (err %v), want empty", rels, err)
 	}
 }

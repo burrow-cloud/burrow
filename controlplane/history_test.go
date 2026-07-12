@@ -50,7 +50,8 @@ func TestHistoryNewestFirst(t *testing.T) {
 
 // TestHistoryValidatesAppAndEnv confirms History validates the app name and resolves the environment
 // like Status does: a malformed app is ErrInvalid, an unregistered environment is ErrNotFound, and a
-// registered one is accepted (the release records are app-global, so it returns the app's timeline).
+// registered one is accepted, returning that environment's timeline (releases are keyed per
+// (app, environment), ADR-0052 Phase 4a).
 func TestHistoryValidatesAppAndEnv(t *testing.T) {
 	e, _, d, _ := newEngine(t, permissive())
 	ctx := context.Background()
@@ -62,11 +63,11 @@ func TestHistoryValidatesAppAndEnv(t *testing.T) {
 		t.Errorf("History(unknown env) err = %v, want ErrNotFound", err)
 	}
 
-	// A registered environment is accepted; history is app-global, so it returns the app's releases.
+	// A registered environment is accepted; history returns that environment's releases.
 	if err := d.CreateEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
-	if err := d.SaveRelease(ctx, cp.Release{ID: "r1", App: "web", Image: "img:1", Status: cp.ReleaseDeployed}); err != nil {
+	if err := d.SaveRelease(ctx, cp.Release{ID: "r1", App: "web", Environment: "prod", Image: "img:1", Status: cp.ReleaseDeployed}); err != nil {
 		t.Fatalf("SaveRelease: %v", err)
 	}
 	got, err := e.History(ctx, "web", "prod")

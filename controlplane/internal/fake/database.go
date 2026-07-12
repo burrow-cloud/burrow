@@ -26,6 +26,7 @@ type Database struct {
 	addons     map[string]controlplane.AddonInfo
 	appEnv     map[string]map[string]string                       // app -> key -> value
 	autoDeploy map[string]map[string]controlplane.AutoDeployLevel // app -> env -> level
+	reason     map[string]map[string]string                       // app -> env -> disable reason
 	audit      []controlplane.AuditEntry                          // append-only, in append order
 	backups    map[string]controlplane.Backup
 	backupSeq  []string                            // backup IDs in record order, for deterministic newest-first listing
@@ -43,6 +44,7 @@ func NewDatabase() *Database {
 		addons:     make(map[string]controlplane.AddonInfo),
 		appEnv:     make(map[string]map[string]string),
 		autoDeploy: make(map[string]map[string]controlplane.AutoDeployLevel),
+		reason:     make(map[string]map[string]string),
 		backups:    make(map[string]controlplane.Backup),
 		envs:       make(map[string]controlplane.Environment),
 		errs:       make(map[Op]error),
@@ -96,7 +98,8 @@ func (d *Database) AutoDeployLevel(ctx context.Context, app, env string) (contro
 	return controlplane.DefaultAutoDeployLevel, nil
 }
 
-// SetAutoDeployLevel upserts app's auto-deploy level in env, keyed by (app, env).
+// SetAutoDeployLevel upserts app's auto-deploy level in env, keyed by (app, env). It clears any
+// stored disable reason: setting the level is the deliberate human re-enable action (ADR-0052 §5).
 func (d *Database) SetAutoDeployLevel(ctx context.Context, app, env string, level controlplane.AutoDeployLevel) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -110,7 +113,39 @@ func (d *Database) SetAutoDeployLevel(ctx context.Context, app, env string, leve
 		d.autoDeploy[app] = make(map[string]controlplane.AutoDeployLevel)
 	}
 	d.autoDeploy[app][env] = level
+	if d.reason[app] != nil {
+		delete(d.reason[app], env)
+	}
 	return nil
+}
+
+// DisableAutoDeploy sets app's level to off in env and records the reason — the safety stop of
+// ADR-0052 §5, keyed by (app, env).
+func (d *Database) DisableAutoDeploy(ctx context.Context, app, env, reason string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpDisableAutoDeploy]; err != nil {
+		return err
+	}
+	if d.autoDeploy[app] == nil {
+		d.autoDeploy[app] = make(map[string]controlplane.AutoDeployLevel)
+	}
+	d.autoDeploy[app][env] = controlplane.AutoDeployOff
+	if d.reason[app] == nil {
+		d.reason[app] = make(map[string]string)
+	}
+	d.reason[app][env] = reason
+	return nil
+}
+
+// AutoDeployReason returns the stored disable reason for app in env, or "" when none is set.
+func (d *Database) AutoDeployReason(ctx context.Context, app, env string) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAutoDeployReason]; err != nil {
+		return "", err
+	}
+	return d.reason[app][env], nil
 }
 
 // SetError makes op return err until cleared with SetError(op, nil).
@@ -153,20 +188,35 @@ func (d *Database) Release(ctx context.Context, id string) (controlplane.Release
 	return cloneRelease(r), nil
 }
 
-func (d *Database) LatestRelease(ctx context.Context, app string) (controlplane.Release, error) {
+// matchEnv reports whether a release stored with storedEnv belongs to the queried env. An empty
+// stored Environment is treated as the canonical "default" so releases pre-set without an env still
+// match the default environment (ADR-0052 Phase 4a).
+func matchEnv(storedEnv, env string) bool {
+	if storedEnv == "" {
+		storedEnv = controlplane.DefaultEnvironment
+	}
+	return storedEnv == env
+}
+
+// LatestRelease returns the newest release for app in env — keyed per (app, environment) by filtering
+// the app-global save order on the stored release's Environment (ADR-0052 Phase 4a).
+func (d *Database) LatestRelease(ctx context.Context, app, env string) (controlplane.Release, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[OpLatestRelease]; err != nil {
 		return controlplane.Release{}, err
 	}
 	ids := d.order[app]
-	if len(ids) == 0 {
-		return controlplane.Release{}, fmt.Errorf("database: latest release for app %q: %w", app, controlplane.ErrNotFound)
+	for i := len(ids) - 1; i >= 0; i-- {
+		if r := d.byID[ids[i]]; matchEnv(r.Environment, env) {
+			return cloneRelease(r), nil
+		}
 	}
-	return cloneRelease(d.byID[ids[len(ids)-1]]), nil
+	return controlplane.Release{}, fmt.Errorf("database: latest release for app %q in %q: %w", app, env, controlplane.ErrNotFound)
 }
 
-func (d *Database) Releases(ctx context.Context, app string) ([]controlplane.Release, error) {
+// Releases returns every release for app in env, oldest first, keyed per (app, environment).
+func (d *Database) Releases(ctx context.Context, app, env string) ([]controlplane.Release, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[OpReleases]; err != nil {
@@ -175,14 +225,17 @@ func (d *Database) Releases(ctx context.Context, app string) ([]controlplane.Rel
 	ids := d.order[app]
 	out := make([]controlplane.Release, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, cloneRelease(d.byID[id]))
+		if r := d.byID[id]; matchEnv(r.Environment, env) {
+			out = append(out, cloneRelease(r))
+		}
 	}
 	return out, nil
 }
 
-// ListReleases returns every release for app, newest first (reverse save order) — the deploy
-// timeline the history surface reads. An app with no releases yields an empty slice and no error.
-func (d *Database) ListReleases(ctx context.Context, app string) ([]controlplane.Release, error) {
+// ListReleases returns every release for app in env, newest first (reverse save order) — the deploy
+// timeline the history surface reads, keyed per (app, environment). An app with no releases in env
+// yields an empty slice and no error.
+func (d *Database) ListReleases(ctx context.Context, app, env string) ([]controlplane.Release, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[OpListReleases]; err != nil {
@@ -191,7 +244,9 @@ func (d *Database) ListReleases(ctx context.Context, app string) ([]controlplane
 	ids := d.order[app]
 	out := make([]controlplane.Release, 0, len(ids))
 	for i := len(ids) - 1; i >= 0; i-- {
-		out = append(out, cloneRelease(d.byID[ids[i]]))
+		if r := d.byID[ids[i]]; matchEnv(r.Environment, env) {
+			out = append(out, cloneRelease(r))
+		}
 	}
 	return out, nil
 }

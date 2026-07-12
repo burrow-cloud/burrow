@@ -130,8 +130,8 @@ func TestHistory(t *testing.T) {
 		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"releases": []map[string]any{
-				{"id": "r2", "app": "web", "image": "img:2", "status": "deployed", "created_at": "2026-06-23T12:00:01Z"},
-				{"id": "r1", "app": "web", "image": "img:1", "status": "superseded", "created_at": "2026-06-23T12:00:00Z"},
+				{"id": "r2", "app": "web", "image": "img:2", "status": "deployed", "trigger": "auto", "auto_level": "minor", "created_at": "2026-06-23T12:00:01Z"},
+				{"id": "r1", "app": "web", "image": "img:1", "status": "superseded", "trigger": "manual", "created_at": "2026-06-23T12:00:00Z"},
 			},
 		})
 	}, "app", "history", "web", "--env", "prod")
@@ -144,8 +144,9 @@ func TestHistory(t *testing.T) {
 	if !strings.Contains(gotQuery, "env=prod") {
 		t.Errorf("query %q missing env=prod", gotQuery)
 	}
-	// Tabular output names the columns and both rows, newest first.
-	for _, want := range []string{"VERSION", "WHEN", "STATUS", "img:2", "deployed", "img:1", "superseded"} {
+	// Tabular output names the columns and both rows, newest first, and the deploy's provenance:
+	// an auto deploy shows the level it ran under (ADR-0052 §5).
+	for _, want := range []string{"VERSION", "WHEN", "STATUS", "TRIGGER", "img:2", "deployed", "img:1", "superseded", "auto (minor)", "manual"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q missing %q", out, want)
 		}
@@ -719,6 +720,23 @@ func TestAutoDeployShowDegraded(t *testing.T) {
 	}
 	if !strings.Contains(out, "upgrade check unavailable: registry tag listing unavailable: 401 unauthorized") {
 		t.Errorf("output = %q, want the degrade note", out)
+	}
+}
+
+// TestAutoDeployShowDisabledReason confirms an off level turned off by the safety stop renders the
+// reason next to it, e.g. "auto-deploy off (disabled by rollback)" (ADR-0052 §5).
+func TestAutoDeployShowDisabledReason(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "env": "default", "level": "off",
+			"disabled_reason": "disabled by rollback",
+		})
+	}, "app", "auto-deploy", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, `web: auto-deploy off (disabled by rollback) in environment "default"`) {
+		t.Errorf("output = %q, want the off line with its reason", out)
 	}
 }
 

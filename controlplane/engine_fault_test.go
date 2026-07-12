@@ -35,7 +35,7 @@ func TestDeployApplyFailureLeavesPriorRunning(t *testing.T) {
 		t.Errorf("cluster image = %q, want img:1 (prior release untouched)", spec.Image)
 	}
 	// History: v1 deployed, v2 failed.
-	all, _ := d.Releases(ctx, "web")
+	all, _ := d.Releases(ctx, "web", "default")
 	if len(all) != 2 {
 		t.Fatalf("releases = %d, want 2", len(all))
 	}

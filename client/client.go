@@ -164,6 +164,9 @@ type WorkloadStatus struct {
 type DeployResult struct {
 	Release             Release `json:"release"`
 	SupersededReleaseID string  `json:"superseded_release_id,omitempty"`
+	// Hints are non-blocking notes about the deploy (ADR-0052 §8): today, a nudge toward semver when
+	// the deployed tag cannot be classified for auto-update. They never gate the deploy.
+	Hints []string `json:"hints,omitempty"`
 }
 
 type StatusResult struct {
@@ -874,6 +877,35 @@ func (c *Client) SetAutoDeploy(ctx context.Context, app, env, level string) (Aut
 	var out AutoDeployResult
 	body := map[string]string{"level": level}
 	err := c.do(ctx, http.MethodPut, withEnv(c.appPath(app, "auto-deploy"), env), body, &out)
+	return out, err
+}
+
+// NextTags are the suggested next release tags after a current semver tag (ADR-0052 §8).
+type NextTags struct {
+	Patch string `json:"patch"`
+	Minor string `json:"minor"`
+	Major string `json:"major"`
+}
+
+// NextTagResult is the read-only next-semver-tag suggestion for an app in one environment
+// (ADR-0052 §8): the current running tag plus the suggested next patch/minor/major tags. When there
+// is no running release or the current tag is not semver, Next is nil and Note carries a short human
+// reason — the suggestion degrades gracefully rather than erroring (ADR-0040).
+type NextTagResult struct {
+	App     string    `json:"app"`
+	Env     string    `json:"env"`
+	Current string    `json:"current,omitempty"`
+	Next    *NextTags `json:"next,omitempty"`
+	Note    string    `json:"note,omitempty"`
+}
+
+// NextTag returns the suggested next semver release tags for app in env, from its current running tag
+// (ADR-0052 §8). It is read-only: it reads the running tag the control plane already knows and
+// computes the next patch/minor/major, so the agent can apply the number to its build. An empty env
+// reads the default environment.
+func (c *Client) NextTag(ctx context.Context, app, env string) (NextTagResult, error) {
+	var out NextTagResult
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "next-tag"), env), nil, &out)
 	return out, err
 }
 

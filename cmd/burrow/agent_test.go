@@ -190,7 +190,7 @@ func TestAgentClaudeInstallWritesRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading CLAUDE.md: %v", err)
 	}
-	for _, want := range []string{agentInstructionsBegin, agentInstructionsEnd, "burrow-agent", "held_for_confirmation", "NEVER self-confirm"} {
+	for _, want := range []string{agentInstructionsBegin, agentInstructionsEnd, "burrow-agent", "held_for_confirmation", "NEVER self-confirm", "major.minor.patch", "next-tag"} {
 		if !strings.Contains(string(mem), want) {
 			t.Errorf("CLAUDE.md missing %q:\n%s", want, string(mem))
 		}

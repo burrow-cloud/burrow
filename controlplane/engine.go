@@ -331,7 +331,15 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 			return DeployResult{}, fmt.Errorf("deploy %s: disabling auto-deploy after downgrade: %w", req.App, err)
 		}
 	}
-	return DeployResult{Release: rel, SupersededReleaseID: superseded}, nil
+	res := DeployResult{Release: rel, SupersededReleaseID: superseded}
+	// Nudge toward semver when the deployed tag cannot be classified for auto-update (ADR-0052 §8).
+	// This is a non-blocking hint on an otherwise-successful deploy, not a gate: the deploy has
+	// already landed. An auto deploy always carries a semver tag, so only a manual non-semver deploy
+	// ever trips it.
+	if stableSemver(imageTag(req.Image)) == "" {
+		res.Hints = append(res.Hints, nonSemverDeployHint)
+	}
+	return res, nil
 }
 
 // SetConfig upserts one non-secret config var for an app in the config store (ADR-0028). The store

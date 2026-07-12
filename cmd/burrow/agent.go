@@ -390,6 +390,8 @@ const agentInstructionsBody = "## Burrow\n\n" +
 	"- Every command prints JSON, so pipe, grep, and jq it (e.g. `burrow-agent logs web | jq '.lines'`).\n" +
 	"- Code never travels over the control channel: build and push a container image with your own\n" +
 	"  tooling, then deploy by image reference; only the reference and small metadata cross.\n" +
+	"- Tag releases `major.minor.patch` (e.g. 1.4.2), never a bare git SHA or `latest`: semver is what\n" +
+	"  unlocks safe auto-updates. Run `burrow-agent next-tag <app>` for the next tag to apply.\n" +
 	"- A mutating verb prints an `outcome` envelope: executed, held_for_confirmation, denied, or error.\n" +
 	"  When held_for_confirmation, relay it to the human and re-run with --confirm ONLY after they\n" +
 	"  explicitly approve. NEVER self-confirm."

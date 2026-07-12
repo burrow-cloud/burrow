@@ -33,6 +33,10 @@ func cannedControlPlane(t *testing.T) *httptest.Server {
 			{"id": "r1", "app": "web", "image": "img:1", "status": "superseded"},
 		}})
 	})
+	mux.HandleFunc("/v1/apps/web/next-tag", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "env": "default", "current": "1.4.2",
+			"next": map[string]any{"patch": "1.4.3", "minor": "1.5.0", "major": "2.0.0"}})
+	})
 	mux.HandleFunc("/v1/apps/web/logs", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"lines": []map[string]any{{"pod": "web-1", "message": "hello"}}})
 	})
@@ -101,6 +105,7 @@ func TestReadOnlyVerbsWiring(t *testing.T) {
 		{"cluster", []string{"cluster"}, `"present": true`},
 		{"providers", []string{"providers"}, `"digitalocean"`},
 		{"addons", []string{"addons"}, `"logs"`},
+		{"next-tag", []string{"next-tag", "web"}, `"1.4.3"`},
 		{"logs-query", []string{"logs-query", "error", "--limit", "10"}, `"boom"`},
 		{"metrics-query", []string{"metrics-query", "up"}, `"value": "1"`},
 	}

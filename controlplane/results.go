@@ -40,6 +40,10 @@ type DeployResult struct {
 	// SupersededReleaseID is the release this deploy replaced, or "" if it was the
 	// first deploy of the app. It is the handle a rollback would return to.
 	SupersededReleaseID string `json:"superseded_release_id,omitempty"`
+	// Hints are non-blocking notes about the deploy the agent can reason over (ADR-0052 §8): today,
+	// a nudge toward semver when the deployed tag cannot be classified for auto-update. They never
+	// gate or fail the deploy — any reference deploys (ADR-0007). Empty when there is nothing to note.
+	Hints []string `json:"hints,omitempty"`
 }
 
 // RunRequest is a one-off command to run in an app's own current image and environment (ADR-0048).

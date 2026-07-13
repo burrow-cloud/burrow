@@ -199,6 +199,67 @@ func newDeployCmd() *cobra.Command {
 	return cmd
 }
 
+// newBuildCmd builds an app's image from a git source reference INSIDE the user's own cluster and, on
+// success, deploys it through the same guarded path an explicit deploy uses (ADR-0053). Only the git
+// reference crosses the control channel — a repository URL (--source) plus a commit or tag (--ref);
+// the builder clones the code inside the cluster, so no source bytes travel over the channel (ADR-0004).
+// It is the optional in-cluster build front-end, not the deploy spine (deploy stays by image reference,
+// ADR-0007): build ends where deploy begins, so its result carries the built digest plus the same
+// DeployResult an explicit deploy returns, and it funnels through the same confirm flow — a held
+// app.deploy guardrail resolves to held_for_confirmation, relayed and re-run with --confirm ONLY after
+// the human approves (never self-confirmed).
+func newBuildCmd() *cobra.Command {
+	o := &connOpts{}
+	var repo, ref, image string
+	var confirm bool
+	cmd := &cobra.Command{
+		Use:   "build <app> --source <repo> --ref <commit-or-tag> --image <target>",
+		Short: "Build an app's image from a git source inside the cluster, then deploy it",
+		Long: "Build an app's image from a git source reference inside the user's own cluster, then deploy\n" +
+			"it through the same guarded path an explicit deploy uses (ADR-0053).\n\n" +
+			"Only the git reference crosses the control channel — a repository URL (--source) plus a commit\n" +
+			"or tag (--ref); the build clones the source inside the cluster, so no code travels over the\n" +
+			"channel (ADR-0004). Pass --ref an exact commit SHA or tag so the build is reproducible. The\n" +
+			"built image is pushed to --image and the resulting deploy pins its digest.\n\n" +
+			"This is the OPTIONAL in-cluster build path, not the default: deploy stays by image reference,\n" +
+			"and build is a front-end that ends where deploy begins. Config and secrets are the same\n" +
+			"app-global store sourced at deploy time — set them beforehand, not here.\n\n" +
+			"Build ends in a deploy, so it is gated by the app.deploy guardrail: an operator may hold it\n" +
+			"for confirmation (e.g. in prod) or deny it. When held, the outcome says so — relay it and\n" +
+			"re-run with --confirm ONLY after the human approves.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app := args[0]
+			// Validate the git reference client-side, before any call, with the same semantics the
+			// control plane enforces (SourceRef.Validate): a repository URL and a commit or tag are both
+			// required. Mirrors the human `burrow app build` CLI verb so the agent gets the same early,
+			// pre-flight rejection of a malformed source.
+			source := controlplane.SourceRef{Repo: repo, Ref: ref}
+			if err := source.Validate(); err != nil {
+				return err
+			}
+			if image == "" {
+				return errors.New("--image is required (the target image reference to push the built image to)")
+			}
+			return o.mutate(cmd, "build", func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.Build(ctx, app, client.BuildRequest{
+					Env:         env,
+					Source:      client.SourceRef{Repo: repo, Ref: ref},
+					TargetImage: image,
+					Confirm:     confirm,
+				})
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVar(&repo, "source", "", "git repository URL to clone and build (required)")
+	cmd.Flags().StringVar(&ref, "ref", "", "commit SHA or tag to build (required)")
+	cmd.Flags().StringVar(&image, "image", "", "target image reference to push the built image to (required)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a build whose deploy a guardrail holds for confirmation (supply only after the human approves)")
+	return cmd
+}
+
 // newRollbackCmd rolls an app back to its previous release.
 func newRollbackCmd() *cobra.Command {
 	o := &connOpts{}

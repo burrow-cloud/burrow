@@ -44,6 +44,11 @@ type Engine struct {
 	// when it is not wired. It is OUTBOUND-only and never touched on the core deploy path, which
 	// stays independent of registry reachability (ADR-0040).
 	registry RegistryClient
+	// builder builds an image from a git source reference inside the cluster for the optional
+	// in-cluster build path (ADR-0053). Optional: nil is allowed, and a build errors cleanly
+	// (ErrNotImplemented) when it is not wired — Burrow stays client-build-first, so build is never
+	// required for deploy (ADR-0053 §1).
+	builder Builder
 	// appNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace
 	// of the implicit `default` environment (ADR-0035 phase 2). It mirrors the kube Adapter's
 	// namespace so the engine can synthesize the default environment in ListEnvironments.
@@ -84,6 +89,10 @@ type Deps struct {
 	// Optional — nil is allowed, and the auto-deploy show degrades to reporting the level alone
 	// when it is not wired. It is OUTBOUND-only and never used on the core deploy path (ADR-0040).
 	RegistryClient RegistryClient
+	// Builder builds an image from a git source reference inside the cluster for the optional
+	// in-cluster build path (ADR-0053). Optional — nil is allowed, and the engine errors cleanly
+	// (ErrNotImplemented) on a build when it is not wired.
+	Builder Builder
 	// AppNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace of
 	// the implicit `default` environment (ADR-0035 phase 2). Optional — an empty value defaults to
 	// "default", matching the kube Adapter.
@@ -127,6 +136,7 @@ func New(d Deps) (*Engine, error) {
 		dbProvisioner: d.DatabaseProvisioner,
 		prober:        d.ClusterProber,
 		registry:      d.RegistryClient,
+		builder:       d.Builder,
 		appNamespace:  appNamespace,
 	}, nil
 }

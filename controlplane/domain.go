@@ -75,6 +75,29 @@ func validateEnvKey(key string) error {
 	return nil
 }
 
+// SourceRef names the git source an in-cluster build clones and checks out inside the user's own
+// cluster (ADR-0053 §3): a repository URL plus the commit or tag to build. It is the ONLY thing a
+// build carries over the control channel — never source bytes (ADR-0004). The builder clones the
+// actual code from git inside the cluster; the agent never carries a tarball, a diff, or any code.
+type SourceRef struct {
+	// Repo is the git repository URL to clone (e.g. "https://github.com/user/app").
+	Repo string
+	// Ref is the commit SHA or tag to check out. A build pins an exact reference, so it is required.
+	Ref string
+}
+
+// Validate reports whether the source reference is well-formed enough to build: a repository URL
+// and a commit or tag to check out are both required.
+func (s SourceRef) Validate() error {
+	if s.Repo == "" {
+		return fmt.Errorf("source repository URL is empty")
+	}
+	if s.Ref == "" {
+		return fmt.Errorf("source ref (a commit or tag) is empty")
+	}
+	return nil
+}
+
 // ReleaseStatus is the lifecycle state of a Release.
 type ReleaseStatus string
 

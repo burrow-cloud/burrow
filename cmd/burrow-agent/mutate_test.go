@@ -267,8 +267,9 @@ func TestMutatingVerbsPresent(t *testing.T) {
 		})
 	}
 	present := [][]string{
-		// Phase 2a compute verbs.
+		// Phase 2a compute verbs, plus the ADR-0053 in-cluster build front-end.
 		{"deploy", "web", "--image", "img:1"},
+		{"build", "web", "--source", "https://github.com/user/app", "--ref", "v1.2.3", "--image", "img:1"},
 		{"rollback", "web"},
 		{"scale", "web", "3"},
 		{"autoscale", "web"},

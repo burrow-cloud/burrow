@@ -3,7 +3,7 @@
 
 // Command burrow-agent is the coding agent's control channel to Burrow: a capability-reduced,
 // JSON-first command-line surface the agent invokes directly (ADR-0049). It carries the operate-verbs
-// — the read-only siblings plus the mutating compute verbs (deploy, rollback, scale, autoscale, run) —
+// — the read-only siblings plus the mutating compute verbs (deploy, build, rollback, scale, autoscale, run) —
 // while the ADMIN verbs (install, bootstrap, cluster setup, guard set, credential writes) are
 // STRUCTURALLY ABSENT, not compiled into this binary, a stronger boundary than a runtime deny list.
 // It authenticates to the control plane with the scoped control-plane credential (ADR-0038) and holds

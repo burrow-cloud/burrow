@@ -17,7 +17,7 @@ import (
 // authenticates. It is the discovery surface (ADR-0049 §5) — the bare invocation prints it.
 const rootLong = `burrow-agent is your control channel to Burrow: it reports the state of the user's applications
 on their Kubernetes cluster so you can survey and diagnose, and it carries the operate-verbs so you
-can act — the compute verbs (deploy, rollback, scale, autoscale, run), the routing verbs (expose,
+can act — the compute verbs (deploy, build, rollback, scale, autoscale, run), the routing verbs (expose,
 unexpose, domain add/remove), the add-on operations (addon install/remove/attach/backup), the config
 writes (config set/unset), secret unset, and the guarded destructive delete.
 
@@ -42,7 +42,7 @@ setup, guard set, credential writes, and — deliberately — setting a secret V
 this binary at all. Run -h on any command to see what it does and the flags it takes.`
 
 // newRootCmd builds the burrow-agent command tree: the read-only operate-verbs and the mutating
-// compute verbs (deploy, rollback, scale, autoscale, run). The dangerous ADMIN verbs are structurally
+// compute verbs (deploy, build, rollback, scale, autoscale, run). The dangerous ADMIN verbs are structurally
 // absent — never registered here — so this binary cannot express them (ADR-0049 §2a).
 func newRootCmd() *cobra.Command {
 	cobra.EnableCommandSorting = false
@@ -74,6 +74,7 @@ func newRootCmd() *cobra.Command {
 		// The mutating compute operate-verbs (ADR-0049 Phase 2a). Each funnels through the confirm
 		// flow in mutate.go and prints an outcome envelope.
 		newDeployCmd(),
+		newBuildCmd(),
 		newRollbackCmd(),
 		newScaleCmd(),
 		newAutoscaleCmd(),

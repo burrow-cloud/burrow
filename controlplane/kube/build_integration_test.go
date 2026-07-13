@@ -8,19 +8,27 @@ import (
 )
 
 // TestBuildIntegration is the honest tracker for the live, end-to-end in-cluster build
-// (ADR-0053 Phase 2, the real Builder Job adapter). A live build must PUSH the image it produces to
-// a registry the cluster can pull from, and Burrow's zero-config push target — the optional
-// in-cluster Zot registry (ADR-0053 §5) — is Phase 3 work that is not yet built. Without a push
-// target reachable from inside the k3d cluster, a real buildah/Buildpacks build has nowhere to land,
-// so this test would assert nothing it can stand behind.
+// (ADR-0053, the real Builder Job adapter). Phase 3 shipped the push target the live build needs —
+// the optional in-cluster Zot registry and its k3s containerd config (`burrow install
+// --with-registry`; controlplane/kube installs no registry itself, the CLI does, ADR-0053 §5). What
+// still blocks a reliable live run in ONE PR, and so keeps this test skipped rather than green:
 //
-// It is deliberately skipped rather than absent, per CLAUDE.md: a skipped test that names the ADR is
-// the honest record of decided-but-unbuilt behavior. It lands, unskipped, with the Phase 3
-// in-cluster registry — driving a real build of a tiny source repo (both the Dockerfile/buildah path
-// and the no-Dockerfile/Buildpacks path), pushing to the in-cluster registry, and asserting the
-// returned digest is pullable. Until then the adapter is covered by the seam-isolated unit tests in
-// build_test.go, which assert the full Job spec, the watch-to-completion happy path, and the
-// failure/timeout paths against the fake Kubernetes client.
+//   - The build container must push to the in-cluster registry over plain HTTP (tls-verify=false for
+//     buildah, plain-http for the CNB lifecycle); the Phase 2 build recipe (build.go) pushes with
+//     TLS defaults, so an insecure-push mode is a deliberate, separate change.
+//   - The k3d harness (scripts/with-k3d.sh) creates a bare cluster with no registries.yaml mirror, so
+//     k3d's containerd would need the same config `burrow cluster bootstrap --with-registry` writes on
+//     k3s before the node could pull the pushed reference.
+//   - The build clones from a git source, so a live run reaches the network to fetch a tiny fixture
+//     repo — a flake surface a single install/config PR should not take on.
+//
+// It stays skipped rather than absent, per CLAUDE.md: a skipped test that names the ADR is the honest
+// record of decided-but-unbuilt behavior. When it lands green it drives a real build of a tiny source
+// repo (both the Dockerfile/buildah and the no-Dockerfile/Buildpacks path), pushes to the in-cluster
+// registry, and asserts the returned digest is pullable. Until then the adapter is covered by the
+// seam-isolated unit tests in build_test.go (the full Job spec, the watch-to-completion happy path,
+// and the failure/timeout paths against the fake Kubernetes client), and the registry install and its
+// containerd config are covered by the CLI's rendering/config unit tests.
 func TestBuildIntegration(t *testing.T) {
-	t.Skip("ADR-0053 Phase 2: the live in-cluster build test lands with the Phase 3 in-cluster registry (its push target)")
+	t.Skip("ADR-0053: the live in-cluster build+push+pull test needs an insecure-push build mode and a registry-configured k3d harness; tracked skipped")
 }

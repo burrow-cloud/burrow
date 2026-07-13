@@ -581,6 +581,65 @@ func TestRenderManifestsBurrowAppsNamespace(t *testing.T) {
 	}
 }
 
+// TestRenderManifestsWithoutRegistry asserts the optional in-cluster registry (ADR-0053 §5) is NOT
+// rendered by default: no registry resources and no default-push-target env, so a plain install costs
+// no extra PersistentVolume or memory.
+func TestRenderManifestsWithoutRegistry(t *testing.T) {
+	out, err := renderManifests(installOptions{
+		Namespace: "burrow", AppNamespace: "burrow-apps", Image: "img:1",
+		Token: "t", DBPassword: "p", Port: 8080, // WithRegistry defaults false
+	})
+	if err != nil {
+		t.Fatalf("renderManifests: %v", err)
+	}
+	for _, unwanted := range []string{
+		"name: burrow-registry",
+		"BURROW_BUILD_REGISTRY",
+		"project-zot",
+		"kind: NodePort",
+	} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("a plain install must not render the in-cluster registry, but found %q", unwanted)
+		}
+	}
+}
+
+// TestRenderManifestsWithRegistry asserts `--with-registry` renders the optional in-cluster registry
+// (ADR-0053 §5): its PVC, config with garbage collection, Deployment on the pinned Zot image, a
+// NodePort Service at the pinned port, and burrowd's default-push-target env pointing at the
+// in-cluster reference. External registries stay supported — this is just a registry that happens to
+// be local.
+func TestRenderManifestsWithRegistry(t *testing.T) {
+	out, err := renderManifests(installOptions{
+		Namespace: "burrow", AppNamespace: "burrow-apps", Image: "img:1",
+		Token: "t", DBPassword: "p", Port: 8080,
+		WithRegistry:     true,
+		RegistryEndpoint: connect.RegistryEndpoint("burrow"),
+		RegistryPort:     connect.DefaultRegistryPort,
+		RegistryNodePort: connect.DefaultRegistryNodePort,
+	})
+	if err != nil {
+		t.Fatalf("renderManifests: %v", err)
+	}
+	for _, want := range []string{
+		"name: burrow-registry",                       // the registry Deployment/Service/PVC/ConfigMap
+		"kind: PersistentVolumeClaim",                 // its persistent volume (ADR-0053 Consequences)
+		"storage: 5Gi",                                // ... sized for accumulating build layers
+		"image: ghcr.io/project-zot/zot-linux-amd64:", // the pinned Zot image
+		`"gc": true`,                                  // garbage collection so layers do not fill disk
+		`"deleteUntagged": true`,                      // ... including orphaned untagged manifests
+		"type: NodePort",                              // reachable by the node's containerd at a pinned port
+		"nodePort: 30500",                             // ... the pinned NodePort
+		// burrowd defaults an empty build target to the in-cluster registry reference.
+		"BURROW_BUILD_REGISTRY",
+		"burrow-registry.burrow.svc.cluster.local:5000",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--with-registry manifests missing %q", want)
+		}
+	}
+}
+
 func TestInstallDefaultAppNamespace(t *testing.T) {
 	// Lock the install command's --app-namespace default to burrow-apps: defaulting to the
 	// cluster's shared `default` namespace would put burrowd's Secrets grant (ADR-0029) there.

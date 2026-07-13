@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -123,6 +124,52 @@ type bootstrapArgs struct {
 	ingressStaging bool
 	// apiReadyBudget is how long to poll the freshly installed k3s API for readiness before failing.
 	apiReadyBudget time.Duration
+	// withRegistry installs the optional in-cluster registry (Zot) as the zero-config default push
+	// target for the in-cluster build (ADR-0053 §5), and writes the k3s registries.yaml so the node's
+	// containerd resolves the in-cluster registry name and can pull what a build pushes. Opt-in;
+	// default off.
+	withRegistry bool
+}
+
+// k3sRegistriesPath is where k3s reads its containerd registry configuration. `burrow cluster
+// bootstrap --with-registry` writes this so the node's containerd resolves the in-cluster registry
+// name and pulls from it (ADR-0053 §5). k3s watches this file and reloads it without a restart.
+const k3sRegistriesPath = "/etc/rancher/k3s/registries.yaml"
+
+// buildRegistriesConfig renders the k3s containerd registry configuration that lets the node pull
+// images pushed to the in-cluster registry (ADR-0053 §5). It mirrors the in-cluster registry
+// reference host (what a build pushes to and the deploy pulls by) to the pinned NodePort on
+// localhost, and marks it insecure because the in-cluster registry serves plain HTTP — the traffic
+// never leaves the node. The mirror host MUST equal connect.RegistryEndpoint(namespace) so the
+// reference the deploy pins is exactly what containerd rewrites.
+func buildRegistriesConfig(namespace string) string {
+	host := connect.RegistryEndpoint(namespace)
+	return fmt.Sprintf(`mirrors:
+  "%s":
+    endpoint:
+      - "http://127.0.0.1:%d"
+configs:
+  "%s":
+    tls:
+      insecure_skip_verify: true
+`, host, connect.DefaultRegistryNodePort, host)
+}
+
+// writeRegistriesConfigFn writes the k3s registries.yaml for the in-cluster registry. It is a
+// package var so a test can substitute a recorder without touching the real /etc path; the real
+// implementation writes the file (creating its directory).
+var writeRegistriesConfigFn = writeRegistriesConfig
+
+// writeRegistriesConfig writes the rendered k3s registry configuration to path, creating the parent
+// directory if k3s has not yet. k3s watches the file and reloads it, so no restart is needed.
+func writeRegistriesConfig(namespace, path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating the k3s registry config directory: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(buildRegistriesConfig(namespace)), 0o644); err != nil {
+		return fmt.Errorf("writing the k3s registry config %s: %w", path, err)
+	}
+	return nil
 }
 
 // runIngressInstallFn is the ingress-install entry point bootstrap calls when --with-ingress is set.
@@ -379,6 +426,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&a.withIngress, "with-ingress", false, "also install the public-HTTPS stack (ingress-nginx, cert-manager, and a Let's Encrypt issuer) so the cluster can serve a public site")
 	cmd.Flags().StringVar(&a.acmeEmail, "acme-email", "", "ACME registration email for the Let's Encrypt issuer when --with-ingress is set (optional; recommended to receive expiry notices)")
 	cmd.Flags().BoolVar(&a.ingressStaging, "ingress-staging", false, "with --with-ingress, use the Let's Encrypt staging environment (untrusted certs, high rate limits) to test the flow")
+	cmd.Flags().BoolVar(&a.withRegistry, "with-registry", false, "also install the optional in-cluster registry as the zero-config default push target for in-cluster builds, and configure k3s's containerd to pull from it")
 	cmd.Flags().DurationVar(&a.apiReadyBudget, "k3s-api-timeout", defaultK3sAPIReadyBudget, "how long to wait for the k3s API to answer after install (a slow first-start on a small VPS needs a generous budget)")
 	return cmd
 }
@@ -425,6 +473,17 @@ func runBootstrap(ctx context.Context, a bootstrapArgs, stdout, stderr io.Writer
 	}
 	if err := ensureK3sInstalled(ctx, installer, buildK3sInstallCommand(ip), budget, stdout, stderr); err != nil {
 		return err
+	}
+
+	// Optional in-cluster registry: configure k3s's containerd BEFORE deploying the control plane, so
+	// the node can pull from the registry the install will deploy (ADR-0053 §5). k3s watches
+	// registries.yaml and reloads it, so this needs no restart. The registry Deployment itself is
+	// applied by the install below (via --with-registry threaded into installArgs).
+	if a.withRegistry {
+		if err := writeRegistriesConfigFn(a.namespace, k3sRegistriesPath); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Configured k3s to pull from the in-cluster registry (%s).\n", k3sRegistriesPath)
 	}
 
 	// Deploy burrowd by REUSING the `burrow install` path against the local k3s admin kubeconfig. This
@@ -609,6 +668,9 @@ func installBurrowdOnK3s(ctx context.Context, a bootstrapArgs, stdout, stderr io
 		image:        a.image,
 		kubeconfig:   a.kubeconfig,
 		wait:         a.wait,
+		// Install the optional in-cluster registry alongside the control plane when bootstrap was asked
+		// for it (ADR-0053 §5); the containerd config for it was written above.
+		withRegistry: a.withRegistry,
 		// Deploy burrowd and mint the scoped agent credential without the laptop-oriented local
 		// bookkeeping: no ~/.burrow handle, no "connect your agent" guidance. bootstrap prints the
 		// join-token block for the laptop instead (ADR-0044).

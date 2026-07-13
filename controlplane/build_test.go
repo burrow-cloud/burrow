@@ -32,6 +32,89 @@ func newBuildEngine(t *testing.T, policy cp.Policy) (*cp.Engine, *fake.Kubernete
 	return e, k, d, b
 }
 
+// newBuildEngineWithRegistry wires a build engine that also carries a default in-cluster registry
+// (ADR-0053 §5), so a build with no explicit target defaults its push target to the local registry.
+func newBuildEngineWithRegistry(t *testing.T, registry string) (*cp.Engine, *fake.Kubernetes, *fake.Builder) {
+	t.Helper()
+	k := fake.NewKubernetes()
+	d := fake.NewDatabase()
+	d.SetPolicy(permissive())
+	b := fake.NewBuilder()
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Database: d, Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs: fake.NewIDs(), Resolver: fake.NewResolver(), Credentials: fake.NewCredentials(),
+		DNS: fake.NewDNSFactory(), Builder: b, BuildRegistry: registry,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return e, k, b
+}
+
+// TestBuildDefaultsTargetToInClusterRegistry asserts that a build with no explicit target defaults
+// its push target to the configured in-cluster registry — the zero-config default push target
+// (ADR-0053 §5). The builder is called with the composed reference, and the resulting deploy pins the
+// exact bytes by digest.
+func TestBuildDefaultsTargetToInClusterRegistry(t *testing.T) {
+	const registry = "burrow-registry.burrow.svc.cluster.local:5000"
+	e, k, b := newBuildEngineWithRegistry(t, registry)
+	b.SetDigest("sha256:def456")
+
+	res, err := e.Build(context.Background(), cp.BuildRequest{
+		App:    "web",
+		Source: cp.SourceRef{Repo: "https://github.com/acme/web", Ref: "v1.0.0"},
+		// No TargetImage: the in-cluster registry is the default.
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	wantTarget := registry + "/web:build"
+	if got := b.LastTarget(); got != wantTarget {
+		t.Errorf("builder target = %q, want the in-cluster default %q", got, wantTarget)
+	}
+	wantImage := wantTarget + "@sha256:def456"
+	if res.Deploy.Release.Image != wantImage {
+		t.Errorf("deployed image = %q, want %q", res.Deploy.Release.Image, wantImage)
+	}
+	spec, ok := k.Spec("web")
+	if !ok || spec.Image != wantImage {
+		t.Errorf("applied workload image = %q (ok=%v), want %q", spec.Image, ok, wantImage)
+	}
+}
+
+// TestBuildExplicitTargetOverridesRegistry asserts a caller-supplied target is used verbatim even
+// when an in-cluster registry is configured — external registries stay fully supported (ADR-0053 §5).
+func TestBuildExplicitTargetOverridesRegistry(t *testing.T) {
+	e, _, b := newBuildEngineWithRegistry(t, "burrow-registry.burrow.svc.cluster.local:5000")
+	b.SetDigest("sha256:abc")
+
+	if _, err := e.Build(context.Background(), cp.BuildRequest{
+		App:         "web",
+		Source:      cp.SourceRef{Repo: "https://github.com/acme/web", Ref: "v1.0.0"},
+		TargetImage: "ghcr.io/acme/web:1.0.0",
+	}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got := b.LastTarget(); got != "ghcr.io/acme/web:1.0.0" {
+		t.Errorf("builder target = %q, want the caller's external target verbatim", got)
+	}
+}
+
+// TestBuildEmptyTargetWithoutRegistryErrors asserts that with no in-cluster registry configured, a
+// build with no explicit target is a clean validation error — there is nowhere to push (ADR-0053 §5).
+func TestBuildEmptyTargetWithoutRegistryErrors(t *testing.T) {
+	e, _, _, b := newBuildEngine(t, permissive())
+	b.SetDigest("sha256:abc")
+	_, err := e.Build(context.Background(), cp.BuildRequest{
+		App:    "web",
+		Source: cp.SourceRef{Repo: "https://github.com/acme/web", Ref: "v1.0.0"},
+	})
+	if !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("empty target with no registry: err = %v, want ErrInvalid", err)
+	}
+}
+
 // TestBuildSuccessFeedsGuardedDeploy asserts a successful build hands the digest-pinned reference of
 // the image it produced into the existing guarded deploy path: a release is recorded and the workload
 // is applied with that exact reference, and the builder is called with the source ref and target image.

@@ -49,6 +49,11 @@ type Engine struct {
 	// (ErrNotImplemented) when it is not wired — Burrow stays client-build-first, so build is never
 	// required for deploy (ADR-0053 §1).
 	builder Builder
+	// buildRegistry is the in-cluster registry reference host:port that the optional in-cluster
+	// build defaults its push target to when the caller supplies none (ADR-0053 §5). Optional: when
+	// empty, an in-cluster build requires an explicit target and a missing one errors. A
+	// caller-supplied target always overrides it, so external registries stay fully supported.
+	buildRegistry string
 	// appNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace
 	// of the implicit `default` environment (ADR-0035 phase 2). It mirrors the kube Adapter's
 	// namespace so the engine can synthesize the default environment in ListEnvironments.
@@ -93,6 +98,13 @@ type Deps struct {
 	// in-cluster build path (ADR-0053). Optional — nil is allowed, and the engine errors cleanly
 	// (ErrNotImplemented) on a build when it is not wired.
 	Builder Builder
+	// BuildRegistry is the in-cluster registry reference host:port the in-cluster build defaults its
+	// push target to when the caller supplies none — the zero-config default push target for a build
+	// (ADR-0053 §5). Optional — an empty value means a build with no explicit target errors, and a
+	// caller-supplied target always overrides it (external registries stay fully supported). burrowd
+	// sets it from BURROW_BUILD_REGISTRY, which `install --with-registry` wires to the in-cluster
+	// registry it deploys.
+	BuildRegistry string
 	// AppNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace of
 	// the implicit `default` environment (ADR-0035 phase 2). Optional — an empty value defaults to
 	// "default", matching the kube Adapter.
@@ -137,6 +149,7 @@ func New(d Deps) (*Engine, error) {
 		prober:        d.ClusterProber,
 		registry:      d.RegistryClient,
 		builder:       d.Builder,
+		buildRegistry: d.BuildRegistry,
 		appNamespace:  appNamespace,
 	}, nil
 }

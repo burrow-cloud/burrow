@@ -104,6 +104,36 @@ type DeployRequest struct {
 	Confirm     bool     `json:"confirm,omitempty"`
 }
 
+// SourceRef names the git source an in-cluster build clones and checks out inside the cluster
+// (ADR-0053 §3): a repository URL plus the commit or tag to build. It is the only thing a build
+// carries over the control channel — never source bytes (ADR-0004). The field names are capitalized
+// to match the control-plane's SourceRef JSON shape, which carries no struct tags.
+type SourceRef struct {
+	Repo string `json:"Repo"`
+	Ref  string `json:"Ref"`
+}
+
+// BuildRequest describes an in-cluster build-then-deploy (ADR-0053): the git source to clone and
+// build inside the cluster and the target image reference the built image is pushed to. On success
+// the built image rejoins the guarded deploy path, so a build is a front-end that ends where deploy
+// begins. Env names the target environment (ADR-0035); empty or "default" targets the default
+// environment. TargetImage is required in this phase (the in-cluster registry default is a later
+// phase); Confirm acknowledges the app.deploy guardrail so a held deploy proceeds.
+type BuildRequest struct {
+	Env         string    `json:"env,omitempty"`
+	Source      SourceRef `json:"source"`
+	TargetImage string    `json:"target_image"`
+	Confirm     bool      `json:"confirm,omitempty"`
+}
+
+// BuildResult reports the outcome of a successful build-then-deploy (ADR-0053 §4): the digest of the
+// image the builder produced and the deploy that shipped it. Because the build ends where deploy
+// begins, Deploy carries the same release, rollback handle, and hints an explicit deploy returns.
+type BuildResult struct {
+	Digest string       `json:"digest"`
+	Deploy DeployResult `json:"deploy"`
+}
+
 // RunRequest is a one-off command to run in an app's own current image and environment (ADR-0048).
 // Command is the argv (non-empty); TTLSeconds overrides the finished-Job TTL (nil applies the
 // default of one hour, 0 deletes it as soon as the output is captured); Confirm acknowledges the
@@ -410,6 +440,17 @@ func (c *Client) Cluster(ctx context.Context) (ClusterCapabilities, error) {
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "deploy"), req, &out)
+	return out, err
+}
+
+// Build builds an app's image from a git source reference inside the cluster and, on success, hands
+// the resulting digest-pinned reference into the guarded deploy path (ADR-0053): the returned
+// BuildResult carries the built digest and the deploy that shipped it. It is gated by the app.deploy
+// guardrail — a held deploy returns a guardrail error the caller surfaces for confirmation, re-invoking
+// with Confirm set only on explicit human approval.
+func (c *Client) Build(ctx context.Context, app string, req BuildRequest) (BuildResult, error) {
+	var out BuildResult
+	err := c.do(ctx, http.MethodPost, c.appPath(app, "build"), req, &out)
 	return out, err
 }
 

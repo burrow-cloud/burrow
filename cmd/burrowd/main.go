@@ -197,6 +197,17 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		return err
 	}
 
+	// The in-cluster builder runs a build as a Kubernetes Job in the app namespace, cloning the git
+	// ref inside the cluster and pushing the built image to a registry the cluster can pull from
+	// (ADR-0053). It is the optional in-cluster build path — Burrow stays client-build-first, so a
+	// build is never required for deploy. BURROW_BUILD_IMAGE / BURROW_GIT_IMAGE let the install
+	// override the default builder and clone images (their install wiring is Phase 3).
+	builder, err := kube.NewBuilderFromConfig(kubeCfg, namespace)
+	if err != nil {
+		return err
+	}
+	builder.WithBuildImage(os.Getenv("BURROW_BUILD_IMAGE")).WithGitImage(os.Getenv("BURROW_GIT_IMAGE"))
+
 	// One HTTP client shared across the observability adapters — burrowd reaches each backend
 	// in-cluster.
 	obsHTTP := &http.Client{Timeout: 20 * time.Second}
@@ -226,6 +237,10 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		// (ADR-0017/ADR-0040); it lands with the Phase 4 poller, for which the adapter is already
 		// ready via RegistryAuth. It reaches the registry outbound over its own bounded-timeout client.
 		RegistryClient: registry.NewClient(&http.Client{Timeout: 20 * time.Second}),
+		// The in-cluster builder for the optional build path (ADR-0053). Optional — a build errors
+		// cleanly (ErrNotImplemented) when it is not wired; it is wired here so `burrow app build` and
+		// the agent build verb (later phases) have a builder.
+		Builder: builder,
 		// The app namespace is the implicit `default` environment (ADR-0035 phase 2).
 		AppNamespace: namespace,
 	})

@@ -1,0 +1,366 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Nicholas Phillips
+
+package kube
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
+
+	"github.com/burrow-cloud/burrow/controlplane"
+)
+
+// validDigest is a well-formed sha256 content digest the build container "writes" to its
+// termination-log in the happy-path tests.
+const validDigest = "sha256:" +
+	"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// buildFakeSucceeding returns a fake clientset whose build Job is observed Succeeded on Get, plus a
+// terminated pod carrying digest in its termination message so the adapter can read it back. It also
+// records every created Job into created.
+func buildFakeSucceeding(t *testing.T, source controlplane.SourceRef, target, digest string) (*fake.Clientset, *[]*batchv1.Job) {
+	t.Helper()
+	client := fake.NewSimpleClientset()
+	created := &[]*batchv1.Job{}
+	client.PrependReactor("create", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		*created = append(*created, a.(clienttesting.CreateAction).GetObject().(*batchv1.Job).DeepCopy())
+		return false, nil, nil // let the tracker store it too
+	})
+	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		name := a.(clienttesting.GetAction).GetName()
+		return true, &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "apps"},
+			Status:     batchv1.JobStatus{Succeeded: 1},
+		}, nil
+	})
+
+	// A finished pod for the build Job, labelled like the Job so the digest read-back finds it.
+	jobName := buildJobName(source, target)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: jobName + "-abc", Namespace: "apps",
+			Labels: map[string]string{nameLabel: jobName},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  buildContainerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Message: digest + "\n"}},
+			}},
+		},
+	}
+	if _, err := client.CoreV1().Pods("apps").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed pod: %v", err)
+	}
+	return client, created
+}
+
+// TestBuildJobSpec asserts the build Job is a hardened, in-cluster clone-and-build in the app's own
+// namespace: an init container clones the git ref (the ref plumbed in as env, never source bytes),
+// the build container selects buildah-or-Buildpacks at runtime and pushes to the target, and both
+// carry the restricted PodSecurity floor and resource caps (ADR-0053 §3, §4, §7).
+func TestBuildJobSpec(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1.2.3"}
+	const target = "reg.burrow.svc/acme/shop:1.2.3"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	b := NewBuilder(client, "apps")
+	digest, err := b.Build(ctx, source, target)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if digest != validDigest {
+		t.Errorf("digest = %q, want %q (read from the pod termination-log)", digest, validDigest)
+	}
+
+	if len(*created) != 1 {
+		t.Fatalf("created %d jobs, want 1", len(*created))
+	}
+	job := (*created)[0]
+
+	if job.Namespace != "apps" {
+		t.Errorf("job namespace = %q, want apps (the app's own namespace, ADR-0053 §4)", job.Namespace)
+	}
+	if !strings.HasPrefix(job.Name, "burrow-build-") {
+		t.Errorf("job name = %q, want a burrow-build- prefix", job.Name)
+	}
+	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 {
+		t.Errorf("backoffLimit = %v, want 0 (a single attempt, no retry masking a failure)", job.Spec.BackoffLimit)
+	}
+	pod := job.Spec.Template.Spec
+	if pod.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("restart policy = %q, want Never", pod.RestartPolicy)
+	}
+
+	// The clone runs as an init container so the workspace is populated before the build container
+	// starts. Only the ref crosses the seam — the source is cloned INSIDE the cluster (ADR-0053 §3).
+	if len(pod.InitContainers) != 1 {
+		t.Fatalf("init containers = %d, want 1 (the clone)", len(pod.InitContainers))
+	}
+	clone := pod.InitContainers[0]
+	gotRepo, gotRef := envValue(clone.Env, "REPO"), envValue(clone.Env, "REF")
+	if gotRepo != source.Repo || gotRef != source.Ref {
+		t.Errorf("clone env REPO/REF = %q/%q, want %q/%q", gotRepo, gotRef, source.Repo, source.Ref)
+	}
+	// The ref is passed as env, never interpolated into the clone script — so it is data, not shell.
+	if strings.Contains(strings.Join(clone.Command, " "), source.Ref) {
+		t.Errorf("clone command interpolates the ref (%q) instead of passing it as env", source.Ref)
+	}
+
+	if len(pod.Containers) != 1 {
+		t.Fatalf("containers = %d, want 1 (the build)", len(pod.Containers))
+	}
+	build := pod.Containers[0]
+	if got := envValue(build.Env, "TARGET_IMAGE"); got != target {
+		t.Errorf("build env TARGET_IMAGE = %q, want %q", got, target)
+	}
+	script := strings.Join(build.Command, " ")
+	// Builder selection happens at runtime, after the clone, from the cloned tree — buildah when a
+	// Dockerfile is present, the Buildpacks lifecycle when it is not (ADR-0053 §4).
+	if !strings.Contains(script, "Dockerfile") {
+		t.Errorf("build script does not detect a Dockerfile:\n%s", script)
+	}
+	if !strings.Contains(script, "buildah") {
+		t.Errorf("build script has no buildah branch (the Dockerfile case):\n%s", script)
+	}
+	if !strings.Contains(script, "creator") {
+		t.Errorf("build script has no Buildpacks lifecycle branch (the no-Dockerfile case):\n%s", script)
+	}
+	if !strings.Contains(script, "/dev/termination-log") {
+		t.Errorf("build script does not write the digest to the termination-log:\n%s", script)
+	}
+
+	// No source bytes anywhere in the Job — only the ref, repo, and target reference cross (ADR-0004).
+	assertNoSourceBytes(t, job)
+
+	// Pod-level restricted PodSecurity (ADR-0053 §7).
+	sc := pod.SecurityContext
+	if sc == nil {
+		t.Fatal("pod securityContext is nil, want the restricted floor")
+	}
+	if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		t.Error("pod runAsNonRoot is not true")
+	}
+	if sc.RunAsUser == nil || *sc.RunAsUser == 0 {
+		t.Error("pod runAsUser is root or unset, want a non-zero UID")
+	}
+	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Error("pod seccompProfile is not RuntimeDefault")
+	}
+	if sc.FSGroup == nil {
+		t.Error("pod fsGroup is unset, want the shared emptyDir group-writable")
+	}
+
+	// Container-level restricted floor + resource caps, on both the clone and the build container.
+	for _, c := range []corev1.Container{clone, build} {
+		csc := c.SecurityContext
+		if csc == nil {
+			t.Fatalf("container %q securityContext is nil", c.Name)
+		}
+		if csc.AllowPrivilegeEscalation == nil || *csc.AllowPrivilegeEscalation {
+			t.Errorf("container %q allows privilege escalation", c.Name)
+		}
+		if csc.ReadOnlyRootFilesystem == nil || !*csc.ReadOnlyRootFilesystem {
+			t.Errorf("container %q root filesystem is not read-only", c.Name)
+		}
+		if csc.Capabilities == nil || len(csc.Capabilities.Drop) == 0 || csc.Capabilities.Drop[0] != "ALL" {
+			t.Errorf("container %q does not drop ALL capabilities", c.Name)
+		}
+		if c.Resources.Limits.Cpu().IsZero() || c.Resources.Limits.Memory().IsZero() {
+			t.Errorf("container %q has no CPU/memory limit (a build must not starve the node)", c.Name)
+		}
+		if c.Resources.Requests.Cpu().IsZero() || c.Resources.Requests.Memory().IsZero() {
+			t.Errorf("container %q has no CPU/memory request", c.Name)
+		}
+	}
+
+	// Every write path is a writable emptyDir so the read-only root filesystem is feasible.
+	if len(pod.Volumes) == 0 {
+		t.Error("build pod has no volumes, want emptyDir scratch for the read-only root")
+	}
+	for _, v := range pod.Volumes {
+		if v.EmptyDir == nil {
+			t.Errorf("volume %q is not an emptyDir", v.Name)
+		}
+	}
+}
+
+// TestBuildReadsDigestAndReaps asserts a successful build returns the digest and reaps its Job.
+func TestBuildReadsDigestAndReaps(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "abc123"}
+	const target = "reg.burrow.svc/acme/shop:2"
+	client, _ := buildFakeSucceeding(t, source, target, validDigest)
+
+	var deleted bool
+	client.PrependReactor("delete", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		deleted = true
+		return true, nil, nil
+	})
+
+	b := NewBuilder(client, "apps")
+	digest, err := b.Build(ctx, source, target)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if digest != validDigest {
+		t.Errorf("digest = %q, want %q", digest, validDigest)
+	}
+	if !deleted {
+		t.Error("a successful build did not reap its Job")
+	}
+}
+
+// TestBuildJobFailure asserts a Failed build Job becomes a structured error and no digest.
+func TestBuildJobFailure(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		name := a.(clienttesting.GetAction).GetName()
+		return true, &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "apps"},
+			Status:     batchv1.JobStatus{Failed: 1},
+		}, nil
+	})
+
+	b := NewBuilder(client, "apps")
+	digest, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1")
+	if err == nil {
+		t.Fatal("Build should return an error when the Job fails")
+	}
+	if digest != "" {
+		t.Errorf("digest = %q, want empty on failure", digest)
+	}
+}
+
+// TestBuildSuccessNoDigest asserts a Job that reports success but wrote no digest is a build failure
+// rather than a deploy pinned to nothing.
+func TestBuildSuccessNoDigest(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		name := a.(clienttesting.GetAction).GetName()
+		return true, &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "apps"},
+			Status:     batchv1.JobStatus{Succeeded: 1},
+		}, nil
+	})
+	// No pod seeded, so there is no termination-log digest to read.
+
+	b := NewBuilder(client, "apps")
+	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1"); err == nil {
+		t.Fatal("Build should error when a succeeded Job produced no digest")
+	}
+}
+
+// TestBuildContextCancel asserts a still-running build honors context cancellation instead of
+// blocking to the timeout.
+func TestBuildContextCancel(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		name := a.(clienttesting.GetAction).GetName()
+		// Never terminal: the Job is still running, so the wait loop must fall through to the select.
+		return true, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "apps"}}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already canceled: the first loop turn must return ctx.Err()
+
+	b := NewBuilder(client, "apps")
+	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Build err = %v, want context.Canceled", err)
+	}
+}
+
+// TestBuildValidatesInputBeforeAnyJob asserts a malformed source or empty target is rejected as
+// ErrInvalid before any Job is created.
+func TestBuildValidatesInputBeforeAnyJob(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		source controlplane.SourceRef
+		target string
+	}{
+		{"empty repo", controlplane.SourceRef{Ref: "v1"}, "reg/app:1"},
+		{"empty ref", controlplane.SourceRef{Repo: "https://github.com/acme/shop"}, "reg/app:1"},
+		{"empty target", controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "  "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			b := NewBuilder(client, "apps")
+			_, err := b.Build(ctx, tc.source, tc.target)
+			if !errors.Is(err, controlplane.ErrInvalid) {
+				t.Fatalf("err = %v, want ErrInvalid", err)
+			}
+			jobs, _ := client.BatchV1().Jobs("apps").List(ctx, metav1.ListOptions{})
+			if len(jobs.Items) != 0 {
+				t.Errorf("created %d jobs for invalid input, want 0", len(jobs.Items))
+			}
+		})
+	}
+}
+
+// TestParseDigest covers the termination-log digest parsing: a well-formed sha256 is accepted
+// (trimming a trailing newline), and anything else is rejected as unknown.
+func TestParseDigest(t *testing.T) {
+	if got := parseDigest(validDigest + "\n"); got != validDigest {
+		t.Errorf("parseDigest(valid) = %q, want %q", got, validDigest)
+	}
+	for _, bad := range []string{"", "not-a-digest", "sha256:short", "sha256:" + strings.Repeat("z", 64), "Successfully built abc"} {
+		if got := parseDigest(bad); got != "" {
+			t.Errorf("parseDigest(%q) = %q, want empty", bad, got)
+		}
+	}
+}
+
+// TestBuildJobNameDeterministic asserts an identical source+target maps to the same Job name (so a
+// re-run is idempotent) and a different one to a different name.
+func TestBuildJobNameDeterministic(t *testing.T) {
+	src := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	a := buildJobName(src, "reg/app:1")
+	if b := buildJobName(src, "reg/app:1"); a != b {
+		t.Errorf("same input gave different names %q vs %q", a, b)
+	}
+	if c := buildJobName(src, "reg/app:2"); a == c {
+		t.Errorf("different target gave the same name %q", a)
+	}
+	if !strings.HasPrefix(a, "burrow-build-") {
+		t.Errorf("name %q lacks the burrow-build- prefix", a)
+	}
+}
+
+// envValue returns the value of the named env var, or "" if absent.
+func envValue(env []corev1.EnvVar, name string) string {
+	for _, e := range env {
+		if e.Name == name {
+			return e.Value
+		}
+	}
+	return ""
+}
+
+// assertNoSourceBytes is a guard for the load-bearing invariant that no source code crosses into the
+// Job (ADR-0004, ADR-0053 §3): the Job carries only the git ref, the repo URL, and the target
+// reference — the source is cloned inside the cluster. There is no ConfigMap/inline volume of source
+// and no command payload beyond the fixed clone/build scripts.
+func assertNoSourceBytes(t *testing.T, job *batchv1.Job) {
+	t.Helper()
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.ConfigMap != nil || v.Secret != nil {
+			t.Errorf("Job volume %q injects data into the build; source must be cloned in-cluster, not carried", v.Name)
+		}
+		if v.EmptyDir == nil {
+			t.Errorf("Job volume %q is not an emptyDir; a build carries no source payload", v.Name)
+		}
+	}
+}

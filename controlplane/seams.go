@@ -88,6 +88,28 @@ type RegistryClient interface {
 	ListTags(ctx context.Context, imageRef string, auth RegistryAuth) ([]string, error)
 }
 
+// Builder builds a container image from a git source reference inside the user's own cluster and
+// pushes it to a target registry (ADR-0053). It is a seam — a real adapter (a Kubernetes build Job)
+// and a fake — like every other Burrow dependency that touches the cluster, the registry, the clock,
+// or the database. The interface is deliberately MINIMAL (ADR-0053 §6): it takes a source reference
+// and a target image reference and returns the resulting image digest or an error — nothing more.
+// Isolation and sandboxing are expressed INSIDE an implementation, never as interface knobs, so the
+// separate commercial multi-tenant product can supply a hardened, sandboxed executor behind this same
+// seam without the OSS interface having to anticipate its needs (ADR-0053 §6/§7). Building is code
+// execution; in the single-tenant OSS path the user owns both the cluster and the source, so no
+// sandbox is required (ADR-0053 §7). It is an OPTIONAL seam: nil is allowed, and the build path errors
+// cleanly (ErrNotImplemented) when it is not wired.
+type Builder interface {
+	// Build clones source inside the cluster, builds an image, pushes it to targetImage (a pullable
+	// repo:tag reference), and returns the resulting image content digest (e.g. "sha256:..."). Only
+	// the git reference and the target reference cross into the builder — never source bytes; the
+	// builder clones the actual code from git inside the cluster (ADR-0004/0053 §3). It returns an
+	// error on any clone, build, or push failure; the caller surfaces that structurally and does NOT
+	// touch the deploy path. On success the returned digest is the immutable identity the resulting
+	// guarded deploy pins (ADR-0053 §4).
+	Build(ctx context.Context, source SourceRef, targetImage string) (digest string, err error)
+}
+
 // DatabaseProvisioner is the seam over the installed Postgres add-on's admin surface (ADR-0031).
 // burrowd connects to the shared instance as the superuser and gives each app its own database and
 // login role inside it; the engine calls this on attach/detach. It is an optional seam — present

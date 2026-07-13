@@ -46,6 +46,41 @@ type DeployResult struct {
 	Hints []string `json:"hints,omitempty"`
 }
 
+// BuildRequest is the code-free description of an in-cluster build-then-deploy (ADR-0053): the app,
+// the git source to clone and build inside the cluster, and the target image reference the built
+// image is pushed to. No code travels here (ADR-0004) — only the git reference and the target
+// reference; the builder clones the source from git inside the cluster. On success the built image
+// rejoins the existing guarded deploy path (ADR-0053 §4), so a build is a front-end that ends where
+// deploy begins.
+type BuildRequest struct {
+	App string `json:"app"`
+	// Env is the environment to deploy the built image into (ADR-0035): empty or "default" targets the
+	// implicit default environment, a registered name targets that environment. An unregistered name
+	// is an error, surfaced by the deploy the build hands off to.
+	Env string `json:"env,omitempty"`
+	// Source is the git reference the builder clones and checks out inside the cluster.
+	Source SourceRef `json:"source"`
+	// TargetImage is the pullable repo:tag reference the built image is pushed to; the resulting deploy
+	// pins the digest the builder returns. In this phase it is supplied explicitly; the optional
+	// in-cluster registry as the zero-config default push target (ADR-0053 §5) is a later phase.
+	TargetImage string `json:"target_image"`
+	// Confirm acknowledges the app.deploy guardrail whose disposition is confirm, letting the deploy
+	// the build hands off to proceed past it (ADR-0020). It has no effect on a guardrail set to deny.
+	Confirm bool `json:"confirm,omitempty"`
+}
+
+// BuildResult reports the outcome of a successful build-then-deploy (ADR-0053 §4): the digest of the
+// image the builder produced and the deploy that shipped it. Because the build ends where deploy
+// begins, Deploy carries the same new release, rollback handle, and hints an explicit deploy returns —
+// downstream cannot tell a built image apart from an externally-built one except in provenance.
+type BuildResult struct {
+	// Digest is the content digest of the built image (e.g. "sha256:..."), the immutable identity the
+	// deployed release pins.
+	Digest string `json:"digest"`
+	// Deploy is the guarded deploy the built image flowed into (ADR-0053 §4).
+	Deploy DeployResult `json:"deploy"`
+}
+
 // RunRequest is a one-off command to run in an app's own current image and environment (ADR-0048).
 // It carries only the command (and its arguments) — the image, config, and secrets come from the
 // app, resolved server-side. No code travels here (ADR-0004): the command names an entrypoint that

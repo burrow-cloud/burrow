@@ -28,7 +28,14 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 		return BuildResult{}, fmt.Errorf("build %s: %w: %w", req.App, ErrInvalid, err)
 	}
 	if req.TargetImage == "" {
-		return BuildResult{}, fmt.Errorf("build %s: target image reference is empty: %w", req.App, ErrInvalid)
+		// No explicit target: default to the optional in-cluster registry when one is wired — the
+		// zero-config default push target (ADR-0053 §5). The image happens to live in a local
+		// registry; deploy still pins it strictly by reference (ADR-0007). When no in-cluster
+		// registry is configured, a build with no target is an error, since there is nowhere to push.
+		if e.buildRegistry == "" {
+			return BuildResult{}, fmt.Errorf("build %s: target image reference is empty and no in-cluster registry is configured to default to: %w", req.App, ErrInvalid)
+		}
+		req.TargetImage = defaultBuildTarget(e.buildRegistry, req.App)
 	}
 	if e.builder == nil {
 		return BuildResult{}, fmt.Errorf("build %s: in-cluster build is not configured: %w", req.App, ErrNotImplemented)
@@ -55,6 +62,21 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}
 	return BuildResult{Digest: digest, Deploy: dep}, nil
+}
+
+// defaultBuildTargetTag is the tag a build's default in-cluster target carries. The deploy pins the
+// exact bytes by digest (see pinDigest), so the tag is only a human-readable handle, not the
+// identity; a fixed, non-semver tag keeps it out of the ADR-0052 semver auto-update path — an
+// in-cluster build is an explicit call, not something to also auto-redeploy on tag movement.
+const defaultBuildTargetTag = "build"
+
+// defaultBuildTarget composes the default push target for an in-cluster build with no explicit
+// target: the in-cluster registry, the app as the repository, and a fixed build tag — e.g.
+// "burrow-registry.burrow.svc.cluster.local:5000/web:build" (ADR-0053 §5). The registry host is the
+// exact reference the node's containerd resolves through the k3s registries.yaml mirror, so what a
+// build pushes is what the resulting deploy pulls.
+func defaultBuildTarget(registry, app string) string {
+	return registry + "/" + app + ":" + defaultBuildTargetTag
 }
 
 // pinDigest returns the digest-pinned form of a target image reference (e.g.

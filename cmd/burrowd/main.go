@@ -241,6 +241,12 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		// cleanly (ErrNotImplemented) when it is not wired; it is wired here so `burrow app build` and
 		// the agent build verb (later phases) have a builder.
 		Builder: builder,
+		// The zero-config default push target for an in-cluster build with no explicit target (ADR-0053
+		// §5): the in-cluster registry `install --with-registry` deploys, whose in-cluster reference is
+		// wired here via BURROW_BUILD_REGISTRY. Empty when no in-cluster registry is installed, in which
+		// case a build must name its own target; a caller-supplied target always overrides this, so
+		// external registries stay fully supported.
+		BuildRegistry: os.Getenv("BURROW_BUILD_REGISTRY"),
 		// The app namespace is the implicit `default` environment (ADR-0035 phase 2).
 		AppNamespace: namespace,
 	})

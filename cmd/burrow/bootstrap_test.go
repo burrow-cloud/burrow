@@ -352,6 +352,116 @@ func TestBootstrapDeploysClusterOnly(t *testing.T) {
 	}
 }
 
+// TestBuildRegistriesConfig asserts the k3s containerd registry config (ADR-0053 §5) mirrors the
+// in-cluster registry reference — the exact host a build pushes to and a deploy pulls by — to the
+// pinned NodePort on localhost, and marks it insecure (the in-cluster registry serves plain HTTP).
+func TestBuildRegistriesConfig(t *testing.T) {
+	got := buildRegistriesConfig("burrow")
+	for _, want := range []string{
+		`"burrow-registry.burrow.svc.cluster.local:5000"`, // the mirror host = connect.RegistryEndpoint
+		"mirrors:",
+		"endpoint:",
+		"http://127.0.0.1:30500", // the pinned NodePort the node reaches it at
+		"insecure_skip_verify: true",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("registries.yaml missing %q:\n%s", want, got)
+		}
+	}
+	// The mirror host must equal the reference burrowd defaults its push target to, or the node would
+	// pull a reference it has no mirror for.
+	if !strings.Contains(got, connect.RegistryEndpoint("burrow")) {
+		t.Errorf("registries.yaml mirror host must equal connect.RegistryEndpoint:\n%s", got)
+	}
+}
+
+// TestWriteRegistriesConfig asserts the real writer creates the k3s registries.yaml (and its parent
+// directory) with the rendered mirror config.
+func TestWriteRegistriesConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rancher", "k3s", "registries.yaml")
+	if err := writeRegistriesConfig("burrow", path); err != nil {
+		t.Fatalf("writeRegistriesConfig: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading written config: %v", err)
+	}
+	if !strings.Contains(string(b), "burrow-registry.burrow.svc.cluster.local:5000") {
+		t.Errorf("written registries.yaml missing the mirror host:\n%s", b)
+	}
+}
+
+// TestBootstrapWithRegistryConfiguresContainerdAndInstallsRegistry asserts `burrow cluster bootstrap
+// --with-registry` writes the k3s registries.yaml (so the node can pull from the in-cluster registry)
+// and threads --with-registry into the reused install so the registry is deployed alongside the
+// control plane (ADR-0053 §5).
+func TestBootstrapWithRegistryConfiguresContainerdAndInstallsRegistry(t *testing.T) {
+	kcPath := stubBootstrapFullFlow(t, &fakeK3sInstaller{running: true})
+
+	var gotNamespace, gotPath, appliedManifests string
+	origWrite := writeRegistriesConfigFn
+	writeRegistriesConfigFn = func(namespace, path string) error {
+		gotNamespace, gotPath = namespace, path
+		return nil
+	}
+	origApply := applyFn
+	applyFn = func(_ context.Context, _, _, manifests string, _ bool, _, _ io.Writer) error {
+		appliedManifests = manifests
+		return nil
+	}
+	t.Cleanup(func() {
+		writeRegistriesConfigFn = origWrite
+		applyFn = origApply
+	})
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{
+		"cluster", "bootstrap",
+		"--public-ip", "203.0.113.10",
+		"--kubeconfig", kcPath,
+		"--burrowd-image", "img:1",
+		"--with-registry",
+		"--wait=false",
+	}, &out, &errb); err != nil {
+		t.Fatalf("cluster bootstrap --with-registry: %v\n%s", err, errb.String())
+	}
+
+	if gotNamespace != connect.DefaultNamespace || gotPath != k3sRegistriesPath {
+		t.Errorf("registries.yaml written for (%q, %q), want (%q, %q)", gotNamespace, gotPath, connect.DefaultNamespace, k3sRegistriesPath)
+	}
+	if !strings.Contains(appliedManifests, "name: burrow-registry") {
+		t.Errorf("bootstrap --with-registry must apply the in-cluster registry, but the manifests lack it")
+	}
+	if !strings.Contains(appliedManifests, "BURROW_BUILD_REGISTRY") {
+		t.Errorf("bootstrap --with-registry must wire burrowd's default push target env")
+	}
+}
+
+// TestBootstrapWithoutRegistryLeavesContainerdUntouched asserts a plain bootstrap neither writes the
+// k3s registries.yaml nor applies the registry.
+func TestBootstrapWithoutRegistryLeavesContainerdUntouched(t *testing.T) {
+	kcPath := stubBootstrapFullFlow(t, &fakeK3sInstaller{running: true})
+
+	wrote := false
+	origWrite := writeRegistriesConfigFn
+	writeRegistriesConfigFn = func(string, string) error { wrote = true; return nil }
+	t.Cleanup(func() { writeRegistriesConfigFn = origWrite })
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{
+		"cluster", "bootstrap",
+		"--public-ip", "203.0.113.10",
+		"--kubeconfig", kcPath,
+		"--burrowd-image", "img:1",
+		"--wait=false",
+	}, &out, &errb); err != nil {
+		t.Fatalf("cluster bootstrap: %v\n%s", err, errb.String())
+	}
+	if wrote {
+		t.Errorf("a plain bootstrap must not write the k3s registries.yaml")
+	}
+}
+
 // prefixForTest is the recognizable join-token prefix (burrowjoin.v1.), asserted in the bootstrap
 // output. It is derived from a real encode so the test tracks the codec.
 var prefixForTest = func() string {

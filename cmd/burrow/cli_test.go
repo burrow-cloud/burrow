@@ -48,6 +48,107 @@ func TestDeploy(t *testing.T) {
 	}
 }
 
+func TestBuild(t *testing.T) {
+	var gotMethod, gotPath string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"digest": "sha256:abc",
+			"deploy": map[string]any{
+				"release":               map[string]any{"id": "r1", "app": "web", "image": "img:1@sha256:abc", "status": "deployed", "replicas": 2},
+				"superseded_release_id": "r0",
+			},
+		})
+	}, "app", "build", "web", "--source", "https://github.com/acme/web", "--ref", "v1.2.3", "--image", "img:1")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotMethod != "POST" || gotPath != "/v1/apps/web/build" {
+		t.Errorf("request = %s %s", gotMethod, gotPath)
+	}
+	if !strings.Contains(out, "built web (digest sha256:abc)") || !strings.Contains(out, "release r1") || !strings.Contains(out, "superseded release r0") {
+		t.Errorf("output = %q", out)
+	}
+}
+
+// buildBody runs `app build` against a mock control plane and returns the decoded request body, so a
+// test can assert the git source and target image the CLI sends (ADR-0053 §3).
+func buildBody(t *testing.T, args ...string) map[string]any {
+	t.Helper()
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"digest": "sha256:abc",
+			"deploy": map[string]any{"release": map[string]any{"id": "r1", "image": "img:1@sha256:abc", "status": "deployed", "replicas": 1}},
+		})
+	}))
+	defer srv.Close()
+	full := append([]string{"app", "build", "web", "--source", "https://github.com/acme/web", "--ref", "v1.2.3", "--image", "img:1", "--control-plane", srv.URL, "--token", "x"}, args...)
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), full, &out, &errb); err != nil {
+		t.Fatalf("run: %v\n%s", err, errb.String())
+	}
+	return gotBody
+}
+
+func TestBuildBodyCarriesSourceAndTarget(t *testing.T) {
+	body := buildBody(t)
+	src, ok := body["source"].(map[string]any)
+	if !ok || src["Repo"] != "https://github.com/acme/web" || src["Ref"] != "v1.2.3" {
+		t.Errorf("source in body = %#v, want repo+ref", body["source"])
+	}
+	if body["target_image"] != "img:1" {
+		t.Errorf("target_image in body = %#v, want img:1", body["target_image"])
+	}
+}
+
+func TestBuildJSON(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"digest": "sha256:abc",
+			"deploy": map[string]any{"release": map[string]any{"id": "r1", "app": "web", "image": "img:1@sha256:abc", "status": "deployed", "replicas": 1}},
+		})
+	}, "app", "build", "web", "--source", "https://github.com/acme/web", "--ref", "v1.2.3", "--image", "img:1", "--json")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("--json output is not JSON: %v\n%s", err, out)
+	}
+	if res["digest"] != "sha256:abc" {
+		t.Errorf("json output missing digest: %s", out)
+	}
+}
+
+// TestBuildRejectsMalformedRef confirms a build with an incomplete git reference (or no target image)
+// is rejected client-side, before any request reaches the control plane (ADR-0053, SourceRef.Validate).
+func TestBuildRejectsMalformedRef(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"missing source repo", []string{"app", "build", "web", "--ref", "v1.2.3", "--image", "img:1"}},
+		{"missing ref", []string{"app", "build", "web", "--source", "https://github.com/acme/web", "--image", "img:1"}},
+		{"missing image", []string{"app", "build", "web", "--source", "https://github.com/acme/web", "--ref", "v1.2.3"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			_, _, err := runCLI(t, func(http.ResponseWriter, *http.Request) {
+				called = true
+			}, tc.args...)
+			if err == nil {
+				t.Errorf("%s: expected a client-side validation error, got nil", tc.name)
+			}
+			if called {
+				t.Errorf("%s: the control plane was called despite invalid input", tc.name)
+			}
+		})
+	}
+}
+
 func TestAudit(t *testing.T) {
 	var gotMethod, gotPath, gotQuery string
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {

@@ -55,6 +55,44 @@ func TestClientDeploy(t *testing.T) {
 	}
 }
 
+func TestClientBuild(t *testing.T) {
+	var gotMethod, gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"digest": "sha256:abc",
+			"deploy": map[string]any{
+				"release":               map[string]any{"id": "r1", "app": "web", "image": "img:1@sha256:abc", "status": "deployed", "replicas": 2},
+				"superseded_release_id": "r0",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := client.NewClient(srv.URL, "tok")
+	res, err := c.Build(context.Background(), "web", client.BuildRequest{
+		Source:      client.SourceRef{Repo: "https://github.com/acme/web", Ref: "v1.2.3"},
+		TargetImage: "img:1",
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.Digest != "sha256:abc" || res.Deploy.Release.ID != "r1" || res.Deploy.SupersededReleaseID != "r0" {
+		t.Errorf("result = %+v", res)
+	}
+	if gotMethod != "POST" || gotPath != "/v1/apps/web/build" {
+		t.Errorf("request = %s %s", gotMethod, gotPath)
+	}
+	// The git source (repo + ref) and the target image cross the channel; source bytes never do.
+	for _, want := range []string{`"https://github.com/acme/web"`, `"v1.2.3"`, `"target_image":"img:1"`} {
+		if !strings.Contains(gotBody, want) {
+			t.Errorf("body = %s, missing %s", gotBody, want)
+		}
+	}
+}
+
 func TestClientAutoDeploy(t *testing.T) {
 	var gotMethod, gotPath, gotQuery, gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

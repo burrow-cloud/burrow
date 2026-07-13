@@ -546,6 +546,87 @@ func TestDeployGuardrailCeiling(t *testing.T) {
 	}
 }
 
+// TestBuildEndpoint confirms POST /v1/apps/{app}/build clones the git ref, builds inside the cluster
+// via the Builder seam, and hands the digest-pinned reference into the guarded deploy path (ADR-0053):
+// the release is recorded with the pinned image, the workload is applied with it, and the builder saw
+// only the git ref and target image — never source bytes.
+func TestBuildEndpoint(t *testing.T) {
+	k, d := fake.NewKubernetes(), fake.NewDatabase()
+	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
+	b := fake.NewBuilder()
+	b.SetDigest("sha256:abc123")
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Database: d,
+		Clock:       fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs:         fake.NewIDs(),
+		Resolver:    fake.NewResolver(),
+		Credentials: fake.NewCredentials(),
+		DNS:         fake.NewDNSFactory(),
+		Builder:     b,
+	})
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	h, err := api.New(api.Config{Engine: e, Token: token})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+
+	body := `{"source":{"Repo":"https://github.com/acme/web","Ref":"v1.2.3"},"target_image":"ghcr.io/acme/web:1.2.3"}`
+	rec := do(h, "POST", "/v1/apps/web/build", token, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("build status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var res cp.BuildResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Digest != "sha256:abc123" {
+		t.Errorf("digest = %q, want sha256:abc123", res.Digest)
+	}
+	wantImage := "ghcr.io/acme/web:1.2.3@sha256:abc123"
+	if res.Deploy.Release.Image != wantImage {
+		t.Errorf("deployed image = %q, want %q", res.Deploy.Release.Image, wantImage)
+	}
+	if res.Deploy.Release.App != "web" {
+		t.Errorf("release app = %q, want web (from the path)", res.Deploy.Release.App)
+	}
+	if spec, ok := k.Spec("web"); !ok || spec.Image != wantImage {
+		t.Errorf("cluster spec = %+v ok=%v", spec, ok)
+	}
+	if got := b.LastSource(); got.Repo != "https://github.com/acme/web" || got.Ref != "v1.2.3" {
+		t.Errorf("builder source = %+v, want the git ref", got)
+	}
+	if got := b.LastTarget(); got != "ghcr.io/acme/web:1.2.3" {
+		t.Errorf("builder target = %q, want ghcr.io/acme/web:1.2.3", got)
+	}
+}
+
+// TestBuildEndpointNotConfigured confirms an engine with no Builder wired reports the in-cluster build
+// path as a 501 not_implemented rather than crashing (ADR-0053 §6): the seam is optional.
+func TestBuildEndpointNotConfigured(t *testing.T) {
+	h, _, _ := newAPI(t) // newAPI wires no Builder
+	body := `{"source":{"Repo":"https://github.com/acme/web","Ref":"v1.2.3"},"target_image":"ghcr.io/acme/web:1"}`
+	rec := do(h, "POST", "/v1/apps/web/build", token, body)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestBuildEndpointBadRequest confirms a malformed build request — an incomplete git reference, or
+// invalid JSON — is a 400, rejected before any builder or deploy runs (ADR-0053 §3).
+func TestBuildEndpointBadRequest(t *testing.T) {
+	h, _, _ := newAPI(t)
+	// A source with a repo but no ref is malformed.
+	rec := do(h, "POST", "/v1/apps/web/build", token, `{"source":{"Repo":"https://github.com/acme/web"},"target_image":"img:1"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("incomplete-ref status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, "POST", "/v1/apps/web/build", token, `{not json`); rec.Code != http.StatusBadRequest {
+		t.Errorf("invalid JSON status = %d, want 400", rec.Code)
+	}
+}
+
 func TestStatus(t *testing.T) {
 	h, _, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":3}`)

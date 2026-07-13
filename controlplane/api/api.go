@@ -52,6 +52,9 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps", s.listApps)
 	v1.HandleFunc("DELETE /v1/apps/{app}", s.deleteApp)
 	v1.HandleFunc("POST /v1/apps/{app}/deploy", s.deploy)
+	// build clones a git source and builds the image inside the cluster, then hands the result into
+	// the same guarded deploy path (ADR-0053): only the git ref crosses, never source bytes.
+	v1.HandleFunc("POST /v1/apps/{app}/build", s.build)
 	v1.HandleFunc("GET /v1/apps/{app}/status", s.status)
 	// history is the read-only deploy timeline: the releases recorded for an app, newest first
 	// (ADR-0007). The optional env query validates a named environment; empty is the default.
@@ -154,6 +157,25 @@ func (s *server) deploy(w http.ResponseWriter, r *http.Request) {
 	}
 	req.App = r.PathValue("app") // the path is authoritative for the app name
 	res, err := s.engine.Deploy(r.Context(), req)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// build clones a git source reference and builds the app's image inside the cluster, then hands the
+// resulting digest-pinned reference into the guarded deploy path (ADR-0053). Only the git ref crosses;
+// no source bytes travel over the API (ADR-0004). A builder error is surfaced structurally and nothing
+// is deployed; the deploy the build hands off to is gated by the app.deploy guardrail exactly as an
+// explicit deploy is, so a held deploy maps to 422 with needs_confirmation.
+func (s *server) build(w http.ResponseWriter, r *http.Request) {
+	var req controlplane.BuildRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	req.App = r.PathValue("app") // the path is authoritative for the app name
+	res, err := s.engine.Build(r.Context(), req)
 	if err != nil {
 		writeEngineError(w, err)
 		return

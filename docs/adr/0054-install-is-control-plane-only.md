@@ -1,0 +1,113 @@
+# ADR-0054: `install` provisions only the control plane; additive components are standalone `cluster` commands
+
+## Status
+
+✅ Accepted
+
+## TL;DR
+
+`burrow install` and `burrow cluster bootstrap` provision **only the control plane**. Every
+additive cluster component — ingress/TLS, the optional in-cluster registry, and future ones — is a
+**standalone, opt-in `burrow cluster <component>` command** with its own `status` / `install` /
+`uninstall`, not a `--with-*` convenience flag on install or bootstrap. This ADR adds
+`burrow cluster registry` for the in-cluster registry and removes the shipped `--with-registry` and
+`--with-ingress` flags.
+
+Extends the CLI command taxonomy ([ADR-0024](0024-cli-command-taxonomy.md)) and the CLI onboarding
+and organization decision ([ADR-0037](0037-cli-onboarding-and-organization.md)); governs how the
+optional in-cluster registry of ([ADR-0053](0053-in-cluster-build-from-source.md)) is provisioned.
+Supersedes nothing.
+
+## Context
+
+`burrow install` deploys the control plane; `burrow cluster bootstrap` turns a bare VPS into a
+single-node cluster and deploys the control plane onto it ([ADR-0044](0044-single-vps-k3s-cluster.md)).
+Two additive components then appeared that a cluster may or may not want: the ingress/TLS stack
+([ADR-0018](0018-reaching-an-app-at-a-url.md), [ADR-0034](0034-agent-native-onboarding.md)) and the
+optional in-cluster image registry ([ADR-0053](0053-in-cluster-build-from-source.md)).
+
+The ingress/TLS stack already had a standalone home: `burrow cluster ingress install`, a one-time
+operator setup run with the kubeconfig. But convenience flags then crept onto the provisioning
+commands — `burrow install --with-registry`, and `burrow cluster bootstrap --with-ingress` and
+`--with-registry` — each folding an additive component into the install/bootstrap run.
+
+Those flags are a design mistake worth correcting before more accrete. They make "what does install
+do?" depend on which flags were passed, so the answer drifts per invocation. They bury a component
+behind a flag on an unrelated command, where it is undiscoverable: a user looking for the in-cluster
+registry finds nothing named "registry" to run, and cannot inspect or remove what a one-shot flag
+installed. And they scale badly — every new additive component would want its own `--with-*` flag on
+both install and bootstrap, multiplying the surface. The in-cluster registry, in particular, needs
+its own inspect-and-remove lifecycle (it costs a PersistentVolume and wires the node's containerd),
+which a one-way install flag cannot express.
+
+## Decision
+
+### 1. `install` and `bootstrap` provision only the control plane
+
+`burrow install` and `burrow cluster bootstrap` provision the control plane and nothing else. They
+never install ingress, the in-cluster registry, or any other additive component. Their output states
+this and points at the standalone commands for the additive pieces.
+
+### 2. Every additive component is a standalone, opt-in `burrow cluster <component>` command
+
+Each additive cluster component is its own noun under `burrow cluster`, with a consistent shape:
+
+- bare `burrow cluster <component>` reports whether the component is installed (read-only status);
+- `burrow cluster <component> install` provisions it;
+- `burrow cluster <component> uninstall` removes it (implementing what is safe, and documenting any
+  residue it cannot cleanly reverse).
+
+`burrow cluster ingress` (with `install`) is the existing example. This ADR adds
+`burrow cluster registry` for the optional in-cluster registry of
+([ADR-0053](0053-in-cluster-build-from-source.md)): its `install` deploys the lightweight registry,
+wires it as burrowd's zero-config default build push target, and — on a k3s node — configures the
+node's containerd to pull from it; its `uninstall` reverses those; the bare command reports status.
+It is a kubeconfig-side operator setup, not an agent operation, and does not route through burrowd's
+guarded API — the same posture as `burrow cluster ingress install`.
+
+The in-cluster registry is deliberately named `burrow cluster registry`, distinct from
+`burrow config registry`, which manages pull credentials for **external** registries
+([ADR-0017](0017-private-registry-authentication.md)). The two use the standard "registry"
+vocabulary and cross-reference each other in help: one manages the registry that runs *in* the
+cluster, the other the credentials to pull from registries *outside* it.
+
+### 3. No `--with-*` convenience flags on install or bootstrap
+
+Install and bootstrap carry no `--with-<component>` flags. The removed `--with-registry` (on
+`burrow install` and `burrow cluster bootstrap`) and `--with-ingress` (on `burrow cluster bootstrap`)
+are gone; the standalone commands are the only way to add these components.
+
+## Consequences
+
+- **`install` has one meaning.** What `burrow install` and `burrow cluster bootstrap` do no longer
+  varies with flags — they provision the control plane, full stop, which is simpler to document,
+  reason about, and keep honest.
+- **Additive components are discoverable and inspectable.** Each is a named noun with a status and an
+  uninstall, so a user can list, add, inspect, and remove it, rather than divine what a one-shot flag
+  left behind.
+- **The pattern scales.** A new additive component is a new `burrow cluster <component>` with the same
+  three verbs, adding no flag to install or bootstrap.
+- **Two steps instead of one for a full public setup.** A user who wants a VPS that serves a public
+  HTTPS site now runs `burrow cluster bootstrap` and then `burrow cluster ingress install` (and
+  `burrow cluster registry install` if they want the in-cluster registry), rather than one flagged
+  bootstrap. The extra step is the cost of the clarity above, and each step is independently
+  inspectable and reversible.
+- **The in-cluster registry gains a real lifecycle.** Because it is a standalone command, it can be
+  inspected and uninstalled, which a one-way install flag never offered.
+
+## Rejected alternatives
+
+- **`--with-registry` / `--with-ingress` convenience flags on install and bootstrap** (the shipped
+  design, now removed). Rejected: one-shot flags blur what `install` means (its behavior varies per
+  invocation), hide additive components behind a flag on an unrelated command where they are
+  undiscoverable and un-removable, and scale poorly — each new component would want its own flag on
+  both commands. A standalone command per component is discoverable, inspectable, reversible, and
+  uniform.
+- **A single `burrow cluster addons` umbrella command.** Rejected as premature and vaguer than named
+  nouns: `burrow cluster ingress` and `burrow cluster registry` say exactly what they manage, matching
+  the noun-grouped taxonomy ([ADR-0024](0024-cli-command-taxonomy.md)); a generic "addons" surface
+  would re-introduce the discoverability problem it aims to solve.
+- **Folding the components into the agent-driven control-plane API.** Rejected: installing a
+  cluster-wide controller or a registry with a PersistentVolume and node containerd wiring is
+  privileged operator setup done with the kubeconfig, not an agent operation — the same boundary that
+  keeps `burrow cluster ingress install` off the guarded API.

@@ -9,16 +9,16 @@ import (
 
 // TestBuildIntegration is the honest tracker for the live, end-to-end in-cluster build
 // (ADR-0053, the real Builder Job adapter). Phase 3 shipped the push target the live build needs —
-// the optional in-cluster Zot registry and its k3s containerd config (`burrow install
-// --with-registry`; controlplane/kube installs no registry itself, the CLI does, ADR-0053 §5). What
+// the optional in-cluster Zot registry and its k3s containerd config (`burrow cluster registry
+// install`; controlplane/kube installs no registry itself, the CLI does, ADR-0053 §5). What
 // still blocks a reliable live run in ONE PR, and so keeps this test skipped rather than green:
 //
 //   - The build container must push to the in-cluster registry over plain HTTP (tls-verify=false for
 //     buildah, plain-http for the CNB lifecycle); the Phase 2 build recipe (build.go) pushes with
 //     TLS defaults, so an insecure-push mode is a deliberate, separate change.
 //   - The k3d harness (scripts/with-k3d.sh) creates a bare cluster with no registries.yaml mirror, so
-//     k3d's containerd would need the same config `burrow cluster bootstrap --with-registry` writes on
-//     k3s before the node could pull the pushed reference.
+//     k3d's containerd would need the same config `burrow cluster registry install` writes on a
+//     k3s node before the node could pull the pushed reference.
 //   - The build clones from a git source, so a live run reaches the network to fetch a tiny fixture
 //     repo — a flake surface a single install/config PR should not take on.
 //

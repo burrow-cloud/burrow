@@ -1,0 +1,111 @@
+# The OPTIONAL lightweight in-cluster registry (ADR-0053 §5): Zot, the OCI-native project-zot
+# registry, chosen for its minimal footprint. It is the zero-config default push target for the
+# in-cluster build so a self-hosted user needs no external registry account or pull token; external
+# registries remain fully supported. Deploy stays strictly by image reference — this is simply a
+# registry that happens to be local. It lives in the control-plane namespace as core build
+# infrastructure, reachable in-cluster at {{.RegistryEndpoint}}. `burrow cluster registry install`
+# applies these resources as a standalone, opt-in step (ADR-0054): `burrow install` provisions only
+# the control plane.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: burrow-registry
+  namespace: {{.Namespace}}
+  labels: { app: burrow-registry, app.kubernetes.io/managed-by: burrow }
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      # Build layers accumulate, so the registry gets more room than the lean control-plane DB; the
+      # GC policy below keeps it from filling (ADR-0053 Consequences).
+      storage: 5Gi
+---
+# Zot's configuration: serve on :{{.RegistryPort}} over plain HTTP (the node's containerd reaches it
+# through the k3s registries.yaml mirror `burrow cluster registry install` writes) and, crucially, run
+# garbage collection so orphaned build layers do not fill the volume (ADR-0053 Consequences).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: burrow-registry-config
+  namespace: {{.Namespace}}
+  labels: { app: burrow-registry, app.kubernetes.io/managed-by: burrow }
+data:
+  config.json: |
+    {
+      "distSpecVersion": "1.1.0",
+      "storage": {
+        "rootDirectory": "/var/lib/registry",
+        "gc": true,
+        "gcDelay": "1h",
+        "gcInterval": "24h",
+        "retention": {
+          "policies": [
+            {
+              "repositories": ["**"],
+              "deleteUntagged": true
+            }
+          ]
+        }
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "{{.RegistryPort}}"
+      },
+      "log": {
+        "level": "info"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: burrow-registry
+  namespace: {{.Namespace}}
+  labels: { app: burrow-registry, app.kubernetes.io/managed-by: burrow }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: burrow-registry } }
+  # A ReadWriteOnce volume cannot be held by two pods at once, so recreate rather than roll.
+  strategy: { type: Recreate }
+  template:
+    metadata: { labels: { app: burrow-registry } }
+    spec:
+      containers:
+        - name: registry
+          image: {{.RegistryImage}}
+          args: ["serve", "/etc/zot/config.json"]
+          ports: [ { containerPort: {{.RegistryPort}} } ]
+          # A registry is lightweight at rest; a modest limit keeps it off a small VPS's back.
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          readinessProbe:
+            httpGet: { path: /v2/, port: {{.RegistryPort}} }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/registry }
+            - { name: config, mountPath: /etc/zot }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: burrow-registry }
+        - name: config
+          configMap: { name: burrow-registry-config }
+---
+# NodePort at a pinned port so the node's containerd reaches the registry at a deterministic
+# localhost address (http://127.0.0.1:{{.RegistryNodePort}}), which the k3s registries.yaml mirror
+# points at. In-cluster clients (the build pod) still reach it by the Service DNS name on
+# :{{.RegistryPort}}, the same reference the resulting deploy pulls by.
+apiVersion: v1
+kind: Service
+metadata:
+  name: burrow-registry
+  namespace: {{.Namespace}}
+  labels: { app: burrow-registry, app.kubernetes.io/managed-by: burrow }
+spec:
+  type: NodePort
+  selector: { app: burrow-registry }
+  ports:
+    - port: {{.RegistryPort}}
+      targetPort: {{.RegistryPort}}
+      nodePort: {{.RegistryNodePort}}

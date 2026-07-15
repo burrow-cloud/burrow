@@ -102,8 +102,8 @@ type Deps struct {
 	// push target to when the caller supplies none — the zero-config default push target for a build
 	// (ADR-0053 §5). Optional — an empty value means a build with no explicit target errors, and a
 	// caller-supplied target always overrides it (external registries stay fully supported). burrowd
-	// sets it from BURROW_BUILD_REGISTRY, which `install --with-registry` wires to the in-cluster
-	// registry it deploys.
+	// sets it from BURROW_BUILD_REGISTRY, which `burrow cluster registry install` wires to the
+	// in-cluster registry it deploys.
 	BuildRegistry string
 	// AppNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace of
 	// the implicit `default` environment (ADR-0035 phase 2). Optional — an empty value defaults to

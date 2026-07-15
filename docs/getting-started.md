@@ -36,6 +36,19 @@ install creates the control plane in the `burrow` namespace and deploys your app
 `burrow-apps` namespace. On success it names and records the environment as your current one, and
 tells you it is ready.
 
+`burrow install` provisions only the control plane. Additive cluster components are separate,
+opt-in commands you run when you want them, each with its own status, install, and uninstall:
+
+```sh
+burrow cluster ingress install    # ingress-nginx, cert-manager, and a Let's Encrypt issuer (public HTTPS)
+burrow cluster registry install   # the optional in-cluster image registry (a zero-config build push target)
+```
+
+Run `burrow cluster ingress` or `burrow cluster registry` with no subcommand to see whether each is
+installed. (`burrow cluster registry` manages the registry that runs in your cluster; to give the
+cluster credentials to pull from an external registry such as GHCR, use `burrow config registry` —
+see Private registries below.)
+
 ## Part 2 - Connect your agent
 
 Your AI agent drives Burrow through `burrow-agent`, a single scoped binary already on your PATH

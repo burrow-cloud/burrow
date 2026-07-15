@@ -42,7 +42,7 @@ const (
 	DefaultAppNamespace = "burrow-apps"
 
 	// DefaultRegistryService is the in-cluster Service name of the optional lightweight registry
-	// `burrow install --with-registry` deploys (Zot, ADR-0053 §5). It is the zero-config default
+	// `burrow cluster registry install` deploys (Zot, ADR-0053 §5). It is the zero-config default
 	// push target for the in-cluster build — a registry that happens to be local; external
 	// registries remain fully supported.
 	DefaultRegistryService = "burrow-registry"

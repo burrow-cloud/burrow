@@ -46,8 +46,10 @@ func newClusterCmd() *cobra.Command {
 			"volumes, whether Service type=LoadBalancer is likely supported or the cluster is\n" +
 			"NodePort-only, whether cert-manager is installed for TLS, the cloud provider, and whether\n" +
 			"a DNS provider is configured. That view is read-only and changes nothing.\n\n" +
+			"Additive cluster components are separate, opt-in subcommands:\n" +
 			"`burrow cluster ingress install` provisions the shared ingress/TLS infrastructure\n" +
-			"(ingress-nginx, cert-manager, a Let's Encrypt issuer); a one-time operator setup.",
+			"(ingress-nginx, cert-manager, a Let's Encrypt issuer), and `burrow cluster registry install`\n" +
+			"provisions the optional in-cluster image registry; each is a one-time operator setup.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -69,6 +71,7 @@ func newClusterCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	cmd.AddCommand(newIngressCmd())
+	cmd.AddCommand(newClusterRegistryCmd())
 	cmd.AddCommand(newBootstrapCmd())
 	return cmd
 }

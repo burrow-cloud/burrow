@@ -240,11 +240,63 @@ command to drop a stale environment:
   it was current and deleting the handle's orphaned scoped credential under `~/.burrow/`. Local-only:
   it does not tear down a namespace-per-env registration or any cluster namespace/RBAC.
 
-**Next: the theme after v0.12 is not yet chosen.** Live candidates, unsequenced: **self-hoster day-2 hardening** (scheduled Postgres backups + retention
-— the [ADR-0032](adr/0032-postgres-backups.md) follow-on — richer blast-radius guardrails, cost
-visibility); **more building-block add-ons** ([ADR-0025](adr/0025-building-block-addons.md)) beyond
-Postgres / cache / logs / metrics; **database-provisioning depth** (managed Postgres as a first-class
-deploy dependency).
+## Shipped: v0.12 — the scoped agent CLI and one-off commands ✅
+
+Released as **v0.12.0**. The agent's control channel becomes a dedicated, capability-reduced CLI, and
+one-off commands get a home.
+
+- **`burrow-agent`, the scoped agent CLI** ([ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md))
+  — the agent now drives a dedicated, JSON-first, composable binary (pipe / `grep` / `jq`) behind the same
+  control-plane boundary, with its dangerous admin verbs absent by construction. `burrow agent <tool> install`
+  wires an agent to it (allow `burrow-agent`, deny the human `burrow`), replacing `burrow mcp <tool> install`;
+  the `burrow-mcp` server is **retired from releases**, its code kept in-tree for now (ADR-0049 §7).
+- **One-off command runner** ([ADR-0048](adr/0048-one-off-command-runner.md)) — `burrow_run` runs a one-off
+  command (migrations, seeds, tasks) in the app's own image, gated by an `app.run` guardrail.
+- **Validated laptop quickstart** — a k3d quickstart pinned by a CI e2e takes a user from nothing to their
+  agent deploying an app (and hitting the delete guardrail) on their own machine.
+- **App-runtime direction recorded** ([ADR-0050](adr/0050-app-runtime-api-and-capability-envelopes.md),
+  Proposed) — a captured direction for a programmatic runtime API bounded by capability envelopes, deferred
+  behind the compute-first core; no code.
+
+## Merged to `main`, awaiting the next release tag
+
+Landed on `main` since v0.12.0 but **not yet released** — honest status, these ship with the next version
+bump ([ADR-0009](adr/0009-honest-status.md)):
+
+- **Pull-based passive deploy (auto-deploy)** ([ADR-0052](adr/0052-pull-based-passive-deploy.md)) — burrowd
+  polls each app's image repository and auto-deploys the newest tag within a per-app, per-environment level
+  (`burrow app auto-deploy <app> [patch|minor|major|off]`, default `minor`, on by default), firing the **same
+  guarded deploy path** an explicit call uses — same rollout, deploy record, rollback handle, and audit entry.
+  A tag above the level is surfaced as an **available upgrade**, not applied silently; a rollback (or any
+  downgrade) disables auto-deploy with its reason shown. The watcher is **outbound-only**, so it works on the
+  private / NAT'd clusters push-from-CI cannot reach. Setting the level is a human operator action; the agent
+  reads it and sees available upgrades. `burrow-agent` suggests the next semver tag and nudges non-semver
+  deploys toward one. Also lands an app-history deploy timeline in both client binaries.
+- **In-cluster build from a git source** ([ADR-0053](adr/0053-in-cluster-build-from-source.md)) — an
+  **optional** path, off the explicit deploy spine: `burrow app build <app> --source <git-ref>` and a
+  `burrow-agent build` verb build the image **inside the user's own cluster** (a Kubernetes Job using buildah
+  for a Dockerfile, Cloud Native Buildpacks for the no-Dockerfile case) behind a minimal `Builder` seam, then
+  the resulting image reference **rejoins the existing guarded deploy path**. Code never crosses the control
+  channel — only the git ref does; the builder clones the source inside the cluster. An **optional in-cluster
+  registry** (Zot) is the zero-config default push target, removing the external-registry-account friction;
+  external registries stay fully supported.
+- **Postgres always exports metrics** ([ADR-0051](adr/0051-postgres-always-exports-metrics.md)) — the Postgres
+  add-on always ships its metrics exporter and the scraper discovers the add-on namespace, so `addon attach`
+  observability needs no separate wiring.
+
+## In progress — the current front line
+
+**Install provisions only the control plane; additive components become standalone `burrow cluster <component>`
+commands.** A new **`burrow cluster registry`** installs the in-cluster registry (ADR-0053) as an explicit,
+standalone step, and the `--with-registry` / `--with-ingress` install flags are **removed** in favor of it, so
+`install` lands a clean control-plane baseline and each add-on component is opted into deliberately. Shaped in
+**ADR-0054 (proposed)** — this is the work in flight; it is **not merged or released**.
+
+**Next — candidates for the theme after the current front line lands** (unsequenced): **self-hoster day-2
+hardening** (scheduled Postgres backups + retention — the [ADR-0032](adr/0032-postgres-backups.md) follow-on —
+richer blast-radius guardrails, cost visibility); **more building-block add-ons**
+([ADR-0025](adr/0025-building-block-addons.md)) beyond Postgres / cache / logs / metrics; **database-provisioning
+depth** (managed Postgres as a first-class deploy dependency).
 
 **Teed up but parked:** per-principal identity + an auth ADR — the natural continuation of the v0.10
 transport seam and the ADR-0039 audit trail (which now records a real slot for the principal), but it
@@ -252,8 +304,8 @@ serves the managed/enterprise direction more than the current self-hoster, so it
 product needs it.
 
 **Deferred until requested:** registry onboarding (ADR-0046, Proposed, held pending a user signal that
-onboarding is painful); server-side build from a git reference
-([ADR-0008](adr/0008-two-build-paths.md)).
+onboarding is painful); managed server-side build ([ADR-0008](adr/0008-two-build-paths.md)'s second path —
+the OSS in-cluster build from a git source now exists via ADR-0053, above).
 
 Shipped in **v0.7.1** (patch): a `burrow mcp <tool> [install]` command that connects Burrow's MCP
 server to Claude Code, Cursor, Codex, Copilot, or OpenCode (preview by default, idempotent, and it

@@ -6,10 +6,13 @@
 
 ## TL;DR
 
-`burrow install` and `burrow cluster bootstrap` provision **only the control plane**. Every
-additive cluster component — ingress/TLS, the optional in-cluster registry, and future ones — is a
-**standalone, opt-in `burrow cluster <component>` command** with its own `status` / `install` /
-`uninstall`, not a `--with-*` convenience flag on install or bootstrap. This ADR adds
+`burrow install` and `burrow cluster bootstrap` provision the **control plane** plus a **lightweight,
+detected baseline** of standard Kubernetes add-ons that Burrow features depend on and that vendors ship
+inconsistently — auto-ensured so Burrow behaves the same on every cluster (metrics-server is the first;
+§1). Every additive *capability* that costs money, storage, or ongoing load — ingress/TLS, the optional
+in-cluster registry, and future ones — is instead a **standalone, opt-in `burrow cluster <component>`
+command** with its own `status` / `install` / `uninstall`, not a `--with-*` convenience flag on install
+or bootstrap. This ADR adds
 `burrow cluster registry` for the in-cluster registry and removes the shipped `--with-registry` and
 `--with-ingress` flags.
 
@@ -49,11 +52,29 @@ which a one-way install flag cannot express.
 
 ## Decision
 
-### 1. `install` and `bootstrap` provision only the control plane
+### 1. `install` and `bootstrap` provision the control plane plus a lightweight baseline
 
-`burrow install` and `burrow cluster bootstrap` provision the control plane and nothing else. They
-never install ingress, the in-cluster registry, or any other additive component. Their output states
-this and points at the standalone commands for the additive pieces.
+`burrow install` and `burrow cluster bootstrap` provision the control plane and nothing else — except
+a lightweight, detected baseline of standard Kubernetes add-ons (below). They never install ingress,
+the in-cluster registry, the observability add-ons, or any other additive *capability*. Their output
+states this and points at the standalone commands for the additive pieces.
+
+**The baseline carve-out.** A standard Kubernetes add-on is auto-ensured by install/bootstrap only when
+it meets **all three** tests: (a) **lightweight** — negligible CPU/memory, no meaningful persistent
+storage or ongoing load; (b) a **recognized baseline** that some vendors already ship by default, so its
+absence is vendor inconsistency rather than a deliberate user choice; and (c) **load-bearing for
+cross-cluster parity** — a Burrow feature behaves differently depending on whether it is present.
+Auto-ensuring such a component makes Burrow behave the same on every cluster (the cluster-parity
+principle). It is always **detected** (skipped when the platform already provides it — e.g. GKE, AKS,
+k3s) and **opt-out-able** (`--minimal` / `--no-<component>`).
+
+**metrics-server is the first such baseline.** It serves live CPU/memory usage through the Kubernetes
+Metrics API, powering `app autoscale` (HPA) and the utilization layer of cluster-capacity reporting.
+Vendors ship it inconsistently — k3s, GKE, and AKS do; EKS, DOKS, and kind do not — so without
+auto-ensuring it, autoscale silently degrades on some clusters and not others. Heavier or billable
+components fail the lightweight test and stay opt-in standalone commands: the ingress LoadBalancer
+(billable), the VictoriaMetrics observability store (storage + scrape load), the in-cluster registry (a
+PersistentVolume), and Postgres.
 
 ### 2. Every additive component is a standalone, opt-in `burrow cluster <component>` command
 

@@ -60,7 +60,7 @@ func seedRelease(t *testing.T, d *fake.Database, id, app, image string) {
 }
 
 // optIn turns auto-deploy on for app in the default environment at level — auto-deploy is off by
-// default (opt-in, ADR-0054), so a poller test that expects the watcher to move an app must set a
+// default (opt-in, ADR-0058), so a poller test that expects the watcher to move an app must set a
 // level first.
 func optIn(t *testing.T, d *fake.Database, app string, level cp.AutoDeployLevel) {
 	t.Helper()
@@ -121,7 +121,7 @@ func imageTagOf(ref string) string {
 func TestPollerDeploysNewerInScopeTag(t *testing.T) {
 	h := newPollerHarness(t, cp.AutoDeployConfig{})
 	seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
-	optIn(t, h.db, "web", cp.AutoDeployMinor) // auto-deploy is opt-in (ADR-0054)
+	optIn(t, h.db, "web", cp.AutoDeployMinor) // auto-deploy is opt-in (ADR-0058)
 	h.reg.SetTags("1.2.5", "1.2.6")
 
 	h.poller.ReconcileOnceForTest(context.Background())
@@ -224,7 +224,7 @@ func TestPollerSkipsOffAndDisabled(t *testing.T) {
 }
 
 // TestPollerSkipsAppWithNoLevelSet: an app that has never opted into auto-deploy (no stored level, so
-// it reads the off default — ADR-0054) is not polled at all. This is the fix for the post-upgrade
+// it reads the off default — ADR-0058) is not polled at all. This is the fix for the post-upgrade
 // regression (#270): a pre-existing app is read as off and skipped BEFORE any registry call, so no
 // tag listing happens and no 401 is logged, even though a newer in-scope tag exists.
 func TestPollerSkipsAppWithNoLevelSet(t *testing.T) {

@@ -50,7 +50,7 @@ func TestAutoDeployStatusReportsTargetAndUpgrade(t *testing.T) {
 	reg.SetTags("1.2.5", "1.2.6", "1.3.0", "2.0.0")
 	e, d := newEngineWithRegistry(t, reg)
 	seedRunningRelease(t, d, "web", "ghcr.io/u/web:1.2.5")
-	// Opt in at minor (auto-deploy is off by default — ADR-0054): 1.3.0 is the highest within the
+	// Opt in at minor (auto-deploy is off by default — ADR-0058): 1.3.0 is the highest within the
 	// current major, 2.0.0 is the held upgrade above the cap.
 	if err := d.SetAutoDeployLevel(ctx, "web", "default", cp.AutoDeployMinor); err != nil {
 		t.Fatalf("SetAutoDeployLevel: %v", err)
@@ -186,7 +186,7 @@ func TestAutoDeployStatusNonSemverCurrent(t *testing.T) {
 }
 
 // TestAutoDeployDefaultAndSet covers the level lifecycle through the engine: an app with no stored
-// level reads the default (off — auto-deploy is opt-in, ADR-0054), a set is reflected on the next
+// level reads the default (off — auto-deploy is opt-in, ADR-0058), a set is reflected on the next
 // read, and an invalid level is rejected as ErrInvalid (ADR-0052 §2).
 func TestAutoDeployDefaultAndSet(t *testing.T) {
 	ctx := context.Background()

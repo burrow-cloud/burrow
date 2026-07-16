@@ -234,7 +234,7 @@ app — and hitting the delete guardrail — on their own machine.
   [ADR-0052](adr/0052-pull-based-passive-deploy.md) (realizing
   [ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)'s optional mode). burrowd polls
   the registry and auto-applies upgrades within a per-environment level (`burrow app auto-deploy
-  <app> [patch|minor|major|off]`), opt-in and off by default until an operator sets a level (ADR-0054); a version above the
+  <app> [patch|minor|major|off]`), opt-in and off by default until an operator sets a level (ADR-0058); a version above the
   level is surfaced as an available upgrade the operator takes explicitly. Outbound-only, so it
   serves the private/NAT'd clusters push-from-CI cannot reach.
 - **Self-host dashboard** — an HTMX dashboard over the control-plane API, if and when a

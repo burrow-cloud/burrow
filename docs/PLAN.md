@@ -265,7 +265,7 @@ bump ([ADR-0009](adr/0009-honest-status.md)):
 
 - **Pull-based passive deploy (auto-deploy)** ([ADR-0052](adr/0052-pull-based-passive-deploy.md)) — burrowd
   polls each app's image repository and auto-deploys the newest tag within a per-app, per-environment level
-  (`burrow app auto-deploy <app> [patch|minor|major|off]`, opt-in, default `off` — ADR-0054), firing the **same
+  (`burrow app auto-deploy <app> [patch|minor|major|off]`, opt-in, default `off` — ADR-0058), firing the **same
   guarded deploy path** an explicit call uses — same rollout, deploy record, rollback handle, and audit entry.
   A tag above the level is surfaced as an **available upgrade**, not applied silently; a rollback (or any
   downgrade) disables auto-deploy with its reason shown. The watcher is **outbound-only**, so it works on the

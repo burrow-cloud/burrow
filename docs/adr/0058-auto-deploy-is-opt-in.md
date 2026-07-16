@@ -1,4 +1,4 @@
-# ADR-0054: Auto-deploy is opt-in — the default level is off
+# ADR-0058: Auto-deploy is opt-in — the default level is off
 
 ## Status
 

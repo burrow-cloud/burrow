@@ -198,7 +198,7 @@ func (p *AutoDeployPoller) reconcileOne(ctx context.Context, ref AppEnvRef) {
 		return
 	}
 
-	// Only opted-in apps reach here (an unset level is off — ADR-0054), so a listing failure below
+	// Only opted-in apps reach here (an unset level is off — ADR-0058), so a listing failure below
 	// belongs to an app that deliberately turned auto-deploy on. The listing is still anonymous: the
 	// poller has no registry READ credential of its own, so a private repository answers 401. Wiring
 	// read auth for the poller is tracked separately (issue #279, tied to provider credentials) and

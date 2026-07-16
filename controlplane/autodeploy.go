@@ -21,7 +21,7 @@ type AutoDeployLevel string
 const (
 	// AutoDeployOff disables auto-deploy: only an explicit CLI or agent deploy ships a release
 	// (ADR-0052 §2). Setting off is also how a version is pinned. It is the default: auto-deploy
-	// is opt-in, so an app is never polled until an operator sets a level (ADR-0054).
+	// is opt-in, so an app is never polled until an operator sets a level (ADR-0058).
 	AutoDeployOff AutoDeployLevel = "off"
 	// AutoDeployPatch auto-deploys patches within the current minor only (e.g. 1.2.6, 1.2.7 for
 	// an app on 1.2.5); crossing to a new minor is a manual step (ADR-0052 §2).
@@ -36,7 +36,7 @@ const (
 
 // DefaultAutoDeployLevel is the level that applies to every app, new or already deployed, until
 // an operator sets one: off, so auto-deploy is opt-in — the watcher never polls or moves an app
-// that has not deliberately opted in (ADR-0054, revising ADR-0052 §2's on-by-default default).
+// that has not deliberately opted in (ADR-0058, revising ADR-0052 §2's on-by-default default).
 // This keeps a pre-existing app from being silently polled the moment a cluster is upgraded to a
 // version carrying the poller; set a level (patch/minor/major) to turn auto-deploy on.
 const DefaultAutoDeployLevel = AutoDeployOff

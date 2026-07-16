@@ -301,7 +301,7 @@ type Database interface {
 
 	// AutoDeployLevel returns the auto-deploy level configured for app in the named environment
 	// (ADR-0052 §2). A missing configuration resolves to DefaultAutoDeployLevel (off): auto-deploy is
-	// opt-in, so an app with no stored row is off and is never polled (ADR-0054). env is the canonical
+	// opt-in, so an app with no stored row is off and is never polled (ADR-0058). env is the canonical
 	// environment name (the reserved "default" for the implicit default environment).
 	AutoDeployLevel(ctx context.Context, app, env string) (AutoDeployLevel, error)
 	// SetAutoDeployLevel upserts the auto-deploy level for app in the named environment — the write
@@ -317,7 +317,7 @@ type Database interface {
 	// reconcile: every app that has a recorded release, paired with the environment it was released
 	// into (ADR-0052 Phase 4b). Candidacy is "has a running release" — the set the poller can compare
 	// a registry tag against — not "has a stored level row"; the poller reads each pair's level and
-	// skips those that are off, which is the default (ADR-0054), so an app that never opted in is read
+	// skips those that are off, which is the default (ADR-0058), so an app that never opted in is read
 	// and skipped before any registry call. None yields an empty slice and no error.
 	AutoDeployCandidates(ctx context.Context) ([]AppEnvRef, error)
 	// AutoDeployReason returns the stored disable reason for app in the named environment, or ""

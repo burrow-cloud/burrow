@@ -134,26 +134,7 @@ type installOptions struct {
 	Token               string
 	DBPassword          string
 	Port                int
-	// WithRegistry installs the optional lightweight in-cluster registry (Zot) and wires it as
-	// burrowd's default in-cluster build push target (ADR-0053 §5). Off by default: the registry
-	// costs a PersistentVolume and memory, so it is opt-in for users who want the in-cluster build's
-	// zero-config push target; external registries work without it.
-	WithRegistry bool
-	// RegistryEndpoint is the in-cluster registry reference host:port burrowd defaults an empty build
-	// target to (connect.RegistryEndpoint). Set only when WithRegistry.
-	RegistryEndpoint string
-	// RegistryImage is the pinned Zot image the in-cluster registry runs. Defaulted in
-	// renderManifests when empty. Used only when WithRegistry.
-	RegistryImage string
-	// RegistryPort is the port the in-cluster registry serves on; RegistryNodePort is the pinned
-	// NodePort the node's containerd reaches it through. Used only when WithRegistry.
-	RegistryPort     int
-	RegistryNodePort int
 }
-
-// defaultRegistryImage is the pinned Zot image (project-zot, Apache-2.0) the optional in-cluster
-// registry runs (ADR-0053 §5). Pinned so the install is reproducible; bump deliberately.
-const defaultRegistryImage = "ghcr.io/project-zot/zot-linux-amd64:v2.1.2"
 
 // installArgs are the resolved inputs to an install run: the target kube context (the required
 // positional, empty for the no-argument listing path), the namespaces, image, and flags.
@@ -167,10 +148,6 @@ type installArgs struct {
 	dryRun       bool
 	wait         bool
 	verbose      bool
-	// withRegistry installs the optional in-cluster registry (Zot) as the zero-config default push
-	// target for the in-cluster build (ADR-0053 §5). Off by default; `burrow cluster bootstrap
-	// --with-registry` threads it through here on the VPS, where it also writes the k3s registries.yaml.
-	withRegistry bool
 	// clusterOnly runs the install for its cluster-side effects only (deploy burrowd, and mint the
 	// scoped burrow-agent credential via the manifests), skipping the laptop-oriented local
 	// bookkeeping: it records no ~/.burrow environment handle and prints no "connect your agent"
@@ -205,6 +182,10 @@ func newInstallCmd() *cobra.Command {
 		Use:   "install <context>",
 		Short: "Install the Burrow control plane into a cluster",
 		Long: "Install the Burrow control plane into the kube context you name.\n\n" +
+			"install provisions ONLY the control plane. Additive cluster components are separate,\n" +
+			"opt-in commands you run when you want them:\n" +
+			"  burrow cluster ingress install    # ingress-nginx, cert-manager, a Let's Encrypt issuer\n" +
+			"  burrow cluster registry install   # the optional in-cluster image registry\n\n" +
 			"The context is required: install targets exactly that cluster and never the ambient\n" +
 			"current context implicitly, so it cannot install into prod by accident. Run `burrow\n" +
 			"install` with no argument to list your contexts.\n\n" +
@@ -227,7 +208,6 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&a.dryRun, "dry-run", false, "print the manifests instead of applying them")
 	cmd.Flags().BoolVar(&a.wait, "wait", true, "wait for the control plane to become ready")
 	cmd.Flags().BoolVar(&a.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
-	cmd.Flags().BoolVar(&a.withRegistry, "with-registry", false, "also install the optional lightweight in-cluster registry as the zero-config default push target for in-cluster builds")
 	return cmd
 }
 
@@ -248,17 +228,13 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 			return "", err
 		}
 		return renderManifests(installOptions{
-			Namespace:        a.namespace,
-			AppNamespace:     a.appNamespace,
-			AddonNamespace:   connect.DefaultAddonNamespace,
-			Image:            a.image,
-			Token:            token,
-			DBPassword:       dbPassword,
-			Port:             connect.DefaultPort,
-			WithRegistry:     a.withRegistry,
-			RegistryEndpoint: connect.RegistryEndpoint(a.namespace),
-			RegistryPort:     connect.DefaultRegistryPort,
-			RegistryNodePort: connect.DefaultRegistryNodePort,
+			Namespace:      a.namespace,
+			AppNamespace:   a.appNamespace,
+			AddonNamespace: connect.DefaultAddonNamespace,
+			Image:          a.image,
+			Token:          token,
+			DBPassword:     dbPassword,
+			Port:           connect.DefaultPort,
 		})
 	}
 
@@ -650,9 +626,6 @@ func renderManifests(o installOptions) (string, error) {
 	}
 	if o.AgentServiceAccount == "" {
 		o.AgentServiceAccount = agentServiceAccountFn(defaultPrincipal)
-	}
-	if o.RegistryImage == "" {
-		o.RegistryImage = defaultRegistryImage
 	}
 	var sb strings.Builder
 	if err := installTemplate.Execute(&sb, o); err != nil {

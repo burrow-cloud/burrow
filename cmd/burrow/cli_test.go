@@ -131,7 +131,6 @@ func TestBuildRejectsMalformedRef(t *testing.T) {
 	}{
 		{"missing source repo", []string{"app", "build", "web", "--ref", "v1.2.3", "--image", "img:1"}},
 		{"missing ref", []string{"app", "build", "web", "--source", "https://github.com/acme/web", "--image", "img:1"}},
-		{"missing image", []string{"app", "build", "web", "--source", "https://github.com/acme/web", "--ref", "v1.2.3"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -146,6 +145,23 @@ func TestBuildRejectsMalformedRef(t *testing.T) {
 				t.Errorf("%s: the control plane was called despite invalid input", tc.name)
 			}
 		})
+	}
+}
+
+// TestBuildAllowsMissingImage verifies that omitting --image is no longer a client-side error: the
+// build reaches the control plane, which defaults the push target to the in-cluster registry when one
+// is installed (ADR-0054). Only --source and --ref are validated client-side.
+func TestBuildAllowsMissingImage(t *testing.T) {
+	called := false
+	runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"digest": "sha256:abc",
+			"deploy": map[string]any{"release": map[string]any{"id": "r1", "app": "web", "image": "registry.example/web:build", "status": "deployed", "replicas": 1}},
+		})
+	}, "app", "build", "web", "--source", "https://github.com/acme/web", "--ref", "v1.2.3")
+	if !called {
+		t.Error("omitting --image should reach the control plane (server-side in-cluster registry default), but it was not called")
 	}
 }
 

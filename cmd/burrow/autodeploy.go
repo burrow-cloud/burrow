@@ -28,9 +28,9 @@ func newAutoDeployCmd() *cobra.Command {
 			"  patch  patches within the current minor (1.2.6, 1.2.7 for an app on 1.2.5)\n" +
 			"  minor  any patch or minor within the current major (1.2.6, 1.3.0), never a major\n" +
 			"  major  anything newer, including a breaking major (2.0.0)\n\n" +
-			"The default is minor, on for every app, so an app auto-takes patches and minors within\n" +
-			"its major until you dial it down. Use --env to set a different level per environment\n" +
-			"(e.g. patch in prod, major in staging).\n\n" +
+			"The default is off: auto-deploy is opt-in, so an app is never polled until you set a\n" +
+			"level. Set minor (or patch/major) to turn it on. Use --env to set a different level per\n" +
+			"environment (e.g. patch in prod, major in staging).\n\n" +
 			"With one argument this shows the current level; with two it sets it. Setting the level is\n" +
 			"a human action and is not available to the agent.\n\n" +
 			"The show also reports, read-only, the current running version, the version auto-deploy\n" +

@@ -76,9 +76,10 @@ type AutoDeployPoller struct {
 // §5). It is not persisted: on restart the watcher simply re-evaluates from the registry and the
 // running release, which is safe because ResolveAutoDeploy is upgrades-only.
 type autoDeployState struct {
-	failedTag  string    // the deploy tag that last failed for this pair, "" if none
-	retryTagAt time.Time // failedTag is not re-attempted before this
-	mutedUntil time.Time // the registry rate-limited this pair; skip it until this
+	failedTag   string    // the deploy tag that last failed for this pair, "" if none
+	retryTagAt  time.Time // failedTag is not re-attempted before this
+	mutedUntil  time.Time // the registry rate-limited this pair; skip it until this
+	lastListErr string    // the last tag-listing error logged for this pair, "" once it cleared
 }
 
 // NewAutoDeployPoller builds the watcher bound to this engine. It reads the engine's registry,
@@ -197,6 +198,12 @@ func (p *AutoDeployPoller) reconcileOne(ctx context.Context, ref AppEnvRef) {
 		return
 	}
 
+	// Only opted-in apps reach here (an unset level is off — ADR-0054), so a listing failure below
+	// belongs to an app that deliberately turned auto-deploy on. The listing is still anonymous: the
+	// poller has no registry READ credential of its own, so a private repository answers 401. Wiring
+	// read auth for the poller is tracked separately (issue #279, tied to provider credentials) and
+	// is deliberately out of scope here; until it lands, a genuinely opted-in private app logs the
+	// failure — but only when it CHANGES, not every interval, so it is not spammy.
 	tags, err := p.engine.registry.ListTags(ctx, repo, RegistryAuth{})
 	if err != nil {
 		var rl retryAfterHinter
@@ -207,9 +214,16 @@ func (p *AutoDeployPoller) reconcileOne(ctx context.Context, ref AppEnvRef) {
 			return
 		}
 		// Fail-soft: a registry error for one app is logged and skipped; the loop and other apps go on.
-		slog.WarnContext(ctx, "auto-deploy poll: listing tags failed", "app", ref.App, "env", ref.Env, "error", err)
+		// De-duplicate the repeated identical failure (e.g. a persistent 401 for a private repo with no
+		// poller read credential) to one line per distinct error, so a standing fault is not spammy.
+		if msg := err.Error(); msg != st.lastListErr {
+			st.lastListErr = msg
+			slog.WarnContext(ctx, "auto-deploy poll: listing tags failed", "app", ref.App, "env", ref.Env, "error", err)
+		}
 		return
 	}
+	// The listing succeeded: clear any standing failure so the next distinct error logs again.
+	st.lastListErr = ""
 
 	target, _ := ResolveAutoDeploy(current, tags, level)
 	if target == "" {

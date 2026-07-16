@@ -5,7 +5,9 @@
 Accepted. Realizes the optional passive mode anticipated by
 [ADR-0007](0007-explicit-deploy-by-image-reference.md); layers on
 [ADR-0006](0006-guardrails-in-the-control-plane.md) /
-[ADR-0020](0020-guardrails-as-configurable-policy.md). Supersedes nothing.
+[ADR-0020](0020-guardrails-as-configurable-policy.md). Supersedes nothing. Its on-by-default default
+(§2/§5) is superseded by [ADR-0054](0054-auto-deploy-is-opt-in.md): auto-deploy is opt-in, default
+`off`; the rest of this ADR stands.
 
 ## TL;DR
 

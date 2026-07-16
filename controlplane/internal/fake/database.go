@@ -84,8 +84,8 @@ func (d *Database) SetGuardrail(ctx context.Context, code controlplane.Guardrail
 	return nil
 }
 
-// AutoDeployLevel returns app's auto-deploy level in env, or DefaultAutoDeployLevel when none is
-// set — a missing configuration resolves to the default, matching the store (ADR-0052 §2).
+// AutoDeployLevel returns app's auto-deploy level in env, or DefaultAutoDeployLevel (off) when none
+// is set — a missing configuration resolves to the opt-in default, matching the store (ADR-0054).
 func (d *Database) AutoDeployLevel(ctx context.Context, app, env string) (controlplane.AutoDeployLevel, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

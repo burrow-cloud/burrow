@@ -4,9 +4,11 @@
 package controlplane_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"strings"
 	"testing"
@@ -54,6 +56,16 @@ func seedRelease(t *testing.T, d *fake.Database, id, app, image string) {
 		ID: id, App: app, Image: image, Environment: "default", Status: cp.ReleaseDeployed,
 	}); err != nil {
 		t.Fatalf("SaveRelease: %v", err)
+	}
+}
+
+// optIn turns auto-deploy on for app in the default environment at level — auto-deploy is off by
+// default (opt-in, ADR-0054), so a poller test that expects the watcher to move an app must set a
+// level first.
+func optIn(t *testing.T, d *fake.Database, app string, level cp.AutoDeployLevel) {
+	t.Helper()
+	if err := d.SetAutoDeployLevel(context.Background(), app, "default", level); err != nil {
+		t.Fatalf("SetAutoDeployLevel(%s, %s): %v", app, level, err)
 	}
 }
 
@@ -109,7 +121,8 @@ func imageTagOf(ref string) string {
 func TestPollerDeploysNewerInScopeTag(t *testing.T) {
 	h := newPollerHarness(t, cp.AutoDeployConfig{})
 	seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
-	h.reg.SetTags("1.2.5", "1.2.6") // minor is the default level
+	optIn(t, h.db, "web", cp.AutoDeployMinor) // auto-deploy is opt-in (ADR-0054)
+	h.reg.SetTags("1.2.5", "1.2.6")
 
 	h.poller.ReconcileOnceForTest(context.Background())
 
@@ -210,6 +223,64 @@ func TestPollerSkipsOffAndDisabled(t *testing.T) {
 	})
 }
 
+// TestPollerSkipsAppWithNoLevelSet: an app that has never opted into auto-deploy (no stored level, so
+// it reads the off default — ADR-0054) is not polled at all. This is the fix for the post-upgrade
+// regression (#270): a pre-existing app is read as off and skipped BEFORE any registry call, so no
+// tag listing happens and no 401 is logged, even though a newer in-scope tag exists.
+func TestPollerSkipsAppWithNoLevelSet(t *testing.T) {
+	ctx := context.Background()
+	h := newPollerHarness(t, cp.AutoDeployConfig{})
+	seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
+	// Deliberately set NO level: the app predates auto-deploy and never opted in.
+	h.reg.SetTags("1.2.5", "1.2.6", "1.3.0") // newer in-scope tags are available, but must be ignored
+
+	// Sanity: with no row the level reads off, matching the opt-in default.
+	if lvl, _ := h.db.AutoDeployLevel(ctx, "web", "default"); lvl != cp.AutoDeployOff {
+		t.Fatalf("unset level = %q, want off (the opt-in default)", lvl)
+	}
+
+	h.poller.ReconcileOnceForTest(ctx)
+
+	if n := releaseCount(t, h.db, "web"); n != 1 {
+		t.Fatalf("release count = %d, want 1 (an app that never opted in is never auto-deployed)", n)
+	}
+	if h.reg.Calls() != 0 {
+		t.Errorf("registry calls = %d, want 0 (an unopted app is never even listed, so no 401)", h.reg.Calls())
+	}
+}
+
+// TestPollerDedupesListingFailureLog: a standing tag-listing failure for an opted-in app (e.g. a
+// persistent 401 for a private repo the poller has no read credential for — read auth is #279) is
+// logged once, not every interval, so it is not spammy. The line logs again only when the error
+// changes or clears.
+func TestPollerDedupesListingFailureLog(t *testing.T) {
+	ctx := context.Background()
+	h := newPollerHarness(t, cp.AutoDeployConfig{})
+	seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
+	optIn(t, h.db, "web", cp.AutoDeployMinor)
+	h.reg.SetError(errors.New("token request failed (http 401): authentication required"))
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	// Three passes with the same standing 401.
+	for i := 0; i < 3; i++ {
+		h.poller.ReconcileOnceForTest(ctx)
+	}
+	if n := strings.Count(buf.String(), "listing tags failed"); n != 1 {
+		t.Errorf("listing failure logged %d times for a standing error, want 1 (de-duplicated)", n)
+	}
+
+	// A DIFFERENT error is a new fact and logs again.
+	h.reg.SetError(errors.New("registry unreachable"))
+	h.poller.ReconcileOnceForTest(ctx)
+	if n := strings.Count(buf.String(), "listing tags failed"); n != 2 {
+		t.Errorf("after a changed error, logged %d times, want 2 (the new error logs)", n)
+	}
+}
+
 // TestPollerIsolatesRegistryError: a registry failure for app A does not stop the loop — app B is
 // still reconciled and deployed in the same pass (ADR-0040 fail-soft isolation).
 func TestPollerIsolatesRegistryError(t *testing.T) {
@@ -217,6 +288,8 @@ func TestPollerIsolatesRegistryError(t *testing.T) {
 	h := newPollerHarness(t, cp.AutoDeployConfig{})
 	seedRelease(t, h.db, "aaa-1", "aaa", "ghcr.io/u/aaa:1.0.0")
 	seedRelease(t, h.db, "bbb-1", "bbb", "ghcr.io/u/bbb:1.0.0")
+	optIn(t, h.db, "aaa", cp.AutoDeployMinor)
+	optIn(t, h.db, "bbb", cp.AutoDeployMinor)
 	// aaa's registry listing fails; bbb lists a newer in-scope tag.
 	h.reg.SetErrorFor("ghcr.io/u/aaa", errors.New("registry unreachable"))
 	h.reg.SetTagsFor("ghcr.io/u/bbb", "1.0.0", "1.1.0")
@@ -236,6 +309,7 @@ func TestPollerIsolatesRegistryError(t *testing.T) {
 func TestPollerEqualOrOlderTagNoOp(t *testing.T) {
 	h := newPollerHarness(t, cp.AutoDeployConfig{})
 	seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.5.0")
+	optIn(t, h.db, "web", cp.AutoDeployMinor)
 	h.reg.SetTags("1.5.0", "1.4.9") // equal + an older backport
 
 	h.poller.ReconcileOnceForTest(context.Background())
@@ -250,6 +324,7 @@ func TestPollerEqualOrOlderTagNoOp(t *testing.T) {
 func TestPollerNonSemverCurrentSkipped(t *testing.T) {
 	h := newPollerHarness(t, cp.AutoDeployConfig{})
 	seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:latest")
+	optIn(t, h.db, "web", cp.AutoDeployMinor)
 	h.reg.SetTags("1.2.6", "1.3.0")
 
 	h.poller.ReconcileOnceForTest(context.Background())
@@ -267,6 +342,7 @@ func TestPollerBacksOffFailedTag(t *testing.T) {
 	backoff := 30 * time.Minute
 	h := newPollerHarness(t, cp.AutoDeployConfig{Backoff: backoff})
 	seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
+	optIn(t, h.db, "web", cp.AutoDeployMinor)
 	h.reg.SetTags("1.2.5", "1.2.6")
 
 	// The cluster rejects the apply, so the auto-deploy of 1.2.6 fails and is recorded Failed.
@@ -303,6 +379,7 @@ func TestPollerHonorsRetryAfter(t *testing.T) {
 	ctx := context.Background()
 	h := newPollerHarness(t, cp.AutoDeployConfig{})
 	seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
+	optIn(t, h.db, "web", cp.AutoDeployMinor)
 
 	// First pass: the registry rate-limits with Retry-After: 120 (seconds).
 	h.reg.SetError(&registry.RateLimitError{RetryAfter: "120"})
@@ -367,6 +444,7 @@ func TestPollerRunReconcilesThenStops(t *testing.T) {
 		After: func(time.Duration) <-chan time.Time { return make(chan time.Time) },
 	})
 	seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
+	optIn(t, h.db, "web", cp.AutoDeployMinor)
 	h.reg.SetTags("1.2.5", "1.2.6")
 
 	ctx, cancel := context.WithCancel(context.Background())

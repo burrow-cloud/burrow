@@ -18,9 +18,11 @@ func TestAutoDeployLevelValid(t *testing.T) {
 	}
 }
 
+// TestDefaultAutoDeployLevel pins the opt-in default: an app with no explicitly-set level is off, so
+// the watcher never polls or moves it until an operator opts in (ADR-0054, revising ADR-0052 §2).
 func TestDefaultAutoDeployLevel(t *testing.T) {
-	if DefaultAutoDeployLevel != AutoDeployMinor {
-		t.Errorf("default auto-deploy level = %q, want %q", DefaultAutoDeployLevel, AutoDeployMinor)
+	if DefaultAutoDeployLevel != AutoDeployOff {
+		t.Errorf("default auto-deploy level = %q, want %q (auto-deploy is opt-in)", DefaultAutoDeployLevel, AutoDeployOff)
 	}
 	if !DefaultAutoDeployLevel.Valid() {
 		t.Errorf("default auto-deploy level %q should be valid", DefaultAutoDeployLevel)

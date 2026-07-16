@@ -113,9 +113,10 @@ func TestGuardEndpointsEnvScoped(t *testing.T) {
 func TestAutoDeployEndpoints(t *testing.T) {
 	h, _, d := newAPI(t)
 
-	// A brand-new app reads the built-in default, keyed to the default environment.
+	// A brand-new app reads the built-in default (off — auto-deploy is opt-in, ADR-0054), keyed to the
+	// default environment.
 	rr := do(h, "GET", "/v1/apps/web/auto-deploy", token, "")
-	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"level":"minor"`) || !strings.Contains(rr.Body.String(), `"env":"default"`) {
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"level":"off"`) || !strings.Contains(rr.Body.String(), `"env":"default"`) {
 		t.Fatalf("auto-deploy get = %d %s", rr.Code, rr.Body.String())
 	}
 

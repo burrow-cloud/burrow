@@ -66,8 +66,8 @@ func TestStoreAutoDeployLevel(t *testing.T) {
 
 // TestStoreAutoDeployCandidates proves the poller's candidate enumeration against a real database
 // (ADR-0052 Phase 4b): it returns the distinct (app, environment) pairs that have a recorded release
-// — regardless of whether an app_autodeploy row exists, since auto-deploy is on by default — and
-// includes the queried pairs.
+// — regardless of whether an app_autodeploy row exists (the poller reads each pair's level and skips
+// those that are off, which is the opt-in default — ADR-0054) — and includes the queried pairs.
 func TestStoreAutoDeployCandidates(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t)

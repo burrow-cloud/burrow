@@ -307,8 +307,8 @@ type Database interface {
 	SetGuardrail(ctx context.Context, code GuardrailCode, d Disposition) error
 
 	// AutoDeployLevel returns the auto-deploy level configured for app in the named environment
-	// (ADR-0052 §2). A missing configuration resolves to DefaultAutoDeployLevel (minor): auto-deploy
-	// is on by default, so an app need not have a stored row to have a level. env is the canonical
+	// (ADR-0052 §2). A missing configuration resolves to DefaultAutoDeployLevel (off): auto-deploy is
+	// opt-in, so an app with no stored row is off and is never polled (ADR-0058). env is the canonical
 	// environment name (the reserved "default" for the implicit default environment).
 	AutoDeployLevel(ctx context.Context, app, env string) (AutoDeployLevel, error)
 	// SetAutoDeployLevel upserts the auto-deploy level for app in the named environment — the write
@@ -322,10 +322,10 @@ type Database interface {
 	DisableAutoDeploy(ctx context.Context, app, env, reason string) error
 	// AutoDeployCandidates returns the distinct (app, environment) pairs the pull-based watcher may
 	// reconcile: every app that has a recorded release, paired with the environment it was released
-	// into (ADR-0052 Phase 4b). Auto-deploy is on by default, so candidacy is "has a running
-	// release" — the set the poller can compare a registry tag against — not "has a stored level
-	// row"; the poller reads each pair's level and skips those set to off. None yields an empty
-	// slice and no error.
+	// into (ADR-0052 Phase 4b). Candidacy is "has a running release" — the set the poller can compare
+	// a registry tag against — not "has a stored level row"; the poller reads each pair's level and
+	// skips those that are off, which is the default (ADR-0058), so an app that never opted in is read
+	// and skipped before any registry call. None yields an empty slice and no error.
 	AutoDeployCandidates(ctx context.Context) ([]AppEnvRef, error)
 	// AutoDeployReason returns the stored disable reason for app in the named environment, or ""
 	// when the level was human-set or is the default (no stored override) — the reason surfaced

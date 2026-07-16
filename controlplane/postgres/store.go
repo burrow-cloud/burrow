@@ -279,8 +279,8 @@ ON CONFLICT (code) DO UPDATE SET disposition = EXCLUDED.disposition`
 }
 
 // AutoDeployLevel returns app's auto-deploy level in env (ADR-0052 §2). A missing row resolves to
-// DefaultAutoDeployLevel: the table holds only overrides, so an app runs at the default level with no
-// row (auto-deploy is on by default).
+// DefaultAutoDeployLevel (off): the table holds only opt-ins, so an app runs at the default level
+// with no row (auto-deploy is opt-in — ADR-0058).
 func (s *Store) AutoDeployLevel(ctx context.Context, app, env string) (controlplane.AutoDeployLevel, error) {
 	const q = `SELECT level FROM app_autodeploy WHERE app = $1 AND environment = $2`
 	var level string

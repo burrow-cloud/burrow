@@ -20,13 +20,14 @@ type AutoDeployLevel string
 
 const (
 	// AutoDeployOff disables auto-deploy: only an explicit CLI or agent deploy ships a release
-	// (ADR-0052 §2). Setting off is also how a version is pinned.
+	// (ADR-0052 §2). Setting off is also how a version is pinned. It is the default: auto-deploy
+	// is opt-in, so an app is never polled until an operator sets a level (ADR-0058).
 	AutoDeployOff AutoDeployLevel = "off"
 	// AutoDeployPatch auto-deploys patches within the current minor only (e.g. 1.2.6, 1.2.7 for
 	// an app on 1.2.5); crossing to a new minor is a manual step (ADR-0052 §2).
 	AutoDeployPatch AutoDeployLevel = "patch"
 	// AutoDeployMinor auto-deploys any patch or minor upgrade within the current major (e.g.
-	// 1.2.6, 1.3.0, 1.4.0 for an app on 1.2.5), never a major (ADR-0052 §2). This is the default.
+	// 1.2.6, 1.3.0, 1.4.0 for an app on 1.2.5), never a major (ADR-0052 §2).
 	AutoDeployMinor AutoDeployLevel = "minor"
 	// AutoDeployMajor auto-deploys anything newer, including a breaking major (e.g. 2.0.0) —
 	// fully hands-off updates for the operator who accepts the risk (ADR-0052 §2).
@@ -34,9 +35,11 @@ const (
 )
 
 // DefaultAutoDeployLevel is the level that applies to every app, new or already deployed, until
-// an operator changes it: minor, so an app auto-takes patches and minors within its major but not
-// a breaking major (ADR-0052 §2). Auto-deploy is on by default; set an app to off to disable it.
-const DefaultAutoDeployLevel = AutoDeployMinor
+// an operator sets one: off, so auto-deploy is opt-in — the watcher never polls or moves an app
+// that has not deliberately opted in (ADR-0058, revising ADR-0052 §2's on-by-default default).
+// This keeps a pre-existing app from being silently polled the moment a cluster is upgraded to a
+// version carrying the poller; set a level (patch/minor/major) to turn auto-deploy on.
+const DefaultAutoDeployLevel = AutoDeployOff
 
 // AppEnvRef names one (app, environment) pair — a unit the pull-based watcher reconciles
 // (ADR-0052 Phase 4b). Env is the canonical environment name (the reserved "default" for the

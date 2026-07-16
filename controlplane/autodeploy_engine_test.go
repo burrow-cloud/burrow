@@ -50,8 +50,12 @@ func TestAutoDeployStatusReportsTargetAndUpgrade(t *testing.T) {
 	reg.SetTags("1.2.5", "1.2.6", "1.3.0", "2.0.0")
 	e, d := newEngineWithRegistry(t, reg)
 	seedRunningRelease(t, d, "web", "ghcr.io/u/web:1.2.5")
+	// Opt in at minor (auto-deploy is off by default — ADR-0058): 1.3.0 is the highest within the
+	// current major, 2.0.0 is the held upgrade above the cap.
+	if err := d.SetAutoDeployLevel(ctx, "web", "default", cp.AutoDeployMinor); err != nil {
+		t.Fatalf("SetAutoDeployLevel: %v", err)
+	}
 
-	// Default level is minor: 1.3.0 is the highest within the current major, 2.0.0 is the held upgrade.
 	st, err := e.AutoDeployStatus(ctx, "web", "")
 	if err != nil {
 		t.Fatalf("AutoDeployStatus: %v", err)
@@ -82,6 +86,9 @@ func TestAutoDeployStatusUpToDate(t *testing.T) {
 	reg.SetTags("1.0.0", "1.2.0", "1.2.5")
 	e, d := newEngineWithRegistry(t, reg)
 	seedRunningRelease(t, d, "web", "ghcr.io/u/web:1.2.5")
+	if err := d.SetAutoDeployLevel(ctx, "web", "default", cp.AutoDeployMinor); err != nil {
+		t.Fatalf("SetAutoDeployLevel: %v", err)
+	}
 
 	st, err := e.AutoDeployStatus(ctx, "web", "")
 	if err != nil {
@@ -115,7 +122,7 @@ func TestAutoDeployStatusDegradesOnRegistryError(t *testing.T) {
 		t.Errorf("Current = %q, want 1.2.5 (still known from the running release)", st.Current)
 	}
 	if st.Level != cp.DefaultAutoDeployLevel {
-		t.Errorf("Level = %q, want the default (minor)", st.Level)
+		t.Errorf("Level = %q, want the default (off)", st.Level)
 	}
 }
 
@@ -179,8 +186,8 @@ func TestAutoDeployStatusNonSemverCurrent(t *testing.T) {
 }
 
 // TestAutoDeployDefaultAndSet covers the level lifecycle through the engine: an app with no stored
-// level reads the default (minor), a set is reflected on the next read, and an invalid level is
-// rejected as ErrInvalid (ADR-0052 §2).
+// level reads the default (off — auto-deploy is opt-in, ADR-0058), a set is reflected on the next
+// read, and an invalid level is rejected as ErrInvalid (ADR-0052 §2).
 func TestAutoDeployDefaultAndSet(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newEngine(t, permissive())
@@ -230,7 +237,7 @@ func TestAutoDeployPerEnvironment(t *testing.T) {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 
-	// prod at patch leaves the default environment at its default (minor).
+	// prod at patch leaves the default environment at its default (off — auto-deploy is opt-in).
 	if err := e.SetAutoDeploy(ctx, "web", "prod", cp.AutoDeployPatch); err != nil {
 		t.Fatalf("SetAutoDeploy prod: %v", err)
 	}

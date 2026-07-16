@@ -1605,8 +1605,8 @@ func (e *Engine) SetGuardrail(ctx context.Context, env string, code GuardrailCod
 }
 
 // AutoDeploy returns the auto-deploy level configured for app in env (ADR-0052 §2). A missing
-// configuration resolves to the built-in default (DefaultAutoDeployLevel, minor): auto-deploy is on
-// by default for every app, so an app need not have a stored level to have one. The environment is
+// configuration resolves to the built-in default (DefaultAutoDeployLevel, off): auto-deploy is
+// opt-in, so an app with no stored level is off and is never polled (ADR-0058). The environment is
 // resolved so an unknown name is a clear error, and the level is keyed by the canonical environment
 // name. This is a read: the agent may observe it over burrow-agent, but only a human sets it (§6).
 func (e *Engine) AutoDeploy(ctx context.Context, app, env string) (AutoDeployLevel, error) {

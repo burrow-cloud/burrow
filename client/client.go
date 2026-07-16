@@ -437,6 +437,56 @@ func (c *Client) Cluster(ctx context.Context) (ClusterCapabilities, error) {
 	return out, err
 }
 
+// CapacityReport mirrors the control plane's cluster capacity/headroom surface (issue #275): per
+// node and cluster-total allocatable / committed (sum of pod requests) / free headroom, the top CPU
+// and memory consumers, and a plain-language verdict on whether a typical in-cluster build fits and
+// whether another node is needed. It is scheduling headroom from the Kubernetes API alone — no
+// metrics-server. CPU figures are milli-CPU (1000 = one core); memory figures are bytes. It carries
+// no secret value.
+type CapacityReport struct {
+	Nodes           []NodeCapacity `json:"nodes"`
+	Cluster         NodeCapacity   `json:"cluster"`
+	TopCPU          []Consumer     `json:"top_cpu"`
+	TopMemory       []Consumer     `json:"top_memory"`
+	BuildCPUMillis  int64          `json:"build_cpu_millis"`
+	BuildMemBytes   int64          `json:"build_mem_bytes"`
+	BuildFits       bool           `json:"build_fits"`
+	BuildFitsNode   string         `json:"build_fits_node,omitempty"`
+	Verdict         string         `json:"verdict"`
+	UtilizationNote string         `json:"utilization_note"`
+}
+
+// NodeCapacity is the allocatable / committed / free-headroom breakdown for one node, or the
+// cluster-wide total when Name is empty. CPU figures are milli-CPU; memory figures are bytes.
+type NodeCapacity struct {
+	Name           string `json:"name,omitempty"`
+	Pods           int    `json:"pods"`
+	AllocCPUMillis int64  `json:"alloc_cpu_millis"`
+	UsedCPUMillis  int64  `json:"committed_cpu_millis"`
+	FreeCPUMillis  int64  `json:"free_cpu_millis"`
+	AllocMemBytes  int64  `json:"alloc_mem_bytes"`
+	UsedMemBytes   int64  `json:"committed_mem_bytes"`
+	FreeMemBytes   int64  `json:"free_mem_bytes"`
+}
+
+// Consumer is one pod's contribution (its resource request, not live usage) to the committed total,
+// for the top-consumers lists. CPUMillis is milli-CPU; MemBytes is bytes.
+type Consumer struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Node      string `json:"node,omitempty"`
+	CPUMillis int64  `json:"cpu_millis"`
+	MemBytes  int64  `json:"mem_bytes"`
+}
+
+// Capacity reports the cluster's scheduling capacity and headroom, read live (issue #275). It is
+// read-only — it changes nothing and carries no secret value.
+func (c *Client) Capacity(ctx context.Context) (CapacityReport, error) {
+	var out CapacityReport
+	err := c.do(ctx, http.MethodGet, "/v1/cluster/capacity", nil, &out)
+	return out, err
+}
+
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
 	err := c.do(ctx, http.MethodPost, c.appPath(app, "deploy"), req, &out)

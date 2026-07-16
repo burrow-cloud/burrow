@@ -411,7 +411,8 @@ func TestRenderManifests(t *testing.T) {
 		"kind: ClusterRole",                          // the one read-only capability ClusterRole (ADR-0034)
 		"kind: ClusterRoleBinding",                   // ... bound to the burrowd ServiceAccount
 		"name: burrowd-cluster-capabilities",         // ... its name
-		`resources: ["nodes"]`,                       // capability reads: nodes (provider inference)
+		`resources: ["nodes"]`,                       // capability reads: nodes (provider inference, allocatable)
+		`resources: ["pods"]`,                        // ... pods (sum of requests for scheduling headroom, #275)
 		`resources: ["storageclasses"]`,              // ... storageclasses (default StorageClass)
 		`resources: ["ingressclasses"]`,              // ... ingressclasses (IngressClass names)
 		`resources: ["deployments"]`,                 // ... deployments (ingress-nginx controller readiness)
@@ -422,8 +423,9 @@ func TestRenderManifests(t *testing.T) {
 	}
 
 	// The capability ClusterRole is the ONLY cluster-scoped grant and it is strictly read-only
-	// (ADR-0034): exactly one ClusterRole/ClusterRoleBinding, get/list only, on exactly the four
-	// non-sensitive capability resources — no secrets, no writes, no other resources.
+	// (ADR-0034): exactly one ClusterRole/ClusterRoleBinding, get/list only, on exactly the five
+	// non-sensitive capability resources (nodes, pods, storageclasses, ingressclasses, deployments) —
+	// no secrets, no writes, no other resources.
 	// Anchor to a line start so the ClusterRoleBinding's roleRef (an indented `kind: ClusterRole`)
 	// is not miscounted as a second ClusterRole.
 	if c := strings.Count(out, "\nkind: ClusterRole\n"); c != 1 {
@@ -434,8 +436,8 @@ func TestRenderManifests(t *testing.T) {
 	}
 	clusterRole := out[strings.Index(out, "kind: ClusterRole\n"):]
 	clusterRole = clusterRole[:strings.Index(clusterRole, "kind: ClusterRoleBinding")]
-	if c := strings.Count(clusterRole, `verbs: ["get", "list"]`); c != 4 {
-		t.Errorf("the capability ClusterRole must be get/list-only on all four resources, found %d such rules", c)
+	if c := strings.Count(clusterRole, `verbs: ["get", "list"]`); c != 5 {
+		t.Errorf("the capability ClusterRole must be get/list-only on all five resources, found %d such rules", c)
 	}
 	for _, banned := range []string{"create", "update", "patch", "delete", "watch"} {
 		if strings.Contains(clusterRole, banned) {

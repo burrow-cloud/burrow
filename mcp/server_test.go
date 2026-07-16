@@ -156,7 +156,7 @@ func TestListTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_run", "burrow_autoscale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_environments"} {
+	for _, want := range []string{"burrow_deploy", "burrow_status", "burrow_logs", "burrow_rollback", "burrow_scale", "burrow_run", "burrow_autoscale", "burrow_domain_add", "burrow_domain_remove", "burrow_providers", "burrow_secret_list", "burrow_secret_unset", "burrow_addon_attach", "burrow_addon_backup", "burrow_addon_backups", "burrow_audit", "burrow_cluster", "burrow_capacity", "burrow_environments"} {
 		if !got[want] {
 			t.Errorf("tool %q not registered (have %v)", want, got)
 		}
@@ -466,6 +466,36 @@ func TestClusterToolReturnsCapabilities(t *testing.T) {
 	}
 	if gotPath != "/v1/cluster" {
 		t.Errorf("API path = %q, want /v1/cluster", gotPath)
+	}
+}
+
+func TestCapacityToolReturnsReport(t *testing.T) {
+	var gotPath string
+	cs := connect(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"nodes":            []any{map[string]any{"name": "node-a", "free_cpu_millis": 1750, "alloc_cpu_millis": 2000}},
+			"cluster":          map[string]any{"free_cpu_millis": 1750, "alloc_cpu_millis": 2000},
+			"build_fits":       true,
+			"build_fits_node":  "node-a",
+			"verdict":          "A typical in-cluster build (¼ of a CPU, 512 MB) would schedule now on node node-a.",
+			"utilization_note": "scheduling headroom only; metrics-server adds live usage",
+		})
+	})
+
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "burrow_capacity"})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool returned error: %v", res.Content)
+	}
+	out := decodeStructured[client.CapacityReport](t, res)
+	if !out.BuildFits || out.BuildFitsNode != "node-a" || out.Verdict == "" {
+		t.Errorf("report = %+v", out)
+	}
+	if gotPath != "/v1/cluster/capacity" {
+		t.Errorf("API path = %q, want /v1/cluster/capacity", gotPath)
 	}
 }
 

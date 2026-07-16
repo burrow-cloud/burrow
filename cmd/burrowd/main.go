@@ -229,6 +229,10 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		},
 		DatabaseProvisioner: dbProvisioner,
 		ClusterProber:       prober,
+		// The same Prober reads scheduling capacity/headroom (node allocatable + pod requests) for
+		// the capacity surface (issue #275). It uses burrowd's in-cluster client and needs the
+		// cluster-wide read on nodes and pods the capability ClusterRole grants.
+		CapacityProber: prober,
 		// RegistryClient lists an image repository's tags for the auto-deploy read/watch (ADR-0052).
 		// It lists anonymously in this read-only phase — public GHCR (the reference registry), public
 		// Docker Hub, DO, and GCR-token registries all list without credentials. Authenticated

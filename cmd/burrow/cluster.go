@@ -70,7 +70,103 @@ func newClusterCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	cmd.AddCommand(newIngressCmd())
 	cmd.AddCommand(newBootstrapCmd())
+	cmd.AddCommand(newCapacityCmd())
 	return cmd
+}
+
+// newCapacityCmd is `burrow cluster capacity` (issue #275): a read-only view of the cluster's
+// scheduling headroom — per node and cluster-total allocatable CPU/memory, how much is committed
+// (the sum of pod resource requests), and the free headroom left — plus the top CPU and memory
+// consumers and a verdict on whether a typical in-cluster build would schedule now and whether the
+// cluster needs another node. It is computed from the Kubernetes API alone (node allocatable and
+// pod requests), which is what actually determines scheduling and needs no metrics-server; live
+// CPU/memory usage is a separate layer that installing metrics-server would add. Read-only.
+func newCapacityCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "capacity",
+		Short: "Show cluster scheduling headroom: allocatable vs committed, top consumers, and whether a build fits",
+		Long: "capacity answers \"is my cluster at capacity, do I need to scale, and what is using the\n" +
+			"most CPU/memory?\" — read live and read-only. For each node and the cluster as a whole it\n" +
+			"reports allocatable CPU/memory, how much is committed (the sum of pod resource requests),\n" +
+			"and the free headroom left, then lists the top CPU and memory consumers and gives a short\n" +
+			"verdict on whether a typical in-cluster build would schedule now and whether another node\n" +
+			"is needed.\n\n" +
+			"This is scheduling headroom — pod requests vs node allocatable — computed from the\n" +
+			"Kubernetes API alone. It is exactly what determines whether a pod schedules, so it needs\n" +
+			"no metrics-server. Live CPU/memory usage is a separate layer; installing metrics-server\n" +
+			"would add it (it is not required for this answer).",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			report, err := c.Capacity(ctx)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if o.json {
+				return emit(out, true, report, "")
+			}
+			writeCapacityReport(out, report)
+			return nil
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	return cmd
+}
+
+// writeCapacityReport prints the capacity report in plain language — CPU in plain units ("½ a CPU",
+// "¼ of a CPU"), memory in MB/GB — never machine units like "500m" (issue #275/#277).
+func writeCapacityReport(w io.Writer, r client.CapacityReport) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NODE\tPODS\tCPU (free / allocatable)\tMEMORY (free / allocatable)")
+	for _, n := range r.Nodes {
+		writeCapacityRow(tw, n.Name, n)
+	}
+	if len(r.Nodes) != 1 {
+		writeCapacityRow(tw, "cluster total", r.Cluster)
+	}
+	_ = tw.Flush()
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Top CPU consumers:")
+	writeConsumers(w, r.TopCPU, true)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Top memory consumers:")
+	writeConsumers(w, r.TopMemory, false)
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, r.Verdict)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, r.UtilizationNote)
+}
+
+// writeCapacityRow prints one node (or the cluster total) row: free vs allocatable CPU and memory,
+// in plain units.
+func writeCapacityRow(tw *tabwriter.Writer, label string, n client.NodeCapacity) {
+	fmt.Fprintf(tw, "%s\t%d\t%s / %s\t%s / %s\n",
+		label, n.Pods,
+		controlplane.HumanCPU(n.FreeCPUMillis), controlplane.HumanCPU(n.AllocCPUMillis),
+		controlplane.HumanMemory(n.FreeMemBytes), controlplane.HumanMemory(n.AllocMemBytes))
+}
+
+// writeConsumers prints the top-consumers list, leading with the resource the list is ranked on.
+func writeConsumers(w io.Writer, consumers []client.Consumer, cpuFirst bool) {
+	if len(consumers) == 0 {
+		fmt.Fprintln(w, "  (none requesting resources)")
+		return
+	}
+	for _, c := range consumers {
+		lead, rest := controlplane.HumanCPU(c.CPUMillis), controlplane.HumanMemory(c.MemBytes)
+		if !cpuFirst {
+			lead, rest = controlplane.HumanMemory(c.MemBytes), controlplane.HumanCPU(c.CPUMillis)
+		}
+		fmt.Fprintf(w, "  %s/%s — %s (%s)\n", c.Namespace, c.Name, lead, rest)
+	}
 }
 
 // writeClusterReport prints the capability report as an aligned, human-readable table.

@@ -289,6 +289,29 @@ func newClusterCmd() *cobra.Command {
 		},
 	}
 	bindConn(cmd.Flags(), o)
+	cmd.AddCommand(newCapacityCmd())
+	return cmd
+}
+
+// newCapacityCmd is `burrow-agent cluster capacity`: the scheduling capacity/headroom surface
+// (issue #275) so the agent can answer "is the cluster at capacity, do I need to scale?" and
+// pre-flight a resource-hungry operation. It reports, per node and cluster-total, allocatable /
+// committed (sum of pod requests) / free CPU and memory, the top consumers, and a verdict on
+// whether a typical in-cluster build fits — all from the Kubernetes API alone, no metrics-server.
+// Read-only; JSON-first so the agent can compose the result.
+func newCapacityCmd() *cobra.Command {
+	o := &connOpts{}
+	cmd := &cobra.Command{
+		Use:   "capacity",
+		Short: "Report scheduling headroom: per-node allocatable vs committed, top consumers, and whether a build fits (no metrics-server needed)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return o.withClient(cmd, func(ctx context.Context, c *client.Client, _ string) (any, error) {
+				return c.Capacity(ctx)
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
 	return cmd
 }
 

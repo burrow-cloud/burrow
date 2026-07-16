@@ -54,6 +54,12 @@ type Engine struct {
 	// empty, an in-cluster build requires an explicit target and a missing one errors. A
 	// caller-supplied target always overrides it, so external registries stay fully supported.
 	buildRegistry string
+	// buildPublicRegistry is the PUBLIC registry host the in-cluster build's resulting deploy
+	// references, distinct from buildRegistry (the internal push endpoint) — the build pushes to the
+	// internal Service in-cluster but the node pulls the public host through the ingress over TLS
+	// (ADR-0054 §5). Optional: when empty, the deploy falls back to referencing the internal push
+	// endpoint (an in-cluster registry installed without a public ingress).
+	buildPublicRegistry string
 	// appNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace
 	// of the implicit `default` environment (ADR-0035 phase 2). It mirrors the kube Adapter's
 	// namespace so the engine can synthesize the default environment in ListEnvironments.
@@ -105,6 +111,12 @@ type Deps struct {
 	// sets it from BURROW_BUILD_REGISTRY, which `burrow cluster registry install` wires to the
 	// in-cluster registry it deploys.
 	BuildRegistry string
+	// BuildPublicRegistry is the PUBLIC registry host the in-cluster build's resulting deploy
+	// references so the node pulls through the ingress over TLS, distinct from BuildRegistry (the
+	// internal push endpoint) — ADR-0054 §5. Optional — an empty value falls back to referencing the
+	// internal push endpoint. burrowd sets it from BURROW_BUILD_PUBLIC_REGISTRY, which
+	// `burrow cluster registry install --host` wires to the registry's public ingress hostname.
+	BuildPublicRegistry string
 	// AppNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace of
 	// the implicit `default` environment (ADR-0035 phase 2). Optional — an empty value defaults to
 	// "default", matching the kube Adapter.
@@ -136,21 +148,22 @@ func New(d Deps) (*Engine, error) {
 		appNamespace = "default"
 	}
 	return &Engine{
-		k8s:           d.Kubernetes,
-		db:            d.Database,
-		clock:         d.Clock,
-		ids:           d.IDs,
-		resolver:      d.Resolver,
-		credentials:   d.Credentials,
-		dns:           d.DNS,
-		logs:          d.Logs,
-		metrics:       d.Metrics,
-		dbProvisioner: d.DatabaseProvisioner,
-		prober:        d.ClusterProber,
-		registry:      d.RegistryClient,
-		builder:       d.Builder,
-		buildRegistry: d.BuildRegistry,
-		appNamespace:  appNamespace,
+		k8s:                 d.Kubernetes,
+		db:                  d.Database,
+		clock:               d.Clock,
+		ids:                 d.IDs,
+		resolver:            d.Resolver,
+		credentials:         d.Credentials,
+		dns:                 d.DNS,
+		logs:                d.Logs,
+		metrics:             d.Metrics,
+		dbProvisioner:       d.DatabaseProvisioner,
+		prober:              d.ClusterProber,
+		registry:            d.RegistryClient,
+		builder:             d.Builder,
+		buildRegistry:       d.BuildRegistry,
+		buildPublicRegistry: d.BuildPublicRegistry,
+		appNamespace:        appNamespace,
 	}, nil
 }
 

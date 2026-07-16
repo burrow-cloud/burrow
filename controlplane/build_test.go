@@ -83,6 +83,60 @@ func TestBuildDefaultsTargetToInClusterRegistry(t *testing.T) {
 	}
 }
 
+// newBuildEngineWithPublicRegistry wires a build engine that carries BOTH an internal push endpoint
+// and a distinct public pull host (ADR-0054 §5), so a default build pushes to the internal Service but
+// the resulting deploy references the public host the node pulls through the ingress.
+func newBuildEngineWithPublicRegistry(t *testing.T, internal, public string) (*cp.Engine, *fake.Kubernetes, *fake.Builder) {
+	t.Helper()
+	k := fake.NewKubernetes()
+	d := fake.NewDatabase()
+	d.SetPolicy(permissive())
+	b := fake.NewBuilder()
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Database: d, Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs: fake.NewIDs(), Resolver: fake.NewResolver(), Credentials: fake.NewCredentials(),
+		DNS: fake.NewDNSFactory(), Builder: b, BuildRegistry: internal, BuildPublicRegistry: public,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return e, k, b
+}
+
+// TestBuildPushesInternalDeploysPublic asserts the crux of ADR-0054 §5: a default in-cluster build
+// PUSHES to the internal Service endpoint but the resulting deploy REFERENCES the public host, sharing
+// the same repository path and digest so the internally pushed image and the publicly pulled reference
+// resolve to the same stored image. The node pulls the public host through the ingress.
+func TestBuildPushesInternalDeploysPublic(t *testing.T) {
+	const internal = "burrow-registry.burrow.svc.cluster.local:5000"
+	const public = "registry.example.com"
+	e, k, b := newBuildEngineWithPublicRegistry(t, internal, public)
+	b.SetDigest("sha256:beef")
+
+	res, err := e.Build(context.Background(), cp.BuildRequest{
+		App:    "web",
+		Source: cp.SourceRef{Repo: "https://github.com/acme/web", Ref: "v1.0.0"},
+		// No TargetImage: the in-cluster registry is the default push target.
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// The builder pushed to the INTERNAL endpoint.
+	if got, want := b.LastTarget(), internal+"/web:build"; got != want {
+		t.Errorf("builder push target = %q, want the internal endpoint %q", got, want)
+	}
+	// The deploy references the PUBLIC host at the SAME repository path and digest.
+	wantImage := public + "/web:build@sha256:beef"
+	if res.Deploy.Release.Image != wantImage {
+		t.Errorf("deployed image = %q, want the public reference %q", res.Deploy.Release.Image, wantImage)
+	}
+	spec, ok := k.Spec("web")
+	if !ok || spec.Image != wantImage {
+		t.Errorf("applied workload image = %q (ok=%v), want %q", spec.Image, ok, wantImage)
+	}
+}
+
 // TestBuildExplicitTargetOverridesRegistry asserts a caller-supplied target is used verbatim even
 // when an in-cluster registry is configured — external registries stay fully supported (ADR-0053 §5).
 func TestBuildExplicitTargetOverridesRegistry(t *testing.T) {

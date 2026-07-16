@@ -27,23 +27,40 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 	if err := req.Source.Validate(); err != nil {
 		return BuildResult{}, fmt.Errorf("build %s: %w: %w", req.App, ErrInvalid, err)
 	}
+	// pushTarget is where the builder pushes the image; deployBase is the reference the resulting
+	// deploy pins. For a caller-supplied target the two are identical (external registries stay fully
+	// supported). For the default in-cluster path they DIFFER (ADR-0054): the builder pushes to the
+	// internal cluster-DNS Service endpoint (in-cluster, plain HTTP, credential-free), but the deploy
+	// must reference the image by the PUBLIC registry host so the kubelet pulls it through the ingress
+	// over a trusted cert. Both share the same repository path and digest, so the internal push and the
+	// public pull resolve to the same stored image — a registry's stored repo path is independent of
+	// the endpoint host used to reach it.
+	pushTarget, deployBase := req.TargetImage, req.TargetImage
 	if req.TargetImage == "" {
 		// No explicit target: default to the optional in-cluster registry when one is wired — the
-		// zero-config default push target (ADR-0053 §5). The image happens to live in a local
-		// registry; deploy still pins it strictly by reference (ADR-0007). When no in-cluster
+		// zero-config default push target (ADR-0053 §5, ADR-0054). The image happens to live in a
+		// local registry; deploy still pins it strictly by reference (ADR-0007). When no in-cluster
 		// registry is configured, a build with no target is an error, since there is nowhere to push.
 		if e.buildRegistry == "" {
 			return BuildResult{}, fmt.Errorf("build %s: target image reference is empty and no in-cluster registry is configured to default to: %w", req.App, ErrInvalid)
 		}
-		req.TargetImage = defaultBuildTarget(e.buildRegistry, req.App)
+		pushTarget = defaultBuildTarget(e.buildRegistry, req.App)
+		// Reference the public host for the deploy so the node pulls through the ingress. Fall back to
+		// the internal push target only when no public host is wired (an in-cluster registry installed
+		// without a public ingress), preserving the earlier single-endpoint behavior.
+		deployBase = pushTarget
+		if e.buildPublicRegistry != "" {
+			deployBase = defaultBuildTarget(e.buildPublicRegistry, req.App)
+		}
 	}
 	if e.builder == nil {
 		return BuildResult{}, fmt.Errorf("build %s: in-cluster build is not configured: %w", req.App, ErrNotImplemented)
 	}
 
-	// Build inside the cluster. A builder error is terminal for the build: surface it and do NOT touch
-	// the deploy path — nothing is rolled out, no release is recorded (ADR-0053 §4).
-	digest, err := e.builder.Build(ctx, req.Source, req.TargetImage)
+	// Build inside the cluster, pushing to pushTarget. A builder error is terminal for the build:
+	// surface it and do NOT touch the deploy path — nothing is rolled out, no release is recorded
+	// (ADR-0053 §4).
+	digest, err := e.builder.Build(ctx, req.Source, pushTarget)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}
@@ -52,11 +69,12 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 	}
 
 	// The built image rejoins the existing guarded deploy path (ADR-0053 §4). Deploy the digest-pinned
-	// reference (repo:tag@sha256:...) so the release pins the exact bytes just built while keeping the
-	// tag for semver classification. This is the SAME unexported deploy the explicit call uses — same
-	// guardrails, rollout, deploy record, rollback chain, and audit entry — stamped manual because an
-	// in-cluster build is an explicit, human- or agent-triggered call (ADR-0053 §2).
-	image := pinDigest(req.TargetImage, digest)
+	// PUBLIC reference (repo:tag@sha256:...) so the release pins the exact bytes just built — reachable
+	// by the node through the ingress — while keeping the tag for semver classification. This is the
+	// SAME unexported deploy the explicit call uses — same guardrails, rollout, deploy record, rollback
+	// chain, and audit entry — stamped manual because an in-cluster build is an explicit, human- or
+	// agent-triggered call (ADR-0053 §2).
+	image := pinDigest(deployBase, digest)
 	dep, err := e.deploy(ctx, DeployRequest{App: req.App, Env: req.Env, Image: image, Confirm: req.Confirm}, manualProvenance())
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
@@ -70,11 +88,11 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 // in-cluster build is an explicit call, not something to also auto-redeploy on tag movement.
 const defaultBuildTargetTag = "build"
 
-// defaultBuildTarget composes the default push target for an in-cluster build with no explicit
-// target: the in-cluster registry, the app as the repository, and a fixed build tag — e.g.
-// "burrow-registry.burrow.svc.cluster.local:5000/web:build" (ADR-0053 §5). The registry host is the
-// exact reference the node's containerd resolves through the k3s registries.yaml mirror, so what a
-// build pushes is what the resulting deploy pulls.
+// defaultBuildTarget composes a default build reference from a registry host, the app as the
+// repository, and a fixed build tag — e.g. "burrow-registry.burrow.svc.cluster.local:5000/web:build"
+// (ADR-0053 §5). It is used for BOTH the internal push endpoint and the public pull host (ADR-0054):
+// because the repository path (app + tag) is identical, the internally pushed image and the publicly
+// pulled reference resolve to the same stored image.
 func defaultBuildTarget(registry, app string) string {
 	return registry + "/" + app + ":" + defaultBuildTargetTag
 }

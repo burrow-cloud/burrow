@@ -243,10 +243,16 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		Builder: builder,
 		// The zero-config default push target for an in-cluster build with no explicit target (ADR-0053
 		// §5): the in-cluster registry `burrow cluster registry install` deploys, whose in-cluster
-		// reference it wires here via BURROW_BUILD_REGISTRY. Empty when no in-cluster registry is
-		// installed, in which case a build must name its own target; a caller-supplied target always
-		// overrides this, so external registries stay fully supported.
+		// Service reference it wires here via BURROW_BUILD_REGISTRY. The build pushes here in-cluster
+		// over plain HTTP. Empty when no in-cluster registry is installed, in which case a build must
+		// name its own target; a caller-supplied target always overrides this, so external registries
+		// stay fully supported.
 		BuildRegistry: os.Getenv("BURROW_BUILD_REGISTRY"),
+		// The PUBLIC registry host the in-cluster build's resulting deploy references so the node pulls
+		// through the ingress over TLS, distinct from the internal push endpoint above (ADR-0054 §5).
+		// `burrow cluster registry install --host` wires it via BURROW_BUILD_PUBLIC_REGISTRY; empty
+		// falls back to referencing the internal push endpoint.
+		BuildPublicRegistry: os.Getenv("BURROW_BUILD_PUBLIC_REGISTRY"),
 		// The app namespace is the implicit `default` environment (ADR-0035 phase 2).
 		AppNamespace: namespace,
 	})

@@ -41,8 +41,13 @@ opt-in commands you run when you want them, each with its own status, install, a
 
 ```sh
 burrow cluster ingress install    # ingress-nginx, cert-manager, and a Let's Encrypt issuer (public HTTPS)
-burrow cluster registry install   # the optional in-cluster image registry (a zero-config build push target)
+burrow cluster registry install --host registry.example.com   # the optional in-cluster image registry (a zero-config build push target)
 ```
+
+The in-cluster registry is reachable the same way on any cluster: the build pushes to an internal
+service in-cluster, and nodes pull the image through the cluster ingress over TLS. It therefore needs
+`burrow cluster ingress install` first and a `--host` for the public pull endpoint; a cluster with no
+domain cannot use it today.
 
 Run `burrow cluster ingress` or `burrow cluster registry` with no subcommand to see whether each is
 installed. (`burrow cluster registry` manages the registry that runs in your cluster; to give the

@@ -1,11 +1,16 @@
-# The OPTIONAL lightweight in-cluster registry (ADR-0053 §5): Zot, the OCI-native project-zot
-# registry, chosen for its minimal footprint. It is the zero-config default push target for the
-# in-cluster build so a self-hosted user needs no external registry account or pull token; external
-# registries remain fully supported. Deploy stays strictly by image reference — this is simply a
-# registry that happens to be local. It lives in the control-plane namespace as core build
-# infrastructure, reachable in-cluster at {{.RegistryEndpoint}}. `burrow cluster registry install`
-# applies these resources as a standalone, opt-in step (ADR-0054): `burrow install` provisions only
-# the control plane.
+# The OPTIONAL lightweight in-cluster registry (ADR-0053 §5, ADR-0054): Zot, the OCI-native
+# project-zot registry, chosen for its minimal footprint. It is the zero-config default push target
+# for the in-cluster build so a self-hosted user needs no external registry account or pull token;
+# external registries remain fully supported. Deploy stays strictly by image reference — this is
+# simply a registry that happens to be local.
+#
+# It is reachable the same way on any cluster (ADR-0054 §5): the build pushes to the INTERNAL ClusterIP
+# Service ({{.RegistryEndpoint}}) in-cluster over plain HTTP, credential-free; nodes pull the PUBLIC
+# host ({{.Host}}) through the cluster ingress, which terminates TLS with a certificate issued by the
+# existing "{{.IssuerName}}" Let's Encrypt ClusterIssuer. No node or containerd editing. The internally
+# pushed image and the publicly pulled reference share the same repository path and digest, so they
+# resolve to the same stored image. `burrow cluster registry install` applies these resources as a
+# standalone, opt-in step (ADR-0054): `burrow install` provisions only the control plane.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -20,8 +25,8 @@ spec:
       # GC policy below keeps it from filling (ADR-0053 Consequences).
       storage: 5Gi
 ---
-# Zot's configuration: serve on :{{.RegistryPort}} over plain HTTP (the node's containerd reaches it
-# through the k3s registries.yaml mirror `burrow cluster registry install` writes) and, crucially, run
+# Zot's configuration: serve on :{{.RegistryPort}} over plain HTTP (the internal Service and the
+# ingress both reach it here; the ingress is what terminates TLS in front of it) and, crucially, run
 # garbage collection so orphaned build layers do not fill the volume (ADR-0053 Consequences).
 apiVersion: v1
 kind: ConfigMap
@@ -92,10 +97,8 @@ spec:
         - name: config
           configMap: { name: burrow-registry-config }
 ---
-# NodePort at a pinned port so the node's containerd reaches the registry at a deterministic
-# localhost address (http://127.0.0.1:{{.RegistryNodePort}}), which the k3s registries.yaml mirror
-# points at. In-cluster clients (the build pod) still reach it by the Service DNS name on
-# :{{.RegistryPort}}, the same reference the resulting deploy pulls by.
+# The INTERNAL push endpoint: a plain ClusterIP Service the build pod pushes to in-cluster over plain
+# HTTP at {{.RegistryEndpoint}}. No auth — it is only reachable inside the cluster (ADR-0054 §5).
 apiVersion: v1
 kind: Service
 metadata:
@@ -103,9 +106,44 @@ metadata:
   namespace: {{.Namespace}}
   labels: { app: burrow-registry, app.kubernetes.io/managed-by: burrow }
 spec:
-  type: NodePort
+  type: ClusterIP
   selector: { app: burrow-registry }
   ports:
     - port: {{.RegistryPort}}
       targetPort: {{.RegistryPort}}
-      nodePort: {{.RegistryNodePort}}
+---
+# The PUBLIC pull endpoint: an ingress vhost at {{.Host}} the nodes pull through over TLS (ADR-0054 §5).
+# cert-manager issues the certificate via the existing "{{.IssuerName}}" HTTP-01 ClusterIssuer. Two
+# annotations are load-bearing: proxy-body-size "0" removes nginx's body cap so large image layers
+# push and pull (without it, big layers fail), and the basic-auth annotations require a credential on
+# this public path while the internal push path above stays credential-free.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: burrow-registry
+  namespace: {{.Namespace}}
+  labels: { app: burrow-registry, app.kubernetes.io/managed-by: burrow }
+  annotations:
+    cert-manager.io/cluster-issuer: "{{.IssuerName}}"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: "{{.AuthSecretName}}"
+    nginx.ingress.kubernetes.io/auth-realm: "Burrow in-cluster registry"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["{{.Host}}"]
+      secretName: "{{.TLSSecretName}}"
+  rules:
+    - host: "{{.Host}}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: burrow-registry
+                port:
+                  number: {{.RegistryPort}}

@@ -13,6 +13,13 @@ additive cluster component — ingress/TLS, the optional in-cluster registry, an
 `burrow cluster registry` for the in-cluster registry and removes the shipped `--with-registry` and
 `--with-ingress` flags.
 
+The in-cluster registry is a **single cluster-agnostic mechanism**: Zot behind the cluster ingress,
+with TLS issued by the existing Let's Encrypt HTTP-01 `letsencrypt` ClusterIssuer. The in-cluster
+build pushes to an **internal ClusterIP Service** over plain HTTP, and nodes pull the image through
+the **ingress over TLS** with a generated pull credential — **no node or containerd editing**, so it
+behaves the same on k3s and a managed cluster like DOKS. It therefore **depends on the ingress
+stack** and needs a hostname; a cluster with no domain cannot use it today (documented limitation).
+
 Extends the CLI command taxonomy ([ADR-0024](0024-cli-command-taxonomy.md)) and the CLI onboarding
 and organization decision ([ADR-0037](0037-cli-onboarding-and-organization.md)); governs how the
 optional in-cluster registry of ([ADR-0053](0053-in-cluster-build-from-source.md)) is provisioned.
@@ -59,11 +66,11 @@ Each additive cluster component is its own noun under `burrow cluster`, with a c
 
 `burrow cluster ingress` (with `install`) is the existing example. This ADR adds
 `burrow cluster registry` for the optional in-cluster registry of
-([ADR-0053](0053-in-cluster-build-from-source.md)): its `install` deploys the lightweight registry,
-wires it as burrowd's zero-config default build push target, and — on a k3s node — configures the
-node's containerd to pull from it; its `uninstall` reverses those; the bare command reports status.
-It is a kubeconfig-side operator setup, not an agent operation, and does not route through burrowd's
-guarded API — the same posture as `burrow cluster ingress install`.
+([ADR-0053](0053-in-cluster-build-from-source.md)): its `install` deploys the lightweight registry
+behind the cluster ingress and wires it as burrowd's zero-config default build push target (§5); its
+`uninstall` reverses those; the bare command reports status. It is a kubeconfig-side operator setup,
+not an agent operation, and does not route through burrowd's guarded API — the same posture as
+`burrow cluster ingress install`.
 
 The in-cluster registry is deliberately named `burrow cluster registry`, distinct from
 `burrow config registry`, which manages pull credentials for **external** registries
@@ -76,6 +83,49 @@ cluster, the other the credentials to pull from registries *outside* it.
 Install and bootstrap carry no `--with-<component>` flags. The removed `--with-registry` (on
 `burrow install` and `burrow cluster bootstrap`) and `--with-ingress` (on `burrow cluster bootstrap`)
 are gone; the standalone commands are the only way to add these components.
+
+### 4. An additive component may depend on another, and verifies it
+
+A standalone component whose install needs another component present verifies that dependency and
+fails with an error naming the command that provides it, rather than half-installing. The in-cluster
+registry (§5) depends on the ingress stack for its public TLS endpoint:
+`burrow cluster registry install` checks that the ingress-nginx controller, cert-manager, and the
+`letsencrypt` ClusterIssuer are present and, if any is missing, refuses and points at
+`burrow cluster ingress install`. This keeps each component standalone and opt-in while making the
+dependency explicit and actionable.
+
+### 5. The in-cluster registry is Kubernetes-native: internal Service push, public ingress pull
+
+The optional in-cluster registry ([ADR-0053](0053-in-cluster-build-from-source.md) §5) runs as a
+single mechanism that is identical on every cluster type — a plain Kubernetes-native service, with no
+node-specific or containerd editing:
+
+- **Zot** runs as a Deployment with a PersistentVolumeClaim in the control-plane namespace.
+- An **internal ClusterIP Service** is the push endpoint. The in-cluster build pushes to it directly
+  over plain HTTP; it needs no external auth because it is only reachable in-cluster. burrowd's
+  `BURROW_BUILD_REGISTRY` points at this Service's cluster-DNS name.
+- An **Ingress vhost** at `--host` is the pull endpoint. It is annotated to use the existing
+  `letsencrypt` HTTP-01 ClusterIssuer, so the certificate is issued through the same ingress the rest
+  of the cluster uses — no DNS-01 solver and no second issuer. `nginx.ingress.kubernetes.io/proxy-
+  body-size: "0"` is set so large image layers push and pull. The public endpoint is protected with
+  ingress-layer nginx basic auth backed by a generated credential, so the *internal* push path stays
+  credential-free while the *external* pull path requires auth.
+- A dedicated **imagePullSecret** carrying that credential is installed in the app namespace (the
+  same [ADR-0017](0017-private-registry-authentication.md) pull-secret path `burrow config registry`
+  uses), so app Pods pull the public host.
+- **Push endpoint and pull reference differ, but resolve to the same stored image.** The build pushes
+  to the internal Service endpoint, but the built image is deployed by the **public** reference
+  `<host>/<app>:<tag>@<digest>` so nodes pull it through the ingress. Because a registry's stored
+  repository path is independent of the endpoint host used to reach it, the internal push and the
+  public pull share the same repository path and digest and therefore address the same bytes.
+  burrowd carries both: `BURROW_BUILD_REGISTRY` (internal push endpoint) and
+  `BURROW_BUILD_PUBLIC_REGISTRY` (public pull host).
+
+**Known limitation — no-domain clusters.** The ingress-and-TLS pull path requires a hostname. A
+cluster with no domain cannot use the in-cluster registry today; `install` fails cleanly and says so.
+A future no-domain fallback can wire the node's container runtime to trust the in-cluster registry
+directly via the runtime-agnostic containerd `certs.d` mechanism (not k3s-specific files); it is out
+of scope here.
 
 ## Consequences
 
@@ -103,6 +153,14 @@ are gone; the standalone commands are the only way to add these components.
   undiscoverable and un-removable, and scale poorly — each new component would want its own flag on
   both commands. A standalone command per component is discoverable, inspectable, reversible, and
   uniform.
+- **The in-cluster registry as a NodePort Service mirrored into the node's containerd via k3s
+  `registries.yaml`** (the earlier design, now dropped). Rejected: editing
+  `/etc/rancher/k3s/registries.yaml` on the node is k3s-specific — it does not work on a managed
+  cluster like DOKS — and it requires running the install on the node itself, splitting the registry's
+  behavior by cluster type instead of keeping one mechanism that works everywhere
+  ([ADR-0046](0046-registry-onboarding.md)). Routing pulls through the cluster ingress with TLS (§5)
+  is one mechanism that works identically everywhere and reuses the ingress the cluster already runs,
+  at the cost of requiring a hostname (the documented no-domain limitation).
 - **A single `burrow cluster addons` umbrella command.** Rejected as premature and vaguer than named
   nouns: `burrow cluster ingress` and `burrow cluster registry` say exactly what they manage, matching
   the noun-grouped taxonomy ([ADR-0024](0024-cli-command-taxonomy.md)); a generic "addons" surface

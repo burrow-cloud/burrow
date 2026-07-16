@@ -24,16 +24,15 @@ import (
 )
 
 // The ingress stack Burrow installs when a cluster has none. Pinned to specific upstream
-// releases so a cluster always gets a known-good set; bump these deliberately. Two
-// ingress-nginx variants at the same pinned controller version: the "cloud" manifest
-// provisions a LoadBalancer Service (a billable cloud load balancer, the right default for a
-// managed cluster like DigitalOcean); the "baremetal" manifest provisions a NodePort Service
-// (no cloud load balancer, no extra charge) for bare-metal or cost-sensitive clusters. The
-// --expose flag (ADR-0034 slice 2) picks between them.
+// releases so a cluster always gets a known-good set; bump these deliberately. The
+// ingress-nginx "cloud" manifest provisions a LoadBalancer Service, which yields a real public
+// IP to point DNS at on every target Burrow supports (a cloud load balancer, k3s's servicelb,
+// or MetalLB). NodePort was dropped as a user-facing exposure choice (ADR-0043): it exposes
+// high ports, not :80/:443, so it cannot serve a turnkey public site or pass Let's Encrypt
+// HTTP-01.
 const (
-	ingressNginxManifest          = "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml"
-	ingressNginxBaremetalManifest = "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/baremetal/deploy.yaml"
-	certManagerManifest           = "https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml"
+	ingressNginxManifest = "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml"
+	certManagerManifest  = "https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml"
 
 	// Let's Encrypt ACME directories. Staging has high rate limits but issues untrusted
 	// certificates; use it to validate the flow without burning the production quota.
@@ -45,13 +44,14 @@ const (
 	defaultIssuerName = "letsencrypt"
 )
 
-// The values of the --expose flag (ADR-0034 slice 2): which ingress-nginx Service the
-// controller gets. "auto" runs the slice-1 capability detection and picks loadbalancer on a
-// known cloud provider, nodeport on bare-metal / no-LB-support clusters.
+// The values of the --expose flag (ADR-0034 slice 2, refined by ADR-0043): public reachability
+// is always a LoadBalancer Service. "loadbalancer" installs it directly; "auto" runs the slice-1
+// capability detection to learn which provider services LoadBalancers (a cloud LB, servicelb, or
+// MetalLB), and when none is present it guides the operator to install MetalLB rather than falling
+// back to NodePort (dropped by ADR-0043).
 const (
 	exposeAuto         = "auto"
 	exposeLoadBalancer = "loadbalancer"
-	exposeNodePort     = "nodeport"
 )
 
 // detectCapabilities is the capability-detection seam used to resolve --expose auto, defaulting
@@ -97,10 +97,10 @@ type ingressOptions struct {
 // validateExpose checks the --expose value, treating an empty value as auto.
 func (o ingressOptions) validateExpose() error {
 	switch o.expose {
-	case "", exposeAuto, exposeLoadBalancer, exposeNodePort:
+	case "", exposeAuto, exposeLoadBalancer:
 		return nil
 	default:
-		return fmt.Errorf("invalid --expose %q: want loadbalancer, nodeport, or auto", o.expose)
+		return fmt.Errorf("invalid --expose %q: want loadbalancer or auto", o.expose)
 	}
 }
 
@@ -140,8 +140,8 @@ func newIngressCmd() *cobra.Command {
 	install.Flags().StringVar(&o.issuerName, "issuer-name", defaultIssuerName, "name of the ClusterIssuer to create")
 	install.Flags().BoolVar(&o.staging, "staging", false, "use the Let's Encrypt staging environment (untrusted certs, high rate limits) to test the flow")
 	install.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
-	install.Flags().StringVar(&o.expose, "expose", exposeAuto, "how to expose the controller: loadbalancer (billable cloud LB), nodeport (free, point DNS at a node IP), or auto (detect from the provider)")
-	install.Flags().BoolVar(&o.approve, "approve", false, "approve installing a billable cloud LoadBalancer (required to install it non-interactively); a free path — nodeport, or a servicelb / MetalLB LoadBalancer — needs no approval. The plan and its notice always print. No shorthand: a cost approval should not be a single keystroke.")
+	install.Flags().StringVar(&o.expose, "expose", exposeAuto, "how to expose the controller with a LoadBalancer Service: loadbalancer (install it directly) or auto (detect the LoadBalancer provider, and guide to MetalLB if none)")
+	install.Flags().BoolVar(&o.approve, "approve", false, "approve installing a billable cloud LoadBalancer (required to install it non-interactively); a free servicelb / MetalLB LoadBalancer needs no approval. The plan and its notice always print. No shorthand: a cost approval should not be a single keystroke.")
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the plan (including the cost notice) instead of applying it")
 	install.Flags().BoolVar(&o.wait, "wait", true, "wait for cert-manager to become ready before creating the issuer")
 	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
@@ -164,7 +164,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 
 	// dry-run prints the plan and the cost notice without contacting the cluster, so an operator
 	// can review what an install would do (including the billable-resource warning) before running
-	// it. auto is left unresolved here: picking loadbalancer vs nodeport needs the live capability
+	// it. auto is left unresolved here: resolving the LoadBalancer provider needs the live capability
 	// probe, which only runs on the real apply.
 	if o.dryRun {
 		writeIngressDryRunPlan(o, issuer, stdout)
@@ -176,16 +176,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 		return err
 	}
 
-	// Resolve --expose (auto runs the slice-1 capability probe), then read what is already present
-	// so the plan only lists the missing pieces (detect-and-skip). The probe also reports which
-	// LoadBalancer provider services the cluster (ADR-0043), so the plan and the gate can tell a
-	// billable cloud LB apart from a free servicelb / MetalLB one.
-	expose, provider, err := resolveExpose(ctx, o.expose, cs)
-	if err != nil {
-		return err
-	}
-	manifest := ingressManifestFor(expose)
-
+	// Read what is already present so the plan only lists the missing pieces (detect-and-skip).
 	hasNginx, err := ingressControllerPresent(ctx, cs)
 	if err != nil {
 		return err
@@ -195,13 +186,33 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 		return err
 	}
 
-	// Always print the plan with the cost/SPOF notice before any write (ADR-0034 slice 2: nothing
+	// Resolve --expose (auto runs the slice-1 capability probe) only when this run will actually
+	// install the controller, and therefore a LoadBalancer Service. If ingress-nginx is already
+	// present no LoadBalancer is provisioned, so there is nothing to probe, cost, or gate — skip the
+	// probe (which would otherwise fail on a cluster with no LoadBalancer provider) and leave the
+	// mode unresolved for display only (ADR-0043, issue #268). The probe also reports which
+	// LoadBalancer provider services the cluster, so the plan and the gate can tell a billable cloud
+	// LB apart from a free servicelb / MetalLB one.
+	expose, provider, manifest := o.expose, "", ""
+	if expose == "" {
+		expose = exposeAuto
+	}
+	if !hasNginx {
+		expose, provider, err = resolveExpose(ctx, o.expose, cs)
+		if err != nil {
+			return err
+		}
+		manifest = ingressNginxManifest
+	}
+
+	// Always print the plan with the cost notice before any write (ADR-0034 slice 2: nothing
 	// cluster-wide is installed without the operator seeing what it costs), then gate the write on
 	// the resolved mode and detected LoadBalancer provider. Only a billable cloud LoadBalancer
-	// requires approval (interactive prompt, or --approve non-interactively); the free nodeport path
-	// and a free servicelb / MetalLB LoadBalancer proceed after the plan, no approval needed (ADR-0043).
+	// requires approval (interactive prompt, or --approve non-interactively); a free servicelb /
+	// MetalLB LoadBalancer, or a run that creates no LoadBalancer at all (ingress-nginx already
+	// present), proceeds after the plan, no approval needed (ADR-0043, issue #268).
 	writeIngressPlan(stdout, o, expose, provider, manifest, hasNginx, hasCertManager)
-	ok, err := confirmInstall(o, expose, provider, stdin, stdout)
+	ok, err := confirmInstall(o, expose, provider, hasNginx, stdin, stdout)
 	if err != nil {
 		return err
 	}
@@ -369,29 +380,31 @@ func writeIngressDone(w io.Writer, o ingressOptions) {
 	fmt.Fprintln(w, "The controller's external address can take a few minutes; check `burrow app reachability <app>`.")
 }
 
-// resolveExpose turns the --expose value into a concrete mode and, for a resolved loadbalancer, the
-// detected LoadBalancer provider (ADR-0043). auto runs the slice-1 capability probe and picks
-// loadbalancer when LoadBalancer support is inferred — by whatever services LoadBalancers: a cloud
-// provider (billable), k3s's servicelb, or MetalLB (both free) — returning that provider so the plan
-// and the gate can distinguish a billable cloud LB from a free one; otherwise it picks nodeport. The
-// explicit modes need no probe, so an explicit --expose loadbalancer returns an empty provider, which
-// the billable check treats conservatively as a cloud LB (cost disclosure and --approve still apply).
+// resolveExpose resolves the --expose value to the loadbalancer mode and, for auto, the detected
+// LoadBalancer provider (ADR-0043). Public reachability is always a LoadBalancer Service; auto runs
+// the slice-1 capability probe to learn which provider services LoadBalancers — a cloud provider
+// (billable), k3s's servicelb, or MetalLB (both free) — returning that provider so the plan and the
+// gate can distinguish a billable cloud LB from a free one. When no LoadBalancer provider is present,
+// auto does not fall back to NodePort (dropped by ADR-0043); it returns an error guiding the operator
+// to install MetalLB, a free bare-metal LoadBalancer. An explicit --expose loadbalancer needs no
+// probe and returns an empty provider, which the billable check treats conservatively as a cloud LB
+// (cost disclosure and --approve still apply).
 func resolveExpose(ctx context.Context, mode string, cs kubernetes.Interface) (expose, provider string, err error) {
-	switch mode {
-	case exposeNodePort:
-		return exposeNodePort, "", nil
-	case exposeLoadBalancer:
+	if mode == exposeLoadBalancer {
 		return exposeLoadBalancer, "", nil
-	default: // auto (or empty)
-		caps, err := detectCapabilities(ctx, cs)
-		if err != nil {
-			return "", "", fmt.Errorf("detecting capabilities to pick an expose mode (pass --expose loadbalancer or --expose nodeport to skip detection): %w", err)
-		}
-		if caps.LoadBalancer.Supported {
-			return exposeLoadBalancer, caps.LoadBalancer.Provider, nil
-		}
-		return exposeNodePort, "", nil
 	}
+	// auto (or empty)
+	caps, err := detectCapabilities(ctx, cs)
+	if err != nil {
+		return "", "", fmt.Errorf("detecting capabilities to pick a LoadBalancer provider (pass --expose loadbalancer to skip detection): %w", err)
+	}
+	if caps.LoadBalancer.Supported {
+		return exposeLoadBalancer, caps.LoadBalancer.Provider, nil
+	}
+	return "", "", errors.New("no LoadBalancer provider detected on this cluster, so an app cannot get a " +
+		"public IP yet. Install MetalLB (a free bare-metal LoadBalancer that assigns a real IP from a pool " +
+		"you configure), then re-run `burrow cluster ingress install`. NodePort is not offered: it exposes " +
+		"high ports, not :80/:443, so it cannot serve a public HTTPS site (ADR-0043).")
 }
 
 // LoadBalancer provider ids reported by capability detection (ADR-0043, controlplane/kube). servicelb
@@ -416,26 +429,15 @@ func billableLoadBalancer(provider string) bool {
 	}
 }
 
-// ingressManifestFor returns the pinned ingress-nginx manifest for the resolved expose mode: the
-// baremetal (NodePort) manifest for nodeport, the cloud (LoadBalancer) manifest otherwise.
-func ingressManifestFor(expose string) string {
-	if expose == exposeNodePort {
-		return ingressNginxBaremetalManifest
-	}
-	return ingressNginxManifest
-}
-
-// manifestVariantLabel describes the chosen ingress-nginx Service for plan and progress output. For a
-// resolved loadbalancer it reflects the detected provider (ADR-0043): a free non-cloud LoadBalancer
-// (servicelb / MetalLB) names its mechanism and that it is free; a cloud provider (or an unprobed,
-// empty provider) is a billable cloud LoadBalancer Service.
-func manifestVariantLabel(expose, provider string) string {
-	switch {
-	case expose == exposeNodePort:
-		return "baremetal, NodePort Service"
-	case provider == lbProviderServiceLB:
+// manifestVariantLabel describes the chosen ingress-nginx LoadBalancer Service for plan and progress
+// output, reflecting the detected provider (ADR-0043): a free non-cloud LoadBalancer (servicelb /
+// MetalLB) names its mechanism and that it is free; a cloud provider (or an unprobed, empty provider)
+// is a billable cloud LoadBalancer Service.
+func manifestVariantLabel(provider string) string {
+	switch provider {
+	case lbProviderServiceLB:
 		return "LoadBalancer Service, served by servicelb — free, uses this node's IP"
-	case provider == lbProviderMetalLB:
+	case lbProviderMetalLB:
 		return "LoadBalancer Service, served by MetalLB — free, uses an IP from its pool"
 	default:
 		return "cloud, LoadBalancer Service"
@@ -444,20 +446,11 @@ func manifestVariantLabel(expose, provider string) string {
 
 // costNotice explains the LoadBalancer path so the operator understands the tradeoff, not just the
 // price: a LoadBalancer is billable but highly available, because a cloud load balancer spreads
-// traffic across the nodes and the site survives a worker-node failure. It points to the free
-// nodeport alternative for cost-sensitive clusters (ADR-0034 slice 2).
+// traffic across the nodes and the site survives a worker-node failure (ADR-0043).
 func costNotice() string {
 	return "Note: a LoadBalancer is billable (a cloud load balancer, priced by your provider, for " +
 		"example roughly a low-double-digit dollars per month on DigitalOcean) but it spreads traffic " +
-		"across your nodes, so the site stays reachable when a worker node fails. Choose it for high " +
-		"availability, or --expose nodeport to avoid the cost."
-}
-
-// nodePortNotice explains the nodeport path so the operator understands the tradeoff: it is free,
-// but it points DNS at a single node's IP, which makes that node a single point of failure.
-func nodePortNotice() string {
-	return "Note: NodePort is free. It points your DNS at a single worker node's IP address, which " +
-		"makes that node a single point of failure: if it goes down, the site becomes unreachable."
+		"across your nodes, so the site stays reachable when a worker node fails."
 }
 
 // freeLoadBalancerNotice explains that a non-cloud LoadBalancer (servicelb / MetalLB) is free, naming
@@ -487,14 +480,16 @@ func dryRunLoadBalancerNotice() string {
 }
 
 // writeIngressPlan prints the live install plan: only the missing pieces (detect-and-skip), and the
-// notice for the resolved path — the cost notice for a billable cloud LoadBalancer, the free-LB notice
-// for a servicelb / MetalLB LoadBalancer, or the node-IP note for nodeport (ADR-0043).
+// LoadBalancer notice for the resolved path — the cost notice for a billable cloud LoadBalancer, or the
+// free-LB notice for a servicelb / MetalLB LoadBalancer (ADR-0043). When ingress-nginx is already
+// present this run provisions no new LoadBalancer Service, so no LoadBalancer notice is printed: a cost
+// note there would be misleading, implying a charge that will not be incurred (issue #268).
 func writeIngressPlan(w io.Writer, o ingressOptions, expose, provider, manifest string, hasNginx, hasCertManager bool) {
 	fmt.Fprintf(w, "Plan (expose: %s). Against your current cluster, ingress install will:\n", expose)
 	if hasNginx {
 		fmt.Fprintln(w, "  - ingress-nginx: already present, skip.")
 	} else {
-		fmt.Fprintf(w, "  - install ingress-nginx (%s): apply %s\n", manifestVariantLabel(expose, provider), manifest)
+		fmt.Fprintf(w, "  - install ingress-nginx (%s): apply %s\n", manifestVariantLabel(provider), manifest)
 	}
 	if hasCertManager {
 		fmt.Fprintln(w, "  - cert-manager: already present, skip.")
@@ -503,21 +498,22 @@ func writeIngressPlan(w io.Writer, o ingressOptions, expose, provider, manifest 
 	}
 	fmt.Fprintf(w, "  - apply a Let's Encrypt ClusterIssuer %q (%s).\n\n", o.issuerName, o.acmeServer())
 	switch {
-	case expose == exposeLoadBalancer && billableLoadBalancer(provider):
+	case hasNginx:
+		// No new LoadBalancer Service is provisioned, so print no LoadBalancer notice (issue #268).
+	case billableLoadBalancer(provider):
 		fmt.Fprintln(w, costNotice())
-	case expose == exposeLoadBalancer:
-		fmt.Fprintln(w, freeLoadBalancerNotice(provider))
+		fmt.Fprintln(w)
 	default:
-		fmt.Fprintln(w, nodePortNotice())
+		fmt.Fprintln(w, freeLoadBalancerNotice(provider))
+		fmt.Fprintln(w)
 	}
-	fmt.Fprintln(w)
 }
 
 // writeIngressDryRunPlan prints the plan without contacting the cluster. The conditional installs
 // stay "if absent" (no live detect-and-skip), and auto is reported as resolved at apply time. Because
-// no probe has run, the LoadBalancer provider — hence whether it is billable — is unknown, so the
+// no probe has run, the LoadBalancer provider — hence whether it is billable — is unknown, so both the
 // loadbalancer and auto cases print the honest dry-run notice (billable on a cloud, free on servicelb /
-// MetalLB) rather than asserting a cost; nodeport shows the node-IP note instead (ADR-0043).
+// MetalLB) rather than asserting a cost (ADR-0043).
 func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
 	expose := o.expose
 	if expose == "" {
@@ -525,21 +521,14 @@ func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
 	}
 	fmt.Fprintf(w, "Plan (expose: %s, dry run). Against your current cluster, ingress install would:\n", expose)
 	switch expose {
-	case exposeNodePort:
-		fmt.Fprintf(w, "  - install ingress-nginx if absent (baremetal, NodePort Service): apply %s\n", ingressNginxBaremetalManifest)
 	case exposeLoadBalancer:
 		fmt.Fprintf(w, "  - install ingress-nginx if absent (LoadBalancer Service; billable on a cloud, free on k3s servicelb / MetalLB): apply %s\n", ingressNginxManifest)
 	default: // auto
-		fmt.Fprintf(w, "  - install ingress-nginx if absent (auto: LoadBalancer on a provider — billable cloud LB, or free servicelb/MetalLB — else baremetal/NodePort): apply %s\n", ingressNginxManifest)
+		fmt.Fprintf(w, "  - install ingress-nginx if absent (auto: LoadBalancer via the cluster's provider — a billable cloud LB, or a free servicelb / MetalLB one; if none, install MetalLB): apply %s\n", ingressNginxManifest)
 	}
 	fmt.Fprintf(w, "  - install cert-manager if absent: apply %s\n", certManagerManifest)
 	fmt.Fprintf(w, "  - apply this ClusterIssuer (%s):\n\n%s\n\n", o.acmeServer(), indent(issuer))
-	switch expose {
-	case exposeNodePort:
-		fmt.Fprintln(w, nodePortNotice())
-	default: // loadbalancer, or auto (which may resolve to loadbalancer at apply time)
-		fmt.Fprintln(w, dryRunLoadBalancerNotice())
-	}
+	fmt.Fprintln(w, dryRunLoadBalancerNotice())
 }
 
 // confirmInstall gates the install after the plan is printed (ADR-0034 slice 2), branching on the
@@ -547,10 +536,14 @@ func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
 // gated (ADR-0043): --approve is an explicit approval and proceeds without a prompt, otherwise an
 // interactive terminal prompts (default No) and with no terminal and no --approve it refuses rather
 // than hang or apply, so a billable cloud load balancer is never provisioned non-interactively without
-// explicit approval. The free nodeport path and a free servicelb / MetalLB LoadBalancer have no cost to
-// approve, so they proceed after the plan and its notice — no prompt, no --approve needed, interactive
-// or not (a passed --approve is a harmless no-op there).
-func confirmInstall(o ingressOptions, expose, provider string, in io.Reader, out io.Writer) (bool, error) {
+// explicit approval. A free servicelb / MetalLB LoadBalancer has no cost to approve and proceeds after
+// the plan and its notice — no prompt, no --approve needed, interactive or not (a passed --approve is a
+// harmless no-op there). When ingress-nginx is already present this run creates no LoadBalancer Service
+// at all, so there is nothing billable to approve and it proceeds unconditionally (issue #268).
+func confirmInstall(o ingressOptions, expose, provider string, hasNginx bool, in io.Reader, out io.Writer) (bool, error) {
+	if hasNginx {
+		return true, nil
+	}
 	if expose != exposeLoadBalancer || !billableLoadBalancer(provider) {
 		return true, nil
 	}
@@ -559,8 +552,7 @@ func confirmInstall(o ingressOptions, expose, provider string, in io.Reader, out
 	}
 	if !stdinIsTerminal(in) {
 		return false, errors.New("installing the loadbalancer path creates a billable cloud load " +
-			"balancer; re-run with --approve to confirm non-interactively (or --expose nodeport for " +
-			"the free option, or --dry-run to preview)")
+			"balancer; re-run with --approve to confirm non-interactively (or --dry-run to preview)")
 	}
 	return confirmProceed(in, out)
 }

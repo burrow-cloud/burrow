@@ -74,7 +74,7 @@ func TestBuildJobSpec(t *testing.T) {
 	client, created := buildFakeSucceeding(t, source, target, validDigest)
 
 	b := NewBuilder(client, "apps")
-	digest, err := b.Build(ctx, source, target)
+	digest, err := b.Build(ctx, source, target, false)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -123,7 +123,15 @@ func TestBuildJobSpec(t *testing.T) {
 	if got := envValue(build.Env, "TARGET_IMAGE"); got != target {
 		t.Errorf("build env TARGET_IMAGE = %q, want %q", got, target)
 	}
+	// A secure (external) push carries no TARGET_INSECURE hint, so the push stays over TLS by default.
+	if got := envValue(build.Env, "TARGET_INSECURE"); got != "" {
+		t.Errorf("build env TARGET_INSECURE = %q, want empty for a secure push", got)
+	}
 	script := strings.Join(build.Command, " ")
+	// The push carries the conditional insecure flag, gated on TARGET_INSECURE at runtime.
+	if !strings.Contains(script, "--tls-verify=false") {
+		t.Errorf("build script has no conditional --tls-verify=false for the plain-HTTP in-cluster push:\n%s", script)
+	}
 	// Builder selection happens at runtime, after the clone, from the cloned tree — buildah when a
 	// Dockerfile is present, the Buildpacks lifecycle when it is not (ADR-0053 §4).
 	if !strings.Contains(script, "Dockerfile") {
@@ -194,6 +202,27 @@ func TestBuildJobSpec(t *testing.T) {
 	}
 }
 
+// TestBuildInsecurePush asserts that an insecure build (the plain-HTTP in-cluster registry, ADR-0054
+// §5) carries the TARGET_INSECURE=true hint the buildScript reads to push with --tls-verify=false.
+func TestBuildInsecurePush(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1.2.3"}
+	const target = "burrow-registry.burrow.svc.cluster.local:5000/shop:build"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	b := NewBuilder(client, "apps")
+	if _, err := b.Build(ctx, source, target, true); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(*created) != 1 {
+		t.Fatalf("created %d jobs, want 1", len(*created))
+	}
+	build := (*created)[0].Spec.Template.Spec.Containers[0]
+	if got := envValue(build.Env, "TARGET_INSECURE"); got != "true" {
+		t.Errorf("build env TARGET_INSECURE = %q, want %q for the plain-HTTP in-cluster push", got, "true")
+	}
+}
+
 // TestBuildReadsDigestAndReaps asserts a successful build returns the digest and reaps its Job.
 func TestBuildReadsDigestAndReaps(t *testing.T) {
 	ctx := context.Background()
@@ -208,7 +237,7 @@ func TestBuildReadsDigestAndReaps(t *testing.T) {
 	})
 
 	b := NewBuilder(client, "apps")
-	digest, err := b.Build(ctx, source, target)
+	digest, err := b.Build(ctx, source, target, false)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -233,7 +262,7 @@ func TestBuildJobFailure(t *testing.T) {
 	})
 
 	b := NewBuilder(client, "apps")
-	digest, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1")
+	digest, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false)
 	if err == nil {
 		t.Fatal("Build should return an error when the Job fails")
 	}
@@ -257,7 +286,7 @@ func TestBuildSuccessNoDigest(t *testing.T) {
 	// No pod seeded, so there is no termination-log digest to read.
 
 	b := NewBuilder(client, "apps")
-	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1"); err == nil {
+	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false); err == nil {
 		t.Fatal("Build should error when a succeeded Job produced no digest")
 	}
 }
@@ -276,7 +305,7 @@ func TestBuildContextCancel(t *testing.T) {
 	cancel() // already canceled: the first loop turn must return ctx.Err()
 
 	b := NewBuilder(client, "apps")
-	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1"); !errors.Is(err, context.Canceled) {
+	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Build err = %v, want context.Canceled", err)
 	}
 }
@@ -298,7 +327,7 @@ func TestBuildValidatesInputBeforeAnyJob(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := fake.NewSimpleClientset()
 			b := NewBuilder(client, "apps")
-			_, err := b.Build(ctx, tc.source, tc.target)
+			_, err := b.Build(ctx, tc.source, tc.target, false)
 			if !errors.Is(err, controlplane.ErrInvalid) {
 				t.Fatalf("err = %v, want ErrInvalid", err)
 			}

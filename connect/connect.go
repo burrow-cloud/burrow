@@ -42,23 +42,19 @@ const (
 	DefaultAppNamespace = "burrow-apps"
 
 	// DefaultRegistryService is the in-cluster Service name of the optional lightweight registry
-	// `burrow install --with-registry` deploys (Zot, ADR-0053 §5). It is the zero-config default
+	// `burrow cluster registry install` deploys (Zot, ADR-0053 §5). It is the zero-config default
 	// push target for the in-cluster build — a registry that happens to be local; external
 	// registries remain fully supported.
 	DefaultRegistryService = "burrow-registry"
 	// DefaultRegistryPort is the port the in-cluster registry serves on (Zot's default).
 	DefaultRegistryPort = 5000
-	// DefaultRegistryNodePort is the fixed NodePort the in-cluster registry Service is published on
-	// so the node's containerd reaches it at a deterministic localhost address through the k3s
-	// registries.yaml mirror (ADR-0053 §5). Pinned so the mirror endpoint the bootstrap writes and
-	// the Service agree without having to discover a dynamically assigned port.
-	DefaultRegistryNodePort = 30500
 )
 
-// RegistryEndpoint is the in-cluster registry reference host:port for the given control-plane
-// namespace (ADR-0053 §5): the DNS name a build pushes to and the resulting deploy pulls by. It is a
-// fully-qualified cluster-DNS name so a build pod in any namespace resolves it, and it is the exact
-// host the k3s registries.yaml mirror keys on so the node's containerd can pull what was pushed.
+// RegistryEndpoint is the in-cluster registry's INTERNAL push endpoint host:port for the given
+// control-plane namespace (ADR-0053 §5, ADR-0054): the cluster-DNS name of the registry Service a
+// build pushes to in-cluster over plain HTTP. It is a fully-qualified cluster-DNS name so a build pod
+// in any namespace resolves it. Nodes do NOT pull by this reference — the resulting deploy references
+// the registry's PUBLIC ingress host instead, which the kubelet pulls over TLS (ADR-0054 §5).
 func RegistryEndpoint(namespace string) string {
 	if namespace == "" {
 		namespace = DefaultNamespace

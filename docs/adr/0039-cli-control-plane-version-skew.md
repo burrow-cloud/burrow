@@ -2,7 +2,8 @@
 
 ## Status
 
-✅ Accepted
+✅ Accepted (compatibility band widened by ADR-0055 from one minor to the same major down to
+the version floor; the anchor, no-hard-block, handshake, and additive-API guarantees stand)
 
 ## TL;DR
 

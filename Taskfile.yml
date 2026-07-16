@@ -7,6 +7,12 @@ version: "3"
 
 silent: true
 
+vars:
+  # Version stamped into from-source dev builds by dev-build / dev-image. A prerelease of the
+  # next minor keeps it distinct from any released tag; override on the command line, e.g.
+  # `task dev-build DEV_VERSION=v0.13.0-dev`.
+  DEV_VERSION: v0.13.0-dev
+
 tasks:
   default:
     desc: List available tasks
@@ -58,6 +64,24 @@ tasks:
       - task: build
       - task: test
       - task: spdx
+
+  # --- dev-cluster builds (stamp a version the upgrade + skew gates accept) ---
+
+  dev-build:
+    desc: "DEV: install the burrow CLI stamped with DEV_VERSION so the skew gate accepts it (override DEV_VERSION=...)"
+    cmds:
+      # The CLI is stamped via ldflags (same var the release goreleaser build sets), so a
+      # from-source `burrow` reports DEV_VERSION instead of the "dev" fallback the skew gate
+      # (ADR-0039) would reject.
+      - go install -ldflags "-X main.version={{.DEV_VERSION}}" ./cmd/burrow
+
+  dev-image:
+    desc: "DEV (Docker): build+push the burrowd image stamped with DEV_VERSION (needs KO_DOCKER_REPO; pairs with dev-build)"
+    cmds:
+      # burrowd carries no ldflags stamp (.ko.yaml has none), so — like the release workflow —
+      # scripts/dev-image.sh sed-stamps `var version`, ko-builds, and reverts the stamp on exit.
+      # KO_DOCKER_REPO (required) and KO_PLATFORM (optional) are read from the environment.
+      - bash scripts/dev-image.sh "{{.DEV_VERSION}}"
 
   # --- heavy targets (start real services / Docker; run deliberately) ---
 

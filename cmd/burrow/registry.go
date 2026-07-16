@@ -58,6 +58,11 @@ func newRegistryCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "registry",
 		Short: "Configure credentials for a private image registry (login/logout/list)",
+		Long: "registry configures the credentials the cluster uses to pull images from an EXTERNAL\n" +
+			"private registry (GHCR, Docker Hub, GitLab, ...) — it stores a pull Secret with your\n" +
+			"kubeconfig. It does not run a registry; to install and manage the OPTIONAL in-cluster\n" +
+			"registry that runs IN your cluster (the zero-config push target for the in-cluster build),\n" +
+			"use `burrow cluster registry` instead.",
 	}
 	parent.PersistentFlags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "control-plane namespace Burrow is installed in")
 	parent.PersistentFlags().StringVar(&appNamespace, "app-namespace", "", "namespace apps deploy into (default: discovered from the install)")

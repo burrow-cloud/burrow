@@ -81,14 +81,30 @@ git -C ` + workspacePath + ` checkout -q FETCH_HEAD`
 // (which detects the language and needs no recipe). Either way the image is pushed to $TARGET_IMAGE
 // and its content digest is written to the pod's termination-log, where the adapter reads it back
 // without mounting anything (the same channel RunBackupJob uses for the dump size).
+//
+// $TARGET_INSECURE marks the push target as a plain-HTTP registry (the in-cluster registry, ADR-0054
+// §5): the buildah push then passes --tls-verify=false, which both skips certificate verification and
+// lets containers/image fall back to plain HTTP, so no extra transport hint is needed. It applies ONLY
+// to the push to $TARGET_IMAGE — the `bud` base-image pull keeps TLS defaults, so pulling a base image
+// from an external registry stays verified. The Cloud Native Buildpacks lifecycle has no equivalent
+// insecure-push handling wired yet, so a no-Dockerfile build to a plain-HTTP registry fails fast with
+// an actionable message rather than an obscure TLS error (documented follow-up, ADR-0054 §5).
 const buildScript = `set -eu
+PUSH_TLS_FLAGS=""
+if [ "${TARGET_INSECURE:-}" = "true" ]; then
+  PUSH_TLS_FLAGS="--tls-verify=false"
+fi
 if [ -f ` + workspacePath + `/Dockerfile ]; then
   # Dockerfile present: buildah builds the user's own recipe (ADR-0053 §4).
   buildah --storage-driver vfs bud -t "$TARGET_IMAGE" ` + workspacePath + `
-  buildah --storage-driver vfs push --digestfile /tmp/digest "$TARGET_IMAGE" "docker://$TARGET_IMAGE"
+  buildah --storage-driver vfs push $PUSH_TLS_FLAGS --digestfile /tmp/digest "$TARGET_IMAGE" "docker://$TARGET_IMAGE"
   cat /tmp/digest > /dev/termination-log
 else
   # No Dockerfile: the Cloud Native Buildpacks lifecycle detects and builds (ADR-0053 §4).
+  if [ "${TARGET_INSECURE:-}" = "true" ]; then
+    echo "the no-Dockerfile Cloud Native Buildpacks path cannot yet push to the plain-HTTP in-cluster registry; add a Dockerfile, or push to an external registry with an explicit target (buildpacks insecure push is a follow-up, ADR-0054 §5)" >&2
+    exit 1
+  fi
   /cnb/lifecycle/creator -app=` + workspacePath + ` "$TARGET_IMAGE"
   grep -o 'sha256:[0-9a-f]\{64\}' /layers/report.toml | head -n1 > /dev/termination-log
 fi`
@@ -156,7 +172,7 @@ func (b *BuildAdapter) WithGitImage(image string) *BuildAdapter {
 // A clone, build, or push failure is returned as a structured error and nothing is pushed; the
 // caller does NOT touch the deploy path on error (ADR-0053 §4). It blocks until the Job succeeds or
 // fails, or the build timeout elapses.
-func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef, targetImage string) (string, error) {
+func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef, targetImage string, insecure bool) (string, error) {
 	if err := source.Validate(); err != nil {
 		return "", fmt.Errorf("kube: build: %w: %w", controlplane.ErrInvalid, err)
 	}
@@ -165,7 +181,7 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 	}
 
 	name := buildJobName(source, targetImage)
-	job := b.buildJob(name, source, targetImage)
+	job := b.buildJob(name, source, targetImage, insecure)
 	jobs := b.client.BatchV1().Jobs(b.namespace)
 	if _, err := jobs.Create(ctx, job, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return "", fmt.Errorf("kube: creating build job %q: %w", name, err)
@@ -218,7 +234,7 @@ func buildJobName(source controlplane.SourceRef, targetImage string) string {
 // (the workspace, $HOME for container storage, /tmp) is a writable emptyDir so the container root
 // filesystem can stay read-only (ADR-0053 §7). BackoffLimit 0 with RestartPolicy Never makes a
 // single attempt whose outcome is the result — no retry masking a failure.
-func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targetImage string) *batchv1.Job {
+func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targetImage string, insecure bool) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
 	var backoff int32
 
@@ -228,6 +244,12 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 	cloneEnv := []corev1.EnvVar{
 		{Name: "REPO", Value: source.Repo},
 		{Name: "REF", Value: source.Ref},
+		// The workspace is a root-owned emptyDir but the clone runs non-root (buildUID), so git's
+		// ownership check rejects it ("dubious ownership"). Mark the workspace safe via git's
+		// environment-based config, which needs no writable HOME and no script interpolation.
+		{Name: "GIT_CONFIG_COUNT", Value: "1"},
+		{Name: "GIT_CONFIG_KEY_0", Value: "safe.directory"},
+		{Name: "GIT_CONFIG_VALUE_0", Value: workspacePath},
 	}
 	buildEnv := []corev1.EnvVar{
 		{Name: "TARGET_IMAGE", Value: targetImage},
@@ -238,6 +260,12 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 		{Name: "STORAGE_DRIVER", Value: "vfs"},
 		// chroot isolation is the rootless, daemonless buildah mode (no privileged container).
 		{Name: "BUILDAH_ISOLATION", Value: "chroot"},
+	}
+	if insecure {
+		// The push target is the plain-HTTP in-cluster registry (ADR-0054 §5): the buildScript reads
+		// this and pushes with --tls-verify=false. Set only when true so an external push stays over
+		// TLS by default.
+		buildEnv = append(buildEnv, corev1.EnvVar{Name: "TARGET_INSECURE", Value: "true"})
 	}
 
 	workspace := corev1.VolumeMount{Name: "workspace", MountPath: workspacePath}

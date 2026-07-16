@@ -31,3 +31,20 @@ If you are working in a fork or under a future CLA, follow the Go conventions an
 [CLAUDE.md](CLAUDE.md): `gofmt`, `go vet`, wrapped errors, dependencies passed explicitly,
 small focused changes, the seam discipline, and the SPDX header rule
 ([LICENSING.md](LICENSING.md)).
+
+## Building for a dev cluster from source
+
+A from-source build must be stamped with a version, or the upgrade gate (ADR-0013) and the
+client/server skew gate (ADR-0039) reject the unstamped `v0.0.0` fallback. The two binaries
+stamp differently — the CLI via ldflags, burrowd via a source rewrite before `ko build` — so
+two Task targets do it consistently:
+
+```sh
+task dev-build                                    # install the CLI, stamped with DEV_VERSION
+KO_DOCKER_REPO=ghcr.io/you/burrowd task dev-image # build+push the burrowd image, same version
+```
+
+`DEV_VERSION` defaults to `v0.13.0-dev`; override it (`task dev-build DEV_VERSION=v0.13.0-dev`).
+`dev-image` needs `ko` and a registry the cluster can pull from (`KO_DOCKER_REPO`), and an
+optional `KO_PLATFORM` (e.g. `linux/amd64`); it reverts its source stamp on exit, so the tree
+is never left dirty.

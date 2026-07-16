@@ -117,8 +117,9 @@ type SourceRef struct {
 // build inside the cluster and the target image reference the built image is pushed to. On success
 // the built image rejoins the guarded deploy path, so a build is a front-end that ends where deploy
 // begins. Env names the target environment (ADR-0035); empty or "default" targets the default
-// environment. TargetImage is required in this phase (the in-cluster registry default is a later
-// phase); Confirm acknowledges the app.deploy guardrail so a held deploy proceeds.
+// environment. TargetImage is optional: when empty, the build pushes to the in-cluster registry if one
+// is installed (ADR-0054), else the server rejects it. Confirm acknowledges the app.deploy guardrail so
+// a held deploy proceeds.
 type BuildRequest struct {
 	Env         string    `json:"env,omitempty"`
 	Source      SourceRef `json:"source"`

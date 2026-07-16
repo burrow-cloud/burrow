@@ -31,13 +31,15 @@ func newBuildCmd() *cobra.Command {
 	var repo, ref, image string
 	var confirm bool
 	cmd := &cobra.Command{
-		Use:   "build <app> --source <repo> --ref <commit-or-tag> --image <target>",
+		Use:   "build <app> --source <repo> --ref <commit-or-tag> [--image <target>]",
 		Short: "Build an app's image from a git source inside the cluster, then deploy it",
 		Long: "Build an app's image from a git source reference inside your own cluster, then deploy it\n" +
 			"through the same guarded path an explicit deploy uses (ADR-0053).\n\n" +
 			"Only the git reference crosses the control channel — a repository URL (--source) plus a\n" +
 			"commit or tag (--ref); the build clones the source inside the cluster, so no code travels\n" +
-			"over the API. The built image is pushed to --image and the resulting deploy pins its digest.\n\n" +
+			"over the API. The built image is pushed to --image, or to the in-cluster registry when --image\n" +
+			"is omitted and one is installed (`burrow cluster registry install`); the resulting deploy pins\n" +
+			"its digest.\n\n" +
 			"This is the optional in-cluster build path, not the default: deploy stays by image reference,\n" +
 			"and build is a front-end that ends where deploy begins. Environment configuration is sourced\n" +
 			"at deploy time as usual — set it with `burrow app config set <app> KEY=VALUE` beforehand.",
@@ -51,9 +53,6 @@ func newBuildCmd() *cobra.Command {
 			source := controlplane.SourceRef{Repo: repo, Ref: ref}
 			if err := source.Validate(); err != nil {
 				return err
-			}
-			if image == "" {
-				return errors.New("--image is required (the target image reference to push the built image to)")
 			}
 			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
 			if err != nil {
@@ -81,7 +80,7 @@ func newBuildCmd() *cobra.Command {
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&repo, "source", "", "git repository URL to clone and build (required)")
 	cmd.Flags().StringVar(&ref, "ref", "", "commit SHA or tag to build (required)")
-	cmd.Flags().StringVar(&image, "image", "", "target image reference to push the built image to (required)")
+	cmd.Flags().StringVar(&image, "image", "", "target image reference to push to; omit to use the in-cluster registry if installed")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }

@@ -4,6 +4,13 @@
 
 ✅ Accepted
 
+§7's restricted-PodSecurity floor for the **build container** is refined by
+[ADR-0056](0056-build-security-context-for-the-oss-builder.md): it is relaxed to the minimal set a
+rootless container builder needs to run (a rootless builder cannot create its user namespace under
+the unmodified floor). The single-tenant trust argument §7 states is what makes that acceptable, and
+the §6 `Builder` seam remains the isolation hook for the untrusted-source case. The rest of §7 and
+this ADR stand.
+
 ## TL;DR
 
 Burrow stays **client-build-first** — build in CI or locally, push, deploy by image

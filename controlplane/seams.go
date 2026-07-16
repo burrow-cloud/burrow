@@ -107,7 +107,14 @@ type Builder interface {
 	// error on any clone, build, or push failure; the caller surfaces that structurally and does NOT
 	// touch the deploy path. On success the returned digest is the immutable identity the resulting
 	// guarded deploy pins (ADR-0053 §4).
-	Build(ctx context.Context, source SourceRef, targetImage string) (digest string, err error)
+	//
+	// insecure marks the push target as a plain-HTTP registry the push must not verify TLS against —
+	// set only for the in-cluster registry, which serves plain HTTP in-cluster (ADR-0054 §5). The
+	// engine is the single place that knows this: it sets insecure when it defaults the target to the
+	// in-cluster registry, and leaves it false for a caller-supplied external target, which is pushed
+	// over TLS. The base-image pull during the build always uses TLS regardless — insecure applies
+	// only to the push to targetImage.
+	Build(ctx context.Context, source SourceRef, targetImage string, insecure bool) (digest string, err error)
 }
 
 // DatabaseProvisioner is the seam over the installed Postgres add-on's admin surface (ADR-0031).

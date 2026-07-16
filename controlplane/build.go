@@ -36,6 +36,10 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 	// public pull resolve to the same stored image — a registry's stored repo path is independent of
 	// the endpoint host used to reach it.
 	pushTarget, deployBase := req.TargetImage, req.TargetImage
+	// insecure marks the push as targeting the in-cluster registry, which serves plain HTTP in-cluster
+	// (ADR-0054 §5). This is the single place that knows the in-cluster endpoint is plain HTTP: only
+	// the default path below sets it; an explicit external target is always pushed over TLS.
+	insecure := false
 	if req.TargetImage == "" {
 		// No explicit target: default to the optional in-cluster registry when one is wired — the
 		// zero-config default push target (ADR-0053 §5, ADR-0054). The image happens to live in a
@@ -45,6 +49,7 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 			return BuildResult{}, fmt.Errorf("build %s: target image reference is empty and no in-cluster registry is configured to default to: %w", req.App, ErrInvalid)
 		}
 		pushTarget = defaultBuildTarget(e.buildRegistry, req.App)
+		insecure = true
 		// Reference the public host for the deploy so the node pulls through the ingress. Fall back to
 		// the internal push target only when no public host is wired (an in-cluster registry installed
 		// without a public ingress), preserving the earlier single-endpoint behavior.
@@ -60,7 +65,7 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 	// Build inside the cluster, pushing to pushTarget. A builder error is terminal for the build:
 	// surface it and do NOT touch the deploy path — nothing is rolled out, no release is recorded
 	// (ADR-0053 §4).
-	digest, err := e.builder.Build(ctx, req.Source, pushTarget)
+	digest, err := e.builder.Build(ctx, req.Source, pushTarget, insecure)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}

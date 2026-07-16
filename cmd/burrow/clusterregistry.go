@@ -206,9 +206,12 @@ func newClusterRegistryCmd() *cobra.Command {
 			"The build pushes to an internal Service in-cluster over plain HTTP; nodes pull the public host\n" +
 			"over TLS with a generated credential. There is no node or containerd editing, so it works the\n" +
 			"same on k3s and a managed cluster.\n\n" +
-			"It depends on the ingress stack: run `burrow cluster ingress install` first. Known limitation:\n" +
+			"It depends on the ingress stack: run `burrow cluster ingress install` first. Known limitations:\n" +
 			"the public pull path needs a hostname — a cluster with no domain cannot use the in-cluster\n" +
-			"registry today (a future no-domain fallback via generic containerd certs.d is out of scope).",
+			"registry today (a future no-domain fallback via generic containerd certs.d is out of scope);\n" +
+			"and the in-cluster build pushes to it over plain HTTP on the Dockerfile/buildah path only —\n" +
+			"the no-Dockerfile Cloud Native Buildpacks path to the in-cluster registry is a follow-up (use\n" +
+			"a Dockerfile, or push the buildpacks image to an external registry).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClusterRegistryInstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())

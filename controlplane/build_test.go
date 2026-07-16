@@ -122,9 +122,13 @@ func TestBuildPushesInternalDeploysPublic(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	// The builder pushed to the INTERNAL endpoint.
+	// The builder pushed to the INTERNAL endpoint, marked insecure (the in-cluster registry is
+	// plain HTTP, ADR-0054 §5).
 	if got, want := b.LastTarget(), internal+"/web:build"; got != want {
 		t.Errorf("builder push target = %q, want the internal endpoint %q", got, want)
+	}
+	if !b.LastInsecure() {
+		t.Error("a default in-cluster build must push insecure (the in-cluster registry serves plain HTTP)")
 	}
 	// The deploy references the PUBLIC host at the SAME repository path and digest.
 	wantImage := public + "/web:build@sha256:beef"
@@ -152,6 +156,10 @@ func TestBuildExplicitTargetOverridesRegistry(t *testing.T) {
 	}
 	if got := b.LastTarget(); got != "ghcr.io/acme/web:1.0.0" {
 		t.Errorf("builder target = %q, want the caller's external target verbatim", got)
+	}
+	// An explicit external target is pushed over TLS, never marked insecure.
+	if b.LastInsecure() {
+		t.Error("an explicit external target must be pushed over TLS, not insecure")
 	}
 }
 

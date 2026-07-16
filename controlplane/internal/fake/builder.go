@@ -18,12 +18,13 @@ var _ controlplane.Builder = (*Builder)(nil)
 // exercised — build success feeding the guarded deploy path, and build failure NOT touching it —
 // without standing up a real Kubernetes build Job (ADR-0053 §6).
 type Builder struct {
-	mu         sync.Mutex
-	digest     string
-	err        error
-	lastSource controlplane.SourceRef
-	lastTarget string
-	calls      int
+	mu           sync.Mutex
+	digest       string
+	err          error
+	lastSource   controlplane.SourceRef
+	lastTarget   string
+	lastInsecure bool
+	calls        int
 }
 
 // DefaultDigest is the digest NewBuilder returns until SetDigest overrides it, so a test can assert
@@ -62,6 +63,14 @@ func (b *Builder) LastTarget() string {
 	return b.lastTarget
 }
 
+// LastInsecure returns the insecure flag Build was last called with — true when the engine pushed to
+// the plain-HTTP in-cluster registry (ADR-0054 §5).
+func (b *Builder) LastInsecure() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastInsecure
+}
+
 // Calls returns how many times Build has been called.
 func (b *Builder) Calls() int {
 	b.mu.Lock()
@@ -69,12 +78,13 @@ func (b *Builder) Calls() int {
 	return b.calls
 }
 
-func (b *Builder) Build(_ context.Context, source controlplane.SourceRef, targetImage string) (string, error) {
+func (b *Builder) Build(_ context.Context, source controlplane.SourceRef, targetImage string, insecure bool) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls++
 	b.lastSource = source
 	b.lastTarget = targetImage
+	b.lastInsecure = insecure
 	if b.err != nil {
 		return "", b.err
 	}

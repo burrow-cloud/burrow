@@ -120,6 +120,17 @@ node-specific or containerd editing:
   public pull share the same repository path and digest and therefore address the same bytes.
   burrowd carries both: `BURROW_BUILD_REGISTRY` (internal push endpoint) and
   `BURROW_BUILD_PUBLIC_REGISTRY` (public pull host).
+- **The internal push is plain HTTP.** The in-cluster build pushes to the internal Service over plain
+  HTTP: the engine is the single place that knows the in-cluster endpoint is insecure, and it marks
+  the push so the build recipe pushes with buildah `--tls-verify=false` (which also allows the plain-
+  HTTP fallback). This applies only to the push to the in-cluster registry — an explicit external
+  target is always pushed over TLS, and the base-image pull is always verified.
+
+**Known limitation — buildpacks push to the in-cluster registry.** The insecure push to the plain-HTTP
+in-cluster registry is wired for the **Dockerfile / buildah** path only. The no-Dockerfile **Cloud
+Native Buildpacks** path has no insecure-push handling wired, so a buildpacks build with no explicit
+target fails fast with an actionable message; it works against an external (TLS) registry, and pushing
+to the in-cluster registry from the buildpacks path is a follow-up.
 
 **Known limitation — no-domain clusters.** The ingress-and-TLS pull path requires a hostname. A
 cluster with no domain cannot use the in-cluster registry today; `install` fails cleanly and says so.

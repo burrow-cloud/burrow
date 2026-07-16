@@ -143,6 +143,53 @@ Prefer to build from source? `go build -o burrow ./cmd/burrow && go build -o bur
 
 Upgrading later? See [Upgrade](docs/getting-started.md#upgrade).
 
+## System requirements
+
+Burrow runs on a cluster you provide, so the sizing is yours to plan. It depends on whether you
+self-host on a single VPS or bring a managed Kubernetes cluster. The numbers below are what Burrow's
+own pieces reserve; your apps and builds need room on top.
+
+### Self-host (single VPS / k3s)
+
+`burrow cluster bootstrap` turns one machine into a k3s cluster with Burrow installed. Before it
+touches the machine it runs a preflight that **requires at least 2 GB of RAM** and refuses to
+continue below that, printing a memory breakdown so you can see where it goes ([ADR-0044](docs/adr/0044-single-vps-k3s-cluster.md)).
+So a 2 GB VPS is the practical floor; a 2-vCPU / 4 GB machine leaves comfortable headroom for your
+own apps and for an in-cluster build to schedule. Budget a few GB of disk on top for k3s, container
+images, and the control-plane database. A single node's public IP serves a free LoadBalancer through
+the bundled servicelb / MetalLB, so there is no separate load-balancer bill to plan for.
+
+### Managed Kubernetes (DOKS / EKS / GKE)
+
+- **A LoadBalancer is required** to reach your apps from the public internet, and cloud providers
+  **bill for it** — a fixed monthly charge per LoadBalancer, separate from your nodes.
+- **Worker-node sizing and count matter, because platform overhead can eat most of a small node
+  before any of your workload runs.** On DigitalOcean (DOKS) the system components — the Cilium CNI,
+  CoreDNS, and per-node agents — take roughly **⅔ of a CPU** on a 1-vCPU / 2 GB node, leaving little
+  for apps or builds. Give the cluster real headroom: a node with at least 2 vCPU / 4 GB, or more
+  than one small node, so an app and an in-cluster build both have somewhere to schedule
+  ([#274](https://github.com/burrow-cloud/burrow/issues/274)).
+
+### Component resource costs
+
+Approximate requests for Burrow's own components, in plain units. A *request* is what a component
+reserves at rest; most sit well under their limits until they are worked.
+
+| Component | CPU | Memory | Notes |
+| --- | --- | --- | --- |
+| Control plane (burrowd + Postgres) | ~a tenth of a CPU | ~160 MB | always on; the two pods together, on a 1 GB database volume |
+| Ingress + cert-manager | ~a tenth of a CPU | ~90 MB | upstream defaults; **+ a LoadBalancer** on managed clusters (billable) |
+| In-cluster registry (Zot) | small, a fraction of a CPU | ~64 MB | optional; **+ a 5 GB PersistentVolume** for image layers |
+| In-cluster build (per build) | ¼ of a CPU, bursting to 2 CPUs | 512 MB, up to 2 GB | **transient**; needs schedulable headroom to run ([#274](https://github.com/burrow-cloud/burrow/issues/274)); **experimental, not yet functional** |
+| Metrics (VictoriaMetrics + vmagent) | moderate scrape load | grows with retention (~10 GB volume, ~1 month by default) | opt-in add-on |
+| metrics-server | negligible | negligible | lightweight; the autoscaler needs it to read CPU / memory |
+
+The in-cluster build is the demanding one: it reserves ¼ of a CPU and can burst to 2 CPUs and 2 GB
+while it runs. On a cluster with no spare capacity it will not schedule at all, which is why a small
+single node needs headroom above the platform and control-plane baseline. It is still experimental
+and not yet functional; today you build and push images with your own tooling and deploy by
+reference.
+
 ## Shell completion
 
 `burrow` ships completion for bash, zsh, fish, and PowerShell. Load it for your shell:

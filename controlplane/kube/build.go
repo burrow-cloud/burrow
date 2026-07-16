@@ -244,6 +244,12 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 	cloneEnv := []corev1.EnvVar{
 		{Name: "REPO", Value: source.Repo},
 		{Name: "REF", Value: source.Ref},
+		// The workspace is a root-owned emptyDir but the clone runs non-root (buildUID), so git's
+		// ownership check rejects it ("dubious ownership"). Mark the workspace safe via git's
+		// environment-based config, which needs no writable HOME and no script interpolation.
+		{Name: "GIT_CONFIG_COUNT", Value: "1"},
+		{Name: "GIT_CONFIG_KEY_0", Value: "safe.directory"},
+		{Name: "GIT_CONFIG_VALUE_0", Value: workspacePath},
 	}
 	buildEnv := []corev1.EnvVar{
 		{Name: "TARGET_IMAGE", Value: targetImage},

@@ -124,6 +124,10 @@ func New(cfg Config) (http.Handler, error) {
 	// cluster can do — ingress, storage, LoadBalancer support, cert-manager, provider, DNS. It moves
 	// no secret value.
 	v1.HandleFunc("GET /v1/cluster", s.cluster)
+	// The cluster capacity/headroom surface is read live (issue #275): per node and cluster-total
+	// allocatable / committed / free, the top CPU and memory consumers, and a build-fit verdict —
+	// all from the Kubernetes API alone, no metrics-server. Read-only; moves no secret value.
+	v1.HandleFunc("GET /v1/cluster/capacity", s.capacity)
 
 	root := http.NewServeMux()
 	// Authenticate first, then apply the client-version handshake (ADR-0039): the too-old gate wraps
@@ -898,6 +902,19 @@ func (s *server) cluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, caps)
+}
+
+// capacity reports the cluster's scheduling capacity and headroom live (issue #275): per node and
+// cluster-total allocatable / committed (sum of pod requests) / free, the top CPU and memory
+// consumers, and a verdict on whether a typical in-cluster build fits and whether another node is
+// needed — all from the Kubernetes API alone. It changes nothing and moves no secret value.
+func (s *server) capacity(w http.ResponseWriter, r *http.Request) {
+	report, err := s.engine.ClusterCapacity(r.Context())
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 // addEnvironment registers a namespace-per-environment target (ADR-0035 phase 2): it decodes

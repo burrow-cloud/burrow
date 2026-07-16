@@ -228,6 +228,11 @@ func NewServer(clientFor ClientForContext, kubeconfig, version string) *sdk.Serv
 	}, clusterTool(clientFor))
 
 	sdk.AddTool(s, &sdk.Tool{
+		Name:        "burrow_capacity",
+		Description: "Answer \"is the cluster at capacity, do I need to scale, and what is using the most CPU/memory?\" before you start a resource-hungry operation (issue #275). Read-only. Reports, per node and cluster-total, the allocatable CPU/memory, the committed amount (the sum of pod resource requests), and the free headroom left; the top consumers by CPU and by memory request; and a verdict on whether a typical in-cluster build (a quarter of a CPU, 512 MB) would schedule right now and whether the cluster needs another node. Use it to PRE-FLIGHT a build (burrow_build) or a scale-up (burrow_scale/burrow_autoscale): if the verdict says a build would not schedule, tell the user to add or resize a node rather than leaving a Pending pod for them to diagnose. This is SCHEDULING headroom — pod requests vs node allocatable — read from the Kubernetes API alone; it is exactly what determines whether a pod schedules, so it needs no metrics-server. It does NOT report live CPU/memory in use; that separate layer needs metrics-server (see the utilization note in the result). CPU figures are milli-CPU (1000 = one core) and memory figures are bytes; the verdict is already in plain language. Read-only: it changes nothing and returns no secret. Pass context to survey a specific cluster/environment (default the current one).",
+	}, capacityTool(clientFor))
+
+	sdk.AddTool(s, &sdk.Tool{
 		Name:        "burrow_audit",
 		Description: "Review the control plane's append-only audit log (ADR-0027): the durable record of the guarded, mutating operations that ran and the guardrail outcome of each — allowed, held (confirmation required, not executed), denied, executed (allowed, or confirmed and carried out), or failed. Use it to answer \"what did the agent do,\" \"what was held or denied,\" and to show that a dangerous action asked first. Newest first; optionally filter by app/host/add-on target, operation (e.g. deploy, rollback, app_delete), outcome, and limit. Read-only — the log has no write or alter path. Args are redacted at the source to KEY NAMES and safe metadata (image reference, replica count, env/secret key names) — never an env value, token, or secret.",
 	}, auditTool(clientFor))
@@ -1178,6 +1183,10 @@ type clusterInput struct {
 	contextArg
 }
 
+type capacityInput struct {
+	contextArg
+}
+
 func clusterTool(clientFor ClientForContext) sdk.ToolHandlerFor[clusterInput, client.ClusterCapabilities] {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in clusterInput) (*sdk.CallToolResult, client.ClusterCapabilities, error) {
 		c, err := clientFor(in.Context)
@@ -1226,6 +1235,20 @@ type environmentsInput struct{}
 
 type environmentsOutput struct {
 	Environments []environmentInfo `json:"environments"`
+}
+
+func capacityTool(clientFor ClientForContext) sdk.ToolHandlerFor[capacityInput, client.CapacityReport] {
+	return func(ctx context.Context, _ *sdk.CallToolRequest, in capacityInput) (*sdk.CallToolResult, client.CapacityReport, error) {
+		c, err := clientFor(in.Context)
+		if err != nil {
+			return nil, client.CapacityReport{}, err
+		}
+		report, err := c.Capacity(ctx)
+		if err != nil {
+			return nil, client.CapacityReport{}, err
+		}
+		return nil, report, nil
+	}
 }
 
 func environmentsTool(sel selector) sdk.ToolHandlerFor[environmentsInput, environmentsOutput] {

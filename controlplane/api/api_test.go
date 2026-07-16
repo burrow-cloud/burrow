@@ -742,6 +742,41 @@ func TestExposeMissingPrerequisitesEndpoint(t *testing.T) {
 	}
 }
 
+// TestCapacityEndpoint confirms GET /v1/cluster/capacity returns the scheduling-headroom report the
+// CapacityProber feeds the engine: per-node and cluster totals, and the plain-language verdict.
+func TestCapacityEndpoint(t *testing.T) {
+	e, err := cp.New(cp.Deps{
+		Kubernetes: fake.NewKubernetes(), Database: fake.NewDatabase(),
+		Clock: fake.NewClock(time.Now()), IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+		CapacityProber: fake.NewCapacityProber(cp.ClusterResourceState{
+			Nodes: []cp.NodeAllocatable{{Name: "node-a", CPUMillis: 2000, MemBytes: 4 << 30}},
+			Pods:  []cp.PodRequest{{Namespace: "burrow", Name: "burrowd", Node: "node-a", CPUMillis: 100, MemBytes: 128 << 20}},
+		}),
+	})
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	h, err := api.New(api.Config{Engine: e, Token: token})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	rec := do(h, "GET", "/v1/cluster/capacity", token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capacity code = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var report cp.CapacityReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(report.Nodes) != 1 || report.Nodes[0].FreeCPUMillis != 1900 {
+		t.Errorf("node free CPU = %+v, want 1900m", report.Nodes)
+	}
+	if !report.BuildFits || report.Verdict == "" {
+		t.Errorf("build should fit and verdict be set: %+v", report)
+	}
+}
+
 func TestRollback(t *testing.T) {
 	h, k, _ := newAPI(t)
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)

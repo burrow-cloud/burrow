@@ -32,7 +32,7 @@ func newBuildCmd() *cobra.Command {
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "build <app> --source <repo> --ref <commit-or-tag> [--image <target>]",
-		Short: "Build an app's image from a git source inside the cluster, then deploy it",
+		Short: "Build an app's image from a git source inside the cluster, then deploy it (experimental)",
 		Long: "Build an app's image from a git source reference inside your own cluster, then deploy it\n" +
 			"through the same guarded path an explicit deploy uses (ADR-0053).\n\n" +
 			"Only the git reference crosses the control channel — a repository URL (--source) plus a\n" +
@@ -42,7 +42,10 @@ func newBuildCmd() *cobra.Command {
 			"its digest.\n\n" +
 			"This is the optional in-cluster build path, not the default: deploy stays by image reference,\n" +
 			"and build is a front-end that ends where deploy begins. Environment configuration is sourced\n" +
-			"at deploy time as usual — set it with `burrow app config set <app> KEY=VALUE` beforehand.",
+			"at deploy time as usual — set it with `burrow app config set <app> KEY=VALUE` beforehand.\n\n" +
+			"EXPERIMENTAL: the in-cluster build is not yet functional end to end — the build container\n" +
+			"image and its security context are still being completed. Build client-side (or in CI) and\n" +
+			"deploy by image reference in the meantime.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()

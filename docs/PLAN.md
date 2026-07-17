@@ -258,41 +258,42 @@ one-off commands get a home.
   Proposed) — a captured direction for a programmatic runtime API bounded by capability envelopes, deferred
   behind the compute-first core; no code.
 
-## Merged to `main`, awaiting the next release tag
+## v0.13 — the optional in-cluster build (release being cut)
 
-Landed on `main` since v0.12.0 but **not yet released** — honest status, these ship with the next version
-bump ([ADR-0009](adr/0009-honest-status.md)):
+Everything below landed on `main` since v0.12.0 and ships as **v0.13** — honest status, unreleased until the
+tag ([ADR-0009](adr/0009-honest-status.md)). The full record lives in [ROADMAP.md](ROADMAP.md), the
+[README](../README.md) status table, and the shipped ADRs; the headline:
 
-- **Pull-based passive deploy (auto-deploy)** ([ADR-0052](adr/0052-pull-based-passive-deploy.md)) — burrowd
-  polls each app's image repository and auto-deploys the newest tag within a per-app, per-environment level
-  (`burrow app auto-deploy <app> [patch|minor|major|off]`, opt-in, default `off` — ADR-0058), firing the **same
-  guarded deploy path** an explicit call uses — same rollout, deploy record, rollback handle, and audit entry.
-  A tag above the level is surfaced as an **available upgrade**, not applied silently; a rollback (or any
-  downgrade) disables auto-deploy with its reason shown. The watcher is **outbound-only**, so it works on the
-  private / NAT'd clusters push-from-CI cannot reach. Setting the level is a human operator action; the agent
-  reads it and sees available upgrades. `burrow-agent` suggests the next semver tag and nudges non-semver
-  deploys toward one. Also lands an app-history deploy timeline in both client binaries.
-- **In-cluster build from a git source** ([ADR-0053](adr/0053-in-cluster-build-from-source.md)) — an
-  **optional** path, off the explicit deploy spine: `burrow app build <app> --source <git-ref>` and a
-  `burrow-agent build` verb build the image **inside the user's own cluster** (a Kubernetes Job using buildah
-  for a Dockerfile, Cloud Native Buildpacks for the no-Dockerfile case) behind a minimal `Builder` seam, then
-  the resulting image reference **rejoins the existing guarded deploy path**. Code never crosses the control
-  channel — only the git ref does; the builder clones the source inside the cluster. An **optional in-cluster
-  registry** (Zot) is the zero-config default push target, removing the external-registry-account friction;
-  external registries stay fully supported.
+- **In-cluster build from a git source** ([ADR-0053](adr/0053-in-cluster-build-from-source.md)) — an optional
+  path off the explicit deploy spine: `burrow app build <app> --source <git-ref>` (and a `burrow-agent build`
+  verb) clone a git ref and build the image **inside the user's own cluster** as a Kubernetes Job (buildah for a
+  Dockerfile, Cloud Native Buildpacks otherwise), push it to a registry, and the built reference rejoins the
+  guarded deploy path. Code never crosses the control channel — only the git ref does. Validated end to end on
+  managed Kubernetes, where the OSS build container runs **privileged**
+  ([ADR-0059](adr/0059-oss-build-container-runs-privileged.md), superseding
+  [ADR-0056](adr/0056-build-security-context-for-the-oss-builder.md)) in a dedicated `burrow-builds` namespace
+  with capacity fail-fast (#274) and TTL-reaped Jobs (#280). **Source-provider credentials**
+  ([ADR-0057](adr/0057-source-provider-credentials.md)) let it clone a private repo and push to its registry with
+  one control-plane-set token. Known limit: the no-Dockerfile Buildpacks path cannot yet push to the plain-HTTP
+  in-cluster registry.
+- **`install` provisions only the control plane** ([ADR-0054](adr/0054-install-is-control-plane-only.md)) — every
+  additive cluster component is an opt-in `burrow cluster <component>` step: `burrow cluster registry` installs the
+  in-cluster registry, `burrow cluster capacity` reports scheduling headroom (#275), and metrics-server is
+  auto-ensured as a baseline. The `--with-registry` / `--with-ingress` install flags are removed.
+- **Opt-in auto-deploy** ([ADR-0052](adr/0052-pull-based-passive-deploy.md),
+  [ADR-0058](adr/0058-auto-deploy-is-opt-in.md)) — burrowd polls each app's image repository and auto-applies
+  upgrades within a per-app, per-environment level (`burrow app auto-deploy <app> [patch|minor|major|off]`, off by
+  default), firing the **same guarded deploy path**; a tag above the level surfaces as an available upgrade.
+  Outbound-only. Also lands an app-history deploy timeline in both client binaries.
+- **Multi-version forward upgrades** ([ADR-0055](adr/0055-multi-version-upgrades.md)) — the database may jump
+  across any number of minors in one step; the startup gate still refuses downgrades and cross-major in-place moves.
 - **Postgres always exports metrics** ([ADR-0051](adr/0051-postgres-always-exports-metrics.md)) — the Postgres
   add-on always ships its metrics exporter and the scraper discovers the add-on namespace, so `addon attach`
   observability needs no separate wiring.
 
-## In progress — the current front line
+## Next — the front line after v0.13
 
-**Install provisions only the control plane; additive components become standalone `burrow cluster <component>`
-commands.** A new **`burrow cluster registry`** installs the in-cluster registry (ADR-0053) as an explicit,
-standalone step, and the `--with-registry` / `--with-ingress` install flags are **removed** in favor of it, so
-`install` lands a clean control-plane baseline and each add-on component is opted into deliberately. Shaped in
-**ADR-0054 (proposed)** — this is the work in flight; it is **not merged or released**.
-
-**Next — candidates for the theme after the current front line lands** (unsequenced): **self-hoster day-2
+**Next — candidates for the theme after v0.13 ships** (unsequenced): **self-hoster day-2
 hardening** (scheduled Postgres backups + retention — the [ADR-0032](adr/0032-postgres-backups.md) follow-on —
 richer blast-radius guardrails, cost visibility); **more building-block add-ons**
 ([ADR-0025](adr/0025-building-block-addons.md)) beyond Postgres / cache / logs / metrics; **database-provisioning

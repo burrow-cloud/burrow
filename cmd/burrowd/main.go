@@ -208,7 +208,15 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	if err != nil {
 		return err
 	}
-	builder.WithBuildImage(os.Getenv("BURROW_BUILD_IMAGE")).WithGitImage(os.Getenv("BURROW_GIT_IMAGE")).WithCapacityProber(prober)
+	// Pin the builder image to burrowd's own stamped version so a released control plane pulls the
+	// builder published under the SAME release tag (reproducible), rather than the floating :latest a
+	// later republish could silently change. An explicit BURROW_BUILD_IMAGE always wins; a dev/e2e
+	// build (version "v0.0.0") leaves the empty value, which keeps the :latest default.
+	buildImage := os.Getenv("BURROW_BUILD_IMAGE")
+	if buildImage == "" {
+		buildImage = kube.BuilderImageForVersion(version)
+	}
+	builder.WithBuildImage(buildImage).WithGitImage(os.Getenv("BURROW_GIT_IMAGE")).WithCapacityProber(prober)
 
 	// One HTTP client shared across the observability adapters — burrowd reaches each backend
 	// in-cluster.

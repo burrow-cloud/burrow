@@ -13,8 +13,10 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 
@@ -77,7 +79,14 @@ func buildFakeSucceeding(t *testing.T, source controlplane.SourceRef, target, di
 	})
 
 	// A finished pod for the build Job, labelled like the Job so the digest read-back finds it.
-	jobName := buildJobName(source, target)
+	seedDigestPod(t, client, buildJobName(source, target), digest)
+	return client, created
+}
+
+// seedDigestPod seeds a terminated build pod for jobName in the build namespace, labelled like the
+// Job so jobTerminationDigest reads digest back from its termination-log.
+func seedDigestPod(t *testing.T, client *fake.Clientset, jobName, digest string) {
+	t.Helper()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: jobName + "-abc", Namespace: buildNamespace,
@@ -93,7 +102,155 @@ func buildFakeSucceeding(t *testing.T, source controlplane.SourceRef, target, di
 	if _, err := client.CoreV1().Pods(buildNamespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seed pod: %v", err)
 	}
-	return client, created
+}
+
+// alreadyExistsOnFirstCreate makes the fake's first jobs.Create for jobName return AlreadyExists,
+// simulating a Job left behind under the deterministic name by a previous re-run (issue #298). Every
+// later Create (the recreate after replacing a failed Job) is recorded into created and succeeds. It
+// returns a pointer to the running create count so a test can assert whether a rebuild happened.
+func alreadyExistsOnFirstCreate(client *fake.Clientset, jobName string, created *[]*batchv1.Job) *int {
+	count := new(int)
+	client.PrependReactor("create", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		*count++
+		if *count == 1 {
+			return true, nil, apierrors.NewAlreadyExists(schema.GroupResource{Group: "batch", Resource: "jobs"}, jobName)
+		}
+		obj := a.(clienttesting.CreateAction).GetObject().(*batchv1.Job).DeepCopy()
+		*created = append(*created, obj)
+		return true, obj, nil
+	})
+	return count
+}
+
+// TestBuildReplacesFailedJob asserts the least-surprising default for issue #298: when a re-run finds
+// a previous build Job under the same deterministic name that FAILED, the adapter deletes it and
+// creates a fresh Job so the re-run actually retries — rather than returning the stale failure until
+// the TTL controller reaps it ~3 days later (issue #280). The "is it failed?" decision reuses the
+// wait loop's interpretation (Status.Failed > 0).
+func TestBuildReplacesFailedJob(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+
+	client := fake.NewSimpleClientset()
+	jobName := buildJobName(source, target)
+	created := &[]*batchv1.Job{}
+	createCount := alreadyExistsOnFirstCreate(client, jobName, created)
+
+	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		name := a.(clienttesting.GetAction).GetName()
+		st := batchv1.JobStatus{Failed: 1} // the reuse-decision Get sees the previous build's failure
+		if len(*created) > 0 {
+			st = batchv1.JobStatus{Succeeded: 1} // the fresh Job then succeeds so the build completes
+		}
+		return true, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: buildNamespace}, Status: st}, nil
+	})
+	deletedBeforeRecreate := false
+	client.PrependReactor("delete", "jobs", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if len(*created) == 0 {
+			deletedBeforeRecreate = true // the failed Job was deleted BEFORE any recreate
+		}
+		return true, nil, nil
+	})
+	seedDigestPod(t, client, jobName, validDigest)
+
+	digest, err := NewBuilder(client).Build(ctx, source, target, false, controlplane.SourceCredential{})
+	if err != nil {
+		t.Fatalf("Build must retry after a failed Job, not reuse it (issue #298): %v", err)
+	}
+	if digest != validDigest {
+		t.Errorf("digest = %q, want %q (the rebuild's result)", digest, validDigest)
+	}
+	if !deletedBeforeRecreate {
+		t.Error("the failed Job was not deleted before the rebuild; a re-run must replace it, not reuse the stale failure (issue #298)")
+	}
+	if *createCount != 2 {
+		t.Errorf("create attempts = %d, want 2 (the initial AlreadyExists, then a fresh Job after deleting the failed one)", *createCount)
+	}
+	if len(*created) != 1 {
+		t.Errorf("recorded %d recreated jobs, want 1", len(*created))
+	}
+}
+
+// TestBuildReusesSucceededJob asserts today's behavior is preserved: a re-run that finds a previously
+// SUCCEEDED Job under the same name reuses its result — cheap and idempotent — and never rebuilds.
+func TestBuildReusesSucceededJob(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+
+	client := fake.NewSimpleClientset()
+	jobName := buildJobName(source, target)
+	created := &[]*batchv1.Job{}
+	createCount := alreadyExistsOnFirstCreate(client, jobName, created)
+
+	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		name := a.(clienttesting.GetAction).GetName()
+		return true, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: buildNamespace}, Status: batchv1.JobStatus{Succeeded: 1}}, nil
+	})
+	seedDigestPod(t, client, jobName, validDigest)
+
+	digest, err := NewBuilder(client).Build(ctx, source, target, false, controlplane.SourceCredential{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if digest != validDigest {
+		t.Errorf("digest = %q, want %q (a succeeded Job's result is reused)", digest, validDigest)
+	}
+	if *createCount != 1 {
+		t.Errorf("create attempts = %d, want 1 (a succeeded Job is reused, never rebuilt)", *createCount)
+	}
+	if len(*created) != 0 {
+		t.Errorf("recreated %d jobs, want 0 (no rebuild of a succeeded Job)", len(*created))
+	}
+}
+
+// TestBuildReusesActiveJob asserts a re-run that finds an ACTIVE Job for the same ref reuses it — an
+// in-flight build must not be replaced or duplicated.
+func TestBuildReusesActiveJob(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+
+	client := fake.NewSimpleClientset()
+	jobName := buildJobName(source, target)
+	created := &[]*batchv1.Job{}
+	createCount := alreadyExistsOnFirstCreate(client, jobName, created)
+
+	completed := false
+	var getCount int
+	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		getCount++
+		name := a.(clienttesting.GetAction).GetName()
+		st := batchv1.JobStatus{Active: 1} // the reuse-decision Get: an in-flight build for the same ref
+		if getCount > 1 {
+			st = batchv1.JobStatus{Succeeded: 1} // it then finishes so the wait loop completes
+			completed = true
+		}
+		return true, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: buildNamespace}, Status: st}, nil
+	})
+	deletedWhileActive := false
+	client.PrependReactor("delete", "jobs", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if !completed {
+			deletedWhileActive = true
+		}
+		return true, nil, nil
+	})
+	seedDigestPod(t, client, jobName, validDigest)
+
+	digest, err := NewBuilder(client).Build(ctx, source, target, false, controlplane.SourceCredential{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if digest != validDigest {
+		t.Errorf("digest = %q, want %q (the in-flight Job is reused)", digest, validDigest)
+	}
+	if *createCount != 1 {
+		t.Errorf("create attempts = %d, want 1 (an active Job is reused, never replaced or duplicated)", *createCount)
+	}
+	if deletedWhileActive {
+		t.Error("deleted the active Job before it finished; an in-flight build must not be replaced (issue #298)")
+	}
 }
 
 // TestBuildJobSpec asserts the build Job is a hardened, in-cluster clone-and-build in the dedicated

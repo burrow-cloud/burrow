@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	batchv1client "k8s.io/client-go/kubernetes/typed/batch/v1"
 	"k8s.io/client-go/rest"
 
 	"github.com/burrow-cloud/burrow/controlplane"
@@ -285,10 +286,28 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 	created, err := jobs.Create(ctx, job, metav1.CreateOptions{})
 	switch {
 	case apierrors.IsAlreadyExists(err):
-		// Idempotent re-run: reuse the existing Job (and its UID, so the credential Secret is owned by
-		// it and garbage-collected when the Job is reaped).
-		if created, err = jobs.Get(ctx, name, metav1.GetOptions{}); err != nil {
-			return "", fmt.Errorf("kube: reading existing build job %q: %w", name, err)
+		// A Job with this deterministic name already exists for this exact source+target. Its status
+		// decides whether the re-run reuses it or retries — read using the SAME interpretation the wait
+		// loop below applies (Status.Failed / Status.Succeeded):
+		//
+		//   - FAILED: reusing it would return the previous build's stale failure on every re-run until the
+		//     TTL controller reaps it ~3 days later (issue #280), never actually retrying (issue #298).
+		//     Delete it and recreate a fresh Job so the re-run rebuilds. Least-surprising default.
+		//   - SUCCEEDED: reuse the result (a good build is cheap and idempotent — do not rebuild).
+		//   - Still ACTIVE: reuse it (an in-flight build for the same ref — do not start a duplicate).
+		//
+		// Reuse keeps the existing Job's UID, so a credential Secret stays owned by it and is
+		// garbage-collected when the Job is reaped.
+		existing, gerr := jobs.Get(ctx, name, metav1.GetOptions{})
+		if gerr != nil {
+			return "", fmt.Errorf("kube: reading existing build job %q: %w", name, gerr)
+		}
+		if existing.Status.Failed > 0 {
+			if created, err = b.replaceFailedJob(ctx, jobs, name, job); err != nil {
+				return "", err
+			}
+		} else {
+			created = existing
 		}
 	case err != nil:
 		return "", fmt.Errorf("kube: creating build job %q: %w", name, err)
@@ -338,6 +357,29 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 		case <-time.After(buildJobPoll):
 		}
 	}
+}
+
+// replaceFailedJob deletes the failed build Job left behind by a previous re-run and creates a fresh
+// one in its place, so an idempotent re-run of the same source+ref actually retries the build instead
+// of returning the previous failure (issue #298). It mirrors the success-reap path's background
+// propagation: the Job owner is removed immediately (dependent pods and the owned credential Secret
+// are garbage-collected asynchronously), so the recreate does not collide with the old Job. A delete
+// that races the TTL controller and finds the Job already gone (NotFound) is fine — the recreate
+// still proceeds. If the recreate itself still races an AlreadyExists (another re-run recreated it
+// first), it is surfaced as a clear transient error the caller can retry.
+func (b *BuildAdapter) replaceFailedJob(ctx context.Context, jobs batchv1client.JobInterface, name string, job *batchv1.Job) (*batchv1.Job, error) {
+	policy := metav1.DeletePropagationBackground
+	if err := jobs.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("kube: replacing failed build job %q: %w", name, err)
+	}
+	created, err := jobs.Create(ctx, job, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("kube: recreating build job %q after failure: the failed Job is still being deleted; retry the build: %w", name, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("kube: recreating build job %q after failure: %w", name, err)
+	}
+	return created, nil
 }
 
 // buildJobName derives a deterministic Job name from the source and target so an identical build is

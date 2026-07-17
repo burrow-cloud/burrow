@@ -98,6 +98,25 @@ func (s SourceRef) Validate() error {
 	return nil
 }
 
+// SourceCredential is a resolved source-provider credential the in-cluster build uses to
+// authenticate a PRIVATE git clone and, where the provider hosts a registry, the build's image
+// push/pull (ADR-0057). The engine resolves it from the guarded credential store just before a
+// build and hands it to the Builder seam, which mounts it into the build Job — the token is never a
+// Job env var, a command-line argument, or anything the agent sees. The zero value (empty Token)
+// means public-source, credential-free — the pre-ADR-0057 behavior. The Token is a SECRET: it is
+// never logged, never placed in an error or an API response, and never stored in Postgres.
+type SourceCredential struct {
+	// Provider is the source provider the token authenticates (github, gitlab), which fixes the git
+	// host and the registry host the token also covers (ADR-0057 §1).
+	Provider ProviderType
+	// Token is the provider token VALUE (an OSS Personal Access Token). It lives in memory in burrowd
+	// only long enough to be written into the build Job's mounted Secret.
+	Token string
+}
+
+// IsZero reports whether the credential carries no token — the public-source, credential-free path.
+func (c SourceCredential) IsZero() bool { return c.Token == "" }
+
 // ReleaseStatus is the lifecycle state of a Release.
 type ReleaseStatus string
 

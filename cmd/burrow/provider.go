@@ -26,6 +26,8 @@ var providerCatalog = []struct {
 }{
 	{"cloudflare", []string{"dns"}},
 	{"digitalocean", []string{"dns"}},
+	{"github", []string{"source"}},
+	{"gitlab", []string{"source"}},
 }
 
 func supportedProviderTypes() []string {
@@ -45,12 +47,13 @@ func providerTypesHint() string { return strings.Join(supportedProviderTypes(), 
 func newProviderCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "provider",
-		Short: "Configure cloud-provider credentials (add/list)",
-		Long: "provider registers the cloud-provider credentials Burrow uses on your behalf —\n" +
-			"e.g. a DigitalOcean or Cloudflare API token for DNS. The token travels over burrowd's\n" +
-			"authenticated control-plane API (TLS), which validates it and stores it in a Kubernetes\n" +
-			"Secret in the control-plane namespace; it never travels over MCP and the agent never\n" +
-			"holds it.",
+		Short: "Configure provider credentials (add/list)",
+		Long: "provider registers the provider credentials Burrow uses on your behalf — a\n" +
+			"DigitalOcean or Cloudflare API token for DNS, or a GitHub/GitLab token whose one\n" +
+			"value the in-cluster build uses to clone a PRIVATE git source AND to authenticate\n" +
+			"the provider's image registry. The token travels over burrowd's\n" +
+			"authenticated control-plane API (TLS), which stores it in a Kubernetes Secret in the\n" +
+			"control-plane namespace; it never travels over MCP and the agent never holds it.",
 	}
 	parent.AddCommand(newProviderTypesCmd(), newProviderAddCmd(), newProviderListCmd())
 	return parent
@@ -84,12 +87,17 @@ func newProviderAddCmd() *cobra.Command {
 			"prompted for the token with the input hidden, so it never lands in your shell\n" +
 			"history or the process table; for scripts, pipe it in instead\n" +
 			"(echo \"$TOKEN\" | burrow config provider add cloudflare). The token travels over\n" +
-			"burrowd's authenticated control-plane API (TLS), which validates it against the vendor\n" +
-			"and writes it into the burrow-credentials Secret; it never travels over MCP\n" +
-			"and is never logged. Pass --name to register more than one provider of the same type.\n\n" +
+			"burrowd's authenticated control-plane API (TLS), which writes it into the\n" +
+			"burrow-credentials Secret; a DNS provider's token is validated against the vendor\n" +
+			"first. It never travels over MCP and is never logged. For a private build source use\n" +
+			"a github or gitlab token — one token clones the private repo and authenticates its\n" +
+			"registry; a fine-grained token scoped to the repos you build (plus\n" +
+			"read:packages where the registry is shared) keeps the blast radius small. Pass --name\n" +
+			"to register more than one provider of the same type.\n\n" +
 			"Supported types: " + providerTypesHint() + " (see `burrow config provider types`).",
 		Example: "  burrow config provider add cloudflare\n" +
-			"  burrow config provider add digitalocean --name do-dns",
+			"  burrow config provider add digitalocean --name do-dns\n" +
+			"  echo \"$GH_PAT\" | burrow config provider add github",
 		ValidArgs: supportedProviderTypes(),
 		Args:      exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

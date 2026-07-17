@@ -5,6 +5,8 @@ package kube
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -106,7 +108,7 @@ func TestBuildJobSpec(t *testing.T) {
 	client, created := buildFakeSucceeding(t, source, target, validDigest)
 
 	b := NewBuilder(client)
-	digest, err := b.Build(ctx, source, target, false)
+	digest, err := b.Build(ctx, source, target, false, controlplane.SourceCredential{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -234,7 +236,7 @@ func TestBuildContainerSecurityContexts(t *testing.T) {
 	const target = "reg.burrow.svc/acme/shop:1"
 	client, created := buildFakeSucceeding(t, source, target, validDigest)
 
-	if _, err := NewBuilder(client).Build(ctx, source, target, false); err != nil {
+	if _, err := NewBuilder(client).Build(ctx, source, target, false, controlplane.SourceCredential{}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 	job := (*created)[0]
@@ -291,7 +293,7 @@ func TestBuildEnsuresBuildNamespace(t *testing.T) {
 	const target = "reg.burrow.svc/acme/shop:1"
 	client, _ := buildFakeSucceeding(t, source, target, validDigest)
 
-	if _, err := NewBuilder(client).Build(ctx, source, target, false); err != nil {
+	if _, err := NewBuilder(client).Build(ctx, source, target, false, controlplane.SourceCredential{}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 	if _, err := client.CoreV1().Namespaces().Get(ctx, buildNamespace, metav1.GetOptions{}); err != nil {
@@ -307,7 +309,7 @@ func TestBuildJobTTL(t *testing.T) {
 	const target = "reg.burrow.svc/acme/shop:1"
 	client, created := buildFakeSucceeding(t, source, target, validDigest)
 
-	if _, err := NewBuilder(client).Build(ctx, source, target, false); err != nil {
+	if _, err := NewBuilder(client).Build(ctx, source, target, false, controlplane.SourceCredential{}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 	ttl := (*created)[0].Spec.TTLSecondsAfterFinished
@@ -332,7 +334,7 @@ func TestBuildFailsFastWhenNoHeadroom(t *testing.T) {
 	})
 
 	b := NewBuilder(client).WithCapacityProber(stubCapacity{state: noHeadroom()})
-	_, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false)
+	_, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false, controlplane.SourceCredential{})
 	if err == nil {
 		t.Fatal("Build should fail fast when no node has room for the build")
 	}
@@ -357,7 +359,7 @@ func TestBuildProceedsWithHeadroom(t *testing.T) {
 	client, created := buildFakeSucceeding(t, source, target, validDigest)
 
 	b := NewBuilder(client).WithCapacityProber(stubCapacity{state: ampleHeadroom()})
-	digest, err := b.Build(ctx, source, target, false)
+	digest, err := b.Build(ctx, source, target, false, controlplane.SourceCredential{})
 	if err != nil {
 		t.Fatalf("Build with ample headroom should proceed: %v", err)
 	}
@@ -378,7 +380,7 @@ func TestBuildCapacityReadErrorDoesNotBlock(t *testing.T) {
 	client, created := buildFakeSucceeding(t, source, target, validDigest)
 
 	b := NewBuilder(client).WithCapacityProber(stubCapacity{err: errors.New("forbidden: cannot list nodes")})
-	if _, err := b.Build(ctx, source, target, false); err != nil {
+	if _, err := b.Build(ctx, source, target, false, controlplane.SourceCredential{}); err != nil {
 		t.Fatalf("a capacity read error must not block the build: %v", err)
 	}
 	if len(*created) != 1 {
@@ -395,7 +397,7 @@ func TestBuildInsecurePush(t *testing.T) {
 	client, created := buildFakeSucceeding(t, source, target, validDigest)
 
 	b := NewBuilder(client)
-	if _, err := b.Build(ctx, source, target, true); err != nil {
+	if _, err := b.Build(ctx, source, target, true, controlplane.SourceCredential{}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 	if len(*created) != 1 {
@@ -421,7 +423,7 @@ func TestBuildReadsDigestAndReaps(t *testing.T) {
 	})
 
 	b := NewBuilder(client)
-	digest, err := b.Build(ctx, source, target, false)
+	digest, err := b.Build(ctx, source, target, false, controlplane.SourceCredential{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -446,7 +448,7 @@ func TestBuildJobFailure(t *testing.T) {
 	})
 
 	b := NewBuilder(client)
-	digest, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false)
+	digest, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false, controlplane.SourceCredential{})
 	if err == nil {
 		t.Fatal("Build should return an error when the Job fails")
 	}
@@ -470,7 +472,7 @@ func TestBuildSuccessNoDigest(t *testing.T) {
 	// No pod seeded, so there is no termination-log digest to read.
 
 	b := NewBuilder(client)
-	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false); err == nil {
+	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false, controlplane.SourceCredential{}); err == nil {
 		t.Fatal("Build should error when a succeeded Job produced no digest")
 	}
 }
@@ -489,7 +491,7 @@ func TestBuildContextCancel(t *testing.T) {
 	cancel() // already canceled: the first loop turn must return ctx.Err()
 
 	b := NewBuilder(client)
-	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false); !errors.Is(err, context.Canceled) {
+	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false, controlplane.SourceCredential{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Build err = %v, want context.Canceled", err)
 	}
 }
@@ -511,7 +513,7 @@ func TestBuildValidatesInputBeforeAnyJob(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := fake.NewSimpleClientset()
 			b := NewBuilder(client)
-			_, err := b.Build(ctx, tc.source, tc.target, false)
+			_, err := b.Build(ctx, tc.source, tc.target, false, controlplane.SourceCredential{})
 			if !errors.Is(err, controlplane.ErrInvalid) {
 				t.Fatalf("err = %v, want ErrInvalid", err)
 			}
@@ -578,12 +580,129 @@ func hasCapability(caps []corev1.Capability, want corev1.Capability) bool {
 // and no command payload beyond the fixed clone/build scripts.
 func assertNoSourceBytes(t *testing.T, job *batchv1.Job) {
 	t.Helper()
+	// The credential Secret (ADR-0057) is the ONE non-emptyDir volume a build may carry: it holds a
+	// provider token, never source. Everything else must be an emptyDir scratch — no ConfigMap or
+	// Secret injecting source bytes into the build.
+	credVolumes := map[string]bool{"git-creds": true, "registry-auth": true}
 	for _, v := range job.Spec.Template.Spec.Volumes {
-		if v.ConfigMap != nil || v.Secret != nil {
+		if v.ConfigMap != nil {
 			t.Errorf("Job volume %q injects data into the build; source must be cloned in-cluster, not carried", v.Name)
+		}
+		if v.Secret != nil {
+			if !credVolumes[v.Name] {
+				t.Errorf("Job volume %q is an unexpected Secret; only the source-provider credential may be mounted", v.Name)
+			}
+			continue
 		}
 		if v.EmptyDir == nil {
 			t.Errorf("Job volume %q is not an emptyDir; a build carries no source payload", v.Name)
 		}
 	}
+}
+
+// TestBuildWithSourceCredential asserts the in-cluster build consumes a source-provider credential
+// by MOUNTING it, never by passing it (ADR-0057 §4): a Secret in the build namespace holds the token
+// (as a git url.insteadOf rewrite and a docker config.json), the clone points GIT_CONFIG_GLOBAL at
+// it, buildah points REGISTRY_AUTH_FILE at it, the Secret is owned by the Job so it is
+// garbage-collected with it — and the token appears NOWHERE in the Job spec.
+func TestBuildWithSourceCredential(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/private", Ref: "v1.2.3"}
+	const target = "ghcr.io/acme/private:1.2.3"
+	const token = "ghp_super_secret_build_token"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	cred := controlplane.SourceCredential{Provider: controlplane.ProviderGitHub, Token: token}
+	if _, err := NewBuilder(client).Build(ctx, source, target, false, cred); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	job := (*created)[0]
+	secretName := credSecretName(job.Name)
+
+	// The credential Secret was created in the build namespace with both materializations of the token.
+	secret, err := client.CoreV1().Secrets(buildNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("credential secret %q not created: %v", secretName, err)
+	}
+	gitcfg := string(secret.Data[gitConfigFile])
+	if !strings.Contains(gitcfg, token) {
+		t.Errorf("gitconfig does not carry the token for the private clone:\n%s", gitcfg)
+	}
+	if !strings.Contains(gitcfg, "insteadOf") || !strings.Contains(gitcfg, "github.com") {
+		t.Errorf("gitconfig is not a github url.insteadOf rewrite:\n%s", gitcfg)
+	}
+	dockercfg := string(secret.Data[registryAuthFile])
+	wantAuth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	if !strings.Contains(dockercfg, wantAuth) {
+		t.Errorf("docker config.json does not carry the base64 registry auth:\n%s", dockercfg)
+	}
+	if !strings.Contains(dockercfg, "ghcr.io") {
+		t.Errorf("docker config.json does not target the provider registry ghcr.io:\n%s", dockercfg)
+	}
+
+	// The Secret is owned by the Job so Kubernetes garbage-collects it when the Job is reaped.
+	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].Kind != "Job" || secret.OwnerReferences[0].Name != job.Name {
+		t.Errorf("credential secret ownerReferences = %+v, want a single Job owner %q", secret.OwnerReferences, job.Name)
+	}
+
+	// The clone mounts the gitconfig and points GIT_CONFIG_GLOBAL at it.
+	clone := job.Spec.Template.Spec.InitContainers[0]
+	if got := envValue(clone.Env, "GIT_CONFIG_GLOBAL"); got != gitCredsPath+"/"+gitConfigFile {
+		t.Errorf("clone GIT_CONFIG_GLOBAL = %q, want the mounted gitconfig", got)
+	}
+	if !mountsVolume(clone.VolumeMounts, "git-creds") {
+		t.Error("clone does not mount the git-creds volume")
+	}
+	// The build mounts the docker config and points REGISTRY_AUTH_FILE at it.
+	build := job.Spec.Template.Spec.Containers[0]
+	if got := envValue(build.Env, "REGISTRY_AUTH_FILE"); got != registryAuthPath+"/"+registryAuthFile {
+		t.Errorf("build REGISTRY_AUTH_FILE = %q, want the mounted docker config", got)
+	}
+	if !mountsVolume(build.VolumeMounts, "registry-auth") {
+		t.Error("build does not mount the registry-auth volume")
+	}
+
+	// The invariant that matters: the token is NOT in the Job spec anywhere — not an env value, not a
+	// command, not a volume. It lives only in the separate Secret object (asserted above).
+	raw, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("marshal job: %v", err)
+	}
+	if strings.Contains(string(raw), token) {
+		t.Error("the source token leaked into the build Job spec; it must live only in the mounted Secret")
+	}
+	// The credential mounts are the only Secret volumes; no source bytes are carried.
+	assertNoSourceBytes(t, job)
+}
+
+// TestBuildWithoutCredentialCreatesNoSecret asserts the public-source path is unchanged: with the
+// zero credential, no credential Secret is created and no credential volume is mounted (ADR-0057).
+func TestBuildWithoutCredentialCreatesNoSecret(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/public", Ref: "v1"}
+	const target = "ghcr.io/acme/public:1"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	if _, err := NewBuilder(client).Build(ctx, source, target, false, controlplane.SourceCredential{}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	job := (*created)[0]
+	if _, err := client.CoreV1().Secrets(buildNamespace).Get(ctx, credSecretName(job.Name), metav1.GetOptions{}); err == nil {
+		t.Error("a public build created a credential Secret; it must not")
+	}
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Secret != nil {
+			t.Errorf("public build mounts a Secret volume %q; want none", v.Name)
+		}
+	}
+}
+
+// mountsVolume reports whether mounts includes one named name.
+func mountsVolume(mounts []corev1.VolumeMount, name string) bool {
+	for _, m := range mounts {
+		if m.Name == name {
+			return true
+		}
+	}
+	return false
 }

@@ -169,3 +169,33 @@ func TestAddProviderSurfacesRegistryError(t *testing.T) {
 		t.Errorf("AddProvider should surface a registry write error")
 	}
 }
+
+// TestAddProviderSourceProviderStoresTokenWithoutDNSVerify asserts a source provider (github)
+// registers with the source capability and its token is written to the credential store WITHOUT a
+// DNS verification call — a source token has no DNS vendor to check against (ADR-0057). The token
+// still rides the guarded control-plane path (ADR-0030) and is never echoed back.
+func TestAddProviderSourceProviderStoresTokenWithoutDNSVerify(t *testing.T) {
+	e, creds, dnsF, d, _ := newProviderEngine(t)
+	ctx := context.Background()
+
+	p, err := e.AddProvider(ctx, cp.AddProviderRequest{Type: cp.ProviderGitHub, Token: "ghp_source_token"})
+	if err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+	if p.Name != "github" || p.SecretKey != "github" {
+		t.Errorf("defaults: name=%q key=%q, want both %q", p.Name, p.SecretKey, "github")
+	}
+	if !p.Serves(cp.CapabilitySource) || p.Serves(cp.CapabilityDNS) {
+		t.Errorf("capabilities %v, want source-only", p.Capabilities)
+	}
+	// No DNS verification for a source provider.
+	if _, calls := dnsF.LastToken(); calls != 0 {
+		t.Errorf("source provider triggered %d DNS verify calls, want 0", calls)
+	}
+	if tok, ok := creds.Get("github"); !ok || tok != "ghp_source_token" {
+		t.Errorf("SetToken stored %q ok=%v, want the source token", tok, ok)
+	}
+	if _, err := d.Provider(ctx, "github"); err != nil {
+		t.Errorf("source provider not persisted: %v", err)
+	}
+}

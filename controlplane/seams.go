@@ -114,7 +114,13 @@ type Builder interface {
 	// in-cluster registry, and leaves it false for a caller-supplied external target, which is pushed
 	// over TLS. The base-image pull during the build always uses TLS regardless — insecure applies
 	// only to the push to targetImage.
-	Build(ctx context.Context, source SourceRef, targetImage string, insecure bool) (digest string, err error)
+	//
+	// cred is the resolved source-provider credential (ADR-0057). When it carries a token the builder
+	// authenticates the clone to a PRIVATE git source and the buildah push/pull to the provider's
+	// registry with it, by mounting it into the build Job — never as a Job env var or command-line
+	// argument. The zero value (IsZero) is the public-source, credential-free path. The token is a
+	// secret: an implementation must not log it, echo it, or place it in an error.
+	Build(ctx context.Context, source SourceRef, targetImage string, insecure bool, cred SourceCredential) (digest string, err error)
 }
 
 // DatabaseProvisioner is the seam over the installed Postgres add-on's admin surface (ADR-0031).

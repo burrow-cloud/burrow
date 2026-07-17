@@ -6,6 +6,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -62,10 +63,19 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 		return BuildResult{}, fmt.Errorf("build %s: in-cluster build is not configured: %w", req.App, ErrNotImplemented)
 	}
 
+	// Resolve the source-provider credential for the clone URL's host, if one is configured (ADR-0057).
+	// A private repo needs it; a public repo resolves to the zero credential and the build clones
+	// anonymously as before. The token is read from the guarded credential store and handed to the
+	// builder in memory — it never enters this method's log lines, the BuildResult, or an error.
+	cred, err := e.resolveSourceCredential(ctx, req.Source.Repo)
+	if err != nil {
+		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
+	}
+
 	// Build inside the cluster, pushing to pushTarget. A builder error is terminal for the build:
 	// surface it and do NOT touch the deploy path — nothing is rolled out, no release is recorded
 	// (ADR-0053 §4).
-	digest, err := e.builder.Build(ctx, req.Source, pushTarget, insecure)
+	digest, err := e.builder.Build(ctx, req.Source, pushTarget, insecure, cred)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}
@@ -85,6 +95,59 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}
 	return BuildResult{Digest: digest, Deploy: dep}, nil
+}
+
+// resolveSourceCredential returns the source-provider credential that authenticates a clone of repo,
+// or the zero SourceCredential when the repo's host has no known source provider, no such provider is
+// configured, or the repo is on a host Burrow does not front (a public clone, credential-free). It
+// maps the clone URL's host to a source provider (ADR-0057 §1), finds the matching registered
+// provider, and reads its token from the guarded credential store — the SAME store `provider add`
+// wrote it to (ADR-0030). The token is returned to the caller in memory and is NEVER placed in an
+// error: a read failure names the provider and the key, never the value.
+func (e *Engine) resolveSourceCredential(ctx context.Context, repo string) (SourceCredential, error) {
+	host := gitHost(repo)
+	if host == "" {
+		return SourceCredential{}, nil
+	}
+	providerType, ok := SourceProviderForHost(host)
+	if !ok {
+		// The clone host is not a source provider Burrow fronts (a self-hosted git, a public mirror):
+		// nothing to authenticate with — clone anonymously, as before.
+		return SourceCredential{}, nil
+	}
+	providers, err := e.db.Providers(ctx)
+	if err != nil {
+		return SourceCredential{}, fmt.Errorf("resolving the %s source credential: %w", providerType, err)
+	}
+	var p *Provider
+	for i := range providers {
+		if providers[i].Type == providerType && providers[i].Serves(CapabilitySource) {
+			p = &providers[i]
+			break
+		}
+	}
+	if p == nil {
+		// No source provider configured for this host: the repo must be public. Clone anonymously; a
+		// private repo then fails at the fetch with an actionable message (issue #279).
+		return SourceCredential{}, nil
+	}
+	token, err := e.credentials.Token(ctx, p.SecretKey)
+	if err != nil {
+		return SourceCredential{}, fmt.Errorf("reading the %s source token (key %q): %w", providerType, p.SecretKey, err)
+	}
+	return SourceCredential{Provider: providerType, Token: token}, nil
+}
+
+// gitHost extracts the host from an HTTPS git clone URL (e.g. "https://github.com/u/app" ->
+// "github.com"). It returns "" for a non-HTTP(S) URL (an SSH `git@…` remote, a local path): the OSS
+// path authenticates HTTPS clones with a token (ADR-0057), and an SSH deploy key is a separate,
+// git-only credential form Burrow does not yet wire.
+func gitHost(repo string) string {
+	u, err := url.Parse(strings.TrimSpace(repo))
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // defaultBuildTargetTag is the tag a build's default in-cluster target carries. The deploy pins the

@@ -6,8 +6,11 @@ package kube
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -40,6 +43,20 @@ const (
 	// reads. It is the only place source bytes ever live — inside the cluster, never on the control
 	// plane (ADR-0004, ADR-0053 §3).
 	workspacePath = "/workspace"
+
+	// gitCredsPath is where the source-provider credential's gitconfig is mounted into the clone init
+	// container (ADR-0057). The clone points GIT_CONFIG_GLOBAL at the file, whose url.insteadOf rewrite
+	// injects the token for the provider's git host — so the token authenticates the fetch of a private
+	// repo WITHOUT ever appearing as a Job env var, a command-line argument, or a --source value.
+	gitCredsPath = "/git-creds"
+	// gitConfigFile is the gitconfig filename inside gitCredsPath.
+	gitConfigFile = "gitconfig"
+	// registryAuthPath is where the source-provider credential's docker config.json is mounted into the
+	// build container (ADR-0057 §4). buildah reads $REGISTRY_AUTH_FILE from here to authenticate the
+	// push and any private base-image pull against the provider's registry (ghcr.io, registry.gitlab.com).
+	registryAuthPath = "/registry-auth"
+	// registryAuthFile is the docker config.json filename inside registryAuthPath.
+	registryAuthFile = "config.json"
 	// buildHomePath backs $HOME for the rootless build so buildah's container storage and the CNB
 	// lifecycle's scratch land on a writable emptyDir, letting the container root filesystem stay
 	// read-only (defense in depth, ADR-0053 §7).
@@ -205,7 +222,7 @@ func (b *BuildAdapter) WithGitImage(image string) *BuildAdapter {
 // A clone, build, or push failure is returned as a structured error and nothing is pushed; the
 // caller does NOT touch the deploy path on error (ADR-0053 §4). It blocks until the Job succeeds or
 // fails, or the build timeout elapses.
-func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef, targetImage string, insecure bool) (string, error) {
+func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) (string, error) {
 	if err := source.Validate(); err != nil {
 		return "", fmt.Errorf("kube: build: %w: %w", controlplane.ErrInvalid, err)
 	}
@@ -236,10 +253,29 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 	}
 
 	name := buildJobName(source, targetImage)
-	job := b.buildJob(name, source, targetImage, insecure)
+	job := b.buildJob(name, source, targetImage, insecure, cred)
 	jobs := b.client.BatchV1().Jobs(b.namespace)
-	if _, err := jobs.Create(ctx, job, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+	created, err := jobs.Create(ctx, job, metav1.CreateOptions{})
+	switch {
+	case apierrors.IsAlreadyExists(err):
+		// Idempotent re-run: reuse the existing Job (and its UID, so the credential Secret is owned by
+		// it and garbage-collected when the Job is reaped).
+		if created, err = jobs.Get(ctx, name, metav1.GetOptions{}); err != nil {
+			return "", fmt.Errorf("kube: reading existing build job %q: %w", name, err)
+		}
+	case err != nil:
 		return "", fmt.Errorf("kube: creating build job %q: %w", name, err)
+	}
+
+	// When a source-provider credential was resolved, materialize it into a Secret in the build
+	// namespace that the Job mounts (ADR-0057 §4). It is owned by the Job, so it is garbage-collected
+	// when the Job is reaped (on success, or by the TTL controller on failure) — the token never
+	// outlives the build. The token reaches Kubernetes only here, written straight into the Secret; it
+	// is never a Job env var, a command line, or an API response.
+	if !cred.IsZero() {
+		if err := b.ensureBuildCredentials(ctx, credSecretName(name), created, cred); err != nil {
+			return "", err
+		}
 	}
 
 	deadline := time.Now().Add(buildJobTimeout)
@@ -291,7 +327,7 @@ func buildJobName(source controlplane.SourceRef, targetImage string) string {
 // (the workspace, $HOME for container storage, /tmp) is a writable emptyDir so the container root
 // filesystem can stay read-only (ADR-0053 §7). BackoffLimit 0 with RestartPolicy Never makes a
 // single attempt whose outcome is the result — no retry masking a failure.
-func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targetImage string, insecure bool) *batchv1.Job {
+func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
 	var backoff int32
 	ttl := buildJobTTLSeconds
@@ -327,10 +363,38 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 	}
 
 	workspace := corev1.VolumeMount{Name: "workspace", MountPath: workspacePath}
+	cloneMounts := []corev1.VolumeMount{workspace}
+	buildMounts := []corev1.VolumeMount{
+		workspace,
+		{Name: "home", MountPath: buildHomePath},
+		{Name: "tmp", MountPath: buildTmpPath},
+	}
 	volumes := []corev1.Volume{
 		{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+
+	// A source-provider credential (ADR-0057) is consumed by MOUNTING, never by passing: the clone
+	// reads its gitconfig (url.insteadOf token rewrite) via GIT_CONFIG_GLOBAL, and buildah reads its
+	// docker config.json via REGISTRY_AUTH_FILE. The token itself lives only in the mounted Secret's
+	// data — it is never one of these env values, so it never appears in the Job spec or a command line.
+	if !cred.IsZero() {
+		secretName := credSecretName(name)
+		volumes = append(volumes,
+			corev1.Volume{Name: "git-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+				Items:      []corev1.KeyToPath{{Key: gitConfigFile, Path: gitConfigFile}},
+			}}},
+			corev1.Volume{Name: "registry-auth", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+				Items:      []corev1.KeyToPath{{Key: registryAuthFile, Path: registryAuthFile}},
+			}}},
+		)
+		cloneMounts = append(cloneMounts, corev1.VolumeMount{Name: "git-creds", MountPath: gitCredsPath, ReadOnly: true})
+		cloneEnv = append(cloneEnv, corev1.EnvVar{Name: "GIT_CONFIG_GLOBAL", Value: gitCredsPath + "/" + gitConfigFile})
+		buildMounts = append(buildMounts, corev1.VolumeMount{Name: "registry-auth", MountPath: registryAuthPath, ReadOnly: true})
+		buildEnv = append(buildEnv, corev1.EnvVar{Name: "REGISTRY_AUTH_FILE", Value: registryAuthPath + "/" + registryAuthFile})
 	}
 
 	return &batchv1.Job{
@@ -350,20 +414,16 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 						Image:           b.gitImage,
 						Command:         []string{"sh", "-c", cloneScript},
 						Env:             cloneEnv,
-						VolumeMounts:    []corev1.VolumeMount{workspace},
+						VolumeMounts:    cloneMounts,
 						SecurityContext: cloneContainerSecurityContext(),
 						Resources:       buildResources(),
 					}},
 					Containers: []corev1.Container{{
-						Name:    buildContainerName,
-						Image:   b.buildImage,
-						Command: []string{"sh", "-c", buildScript},
-						Env:     buildEnv,
-						VolumeMounts: []corev1.VolumeMount{
-							workspace,
-							{Name: "home", MountPath: buildHomePath},
-							{Name: "tmp", MountPath: buildTmpPath},
-						},
+						Name:            buildContainerName,
+						Image:           b.buildImage,
+						Command:         []string{"sh", "-c", buildScript},
+						Env:             buildEnv,
+						VolumeMounts:    buildMounts,
 						SecurityContext: builderContainerSecurityContext(),
 						Resources:       buildResources(),
 					}},
@@ -372,6 +432,89 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 			},
 		},
 	}
+}
+
+// credSecretName is the deterministic name of the source-provider credential Secret for a build Job.
+// It is derived from the Job name so a re-run reuses it, and it is owned by the Job so it is
+// garbage-collected when the Job is reaped (ADR-0057 §4).
+func credSecretName(jobName string) string { return jobName + "-creds" }
+
+// ensureBuildCredentials writes the source-provider token into a Secret in the build namespace that
+// the Job mounts (ADR-0057 §4). The Secret holds two materializations of the ONE token: a gitconfig
+// whose url.insteadOf rewrite authenticates the private clone, and a docker config.json that
+// authenticates buildah's push/pull to the provider's registry. It is owned by the build Job so
+// Kubernetes garbage-collects it when the Job is reaped. The token is written straight into the
+// Secret data and is never logged or placed in an error — a write failure names the Secret only.
+func (b *BuildAdapter) ensureBuildCredentials(ctx context.Context, secretName string, owner *batchv1.Job, cred controlplane.SourceCredential) error {
+	gitcfg, err := gitCredentialConfig(cred)
+	if err != nil {
+		return fmt.Errorf("kube: building git credentials for build %q: %w", owner.Name, err)
+	}
+	dockercfg, err := registryAuthConfig(cred)
+	if err != nil {
+		return fmt.Errorf("kube: building registry credentials for build %q: %w", owner.Name, err)
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: b.namespace,
+			Labels:    map[string]string{nameLabel: owner.Name, managedByLabel: managedByValue},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "batch/v1",
+				Kind:       "Job",
+				Name:       owner.Name,
+				UID:        owner.UID,
+			}},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			gitConfigFile:    []byte(gitcfg),
+			registryAuthFile: []byte(dockercfg),
+		},
+	}
+	if _, err := b.client.CoreV1().Secrets(b.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		// The error names the Secret only — never the token value.
+		return fmt.Errorf("kube: writing build credentials secret %s/%s: %w", b.namespace, secretName, err)
+	}
+	return nil
+}
+
+// gitCredentialConfig renders a gitconfig whose url.<authed>.insteadOf rewrite injects the provider
+// token into every clone of the provider's git host — so `git fetch` authenticates a private repo
+// without the token ever being a command-line argument. The token rides in the userinfo of the
+// rewritten URL, URL-encoded so any token character is carried safely.
+func gitCredentialConfig(cred controlplane.SourceCredential) (string, error) {
+	host := cred.Provider.GitHost()
+	if host == "" {
+		return "", fmt.Errorf("provider %q is not a source provider", cred.Provider)
+	}
+	authed := (&url.URL{Scheme: "https", User: url.UserPassword(cred.Provider.GitUser(), cred.Token), Host: host, Path: "/"}).String()
+	base := "https://" + host + "/"
+	return fmt.Sprintf("[url %q]\n\tinsteadOf = %s\n", authed, base), nil
+}
+
+// registryAuthConfig renders a docker config.json authenticating the provider's registry host with
+// the same token, for buildah's $REGISTRY_AUTH_FILE (ADR-0057 §4). One provider token covers both the
+// git clone and the registry (§1), so the build's push and any private base-image pull authenticate
+// with it too.
+func registryAuthConfig(cred controlplane.SourceCredential) (string, error) {
+	host := cred.Provider.RegistryHost()
+	if host == "" {
+		return "", fmt.Errorf("provider %q has no registry host", cred.Provider)
+	}
+	auth := base64.StdEncoding.EncodeToString([]byte(cred.Provider.GitUser() + ":" + cred.Token))
+	cfg := struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}{Auths: map[string]struct {
+		Auth string `json:"auth"`
+	}{host: {Auth: auth}}}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 // buildPodSecurityContext is the pod-level restricted PodSecurity floor for a build (ADR-0053 §7):

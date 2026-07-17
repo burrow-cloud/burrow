@@ -138,7 +138,7 @@ func TestUpgradeBackfillsAgentCredential(t *testing.T) {
 	if err := cfg.Save(); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	stubJoinAgentCredential(t, func(envName string) (string, string, error) {
+	calls := stubJoinAgentCredential(t, func(envName string) (string, string, error) {
 		return "/tmp/agents/" + envName, agentKubeContextName, nil
 	})
 
@@ -153,8 +153,42 @@ func TestUpgradeBackfillsAgentCredential(t *testing.T) {
 	if env.AgentKubeconfig != "/tmp/agents/dev" || env.AgentContext != agentKubeContextName {
 		t.Errorf("upgrade did not backfill the scoped credential onto the dev handle: %+v", env)
 	}
+	if len(*calls) != 1 {
+		t.Errorf("a pre-credential handle should trigger exactly one join, got %d", len(*calls))
+	}
 	if !strings.Contains(out.String(), "Backfilled the scoped agent credential") {
 		t.Errorf("missing the backfill confirmation:\n%s", out.String())
+	}
+}
+
+// TestUpgradeBackfillSilentWhenCredentialPresent asserts the every-upgrade "Backfilled…" noise is
+// gone: a handle that already carries the scoped credential (the common case, any current install)
+// is a no-op — no re-join and no output — so a routine upgrade never re-prints the backfill line.
+func TestUpgradeBackfillSilentWhenCredentialPresent(t *testing.T) {
+	tempConfig(t)
+	kc := kubeconfigWithCurrent(t, "dev", "dev")
+	cfg := &localconfig.Config{Environments: []localconfig.Environment{{
+		Name:                  "dev",
+		Context:               "dev",
+		ControlPlaneNamespace: "burrow",
+		AgentKubeconfig:       "/tmp/agents/dev",
+		AgentContext:          agentKubeContextName,
+	}}}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	calls := stubJoinAgentCredential(t, func(envName string) (string, string, error) {
+		return "/tmp/agents/" + envName, agentKubeContextName, nil
+	})
+
+	var out bytes.Buffer
+	backfillAgentCredential(context.Background(), kc, "burrow", &out)
+
+	if len(*calls) != 0 {
+		t.Errorf("a handle with a credential must not re-join, got %d join call(s)", len(*calls))
+	}
+	if out.String() != "" {
+		t.Errorf("a routine upgrade must stay silent, got output:\n%s", out.String())
 	}
 }
 

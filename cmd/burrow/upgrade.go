@@ -94,7 +94,9 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 // local kubeconfig without a fresh install. It is best-effort: any failure warns and returns, never
 // failing the upgrade. It backfills only a handle already registered for the upgraded cluster's
 // context; if none is registered locally there is nothing to backfill (the operator can `burrow
-// install` to register and join).
+// install` to register and join). A handle that already carries the scoped credential is left
+// untouched — an upgrade preserves the credential, so the backfill runs (and reports) exactly
+// once, on the upgrade that first adds it, and stays silent on every routine upgrade after.
 func backfillAgentCredential(ctx context.Context, kubeconfig, namespace string, stdout io.Writer) {
 	ctxName, err := connect.TargetContextName(kubeconfig, "")
 	if err != nil {
@@ -109,6 +111,14 @@ func backfillAgentCredential(ctx context.Context, kubeconfig, namespace string, 
 	env, ok := cfg.LookupByContext(ctxName)
 	if !ok {
 		// No local handle for this cluster, so nothing to backfill onto.
+		return
+	}
+	if env.AgentKubeconfig != "" {
+		// The handle already carries the scoped credential, which an upgrade preserves: it keeps
+		// the API token and does not rotate the agent credential, so an existing credential stays
+		// valid. Backfilling exists only to add the credential to a handle that predates it, so
+		// re-joining here would be a no-op that re-prints "Backfilled…" on every routine upgrade —
+		// misleading noise that reads as "something was missing and I fixed it" when nothing was.
 		return
 	}
 	path, agentContext, err := joinAgentCredentialFn(ctx, kubeconfig, ctxName, namespace, env.Name)

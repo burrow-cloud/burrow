@@ -175,14 +175,13 @@ the bundled servicelb / MetalLB, so there is no separate load-balancer bill to p
 Approximate requests for Burrow's own components, in plain units. A *request* is what a component
 reserves at rest; most sit well under their limits until they are worked.
 
-| Component | CPU | Memory | Notes |
-| --- | --- | --- | --- |
-| Control plane (burrowd + Postgres) | ~a tenth of a CPU | ~160 MB | always on; the two pods together, on a 1 GB database volume |
-| Ingress + cert-manager | ~a tenth of a CPU | ~90 MB | upstream defaults; **+ a LoadBalancer** on managed clusters (billable) |
-| In-cluster registry (Zot) | small, a fraction of a CPU | ~64 MB | optional; **+ a 5 GB PersistentVolume** for image layers |
-| In-cluster build (per build) | ¼ of a CPU, bursting to 2 CPUs | 512 MB, up to 2 GB | **transient**; needs schedulable headroom to run ([#274](https://github.com/burrow-cloud/burrow/issues/274)); **experimental, not yet functional** |
-| Metrics (VictoriaMetrics + vmagent) | moderate scrape load | grows with retention (~10 GB volume, ~1 month by default) | opt-in add-on |
-| metrics-server | negligible | negligible | lightweight; the autoscaler needs it to read CPU / memory |
+| Component | CPU | Memory | Storage | Notes |
+| --- | --- | --- | --- | --- |
+| Control plane (burrowd + Postgres) | ~a tenth of a CPU | ~160 MB | ~1 GB database volume | always on; the two pods together |
+| Ingress + cert-manager | ~a tenth of a CPU | ~90 MB | none | upstream defaults; **+ a LoadBalancer** on managed clusters (billable) |
+| In-cluster registry (Zot) | small, a fraction of a CPU | ~64 MB | ~5 GB PersistentVolume for image layers | optional |
+| In-cluster build (per build) | ¼ of a CPU, bursting to 2 CPUs | 512 MB, up to 2 GB | transient scratch while the build runs | **transient**; needs schedulable headroom to run ([#274](https://github.com/burrow-cloud/burrow/issues/274)); **experimental, not yet functional** |
+| Metrics (VictoriaMetrics + vmagent) | moderate scrape load | grows with retention | ~10 GB volume (~1 month by default) | opt-in add-on |
 
 The in-cluster build is the demanding one: it reserves ¼ of a CPU and can burst to 2 CPUs and 2 GB
 while it runs. On a cluster with no spare capacity it will not schedule at all, which is why a small

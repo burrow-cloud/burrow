@@ -128,6 +128,7 @@ type installOptions struct {
 	Namespace           string
 	AppNamespace        string
 	AddonNamespace      string
+	BuildNamespace      string
 	ServiceAccount      string
 	AgentServiceAccount string
 	Image               string
@@ -239,6 +240,7 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 			Namespace:      a.namespace,
 			AppNamespace:   a.appNamespace,
 			AddonNamespace: connect.DefaultAddonNamespace,
+			BuildNamespace: connect.DefaultBuildNamespace,
 			Image:          a.image,
 			Token:          token,
 			DBPassword:     dbPassword,

@@ -226,10 +226,12 @@ func TestBuildJobSpec(t *testing.T) {
 	}
 }
 
-// TestBuildContainerSecurityContexts asserts the ADR-0056 split: the clone init container keeps the
-// full restricted §7 floor, while the build container is relaxed by exactly the minimal set rootless
-// buildah needs — Unconfined seccomp, SETUID/SETGID added (all others dropped), and privilege
-// escalation allowed — with the read-only root filesystem retained (issue #282).
+// TestBuildContainerSecurityContexts asserts the split: the clone init container keeps the full
+// restricted §7 floor, while the build container runs privileged. buildah's layer extraction remounts
+// the container root mount private, which a managed CRI (DOKS/containerd) locks — nothing short of
+// privileged completes a build there (validated live), so the OSS build container, which builds
+// trusted user-owned source, runs privileged; the untrusted-source case is hardened behind the
+// Builder seam, not here (issue #282, supersedes ADR-0056's narrower relaxation).
 func TestBuildContainerSecurityContexts(t *testing.T) {
 	ctx := context.Background()
 	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
@@ -257,37 +259,27 @@ func TestBuildContainerSecurityContexts(t *testing.T) {
 		t.Error("clone container does not drop ALL capabilities")
 	}
 
-	// Build is relaxed by exactly the ADR-0056 set — and no more.
+	// Build runs privileged — the only context that completes a buildah layer-apply on a managed CRI
+	// whose container root mount is locked (validated live on DOKS).
+	if build.Privileged == nil || !*build.Privileged {
+		t.Error("build container is not privileged; buildah's layer remount is denied without it on a managed CRI (issue #282)")
+	}
 	if build.SeccompProfile == nil || build.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
-		t.Errorf("build seccompProfile = %v, want Unconfined so unshare(CLONE_NEWUSER) is permitted (ADR-0056)", build.SeccompProfile)
+		t.Errorf("build seccompProfile = %v, want Unconfined", build.SeccompProfile)
 	}
-	if build.AllowPrivilegeEscalation == nil || !*build.AllowPrivilegeEscalation {
-		t.Error("build allowPrivilegeEscalation is not true, so the setuid newuidmap/newgidmap helpers cannot run (ADR-0056)")
-	}
-	if build.Capabilities == nil {
-		t.Fatal("build container has no capabilities set")
-	}
-	if !hasCapability(build.Capabilities.Drop, "ALL") {
-		t.Error("build container does not drop ALL capabilities before adding the narrow set")
-	}
-	if !hasCapability(build.Capabilities.Add, "SETUID") || !hasCapability(build.Capabilities.Add, "SETGID") {
-		t.Errorf("build capabilities add = %v, want SETUID and SETGID (ADR-0056)", build.Capabilities.Add)
-	}
-	// The relaxation is bounded: nothing broader than SETUID/SETGID is granted, and the read-only
-	// root filesystem is kept.
-	for _, c := range build.Capabilities.Add {
-		if c != "SETUID" && c != "SETGID" {
-			t.Errorf("build adds capability %q beyond the minimal SETUID/SETGID set (ADR-0056)", c)
-		}
-	}
-	if build.ReadOnlyRootFilesystem == nil || !*build.ReadOnlyRootFilesystem {
-		t.Error("build container root filesystem is not read-only; the relaxation must keep this hardening (ADR-0056)")
+	// The read-only root filesystem is NOT kept: buildah remounts the root mount during layer
+	// extraction, which requires it to be writable.
+	if build.ReadOnlyRootFilesystem == nil || *build.ReadOnlyRootFilesystem {
+		t.Error("build container root filesystem must be writable so buildah can remount it during layer extraction")
 	}
 }
 
-// TestBuildEnsuresBuildNamespace asserts the dedicated build namespace is created before the Job so
-// a build never fails for want of its namespace (issue #278).
-func TestBuildEnsuresBuildNamespace(t *testing.T) {
+// TestBuildDoesNotCreateBuildNamespace asserts burrowd never creates the build namespace itself.
+// `burrow install` provisions burrow-builds and burrowd's Role in it kubeconfig-side, because burrowd
+// holds only namespaced Roles and cannot create namespaces or cluster RBAC (least privilege, issue
+// #278) — the same reason `burrow env add` creates per-environment namespaces kubeconfig-side. A
+// build that tried to create its own namespace would need a cluster-scoped grant it must not hold.
+func TestBuildDoesNotCreateBuildNamespace(t *testing.T) {
 	ctx := context.Background()
 	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
 	const target = "reg.burrow.svc/acme/shop:1"
@@ -296,8 +288,10 @@ func TestBuildEnsuresBuildNamespace(t *testing.T) {
 	if _, err := NewBuilder(client).Build(ctx, source, target, false, controlplane.SourceCredential{}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if _, err := client.CoreV1().Namespaces().Get(ctx, buildNamespace, metav1.GetOptions{}); err != nil {
-		t.Errorf("build namespace %q was not created: %v", buildNamespace, err)
+	for _, a := range client.Actions() {
+		if a.GetVerb() == "create" && a.GetResource().Resource == "namespaces" {
+			t.Errorf("burrowd created a namespace; install must provision %q, burrowd holds only namespaced Roles (issue #278)", buildNamespace)
+		}
 	}
 }
 

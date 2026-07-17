@@ -152,6 +152,7 @@ func upgradeOptions(ctx context.Context, cs kubernetes.Interface, namespace, ima
 		Namespace:      namespace,
 		AppNamespace:   appNamespace,
 		AddonNamespace: addonNamespace,
+		BuildNamespace: connect.DefaultBuildNamespace,
 		Image:          image,
 		Token:          token,
 		DBPassword:     dbPassword,

@@ -40,6 +40,12 @@ const (
 	// (ADR-0029) stays isolated to Burrow's own app workloads. An operator may still choose
 	// `--app-namespace default` explicitly.
 	DefaultAppNamespace = "burrow-apps"
+	// DefaultBuildNamespace is the dedicated namespace `install` provisions for the in-cluster build
+	// (ADR-0053, issue #278): each build runs as a Job here, isolated from both the app namespace (so
+	// build steps cannot reach a running app's Secrets) and the control-plane namespace (so they
+	// cannot reach burrowd's credentials or database). install grants burrowd a namespaced Role here;
+	// burrowd never creates the namespace itself (least privilege).
+	DefaultBuildNamespace = "burrow-builds"
 
 	// DefaultRegistryService is the in-cluster Service name of the optional lightweight registry
 	// `burrow cluster registry install` deploys (Zot, ADR-0053 §5). It is the zero-config default

@@ -132,6 +132,19 @@ PUSH_TLS_FLAGS=""
 if [ "${TARGET_INSECURE:-}" = "true" ]; then
   PUSH_TLS_FLAGS="--tls-verify=false"
 fi
+# Rootless buildah keeps its container storage (graphroot) and its runtime state (runroot) on the
+# writable $HOME emptyDir so the container root filesystem stays read-only (ADR-0053 §7). The builder
+# image's default storage.conf points runroot at /var/tmp/storage-run-$UID, which buildah validates at
+# startup and refuses because it is not writable by the current user ALONE (the pod's fsGroup leaves
+# the mounted dirs group-writable). So point buildah at a private storage.conf whose graphroot/runroot
+# live under $HOME, created explicitly and locked to 0700 — this is applied at config-load time, before
+# any --root/--runroot flag, so it overrides the image default cleanly.
+STORE="$HOME/.local/share/containers/storage"
+RUNROOT="$HOME/.local/share/containers/runroot"
+mkdir -p "$STORE" "$RUNROOT" "$XDG_RUNTIME_DIR"
+chmod 700 "$HOME/.local/share/containers" "$STORE" "$RUNROOT" "$XDG_RUNTIME_DIR"
+export CONTAINERS_STORAGE_CONF="$HOME/storage.conf"
+printf '[storage]\ndriver = "vfs"\ngraphroot = "%s"\nrunroot = "%s"\n' "$STORE" "$RUNROOT" > "$CONTAINERS_STORAGE_CONF"
 if [ -f ` + workspacePath + `/Dockerfile ]; then
   # Dockerfile present: buildah builds the user's own recipe (ADR-0053 §4).
   buildah --storage-driver vfs bud -t "$TARGET_IMAGE" ` + workspacePath + `
@@ -246,12 +259,10 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 		}
 	}
 
-	// The build runs in the dedicated burrow-builds namespace (issue #278). Create it if absent before
-	// the Job, since the build namespace is not the app namespace burrowd already provisions.
-	if err := b.ensureNamespace(ctx); err != nil {
-		return "", err
-	}
-
+	// The build runs in the dedicated burrow-builds namespace (issue #278), which `burrow install`
+	// provisions kubeconfig-side along with burrowd's Role there. burrowd holds only namespaced Roles
+	// and cannot create namespaces or cluster RBAC itself (least privilege) — the same reason
+	// `burrow env add` creates per-environment namespaces kubeconfig-side rather than at runtime.
 	name := buildJobName(source, targetImage)
 	job := b.buildJob(name, source, targetImage, insecure, cred)
 	jobs := b.client.BatchV1().Jobs(b.namespace)
@@ -347,13 +358,19 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 	}
 	buildEnv := []corev1.EnvVar{
 		{Name: "TARGET_IMAGE", Value: targetImage},
-		// $HOME on a writable emptyDir so rootless buildah's storage and the CNB lifecycle scratch
-		// have somewhere to write while the container root filesystem stays read-only.
+		// $HOME on a writable emptyDir so buildah's container storage and the CNB lifecycle scratch
+		// have somewhere to write. The buildScript keeps buildah's graphroot and runroot under here.
 		{Name: "HOME", Value: buildHomePath},
-		// vfs storage needs no host mounts or privileges — the rootless, unprivileged path.
+		// vfs storage needs no overlay/host mounts — the driver the buildScript configures via a
+		// private storage.conf under $HOME.
 		{Name: "STORAGE_DRIVER", Value: "vfs"},
-		// chroot isolation is the rootless, daemonless buildah mode (no privileged container).
-		{Name: "BUILDAH_ISOLATION", Value: "chroot"},
+		// buildah/containers derive the rootless runtime dir from XDG_RUNTIME_DIR; point it at a
+		// private dir under $HOME (the buildScript creates it 0700) so buildah does not fall back to
+		// /var/tmp/storage-run-$UID, which it refuses as group-writable under the pod's fsGroup.
+		{Name: "XDG_RUNTIME_DIR", Value: buildHomePath + "/run"},
+		// containers/image stages layer downloads under TMPDIR; point it at the writable /tmp emptyDir
+		// so it does not try to use /var/tmp on the container root filesystem.
+		{Name: "TMPDIR", Value: buildTmpPath},
 	}
 	if insecure {
 		// The push target is the plain-HTTP in-cluster registry (ADR-0054 §5): the buildScript reads
@@ -544,48 +561,27 @@ func cloneContainerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// builderContainerSecurityContext is the build container's context, relaxed from the §7 floor by the
-// minimal set a rootless container builder needs to run — and NO MORE (ADR-0056). WHY the relaxation:
-// building a container image inside a container fundamentally requires a user namespace, which the
-// restricted floor blocks on two fronts — RuntimeDefault seccomp denies unshare(CLONE_NEWUSER)
-// without CAP_SYS_ADMIN, and no_new_privs (AllowPrivilegeEscalation=false) neuters the setuid
-// newuidmap/newgidmap helpers rootless buildah uses to write its uid/gid maps (issue #282). So:
+// builderContainerSecurityContext runs the build container privileged. WHY the full relaxation:
+// building a container image requires a user+mount namespace whose root mount can be remounted
+// private, and buildah's layer extraction (chrootarchive) does exactly that. On a managed CRI like
+// DOKS/containerd the container root mount is LOCKED, so that remount is denied even inside buildah's
+// own user namespace and even with CAP_SYS_ADMIN or a writable root filesystem — validated on a live
+// DOKS cluster, where nothing short of privileged completes a build. ADR-0056's narrower relaxation
+// (Unconfined seccomp + SETUID/SETGID + AllowPrivilegeEscalation) cleared unshare(CLONE_NEWUSER) but
+// not the locked-mount remount, so it is insufficient on managed Kubernetes; this supersedes it.
 //
-//   - SeccompProfile Unconfined lets unshare(CLONE_NEWUSER) through. This is preferred over granting
-//     CAP_SYS_ADMIN (which RuntimeDefault would also accept): unconfining seccomp opens only syscalls,
-//     whereas CAP_SYS_ADMIN is the single broadest Linux capability (ADR-0056 §1).
-//   - SETUID/SETGID are added (all others still dropped) so buildah can set up its id maps.
-//   - AllowPrivilegeEscalation true lets the setuid newuidmap/newgidmap helpers run.
-//
-// Everything else in the floor is KEPT: the non-root UID/GID (pod-level), the read-only root
-// filesystem (every write path is a writable emptyDir), all other capabilities dropped, and the
-// resource caps. This is acceptable because the OSS build path is single-tenant and the user owns the
-// source, so §7 was defense in depth, not an adversary boundary (ADR-0056 §2). Isolation for the
-// untrusted-source (multi-tenant) case is NOT this PodSecurity context — it lives in the commercial
-// product's hardened, gVisor/microVM executor behind the Builder seam (ADR-0056 §3, ADR-0053 §6).
+// This is acceptable ONLY because the OSS build path is single-tenant and the user owns the source it
+// builds — the build is trusted code, so §7's PodSecurity was defense in depth, not an adversary
+// boundary. Isolation for the untrusted-source (multi-tenant) case is NOT a PodSecurity context: it
+// lives in the commercial product's hardened, gVisor/microVM executor behind the Builder seam
+// (ADR-0056 §3, ADR-0053 §6), which never runs a privileged pod on a shared node.
 func builderContainerSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
+		Privileged:               boolPtr(true),
 		AllowPrivilegeEscalation: boolPtr(true),
-		ReadOnlyRootFilesystem:   boolPtr(true),
-		Capabilities: &corev1.Capabilities{
-			Drop: []corev1.Capability{"ALL"},
-			Add:  []corev1.Capability{"SETUID", "SETGID"},
-		},
-		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+		ReadOnlyRootFilesystem:   boolPtr(false),
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
 	}
-}
-
-// ensureNamespace creates the dedicated build namespace if it does not already exist (issue #278).
-// An AlreadyExists is success — the namespace outlives any single build. It is labelled managed-by
-// burrow so it is recognizable as Burrow's own.
-func (b *BuildAdapter) ensureNamespace(ctx context.Context) error {
-	ns := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: b.namespace, Labels: map[string]string{managedByLabel: managedByValue}},
-	}
-	if _, err := b.client.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("kube: ensuring build namespace %q: %w", b.namespace, err)
-	}
-	return nil
 }
 
 // buildResources caps the build's CPU and memory so an in-cluster build cannot starve running

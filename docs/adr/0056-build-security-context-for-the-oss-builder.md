@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+♻️ Superseded by [ADR-0059](0059-oss-build-container-runs-privileged.md)
 
 ## TL;DR
 

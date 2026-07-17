@@ -548,6 +548,20 @@ func TestBuildJobNameDeterministic(t *testing.T) {
 	}
 }
 
+// TestBuilderImageForVersion asserts the version pin: a stamped release version maps to the builder
+// image published under the same tag (reproducible), while an unstamped dev build ("" or "v0.0.0")
+// maps to "" so the caller keeps the floating :latest default.
+func TestBuilderImageForVersion(t *testing.T) {
+	for _, unstamped := range []string{"", "v0.0.0"} {
+		if got := BuilderImageForVersion(unstamped); got != "" {
+			t.Errorf("BuilderImageForVersion(%q) = %q, want empty (keep :latest default)", unstamped, got)
+		}
+	}
+	if got, want := BuilderImageForVersion("v0.13.0"), "ghcr.io/burrow-cloud/burrow-builder:v0.13.0"; got != want {
+		t.Errorf("BuilderImageForVersion(v0.13.0) = %q, want %q", got, want)
+	}
+}
+
 // envValue returns the value of the named env var, or "" if absent.
 func envValue(env []corev1.EnvVar, name string) string {
 	for _, e := range env {

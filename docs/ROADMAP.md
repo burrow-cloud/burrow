@@ -1,7 +1,7 @@
 # Burrow Roadmap
 
-> **Status: v0.1 through v0.12 shipped.** These are version milestones; each unshipped one is
-> a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
+> **Status: v0.1 through v0.12 shipped; v0.13 is the release being cut.** These are version
+> milestones; each unshipped one is a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
 > [README](../README.md) status table is the authoritative shipped/in-progress/planned
 > surface. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the current
 > execution detail.
@@ -213,11 +213,52 @@ it, **`burrow_run`** ([ADR-0048](adr/0048-one-off-command-runner.md)) runs a one
 laptop quickstart** on k3d, pinned by a CI e2e, takes a user from nothing to their agent deploying an
 app — and hitting the delete guardrail — on their own machine.
 
+## v0.13 — The optional in-cluster build 🚧 in progress
+
+The release being cut. Burrow gains an **optional in-cluster build from a git source** and turns
+cluster provisioning into deliberate, standalone steps — the compute story now spans "build my code"
+as well as "run my image", without a CI dependency and without ever moving code over the control
+channel.
+
+- **In-cluster build from a git source** ([ADR-0053](adr/0053-in-cluster-build-from-source.md)) — an
+  optional path off the explicit deploy spine: `burrow app build <app> --source <git-ref>` (and a
+  `burrow-agent build` verb) clone a git ref and build the image **inside the user's own cluster** as a
+  Kubernetes Job — buildah for a Dockerfile, Cloud Native Buildpacks for the no-Dockerfile case — push
+  it to a registry, and the built reference rejoins the guarded deploy path (same rollout, record,
+  rollback, audit). Code never crosses the control channel; only the git ref does. An optional
+  in-cluster registry (Zot) is the zero-config default push target; external registries stay fully
+  supported. Validated end to end on managed Kubernetes, where the OSS build container runs
+  **privileged** ([ADR-0059](adr/0059-oss-build-container-runs-privileged.md), superseding
+  [ADR-0056](adr/0056-build-security-context-for-the-oss-builder.md)) in a dedicated `burrow-builds`
+  namespace with capacity fail-fast and TTL-reaped Jobs. Known limit: the no-Dockerfile Buildpacks path
+  cannot yet push to the plain-HTTP in-cluster registry.
+- **Source-provider credentials** ([ADR-0057](adr/0057-source-provider-credentials.md)) — one provider
+  token, set through the control plane and mounted into the build, authenticates a private-git clone and
+  its registry (a GitHub PAT covers `github.com` and `ghcr.io`); it never crosses the control channel,
+  is never logged, and never lands in Postgres.
+- **`install` provisions only the control plane** ([ADR-0054](adr/0054-install-is-control-plane-only.md))
+  — every additive cluster component is an opt-in `burrow cluster <component>` step, not a `--with-*`
+  flag: `burrow cluster registry` installs the in-cluster registry, and metrics-server is auto-ensured as
+  a baseline. A `burrow cluster capacity` surface reports scheduling headroom ("do I need to scale?").
+- **Opt-in auto-deploy** ([ADR-0052](adr/0052-pull-based-passive-deploy.md),
+  [ADR-0058](adr/0058-auto-deploy-is-opt-in.md)) — burrowd polls each app's image repository and
+  auto-applies upgrades within a per-app, per-environment level (`burrow app auto-deploy <app>
+  [patch|minor|major|off]`, off by default), firing the same guarded deploy path an explicit call uses; a
+  tag above the level is surfaced as an available upgrade. Outbound-only, so it serves the private/NAT'd
+  clusters push-from-CI cannot reach.
+- **Multi-version forward upgrades** ([ADR-0055](adr/0055-multi-version-upgrades.md)) — a database may
+  jump across any number of minors in one step, since the migrations are a linear forward-only chain; the
+  startup gate still refuses downgrades and cross-major in-place moves.
+- **Postgres always exports metrics** ([ADR-0051](adr/0051-postgres-always-exports-metrics.md)) — the
+  Postgres add-on ships an always-on metrics exporter and the scraper discovers the add-on namespace, so
+  installing metrics scrapes the database automatically regardless of install order.
+
 ## Deferred until requested
 
-- **Server-side build from a git reference** ([ADR-0008](adr/0008-two-build-paths.md)) — a
-  real second build path, but parked until a user actually needs it; client-side build plus
-  deploy-by-image-reference covers the common case today.
+- **Managed, Burrow-hosted build service** ([ADR-0008](adr/0008-two-build-paths.md)) — the OSS
+  in-cluster build from a git source now exists (ADR-0053, v0.13); a Burrow-*hosted* build that runs the
+  user's build off their cluster stays parked until the managed product needs it, behind the same
+  `Builder` seam.
 
 ## Later — candidate themes (unsequenced)
 
@@ -229,14 +270,6 @@ app — and hitting the delete guardrail — on their own machine.
 - **Registry onboarding** — reduce the friction of getting an image into a registry, per
   ADR-0046 (Proposed); held pending a user signal that onboarding is painful.
 - **Cost controls and caps** — visibility and limits on cluster spend.
-- **Optional passive deploy mode** — a pull-based, semver-scoped registry watcher layered on
-  the explicit path, never replacing it, specified in
-  [ADR-0052](adr/0052-pull-based-passive-deploy.md) (realizing
-  [ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)'s optional mode). burrowd polls
-  the registry and auto-applies upgrades within a per-environment level (`burrow app auto-deploy
-  <app> [patch|minor|major|off]`), opt-in and off by default until an operator sets a level (ADR-0058); a version above the
-  level is surfaced as an available upgrade the operator takes explicitly. Outbound-only, so it
-  serves the private/NAT'd clusters push-from-CI cannot reach.
 - **Self-host dashboard** — an HTMX dashboard over the control-plane API, if and when a
   self-host UI is warranted.
 - **App-runtime API and capability envelopes** *(exploratory)* — a programmatic control-plane

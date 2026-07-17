@@ -31,13 +31,17 @@ const (
 	// defaultGitImage is the image the clone init container runs. It only needs `git`; a minimal
 	// git image keeps the pull small. Phase 3's install wiring (ADR-0053 §5) may override it.
 	defaultGitImage = "alpine/git:2.45.2"
+	// builderImageRepo is the repository the build container image is published to. The floating
+	// :latest tag is the default; a released burrowd pins it to its own stamped version instead (see
+	// BuilderImageForVersion) so a build is reproducible.
+	builderImageRepo = "ghcr.io/burrow-cloud/burrow-builder"
 	// defaultBuildImage is the image the build container runs. It bundles BOTH builders the ADR
 	// names (ADR-0053 §4) — buildah (for the Dockerfile case) and the Cloud Native Buildpacks
 	// lifecycle (for the no-Dockerfile case) — so a single Job can choose between them at runtime,
 	// after the source is cloned, without the control plane ever inspecting the source (§3). Phase 3
 	// wires its install and can override it via WithBuildImage; it is a constant here so the adapter
 	// and its unit tests are self-contained.
-	defaultBuildImage = "ghcr.io/burrow-cloud/burrow-builder:latest"
+	defaultBuildImage = builderImageRepo + ":latest"
 
 	// workspacePath is the shared emptyDir the init container clones into and the build container
 	// reads. It is the only place source bytes ever live — inside the cluster, never on the control
@@ -102,6 +106,18 @@ const (
 	// deliberately leaves behind for diagnosis.
 	buildJobTTLSeconds int32 = 3 * 24 * 60 * 60 // 259200s = 3 days
 )
+
+// BuilderImageForVersion returns the pinned builder image reference for a stamped release
+// version, so a released burrowd pulls the builder image published under the SAME release tag
+// (reproducible) rather than the floating :latest. For an unstamped dev build (version "" or
+// "v0.0.0") it returns "" — the caller then leaves the :latest default (or an explicit
+// BURROW_BUILD_IMAGE override) in place.
+func BuilderImageForVersion(version string) string {
+	if version == "" || version == "v0.0.0" {
+		return ""
+	}
+	return builderImageRepo + ":" + version
+}
 
 // cloneScript clones the git reference INTO the cluster (ADR-0053 §3). The repository URL and ref
 // arrive as environment variables (REPO, REF), never interpolated into the script, so a crafted

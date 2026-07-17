@@ -110,6 +110,10 @@ type bootstrapArgs struct {
 	image        string
 	wait         bool
 	yes          bool
+	// minimal and noMetricsServer opt out of the detected lightweight baseline (metrics-server)
+	// bootstrap ensures alongside the control plane (ADR-0054 §1), threaded into the reused install.
+	minimal         bool
+	noMetricsServer bool
 	// apiReadyBudget is how long to poll the freshly installed k3s API for readiness before failing.
 	apiReadyBudget time.Duration
 }
@@ -354,6 +358,8 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().StringVar(&a.image, "burrowd-image", defaultBurrowdImage(), "burrowd container image to deploy (must be pullable by the cluster)")
 	cmd.Flags().BoolVar(&a.wait, "wait", true, "wait for the control plane to become ready before printing the join token")
 	cmd.Flags().BoolVar(&a.yes, "yes", false, "skip the confirmation prompt (for intentional automation)")
+	cmd.Flags().BoolVar(&a.minimal, "minimal", false, "install only the control plane, skipping the detected lightweight baseline (metrics-server)")
+	cmd.Flags().BoolVar(&a.noMetricsServer, "no-metrics-server", false, "do not auto-ensure the metrics-server baseline (needed for HPA autoscaling and `kubectl top`)")
 	cmd.Flags().DurationVar(&a.apiReadyBudget, "k3s-api-timeout", defaultK3sAPIReadyBudget, "how long to wait for the k3s API to answer after install (a slow first-start on a small VPS needs a generous budget)")
 	return cmd
 }
@@ -525,12 +531,14 @@ func installBurrowdOnK3s(ctx context.Context, a bootstrapArgs, stdout, stderr io
 		return err
 	}
 	return runInstall(ctx, installArgs{
-		kubeContext:  kubeContext,
-		namespace:    a.namespace,
-		appNamespace: a.appNamespace,
-		image:        a.image,
-		kubeconfig:   a.kubeconfig,
-		wait:         a.wait,
+		kubeContext:     kubeContext,
+		namespace:       a.namespace,
+		appNamespace:    a.appNamespace,
+		image:           a.image,
+		kubeconfig:      a.kubeconfig,
+		wait:            a.wait,
+		minimal:         a.minimal,
+		noMetricsServer: a.noMetricsServer,
 		// Deploy burrowd and mint the scoped agent credential without the laptop-oriented local
 		// bookkeeping: no ~/.burrow handle, no "connect your agent" guidance. bootstrap prints the
 		// join-token block for the laptop instead (ADR-0044).

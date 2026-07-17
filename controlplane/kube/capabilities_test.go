@@ -70,9 +70,11 @@ func TestDetectCapabilitiesFullCluster(t *testing.T) {
 		storageClass("legacy", false),
 		node("node-1", "digitalocean://12345"),
 	)
-	// cert-manager is detected via API-group discovery (no RBAC); seed its group.
+	// cert-manager and metrics-server are detected via API-group discovery (no RBAC); seed their
+	// groups.
 	client.Resources = []*metav1.APIResourceList{
 		{GroupVersion: "cert-manager.io/v1"},
+		{GroupVersion: "metrics.k8s.io/v1beta1"},
 		{GroupVersion: "apps/v1"},
 	}
 
@@ -99,6 +101,9 @@ func TestDetectCapabilitiesFullCluster(t *testing.T) {
 	}
 	if !caps.CertManager.Present {
 		t.Errorf("cert-manager = %+v, want present (cert-manager.io group served)", caps.CertManager)
+	}
+	if !caps.MetricsServer.Present {
+		t.Errorf("metrics-server = %+v, want present (metrics.k8s.io group served)", caps.MetricsServer)
 	}
 	// DNS is filled by the engine from the registry, not the cluster probe.
 	if caps.DNS.Configured {
@@ -142,6 +147,9 @@ func TestDetectCapabilitiesBareMetal(t *testing.T) {
 	}
 	if caps.CertManager.Present {
 		t.Errorf("cert-manager should be absent, got %+v", caps.CertManager)
+	}
+	if caps.MetricsServer.Present {
+		t.Errorf("metrics-server should be absent (metrics.k8s.io not served), got %+v", caps.MetricsServer)
 	}
 }
 

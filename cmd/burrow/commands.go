@@ -6,6 +6,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -394,7 +395,7 @@ func newAutoscaleCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, formatAutoscale(res))
+			return emit(cmd.OutOrStdout(), o.json, res, formatAutoscale(cmd.OutOrStdout(), res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -410,7 +411,7 @@ func newAutoscaleCmd() *cobra.Command {
 // formatAutoscale renders the applied autoscaling shape for the human-readable result. When
 // metrics-server was not detected it appends the plain-language note the result carries (no
 // em-dashes: it is printed verbatim).
-func formatAutoscale(res client.AutoscaleResult) string {
+func formatAutoscale(w io.Writer, res client.AutoscaleResult) string {
 	target := fmt.Sprintf("%d%% CPU", res.CPUPercent)
 	if res.MemoryPercent > 0 {
 		target += fmt.Sprintf(" and %d%% memory", res.MemoryPercent)
@@ -422,7 +423,7 @@ func formatAutoscale(res client.AutoscaleResult) string {
 	s := fmt.Sprintf("set %s to autoscale between %d and %d replicas at %s in the %s environment",
 		res.App, res.MinReplicas, res.MaxReplicas, target, env)
 	if res.Warning != "" {
-		s += "\nNote: " + res.Warning
+		s += "\n" + note(w) + res.Warning
 	}
 	return s
 }

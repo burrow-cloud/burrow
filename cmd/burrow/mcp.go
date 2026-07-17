@@ -115,7 +115,8 @@ const claudeDenyKubectlRecommendation = "Recommended: keep every cluster change 
 
 // claudeDenyKubectlIgnoredNote is printed when both --no-harden and --deny-kubectl were passed:
 // --no-harden wins (Burrow manages no permissions), so --deny-kubectl has nothing to act on. No em-dashes.
-const claudeDenyKubectlIgnoredNote = "Note: --deny-kubectl was ignored because hardening is off " +
+// It carries no "Note:" label of its own — the shared note() helper adds the label and its ⚠️ marker.
+const claudeDenyKubectlIgnoredNote = "--deny-kubectl was ignored because hardening is off " +
 	"(--no-harden means you manage permissions yourself).\n"
 
 // mcpTryPrompt is appended after any successful install, giving the user a concrete first thing to
@@ -406,7 +407,7 @@ func (t claudeTool) install(w io.Writer) error {
 	// --no-harden wins over --deny-kubectl: it skips every Burrow-managed deny, so there is nothing for
 	// --deny-kubectl to act on. Say so rather than silently dropping the flag.
 	if !t.harden && t.denyKubectl {
-		fmt.Fprint(w, claudeDenyKubectlIgnoredNote)
+		fmt.Fprint(w, note(w)+claudeDenyKubectlIgnoredNote)
 	}
 
 	hardenChanged := false

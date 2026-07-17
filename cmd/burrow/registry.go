@@ -224,7 +224,7 @@ func resolveLoginCredentials(cmd *cobra.Command, host, username, password string
 		password = strings.TrimRight(string(b), "\r\n")
 	case password != "":
 		if interactive {
-			fmt.Fprintln(errOut, "warning: using --password/-p on the command line is insecure; prefer the interactive prompt or --password-stdin")
+			fmt.Fprintln(errOut, warning(errOut)+"using --password/-p on the command line is insecure; prefer the interactive prompt or --password-stdin")
 		}
 	case interactive:
 		p, err := readHidden(in, errOut, "Password (read:packages token): ")

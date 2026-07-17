@@ -372,7 +372,7 @@ func applyDetail(summary string) string {
 func writeIngressDone(w io.Writer, o ingressOptions) {
 	fmt.Fprintln(w, "\nDone. Ingress and TLS are set up.")
 	if o.email == "" {
-		fmt.Fprintln(w, "note: no --email set, so Let's Encrypt expiry and renewal-failure notices are off.")
+		fmt.Fprintln(w, note(w)+"no --email set, so Let's Encrypt expiry and renewal-failure notices are off.")
 		fmt.Fprintln(w, "  Add one anytime: burrow cluster ingress install --email <you@example.com>")
 	}
 	fmt.Fprintln(w, "\nExpose an app and request a certificate:")
@@ -447,8 +447,8 @@ func manifestVariantLabel(provider string) string {
 // costNotice explains the LoadBalancer path so the operator understands the tradeoff, not just the
 // price: a LoadBalancer is billable but highly available, because a cloud load balancer spreads
 // traffic across the nodes and the site survives a worker-node failure (ADR-0043).
-func costNotice() string {
-	return "Note: a LoadBalancer is billable (a cloud load balancer, priced by your provider, for " +
+func costNotice(w io.Writer) string {
+	return note(w) + "a LoadBalancer is billable (a cloud load balancer, priced by your provider, for " +
 		"example roughly a low-double-digit dollars per month on DigitalOcean) but it spreads traffic " +
 		"across your nodes, so the site stays reachable when a worker node fails."
 }
@@ -457,12 +457,12 @@ func costNotice() string {
 // the mechanism, so a k3s or bare-metal operator is not warned about a cost that does not exist and
 // the install is not gated behind --approve (ADR-0043). The LoadBalancer Service is functionally the
 // same as on a cloud; only its backing — and therefore its price — differs.
-func freeLoadBalancerNotice(provider string) string {
+func freeLoadBalancerNotice(w io.Writer, provider string) string {
 	if provider == lbProviderMetalLB {
-		return "Note: this LoadBalancer is free: MetalLB assigns an address from its configured pool; " +
+		return note(w) + "this LoadBalancer is free: MetalLB assigns an address from its configured pool; " +
 			"there is no cloud load balancer to pay for."
 	}
-	return "Note: this LoadBalancer is free: servicelb (built into k3s) assigns this node's IP; there " +
+	return note(w) + "this LoadBalancer is free: servicelb (built into k3s) assigns this node's IP; there " +
 		"is no cloud load balancer to pay for."
 }
 
@@ -471,8 +471,8 @@ func freeLoadBalancerNotice(provider string) string {
 // a cloud it is a billable, highly available cloud load balancer; on k3s's servicelb or MetalLB it is
 // free (a node/pool IP, no cloud load balancer to pay for). The real apply detects which and applies
 // the cost disclosure and the --approve gate only to a billable cloud LB.
-func dryRunLoadBalancerNotice() string {
-	return "Note: whether this LoadBalancer is billable depends on your cluster's LoadBalancer " +
+func dryRunLoadBalancerNotice(w io.Writer) string {
+	return note(w) + "whether this LoadBalancer is billable depends on your cluster's LoadBalancer " +
 		"provider, resolved at apply time. On a cloud (for example DigitalOcean) it is a billable cloud " +
 		"load balancer (roughly a low-double-digit dollars per month) that is highly available across " +
 		"your nodes; on k3s servicelb or MetalLB it is free — it assigns a node or pool IP with no cloud " +
@@ -501,10 +501,10 @@ func writeIngressPlan(w io.Writer, o ingressOptions, expose, provider, manifest 
 	case hasNginx:
 		// No new LoadBalancer Service is provisioned, so print no LoadBalancer notice (issue #268).
 	case billableLoadBalancer(provider):
-		fmt.Fprintln(w, costNotice())
+		fmt.Fprintln(w, costNotice(w))
 		fmt.Fprintln(w)
 	default:
-		fmt.Fprintln(w, freeLoadBalancerNotice(provider))
+		fmt.Fprintln(w, freeLoadBalancerNotice(w, provider))
 		fmt.Fprintln(w)
 	}
 }
@@ -528,7 +528,7 @@ func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
 	}
 	fmt.Fprintf(w, "  - install cert-manager if absent: apply %s\n", certManagerManifest)
 	fmt.Fprintf(w, "  - apply this ClusterIssuer (%s):\n\n%s\n\n", o.acmeServer(), indent(issuer))
-	fmt.Fprintln(w, dryRunLoadBalancerNotice())
+	fmt.Fprintln(w, dryRunLoadBalancerNotice(w))
 }
 
 // confirmInstall gates the install after the plan is printed (ADR-0034 slice 2), branching on the

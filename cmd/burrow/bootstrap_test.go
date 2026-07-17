@@ -186,7 +186,7 @@ func TestEnsureK3sInstalledProceedsOnInstallerExitWhenAPIReady(t *testing.T) {
 	if !f.waited {
 		t.Error("WaitForAPI must be polled even after a non-zero installer exit")
 	}
-	if !strings.Contains(errb.String(), "warning") || !strings.Contains(errb.String(), "exit status 1") {
+	if !strings.Contains(errb.String(), "Warning:") || !strings.Contains(errb.String(), "exit status 1") {
 		t.Errorf("a tolerated installer exit should be logged as a warning carrying the exit, stderr:\n%s", errb.String())
 	}
 }
@@ -553,7 +553,7 @@ func TestBootstrapProceedsWhenInstallerExitsButAPIReady(t *testing.T) {
 	if !strings.Contains(out, "burrow join "+prefixForTest) {
 		t.Errorf("bootstrap must reach the deploy step and print the join line, stdout:\n%s", out)
 	}
-	if !strings.Contains(errb, "warning") {
+	if !strings.Contains(errb, "Warning:") {
 		t.Errorf("the tolerated installer exit should be logged as a warning, stderr:\n%s", errb)
 	}
 }

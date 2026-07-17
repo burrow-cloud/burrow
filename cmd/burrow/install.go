@@ -352,8 +352,8 @@ func recordEnvironment(ctx context.Context, a installArgs, cs kubernetes.Interfa
 	// without the credential, which a re-run can provision.
 	agentKubeconfig, agentContext, err := mintAgentCredentialFn(ctx, a, name, cs, stdout)
 	if err != nil {
-		fmt.Fprintf(stdout, "\nWarning: could not mint the scoped agent credential: %v\n"+
-			"The control plane is installed; re-run `burrow install` to provision it.\n", err)
+		fmt.Fprintf(stdout, "\n%scould not mint the scoped agent credential: %v\n"+
+			"The control plane is installed; re-run `burrow install` to provision it.\n", warning(stdout), err)
 	}
 
 	if err := addAndPinEnvironment(a, name, agentKubeconfig, agentContext); err != nil {

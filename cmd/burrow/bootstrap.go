@@ -511,8 +511,8 @@ func ensureK3sInstalled(ctx context.Context, inst k3sInstaller, cmd k3sInstallCo
 			"Diagnose with `journalctl -xeu k3s.service` and `systemctl status k3s`", err)
 	}
 	if installErr != nil {
-		fmt.Fprintf(stderr, "warning: the k3s installer reported a non-zero exit (a slow first-start can time out "+
-			"systemd's readiness wait); the k3s API came up, continuing. Installer exit: %v\n", installErr)
+		fmt.Fprintf(stderr, "%sthe k3s installer reported a non-zero exit (a slow first-start can time out "+
+			"systemd's readiness wait); the k3s API came up, continuing. Installer exit: %v\n", warning(stderr), installErr)
 	}
 	return nil
 }

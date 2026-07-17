@@ -98,12 +98,12 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 func backfillAgentCredential(ctx context.Context, kubeconfig, namespace string, stdout io.Writer) {
 	ctxName, err := connect.TargetContextName(kubeconfig, "")
 	if err != nil {
-		fmt.Fprintf(stdout, "\nWarning: could not resolve the current kube context to backfill the agent credential: %v\n", err)
+		fmt.Fprintf(stdout, "\n%scould not resolve the current kube context to backfill the agent credential: %v\n", warning(stdout), err)
 		return
 	}
 	cfg, err := localconfig.Load()
 	if err != nil {
-		fmt.Fprintf(stdout, "\nWarning: could not load the local config to backfill the agent credential: %v\n", err)
+		fmt.Fprintf(stdout, "\n%scould not load the local config to backfill the agent credential: %v\n", warning(stdout), err)
 		return
 	}
 	env, ok := cfg.LookupByContext(ctxName)
@@ -113,12 +113,12 @@ func backfillAgentCredential(ctx context.Context, kubeconfig, namespace string, 
 	}
 	path, agentContext, err := joinAgentCredentialFn(ctx, kubeconfig, ctxName, namespace, env.Name)
 	if err != nil {
-		fmt.Fprintf(stdout, "\nWarning: could not backfill the scoped agent credential for environment %q: %v\n", env.Name, err)
+		fmt.Fprintf(stdout, "\n%scould not backfill the scoped agent credential for environment %q: %v\n", warning(stdout), env.Name, err)
 		return
 	}
 	cfg.SetAgentCredential(env.Name, path, agentContext)
 	if err := cfg.Save(); err != nil {
-		fmt.Fprintf(stdout, "\nWarning: backfilled the agent credential but could not save the local config: %v\n", err)
+		fmt.Fprintf(stdout, "\n%sbackfilled the agent credential but could not save the local config: %v\n", warning(stdout), err)
 		return
 	}
 	fmt.Fprintf(stdout, "Backfilled the scoped agent credential for environment %q.\n", env.Name)

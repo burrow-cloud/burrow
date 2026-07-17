@@ -13,12 +13,13 @@ import (
 
 func fullCaps() client.ClusterCapabilities {
 	return client.ClusterCapabilities{
-		Ingress:      client.IngressCapability{Present: true, Classes: []string{"nginx"}},
-		Storage:      client.StorageCapability{DefaultPresent: true, DefaultClass: "do-block-storage", Classes: []string{"do-block-storage"}},
-		LoadBalancer: client.LoadBalancerCapability{Supported: true, Inferred: true},
-		CertManager:  client.CertManagerCapability{Present: false},
-		Provider:     client.ProviderCapability{Cloud: "digitalocean", Name: "DigitalOcean"},
-		DNS:          client.DNSCapability{Configured: false},
+		Ingress:       client.IngressCapability{Present: true, Classes: []string{"nginx"}},
+		Storage:       client.StorageCapability{DefaultPresent: true, DefaultClass: "do-block-storage", Classes: []string{"do-block-storage"}},
+		LoadBalancer:  client.LoadBalancerCapability{Supported: true, Inferred: true},
+		CertManager:   client.CertManagerCapability{Present: false},
+		MetricsServer: client.MetricsServerCapability{Present: true},
+		Provider:      client.ProviderCapability{Cloud: "digitalocean", Name: "DigitalOcean"},
+		DNS:           client.DNSCapability{Configured: false},
 	}
 }
 
@@ -35,7 +36,7 @@ func TestWriteClusterReport(t *testing.T) {
 
 func TestCapabilitySummary(t *testing.T) {
 	got := capabilitySummary(fullCaps())
-	want := "nginx IngressClass · default StorageClass do-block-storage · provider DigitalOcean · cert-manager not installed"
+	want := "nginx IngressClass · default StorageClass do-block-storage · provider DigitalOcean · cert-manager not installed · metrics-server present"
 	if got != want {
 		t.Errorf("summary = %q, want %q", got, want)
 	}
@@ -63,7 +64,7 @@ func TestCapabilitySummaryBareMetal(t *testing.T) {
 		Provider: client.ProviderCapability{},
 	}
 	got := capabilitySummary(caps)
-	for _, want := range []string{"no ingress controller", "no default StorageClass", "provider unknown", "cert-manager not installed"} {
+	for _, want := range []string{"no ingress controller", "no default StorageClass", "provider unknown", "cert-manager not installed", "metrics-server absent"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("summary %q missing %q", got, want)
 		}

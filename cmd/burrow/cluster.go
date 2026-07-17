@@ -21,12 +21,13 @@ import (
 // and the `burrow cluster` view.
 func toClientCaps(c controlplane.ClusterCapabilities) client.ClusterCapabilities {
 	return client.ClusterCapabilities{
-		Ingress:      client.IngressCapability{Present: c.Ingress.Present, Classes: c.Ingress.Classes},
-		Storage:      client.StorageCapability{DefaultPresent: c.Storage.DefaultPresent, DefaultClass: c.Storage.DefaultClass, Classes: c.Storage.Classes},
-		LoadBalancer: client.LoadBalancerCapability{Supported: c.LoadBalancer.Supported, Inferred: c.LoadBalancer.Inferred, Provider: c.LoadBalancer.Provider},
-		CertManager:  client.CertManagerCapability{Present: c.CertManager.Present},
-		Provider:     client.ProviderCapability{Cloud: c.Provider.Cloud, Name: c.Provider.Name},
-		DNS:          client.DNSCapability{Configured: c.DNS.Configured, Providers: c.DNS.Providers},
+		Ingress:       client.IngressCapability{Present: c.Ingress.Present, Classes: c.Ingress.Classes},
+		Storage:       client.StorageCapability{DefaultPresent: c.Storage.DefaultPresent, DefaultClass: c.Storage.DefaultClass, Classes: c.Storage.Classes},
+		LoadBalancer:  client.LoadBalancerCapability{Supported: c.LoadBalancer.Supported, Inferred: c.LoadBalancer.Inferred, Provider: c.LoadBalancer.Provider},
+		CertManager:   client.CertManagerCapability{Present: c.CertManager.Present},
+		MetricsServer: client.MetricsServerCapability{Present: c.MetricsServer.Present},
+		Provider:      client.ProviderCapability{Cloud: c.Provider.Cloud, Name: c.Provider.Name},
+		DNS:           client.DNSCapability{Configured: c.DNS.Configured, Providers: c.DNS.Providers},
 	}
 }
 
@@ -179,6 +180,7 @@ func writeClusterReport(w io.Writer, caps client.ClusterCapabilities) {
 	fmt.Fprintf(tw, "Storage\t%s\n", storageLine(caps.Storage))
 	fmt.Fprintf(tw, "Load balancer\t%s\n", loadBalancerLine(caps.LoadBalancer))
 	fmt.Fprintf(tw, "cert-manager\t%s\n", certManagerLine(caps.CertManager))
+	fmt.Fprintf(tw, "metrics-server\t%s\n", metricsServerLine(caps.MetricsServer))
 	fmt.Fprintf(tw, "Provider\t%s\n", providerLine(caps.Provider))
 	fmt.Fprintf(tw, "DNS\t%s\n", dnsLine(caps.DNS))
 	_ = tw.Flush()
@@ -229,6 +231,13 @@ func certManagerLine(c client.CertManagerCapability) string {
 	return "not installed"
 }
 
+func metricsServerLine(m client.MetricsServerCapability) string {
+	if m.Present {
+		return "serving the Metrics API (kubectl top, HPA autoscaling, utilization)"
+	}
+	return "not serving the Metrics API (install adds it as a baseline; needed for HPA autoscaling)"
+}
+
 func providerLine(p client.ProviderCapability) string {
 	if p.Name != "" {
 		return p.Name
@@ -272,6 +281,12 @@ func capabilitySummary(caps client.ClusterCapabilities) string {
 		parts = append(parts, "cert-manager installed")
 	} else {
 		parts = append(parts, "cert-manager not installed")
+	}
+
+	if caps.MetricsServer.Present {
+		parts = append(parts, "metrics-server present")
+	} else {
+		parts = append(parts, "metrics-server absent")
 	}
 
 	return strings.Join(parts, " · ")

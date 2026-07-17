@@ -381,12 +381,13 @@ func (c *Client) Audit(ctx context.Context, f AuditFilter) ([]AuditEntry, error)
 // LoadBalancer support, cert-manager, the cloud provider, and whether a DNS provider is configured.
 // It carries no secret value.
 type ClusterCapabilities struct {
-	Ingress      IngressCapability      `json:"ingress"`
-	Storage      StorageCapability      `json:"storage"`
-	LoadBalancer LoadBalancerCapability `json:"load_balancer"`
-	CertManager  CertManagerCapability  `json:"cert_manager"`
-	Provider     ProviderCapability     `json:"provider"`
-	DNS          DNSCapability          `json:"dns"`
+	Ingress       IngressCapability       `json:"ingress"`
+	Storage       StorageCapability       `json:"storage"`
+	LoadBalancer  LoadBalancerCapability  `json:"load_balancer"`
+	CertManager   CertManagerCapability   `json:"cert_manager"`
+	MetricsServer MetricsServerCapability `json:"metrics_server"`
+	Provider      ProviderCapability      `json:"provider"`
+	DNS           DNSCapability           `json:"dns"`
 }
 
 // IngressCapability reports the ingress-controller situation. Present is true only when an ingress
@@ -415,6 +416,13 @@ type LoadBalancerCapability struct {
 
 // CertManagerCapability reports whether cert-manager is installed (detected via its API group).
 type CertManagerCapability struct {
+	Present bool `json:"present"`
+}
+
+// MetricsServerCapability reports whether metrics-server is serving the Kubernetes Metrics API
+// (detected via the metrics.k8s.io API group). It powers `kubectl top`, HPA autoscaling, and the
+// utilization layer of capacity reporting.
+type MetricsServerCapability struct {
 	Present bool `json:"present"`
 }
 

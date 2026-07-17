@@ -80,7 +80,8 @@ func (p *Prober) DetectCapabilities(ctx context.Context) (controlplane.ClusterCa
 // DetectCapabilities reads a cluster's capabilities read-only over the given clientset (ADR-0034):
 // the ingress controller (a ready ingress-nginx controller Deployment) and its IngressClasses, the
 // default and all StorageClasses, the cloud
-// provider (from node providerIDs/labels), and cert-manager (via API-group discovery), and detects
+// provider (from node providerIDs/labels), cert-manager and metrics-server (via API-group
+// discovery), and detects
 // LoadBalancer support from whatever actually services LoadBalancers — a recognized cloud provider,
 // k3s's built-in servicelb, or MetalLB (ADR-0043). It performs only get/list reads and API-group
 // discovery — it never writes. It is a free function so the same detection runs whether driven by
@@ -118,6 +119,12 @@ func DetectCapabilities(ctx context.Context, client kubernetes.Interface) (contr
 		return controlplane.ClusterCapabilities{}, err
 	}
 	caps.CertManager = certManager
+
+	metricsServer, err := detectMetricsServer(client)
+	if err != nil {
+		return controlplane.ClusterCapabilities{}, err
+	}
+	caps.MetricsServer = metricsServer
 
 	return caps, nil
 }
@@ -341,4 +348,22 @@ func detectCertManager(client kubernetes.Interface) (controlplane.CertManagerCap
 		}
 	}
 	return controlplane.CertManagerCapability{}, nil
+}
+
+// detectMetricsServer reports whether metrics-server is serving the Kubernetes Metrics API by
+// looking for the metrics.k8s.io group in API-group discovery. Discovery needs no RBAC (ADR-0034):
+// the presence of the group means a metrics-server (or a vendor's equivalent on k3s, GKE, or AKS)
+// is registered. This is also how install detects a vendor-shipped copy so it does not install a
+// second one (ADR-0054 §1).
+func detectMetricsServer(client kubernetes.Interface) (controlplane.MetricsServerCapability, error) {
+	groups, err := client.Discovery().ServerGroups()
+	if err != nil {
+		return controlplane.MetricsServerCapability{}, fmt.Errorf("kube: discovering API groups: %w", err)
+	}
+	for _, g := range groups.Groups {
+		if g.Name == metricsAPIGroup {
+			return controlplane.MetricsServerCapability{Present: true}, nil
+		}
+	}
+	return controlplane.MetricsServerCapability{}, nil
 }

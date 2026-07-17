@@ -148,6 +148,12 @@ type installArgs struct {
 	dryRun       bool
 	wait         bool
 	verbose      bool
+	// minimal and noMetricsServer opt out of the detected lightweight baseline install/bootstrap
+	// ensures on top of the control plane (ADR-0054 §1). minimal skips every baseline add-on;
+	// noMetricsServer skips just metrics-server. metrics-server is the only baseline today, so the
+	// two currently coincide; minimal is the forward-looking "control plane only" switch.
+	minimal         bool
+	noMetricsServer bool
 	// clusterOnly runs the install for its cluster-side effects only (deploy burrowd, and mint the
 	// scoped burrow-agent credential via the manifests), skipping the laptop-oriented local
 	// bookkeeping: it records no ~/.burrow environment handle and prints no "connect your agent"
@@ -208,6 +214,8 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&a.dryRun, "dry-run", false, "print the manifests instead of applying them")
 	cmd.Flags().BoolVar(&a.wait, "wait", true, "wait for the control plane to become ready")
 	cmd.Flags().BoolVar(&a.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
+	cmd.Flags().BoolVar(&a.minimal, "minimal", false, "install only the control plane, skipping the detected lightweight baseline (metrics-server)")
+	cmd.Flags().BoolVar(&a.noMetricsServer, "no-metrics-server", false, "do not auto-ensure the metrics-server baseline (needed for HPA autoscaling and `kubectl top`)")
 	return cmd
 }
 
@@ -307,6 +315,16 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	// kubeconfig-side and print a one-line summary. The probe is read-only and best-effort — a
 	// failure here never fails a successful install, since the agent reads capabilities live anyway.
 	printCapabilitySummary(ctx, cs, stdout)
+
+	// Auto-ensure the lightweight, detected baseline on top of the control plane (ADR-0054 §1):
+	// metrics-server, so `app autoscale` (HPA), `kubectl top`, and utilization reporting behave the
+	// same on every cluster. It detects a vendor copy (k3s/GKE/AKS) and leaves it alone, installs the
+	// baseline where absent (EKS/DOKS/kind), and is opt-out via --minimal / --no-metrics-server. It is
+	// best-effort: a baseline hiccup must not fail an already-installed control plane.
+	if err := ensureMetricsServer(ctx, a.kubeconfig, a.kubeContext, cs, a.minimal || a.noMetricsServer, a.verbose, stdout, stderr); err != nil {
+		fmt.Fprintf(stdout, "\n%scould not ensure the metrics-server baseline: %v\n"+
+			"The control plane is installed; ensure it later with a metrics-server manifest, or re-run install.\n", warning(stdout), err)
+	}
 
 	// Cluster-only (bootstrap on the VPS): the cluster-side effects are done — burrowd deployed and
 	// the scoped burrow-agent credential minted by the manifests. Skip the laptop-oriented local

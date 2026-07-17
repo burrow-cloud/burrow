@@ -26,6 +26,10 @@ type ClusterCapabilities struct {
 	LoadBalancer LoadBalancerCapability `json:"load_balancer"`
 	// CertManager is whether cert-manager is installed, detected via its API group (its CRDs).
 	CertManager CertManagerCapability `json:"cert_manager"`
+	// MetricsServer is whether metrics-server is serving the Kubernetes Metrics API (metrics.k8s.io),
+	// detected via API-group discovery. It powers `kubectl top`, HPA CPU/memory autoscaling, and the
+	// utilization layer of capacity reporting; Burrow auto-ensures it as a baseline (ADR-0054 §1).
+	MetricsServer MetricsServerCapability `json:"metrics_server"`
 	// Provider is the detected cloud provider, inferred from node labels / providerID.
 	Provider ProviderCapability `json:"provider"`
 	// DNS is whether a DNS provider is configured in the registry (ADR-0023) — a control-plane
@@ -74,6 +78,14 @@ type LoadBalancerCapability struct {
 // cert-manager.io API group is served — i.e. its CRDs are installed — detected via API-group
 // discovery, which needs no RBAC.
 type CertManagerCapability struct {
+	Present bool `json:"present"`
+}
+
+// MetricsServerCapability reports whether metrics-server is serving the Kubernetes Metrics API.
+// Present is true when the metrics.k8s.io API group is served — i.e. a metrics-server (or a
+// vendor's equivalent on k3s, GKE, or AKS) is registered — detected via API-group discovery, which
+// needs no RBAC.
+type MetricsServerCapability struct {
 	Present bool `json:"present"`
 }
 

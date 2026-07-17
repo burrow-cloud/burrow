@@ -9,6 +9,7 @@ import (
 	"crypto/sha1"
 	_ "embed"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
 )
 
@@ -155,6 +157,7 @@ type clusterRegistryOptions struct {
 	kubeconfig   string
 	host         string
 	verbose      bool
+	confirm      bool
 }
 
 // newClusterRegistryCmd is a setup command (not part of `burrow install`, ADR-0054): it installs,
@@ -218,7 +221,8 @@ func newClusterRegistryCmd() *cobra.Command {
 		},
 	}
 	install.Flags().StringVar(&o.host, "host", "", "public hostname the registry is pulled at, e.g. registry.example.com (required)")
-	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
+	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies and the full wiring detail instead of a summary")
+	install.Flags().BoolVar(&o.confirm, "confirm", false, "confirm the DNS write the dns.write guardrail holds by default, so the registry's public DNS record is created when a provider is configured")
 
 	uninstall := &cobra.Command{
 		Use:   "uninstall",
@@ -346,8 +350,14 @@ func runClusterRegistryInstall(ctx context.Context, o clusterRegistryOptions, st
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, "Installing the in-cluster registry:")
-	if err := applyFn(ctx, o.kubeconfig, "", manifests, o.verbose, stdout, stderr); err != nil {
+	// The per-resource apply chatter and the wiring lines are operational detail. Show them only under
+	// --verbose; otherwise discard the apply progress so the default output is a scannable summary (#272).
+	applyOut := io.Writer(io.Discard)
+	if o.verbose {
+		fmt.Fprintln(stdout, "Installing the in-cluster registry:")
+		applyOut = stdout
+	}
+	if err := applyFn(ctx, o.kubeconfig, "", manifests, o.verbose, applyOut, stderr); err != nil {
 		return err
 	}
 
@@ -362,7 +372,9 @@ func runClusterRegistryInstall(ctx context.Context, o clusterRegistryOptions, st
 	if err := registryLogin(ctx, cs, appNS, o.host, registryPullUsername, password); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Installed a pull credential for %s in the app namespace (%s).\n", o.host, appNS)
+	if o.verbose {
+		fmt.Fprintf(stdout, "Installed a pull credential for %s in the app namespace (%s).\n", o.host, appNS)
+	}
 
 	// Wire burrowd: the internal endpoint the build pushes to, and the public host the deploy
 	// references so the node pulls through the ingress. burrowd is already running (install deployed
@@ -373,12 +385,132 @@ func runClusterRegistryInstall(ctx context.Context, o clusterRegistryOptions, st
 	if err := setBurrowdEnv(ctx, cs, o.namespace, buildPublicRegistryEnv, o.host); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Wired burrowd's build push endpoint to %s and its public pull host to %s.\n", connect.RegistryEndpoint(o.namespace), o.host)
+	if o.verbose {
+		fmt.Fprintf(stdout, "Wired burrowd's build push endpoint to %s and its public pull host to %s.\n", connect.RegistryEndpoint(o.namespace), o.host)
+	}
 
-	fmt.Fprintln(stdout, "\nDone. The in-cluster registry is installed. An in-cluster build with no explicit target")
-	fmt.Fprintf(stdout, "now pushes to the internal endpoint and deploys by %s; external registries remain fully\n", o.host)
-	fmt.Fprintln(stdout, "supported. The TLS certificate can take a few minutes to issue — check `burrow cluster registry`.")
+	// The condensed success view (#272): a clean success line, the push-vs-pull endpoints the user
+	// needs, then the DNS and TLS follow-ups. The explainer about zero-target builds and external
+	// registries is operational detail kept behind --verbose.
+	fmt.Fprintf(stdout, "%s Registry installed at https://%s\n", okMark(stdout), o.host)
+	fmt.Fprintf(stdout, "  Push (in-cluster, plain HTTP): %s\n", connect.RegistryEndpoint(o.namespace))
+	fmt.Fprintf(stdout, "  Pull (public, over TLS):       %s\n", o.host)
+	if o.verbose {
+		fmt.Fprintf(stdout, "  An in-cluster build with no explicit target now pushes to the internal endpoint and\n"+
+			"  deploys by %s; external registries remain fully supported.\n", o.host)
+	}
+
+	// Point the registry's public host at the cluster ingress: create the record automatically through
+	// the guarded provider path when a DNS provider is configured, else print the record to add by hand
+	// (#273). A DNS problem does not fail the install — the registry itself is already up.
+	provisionRegistryDNS(ctx, o, cs, stdout, stderr)
+
+	fmt.Fprintln(stdout, note(stdout)+"the TLS certificate can take a few minutes to issue — run `burrow cluster registry` to check.")
 	return nil
+}
+
+// registryDNSClient is the slice of the control-plane client `burrow cluster registry install` uses to
+// point the registry's public host at the cluster ingress through the guarded provider path (ADR-0006,
+// ADR-0018): listing the configured providers and creating the record. burrowd holds the provider token
+// and is the only thing that calls the vendor; this command never touches the vendor directly. A small
+// interface so tests substitute a fake without a live control plane.
+type registryDNSClient interface {
+	Providers(ctx context.Context) ([]client.Provider, error)
+	AddDomain(ctx context.Context, host, provider, address, app string, confirm bool) (client.DomainResult, error)
+}
+
+// registryDNSClientFn builds the control-plane client the DNS step drives. install runs with the
+// developer's kubeconfig, so it auto-connects to burrowd the same way `burrow domain add` does (reading
+// the API token from the install Secret). It is a package var so tests inject a fake.
+var registryDNSClientFn = func(ctx context.Context, o clusterRegistryOptions) (registryDNSClient, error) {
+	co := &commonOpts{kubeconfig: o.kubeconfig, namespace: o.namespace}
+	return co.client(ctx)
+}
+
+// provisionRegistryDNS points the registry's public host at the cluster ingress. When a DNS provider is
+// configured it creates the record automatically through burrowd's guarded dns.write path (ADR-0006), so
+// the Let's Encrypt certificate issues with no manual step (#273); when none is configured — or the write
+// is held for confirmation, or fails — it prints the record for the user to add by hand. It never fails
+// the install: the registry is already up, and pointing DNS at it is a follow-on the user can complete
+// later. Advisory output uses the shared note/warning helpers (issue #271).
+func provisionRegistryDNS(ctx context.Context, o clusterRegistryOptions, cs kubernetes.Interface, stdout, stderr io.Writer) {
+	address, _ := ingressLoadBalancerAddress(ctx, cs)
+
+	dnsClient, err := registryDNSClientFn(ctx, o)
+	if err != nil {
+		printManualDNSNote(stdout, o.host, address)
+		return
+	}
+	providers, err := dnsClient.Providers(ctx)
+	if err != nil {
+		printManualDNSNote(stdout, o.host, address)
+		return
+	}
+	if !hasDNSProvider(providers) {
+		printManualDNSNote(stdout, o.host, address)
+		return
+	}
+	// A provider is configured, but the record needs an address to point at. If the ingress has not been
+	// assigned one yet, name the manual follow-up rather than calling AddDomain with an empty address.
+	if address == "" {
+		fmt.Fprintf(stdout, "%sa DNS provider is configured, but the cluster ingress has no external address yet; once it does, run `burrow domain add %s --app <exposed-app>` (or pass --address).\n", note(stdout), o.host)
+		return
+	}
+	res, err := dnsClient.AddDomain(ctx, o.host, "", address, "", o.confirm)
+	if err != nil {
+		var apiErr *client.APIError
+		if errors.As(err, &apiErr) && apiErr.NeedsConfirmation {
+			fmt.Fprintf(stdout, "%screating the DNS record for %s is held by the dns.write guardrail; re-run with --confirm to create it, or point %s at %s yourself.\n", note(stdout), o.host, o.host, address)
+			return
+		}
+		fmt.Fprintf(stderr, "%scould not create the DNS record for %s automatically (%v); point it at %s yourself.\n", warning(stderr), o.host, err, address)
+		return
+	}
+	fmt.Fprintf(stdout, "%s DNS record created: %s → %s (%s) via %s\n", okMark(stdout), res.Host, res.Address, res.Type, res.Provider)
+}
+
+// printManualDNSNote tells the user to create the registry's DNS record by hand — the fallback when no
+// DNS provider is configured (#273). It names the ingress address to point at when it is known.
+func printManualDNSNote(stdout io.Writer, host, address string) {
+	at := "your cluster's ingress load balancer"
+	if address != "" {
+		at = fmt.Sprintf("%s (%s)", at, address)
+	}
+	fmt.Fprintf(stdout, "%spoint %s at %s so nodes can pull and the TLS certificate can issue. Configure a DNS provider (`burrow config provider add`) to have this done automatically.\n", note(stdout), host, at)
+}
+
+// hasDNSProvider reports whether any configured provider serves DNS.
+func hasDNSProvider(providers []client.Provider) bool {
+	for _, p := range providers {
+		for _, c := range p.Capabilities {
+			if c == "dns" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ingressLoadBalancerAddress returns the cluster ingress's external address — the IP or hostname the
+// ingress-nginx controller's LoadBalancer Service was assigned — so the registry's DNS record can point
+// at it. It returns an empty string (not an error) when no address has been assigned yet, so the caller
+// can fall back to the manual note.
+func ingressLoadBalancerAddress(ctx context.Context, cs kubernetes.Interface) (string, error) {
+	svcs, err := cs.CoreV1().Services(metav1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: ingressNginxControllerSelector})
+	if err != nil {
+		return "", fmt.Errorf("reading the ingress controller service address: %w", err)
+	}
+	for i := range svcs.Items {
+		for _, lb := range svcs.Items[i].Status.LoadBalancer.Ingress {
+			if lb.IP != "" {
+				return lb.IP, nil
+			}
+			if lb.Hostname != "" {
+				return lb.Hostname, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // runClusterRegistryUninstall removes the in-cluster registry: it deletes the registry resources,

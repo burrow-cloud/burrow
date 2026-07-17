@@ -20,8 +20,59 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
 )
+
+// fakeRegistryDNS is a substitute registryDNSClient: it reports a fixed set of configured providers and
+// records the AddDomain calls the registry install makes, so a test can assert the guarded DNS write
+// happens (or does not) without a live control plane.
+type fakeRegistryDNS struct {
+	providers []client.Provider
+	result    client.DomainResult
+	err       error
+	added     []addDomainCall
+}
+
+type addDomainCall struct {
+	host, provider, address, app string
+	confirm                      bool
+}
+
+func (f *fakeRegistryDNS) Providers(context.Context) ([]client.Provider, error) {
+	return f.providers, nil
+}
+
+func (f *fakeRegistryDNS) AddDomain(_ context.Context, host, provider, address, app string, confirm bool) (client.DomainResult, error) {
+	f.added = append(f.added, addDomainCall{host, provider, address, app, confirm})
+	if f.err != nil {
+		return client.DomainResult{}, f.err
+	}
+	return f.result, nil
+}
+
+// stubRegistryDNSClient substitutes the DNS-client seam with the given fake and restores it on cleanup,
+// so install's DNS step never reaches a live burrowd.
+func stubRegistryDNSClient(t *testing.T, f registryDNSClient) {
+	t.Helper()
+	orig := registryDNSClientFn
+	registryDNSClientFn = func(context.Context, clusterRegistryOptions) (registryDNSClient, error) { return f, nil }
+	t.Cleanup(func() { registryDNSClientFn = orig })
+}
+
+// ingressLBServiceFixture returns the ingress-nginx controller LoadBalancer Service assigned an external
+// address, so ingressLoadBalancerAddress has an address to point the registry's DNS record at.
+func ingressLBServiceFixture(address string) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ingress-nginx-controller",
+			Namespace: "ingress-nginx",
+			Labels:    map[string]string{"app.kubernetes.io/name": "ingress-nginx", "app.kubernetes.io/component": "controller"},
+		},
+		Spec:   corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer},
+		Status: corev1.ServiceStatus{LoadBalancer: corev1.LoadBalancerStatus{Ingress: []corev1.LoadBalancerIngress{{IP: address}}}},
+	}
+}
 
 // TestRenderRegistryManifest asserts the standalone in-cluster registry manifest (ADR-0054) renders
 // Zot's PVC, its config with garbage collection, a Deployment on the pinned image, an INTERNAL
@@ -236,6 +287,7 @@ func TestClusterRegistryInstall(t *testing.T) {
 	cs := fake.NewSimpleClientset(objs...)
 	stubClusterRegistryClientset(t, cs)
 	stubClusterIssuerPresent(t, true)
+	stubRegistryDNSClient(t, &fakeRegistryDNS{}) // no DNS provider configured
 
 	var appliedManifests string
 	origApply := applyFn
@@ -277,6 +329,153 @@ func TestClusterRegistryInstall(t *testing.T) {
 	}
 	if got := burrowdEnvValue(t, cs, ns, buildPublicRegistryEnv); got != host {
 		t.Errorf("%s = %q, want the public host %q", buildPublicRegistryEnv, got, host)
+	}
+}
+
+// installFixtureClientset returns a fake clientset with the ingress stack, burrowd, and the app
+// namespace's default ServiceAccount present — the objects an install run needs to reach the output and
+// DNS stages. Extra objects (e.g. an ingress LoadBalancer Service) are appended.
+func installFixtureClientset(ns string, extra ...runtime.Object) *fake.Clientset {
+	objs := append(ingressStackFixtures(), burrowdDeploymentFixture(ns), defaultSAFixture("burrow-apps"))
+	objs = append(objs, extra...)
+	return fake.NewSimpleClientset(objs...)
+}
+
+// TestClusterRegistryInstallCondensedOutput asserts the default (non-verbose) install prints the
+// condensed view (#272): a clean success line, the push-vs-pull endpoints, and the TLS note — and none
+// of the verbose wiring chatter.
+func TestClusterRegistryInstallCondensedOutput(t *testing.T) {
+	ns := connect.DefaultNamespace
+	const host = "registry.example.com"
+	cs := installFixtureClientset(ns)
+	stubClusterRegistryClientset(t, cs)
+	stubClusterIssuerPresent(t, true)
+	stubRegistryDNSClient(t, &fakeRegistryDNS{}) // no DNS provider configured
+	origApply := applyFn
+	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+	t.Cleanup(func() { applyFn = origApply })
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host}, &out, &errb); err != nil {
+		t.Fatalf("cluster registry install: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	for _, want := range []string{
+		"Registry installed at https://" + host, // the clean success line
+		"Push (in-cluster, plain HTTP): " + connect.RegistryEndpoint(ns),
+		"Pull (public, over TLS):       " + host,
+		"the TLS certificate can take a few minutes to issue", // the prominent TLS note
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("condensed install output missing %q:\n%s", want, s)
+		}
+	}
+	// The verbose-only wiring chatter must be suppressed by default.
+	for _, unwanted := range []string{
+		"Installing the in-cluster registry:",
+		"Wired burrowd's build push endpoint",
+		"external registries remain fully supported",
+		"Installed a pull credential",
+	} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("default output must not contain the verbose detail %q:\n%s", unwanted, s)
+		}
+	}
+}
+
+// TestClusterRegistryInstallVerbose asserts --verbose restores the operational detail behind the
+// condensed default (#272): the wiring lines and the zero-target-build explainer.
+func TestClusterRegistryInstallVerbose(t *testing.T) {
+	ns := connect.DefaultNamespace
+	const host = "registry.example.com"
+	cs := installFixtureClientset(ns)
+	stubClusterRegistryClientset(t, cs)
+	stubClusterIssuerPresent(t, true)
+	stubRegistryDNSClient(t, &fakeRegistryDNS{})
+	origApply := applyFn
+	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+	t.Cleanup(func() { applyFn = origApply })
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host, "--verbose"}, &out, &errb); err != nil {
+		t.Fatalf("cluster registry install --verbose: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	for _, want := range []string{
+		"Installing the in-cluster registry:",
+		"Wired burrowd's build push endpoint",
+		"external registries remain fully supported",
+		"Registry installed at https://" + host, // the success line still prints
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("verbose install output missing %q:\n%s", want, s)
+		}
+	}
+}
+
+// TestClusterRegistryInstallCreatesDNSRecord asserts that, with a DNS provider configured and the ingress
+// assigned an external address, install creates the registry's public DNS record through the guarded
+// provider seam (#273), forwarding --confirm and the ingress address.
+func TestClusterRegistryInstallCreatesDNSRecord(t *testing.T) {
+	ns := connect.DefaultNamespace
+	const host = "registry.example.com"
+	const lbAddr = "203.0.113.10"
+	cs := installFixtureClientset(ns, ingressLBServiceFixture(lbAddr))
+	stubClusterRegistryClientset(t, cs)
+	stubClusterIssuerPresent(t, true)
+	origApply := applyFn
+	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+	t.Cleanup(func() { applyFn = origApply })
+
+	dns := &fakeRegistryDNS{
+		providers: []client.Provider{{Name: "digitalocean", Type: "digitalocean", Capabilities: []string{"dns"}}},
+		result:    client.DomainResult{Host: host, Provider: "digitalocean", Type: "A", Address: lbAddr},
+	}
+	stubRegistryDNSClient(t, dns)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host, "--confirm"}, &out, &errb); err != nil {
+		t.Fatalf("cluster registry install: %v\n%s", err, errb.String())
+	}
+	if len(dns.added) != 1 {
+		t.Fatalf("install must create exactly one DNS record via the provider seam, made %d calls: %+v", len(dns.added), dns.added)
+	}
+	got := dns.added[0]
+	if got.host != host || got.address != lbAddr || !got.confirm {
+		t.Errorf("AddDomain call = %+v, want host=%s address=%s confirm=true", got, host, lbAddr)
+	}
+	s := out.String()
+	if !strings.Contains(s, "DNS record created: "+host+" → "+lbAddr+" (A) via digitalocean") {
+		t.Errorf("install must report the created DNS record:\n%s", s)
+	}
+}
+
+// TestClusterRegistryInstallNoProviderManualNote asserts that with no DNS provider configured, install
+// prints the manual-record note (naming the ingress address to point at) and makes no DNS write (#273).
+func TestClusterRegistryInstallNoProviderManualNote(t *testing.T) {
+	ns := connect.DefaultNamespace
+	const host = "registry.example.com"
+	const lbAddr = "203.0.113.10"
+	cs := installFixtureClientset(ns, ingressLBServiceFixture(lbAddr))
+	stubClusterRegistryClientset(t, cs)
+	stubClusterIssuerPresent(t, true)
+	origApply := applyFn
+	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+	t.Cleanup(func() { applyFn = origApply })
+
+	dns := &fakeRegistryDNS{} // no providers
+	stubRegistryDNSClient(t, dns)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host}, &out, &errb); err != nil {
+		t.Fatalf("cluster registry install: %v\n%s", err, errb.String())
+	}
+	if len(dns.added) != 0 {
+		t.Errorf("install must make no DNS write with no provider configured, made: %+v", dns.added)
+	}
+	s := out.String()
+	if !strings.Contains(s, "point "+host+" at your cluster's ingress load balancer ("+lbAddr+")") {
+		t.Errorf("install must print the manual-record note naming the ingress address:\n%s", s)
 	}
 }
 

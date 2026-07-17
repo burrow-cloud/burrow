@@ -1,0 +1,72 @@
+name: Builder image
+
+# Builds and publishes ghcr.io/<owner>/burrow-builder — the image the in-cluster build Job's
+# build container runs (controlplane/kube/build.go; ADR-0053 §4), which today is hand-built and
+# unreproducible (#281). A v* tag push publishes the version tag and `latest`; a manual dispatch
+# publishes a chosen tag to test a build before cutting a release; a pull request that touches
+# the builder image definition builds it *without* pushing, so the Dockerfile is validated on
+# every change without minting an image. Mirrors the burrowd publish shape in release.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (e.g. v0.2.2 or a test tag)"
+        required: true
+        default: latest
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "images/burrow-builder/**"
+      - ".github/workflows/builder-image.yml"
+
+permissions:
+  contents: read
+  packages: write # push the image to GHCR
+
+jobs:
+  build:
+    name: build and push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Push on a tag or a manual dispatch; a pull request only validates that the image builds.
+      - name: log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/burrow-builder
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=ref,event=pr
+
+      - name: build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: images/burrow-builder
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: summary
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "Published ghcr.io/${{ github.repository_owner }}/burrow-builder:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "If this is the first publish, make the package public in GitHub > Packages so clusters can pull it anonymously." >> "$GITHUB_STEP_SUMMARY"

@@ -139,6 +139,17 @@ func (e *Engine) ClusterCapacity(ctx context.Context) (CapacityReport, error) {
 	return computeCapacity(state), nil
 }
 
+// BuildFitsState reports whether a typical in-cluster build (buildRequestCPUMillis /
+// buildRequestMemBytes — a quarter CPU and 512 MB) would currently schedule on the given resource
+// state, and returns the short plain-language verdict to surface when it would not. It runs the same
+// pure headroom math as ClusterCapacity, so the build pre-flight (issue #274) and the capacity report
+// (issue #275) can never disagree. The kube build adapter calls it before creating a build Job to
+// fail fast with an actionable message instead of leaving a Job stuck Pending.
+func BuildFitsState(state ClusterResourceState) (fits bool, verdict string) {
+	r := computeCapacity(state)
+	return r.BuildFits, r.Verdict
+}
+
 // computeCapacity is the pure headroom math: it aggregates pod requests onto their nodes, totals
 // the cluster, ranks the top CPU and memory consumers, and renders the build-fit verdict. It reads
 // no clock, cluster, or I/O — everything comes from state — so it is deterministic and unit-tested

@@ -24,9 +24,40 @@ import (
 const validDigest = "sha256:" +
 	"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+// stubCapacity is a controlplane.CapacityProber whose resource state (and optional error) are seeded
+// by the test, so the build's pre-flight (issue #274) can be driven without a cluster.
+type stubCapacity struct {
+	state controlplane.ClusterResourceState
+	err   error
+}
+
+func (s stubCapacity) ReadResourceState(context.Context) (controlplane.ClusterResourceState, error) {
+	return s.state, s.err
+}
+
+// ampleHeadroom is a resource state a build (¼ CPU / 512Mi) comfortably fits on: one large,
+// near-empty node.
+func ampleHeadroom() controlplane.ClusterResourceState {
+	return controlplane.ClusterResourceState{
+		Nodes: []controlplane.NodeAllocatable{{Name: "n1", CPUMillis: 4000, MemBytes: 8 << 30}},
+	}
+}
+
+// noHeadroom mirrors issue #274: a small node already committed past what a build needs, so no single
+// node has ¼ CPU and 512Mi free at once.
+func noHeadroom() controlplane.ClusterResourceState {
+	return controlplane.ClusterResourceState{
+		Nodes: []controlplane.NodeAllocatable{{Name: "n1", CPUMillis: 1000, MemBytes: 1 << 30}},
+		Pods: []controlplane.PodRequest{
+			{Namespace: "kube-system", Name: "overhead", Node: "n1", CPUMillis: 900, MemBytes: 900 << 20},
+		},
+	}
+}
+
 // buildFakeSucceeding returns a fake clientset whose build Job is observed Succeeded on Get, plus a
 // terminated pod carrying digest in its termination message so the adapter can read it back. It also
-// records every created Job into created.
+// records every created Job into created. The pod is seeded in the dedicated build namespace, where
+// the adapter reads it back (issue #278).
 func buildFakeSucceeding(t *testing.T, source controlplane.SourceRef, target, digest string) (*fake.Clientset, *[]*batchv1.Job) {
 	t.Helper()
 	client := fake.NewSimpleClientset()
@@ -38,7 +69,7 @@ func buildFakeSucceeding(t *testing.T, source controlplane.SourceRef, target, di
 	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		name := a.(clienttesting.GetAction).GetName()
 		return true, &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "apps"},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: buildNamespace},
 			Status:     batchv1.JobStatus{Succeeded: 1},
 		}, nil
 	})
@@ -47,7 +78,7 @@ func buildFakeSucceeding(t *testing.T, source controlplane.SourceRef, target, di
 	jobName := buildJobName(source, target)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: jobName + "-abc", Namespace: "apps",
+			Name: jobName + "-abc", Namespace: buildNamespace,
 			Labels: map[string]string{nameLabel: jobName},
 		},
 		Status: corev1.PodStatus{
@@ -57,23 +88,24 @@ func buildFakeSucceeding(t *testing.T, source controlplane.SourceRef, target, di
 			}},
 		},
 	}
-	if _, err := client.CoreV1().Pods("apps").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+	if _, err := client.CoreV1().Pods(buildNamespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seed pod: %v", err)
 	}
 	return client, created
 }
 
-// TestBuildJobSpec asserts the build Job is a hardened, in-cluster clone-and-build in the app's own
-// namespace: an init container clones the git ref (the ref plumbed in as env, never source bytes),
-// the build container selects buildah-or-Buildpacks at runtime and pushes to the target, and both
-// carry the restricted PodSecurity floor and resource caps (ADR-0053 §3, §4, §7).
+// TestBuildJobSpec asserts the build Job is a hardened, in-cluster clone-and-build in the dedicated
+// burrow-builds namespace (issue #278): an init container clones the git ref (the ref plumbed in as
+// env, never source bytes), the build container selects buildah-or-Buildpacks at runtime and pushes
+// to the target, and both carry resource caps. The clone keeps the full restricted floor; the build
+// container's context is relaxed to run the rootless builder (ADR-0056) — asserted separately.
 func TestBuildJobSpec(t *testing.T) {
 	ctx := context.Background()
 	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1.2.3"}
 	const target = "reg.burrow.svc/acme/shop:1.2.3"
 	client, created := buildFakeSucceeding(t, source, target, validDigest)
 
-	b := NewBuilder(client, "apps")
+	b := NewBuilder(client)
 	digest, err := b.Build(ctx, source, target, false)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -87,8 +119,8 @@ func TestBuildJobSpec(t *testing.T) {
 	}
 	job := (*created)[0]
 
-	if job.Namespace != "apps" {
-		t.Errorf("job namespace = %q, want apps (the app's own namespace, ADR-0053 §4)", job.Namespace)
+	if job.Namespace != buildNamespace {
+		t.Errorf("job namespace = %q, want %q (the dedicated build namespace, issue #278)", job.Namespace, buildNamespace)
 	}
 	if !strings.HasPrefix(job.Name, "burrow-build-") {
 		t.Errorf("job name = %q, want a burrow-build- prefix", job.Name)
@@ -150,7 +182,7 @@ func TestBuildJobSpec(t *testing.T) {
 	// No source bytes anywhere in the Job — only the ref, repo, and target reference cross (ADR-0004).
 	assertNoSourceBytes(t, job)
 
-	// Pod-level restricted PodSecurity (ADR-0053 §7).
+	// Pod-level restricted PodSecurity (ADR-0053 §7): non-root, fixed UID, fsGroup, RuntimeDefault.
 	sc := pod.SecurityContext
 	if sc == nil {
 		t.Fatal("pod securityContext is nil, want the restricted floor")
@@ -168,20 +200,10 @@ func TestBuildJobSpec(t *testing.T) {
 		t.Error("pod fsGroup is unset, want the shared emptyDir group-writable")
 	}
 
-	// Container-level restricted floor + resource caps, on both the clone and the build container.
+	// Resource caps on both containers so a build cannot starve the node (ADR-0053 Consequences).
 	for _, c := range []corev1.Container{clone, build} {
-		csc := c.SecurityContext
-		if csc == nil {
+		if c.SecurityContext == nil {
 			t.Fatalf("container %q securityContext is nil", c.Name)
-		}
-		if csc.AllowPrivilegeEscalation == nil || *csc.AllowPrivilegeEscalation {
-			t.Errorf("container %q allows privilege escalation", c.Name)
-		}
-		if csc.ReadOnlyRootFilesystem == nil || !*csc.ReadOnlyRootFilesystem {
-			t.Errorf("container %q root filesystem is not read-only", c.Name)
-		}
-		if csc.Capabilities == nil || len(csc.Capabilities.Drop) == 0 || csc.Capabilities.Drop[0] != "ALL" {
-			t.Errorf("container %q does not drop ALL capabilities", c.Name)
 		}
 		if c.Resources.Limits.Cpu().IsZero() || c.Resources.Limits.Memory().IsZero() {
 			t.Errorf("container %q has no CPU/memory limit (a build must not starve the node)", c.Name)
@@ -202,6 +224,168 @@ func TestBuildJobSpec(t *testing.T) {
 	}
 }
 
+// TestBuildContainerSecurityContexts asserts the ADR-0056 split: the clone init container keeps the
+// full restricted §7 floor, while the build container is relaxed by exactly the minimal set rootless
+// buildah needs — Unconfined seccomp, SETUID/SETGID added (all others dropped), and privilege
+// escalation allowed — with the read-only root filesystem retained (issue #282).
+func TestBuildContainerSecurityContexts(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	if _, err := NewBuilder(client).Build(ctx, source, target, false); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	job := (*created)[0]
+	clone := job.Spec.Template.Spec.InitContainers[0].SecurityContext
+	build := job.Spec.Template.Spec.Containers[0].SecurityContext
+
+	// Clone keeps the tightest floor.
+	if clone.AllowPrivilegeEscalation == nil || *clone.AllowPrivilegeEscalation {
+		t.Error("clone container allows privilege escalation, want the restricted floor")
+	}
+	if clone.SeccompProfile != nil {
+		t.Errorf("clone container overrides seccomp (%v), want the pod-level RuntimeDefault floor", clone.SeccompProfile)
+	}
+	if clone.Capabilities == nil || len(clone.Capabilities.Add) != 0 {
+		t.Errorf("clone container adds capabilities %v, want none", clone.Capabilities)
+	}
+	if !hasCapability(clone.Capabilities.Drop, "ALL") {
+		t.Error("clone container does not drop ALL capabilities")
+	}
+
+	// Build is relaxed by exactly the ADR-0056 set — and no more.
+	if build.SeccompProfile == nil || build.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
+		t.Errorf("build seccompProfile = %v, want Unconfined so unshare(CLONE_NEWUSER) is permitted (ADR-0056)", build.SeccompProfile)
+	}
+	if build.AllowPrivilegeEscalation == nil || !*build.AllowPrivilegeEscalation {
+		t.Error("build allowPrivilegeEscalation is not true, so the setuid newuidmap/newgidmap helpers cannot run (ADR-0056)")
+	}
+	if build.Capabilities == nil {
+		t.Fatal("build container has no capabilities set")
+	}
+	if !hasCapability(build.Capabilities.Drop, "ALL") {
+		t.Error("build container does not drop ALL capabilities before adding the narrow set")
+	}
+	if !hasCapability(build.Capabilities.Add, "SETUID") || !hasCapability(build.Capabilities.Add, "SETGID") {
+		t.Errorf("build capabilities add = %v, want SETUID and SETGID (ADR-0056)", build.Capabilities.Add)
+	}
+	// The relaxation is bounded: nothing broader than SETUID/SETGID is granted, and the read-only
+	// root filesystem is kept.
+	for _, c := range build.Capabilities.Add {
+		if c != "SETUID" && c != "SETGID" {
+			t.Errorf("build adds capability %q beyond the minimal SETUID/SETGID set (ADR-0056)", c)
+		}
+	}
+	if build.ReadOnlyRootFilesystem == nil || !*build.ReadOnlyRootFilesystem {
+		t.Error("build container root filesystem is not read-only; the relaxation must keep this hardening (ADR-0056)")
+	}
+}
+
+// TestBuildEnsuresBuildNamespace asserts the dedicated build namespace is created before the Job so
+// a build never fails for want of its namespace (issue #278).
+func TestBuildEnsuresBuildNamespace(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+	client, _ := buildFakeSucceeding(t, source, target, validDigest)
+
+	if _, err := NewBuilder(client).Build(ctx, source, target, false); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if _, err := client.CoreV1().Namespaces().Get(ctx, buildNamespace, metav1.GetOptions{}); err != nil {
+		t.Errorf("build namespace %q was not created: %v", buildNamespace, err)
+	}
+}
+
+// TestBuildJobTTL asserts the Job carries ttlSecondsAfterFinished so BOTH succeeded and failed build
+// Jobs are reaped by the TTL controller and do not accumulate (issue #280).
+func TestBuildJobTTL(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	if _, err := NewBuilder(client).Build(ctx, source, target, false); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	ttl := (*created)[0].Spec.TTLSecondsAfterFinished
+	if ttl == nil {
+		t.Fatal("build Job has no ttlSecondsAfterFinished; failed Jobs would accumulate (issue #280)")
+	}
+	if *ttl != buildJobTTLSeconds {
+		t.Errorf("ttlSecondsAfterFinished = %d, want %d (3 days)", *ttl, buildJobTTLSeconds)
+	}
+}
+
+// TestBuildFailsFastWhenNoHeadroom asserts that when the capacity prober reports no schedulable room
+// for a build, the build is refused with an actionable error and NO Job is created — rather than a
+// Job that hangs Pending (issue #274).
+func TestBuildFailsFastWhenNoHeadroom(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	var created int
+	client.PrependReactor("create", "jobs", func(clienttesting.Action) (bool, runtime.Object, error) {
+		created++
+		return false, nil, nil
+	})
+
+	b := NewBuilder(client).WithCapacityProber(stubCapacity{state: noHeadroom()})
+	_, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false)
+	if err == nil {
+		t.Fatal("Build should fail fast when no node has room for the build")
+	}
+	if !strings.Contains(err.Error(), "cannot be scheduled") {
+		t.Errorf("error = %q, want it to say the build cannot be scheduled", err)
+	}
+	// The message must be actionable: name the shortfall and tell the user to add capacity.
+	if !strings.Contains(err.Error(), "Add a node") {
+		t.Errorf("error = %q, want an actionable 'add a node' remedy", err)
+	}
+	if created != 0 {
+		t.Errorf("created %d jobs, want 0 — nothing should be created when the build cannot schedule", created)
+	}
+}
+
+// TestBuildProceedsWithHeadroom asserts the pre-flight is a gate only when the build cannot fit: with
+// a prober reporting ample room, the build runs to completion as normal (issue #274).
+func TestBuildProceedsWithHeadroom(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	b := NewBuilder(client).WithCapacityProber(stubCapacity{state: ampleHeadroom()})
+	digest, err := b.Build(ctx, source, target, false)
+	if err != nil {
+		t.Fatalf("Build with ample headroom should proceed: %v", err)
+	}
+	if digest != validDigest {
+		t.Errorf("digest = %q, want %q", digest, validDigest)
+	}
+	if len(*created) != 1 {
+		t.Errorf("created %d jobs, want 1", len(*created))
+	}
+}
+
+// TestBuildCapacityReadErrorDoesNotBlock asserts a capacity read failure does NOT break the build:
+// the pre-flight is best-effort, so a misconfigured capacity read must not stop builds (issue #274).
+func TestBuildCapacityReadErrorDoesNotBlock(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	b := NewBuilder(client).WithCapacityProber(stubCapacity{err: errors.New("forbidden: cannot list nodes")})
+	if _, err := b.Build(ctx, source, target, false); err != nil {
+		t.Fatalf("a capacity read error must not block the build: %v", err)
+	}
+	if len(*created) != 1 {
+		t.Errorf("created %d jobs, want 1 (the build proceeds despite the capacity read error)", len(*created))
+	}
+}
+
 // TestBuildInsecurePush asserts that an insecure build (the plain-HTTP in-cluster registry, ADR-0054
 // §5) carries the TARGET_INSECURE=true hint the buildScript reads to push with --tls-verify=false.
 func TestBuildInsecurePush(t *testing.T) {
@@ -210,7 +394,7 @@ func TestBuildInsecurePush(t *testing.T) {
 	const target = "burrow-registry.burrow.svc.cluster.local:5000/shop:build"
 	client, created := buildFakeSucceeding(t, source, target, validDigest)
 
-	b := NewBuilder(client, "apps")
+	b := NewBuilder(client)
 	if _, err := b.Build(ctx, source, target, true); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -236,7 +420,7 @@ func TestBuildReadsDigestAndReaps(t *testing.T) {
 		return true, nil, nil
 	})
 
-	b := NewBuilder(client, "apps")
+	b := NewBuilder(client)
 	digest, err := b.Build(ctx, source, target, false)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
@@ -256,12 +440,12 @@ func TestBuildJobFailure(t *testing.T) {
 	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		name := a.(clienttesting.GetAction).GetName()
 		return true, &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "apps"},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: buildNamespace},
 			Status:     batchv1.JobStatus{Failed: 1},
 		}, nil
 	})
 
-	b := NewBuilder(client, "apps")
+	b := NewBuilder(client)
 	digest, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false)
 	if err == nil {
 		t.Fatal("Build should return an error when the Job fails")
@@ -279,13 +463,13 @@ func TestBuildSuccessNoDigest(t *testing.T) {
 	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		name := a.(clienttesting.GetAction).GetName()
 		return true, &batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "apps"},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: buildNamespace},
 			Status:     batchv1.JobStatus{Succeeded: 1},
 		}, nil
 	})
 	// No pod seeded, so there is no termination-log digest to read.
 
-	b := NewBuilder(client, "apps")
+	b := NewBuilder(client)
 	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false); err == nil {
 		t.Fatal("Build should error when a succeeded Job produced no digest")
 	}
@@ -298,13 +482,13 @@ func TestBuildContextCancel(t *testing.T) {
 	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		name := a.(clienttesting.GetAction).GetName()
 		// Never terminal: the Job is still running, so the wait loop must fall through to the select.
-		return true, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "apps"}}, nil
+		return true, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: buildNamespace}}, nil
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already canceled: the first loop turn must return ctx.Err()
 
-	b := NewBuilder(client, "apps")
+	b := NewBuilder(client)
 	if _, err := b.Build(ctx, controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}, "reg/acme/shop:1", false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Build err = %v, want context.Canceled", err)
 	}
@@ -326,12 +510,12 @@ func TestBuildValidatesInputBeforeAnyJob(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			client := fake.NewSimpleClientset()
-			b := NewBuilder(client, "apps")
+			b := NewBuilder(client)
 			_, err := b.Build(ctx, tc.source, tc.target, false)
 			if !errors.Is(err, controlplane.ErrInvalid) {
 				t.Fatalf("err = %v, want ErrInvalid", err)
 			}
-			jobs, _ := client.BatchV1().Jobs("apps").List(ctx, metav1.ListOptions{})
+			jobs, _ := client.BatchV1().Jobs(buildNamespace).List(ctx, metav1.ListOptions{})
 			if len(jobs.Items) != 0 {
 				t.Errorf("created %d jobs for invalid input, want 0", len(jobs.Items))
 			}
@@ -376,6 +560,16 @@ func envValue(env []corev1.EnvVar, name string) string {
 		}
 	}
 	return ""
+}
+
+// hasCapability reports whether caps contains want.
+func hasCapability(caps []corev1.Capability, want corev1.Capability) bool {
+	for _, c := range caps {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 // assertNoSourceBytes is a guard for the load-bearing invariant that no source code crosses into the

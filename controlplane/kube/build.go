@@ -63,6 +63,27 @@ const (
 	// GID so the shared emptyDir is group-writable and the clone and build steps can both write it.
 	buildUID int64 = 1000
 	buildGID int64 = 1000
+
+	// buildNamespace is the dedicated namespace the in-cluster build Job runs in — isolated from BOTH
+	// the app namespace (where running workloads and their Secrets live) and the control-plane
+	// namespace (where burrowd, Postgres, and the cluster credentials live). The build executes the
+	// user's own source build steps (Dockerfile directives, dependency-install scripts), so it must not
+	// share a namespace with running apps: a build in the app namespace could reach another app's
+	// Secret. A dedicated namespace scopes the build's RBAC and Secret reach to nothing but the build
+	// itself (issue #278, ADR-0053 §7), and is the natural seam for the commercial product's sandboxed
+	// executor (cloud ADR-0003). It is deliberately NOT the control-plane namespace — running build
+	// code there would let it reach burrowd's ServiceAccount, Secrets, and database, weaker isolation.
+	// Any imagePullSecret / registry-auth Secret a build needs is created HERE, never in the app
+	// namespace.
+	buildNamespace = "burrow-builds"
+
+	// buildJobTTLSeconds is how long a finished build Job (succeeded OR failed) lingers before
+	// Kubernetes' TTL-after-finished controller reaps it and its pods. The maintainer's chosen
+	// retention is a few days; three days keeps a recent failure inspectable without leaking Jobs
+	// forever. It is the UNIFORM backstop that fixes failed-Job accumulation (issue #280) — a success
+	// is still reaped immediately for a clean cluster, and the TTL covers the failures the wait loop
+	// deliberately leaves behind for diagnosis.
+	buildJobTTLSeconds int32 = 3 * 24 * 60 * 60 // 259200s = 3 days
 )
 
 // cloneScript clones the git reference INTO the cluster (ADR-0053 §3). The repository URL and ref
@@ -110,7 +131,7 @@ else
 fi`
 
 // BuildAdapter is the production controlplane.Builder: it runs an in-cluster build as a Kubernetes
-// Job in the app's own namespace (ADR-0053 §4). It clones the git reference inside the cluster,
+// Job in the dedicated burrow-builds namespace (issue #278, ADR-0053 §4). It clones the git reference inside the cluster,
 // builds with buildah or Cloud Native Buildpacks, pushes to the target registry reference, and
 // returns the resulting image digest — the immutable identity the resulting guarded deploy pins
 // (ADR-0053 §4). Isolation lives INSIDE this implementation, not on the seam (ADR-0053 §6): the OSS
@@ -125,27 +146,39 @@ type BuildAdapter struct {
 	namespace  string
 	gitImage   string
 	buildImage string
+	// capacity pre-flights scheduling headroom before a build Job is created so a build that cannot
+	// fit fails fast with an actionable message instead of hanging Pending (issue #274). It is
+	// OPTIONAL: nil means no pre-flight (the build proceeds), and it is wired in production via
+	// WithCapacityProber. Reusing the CapacityProber seam keeps the build check and the capacity
+	// report (issue #275) on the same headroom math.
+	capacity controlplane.CapacityProber
 }
 
-// NewBuilder returns a BuildAdapter over the given clientset and namespace (defaulting to
-// "default"). Tests inject a fake clientset; production injects a real one (see
-// NewBuilderFromConfig). The namespace is the app's own namespace: a build runs beside the workload
-// it will become, never in the control-plane namespace (ADR-0053 §4).
-func NewBuilder(client kubernetes.Interface, namespace string) *BuildAdapter {
-	if namespace == "" {
-		namespace = "default"
-	}
-	return &BuildAdapter{client: client, namespace: namespace, gitImage: defaultGitImage, buildImage: defaultBuildImage}
+// NewBuilder returns a BuildAdapter over the given clientset. The build always runs in the dedicated
+// burrow-builds namespace (issue #278), isolated from both the app and control-plane namespaces —
+// the caller no longer chooses it. Tests inject a fake clientset; production injects a real one (see
+// NewBuilderFromConfig).
+func NewBuilder(client kubernetes.Interface) *BuildAdapter {
+	return &BuildAdapter{client: client, namespace: buildNamespace, gitImage: defaultGitImage, buildImage: defaultBuildImage}
 }
 
-// NewBuilderFromConfig builds a BuildAdapter from a REST config and namespace — the production
-// wiring path, mirroring NewFromConfig for the Kubernetes seam.
-func NewBuilderFromConfig(cfg *rest.Config, namespace string) (*BuildAdapter, error) {
+// NewBuilderFromConfig builds a BuildAdapter from a REST config — the production wiring path,
+// mirroring NewFromConfig for the Kubernetes seam.
+func NewBuilderFromConfig(cfg *rest.Config) (*BuildAdapter, error) {
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kube: building clientset: %w", err)
 	}
-	return NewBuilder(client, namespace), nil
+	return NewBuilder(client), nil
+}
+
+// WithCapacityProber enables the pre-build scheduling-headroom check (issue #274): before creating a
+// build Job, the adapter reads the cluster's capacity through the prober and refuses with an
+// actionable error when no node has room for the build's request. A nil prober (the default) leaves
+// the check off and the build proceeds. Returns the adapter for chaining.
+func (b *BuildAdapter) WithCapacityProber(p controlplane.CapacityProber) *BuildAdapter {
+	b.capacity = p
+	return b
 }
 
 // WithBuildImage overrides the build image (the buildah + Buildpacks bundle). An empty value leaves
@@ -180,6 +213,28 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 		return "", fmt.Errorf("kube: build: target image reference is empty: %w", controlplane.ErrInvalid)
 	}
 
+	// Fail fast when the build cannot schedule (issue #274). A build pod requests a quarter CPU /
+	// 512Mi (buildResources); on a fully-committed small node — common on the cheap self-host ICP,
+	// where platform overhead alone can exhaust a 1-vCPU/2-GB node — the Job would otherwise sit
+	// Pending forever behind an obscure FailedScheduling event. Pre-flight the same scheduling-headroom
+	// math the capacity surface uses (issue #275) and refuse with the plain-language verdict instead.
+	// The check is best-effort: it runs only when a prober is wired, and a read error does NOT block
+	// the build (a misconfigured capacity read must not break builds) — only a definitive "no node has
+	// room" verdict stops it before any Job is created.
+	if b.capacity != nil {
+		if state, err := b.capacity.ReadResourceState(ctx); err == nil {
+			if fits, verdict := controlplane.BuildFitsState(state); !fits {
+				return "", fmt.Errorf("kube: in-cluster build cannot be scheduled: %s", verdict)
+			}
+		}
+	}
+
+	// The build runs in the dedicated burrow-builds namespace (issue #278). Create it if absent before
+	// the Job, since the build namespace is not the app namespace burrowd already provisions.
+	if err := b.ensureNamespace(ctx); err != nil {
+		return "", err
+	}
+
 	name := buildJobName(source, targetImage)
 	job := b.buildJob(name, source, targetImage, insecure)
 	jobs := b.client.BatchV1().Jobs(b.namespace)
@@ -194,7 +249,8 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 			return "", fmt.Errorf("kube: reading build job %q: %w", name, err)
 		}
 		if j.Status.Failed > 0 {
-			// Leave the Job (and its pod logs) for diagnosis; do not reap a failure.
+			// Leave the failed Job (and its pod logs) for diagnosis; the TTL controller reaps it after
+			// buildJobTTLSeconds so failures no longer accumulate indefinitely (issue #280).
 			return "", fmt.Errorf("kube: build job %q failed", name)
 		}
 		if j.Status.Succeeded > 0 {
@@ -204,7 +260,8 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 				// than pinning a deploy to nothing. Leave the Job for diagnosis.
 				return "", fmt.Errorf("kube: build job %q reported success but produced no image digest", name)
 			}
-			// Reap on success: delete the Job and its pods so builds do not accumulate.
+			// Reap on success immediately (a clean cluster: a good build has nothing to diagnose) —
+			// the TTL is only the backstop for the failures left behind above (issue #280).
 			policy := metav1.DeletePropagationBackground
 			_ = jobs.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy})
 			return digest, nil
@@ -237,6 +294,7 @@ func buildJobName(source controlplane.SourceRef, targetImage string) string {
 func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targetImage string, insecure bool) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
 	var backoff int32
+	ttl := buildJobTTLSeconds
 
 	// The repo URL and ref are passed as env, never interpolated into a script, so they are data
 	// and cannot inject shell (ADR-0053 §3, §7). Only these two values and the target reference
@@ -279,6 +337,9 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff,
+			// The TTL controller reaps this Job and its pods buildJobTTLSeconds after it finishes,
+			// covering both successes and failures uniformly (issue #280).
+			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
@@ -290,7 +351,7 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 						Command:         []string{"sh", "-c", cloneScript},
 						Env:             cloneEnv,
 						VolumeMounts:    []corev1.VolumeMount{workspace},
-						SecurityContext: buildContainerSecurityContext(),
+						SecurityContext: cloneContainerSecurityContext(),
 						Resources:       buildResources(),
 					}},
 					Containers: []corev1.Container{{
@@ -303,7 +364,7 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 							{Name: "home", MountPath: buildHomePath},
 							{Name: "tmp", MountPath: buildTmpPath},
 						},
-						SecurityContext: buildContainerSecurityContext(),
+						SecurityContext: builderContainerSecurityContext(),
 						Resources:       buildResources(),
 					}},
 					Volumes: volumes,
@@ -328,15 +389,60 @@ func buildPodSecurityContext() *corev1.PodSecurityContext {
 	}
 }
 
-// buildContainerSecurityContext is the container-level restricted floor: no privilege escalation,
-// all Linux capabilities dropped, and a read-only root filesystem (every write path is a writable
-// emptyDir, ADR-0053 §7).
-func buildContainerSecurityContext() *corev1.SecurityContext {
+// cloneContainerSecurityContext is the full restricted PodSecurity floor (ADR-0053 §7), kept as-is
+// for the clone init container: no privilege escalation, all Linux capabilities dropped, and a
+// read-only root filesystem (its one write path, the workspace, is a writable emptyDir). A shallow
+// git fetch needs none of the relaxation the builder does, so it keeps the tightest floor.
+func cloneContainerSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		AllowPrivilegeEscalation: boolPtr(false),
 		ReadOnlyRootFilesystem:   boolPtr(true),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 	}
+}
+
+// builderContainerSecurityContext is the build container's context, relaxed from the §7 floor by the
+// minimal set a rootless container builder needs to run — and NO MORE (ADR-0056). WHY the relaxation:
+// building a container image inside a container fundamentally requires a user namespace, which the
+// restricted floor blocks on two fronts — RuntimeDefault seccomp denies unshare(CLONE_NEWUSER)
+// without CAP_SYS_ADMIN, and no_new_privs (AllowPrivilegeEscalation=false) neuters the setuid
+// newuidmap/newgidmap helpers rootless buildah uses to write its uid/gid maps (issue #282). So:
+//
+//   - SeccompProfile Unconfined lets unshare(CLONE_NEWUSER) through. This is preferred over granting
+//     CAP_SYS_ADMIN (which RuntimeDefault would also accept): unconfining seccomp opens only syscalls,
+//     whereas CAP_SYS_ADMIN is the single broadest Linux capability (ADR-0056 §1).
+//   - SETUID/SETGID are added (all others still dropped) so buildah can set up its id maps.
+//   - AllowPrivilegeEscalation true lets the setuid newuidmap/newgidmap helpers run.
+//
+// Everything else in the floor is KEPT: the non-root UID/GID (pod-level), the read-only root
+// filesystem (every write path is a writable emptyDir), all other capabilities dropped, and the
+// resource caps. This is acceptable because the OSS build path is single-tenant and the user owns the
+// source, so §7 was defense in depth, not an adversary boundary (ADR-0056 §2). Isolation for the
+// untrusted-source (multi-tenant) case is NOT this PodSecurity context — it lives in the commercial
+// product's hardened, gVisor/microVM executor behind the Builder seam (ADR-0056 §3, ADR-0053 §6).
+func builderContainerSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: boolPtr(true),
+		ReadOnlyRootFilesystem:   boolPtr(true),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+			Add:  []corev1.Capability{"SETUID", "SETGID"},
+		},
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+	}
+}
+
+// ensureNamespace creates the dedicated build namespace if it does not already exist (issue #278).
+// An AlreadyExists is success — the namespace outlives any single build. It is labelled managed-by
+// burrow so it is recognizable as Burrow's own.
+func (b *BuildAdapter) ensureNamespace(ctx context.Context) error {
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: b.namespace, Labels: map[string]string{managedByLabel: managedByValue}},
+	}
+	if _, err := b.client.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("kube: ensuring build namespace %q: %w", b.namespace, err)
+	}
+	return nil
 }
 
 // buildResources caps the build's CPU and memory so an in-cluster build cannot starve running

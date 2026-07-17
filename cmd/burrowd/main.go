@@ -197,16 +197,18 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		return err
 	}
 
-	// The in-cluster builder runs a build as a Kubernetes Job in the app namespace, cloning the git
-	// ref inside the cluster and pushing the built image to a registry the cluster can pull from
-	// (ADR-0053). It is the optional in-cluster build path — Burrow stays client-build-first, so a
-	// build is never required for deploy. BURROW_BUILD_IMAGE / BURROW_GIT_IMAGE let the install
-	// override the default builder and clone images (their install wiring is Phase 3).
-	builder, err := kube.NewBuilderFromConfig(kubeCfg, namespace)
+	// The in-cluster builder runs a build as a Kubernetes Job in the dedicated burrow-builds namespace,
+	// isolated from both the app and control-plane namespaces (issue #278), cloning the git ref inside
+	// the cluster and pushing the built image to a registry the cluster can pull from (ADR-0053). It is
+	// the optional in-cluster build path — Burrow stays client-build-first, so a build is never
+	// required for deploy. BURROW_BUILD_IMAGE / BURROW_GIT_IMAGE let the install override the default
+	// builder and clone images (their install wiring is Phase 3). The same capacity prober fails a
+	// build fast when no node has room for it, instead of leaving it Pending (issue #274).
+	builder, err := kube.NewBuilderFromConfig(kubeCfg)
 	if err != nil {
 		return err
 	}
-	builder.WithBuildImage(os.Getenv("BURROW_BUILD_IMAGE")).WithGitImage(os.Getenv("BURROW_GIT_IMAGE"))
+	builder.WithBuildImage(os.Getenv("BURROW_BUILD_IMAGE")).WithGitImage(os.Getenv("BURROW_GIT_IMAGE")).WithCapacityProber(prober)
 
 	// One HTTP client shared across the observability adapters — burrowd reaches each backend
 	// in-cluster.

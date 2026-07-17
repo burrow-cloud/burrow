@@ -457,9 +457,13 @@ func TestRenderManifests(t *testing.T) {
 	//      API, and let a provisioned backend write a connection string; and
 	//   3. an add-on-namespace-scoped grant (ADR-0031) so burrowd can create/read/delete the
 	//      Postgres add-on's burrow-postgres superuser Secret. Secret values still never cross MCP
-	//      (no secret-set tool) and are never logged or stored in the DB (ADR-0029/0004).
-	if c := strings.Count(out, `resources: ["secrets"]`); c != 4 {
-		t.Errorf("expected exactly four secrets grants (scoped credentials + app-namespace env secrets + add-on-namespace postgres secret + the agent's get on burrowd-api-token), found %d", c)
+	//      (no secret-set tool) and are never logged or stored in the DB (ADR-0029/0004); and
+	//   4. a build-namespace-scoped grant (ADR-0057, issue #278) so burrowd can create/read/delete
+	//      the short-lived Secret holding a private source's provider token for the git clone and
+	//      registry login — scoped to burrow-builds only.
+	// Plus the agent's resourceNames-scoped `get` on burrowd-api-token, making five in total.
+	if c := strings.Count(out, `resources: ["secrets"]`); c != 5 {
+		t.Errorf("expected exactly five secrets grants (scoped credentials + app-namespace env secrets + add-on-namespace postgres secret + build-namespace provider-token secret + the agent's get on burrowd-api-token), found %d", c)
 	}
 	if !strings.Contains(out, `verbs: ["get", "list", "create", "update"]`) {
 		t.Errorf("missing the app-namespace env-secrets grant (ADR-0028/0029)")

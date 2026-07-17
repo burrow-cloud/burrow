@@ -36,6 +36,58 @@ metadata:
 ---
 {{ template "appNamespaceRole" . }}
 ---
+# The in-cluster build (ADR-0053, issue #278) runs each build as a Kubernetes Job in its own
+# dedicated namespace — isolated from BOTH the app namespace (so build steps from the user's source
+# cannot reach a running app's Secrets) and the control-plane namespace (so they cannot reach
+# burrowd's ServiceAccount, credentials, or database). install provisions the namespace and burrowd's
+# Role in it kubeconfig-side, because burrowd holds only namespaced Roles and cannot create namespaces
+# or RBAC itself (least privilege) — the same reason `burrow env add` creates per-environment
+# namespaces kubeconfig-side rather than burrowd creating them at runtime.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{.BuildNamespace}}
+  labels: { app.kubernetes.io/managed-by: burrow }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burrowd-builds
+  namespace: {{.BuildNamespace}}
+rules:
+  # The build itself is a Job (a git-clone init container, then the buildah/buildpacks build container).
+  # burrowd creates it, polls it to completion, and reaps it (deleting on a ttl and on idempotent re-run).
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # burrowd reads the build Job's pod for status and streams its logs back to the caller.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # A private-source build (ADR-0057) needs a short-lived Secret in this namespace holding the provider
+  # token for the git clone and the registry login; burrowd creates it owned by the Job so it is
+  # garbage-collected when the Job is reaped. Scoped to this build namespace only.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burrowd-builds
+  namespace: {{.BuildNamespace}}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: burrowd-builds
+subjects:
+  - kind: ServiceAccount
+    name: burrowd
+    namespace: {{.Namespace}}
+---
 # Add-ons live in their own namespace (ADR-0025), so burrowd's permission to manage them is
 # scoped there: a logs store is a Deployment + Service + PVC, its collector a DaemonSet +
 # ConfigMap; the Postgres add-on (ADR-0031) adds a Secret, burrow-postgres, holding the generated

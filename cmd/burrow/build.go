@@ -32,7 +32,7 @@ func newBuildCmd() *cobra.Command {
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "build <app> --source <repo> --ref <commit-or-tag> [--image <target>]",
-		Short: "Build an app's image from a git source inside the cluster, then deploy it (experimental)",
+		Short: "Build an app's image from a git source inside the cluster, then deploy it",
 		Long: "Build an app's image from a git source reference inside your own cluster, then deploy it\n" +
 			"through the same guarded path an explicit deploy uses (ADR-0053).\n\n" +
 			"Only the git reference crosses the control channel — a repository URL (--source) plus a\n" +
@@ -43,9 +43,9 @@ func newBuildCmd() *cobra.Command {
 			"This is the optional in-cluster build path, not the default: deploy stays by image reference,\n" +
 			"and build is a front-end that ends where deploy begins. Environment configuration is sourced\n" +
 			"at deploy time as usual — set it with `burrow app config set <app> KEY=VALUE` beforehand.\n\n" +
-			"EXPERIMENTAL: the in-cluster build is not yet functional end to end — the build container\n" +
-			"image and its security context are still being completed. Build client-side (or in CI) and\n" +
-			"deploy by image reference in the meantime.",
+			"A source with a Dockerfile builds with buildah; a source without one builds with Cloud Native\n" +
+			"Buildpacks, which cannot yet push to the plain-HTTP in-cluster registry — for the no-Dockerfile\n" +
+			"case, push to an external registry with --image (ADR-0054).",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()

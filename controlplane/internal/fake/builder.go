@@ -24,6 +24,7 @@ type Builder struct {
 	lastSource   controlplane.SourceRef
 	lastTarget   string
 	lastInsecure bool
+	lastCred     controlplane.SourceCredential
 	calls        int
 }
 
@@ -71,6 +72,15 @@ func (b *Builder) LastInsecure() bool {
 	return b.lastInsecure
 }
 
+// LastCredential returns the source-provider credential Build was last called with, so a test can
+// assert the engine resolved a configured private-source token and handed it to the builder — or
+// handed the zero credential for a public source (ADR-0057).
+func (b *Builder) LastCredential() controlplane.SourceCredential {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastCred
+}
+
 // Calls returns how many times Build has been called.
 func (b *Builder) Calls() int {
 	b.mu.Lock()
@@ -78,13 +88,14 @@ func (b *Builder) Calls() int {
 	return b.calls
 }
 
-func (b *Builder) Build(_ context.Context, source controlplane.SourceRef, targetImage string, insecure bool) (string, error) {
+func (b *Builder) Build(_ context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls++
 	b.lastSource = source
 	b.lastTarget = targetImage
 	b.lastInsecure = insecure
+	b.lastCred = cred
 	if b.err != nil {
 		return "", b.err
 	}

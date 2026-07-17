@@ -20,6 +20,11 @@ type Capability string
 const (
 	// CapabilityDNS is managing DNS records for a domain the user has delegated to Burrow.
 	CapabilityDNS Capability = "dns"
+	// CapabilitySource is authenticating to a source provider (GitHub, GitLab, …): the in-cluster
+	// build uses the provider's token to clone a PRIVATE git source and — where the same provider
+	// hosts a registry — to authenticate the build's image push/pull (ADR-0057). One provider token
+	// covers both, so a single credential serves the clone and the provider registry.
+	CapabilitySource Capability = "source"
 )
 
 // ProviderType identifies a vendor Burrow knows how to talk to. The type implies the
@@ -33,6 +38,12 @@ const (
 	ProviderDigitalOcean ProviderType = "digitalocean"
 	// ProviderCloudflare is Cloudflare (DNS).
 	ProviderCloudflare ProviderType = "cloudflare"
+	// ProviderGitHub is GitHub: a source provider whose one token covers both github.com private-git
+	// clones and ghcr.io image pulls (ADR-0057).
+	ProviderGitHub ProviderType = "github"
+	// ProviderGitLab is GitLab: a source provider whose one token covers both gitlab.com private-git
+	// clones and its container registry (ADR-0057).
+	ProviderGitLab ProviderType = "gitlab"
 )
 
 // knownProviderTypes maps each supported vendor to the capabilities it serves. It is the
@@ -41,6 +52,46 @@ const (
 var knownProviderTypes = map[ProviderType][]Capability{
 	ProviderDigitalOcean: {CapabilityDNS},
 	ProviderCloudflare:   {CapabilityDNS},
+	ProviderGitHub:       {CapabilitySource},
+	ProviderGitLab:       {CapabilitySource},
+}
+
+// sourceProviderHosts maps a source provider to the git host it clones from and the registry host
+// its one token also authenticates (ADR-0057 §1): a GitHub token covers github.com git and ghcr.io
+// pulls; a GitLab token covers gitlab.com git and registry.gitlab.com. gitUser is the username the
+// clone presents alongside the token in HTTPS basic-auth — providers accept a fixed sentinel with
+// the token as the password.
+var sourceProviderHosts = map[ProviderType]struct {
+	gitHost      string
+	registryHost string
+	gitUser      string
+}{
+	ProviderGitHub: {gitHost: "github.com", registryHost: "ghcr.io", gitUser: "x-access-token"},
+	ProviderGitLab: {gitHost: "gitlab.com", registryHost: "registry.gitlab.com", gitUser: "oauth2"},
+}
+
+// GitHost returns the git host a source provider clones from (e.g. "github.com"), or "" for a
+// non-source provider.
+func (t ProviderType) GitHost() string { return sourceProviderHosts[t].gitHost }
+
+// RegistryHost returns the registry host a source provider's token also authenticates (e.g.
+// "ghcr.io"), or "" for a non-source provider (ADR-0057 §1).
+func (t ProviderType) RegistryHost() string { return sourceProviderHosts[t].registryHost }
+
+// GitUser returns the HTTPS basic-auth username the clone presents alongside a source provider's
+// token, or "" for a non-source provider.
+func (t ProviderType) GitUser() string { return sourceProviderHosts[t].gitUser }
+
+// SourceProviderForHost returns the source provider that serves the given git host (e.g.
+// "github.com" -> ProviderGitHub) and whether one is known. It is how the in-cluster build maps a
+// clone URL's host to the provider whose credential authenticates it (ADR-0057 §1).
+func SourceProviderForHost(host string) (ProviderType, bool) {
+	for t, h := range sourceProviderHosts {
+		if h.gitHost == host {
+			return t, true
+		}
+	}
+	return "", false
 }
 
 // Valid reports whether t is a provider type Burrow supports.

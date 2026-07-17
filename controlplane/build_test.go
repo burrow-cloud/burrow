@@ -6,6 +6,7 @@ package controlplane_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -326,5 +327,108 @@ func TestBuildValidation(t *testing.T) {
 				t.Errorf("builder calls = %d, want 0 (validation must precede the builder)", b.Calls())
 			}
 		})
+	}
+}
+
+// newBuildEngineWithCredentials wires a build engine returning handles to the fake credential store
+// and database, so a test can register a source provider and seed its token to exercise the
+// source-provider credential resolution (ADR-0057).
+func newBuildEngineWithCredentials(t *testing.T) (*cp.Engine, *fake.Database, *fake.Credentials, *fake.Builder) {
+	t.Helper()
+	k := fake.NewKubernetes()
+	d := fake.NewDatabase()
+	d.SetPolicy(permissive())
+	creds := fake.NewCredentials()
+	b := fake.NewBuilder()
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Database: d, Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs: fake.NewIDs(), Resolver: fake.NewResolver(), Credentials: creds,
+		DNS: fake.NewDNSFactory(), Builder: b,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return e, d, creds, b
+}
+
+// TestBuildResolvesConfiguredSourceCredential asserts that when a source provider is configured for
+// the clone URL's host, the engine reads its token from the guarded credential store and hands it to
+// the builder — the private-source path (ADR-0057). The token is resolved server-side; only metadata
+// (the ref and target) otherwise crosses into the builder.
+func TestBuildResolvesConfiguredSourceCredential(t *testing.T) {
+	const token = "ghp_private_source_token"
+	e, d, creds, b := newBuildEngineWithCredentials(t)
+
+	// Register a github source provider and seed its token exactly as `provider add` would (ADR-0030).
+	if err := d.SaveProvider(context.Background(), cp.Provider{
+		Name: "github", Type: cp.ProviderGitHub, Capabilities: cp.ProviderGitHub.Capabilities(), SecretKey: "github",
+	}); err != nil {
+		t.Fatalf("SaveProvider: %v", err)
+	}
+	creds.Set("github", token)
+
+	res, err := e.Build(context.Background(), cp.BuildRequest{
+		App:         "web",
+		Source:      cp.SourceRef{Repo: "https://github.com/acme/private-web", Ref: "v1.0.0"},
+		TargetImage: "ghcr.io/acme/web:1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	got := b.LastCredential()
+	if got.Provider != cp.ProviderGitHub || got.Token != token {
+		t.Errorf("builder credential = {%q, %q}, want {github, %q}", got.Provider, got.Token, token)
+	}
+
+	// The token is a secret: it must never surface in the structured result. BuildResult carries only
+	// the digest and the deploy record — never the credential.
+	if res.Deploy.Release.Image == "" {
+		t.Fatal("expected a deployed image")
+	}
+	if strings.Contains(res.Deploy.Release.Image, token) {
+		t.Errorf("deployed image %q contains the source token", res.Deploy.Release.Image)
+	}
+}
+
+// TestBuildPublicSourceHasNoCredential asserts the credential-free path is unchanged: with no source
+// provider configured, a build resolves the ZERO credential and clones anonymously (ADR-0057) — the
+// pre-existing public-source behavior (issue #279).
+func TestBuildPublicSourceHasNoCredential(t *testing.T) {
+	e, _, _, b := newBuildEngineWithCredentials(t)
+
+	if _, err := e.Build(context.Background(), cp.BuildRequest{
+		App:         "web",
+		Source:      cp.SourceRef{Repo: "https://github.com/acme/public-web", Ref: "v1.0.0"},
+		TargetImage: "ghcr.io/acme/web:1.0.0",
+	}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got := b.LastCredential(); !got.IsZero() {
+		t.Errorf("builder credential = %+v, want the zero credential for an unconfigured (public) source", got)
+	}
+}
+
+// TestBuildNonProviderHostHasNoCredential asserts a clone URL on a host Burrow does not front (a
+// self-hosted git) resolves to no credential even when a github provider is configured — the token
+// only authenticates its own provider's host (ADR-0057 §1).
+func TestBuildNonProviderHostHasNoCredential(t *testing.T) {
+	e, d, creds, b := newBuildEngineWithCredentials(t)
+	if err := d.SaveProvider(context.Background(), cp.Provider{
+		Name: "github", Type: cp.ProviderGitHub, Capabilities: cp.ProviderGitHub.Capabilities(), SecretKey: "github",
+	}); err != nil {
+		t.Fatalf("SaveProvider: %v", err)
+	}
+	creds.Set("github", "ghp_token")
+
+	if _, err := e.Build(context.Background(), cp.BuildRequest{
+		App:         "web",
+		Source:      cp.SourceRef{Repo: "https://git.acme.internal/web", Ref: "v1.0.0"},
+		TargetImage: "ghcr.io/acme/web:1.0.0",
+	}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got := b.LastCredential(); !got.IsZero() {
+		t.Errorf("builder credential = %+v, want zero for a non-provider host", got)
 	}
 }

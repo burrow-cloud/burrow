@@ -941,6 +941,78 @@ func TestBuildPodMutatorApplied(t *testing.T) {
 	}
 }
 
+// TestBuildNamespaceConfigurable asserts WithBuildNamespace overrides where the build Job and its
+// credential Secret are created, while the default (no override) still lands in the dedicated
+// burrow-builds namespace. This parameterizes what is otherwise a constant for downstream callers
+// (the managed product's per-tenant build namespaces, cloud ADR-0003) without changing OSS behavior.
+func TestBuildNamespaceConfigurable(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/private", Ref: "v1.2.3"}
+	const target = "ghcr.io/acme/private:1.2.3"
+	const ns = "t-abc-build"
+	cred := controlplane.SourceCredential{Provider: controlplane.ProviderGitHub, Token: "ghp_token"}
+
+	// A fake whose build Job is observed Succeeded in the OVERRIDE namespace, with a terminated pod
+	// there carrying the digest so the read-back finds it.
+	client := fake.NewSimpleClientset()
+	created := &[]*batchv1.Job{}
+	client.PrependReactor("create", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		*created = append(*created, a.(clienttesting.CreateAction).GetObject().(*batchv1.Job).DeepCopy())
+		return false, nil, nil
+	})
+	client.PrependReactor("get", "jobs", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		name := a.(clienttesting.GetAction).GetName()
+		return true, &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Status:     batchv1.JobStatus{Succeeded: 1},
+		}, nil
+	})
+	jobName := buildJobName(source, target)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: jobName + "-abc", Namespace: ns,
+			Labels: map[string]string{nameLabel: jobName},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  buildContainerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Message: validDigest + "\n"}},
+			}},
+		},
+	}
+	if _, err := client.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed pod: %v", err)
+	}
+
+	if _, err := NewBuilder(client).WithBuildNamespace(ns).Build(ctx, source, target, false, cred); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(*created) != 1 {
+		t.Fatalf("created %d jobs, want 1", len(*created))
+	}
+	if got := (*created)[0].Namespace; got != ns {
+		t.Errorf("job namespace = %q, want the override %q", got, ns)
+	}
+	// The credential Secret lands in the SAME override namespace, not the default.
+	if _, err := client.CoreV1().Secrets(ns).Get(ctx, credSecretName(jobName), metav1.GetOptions{}); err != nil {
+		t.Errorf("credential secret not created in the override namespace %q: %v", ns, err)
+	}
+	if _, err := client.CoreV1().Secrets(buildNamespace).Get(ctx, credSecretName(jobName), metav1.GetOptions{}); err == nil {
+		t.Errorf("credential secret leaked into the default namespace %q", buildNamespace)
+	}
+
+	// The default (no WithBuildNamespace) still lands in burrow-builds.
+	defSource := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const defTarget = "reg.burrow.svc/acme/shop:1"
+	defClient, defCreated := buildFakeSucceeding(t, defSource, defTarget, validDigest)
+	if _, err := NewBuilder(defClient).Build(ctx, defSource, defTarget, false, controlplane.SourceCredential{}); err != nil {
+		t.Fatalf("default Build: %v", err)
+	}
+	if got := (*defCreated)[0].Namespace; got != buildNamespace {
+		t.Errorf("default job namespace = %q, want %q", got, buildNamespace)
+	}
+}
+
 // mountsVolume reports whether mounts includes one named name.
 func mountsVolume(mounts []corev1.VolumeMount, name string) bool {
 	for _, m := range mounts {

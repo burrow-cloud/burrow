@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -68,11 +69,12 @@ func newProviderTypesCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "%-16s%s\n", "TYPE", "SUPPORTS")
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "TYPE\tSUPPORTS")
 			for _, p := range providerCatalog {
-				fmt.Fprintf(out, "%-16s%s\n", p.Type, strings.Join(p.Capabilities, ", "))
+				fmt.Fprintf(tw, "%s\t%s\n", p.Type, strings.Join(p.Capabilities, ", "))
 			}
-			return nil
+			return tw.Flush()
 		},
 	}
 }
@@ -170,11 +172,12 @@ func newProviderListCmd() *cobra.Command {
 					"Supported types: %s (see `burrow config provider types`).\n", providerTypesHint())
 				return nil
 			}
-			fmt.Fprintf(out, "%-16s%-14s%s\n", "NAME", "TYPE", "CAPABILITIES")
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tTYPE\tCAPABILITIES")
 			for _, p := range providers {
-				fmt.Fprintf(out, "%-16s%-14s%s\n", p.Name, p.Type, strings.Join(p.Capabilities, ","))
+				fmt.Fprintf(tw, "%s\t%s\t%s\n", p.Name, p.Type, strings.Join(p.Capabilities, ","))
 			}
-			return nil
+			return tw.Flush()
 		},
 	}
 	bindCommon(cmd.Flags(), o)

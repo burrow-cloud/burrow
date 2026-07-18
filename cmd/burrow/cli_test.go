@@ -368,19 +368,30 @@ func TestDeployNoMetricsPortOmitsIt(t *testing.T) {
 }
 
 func TestAppList(t *testing.T) {
+	// A registry-qualified image reference is long (35 chars here); the table sizes its
+	// columns from the data so the image keeps a gutter to REPLICAS instead of colliding
+	// with it (#306). Before the tabwriter fix, a >=34-char image ran straight into "2/2".
+	const image = "ghcr.io/burrow-cloud/website:0.1.52"
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.URL.Path != "/v1/apps" {
 			t.Errorf("request = %s %s, want GET /v1/apps", r.Method, r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"apps": []map[string]any{
-			{"app": "web", "image": "nginx:alpine", "desired_replicas": 2, "ready_replicas": 2, "available": true},
+			{"app": "web", "image": image, "desired_replicas": 2, "ready_replicas": 2, "available": true},
 		}})
 	}, "app", "list")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(out, "NAME") || !strings.Contains(out, "web") || !strings.Contains(out, "nginx:alpine") || !strings.Contains(out, "2/2") {
+	if !strings.Contains(out, "NAME") || !strings.Contains(out, "web") || !strings.Contains(out, image) || !strings.Contains(out, "2/2") {
 		t.Errorf("output = %q", out)
+	}
+	// The image and the replica count must not be adjacent: a gutter of spaces separates them.
+	if strings.Contains(out, image+"2/2") {
+		t.Errorf("image collided with the replica count (no gutter): %q", out)
+	}
+	if !strings.Contains(out, image+"  2/2") {
+		t.Errorf("expected a two-space gutter between the image and the replica count, got %q", out)
 	}
 }
 

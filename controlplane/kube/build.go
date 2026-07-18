@@ -251,6 +251,18 @@ func (b *BuildAdapter) WithGitImage(image string) *BuildAdapter {
 	return b
 }
 
+// WithBuildNamespace overrides the namespace the in-cluster build Job (and any credential Secret) is
+// created in. The default remains the dedicated burrow-builds namespace; an empty value leaves it.
+// This parameterizes what is otherwise a constant for downstream callers that run builds in a
+// different namespace — the managed product's per-tenant build namespaces (cloud ADR-0003) — without
+// changing OSS behavior, which never sets it. Returns the adapter for chaining.
+func (b *BuildAdapter) WithBuildNamespace(ns string) *BuildAdapter {
+	if ns != "" {
+		b.namespace = ns
+	}
+	return b
+}
+
 // WithBuildPodMutator registers a hook the adapter applies to the build Job's pod template spec
 // after it is constructed and before the Job is created. It is the ADR-0053 §6 seam's executor
 // extension point: the managed product (cloud ADR-0003) uses it to run the build under a gVisor

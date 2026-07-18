@@ -23,12 +23,12 @@ channel your agent drives).
 
 ### 2. Install Burrow into your cluster
 
-Run `burrow install` with no argument to list the contexts in your kubeconfig, then install into
-the one you want:
+Run `burrow cluster install` with no argument to list the contexts in your kubeconfig, then install
+into the one you want:
 
 ```sh
-burrow install                 # lists your contexts (and which already run Burrow)
-burrow install <context>       # installs into the context you name
+burrow cluster install                 # lists your contexts (and which already run Burrow)
+burrow cluster install <context>       # installs into the context you name
 ```
 
 Naming the context is required, so Burrow never installs into the wrong cluster by accident. The
@@ -36,7 +36,7 @@ install creates the control plane in the `burrow` namespace and deploys your app
 `burrow-apps` namespace. On success it names and records the environment as your current one, and
 tells you it is ready.
 
-`burrow install` provisions only the control plane. Additive cluster components are separate,
+`burrow cluster install` provisions only the control plane. Additive cluster components are separate,
 opt-in commands you run when you want them, each with its own status, install, and uninstall:
 
 ```sh
@@ -130,7 +130,7 @@ brew update && brew upgrade burrow
 To roll the in-cluster Burrow forward after a new release:
 
 ```sh
-burrow upgrade
+burrow cluster upgrade
 ```
 
-`burrow upgrade` updates the installed control plane in place and preserves your state.
+`burrow cluster upgrade` updates the installed control plane in place and preserves your state.

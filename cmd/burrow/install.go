@@ -177,11 +177,22 @@ var listContexts = connect.Contexts
 // installExamples is the Examples block for `install`, shared by the command's `-h` help and the
 // no-argument context listing so the two never drift.
 const installExamples = "  # Install Burrow into a context with the defaults\n" +
-	"  burrow install do-nyc1-cluster\n\n" +
+	"  burrow cluster install do-nyc1-cluster\n\n" +
 	"  # Install into a different app namespace\n" +
-	"  burrow install do-nyc1-cluster --app-namespace my-apps\n\n" +
+	"  burrow cluster install do-nyc1-cluster --app-namespace my-apps\n\n" +
 	"  # Preview the manifests without applying them\n" +
-	"  burrow install do-nyc1-cluster --dry-run"
+	"  burrow cluster install do-nyc1-cluster --dry-run"
+
+// newInstallAliasCmd is the deprecated top-level `burrow install` (ADR-0060): install now lives
+// under the cluster-lifecycle surface as `burrow cluster install`, but the old spelling keeps
+// working so existing muscle memory and scripts do not break. It delegates to the same constructor
+// and marks itself Deprecated, which both prints a one-line migration hint on use and hides it from
+// the main help (Cobra excludes Deprecated commands from the command listing).
+func newInstallAliasCmd() *cobra.Command {
+	cmd := newInstallCmd()
+	cmd.Deprecated = "use \"burrow cluster install\"."
+	return cmd
+}
 
 func newInstallCmd() *cobra.Command {
 	a := installArgs{}
@@ -194,8 +205,8 @@ func newInstallCmd() *cobra.Command {
 			"  burrow cluster ingress install    # ingress-nginx, cert-manager, a Let's Encrypt issuer\n" +
 			"  burrow cluster registry install   # the optional in-cluster image registry\n\n" +
 			"The context is required: install targets exactly that cluster and never the ambient\n" +
-			"current context implicitly, so it cannot install into prod by accident. Run `burrow\n" +
-			"install` with no argument to list your contexts.\n\n" +
+			"current context implicitly, so it cannot install into prod by accident. Run\n" +
+			"`burrow cluster install` with no argument to list your contexts.\n\n" +
 			"On success it names the environment (a generated name, or --environment) and records it\n" +
 			"as your current environment.",
 		Example: installExamples,
@@ -271,7 +282,7 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 		return nil
 	}
 	if !contextExists(contexts, a.kubeContext) {
-		return fmt.Errorf("context %q is not in your kubeconfig; available: %s\nrun `burrow install <context>` with one of these",
+		return fmt.Errorf("context %q is not in your kubeconfig; available: %s\nrun `burrow cluster install <context>` with one of these",
 			a.kubeContext, contextNames(contexts))
 	}
 
@@ -373,7 +384,7 @@ func recordEnvironment(ctx context.Context, a installArgs, cs kubernetes.Interfa
 	agentKubeconfig, agentContext, err := mintAgentCredentialFn(ctx, a, name, cs, stdout)
 	if err != nil {
 		fmt.Fprintf(stdout, "\n%scould not mint the scoped agent credential: %v\n"+
-			"The control plane is installed; re-run `burrow install` to provision it.\n", warning(stdout), err)
+			"The control plane is installed; re-run `burrow cluster install` to provision it.\n", warning(stdout), err)
 	}
 
 	if err := addAndPinEnvironment(a, name, agentKubeconfig, agentContext); err != nil {
@@ -479,7 +490,7 @@ func joinExistingInstall(ctx context.Context, a installArgs, stdout io.Writer) e
 // library error.
 func errNoCluster() error {
 	return fmt.Errorf("no kubeconfig found, so there is no cluster to install into. Burrow operates a " +
-		"cluster you point it at: set $KUBECONFIG or create ~/.kube/config, then run `burrow install <context>`")
+		"cluster you point it at: set $KUBECONFIG or create ~/.kube/config, then run `burrow cluster install <context>`")
 }
 
 // writeInstallContextHint lists the kubeconfig contexts (marking the current one) and, for each,
@@ -504,7 +515,7 @@ func writeInstallContextHint(ctx context.Context, w io.Writer, kubeconfig, names
 	_ = tw.Flush()
 	// Close with the same Examples block `install -h` shows and a single Usage line at the bottom,
 	// matching the kubectl-style help layout.
-	fmt.Fprintf(w, "\nExamples:\n%s\n\nUsage:\n  burrow install <context> [flags]\n", installExamples)
+	fmt.Fprintf(w, "\nExamples:\n%s\n\nUsage:\n  burrow cluster install <context> [flags]\n", installExamples)
 }
 
 // installStatusFor probes one context for an installed burrowd and renders its BURROWD cell:

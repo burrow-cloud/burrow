@@ -28,6 +28,17 @@ const dbSecretName = "burrowd-db"
 // defaults to this CLI's pinned release, so `burrow upgrade` after a CLI update is the whole
 // control-plane upgrade. Migrations ride burrowd's startup behind the single-minor-step gate
 // (ADR-0013). See ADR-0016.
+// newUpgradeAliasCmd is the deprecated top-level `burrow upgrade` (ADR-0060): upgrade now lives
+// under the cluster-lifecycle surface as `burrow cluster upgrade`, but the old spelling keeps
+// working so existing muscle memory and scripts do not break. It delegates to the same constructor
+// and marks itself Deprecated, which both prints a one-line migration hint on use and hides it from
+// the main help (Cobra excludes Deprecated commands from the command listing).
+func newUpgradeAliasCmd() *cobra.Command {
+	cmd := newUpgradeCmd()
+	cmd.Deprecated = "use \"burrow cluster upgrade\"."
+	return cmd
+}
+
 func newUpgradeCmd() *cobra.Command {
 	var namespace, image, kubeconfig string
 	var dryRun, wait, verbose bool
@@ -142,7 +153,7 @@ func upgradeOptions(ctx context.Context, cs kubernetes.Interface, namespace, ima
 	token, err := secretValue(ctx, cs, namespace, connect.DefaultTokenSecret, connect.DefaultTokenKey)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return installOptions{}, fmt.Errorf("Burrow is not installed in namespace %q; run `burrow install` first", namespace)
+			return installOptions{}, fmt.Errorf("Burrow is not installed in namespace %q; run `burrow cluster install` first", namespace)
 		}
 		return installOptions{}, err
 	}

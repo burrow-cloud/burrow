@@ -120,7 +120,7 @@ commands get you from nothing to an agent operating your cluster:
 
 ```sh
 brew install burrow-cloud/tap/burrow     # installs burrow and burrow-agent
-burrow install <context>                 # installs Burrow into the named kube context (run `burrow install` to list them)
+burrow cluster install <context>         # installs Burrow into the named kube context (run `burrow cluster install` to list them)
 burrow agent claude install              # wire your agent to burrow-agent (or another supported agent)
 ```
 

@@ -1121,8 +1121,8 @@ func TestHelpLayoutKubectlStyle(t *testing.T) {
 
 	screens := [][]string{
 		{"-h"},
-		{"install", "-h"},
-		{"upgrade", "-h"},
+		{"cluster", "install", "-h"},
+		{"cluster", "upgrade", "-h"},
 		{"mcp", "-h"},
 		{"cluster", "-h"},
 		{"config", "-h"},

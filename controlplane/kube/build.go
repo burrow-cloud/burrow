@@ -199,6 +199,11 @@ type BuildAdapter struct {
 	// WithCapacityProber. Reusing the CapacityProber seam keeps the build check and the capacity
 	// report (issue #275) on the same headroom math.
 	capacity controlplane.CapacityProber
+	// podMutator is the ADR-0053 §6 executor extension point: an OPTIONAL hook applied to the build
+	// Job's pod template spec after it is constructed and before the Job is created. It is enabling
+	// API for the managed product (cloud ADR-0003), never consumed by OSS — nil (the default) leaves
+	// the OSS behavior exactly as-is. Wired via WithBuildPodMutator.
+	podMutator func(*corev1.PodSpec)
 }
 
 // NewBuilder returns a BuildAdapter over the given clientset. The build always runs in the dedicated
@@ -243,6 +248,18 @@ func (b *BuildAdapter) WithGitImage(image string) *BuildAdapter {
 	if image != "" {
 		b.gitImage = image
 	}
+	return b
+}
+
+// WithBuildPodMutator registers a hook the adapter applies to the build Job's pod template spec
+// after it is constructed and before the Job is created. It is the ADR-0053 §6 seam's executor
+// extension point: the managed product (cloud ADR-0003) uses it to run the build under a gVisor
+// RuntimeClass with a non-privileged restricted security context, a hard activeDeadlineSeconds, and
+// pod labels its egress NetworkPolicy selects — none of which OSS itself needs (OSS runs privileged,
+// no RuntimeClass, per ADR-0059). A nil mutator (the default) leaves the OSS behavior exactly as-is.
+// Returns the adapter for chaining.
+func (b *BuildAdapter) WithBuildPodMutator(fn func(*corev1.PodSpec)) *BuildAdapter {
+	b.podMutator = fn
 	return b
 }
 
@@ -472,7 +489,7 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 		buildEnv = append(buildEnv, corev1.EnvVar{Name: "REGISTRY_AUTH_FILE", Value: registryAuthPath + "/" + registryAuthFile})
 	}
 
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff,
@@ -507,6 +524,15 @@ func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targ
 			},
 		},
 	}
+
+	// Apply the ADR-0053 §6 executor extension point last, over the fully-constructed pod spec: the
+	// managed product's hook swaps in its gVisor RuntimeClass, a non-privileged security context, a
+	// build deadline, and its NetworkPolicy labels. OSS wires no mutator, so the pod is left exactly
+	// as built above (privileged, no RuntimeClass, per ADR-0059).
+	if b.podMutator != nil {
+		b.podMutator(&job.Spec.Template.Spec)
+	}
+	return job
 }
 
 // credSecretName is the deterministic name of the source-provider credential Secret for a build Job.

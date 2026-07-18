@@ -862,6 +862,85 @@ func TestBuildWithoutCredentialCreatesNoSecret(t *testing.T) {
 	}
 }
 
+// TestBuildNoPodMutatorLeavesDefault guards the backward-compatible default of the ADR-0053 §6
+// executor extension point (WithBuildPodMutator): with no mutator wired, the build Job is byte-for-byte
+// the OSS default — the build container stays privileged and the pod carries no runtimeClassName. This
+// is the safety net against an accidental behavior change from adding the hook.
+func TestBuildNoPodMutatorLeavesDefault(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	if _, err := NewBuilder(client).Build(ctx, source, target, false, controlplane.SourceCredential{}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	pod := (*created)[0].Spec.Template.Spec
+	if pod.RuntimeClassName != nil {
+		t.Errorf("pod runtimeClassName = %q, want nil (OSS runs no RuntimeClass, ADR-0059)", *pod.RuntimeClassName)
+	}
+	if pod.ActiveDeadlineSeconds != nil {
+		t.Errorf("pod activeDeadlineSeconds = %d, want nil (OSS sets no build deadline)", *pod.ActiveDeadlineSeconds)
+	}
+	build := pod.Containers[0].SecurityContext
+	if build.Privileged == nil || !*build.Privileged {
+		t.Error("build container is not privileged; the default (no mutator) must leave OSS behavior unchanged (ADR-0059)")
+	}
+}
+
+// TestBuildPodMutatorApplied asserts the ADR-0053 §6 executor extension point is honored: a mutator
+// standing in for the managed product's hardened executor (cloud ADR-0003) can set a gVisor
+// RuntimeClass, override the build container's security context to a non-privileged restricted one,
+// and set a hard build deadline — and all of it reaches the created Job. This is enabling API for the
+// managed product; OSS itself wires no mutator.
+func TestBuildPodMutatorApplied(t *testing.T) {
+	ctx := context.Background()
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "v1"}
+	const target = "reg.burrow.svc/acme/shop:1"
+	const runtimeClass = "gvisor"
+	const deadline int64 = 900
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	mutator := func(spec *corev1.PodSpec) {
+		rc := runtimeClass
+		d := deadline
+		spec.RuntimeClassName = &rc
+		spec.ActiveDeadlineSeconds = &d
+		for i := range spec.Containers {
+			if spec.Containers[i].Name == buildContainerName {
+				spec.Containers[i].SecurityContext = &corev1.SecurityContext{
+					Privileged:               boolPtr(false),
+					AllowPrivilegeEscalation: boolPtr(false),
+					ReadOnlyRootFilesystem:   boolPtr(true),
+					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				}
+			}
+		}
+	}
+
+	b := NewBuilder(client).WithBuildPodMutator(mutator)
+	if _, err := b.Build(ctx, source, target, false, controlplane.SourceCredential{}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	pod := (*created)[0].Spec.Template.Spec
+	if pod.RuntimeClassName == nil || *pod.RuntimeClassName != runtimeClass {
+		t.Errorf("pod runtimeClassName = %v, want %q (the mutator's gVisor class)", pod.RuntimeClassName, runtimeClass)
+	}
+	if pod.ActiveDeadlineSeconds == nil || *pod.ActiveDeadlineSeconds != deadline {
+		t.Errorf("pod activeDeadlineSeconds = %v, want %d (the mutator's build deadline)", pod.ActiveDeadlineSeconds, deadline)
+	}
+	build := pod.Containers[0].SecurityContext
+	if build.Privileged == nil || *build.Privileged {
+		t.Error("mutator's non-privileged build container was not applied; the hook must override the security context")
+	}
+	if build.ReadOnlyRootFilesystem == nil || !*build.ReadOnlyRootFilesystem {
+		t.Error("mutator's read-only root filesystem was not applied")
+	}
+	if build.AllowPrivilegeEscalation == nil || *build.AllowPrivilegeEscalation {
+		t.Error("mutator's no-privilege-escalation was not applied")
+	}
+}
+
 // mountsVolume reports whether mounts includes one named name.
 func mountsVolume(mounts []corev1.VolumeMount, name string) bool {
 	for _, m := range mounts {

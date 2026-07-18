@@ -373,6 +373,57 @@ func TestStatusUnknownApp(t *testing.T) {
 	}
 }
 
+// TestStatusWedgedRolloutNotHealthy is the #307 regression at the engine level: a new release stuck
+// in ImagePullBackOff while the previous release's pods keep serving (ready still meets desired)
+// must read NOT available with the actionable Issue, not "available" on the strength of the old
+// release. It fails before the fix, where a ready>=desired workload short-circuited to available.
+func TestStatusWedgedRolloutNotHealthy(t *testing.T) {
+	ctx := context.Background()
+	e, k, _, _ := newEngine(t, permissive())
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "ghcr.io/burrow-cloud/website:0.1.2", Replicas: 2}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	// The new release cannot pull its image; the old pods keep ready == desired.
+	k.SetWedgedRollout("web", cp.ReasonImagePullBackOff)
+
+	st, err := e.Status(ctx, "web", "")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Workload.Available {
+		t.Fatalf("wedged rollout reported available: %+v", st.Workload)
+	}
+	if st.Workload.IssueReason != cp.ReasonImagePullBackOff {
+		t.Errorf("issue reason = %q, want %q", st.Workload.IssueReason, cp.ReasonImagePullBackOff)
+	}
+}
+
+// TestListAppsSurfacesWedgedRollout is the #307 regression on the list path: `burrow app list`
+// (ListApps) must report the wedged app not-available and carry the Issue, so a broken deploy is
+// visible without opening logs.
+func TestListAppsSurfacesWedgedRollout(t *testing.T) {
+	ctx := context.Background()
+	e, k, _, _ := newEngine(t, permissive())
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "ghcr.io/burrow-cloud/website:0.1.2", Replicas: 2}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	k.SetWedgedRollout("web", cp.ReasonImagePullBackOff)
+
+	apps, err := e.ListApps(ctx, "")
+	if err != nil {
+		t.Fatalf("ListApps: %v", err)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("got %d apps, want 1: %+v", len(apps), apps)
+	}
+	if apps[0].Available {
+		t.Fatalf("list reported wedged app available: %+v", apps[0])
+	}
+	if apps[0].IssueReason != cp.ReasonImagePullBackOff {
+		t.Errorf("issue reason = %q, want %q", apps[0].IssueReason, cp.ReasonImagePullBackOff)
+	}
+}
+
 func TestLogs(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newEngine(t, permissive())

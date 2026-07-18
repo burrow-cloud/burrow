@@ -40,9 +40,12 @@ func newAppListCmd() *cobra.Command {
 				fmt.Fprintln(out, "No apps deployed. Deploy one with `burrow app deploy <app> --image <ref>`.")
 				return nil
 			}
-			fmt.Fprintf(out, "%-20s%-34s%-12s%s\n", "NAME", "IMAGE", "REPLICAS", "AVAILABLE")
+			fmt.Fprintf(out, "%-20s%-34s%-12s%-11s%s\n", "NAME", "IMAGE", "REPLICAS", "AVAILABLE", "ISSUE")
 			for _, a := range apps {
-				fmt.Fprintf(out, "%-20s%-34s%-12s%t\n", a.App, a.Image, fmt.Sprintf("%d/%d", a.ReadyReplicas, a.DesiredReplicas), a.Available)
+				// Show the raw issue reason (e.g. ImagePullBackOff) so a wedged rollout is visible
+				// here without opening `burrow app logs`; the full actionable message and fix live in
+				// `burrow app status` and the --json output (#307).
+				fmt.Fprintf(out, "%-20s%-34s%-12s%-11t%s\n", a.App, a.Image, fmt.Sprintf("%d/%d", a.ReadyReplicas, a.DesiredReplicas), a.Available, a.IssueReason)
 			}
 			return nil
 		},

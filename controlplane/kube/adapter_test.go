@@ -788,6 +788,144 @@ func TestWorkloadStatusPodListErrorIsBestEffort(t *testing.T) {
 	}
 }
 
+// wedgedRolloutDeployment models issue #307: the new release cannot pull its image, so the newest
+// revision is stuck while the PREVIOUS ReplicaSet's pods keep serving. Kubernetes holds the
+// DeploymentAvailable condition True (the old pods meet minimum availability) and ReadyReplicas at
+// the old count, but UpdatedReplicas has not reached desired — the signal that the current release
+// has not rolled out. It carries the Burrow labels so it is included by ListWorkloads too.
+func wedgedRolloutDeployment(image string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "web",
+			Namespace: ns,
+			Labels:    map[string]string{"app.kubernetes.io/name": "web", "app.kubernetes.io/managed-by": "burrow"},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: i32p(2),
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: image}}}},
+		},
+		Status: appsv1.DeploymentStatus{
+			Replicas:          3, // 2 old + 1 surged new
+			ReadyReplicas:     2, // old pods still serving
+			AvailableReplicas: 2,
+			UpdatedReplicas:   1, // the new ReplicaSet's pod, not yet ready
+			Conditions:        []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue}},
+		},
+	}
+}
+
+// waitingPod is a pod labelled for app "web" whose container is waiting for the given reason, so
+// the adapter's pod inspection finds it.
+func waitingPod(image, reason, message string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-new", Namespace: ns, Labels: map[string]string{"app.kubernetes.io/name": "web"}},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "web",
+				Image: image,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: message}},
+			}},
+		},
+	}
+}
+
+// TestWorkloadStatusWedgedRolloutNotAvailable is the regression for issue #307: a new release
+// stuck in ImagePullBackOff while the old pods keep serving must report NOT available with the
+// actionable Issue — not "available" on the strength of the superseded release. It fails before
+// the fix, where WorkloadStatus returned the DeploymentAvailable condition (True) and skipped the
+// pod inspection whenever the workload looked available.
+func TestWorkloadStatusWedgedRolloutNotAvailable(t *testing.T) {
+	const image = "ghcr.io/burrow-cloud/website:0.1.2"
+	a := kube.New(fake.NewSimpleClientset(
+		wedgedRolloutDeployment(image),
+		waitingPod(image, cp.ReasonImagePullBackOff, "Back-off pulling image"),
+	), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.Available {
+		t.Fatalf("wedged rollout reported available; the old release serves but the new one cannot pull: %+v", st)
+	}
+	if st.IssueReason != cp.ReasonImagePullBackOff {
+		t.Errorf("issue reason = %q, want %q", st.IssueReason, cp.ReasonImagePullBackOff)
+	}
+	if !strings.Contains(st.Issue, image) {
+		t.Errorf("issue = %q, want it to name the image %q", st.Issue, image)
+	}
+}
+
+// TestWorkloadStatusInProgressRolloutStaysAvailable guards the other side: a normal rolling update
+// (old pods serving, the new pod merely ContainerCreating and the deadline not exceeded) is NOT
+// flagged as broken — a deploy that will succeed in a few seconds keeps reading available with no
+// issue.
+func TestWorkloadStatusInProgressRolloutStaysAvailable(t *testing.T) {
+	a := kube.New(fake.NewSimpleClientset(
+		wedgedRolloutDeployment("img:2"),
+		waitingPod("img:2", "ContainerCreating", ""),
+	), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if !st.Available {
+		t.Fatalf("normal in-progress rollout flagged not-available: %+v", st)
+	}
+	if st.Issue != "" || st.IssueReason != "" {
+		t.Errorf("in-progress rollout carries issue = %q / %q, want empty", st.Issue, st.IssueReason)
+	}
+}
+
+// TestWorkloadStatusProgressDeadlineExceededNotAvailable covers a rollout wedged for a reason other
+// than an image pull (e.g. a crash loop): the Progressing condition reports
+// ProgressDeadlineExceeded, so the app reads not-available even though the old ReplicaSet keeps the
+// Available condition True.
+func TestWorkloadStatusProgressDeadlineExceededNotAvailable(t *testing.T) {
+	dep := wedgedRolloutDeployment("img:2")
+	dep.Status.Conditions = append(dep.Status.Conditions, appsv1.DeploymentCondition{
+		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
+	})
+	a := kube.New(fake.NewSimpleClientset(dep), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.Available {
+		t.Fatalf("rollout past its progress deadline reported available: %+v", st)
+	}
+}
+
+// TestListWorkloadsSurfacesWedgedRollout is the #307 regression on the list path: `burrow app list`
+// must report the wedged app not-available and carry the Issue, so a broken deploy is visible
+// without opening logs. It fails before the fix, where ListWorkloads ran no pod inspection at all.
+func TestListWorkloadsSurfacesWedgedRollout(t *testing.T) {
+	const image = "ghcr.io/burrow-cloud/website:0.1.2"
+	a := kube.New(fake.NewSimpleClientset(
+		wedgedRolloutDeployment(image),
+		waitingPod(image, cp.ReasonImagePullBackOff, "Back-off pulling image"),
+	), ns)
+
+	apps, err := a.ListWorkloads(context.Background())
+	if err != nil {
+		t.Fatalf("ListWorkloads: %v", err)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("got %d apps, want 1: %+v", len(apps), apps)
+	}
+	if apps[0].Available {
+		t.Fatalf("list reported wedged app available: %+v", apps[0])
+	}
+	if apps[0].IssueReason != cp.ReasonImagePullBackOff {
+		t.Errorf("issue reason = %q, want %q", apps[0].IssueReason, cp.ReasonImagePullBackOff)
+	}
+	if !strings.Contains(apps[0].Issue, image) {
+		t.Errorf("issue = %q, want it to name the image %q", apps[0].Issue, image)
+	}
+}
+
 func TestScale(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

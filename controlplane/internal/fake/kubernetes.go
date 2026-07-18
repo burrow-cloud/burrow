@@ -116,8 +116,14 @@ type deployState struct {
 
 // status builds the observed WorkloadStatus for this deploy state, mirroring the real adapter:
 // availability comes from the ready/desired replicas, and an injected blocking pod waiting
-// reason (SetImagePullFailure) becomes the same actionable Issue the real adapter attaches when
-// the workload is not serving. It centralizes the shape so WorkloadStatus and ListWorkloads agree.
+// reason (SetImagePullFailure/SetWedgedRollout) becomes the same actionable Issue the real
+// adapter attaches. It centralizes the shape so WorkloadStatus and ListWorkloads agree.
+//
+// A blocking image-pull reason forces the workload not-available and surfaces the Issue even when
+// ready still meets desired: that is the wedged rolling update of issue #307, where the NEW
+// release cannot pull its image while the PREVIOUS release's pods keep serving, so a naive
+// ready>=desired check would wrongly read healthy. The real adapter reaches the same verdict by
+// inspecting the updated pods; the fake models it directly.
 func (d *deployState) status(app string) controlplane.WorkloadStatus {
 	st := controlplane.WorkloadStatus{
 		App:             app,
@@ -128,7 +134,8 @@ func (d *deployState) status(app string) controlplane.WorkloadStatus {
 		UpdatedReplicas: d.ready,
 		Available:       d.spec.Replicas > 0 && d.ready >= d.spec.Replicas,
 	}
-	if !st.Available && controlplane.IsImagePullReason(d.waitingReason) {
+	if controlplane.IsImagePullReason(d.waitingReason) {
+		st.Available = false
 		st.Issue = controlplane.ImagePullIssue(d.spec.Image, d.waitingReason, d.waitingMessage)
 		st.IssueReason = d.waitingReason
 	}
@@ -324,6 +331,21 @@ func (k *Kubernetes) setImagePullFailure(app, reason, message string) {
 		d.ready = 0
 		d.waitingReason = reason
 		d.waitingMessage = message
+	}
+}
+
+// SetWedgedRollout models issue #307: a NEW release whose image cannot be pulled while the
+// PREVIOUS release's pods keep serving. Unlike SetImagePullFailure it leaves ready at its current
+// (old-release) count, so a naive ready>=desired check still reads healthy; the blocking waiting
+// reason is what marks the current release not-serving, exactly as a wedged rolling update looks in
+// a real cluster. Pass a non-image-pull reason (or "") to clear it. It is a no-op if app has no
+// workload.
+func (k *Kubernetes) SetWedgedRollout(app, reason string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if d := k.deploys[k.key(app)]; d != nil {
+		d.waitingReason = reason
+		d.waitingMessage = ""
 	}
 }
 

@@ -130,6 +130,21 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 	if err != nil {
 		return controlplane.WorkloadStatus{}, fmt.Errorf("kube: reading deployment %q: %w", app, err)
 	}
+	return a.workloadStatus(ctx, dep), nil
+}
+
+// workloadStatus maps a Deployment to a WorkloadStatus and enriches it with the health of the
+// CURRENT release. The DeploymentAvailable condition alone is not enough: Kubernetes holds it
+// True throughout a rolling update as long as the PREVIOUS ReplicaSet still meets minimum
+// availability, so a new release whose image cannot be pulled reads as healthy while the old
+// pods keep serving (issue #307). When the newest revision has not finished rolling out, this
+// inspects the app's pods for a blocking image-pull failure and checks the progress deadline:
+// either means the current release is not serving, so it is reported not-available with the
+// actionable Issue. A merely-in-progress rollout — a new pod still ContainerCreating, deadline
+// not yet exceeded — has no blocking reason, so availability is left as reported and a normal
+// deploy is not flagged as broken. Enrichment is best-effort: a pod-list error leaves the base
+// status untouched. It is shared by WorkloadStatus and ListWorkloads so both surfaces agree.
+func (a *Adapter) workloadStatus(ctx context.Context, dep *appsv1.Deployment) controlplane.WorkloadStatus {
 	var desired int32
 	if dep.Spec.Replicas != nil {
 		desired = *dep.Spec.Replicas
@@ -139,7 +154,7 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 		image = c[0].Image
 	}
 	st := controlplane.WorkloadStatus{
-		App:             app,
+		App:             dep.Name,
 		Kind:            controlplane.WorkloadDeployment,
 		Image:           image,
 		DesiredReplicas: desired,
@@ -147,15 +162,20 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 		UpdatedReplicas: dep.Status.UpdatedReplicas,
 		Available:       deploymentAvailable(dep, desired),
 	}
-	// Best-effort enrichment: when the workload is not serving, look for a blocking pod
-	// condition (an image the cluster cannot pull) and turn it into an actionable Issue. A
-	// pod-list error must not fail Status, so it is swallowed and Issue is left empty.
-	if !st.Available {
-		if issue, reason := a.pullIssue(ctx, app); reason != "" {
-			st.Issue, st.IssueReason = issue, reason
-		}
+	if deploymentRolledOut(dep, desired) {
+		return st // the current release is fully rolled out and serving
 	}
-	return st, nil
+	// The newest revision has not completed. A blocking pull failure on the app's pods is the
+	// immediate, reliable signal that the current release is wedged; an exceeded progress
+	// deadline is the general one. Either downgrades availability so a broken deploy does not
+	// read as healthy on the strength of the superseded release still serving.
+	if issue, reason := a.pullIssue(ctx, dep.Name); reason != "" {
+		st.Issue, st.IssueReason = issue, reason
+		st.Available = false
+	} else if deploymentProgressStalled(dep) {
+		st.Available = false
+	}
+	return st
 }
 
 // pullIssue inspects the app's pods for a blocking image-pull failure and, if one is found,
@@ -190,24 +210,10 @@ func (a *Adapter) ListWorkloads(ctx context.Context) ([]controlplane.WorkloadSta
 	}
 	out := make([]controlplane.WorkloadStatus, 0, len(deps.Items))
 	for i := range deps.Items {
-		dep := &deps.Items[i]
-		var desired int32
-		if dep.Spec.Replicas != nil {
-			desired = *dep.Spec.Replicas
-		}
-		image := ""
-		if c := dep.Spec.Template.Spec.Containers; len(c) > 0 {
-			image = c[0].Image
-		}
-		out = append(out, controlplane.WorkloadStatus{
-			App:             dep.Name,
-			Kind:            controlplane.WorkloadDeployment,
-			Image:           image,
-			DesiredReplicas: desired,
-			ReadyReplicas:   dep.Status.ReadyReplicas,
-			UpdatedReplicas: dep.Status.UpdatedReplicas,
-			Available:       deploymentAvailable(dep, desired),
-		})
+		// Enrich each app the same way single-app Status does, so a wedged rollout (a new
+		// release stuck in ImagePullBackOff while the old pods still serve) surfaces its Issue
+		// and reads not-available in `burrow app list`, not only in `burrow app logs` (#307).
+		out = append(out, a.workloadStatus(ctx, &deps.Items[i]))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].App < out[j].App })
 	return out, nil
@@ -619,6 +625,41 @@ func deploymentAvailable(dep *appsv1.Deployment, desired int32) bool {
 		}
 	}
 	return desired > 0 && dep.Status.ReadyReplicas >= desired
+}
+
+// deploymentRolledOut reports whether the Deployment's newest revision is fully rolled out and
+// serving, using the same completion test as `kubectl rollout status`
+// (deploymentutil.DeploymentComplete). ReadyReplicas alone is insufficient: it counts ready pods
+// across BOTH the old and new ReplicaSets, so during a rolling update the old pods keep it
+// satisfied while the new pods are wedged. Requiring UpdatedReplicas/AvailableReplicas to reach
+// desired and Replicas to equal UpdatedReplicas confirms the new revision is the only one left
+// and available. When it returns false the caller inspects the pods and the progress deadline to
+// tell a wedged rollout from one still legitimately in progress.
+func deploymentRolledOut(dep *appsv1.Deployment, desired int32) bool {
+	return desired > 0 &&
+		dep.Status.ObservedGeneration >= dep.Generation &&
+		dep.Status.UpdatedReplicas >= desired &&
+		dep.Status.Replicas == dep.Status.UpdatedReplicas &&
+		dep.Status.AvailableReplicas >= desired
+}
+
+// progressDeadlineExceeded is the Progressing-condition reason Kubernetes sets when a rollout has
+// not made progress within .spec.progressDeadlineSeconds. It is a string constant in
+// deploymentutil, not exported by appsv1, so it is named here.
+const progressDeadlineExceeded = "ProgressDeadlineExceeded"
+
+// deploymentProgressStalled reports whether the Deployment's rollout has stalled past its progress
+// deadline: the Progressing condition goes False with reason ProgressDeadlineExceeded when the
+// newest revision has not made progress in time. It is the deadline-bounded signal that a rollout
+// is wedged for a reason other than an image pull (e.g. a crash loop), complementing the immediate
+// pull-failure pod inspection.
+func deploymentProgressStalled(dep *appsv1.Deployment) bool {
+	for _, c := range dep.Status.Conditions {
+		if c.Type == appsv1.DeploymentProgressing {
+			return c.Status == corev1.ConditionFalse && c.Reason == progressDeadlineExceeded
+		}
+	}
+	return false
 }
 
 func sortedKeys(m map[string]string) []string {

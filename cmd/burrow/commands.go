@@ -9,6 +9,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -40,14 +41,17 @@ func newAppListCmd() *cobra.Command {
 				fmt.Fprintln(out, "No apps deployed. Deploy one with `burrow app deploy <app> --image <ref>`.")
 				return nil
 			}
-			fmt.Fprintf(out, "%-20s%-34s%-12s%-11s%s\n", "NAME", "IMAGE", "REPLICAS", "AVAILABLE", "ISSUE")
+			// Size the columns from the data through a tabwriter so a long image reference
+			// keeps its gutter to the next column instead of colliding with it (#306).
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tIMAGE\tREPLICAS\tAVAILABLE\tISSUE")
 			for _, a := range apps {
 				// Show the raw issue reason (e.g. ImagePullBackOff) so a wedged rollout is visible
 				// here without opening `burrow app logs`; the full actionable message and fix live in
 				// `burrow app status` and the --json output (#307).
-				fmt.Fprintf(out, "%-20s%-34s%-12s%-11t%s\n", a.App, a.Image, fmt.Sprintf("%d/%d", a.ReadyReplicas, a.DesiredReplicas), a.Available, a.IssueReason)
+				fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%t\t%s\n", a.App, a.Image, a.ReadyReplicas, a.DesiredReplicas, a.Available, a.IssueReason)
 			}
-			return nil
+			return tw.Flush()
 		},
 	}
 	bindCommon(cmd.Flags(), o)

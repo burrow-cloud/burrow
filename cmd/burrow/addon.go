@@ -127,11 +127,12 @@ func newAddonBackupsCmd() *cobra.Command {
 				fmt.Fprintln(out, "No backups recorded. Create one with `burrow addon backup postgres <app>`.")
 				return nil
 			}
-			fmt.Fprintf(out, "%-26s%-16s%-24s%-12s%s\n", "ID", "APP", "CREATED", "STATUS", "SIZE")
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "ID\tAPP\tCREATED\tSTATUS\tSIZE")
 			for _, b := range backups {
-				fmt.Fprintf(out, "%-26s%-16s%-24s%-12s%d\n", b.ID, b.App, b.CreatedAt, b.Status, b.SizeBytes)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", b.ID, b.App, b.CreatedAt, b.Status, b.SizeBytes)
 			}
-			return nil
+			return tw.Flush()
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -580,11 +581,12 @@ func newAddonListCmd() *cobra.Command {
 				fmt.Fprintln(out, "No add-ons installed. Install one with `burrow addon install logs`.")
 				return nil
 			}
-			fmt.Fprintf(out, "%-16s%-10s%-12s%-30s%s\n", "NAME", "TYPE", "MODE", "ENDPOINT", "CAPABILITIES")
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "NAME\tTYPE\tMODE\tENDPOINT\tCAPABILITIES")
 			for _, a := range addons {
-				fmt.Fprintf(out, "%-16s%-10s%-12s%-30s%s\n", a.Name, a.Type, a.Mode, a.Endpoint, strings.Join(a.Capabilities, ","))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", a.Name, a.Type, a.Mode, a.Endpoint, strings.Join(a.Capabilities, ","))
 			}
-			return nil
+			return tw.Flush()
 		},
 	}
 	bindCommon(cmd.Flags(), o)

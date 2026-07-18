@@ -119,10 +119,13 @@ func newRootCmd() *cobra.Command {
 	// covers bash, zsh, fish, and PowerShell.
 	addGroups(root)
 	root.AddCommand(
-		// Get started: install, point at a cluster, configure credentials (ADR-0037).
-		grouped(newInstallCmd(), groupGetStarted),
+		// Get started: install, point at a cluster, configure credentials (ADR-0037). install and
+		// upgrade now live under `burrow cluster` (the cluster-lifecycle surface); the top-level
+		// `burrow install` / `burrow upgrade` stay as deprecated, hidden aliases so existing muscle
+		// memory and scripts keep working (they print a one-line migration hint).
 		grouped(newJoinCmd(), groupGetStarted),
-		grouped(newUpgradeCmd(), groupGetStarted),
+		newInstallAliasCmd(),
+		newUpgradeAliasCmd(),
 		grouped(newMcpCmd(), groupGetStarted),
 		grouped(newAgentCmd(), groupGetStarted),
 		grouped(newClusterCmd(), groupGetStarted),

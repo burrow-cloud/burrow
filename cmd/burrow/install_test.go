@@ -292,8 +292,8 @@ func TestInstallNoArgListsContextsAndDoesNotInstall(t *testing.T) {
 		"dev", "prod", "broken", "*",
 		"installed (v0.7.0)", "not installed", "unreachable",
 		"# Install Burrow into a context with the defaults",
-		"burrow install do-nyc1-cluster",
-		"burrow install <context> [flags]",
+		"burrow cluster install do-nyc1-cluster",
+		"burrow cluster install <context> [flags]",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("context listing missing %q:\n%s", want, s)

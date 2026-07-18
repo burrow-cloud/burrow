@@ -31,7 +31,8 @@ func noConfig(t *testing.T) {
 }
 
 // TestRootHelpShowsGroups confirms `burrow --help` renders the labeled command groups, lists the
-// `agent` wiring command, hides the deprecated `mcp` command (ADR-0049), and lists no retired
+// `agent` wiring command, hides the deprecated `mcp` command (ADR-0049) and the deprecated
+// top-level `install`/`upgrade` aliases (ADR-0060, now under `cluster`), and lists no retired
 // `system`/`context` command (ADR-0037).
 func TestRootHelpShowsGroups(t *testing.T) {
 	configWithEnv(t) // config present so the first-run banner is suppressed
@@ -44,7 +45,7 @@ func TestRootHelpShowsGroups(t *testing.T) {
 
 	for _, want := range []string{
 		"Get started:", "Environments:", "Operate:", "Govern:",
-		"install", "upgrade", "agent", "cluster", "config", "env", "app", "addon", "guard", "audit",
+		"agent", "cluster", "config", "env", "app", "addon", "guard", "audit",
 		"version", "completion", "help",
 	} {
 		if !strings.Contains(s, want) {
@@ -52,9 +53,10 @@ func TestRootHelpShowsGroups(t *testing.T) {
 		}
 	}
 
-	// The deprecated `mcp` command is hidden (ADR-0049): it must not appear as a command line in help.
+	// The deprecated `mcp` command (ADR-0049) and the deprecated top-level `install`/`upgrade`
+	// aliases (ADR-0060) are hidden: none may appear as a command line in the main help.
 	for _, line := range strings.Split(s, "\n") {
-		if f := strings.Fields(line); len(f) > 0 && f[0] == "mcp" {
+		if f := strings.Fields(line); len(f) > 0 && (f[0] == "mcp" || f[0] == "install" || f[0] == "upgrade") {
 			t.Errorf("help lists the hidden deprecated %q command: %q", f[0], line)
 		}
 	}
@@ -80,9 +82,9 @@ func TestBareBurrowFirstRunShowsBanner(t *testing.T) {
 		// Leads with the one-line description, flags that Burrow is not set up, and points at install.
 		"Run your apps on your own Kubernetes cluster",
 		"Burrow is not set up yet",
-		"burrow install <context>",
+		"burrow cluster install <context>",
 		// The `Use "..."` pointers guide the next step.
-		`Use "burrow install" to list your contexts and install into one.`,
+		`Use "burrow cluster install" to list your contexts and install into one.`,
 		`Use "burrow env list --discover" to find an existing Burrow in your clusters.`,
 		`Use "burrow -h" to see all commands.`,
 	} {

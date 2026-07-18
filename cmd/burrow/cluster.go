@@ -40,17 +40,22 @@ func newClusterCmd() *cobra.Command {
 	o := &commonOpts{}
 	cmd := &cobra.Command{
 		Use:   "cluster",
-		Short: "Inspect what your cluster can do, and set up its shared infrastructure (ingress, TLS)",
-		Long: "cluster is the home for the Kubernetes cluster Burrow runs on. With no subcommand it\n" +
-			"reports the cluster's capabilities, read live: whether an ingress controller is installed\n" +
-			"and which IngressClass to use, whether there is a default StorageClass for persistent\n" +
-			"volumes, whether Service type=LoadBalancer is likely supported or the cluster is\n" +
+		Short: "Set up and manage the Burrow cluster: install/upgrade the control plane, inspect capabilities, provision infrastructure",
+		Long: "cluster is the home for the Kubernetes cluster Burrow runs on — the cluster-lifecycle\n" +
+			"surface, which is inherently self-hosted because it drives a kube context. With no\n" +
+			"subcommand it reports the cluster's capabilities, read live: whether an ingress controller\n" +
+			"is installed and which IngressClass to use, whether there is a default StorageClass for\n" +
+			"persistent volumes, whether Service type=LoadBalancer is likely supported or the cluster is\n" +
 			"NodePort-only, whether cert-manager is installed for TLS, the cloud provider, and whether\n" +
 			"a DNS provider is configured. That view is read-only and changes nothing.\n\n" +
-			"Additive cluster components are separate, opt-in subcommands:\n" +
-			"`burrow cluster ingress install` provisions the shared ingress/TLS infrastructure\n" +
-			"(ingress-nginx, cert-manager, a Let's Encrypt issuer), and `burrow cluster registry install`\n" +
-			"provisions the optional in-cluster image registry; each is a one-time operator setup.",
+			"Its subcommands stand up and roll the cluster forward:\n" +
+			"`burrow cluster install` installs the control plane into a context, `burrow cluster upgrade`\n" +
+			"rolls it forward in place, and `burrow cluster bootstrap` turns a bare VPS into a\n" +
+			"single-node cluster with the control plane on it. Additive components are separate, opt-in\n" +
+			"subcommands: `burrow cluster ingress install` provisions the shared ingress/TLS\n" +
+			"infrastructure (ingress-nginx, cert-manager, a Let's Encrypt issuer), and\n" +
+			"`burrow cluster registry install` provisions the optional in-cluster image registry; each\n" +
+			"is a one-time operator setup.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -71,6 +76,8 @@ func newClusterCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	cmd.AddCommand(newInstallCmd())
+	cmd.AddCommand(newUpgradeCmd())
 	cmd.AddCommand(newIngressCmd())
 	cmd.AddCommand(newClusterRegistryCmd())
 	cmd.AddCommand(newBootstrapCmd())

@@ -22,7 +22,7 @@ it from deleting the app without your say-so.
     `go build -o burrow-agent ./cmd/burrow-agent`, then move both onto your `PATH`.
 
 `burrow` is your admin CLI; `burrow-agent` is the scoped binary your coding agent drives. You do
-**not** need to build the control plane — `burrow install` pulls the published `burrowd` image.
+**not** need to build the control plane — `burrow cluster install` pulls the published `burrowd` image.
 
 This walkthrough deploys the sample app in this repo, so clone it and work from its root (if you
 built the binaries from source you already have it):
@@ -52,7 +52,7 @@ kubeconfig.
 ### 2. Install Burrow into it
 
 ```sh
-burrow install k3d-burrow-quickstart
+burrow cluster install k3d-burrow-quickstart
 ```
 
 Burrow deploys its control plane (the published `burrowd` image plus an in-cluster Postgres),

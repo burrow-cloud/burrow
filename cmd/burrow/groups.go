@@ -9,9 +9,10 @@ import (
 
 // The CLI is grouped by the task a person is doing rather than as a flat verb list (ADR-0024):
 // `app` operates a deployed application, `config` sets up the credentials Burrow uses, and
-// `cluster` both inspects the cluster's capabilities and provisions its shared infrastructure
-// (ingress/TLS). install/upgrade, guard, and version stay at the top level. The grouping is a
-// human-discoverability aid; the MCP tool surface stays flat.
+// `cluster` is the cluster-lifecycle surface — it installs and upgrades the control plane, inspects
+// the cluster's capabilities, and provisions its shared infrastructure (ingress/TLS) (ADR-0060).
+// guard and version stay at the top level. The grouping is a human-discoverability aid; the MCP
+// tool surface stays flat.
 
 // The top-level command groups, ordered along the golden path (ADR-0037): get started, pick an
 // environment, operate apps, then govern with guardrails and the audit trail. version and the
@@ -62,8 +63,8 @@ const rootLongDesc = "Burrow runs your apps on your own Kubernetes cluster, oper
 // (the ⚠️ alert is intentional): it is user-facing CLI output.
 const firstRunBanner = rootShortDesc + "\n\n" +
 	"⚠️  Burrow is not set up yet. Point it at a cluster to get started:\n\n" +
-	"  burrow install <context>\n\n" +
-	"Use \"burrow install\" to list your contexts and install into one.\n" +
+	"  burrow cluster install <context>\n\n" +
+	"Use \"burrow cluster install\" to list your contexts and install into one.\n" +
 	"Use \"burrow env list --discover\" to find an existing Burrow in your clusters.\n" +
 	"Use \"burrow -h\" to see all commands.\n"
 

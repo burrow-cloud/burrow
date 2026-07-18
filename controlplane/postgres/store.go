@@ -517,6 +517,25 @@ func (s *Store) GetEnvironment(ctx context.Context, name string) (controlplane.E
 	return e, nil
 }
 
+// DeleteEnvironment removes the registered environment with the given name, or ErrNotFound when no
+// such environment is registered. The synthesized `default` environment is never stored here, so it
+// is never removed (the engine rejects it before this call).
+func (s *Store) DeleteEnvironment(ctx context.Context, name string) error {
+	const q = `DELETE FROM environments WHERE name = $1`
+	res, err := s.db.ExecContext(ctx, q, name)
+	if err != nil {
+		return fmt.Errorf("postgres: delete environment %q: %w", name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("postgres: delete environment %q: %w", name, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("postgres: environment %q: %w", name, controlplane.ErrNotFound)
+	}
+	return nil
+}
+
 // scanner is the read side common to *sql.Row and *sql.Rows.
 type scanner interface {
 	Scan(dest ...any) error

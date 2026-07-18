@@ -1793,6 +1793,26 @@ func (e *Engine) ListEnvironments(ctx context.Context) ([]Environment, error) {
 	return out, nil
 }
 
+// RemoveEnvironment unregisters a named environment (ADR-0035 phase 2), the inverse of
+// AddEnvironment. It rejects the reserved `default` environment (which is implicit and synthesized,
+// never stored) and an empty name, and returns ErrNotFound for an unknown name (from the store).
+// Like AddEnvironment it only touches the registry entry: the environment's namespace and any apps
+// in it are managed out of band — kubeconfig-side by the operator in the single-tenant install, or
+// by the managed control plane's own teardown in the cloud — so removing the mapping does not delete
+// the namespace. A removed environment can be re-added later.
+func (e *Engine) RemoveEnvironment(ctx context.Context, name string) error {
+	switch name {
+	case "":
+		return fmt.Errorf("remove environment: name is empty: %w", ErrInvalid)
+	case DefaultEnvironment:
+		return fmt.Errorf("remove environment %q: the default environment is implicit and cannot be removed: %w", name, ErrInvalid)
+	}
+	if err := e.db.DeleteEnvironment(ctx, name); err != nil {
+		return fmt.Errorf("remove environment %s: %w", name, err)
+	}
+	return nil
+}
+
 // resolveMutatingNamespace maps a mutating operation's environment name to its namespace, first
 // applying the ADR-0047 forcing function: when the operation names no environment (an empty env) and
 // more than one environment is registered — the implicit `default` plus at least one named

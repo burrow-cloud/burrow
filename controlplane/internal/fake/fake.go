@@ -77,6 +77,7 @@ const (
 	OpCreateEnvironment Op = "CreateEnvironment"
 	OpListEnvironments  Op = "ListEnvironments"
 	OpGetEnvironment    Op = "GetEnvironment"
+	OpDeleteEnvironment Op = "DeleteEnvironment"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

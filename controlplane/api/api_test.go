@@ -276,6 +276,44 @@ func TestDomainEndpoints(t *testing.T) {
 	}
 }
 
+// TestEnvironmentEndpoints exercises the environment registry routes: add, list (default first),
+// and remove, plus the refusals (removing the implicit default, and authentication).
+func TestEnvironmentEndpoints(t *testing.T) {
+	h, _, _ := newAPI(t)
+
+	if rr := do(h, "POST", "/v1/environments", token, `{"name":"staging","namespace":"burrow-apps-staging"}`); rr.Code != 200 {
+		t.Fatalf("add environment = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// List returns the implicit default first, then the registered one.
+	rr := do(h, "GET", "/v1/environments", token, "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"staging"`) {
+		t.Fatalf("list environments = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// Remove via DELETE with the name in the path.
+	if rr := do(h, "DELETE", "/v1/environments/staging", token, ""); rr.Code != 200 {
+		t.Errorf("remove environment = %d %s", rr.Code, rr.Body.String())
+	}
+	// After removal only the implicit default remains.
+	rr = do(h, "GET", "/v1/environments", token, "")
+	if rr.Code != 200 || strings.Contains(rr.Body.String(), `"staging"`) {
+		t.Errorf("list after remove = %d %s, want no staging", rr.Code, rr.Body.String())
+	}
+	// Removing the implicit default is refused (400 ErrInvalid).
+	if rr := do(h, "DELETE", "/v1/environments/default", token, ""); rr.Code != 400 {
+		t.Errorf("remove default = %d %s, want 400", rr.Code, rr.Body.String())
+	}
+	// Removing an unregistered environment is 404.
+	if rr := do(h, "DELETE", "/v1/environments/nope", token, ""); rr.Code != 404 {
+		t.Errorf("remove unknown = %d %s, want 404", rr.Code, rr.Body.String())
+	}
+	// Authenticated like every other /v1 route.
+	if rr := do(h, "DELETE", "/v1/environments/staging", "", ""); rr.Code != 401 {
+		t.Errorf("unauthenticated remove = %d, want 401", rr.Code)
+	}
+}
+
 // TestAuditEndpoint exercises the read path: a deploy records audit rows, and GET /v1/audit
 // returns them newest-first, with the app/operation/outcome filters applied.
 func TestAuditEndpoint(t *testing.T) {

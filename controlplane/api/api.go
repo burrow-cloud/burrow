@@ -120,6 +120,7 @@ func New(cfg Config) (http.Handler, error) {
 	// `burrow env add`); list returns them with the implicit `default` first. They move no secret.
 	v1.HandleFunc("POST /v1/environments", s.addEnvironment)
 	v1.HandleFunc("GET /v1/environments", s.listEnvironments)
+	v1.HandleFunc("DELETE /v1/environments/{name}", s.removeEnvironment)
 	// The cluster capabilities are read live (ADR-0034): a neutral, read-only report of what the
 	// cluster can do — ingress, storage, LoadBalancer support, cert-manager, provider, DNS. It moves
 	// no secret value.
@@ -941,6 +942,19 @@ func (s *server) listEnvironments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, environmentsResponse{Environments: envs})
+}
+
+// removeEnvironment unregisters a namespace-per-environment target (ADR-0035 phase 2), the inverse
+// of addEnvironment. It removes only the registry mapping; the namespace and its apps are managed
+// out of band (kubeconfig-side in the single-tenant install, by the managed control plane in the
+// cloud). It moves no secret value.
+func (s *server) removeEnvironment(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := s.engine.RemoveEnvironment(r.Context(), name); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"name": name})
 }
 
 // environmentAddRequest is the body of an environment add: the environment name and the namespace

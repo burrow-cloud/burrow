@@ -107,6 +107,47 @@ func TestListEnvironmentsDefaultFirst(t *testing.T) {
 	}
 }
 
+// TestRemoveEnvironment covers the inverse of AddEnvironment: a registered environment can be
+// unregistered (and re-added), the implicit default is refused, and an unknown name is ErrNotFound.
+func TestRemoveEnvironment(t *testing.T) {
+	e, _ := newEnvEngine(t, "burrow-apps")
+	ctx := context.Background()
+
+	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
+		t.Fatalf("add staging: %v", err)
+	}
+
+	// Removing a registered environment leaves only the implicit default.
+	if err := e.RemoveEnvironment(ctx, "staging"); err != nil {
+		t.Fatalf("RemoveEnvironment(staging): %v", err)
+	}
+	envs, err := e.ListEnvironments(ctx)
+	if err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if len(envs) != 1 || envs[0].Name != cp.DefaultEnvironment {
+		t.Fatalf("after remove, listing = %+v, want default only", envs)
+	}
+
+	// The implicit default cannot be removed (it is synthesized, never stored).
+	if err := e.RemoveEnvironment(ctx, cp.DefaultEnvironment); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("RemoveEnvironment(default) err = %v, want ErrInvalid", err)
+	}
+	// An empty name is invalid too.
+	if err := e.RemoveEnvironment(ctx, ""); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("RemoveEnvironment(\"\") err = %v, want ErrInvalid", err)
+	}
+	// Removing an unregistered name is ErrNotFound (already removed above).
+	if err := e.RemoveEnvironment(ctx, "staging"); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("RemoveEnvironment(unknown) err = %v, want ErrNotFound", err)
+	}
+
+	// A removed environment can be re-added.
+	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
+		t.Errorf("re-add staging after remove: %v", err)
+	}
+}
+
 // TestListEnvironmentsDefaultsNamespace confirms an engine with no configured app namespace falls
 // back to "default" for the implicit environment, matching the kube Adapter's default.
 func TestListEnvironmentsDefaultsNamespace(t *testing.T) {

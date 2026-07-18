@@ -616,6 +616,21 @@ func (d *Database) GetEnvironment(ctx context.Context, name string) (controlplan
 	return e, nil
 }
 
+// DeleteEnvironment removes the registered environment with the given name, or ErrNotFound when it
+// is not registered, matching the store. The synthesized `default` environment is never stored here.
+func (d *Database) DeleteEnvironment(ctx context.Context, name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpDeleteEnvironment]; err != nil {
+		return err
+	}
+	if _, ok := d.envs[name]; !ok {
+		return fmt.Errorf("database: environment %q: %w", name, controlplane.ErrNotFound)
+	}
+	delete(d.envs, name)
+	return nil
+}
+
 // cloneStringMap deep-copies a string map (nil stays nil) so the fake never aliases a caller's map.
 func cloneStringMap(m map[string]string) map[string]string {
 	if m == nil {

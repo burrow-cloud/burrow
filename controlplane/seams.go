@@ -391,6 +391,10 @@ type Database interface {
 	ListEnvironments(ctx context.Context) ([]Environment, error)
 	// GetEnvironment returns the registered environment with the given name, or ErrNotFound.
 	GetEnvironment(ctx context.Context, name string) (Environment, error)
+	// DeleteEnvironment removes the registered environment with the given name, or ErrNotFound when
+	// no such environment is registered. The synthesized `default` environment is never stored here,
+	// so it is never removed (the engine rejects it before this call).
+	DeleteEnvironment(ctx context.Context, name string) error
 }
 
 // Credentials is the seam over the one burrow-credentials Secret that holds every vendor

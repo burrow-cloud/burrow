@@ -64,4 +64,15 @@ func TestStoreEnvironments(t *testing.T) {
 	if idxProd > idxStaging {
 		t.Errorf("ListEnvironments not name-ordered: prod at %d, staging at %d", idxProd, idxStaging)
 	}
+
+	// DeleteEnvironment removes the row; a subsequent get and a second delete both report ErrNotFound.
+	if err := s.DeleteEnvironment(ctx, prod); err != nil {
+		t.Fatalf("DeleteEnvironment(prod): %v", err)
+	}
+	if _, err := s.GetEnvironment(ctx, prod); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("GetEnvironment(deleted) err = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteEnvironment(ctx, prod); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("DeleteEnvironment(missing) err = %v, want ErrNotFound", err)
+	}
 }

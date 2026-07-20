@@ -68,6 +68,38 @@ type MetricsQuerier interface {
 	QueryMetrics(ctx context.Context, endpoint, query string, token string) ([]MetricSample, error)
 }
 
+// MetricPoint is one sample in a time series: a timestamp and the metric's value at it. Value is a
+// string for the same reason MetricSample.Value is — PromQL's exact numeric formatting (precision,
+// NaN/Inf) is preserved rather than lost to a float round-trip. Time is the timestamp as the
+// Prometheus API returns it, formatted the same way MetricSample.Time is.
+type MetricPoint struct {
+	Time  string `json:"time,omitempty"`
+	Value string `json:"value"`
+}
+
+// MetricSeries is one labelled time series returned by a range query: a label set and its ordered
+// points over the queried window. It is the time-series sibling of MetricSample, which carries a
+// single instant sample.
+type MetricSeries struct {
+	Labels map[string]string `json:"labels,omitempty"`
+	Points []MetricPoint     `json:"points"`
+}
+
+// MetricsRangeQuerier runs a PromQL range query against a Prometheus-API-compatible metrics store and
+// returns time series over a window — the sibling of MetricsQuerier's instant query, for sparklines
+// and area charts rather than a point-in-time read (ADR-0026). It is kept as a SEPARATE optional
+// interface rather than folded into MetricsQuerier so an existing instant-only implementer stays
+// valid unchanged: the engine type-asserts a selected metrics querier to it and errors cleanly
+// (ErrNotImplemented) when a backend does not provide the range surface.
+type MetricsRangeQuerier interface {
+	// QueryMetricsRange runs a PromQL range query against the Prometheus-API-compatible store
+	// reachable at endpoint (an in-cluster host:port) over [start, end] sampled every step, and
+	// returns one MetricSeries per matching series. token is a bearer credential for an
+	// authenticated backend; an empty token means unauthenticated and no Authorization header is
+	// sent.
+	QueryMetricsRange(ctx context.Context, endpoint, query, token string, start, end time.Time, step time.Duration) ([]MetricSeries, error)
+}
+
 // RegistryAuth carries optional basic-auth credentials for listing a private repo's tags
 // (ADR-0052 §7). The zero value lists anonymously — the case for public GHCR/Docker Hub.
 type RegistryAuth struct {

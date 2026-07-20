@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Engine is the control plane's deploy orchestrator: the product. It turns an agent's
@@ -1115,6 +1116,61 @@ func (e *Engine) QueryMetrics(ctx context.Context, query string, backend string)
 		return nil, fmt.Errorf("query metrics: %w", err)
 	}
 	return samples, nil
+}
+
+// QueryMetricsRange runs a PromQL range query against the connected metrics add-on and returns the
+// matching time series over [start, end] sampled every step. It is the time-series sibling of
+// QueryMetrics — the read path behind a sparkline or area chart — and resolves and authenticates the
+// add-on identically (ADR-0026): it locates the "metrics" add-on, reads its token when the backend is
+// authenticated, and dispatches through the querier keyed by that backend. The window is caller-supplied
+// (no ambient time in the engine, ADR-0010). The selected querier must additionally implement the
+// optional MetricsRangeQuerier seam; a backend that offers only instant queries returns a clean
+// ErrNotImplemented-wrapped error. An empty backend picks the first metrics add-on; a non-empty backend
+// targets a specific one (by its concrete backend or its registry name).
+func (e *Engine) QueryMetricsRange(ctx context.Context, query string, backend string, start, end time.Time, step time.Duration) ([]MetricSeries, error) {
+	if step <= 0 {
+		return nil, fmt.Errorf("query metrics range: step must be positive: %w", ErrInvalid)
+	}
+	if end.Before(start) {
+		return nil, fmt.Errorf("query metrics range: end %s is before start %s: %w", end.Format(time.RFC3339), start.Format(time.RFC3339), ErrInvalid)
+	}
+	if len(e.metrics) == 0 {
+		return nil, fmt.Errorf("query metrics range: metrics querying is not configured: %w", ErrNotImplemented)
+	}
+	addons, err := e.db.Addons(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query metrics range: %w", err)
+	}
+	addon, found := selectAddon(addons, "metrics", backend)
+	if !found {
+		if backend != "" {
+			return nil, fmt.Errorf("query metrics range: no metrics add-on with backend %q (have: %s): %w", backend, strings.Join(availableBackends(addons, "metrics"), ", "), ErrNotFound)
+		}
+		return nil, fmt.Errorf("query metrics range: no metrics add-on is connected — run `burrow addon connect prometheus`: %w", ErrNotFound)
+	}
+	q := e.metrics[addon.Backend]
+	if q == nil {
+		return nil, fmt.Errorf("query metrics range: no metrics querier for backend %q: %w", addon.Backend, ErrNotImplemented)
+	}
+	rq, ok := q.(MetricsRangeQuerier)
+	if !ok {
+		return nil, fmt.Errorf("query metrics range: range metrics querying is not supported by backend %q: %w", addon.Backend, ErrNotImplemented)
+	}
+	// An authenticated backend records the key under which its bearer token lives in the
+	// burrow-credentials Secret; read it at query time so a rotation is picked up with no restart
+	// (ADR-0023). An empty SecretKey means the backend is unauthenticated — pass no token.
+	token := ""
+	if addon.SecretKey != "" {
+		token, err = e.credentials.Token(ctx, addon.SecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("query metrics range: reading token for add-on %q under key %q: %w", addon.Name, addon.SecretKey, err)
+		}
+	}
+	series, err := rq.QueryMetricsRange(ctx, addon.Endpoint, query, token, start, end, step)
+	if err != nil {
+		return nil, fmt.Errorf("query metrics range: %w", err)
+	}
+	return series, nil
 }
 
 // recorded release and the live workload state. It returns ErrNotFound only when the

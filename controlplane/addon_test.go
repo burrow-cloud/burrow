@@ -28,18 +28,43 @@ func (s *stubLogs) QueryLogs(_ context.Context, endpoint, _ string, _ int, token
 	return []cp.LogEntry{{Message: "hello"}}, nil
 }
 
-// stubMetrics is an inline MetricsQuerier that records the endpoint and bearer token it was queried
-// with and returns a fixed sample, so a QueryMetrics test can assert the engine resolved the add-on
-// from the registry and threaded the token through.
+// stubMetrics is an inline MetricsQuerier (and MetricsRangeQuerier) that records the endpoint, bearer
+// token, and — for a range query — the query text and window it was called with, returning fixed data,
+// so a QueryMetrics/QueryMetricsRange test can assert the engine resolved the add-on from the registry
+// and threaded its arguments through.
 type stubMetrics struct {
 	endpoint string
 	token    string
+	// range-query call record
+	rangeQuery string
+	start      time.Time
+	end        time.Time
+	step       time.Duration
 }
 
 func (s *stubMetrics) QueryMetrics(_ context.Context, endpoint, _ string, token string) ([]cp.MetricSample, error) {
 	s.endpoint = endpoint
 	s.token = token
 	return []cp.MetricSample{{Value: "1"}}, nil
+}
+
+func (s *stubMetrics) QueryMetricsRange(_ context.Context, endpoint, query, token string, start, end time.Time, step time.Duration) ([]cp.MetricSeries, error) {
+	s.endpoint = endpoint
+	s.token = token
+	s.rangeQuery = query
+	s.start, s.end, s.step = start, end, step
+	return []cp.MetricSeries{{
+		Labels: map[string]string{"job": "web"},
+		Points: []cp.MetricPoint{{Time: "t0", Value: "1"}, {Time: "t1", Value: "2"}},
+	}}, nil
+}
+
+// instantOnlyMetrics is a MetricsQuerier that deliberately does NOT implement MetricsRangeQuerier, so
+// a range query against a backend wired to it exercises the not-supported path.
+type instantOnlyMetrics struct{}
+
+func (instantOnlyMetrics) QueryMetrics(_ context.Context, _, _, _ string) ([]cp.MetricSample, error) {
+	return nil, nil
 }
 
 // newAddonEngine builds an engine with logs and metrics queriers wired, returning the seams a test
@@ -391,5 +416,129 @@ func TestQueryMetricsNoAddon(t *testing.T) {
 	e, _, _, _, _, _ := newAddonEngineFull(t)
 	if _, err := e.QueryMetrics(ctx, "up", ""); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("QueryMetrics with no add-on err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestQueryMetricsRange connects a Prometheus and runs a range query: the engine resolves the add-on,
+// threads the query and window through to the range querier, and returns the canned series. It mirrors
+// the instant-query happy path with the added window arguments (ADR-0026).
+func TestQueryMetricsRange(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _, mets, _ := newAddonEngineFull(t)
+
+	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "", ""); err != nil {
+		t.Fatalf("ConnectAddon: %v", err)
+	}
+	start := time.Date(2026, 6, 25, 11, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	step := 30 * time.Second
+
+	series, err := e.QueryMetricsRange(ctx, `up{job="web"}`, "", start, end, step)
+	if err != nil {
+		t.Fatalf("QueryMetricsRange: %v", err)
+	}
+	if len(series) != 1 || len(series[0].Points) != 2 || series[0].Points[1].Value != "2" {
+		t.Errorf("series = %+v, want one series with two points", series)
+	}
+	if mets.endpoint != "prometheus.monitoring.svc:9090" {
+		t.Errorf("resolved endpoint %q, want the connected Prometheus endpoint", mets.endpoint)
+	}
+	if mets.rangeQuery != `up{job="web"}` || !mets.start.Equal(start) || !mets.end.Equal(end) || mets.step != step {
+		t.Errorf("range args = %q/%v/%v/%v, want the query and window passed", mets.rangeQuery, mets.start, mets.end, mets.step)
+	}
+}
+
+// TestQueryMetricsRangeValidation rejects an obviously-bad window before touching any add-on: a
+// non-positive step and an end before start are ErrInvalid.
+func TestQueryMetricsRangeValidation(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _, _, _ := newAddonEngineFull(t)
+	start := time.Date(2026, 6, 25, 11, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+
+	if _, err := e.QueryMetricsRange(ctx, "up", "", start, end, 0); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("zero step err = %v, want ErrInvalid", err)
+	}
+	if _, err := e.QueryMetricsRange(ctx, "up", "", end, start, time.Minute); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("end<start err = %v, want ErrInvalid", err)
+	}
+}
+
+// TestQueryMetricsRangeNoAddon reports ErrNotFound when no metrics add-on is registered, matching the
+// instant path.
+func TestQueryMetricsRangeNoAddon(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _, _, _ := newAddonEngineFull(t)
+	start := time.Date(2026, 6, 25, 11, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	if _, err := e.QueryMetricsRange(ctx, "up", "", start, end, time.Minute); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("range query with no add-on err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestQueryMetricsRangeNotConfigured reports ErrNotImplemented when no metrics querier is wired at all.
+func TestQueryMetricsRangeNotConfigured(t *testing.T) {
+	ctx := context.Background()
+	d := fake.NewDatabase()
+	d.SetPolicy(permissive())
+	c := fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC))
+	e, err := cp.New(cp.Deps{
+		Kubernetes: fake.NewKubernetes(), Database: d,
+		Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+		// No Metrics map wired.
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	start := time.Date(2026, 6, 25, 11, 0, 0, 0, time.UTC)
+	if _, err := e.QueryMetricsRange(ctx, "up", "", start, start.Add(time.Hour), time.Minute); !errors.Is(err, cp.ErrNotImplemented) {
+		t.Errorf("range query with no metrics wired err = %v, want ErrNotImplemented", err)
+	}
+}
+
+// TestQueryMetricsRangeNotSupported reports ErrNotImplemented when the selected metrics querier
+// implements only instant queries (no MetricsRangeQuerier), naming the backend.
+func TestQueryMetricsRangeNotSupported(t *testing.T) {
+	ctx := context.Background()
+	d := fake.NewDatabase()
+	d.SetPolicy(permissive())
+	c := fake.NewClock(time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC))
+	e, err := cp.New(cp.Deps{
+		Kubernetes: fake.NewKubernetes(), Database: d,
+		Clock: c, IDs: fake.NewIDs(), Resolver: fake.NewResolver(),
+		Credentials: fake.NewCredentials(), DNS: fake.NewDNSFactory(),
+		Metrics: map[string]cp.MetricsQuerier{"prometheus": instantOnlyMetrics{}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "", ""); err != nil {
+		t.Fatalf("ConnectAddon: %v", err)
+	}
+	start := time.Date(2026, 6, 25, 11, 0, 0, 0, time.UTC)
+	_, err = e.QueryMetricsRange(ctx, "up", "", start, start.Add(time.Hour), time.Minute)
+	if !errors.Is(err, cp.ErrNotImplemented) {
+		t.Errorf("range query on instant-only backend err = %v, want ErrNotImplemented", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "prometheus") {
+		t.Errorf("err = %v, want it to name the backend", err)
+	}
+}
+
+// TestQueryMetricsRangeAuthThreadsToken connects an authenticated Prometheus and confirms the range
+// query reads the bearer token back through the Credentials seam and threads it to the querier.
+func TestQueryMetricsRangeAuthThreadsToken(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, _, mets, _ := newAddonEngineFull(t)
+	if _, err := e.ConnectAddon(ctx, "prometheus", "prometheus.monitoring.svc:9090", "addon-prometheus", "s3cr3t"); err != nil {
+		t.Fatalf("ConnectAddon: %v", err)
+	}
+	start := time.Date(2026, 6, 25, 11, 0, 0, 0, time.UTC)
+	if _, err := e.QueryMetricsRange(ctx, "up", "", start, start.Add(time.Hour), time.Minute); err != nil {
+		t.Fatalf("QueryMetricsRange: %v", err)
+	}
+	if mets.token != "s3cr3t" {
+		t.Errorf("range query token = %q, want the token read from the Secret", mets.token)
 	}
 }

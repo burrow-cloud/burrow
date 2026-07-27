@@ -6,6 +6,7 @@ package kube_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -983,3 +984,199 @@ func TestLogs(t *testing.T) {
 		t.Errorf("logs for missing app err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestApplyNoPodMutatorLeavesDeploymentUnchanged guards the backward-compatible default of the
+// ADR-0061 deploy-path extension point (WithPodMutator): with no mutator wired, the Deployment the
+// adapter constructs is byte-for-byte what it was before the hook existed. ADR-0061 §3 makes that a
+// test obligation rather than an aspiration, so the whole expected object is spelled out here — any
+// accidental change to the deploy path's pod shape fails this test.
+func TestApplyNoPodMutatorLeavesDeploymentUnchanged(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns)
+
+	spec := cp.WorkloadSpec{
+		App: "web", Kind: cp.WorkloadDeployment, Image: "img:1", Replicas: 2,
+		Env:         map[string]string{"B": "2", "A": "1"},
+		Command:     []string{"server", "--port", "8080"},
+		MetricsPort: 9090,
+		ReleaseID:   "rel-1",
+	}
+	if err := a.ApplyWorkload(ctx, spec); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
+	}
+	got, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	// The fake clientset stamps its own resourceVersion on create; that is the tracker's, not the
+	// adapter's, so it is cleared before comparing.
+	got.ResourceVersion = ""
+
+	labels := map[string]string{"app.kubernetes.io/name": "web", "app.kubernetes.io/managed-by": "burrow"}
+	want := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns, Labels: labels},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: i32p(2),
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": "web"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+					Annotations: map[string]string{
+						"prometheus.io/scrape": "true",
+						"prometheus.io/port":   "9090",
+						"prometheus.io/path":   "/metrics",
+						cp.ReleaseAnnotation:   "rel-1",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:    "web",
+						Image:   "img:1",
+						Command: []string{"server", "--port", "8080"},
+						Env: []corev1.EnvVar{
+							{Name: "A", Value: "1"},
+							{Name: "B", Value: "2"},
+						},
+						EnvFrom: []corev1.EnvFromSource{{
+							SecretRef: &corev1.SecretEnvSource{
+								LocalObjectReference: corev1.LocalObjectReference{Name: cp.AppSecretName("web")},
+								Optional:             boolp(true),
+							},
+						}},
+					}},
+				},
+			},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Deployment built with no pod mutator differs from the pre-hook output (ADR-0061 §3)\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+// TestApplyPodMutatorAppliedOnCreate asserts the ADR-0061 extension point is honored on the create
+// path: a mutator standing in for an operator's cluster requirements — a toleration for a tainted
+// node pool and a mandated runtime class — reaches the created Deployment.
+func TestApplyPodMutatorAppliedOnCreate(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns).WithPodMutator(tolerationMutator("gpu", "kata"))
+
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
+	}
+	dep, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	assertMutated(t, dep.Spec.Template.Spec, "gpu", "kata")
+}
+
+// TestApplyPodMutatorAppliedOnUpdate is the case that would otherwise regress silently: the hook
+// must run on every path that writes the pod template, not only on create (ADR-0061 §2). A mutator
+// applied only on create is dropped by the first rollout, leaving a long-running workload without
+// the toleration or runtime class it was deployed with — a failure that shows up later, under a
+// redeploy, as an unschedulable pod rather than as a missing hook.
+func TestApplyPodMutatorAppliedOnUpdate(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := kube.New(client, ns).WithPodMutator(tolerationMutator("gpu", "kata"))
+
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	// The second apply is a rollout: it takes the update path, which rebuilds the pod template.
+	if err := a.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "img:2", Replicas: 3}); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	dep, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if dep.Spec.Template.Spec.Containers[0].Image != "img:2" {
+		t.Fatalf("image = %q, want img:2 (the rollout did not take the update path)", dep.Spec.Template.Spec.Containers[0].Image)
+	}
+	assertMutated(t, dep.Spec.Template.Spec, "gpu", "kata")
+	// The mutator here is idempotent (it replaces rather than appends), so the rollout must not
+	// have accumulated a second copy of the toleration.
+	if n := len(dep.Spec.Template.Spec.Tolerations); n != 1 {
+		t.Errorf("tolerations after a rollout = %d, want 1", n)
+	}
+}
+
+// TestApplyPodMutatorSeesConstructedPodSpec asserts the hook runs over the FULLY-constructed pod
+// spec, not an empty one: it must be able to read and adjust the containers, env, and command the
+// engine built (ADR-0061 §1). A hook applied before construction could not, for example, add a
+// volume mount to the app container.
+func TestApplyPodMutatorSeesConstructedPodSpec(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+
+	var sawContainers, sawEnv int
+	var sawImage string
+	a := kube.New(client, ns).WithPodMutator(func(pod *corev1.PodSpec) {
+		sawContainers = len(pod.Containers)
+		if len(pod.Containers) == 0 {
+			return
+		}
+		sawImage = pod.Containers[0].Image
+		sawEnv = len(pod.Containers[0].Env)
+		// A mutator that adjusts the constructed container, which is only possible if it is there.
+		pod.Containers[0].ImagePullPolicy = corev1.PullAlways
+	})
+
+	spec := cp.WorkloadSpec{
+		App: "web", Image: "img:1", Replicas: 1,
+		Env: map[string]string{"A": "1", "B": "2"},
+	}
+	if err := a.ApplyWorkload(ctx, spec); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
+	}
+	if sawContainers != 1 {
+		t.Errorf("mutator saw %d containers, want 1 (the hook must run over the constructed pod spec)", sawContainers)
+	}
+	if sawImage != "img:1" {
+		t.Errorf("mutator saw image %q, want img:1", sawImage)
+	}
+	if sawEnv != 2 {
+		t.Errorf("mutator saw %d env vars, want 2", sawEnv)
+	}
+	dep, err := client.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := dep.Spec.Template.Spec.Containers[0].ImagePullPolicy; got != corev1.PullAlways {
+		t.Errorf("imagePullPolicy = %q, want Always (the mutator's edit to the built container)", got)
+	}
+}
+
+// tolerationMutator stands in for an operator's cluster requirements: a toleration for a tainted
+// node pool and a mandated runtime class. It is idempotent — it replaces the toleration slice
+// rather than appending to it — as ADR-0061 requires of a hook that runs on every update.
+func tolerationMutator(pool, runtimeClass string) func(*corev1.PodSpec) {
+	return func(pod *corev1.PodSpec) {
+		pod.Tolerations = []corev1.Toleration{{
+			Key:      "dedicated",
+			Operator: corev1.TolerationOpEqual,
+			Value:    pool,
+			Effect:   corev1.TaintEffectNoSchedule,
+		}}
+		rc := runtimeClass
+		pod.RuntimeClassName = &rc
+	}
+}
+
+func assertMutated(t *testing.T, pod corev1.PodSpec, pool, runtimeClass string) {
+	t.Helper()
+	if len(pod.Tolerations) == 0 {
+		t.Fatalf("pod carries no tolerations; the mutator's toleration for the %q pool was dropped", pool)
+	}
+	if got := pod.Tolerations[0].Value; got != pool {
+		t.Errorf("toleration value = %q, want %q", got, pool)
+	}
+	if pod.RuntimeClassName == nil || *pod.RuntimeClassName != runtimeClass {
+		t.Errorf("runtimeClassName = %v, want %q", pod.RuntimeClassName, runtimeClass)
+	}
+}
+
+func boolp(b bool) *bool { return &b }

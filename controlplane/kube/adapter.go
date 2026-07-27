@@ -55,6 +55,12 @@ type Adapter struct {
 	client         kubernetes.Interface
 	namespace      string
 	addonNamespace string
+	// podMutator is the ADR-0061 deploy-path extension point: an OPTIONAL hook applied to the app
+	// Deployment's pod template spec after it is constructed and before the object is sent to the
+	// API server. It carries cluster requirements the engine cannot know about — a toleration for a
+	// tainted node pool, a mandated runtimeClassName, a priority or topology policy. nil (the
+	// default) leaves the constructed Deployment exactly as it is. Wired via WithPodMutator.
+	podMutator func(*corev1.PodSpec)
 }
 
 // New returns an Adapter over the given clientset and namespace (defaulting to
@@ -77,12 +83,39 @@ func (a *Adapter) WithAddonNamespace(ns string) *Adapter {
 	return a
 }
 
+// WithPodMutator registers a hook the adapter applies to the app Deployment's pod template spec
+// after it is constructed and before the object is sent to the API server (ADR-0061). It is the
+// deploy-path counterpart of BuildAdapter.WithBuildPodMutator (ADR-0053 §6).
+//
+// It exists for cluster requirements the engine cannot know about, because they are properties of a
+// cluster rather than of Burrow: a toleration for a tainted node pool (a GPU pool, spot capacity, a
+// pool reserved for one team), a mandated runtimeClassName, a priorityClassName, a
+// topologySpreadConstraint, a nodeSelector, an image-pull secret for a private base registry. Burrow
+// hard-codes none of these — the operator embedding the engine supplies what their cluster requires.
+// A nil mutator (the default) leaves the constructed Deployment exactly as-is.
+//
+// Unlike the build seam, whose Job is created once, this hook runs on EVERY write of the pod
+// template — creates and updates alike, so a rollout does not drop what the deploy was given
+// (ADR-0061 §2). The mutator must therefore be idempotent: appending to a slice (tolerations,
+// volumes, env) without first checking whether the entry is already there will drift across
+// redeploys. Set or replace rather than append blindly.
+//
+// The hook is trusted and unvalidated: it can set anything on the pod spec, including breaking it.
+// It is compiled into the binary by whoever operates that binary, not supplied at runtime.
+//
+// Returns the adapter for chaining.
+func (a *Adapter) WithPodMutator(fn func(*corev1.PodSpec)) *Adapter {
+	a.podMutator = fn
+	return a
+}
+
 // WithNamespace returns a copy of the Adapter whose app-resource operations act in ns instead of
 // the configured app namespace — the mechanism that routes an operation to a named environment's
 // namespace (ADR-0035 phase 2). The add-on namespace is unchanged, so add-ons still land in their
 // own namespace. An empty ns, or ns equal to the current app namespace, returns the receiver
 // unchanged, so default-environment behavior is identical to before environments existed. The copy
-// is shallow: it shares the same client, so no new connection is made per operation.
+// is shallow: it shares the same client (and the pod mutator, so an environment-scoped view applies
+// the same hook), so no new connection is made per operation.
 func (a *Adapter) WithNamespace(ns string) controlplane.Kubernetes {
 	if ns == "" || ns == a.namespace {
 		return a
@@ -595,7 +628,7 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 	}}
 
 	replicas := spec.Replicas
-	return &appsv1.Deployment{
+	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: spec.App, Namespace: a.namespace, Labels: labels},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
@@ -614,6 +647,17 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 			},
 		},
 	}
+
+	// Apply the ADR-0061 extension point last, over the fully-constructed pod spec, so the hook sees
+	// the containers, env, and annotations the engine built and can adjust the pod for the cluster's
+	// own requirements (a toleration, a runtime class, a scheduling policy). Because both callers of
+	// buildDeployment go through here — the create and the update in ApplyWorkload — the mutation is
+	// re-applied on every rollout instead of being dropped by the first one (ADR-0061 §2). No mutator
+	// leaves the Deployment exactly as built above (ADR-0061 §3).
+	if a.podMutator != nil {
+		a.podMutator(&dep.Spec.Template.Spec)
+	}
+	return dep
 }
 
 func boolPtr(b bool) *bool { return &b }

@@ -5,7 +5,7 @@
 // operations over JSON and authenticates its callers with a bearer token (ADR-0005).
 // It is a thin transport adapter — it decodes requests, calls the engine, and maps the
 // engine's typed outcomes to HTTP status codes; the orchestration and guardrails live
-// in the engine (ADR-0006). The MCP server and the CLI are both clients of this API.
+// in the engine (ADR-0006). The `burrow` CLI and `burrow-agent` are both clients of this API.
 //
 // It lives under controlplane/ (not controlplane/internal) so cmd/burrowd and the
 // managed module can wire it; it is licensed Apache-2.0.
@@ -85,8 +85,8 @@ func New(cfg Config) (http.Handler, error) {
 	// set is the ONE secret endpoint that carries a value — it travels over this authenticated,
 	// TLS-protected API and burrowd writes it to the per-app Kubernetes Secret (ADR-0029). The
 	// value is never logged (the access log records method+path+status only; the path holds no
-	// value), never audited, never stored in Postgres, and never exposed over MCP — there is no
-	// burrow_secret_set tool (ADR-0029/0004). list and unset carry no value.
+	// value), never audited, never stored in Postgres, and never reachable from the agent control
+	// channel — `burrow-agent` has no secret-set command (ADR-0029/0004). list and unset carry no value.
 	v1.HandleFunc("POST /v1/apps/{app}/secrets", s.setSecret)
 	v1.HandleFunc("GET /v1/apps/{app}/secrets", s.listSecrets)
 	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/{key}", s.unsetSecret)
@@ -384,9 +384,9 @@ type configResponse struct {
 // setSecret is the ONE secret endpoint that carries a value: it decodes {key, value, no_restart}
 // from the POST body and hands the value to the engine, which writes it to the per-app Kubernetes
 // Secret (ADR-0029). The value is never logged, never audited, never stored in Postgres, and the
-// response carries the app and KEY only — never the value. This endpoint is deliberately not
-// exposed over MCP (there is no burrow_secret_set tool; ADR-0029/0004): the agent references a
-// secret key and asks the human to set the value, who does so through the CLI or the UI.
+// response carries the app and KEY only — never the value. This endpoint is deliberately absent
+// from the agent surface (`burrow-agent` has no secret-set command; ADR-0029/0004): the agent
+// references a secret key and asks the human to set the value, who does so through the CLI or the UI.
 func (s *server) setSecret(w http.ResponseWriter, r *http.Request) {
 	var req secretSetRequest
 	if !decode(w, r, &req) {
@@ -565,7 +565,7 @@ func envName(env string) string {
 // the registry entry (ADR-0030). The token travels only in the body (never the path or query), is
 // never logged (the access log carries method+path+status, no body), is never stored in Postgres,
 // and the response — the recorded Provider — carries the Secret key only, never the value. This is a
-// human/CLI operation; there is no MCP tool that adds a provider or carries a token.
+// human/CLI operation; `burrow-agent` has no command that adds a provider or carries a token.
 func (s *server) addProvider(w http.ResponseWriter, r *http.Request) {
 	var req controlplane.AddProviderRequest
 	if !decode(w, r, &req) {
@@ -638,8 +638,8 @@ func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 // backend — from the POST body and hands it to the engine, which writes it into burrow-credentials
 // (ADR-0030). The token travels only in the body (never the path or query), is never logged, is
 // never stored in Postgres, and the response — the recorded AddonInfo — carries the Secret key only,
-// never the value. Connecting an authenticated backend is a human/CLI operation; no MCP tool carries
-// a token.
+// never the value. Connecting an authenticated backend is a human/CLI operation; no command on the
+// agent surface carries a token.
 func (s *server) connectAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonConnectRequest
 	if !decode(w, r, &req) {
@@ -675,7 +675,7 @@ func (s *server) removeAddon(w http.ResponseWriter, r *http.Request) {
 // (ADR-0031). The request carries only the add-on type and app name — NO secret value. burrowd
 // generates the DATABASE_URL server-side and writes it into the app's Secret; the response is the
 // key name only (AttachResult), never the value. The value is never logged, never audited, never
-// stored in Postgres, and never returned — so attach is safe to expose over MCP.
+// stored in Postgres, and never returned — so attach is safe to expose on the agent surface.
 func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonAttachRequest
 	if !decode(w, r, &req) {
@@ -796,7 +796,7 @@ type addonInstallRequest struct {
 // in the burrow-credentials Secret under which the backend's bearer token lives. Token is the bearer
 // token VALUE for an authenticated backend: it travels over this authenticated, TLS-protected API
 // and is written to burrow-credentials (ADR-0030) — never logged, never stored in Postgres, never
-// echoed back, and never carried over MCP.
+// echoed back, and never carried over the agent control channel.
 type addonConnectRequest struct {
 	Backend   string `json:"backend"`
 	Endpoint  string `json:"endpoint"`
@@ -1124,7 +1124,7 @@ func writeEngineError(w http.ResponseWriter, err error) {
 	}
 	// Missing cluster prerequisites is a structured, actionable outcome (ADR-0006): the request was
 	// valid but the cluster is not set up for it. The full checklist rides in the error text so the
-	// agent gets each missing piece and its burrow fix over MCP without inspecting the cluster.
+	// agent gets each missing piece and its burrow fix in one response, without inspecting the cluster.
 	if _, ok := controlplane.AsMissingPrerequisites(err); ok {
 		writeError(w, http.StatusUnprocessableEntity, err.Error(), "missing_prerequisites")
 		return

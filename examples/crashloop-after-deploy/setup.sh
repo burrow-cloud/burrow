@@ -2,7 +2,7 @@
 # Plant the scenario: deploy a healthy 'checkout', then ship a broken release over it so the
 # app is now crash-looping in CrashLoopBackOff — exactly the state a user finds after a bad
 # deploy. Stand up (or reuse) a disposable k3d cluster with Burrow installed, leave the app
-# broken, and write the agent's MCP config into ./workspace. Then you take over: launch your
+# broken, and wire the agent to burrow-agent in ./workspace. Then you take over: launch your
 # agent in ./workspace and let it diagnose and fix it through Burrow.
 #
 # Setup spends NO API tokens — only your interactive agent session does. See ../README.md.
@@ -38,8 +38,8 @@ echo "=== ship a BROKEN release over it (this is the bug) ==="
 "$BURROW" app deploy "$APP" --image busybox:1.36 --kubeconfig "$KCFG" -- \
   sh -c 'echo "FATAL: checkout: config migration v2 failed: unknown column \"region\" — aborting startup"; sleep 2; exit 1'
 
-echo "=== write the agent's MCP config into ./workspace ==="
-ex_write_mcp_config "$SCRIPT_DIR/workspace"
+echo "=== wire the agent to burrow-agent in ./workspace ==="
+ex_wire_agent "$SCRIPT_DIR/workspace"
 
 cat <<EOF
 
@@ -49,7 +49,7 @@ Scenario planted: '$APP' is crash-looping after a bad deploy.
 Now play the operator. In a NEW terminal:
 
     cd $SCRIPT_DIR/workspace
-    claude          # or your agent CLI — it auto-loads .mcp.json (the burrow MCP server)
+    claude          # or your agent CLI — it auto-loads .claude/settings.json (burrow-agent)
 
 Hand it the ticket in that directory (workspace/TICKET.md) and let it drive Burrow to
 diagnose and fix the app. Do NOT read this directory's README.md — it is the answer key.

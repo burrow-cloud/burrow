@@ -91,7 +91,7 @@ func newDeployCmd() *cobra.Command {
 			ctx := cmd.Context()
 			app := args[0]
 			// Everything after the -- separator overrides the container's command. The engine,
-			// the deploy API, and the MCP deploy tool already carry Command; this surfaces it on
+			// the deploy API, and `burrow-agent deploy` already carry Command; this surfaces it on
 			// the CLI so a human has the same reach the agent does.
 			var command []string
 			if d := cmd.ArgsLenAtDash(); d >= 0 {

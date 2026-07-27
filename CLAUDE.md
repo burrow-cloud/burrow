@@ -69,7 +69,7 @@ tests pass. Each has an ADR.
   and seam-isolated. Determinism comes from injected dependencies, not from a global
   simulator.
 - **Prefer the standard library; keep the dependency graph small.** Every dependency must
-  justify itself. The Kubernetes client, an MCP library, and a Postgres driver are expected
+  justify itself. The Kubernetes client, the CLI framework, and a Postgres driver are expected
   costs; speculative dependencies are not.
 - The stack: **Go** for the control plane, the `burrow-agent` control channel, and the CLI. **Kubernetes** as the
   target. **Postgres** (self-hosted, running in the cluster — ADR-0012) for the control
@@ -136,9 +136,9 @@ not a license boundary.
   a thin, agent-neutral, credential-free, capability-reduced CLI the agent invokes directly. It
   carries the operate-verbs, outputs JSON first so the agent can compose the result, and holds no
   cluster credentials.
-- [`mcp`](mcp/) — the **MCP server** package (binary [`cmd/burrow-mcp`](cmd/burrow-mcp/)): the agent's
-  former surface, **retired** by [ADR-0049](docs/adr/0049-burrow-agent-scoped-cli-control-channel.md) and
-  no longer shipped in releases. Kept in-tree for now (ADR-0049 §7); not the recommended path.
+  It is the **only** agent-facing surface: the MCP server that preceded it is gone from the tree
+  ([ADR-0062](docs/adr/0062-remove-the-mcp-server.md)), so a rule about what an agent may do is
+  written and enforced in one place. A new agent surface must not reintroduce a second one.
 - [`internal`](internal/) — module-private **shared helpers** only.
 
 **The product:**

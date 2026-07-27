@@ -126,7 +126,7 @@ source-available friction from the license.
 - **Apache-2.0 relicense** ([ADR-0033](adr/0033-relicense-to-apache.md)) — the whole repository is now
   Apache-2.0; the managed cloud and the enterprise tier remain separate proprietary products.
 - **Homebrew distribution** ([ADR-0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md)) — the
-  `burrow` and `burrow-mcp` CLIs publish to a Homebrew tap on each release.
+  `burrow` and `burrow-agent` CLIs publish to a Homebrew tap on each release.
 
 ## v0.7 — Environments and a self-contained, kubectl-free CLI ✅ shipped
 
@@ -156,8 +156,8 @@ active environment, with prod gated while staging stays permissive.
 
 Application autoscaling plus a batch of least-privilege and deploy-safety hardening. `burrow app
 autoscale` applies a HorizontalPodAutoscaler bounded by the replica-ceiling guardrail; install mints a
-scoped `burrow-agent` credential ([ADR-0038](adr/0038-scoped-agent-credential.md)) and `burrow-mcp`
-fails closed without it; an `app.deploy` guardrail gates deploys and every deploy rolls the workload
+scoped `burrow-agent` credential ([ADR-0038](adr/0038-scoped-agent-credential.md)) and the agent's
+binary fails closed without it; an `app.deploy` guardrail gates deploys and every deploy rolls the workload
 while preserving replicas; burrowd no longer contacts the registry
 ([ADR-0040](adr/0040-burrowd-never-contacts-the-registry.md)); and `ingress install` gates a billable
 LoadBalancer behind `--approve`.
@@ -207,7 +207,8 @@ the agent invokes directly ([ADR-0049](adr/0049-burrow-agent-scoped-cli-control-
 superseding the MCP server: the agent composes its `--json` output with pipes, `grep`, and `jq`, and
 its dangerous admin verbs are absent by construction. `burrow agent <tool> install` wires an agent to
 it (allow `burrow-agent`, deny the human `burrow` CLI), replacing `burrow mcp <tool> install`, and the
-`burrow-mcp` server is retired from releases (its code stays in-tree for now, ADR-0049 §7). Alongside
+`burrow-mcp` server is retired from releases (its code was removed from the tree afterwards by
+[ADR-0062](adr/0062-remove-the-mcp-server.md)). Alongside
 it, **`burrow_run`** ([ADR-0048](adr/0048-one-off-command-runner.md)) runs a one-off command
 (migrations, seeds, tasks) in the app's own image, gated by an `app.run` guardrail; and a **validated
 laptop quickstart** on k3d, pinned by a CI e2e, takes a user from nothing to their agent deploying an

@@ -2,17 +2,18 @@
 // Copyright 2026 Nicholas Phillips
 
 // Package agentconn resolves the credential-free, agent-layer control-plane client the scoped
-// agent binary uses (ADR-0005, ADR-0038). It is module-private shared connection logic: the same
-// building blocks burrow-mcp uses (connect.KubeconfigTransport, client.NewClientVersion, and the
-// localconfig scoped-credential lookup), lifted out so a second thin client — burrow-agent — reaches
-// burrowd over one seam without duplicating the precedence or the fail-closed rules.
+// agent binary uses (ADR-0005, ADR-0038). It is module-private shared connection logic: the
+// connection building blocks (connect.KubeconfigTransport, client.NewClientVersion, and the
+// localconfig scoped-credential lookup) assembled in one place, so `burrow-agent` — the agent
+// control channel (ADR-0049) — reaches burrowd over one seam, and the credential precedence and
+// fail-closed rules live somewhere a reader can check them rather than inside a command.
 //
-// Like burrow-mcp it holds no cluster-operating credentials of its own: it reaches the in-cluster
-// control plane through the scoped, burrowd-only agent kubeconfig `burrow install` mints (ADR-0038)
-// and the Kubernetes API-server proxy (ADR-0014), and it fails closed — a handle that records a
-// scoped credential whose file is missing is an error, never a silent escalation to the
-// ambient/admin kubeconfig. In strict mode a context with no scoped credential is an error too. The
-// package is binary-neutral: its messages name no particular environment variable.
+// It holds no cluster-operating credentials of its own: it reaches the in-cluster control plane
+// through the scoped, burrowd-only agent kubeconfig `burrow install` mints (ADR-0038) and the
+// Kubernetes API-server proxy (ADR-0014), and it fails closed — a handle that records a scoped
+// credential whose file is missing is an error, never a silent escalation to the ambient/admin
+// kubeconfig. In strict mode a context with no scoped credential is an error too. The package is
+// binary-neutral: its messages name no particular environment variable.
 package agentconn
 
 import (
@@ -58,10 +59,10 @@ type ClientForContext = func(kubeContext string) (*client.Client, error)
 //  4. the ambient kubeconfig — the fallback for a context with no matching handle or scoped
 //     credential.
 //
-// Like burrow-mcp it fails closed (ADR-0038): step 4 is refused when the handle records a scoped
-// credential whose file is missing (always an error, never a silent escalation to admin), and in
-// strict mode the ambient fallback is refused entirely — only the explicit escape hatches (steps 1
-// and 2) remain. The proxy-path factory is concurrency-safe and caches one client per context.
+// It fails closed (ADR-0038): step 4 is refused when the handle records a scoped credential whose
+// file is missing (always an error, never a silent escalation to admin), and in strict mode the
+// ambient fallback is refused entirely — only the explicit escape hatches (steps 1 and 2) remain.
+// The proxy-path factory is concurrency-safe and caches one client per context.
 func NewFactory(ctx context.Context, cfg Config, stderr io.Writer) (ClientForContext, error) {
 	if cfg.ControlPlaneURL != "" {
 		if cfg.Token == "" {
@@ -84,7 +85,7 @@ func NewFactory(ctx context.Context, cfg Config, stderr io.Writer) (ClientForCon
 			return nil, err
 		}
 		opts.ClientVersion = cfg.Version // ADR-0039: forward this binary's version as X-Burrow-Client-Version
-		// Route through the same kubeconfig transport the CLI and MCP server use, so all three share
+		// Route through the same kubeconfig transport the `burrow` CLI uses, so both binaries share
 		// one seam (ADR-0045). The transport stays credential-free here: it reads the burrowd API token
 		// from the install Secret over the human's proxy, holding no cluster-operating credential of
 		// its own (ADR-0005).

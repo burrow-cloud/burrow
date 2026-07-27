@@ -86,8 +86,8 @@ func missingDNSProviderPrerequisite(host string) Prerequisite {
 }
 
 // AsMissingPrerequisites reports whether err is (or wraps) a MissingPrerequisitesError and returns
-// it, mirroring AsGuardrail so a front end (the HTTP API, the MCP server) can surface the structured
-// checklist without parsing prose.
+// it, mirroring AsGuardrail so a front end (the HTTP API, and through it the `burrow` CLI and
+// `burrow-agent`) can surface the structured checklist without parsing prose.
 func AsMissingPrerequisites(err error) (*MissingPrerequisitesError, bool) {
 	var m *MissingPrerequisitesError
 	if errors.As(err, &m) {

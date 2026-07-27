@@ -1,8 +1,9 @@
 # Licensing
 
 All of Burrow's code in this repository is licensed under **Apache-2.0**: the CLI
-(`cmd/burrow/`), the MCP server (`mcp/`), the control plane (`controlplane/`, `cmd/burrowd/`),
-the operator (`operator/`), and the shared helpers (`internal/`). Read, modify, self-host, and
+(`cmd/burrow/`), the agent control channel (`cmd/burrow-agent/`), the control plane
+(`controlplane/`, `cmd/burrowd/`), the operator (`operator/`), and the shared helpers
+(`internal/`). Read, modify, self-host, and
 integrate against any of it freely. See
 [ADR-0033](docs/adr/0033-relicense-to-apache.md) for the decision and reasoning.
 

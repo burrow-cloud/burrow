@@ -16,7 +16,7 @@
 _COMMON_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 EX_ROOT=$(cd "$_COMMON_DIR/.." && pwd)   # the examples/ directory
 REPO_ROOT=$(cd "$EX_ROOT/.." && pwd)     # the repo root
-EX_BIN="$EX_ROOT/.bin"                   # built CLI + MCP binaries (gitignored)
+EX_BIN="$EX_ROOT/.bin"                   # the built burrow + burrow-agent binaries (gitignored)
 RUN_ENV="$EX_ROOT/.run-env"              # setup -> verify handoff (gitignored)
 
 # One disposable cluster is shared across every example so you can run several without
@@ -25,7 +25,7 @@ CLUSTER="${BURROW_EXAMPLES_CLUSTER:-burrow-examples}"
 
 # Populated by ex_ensure_cluster; also restored by ex_load_env in verify.sh.
 BURROW=""
-BURROW_MCP=""
+BURROW_AGENT=""
 KCFG=""
 
 # ex_require_bins fails early, listing everything missing, before any slow work. Note this is
@@ -44,14 +44,15 @@ ex_require_bins() {
   fi
 }
 
-# ex_build_binaries compiles the burrow CLI and the burrow-mcp server into $EX_BIN. The MCP
-# binary is what your agent launches (via the generated .mcp.json) to reach the control plane.
+# ex_build_binaries compiles both CLIs into $EX_BIN: `burrow`, the human admin CLI the setup
+# and verify scripts drive, and `burrow-agent`, the scoped control channel the agent itself runs
+# (ADR-0049). They are separate binaries so the agent can be allowed one and denied the other.
 ex_build_binaries() {
   mkdir -p "$EX_BIN"
   BURROW="$EX_BIN/burrow"
-  BURROW_MCP="$EX_BIN/burrow-mcp"
-  echo "=== build the burrow CLI and burrow-mcp ==="
-  ( cd "$REPO_ROOT" && go build -o "$BURROW" ./cmd/burrow && go build -o "$BURROW_MCP" ./cmd/burrow-mcp )
+  BURROW_AGENT="$EX_BIN/burrow-agent"
+  echo "=== build the burrow and burrow-agent CLIs ==="
+  ( cd "$REPO_ROOT" && go build -o "$BURROW" ./cmd/burrow && go build -o "$BURROW_AGENT" ./cmd/burrow-agent )
 }
 
 # ex_ensure_cluster makes a Burrow-serving k3d cluster exist, reusing it if it already does so
@@ -90,7 +91,7 @@ ex_save_env() {
 CLUSTER="$CLUSTER"
 KCFG="$KCFG"
 BURROW="$BURROW"
-BURROW_MCP="$BURROW_MCP"
+BURROW_AGENT="$BURROW_AGENT"
 EOF
 }
 
@@ -104,17 +105,22 @@ ex_load_env() {
   . "$RUN_ENV"
 }
 
-# ex_write_mcp_config writes a .mcp.json into the given workspace dir so an agent launched
-# there auto-discovers the Burrow MCP server. The server key MUST be "burrow" so the tool ids
-# are mcp__burrow__<tool>; burrow-mcp reaches the in-cluster control plane via BURROW_KUBECONFIG
-# over the API-server proxy (no port-forward). Absolute paths so it works from any cwd.
-ex_write_mcp_config() {
+# ex_wire_agent writes a project-local .claude/settings.json into the given workspace dir so an
+# agent launched there is wired to burrow-agent the way `burrow agent claude install` wires a real
+# user (ADR-0049 §4) — allow the scoped binary, deny the human admin CLI — without touching the
+# reader's own ~/.claude. The env block puts $EX_BIN on PATH so plain `burrow-agent` resolves (the
+# allow rule matches the command name, so the binary must be reachable by that name) and points
+# KUBECONFIG at this example's cluster, which is how burrow-agent finds the control plane.
+# Absolute paths so it works from any cwd.
+ex_wire_agent() {
   local ws="$1"
+  mkdir -p "$ws/.claude"
   jq -n \
-    --arg cmd "$BURROW_MCP" \
+    --arg path "$EX_BIN:$PATH" \
     --arg kcfg "$KCFG" \
-    '{mcpServers:{burrow:{command:$cmd,args:[],env:{BURROW_KUBECONFIG:$kcfg}}}}' \
-    > "$ws/.mcp.json"
+    '{permissions:{allow:["Bash(burrow-agent *)","Bash(burrow-agent)"],deny:["Bash(burrow *)"]},
+      env:{PATH:$path,KUBECONFIG:$kcfg}}' \
+    > "$ws/.claude/settings.json"
 }
 
 # ex_wait_available polls `burrow app status <app>` until the workload reports available, or

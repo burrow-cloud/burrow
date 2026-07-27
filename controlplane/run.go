@@ -22,9 +22,10 @@ const defaultRunTTLSeconds int32 = 3600
 // The command runs in the app's currently-deployed release image — resolved the same way deploy and
 // rollback resolve it — with the app's config env and per-app Secret injected via envFrom, so the
 // command sees exactly the runtime, dependencies, config, and secrets the running app sees
-// (ADR-0048 §2). No secret value crosses the API or MCP: the caller supplies only the command
-// (ADR-0029). The operation is synchronous — launch, wait, capture, return (ADR-0048 §3): a non-zero
-// exit is a normal structured outcome the agent reasons over, not a transport error.
+// (ADR-0048 §2). No secret value crosses the API or the agent control channel: the caller supplies
+// only the command (ADR-0029). The operation is synchronous — launch, wait, capture, return
+// (ADR-0048 §3): a non-zero exit is a normal structured outcome the agent reasons over, not a
+// transport error.
 //
 // It is gated by the app.run guardrail (confirm by default), which gates WHETHER the command runs,
 // not what it does — the opaque-command limitation is honest and stated (ADR-0048 §5). A held run

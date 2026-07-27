@@ -178,7 +178,10 @@ func TestConnectOptionsStrictNoScopedCredentialErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "strict mode") {
 		t.Errorf("error = %q, want it to report strict mode", err)
 	}
-	if strings.Contains(err.Error(), "BURROW_MCP_REQUIRE_SCOPED") {
+	// BURROW_AGENT_REQUIRE_SCOPED is how burrow-agent turns strict mode on, but strict mode is a
+	// plain argument here: a caller that spells the switch differently must still get a message it
+	// can hand to its own user, so the env var's name must not leak into this package's prose.
+	if strings.Contains(err.Error(), "BURROW_AGENT_REQUIRE_SCOPED") {
 		t.Errorf("error = %q, must not hardcode a binary-specific env var (this package is binary-neutral)", err)
 	}
 }

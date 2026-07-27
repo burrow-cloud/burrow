@@ -121,7 +121,7 @@ relicenses the whole repository to Apache-2.0.
 - **Apache-2.0 relicense** ([ADR-0033](adr/0033-relicense-to-apache.md)) — the whole repository is now
   Apache-2.0; managed cloud and the enterprise tier stay separate proprietary products.
 - **Homebrew distribution** ([ADR-0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md)) — the
-  `burrow` and `burrow-mcp` CLIs publish to a Homebrew tap on release.
+  `burrow` and `burrow-agent` CLIs publish to a Homebrew tap on release.
 
 ## Shipped: v0.7 — environments and a self-contained, kubectl-free CLI ✅
 
@@ -155,7 +155,7 @@ hardening.
   metrics-server is absent.
 - **Scoped agent credential** ([ADR-0038](adr/0038-scoped-agent-credential.md)) — install mints a
   `burrow-agent` ServiceAccount with narrow RBAC and writes a burrowd-only kubeconfig; the human keeps
-  the admin kubeconfig, and `burrow-mcp` fails closed if the scoped credential is missing.
+  the admin kubeconfig, and the agent's binary fails closed if the scoped credential is missing.
 - **Deploy safety** — an `app.deploy` guardrail (gate or require sign-off per environment); every
   deploy rolls the workload (release-stamped, so a re-deploy or a pull-credential fix always takes
   effect) while preserving the running replica count.
@@ -209,7 +209,7 @@ the MCP server, and burrowd get along across versions, and prepares the OSS/ente
   404. The acting client version is recorded in the audit log next to the principal (migration 00012).
 - **Control-plane transport seam** ([ADR-0045](adr/0045-oss-enterprise-boundary.md)) — the CLI's
   control-plane transport/auth is an explicit `client.Transport` interface (a direct-URL transport and
-  the kubeconfig API-server proxy), importable by both `burrow` and `burrow-mcp`; the `Client`'s request
+  the kubeconfig API-server proxy), importable by both `burrow` and `burrow-agent`; the `Client`'s request
   methods are auth-agnostic, so a private managed layer can add an SSO transport without forking them.
   One of the three seams ADR-0045 names for keeping the managed product a thin layer over the OSS core.
 
@@ -249,7 +249,8 @@ one-off commands get a home.
   — the agent now drives a dedicated, JSON-first, composable binary (pipe / `grep` / `jq`) behind the same
   control-plane boundary, with its dangerous admin verbs absent by construction. `burrow agent <tool> install`
   wires an agent to it (allow `burrow-agent`, deny the human `burrow`), replacing `burrow mcp <tool> install`;
-  the `burrow-mcp` server is **retired from releases**, its code kept in-tree for now (ADR-0049 §7).
+  the `burrow-mcp` server is **retired from releases**, and its code was removed from the tree afterwards
+  ([ADR-0062](adr/0062-remove-the-mcp-server.md)).
 - **One-off command runner** ([ADR-0048](adr/0048-one-off-command-runner.md)) — `burrow_run` runs a one-off
   command (migrations, seeds, tasks) in the app's own image, gated by an `app.run` guardrail.
 - **Validated laptop quickstart** — a k3d quickstart pinned by a CI e2e takes a user from nothing to their

@@ -42,10 +42,10 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 
 	// The metrics add-on's vmagent scraper references a pre-provisioned ServiceAccount whose RBAC
 	// only a kubeconfig-holder can apply (burrowd cannot create RBAC). The CLI self-heals this
-	// before calling InstallAddon, but the agent (MCP) path has no kubeconfig and cannot. Verify the
-	// ServiceAccount exists with a read-only Get FIRST, so an agent-driven install over absent RBAC
-	// fails cleanly here instead of half-deploying a vmagent pod that can never schedule. No partial
-	// resources are created before this check.
+	// before calling InstallAddon, but the agent path holds no credential that can write RBAC and
+	// cannot. Verify the ServiceAccount exists with a read-only Get FIRST, so an agent-driven install
+	// over absent RBAC fails cleanly here instead of half-deploying a vmagent pod that can never
+	// schedule. No partial resources are created before this check.
 	if spec.Type == controlplane.AddonMetrics {
 		if err := a.requireAddonServiceAccount(ctx, vmagentServiceAccount); err != nil {
 			return controlplane.AddonInfo{}, err

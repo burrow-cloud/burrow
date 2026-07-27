@@ -88,8 +88,7 @@ func bindEnv(flags *pflag.FlagSet, o *connOpts) {
 }
 
 // resolve builds a control-plane client and the environment name to send with the operation,
-// applying the same precedence as burrow-mcp through the shared agentconn resolver (ADR-0038,
-// ADR-0049). With --control-plane it talks to that URL directly and sends the raw --env. Otherwise it
+// applying the shared agentconn resolver's precedence (ADR-0038, ADR-0049). With --control-plane it talks to that URL directly and sends the raw --env. Otherwise it
 // resolves the active handle (the pinned one, or the current kube context in follow mode) and applies
 // the flag overrides, defaulting to the scoped, burrowd-only agent credential. Strict mode
 // (BURROW_AGENT_REQUIRE_SCOPED) refuses the ambient fallback.

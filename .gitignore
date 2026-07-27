@@ -34,7 +34,7 @@ go.work.sum
 # Built command binaries (go build ./cmd/... writes these to the repo root)
 /burrow
 /burrowd
-/burrow-mcp
+/burrow-agent
 
 # Local build output directory (e.g. `go build -o bin/...`)
 /bin/

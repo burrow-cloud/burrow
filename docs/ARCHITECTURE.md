@@ -142,9 +142,9 @@ boundary, not a license boundary.
 - **Client surface:** `cmd/burrow` — the human **admin CLI**; `cmd/burrow-agent` — the thin,
   agent-neutral, credential-free **agent control channel**
   ([ADR-0049](adr/0049-burrow-agent-scoped-cli-control-channel.md)), a capability-reduced,
-  JSON-first CLI the agent invokes directly; `mcp` (with binary `cmd/burrow-mcp`) — the agent's
-  former MCP server, **retired** by ADR-0049 and no longer shipped, kept in-tree for now
-  (ADR-0049 §7); `internal` — module-private shared helpers only.
+  JSON-first CLI the agent invokes directly and the **only** agent-facing surface
+  ([ADR-0062](adr/0062-remove-the-mcp-server.md) removed the MCP server that preceded it);
+  `internal` — module-private shared helpers only.
 - **The product:** `controlplane` (public API) with `controlplane/internal`
   (guts) and binary `cmd/burrowd` — the **control plane** that holds cluster credentials, runs
   orchestration and guardrails, and owns the deploy record and its database state; `operator`

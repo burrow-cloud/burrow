@@ -11,8 +11,8 @@ import (
 )
 
 // newGuardCmd inspects and configures the control-plane guardrail policy (ADR-0020).
-// `list` is read-only; `set` is the operator's lever — there is deliberately no MCP tool
-// for it, so an agent cannot change its own guardrails.
+// `list` is read-only; `set` is the operator's lever — `burrow-agent` deliberately carries no
+// `guard set`, so an agent cannot change its own guardrails.
 func newGuardCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "guard",

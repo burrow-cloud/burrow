@@ -1,8 +1,7 @@
 # GoReleaser builds the Burrow CLI (burrow) for macOS and Linux, creates the GitHub release
 # with the archives and auto-generated notes, and publishes the `burrow` Homebrew formula to
 # burrow-cloud/homebrew-tap so `brew install burrow-cloud/tap/burrow` works after each tagged
-# release. The agent's control channel is the `burrow-agent` binary (ADR-0049); the retired
-# `burrow-mcp` server is no longer built or shipped, though its code stays in the tree for now.
+# release. The agent's control channel is the `burrow-agent` binary (ADR-0049).
 # The burrowd image is built separately with ko in the release workflow — GoReleaser owns the
 # CLI release, not the control-plane image.
 version: 2

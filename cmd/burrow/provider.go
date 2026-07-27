@@ -43,8 +43,8 @@ func providerTypesHint() string { return strings.Join(supportedProviderTypes(), 
 
 // newProviderCmd manages cloud-provider credentials. `provider add` is a setup command: the token
 // travels over burrowd's authenticated control-plane API (TLS), which validates it and writes it
-// into the burrow-credentials Secret (ADR-0030). burrowd holds the token; it never travels over MCP
-// and the agent never holds it.
+// into the burrow-credentials Secret (ADR-0030). burrowd holds the token; it never travels over the
+// agent control channel and the agent never holds it.
 func newProviderCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "provider",
@@ -54,7 +54,8 @@ func newProviderCmd() *cobra.Command {
 			"value the in-cluster build uses to clone a PRIVATE git source AND to authenticate\n" +
 			"the provider's image registry. The token travels over burrowd's\n" +
 			"authenticated control-plane API (TLS), which stores it in a Kubernetes Secret in the\n" +
-			"control-plane namespace; it never travels over MCP and the agent never holds it.",
+			"control-plane namespace; it never travels over the agent control channel and the agent\n" +
+			"never holds it.",
 	}
 	parent.AddCommand(newProviderTypesCmd(), newProviderAddCmd(), newProviderListCmd())
 	return parent
@@ -91,7 +92,8 @@ func newProviderAddCmd() *cobra.Command {
 			"(echo \"$TOKEN\" | burrow config provider add cloudflare). The token travels over\n" +
 			"burrowd's authenticated control-plane API (TLS), which writes it into the\n" +
 			"burrow-credentials Secret; a DNS provider's token is validated against the vendor\n" +
-			"first. It never travels over MCP and is never logged. For a private build source use\n" +
+			"first. It never travels over the agent control channel and is never logged. For a private\n" +
+			"build source use\n" +
 			"a github or gitlab token — one token clones the private repo and authenticates its\n" +
 			"registry; a fine-grained token scoped to the repos you build (plus\n" +
 			"read:packages where the registry is shared) keeps the blast radius small. Pass --name\n" +
@@ -125,7 +127,8 @@ func newProviderAddCmd() *cobra.Command {
 			// Send the token to burrowd over its authenticated control-plane API (TLS). burrowd
 			// validates it against the vendor, writes it into the burrow-credentials Secret, and
 			// records the registry entry — a rejected token writes nothing (ADR-0030). The token
-			// travels only in the request body; it never crosses MCP and is never logged.
+			// travels only in the request body; it never crosses the agent control channel and is
+			// never logged.
 			c, err := o.client(ctx)
 			if err != nil {
 				return err

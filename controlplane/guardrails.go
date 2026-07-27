@@ -92,7 +92,7 @@ const (
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through
-// `guard list` and the read-only MCP guard tool (ADR-0020).
+// `guard list` and `burrow-agent`'s read-only `guard` command (ADR-0020).
 type GuardrailInfo struct {
 	Code        GuardrailCode `json:"code"`
 	Disposition Disposition   `json:"disposition"`

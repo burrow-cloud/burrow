@@ -76,12 +76,12 @@ type AuditEntry struct {
 	// where a future TokenReview→SSO identity resolution fills in a real per-user value, so
 	// attribution becomes additive rather than a migration of past rows' meaning.
 	Principal string `json:"principal,omitempty"`
-	// ClientVersion is the release version of the client (CLI or MCP server) that drove the
-	// operation, read from the X-Burrow-Client-Version handshake header (ADR-0039). It records which
-	// client acted, next to the principal (who) and the server's own version — so version skew is
-	// legible after the fact. Empty for a pre-handshake client that sent no version. The json tag must
-	// match the client-side AuditEntry tag exactly (the struct crosses the API), or the field would
-	// silently drop.
+	// ClientVersion is the release version of the client (the `burrow` CLI or `burrow-agent`) that
+	// drove the operation, read from the X-Burrow-Client-Version handshake header (ADR-0039). It
+	// records which client acted, next to the principal (who) and the server's own version — so
+	// version skew is legible after the fact. Empty for a pre-handshake client that sent no version.
+	// The json tag must match the client-side AuditEntry tag exactly (the struct crosses the API), or
+	// the field would silently drop.
 	ClientVersion string `json:"client_version,omitempty"`
 }
 

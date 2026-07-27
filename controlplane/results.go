@@ -249,8 +249,8 @@ type RollbackResult struct {
 // AddProviderRequest registers a vendor credential (ADR-0023, ADR-0030). The token VALUE travels
 // in this request over burrowd's authenticated, TLS-protected control-plane API; burrowd validates
 // it and then writes it into the burrow-credentials Secret. The value is never logged, never stored
-// in Postgres, never returned in a response, and still never carried over MCP — provider add is a
-// human/CLI operation, not an agent one.
+// in Postgres, never returned in a response, and still never carried over the agent control channel
+// — provider add is a human/CLI operation, not an agent one.
 type AddProviderRequest struct {
 	// Name identifies the provider; empty defaults to the type.
 	Name string `json:"name,omitempty"`

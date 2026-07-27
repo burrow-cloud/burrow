@@ -18,10 +18,10 @@ End to end, with no human in the loop after launch:
 4. Confirm the failure line is actually **queryable back through Burrow**
    (`burrow addon logs FATAL`) before involving the agent — otherwise the agent test would
    be meaningless.
-5. Run `claude -p` pointed at the **burrow MCP server** (`bin/burrow-mcp`, auto-connecting via
-   `BURROW_KUBECONFIG`), allowed only the read-only burrow tools, and assert that the agent
-   **both** (a) issued a `mcp__burrow__burrow_logs_query` tool call **and** (b) named the root
-   cause in its final answer.
+5. Run `claude -p` wired to **`burrow-agent`** (`bin/burrow-agent` on `PATH`, reaching the
+   control plane through the ambient `KUBECONFIG`), allowed to run that binary and nothing else,
+   and assert that the agent **both** (a) ran a `burrow-agent logs-query` command **and**
+   (b) named the root cause in its final answer.
 
 ## Prerequisites
 
@@ -46,7 +46,7 @@ prints the agent output tail and a cluster-state diagnostics dump, then exits no
 KEEP=1 ANTHROPIC_API_KEY=sk-ant-... bash test/agent/diagnose.sh
 ```
 
-`KEEP=1` leaves the k3d cluster and the temp work dir (kubeconfig, MCP config, and the raw
+`KEEP=1` leaves the k3d cluster and the temp work dir (kubeconfig and the raw
 `agent-out.jsonl` stream) in place so you can inspect them. The cluster name defaults to
 `burrow-agent-diag` and is overridable with `K3D_CLUSTER`.
 

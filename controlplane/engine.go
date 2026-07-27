@@ -486,8 +486,8 @@ func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app, env string) 
 }
 
 // ListSecrets returns the env-var KEYS in an app's per-app Secret, sorted, never the values
-// (ADR-0028/0004). Secret values live only in the Kubernetes Secret and never cross the API or
-// MCP, so this read returns keys only. An app with no secrets yields an empty slice.
+// (ADR-0028/0004). Secret values live only in the Kubernetes Secret and never cross the API or the
+// agent control channel, so this read returns keys only. An app with no secrets yields an empty slice.
 func (e *Engine) ListSecrets(ctx context.Context, app, env string) ([]string, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return nil, fmt.Errorf("list secrets: %w: %w", ErrInvalid, err)
@@ -506,10 +506,10 @@ func (e *Engine) ListSecrets(ctx context.Context, app, env string) ([]string, er
 // SetSecret upserts one key=value into an app's per-app Secret and, unless noRestart, rolls the
 // running workload so it picks the value up (ADR-0029). The value arrives over burrowd's
 // authenticated control-plane API and is written here through the Kubernetes seam; it is NEVER
-// logged, never audited, never stored in Postgres, and never carried over MCP — only its KEY name
-// appears in any error (the value is never formatted into one). Setting a value still cannot be
-// done over MCP: there is no secret-set MCP tool. An app with no running workload just writes the
-// Secret; the change lands on the next deploy.
+// logged, never audited, never stored in Postgres, and never carried over the agent control channel
+// — only its KEY name appears in any error (the value is never formatted into one). Setting a value
+// stays a human operation: `burrow-agent` has no secret-set command, so the agent cannot supply a
+// value. An app with no running workload just writes the Secret; the change lands on the next deploy.
 func (e *Engine) SetSecret(ctx context.Context, app, env, key, value string, noRestart bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("set secret: %w: %w", ErrInvalid, err)
@@ -542,9 +542,9 @@ func (e *Engine) SetSecret(ctx context.Context, app, env, key, value string, noR
 }
 
 // UnsetSecret removes one key from an app's per-app Secret and, unless noRestart, rolls the
-// running workload so it drops the value (ADR-0028). Removing a key carries no value, and this is
-// MCP-allowed. An app with no running workload just updates the Secret; the change lands on the
-// next deploy. Removing an absent key succeeds.
+// running workload so it drops the value (ADR-0028). Removing a key carries no value, so it is on
+// the agent surface (`burrow-agent secret unset`). An app with no running workload just updates the
+// Secret; the change lands on the next deploy. Removing an absent key succeeds.
 func (e *Engine) UnsetSecret(ctx context.Context, app, env, key string, noRestart bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("unset secret: %w: %w", ErrInvalid, err)
@@ -630,8 +630,9 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, confirm bool) (A
 // the backend is unauthenticated. token is the bearer token VALUE for an authenticated backend: it
 // arrives over burrowd's authenticated control-plane API and is written into burrow-credentials under
 // secretKey (ADR-0030). The value is never logged, never stored in Postgres, never returned, and
-// never carried over MCP — only the key is recorded in the registry (ADR-0004/0023). A token without
-// a secretKey is invalid. The registry entry that crosses the API holds only the key.
+// never carried over the agent control channel — only the key is recorded in the registry
+// (ADR-0004/0023). A token without a secretKey is invalid. The registry entry that crosses the API
+// holds only the key.
 func (e *Engine) ConnectAddon(ctx context.Context, backend, endpoint, secretKey, token string) (AddonInfo, error) {
 	b, ok := LookupConnectBackend(backend)
 	if !ok {
@@ -735,9 +736,9 @@ type AttachResult struct {
 // app (ADR-0031). burrowd provisions an isolated database + login role on the shared instance,
 // generates the DATABASE_URL server-side, writes it into the app's per-app Secret via the
 // SetSecretValue path (ADR-0029), and restarts the app so envFrom picks it up. Attach provisions
-// and destroys nothing, so it is allowed by default (no guardrail) and is safe over MCP: no secret
-// value crosses MCP — the agent supplies only the app name; burrowd generates the value and never
-// returns it. The audit row records {addon, app} only — never the URL.
+// and destroys nothing, so it is allowed by default (no guardrail) and is safe over the agent
+// control channel: no secret value crosses it — the agent supplies only the app name; burrowd
+// generates the value and never returns it. The audit row records {addon, app} only — never the URL.
 func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app string) (AttachResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return AttachResult{}, fmt.Errorf("attach addon: %w: %w", ErrInvalid, err)
@@ -762,7 +763,7 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app string) (Atta
 
 	// Write the connection string into the app's per-app Secret and roll the app to pick it up —
 	// the ADR-0029 secret path, the same one `secret set` uses. The value never crosses the audit
-	// log, MCP, or Postgres.
+	// log, the agent control channel, or Postgres.
 	const key = "DATABASE_URL"
 	if err := e.k8s.SetSecretValue(ctx, app, key, url); err != nil {
 		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
@@ -826,7 +827,7 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app string, confi
 // mounted to the backup PVC, so the database, not the volume, is the index of backups. It moves no
 // secret value: the Job reads the superuser password only via secretKeyRef, and the audit row and the
 // returned result name the add-on, app, backup id, path, and size — never a credential. Backup is
-// allowed by default (it destroys nothing) and safe over MCP.
+// allowed by default (it destroys nothing) and safe over the agent control channel.
 func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app string) (BackupResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return BackupResult{}, fmt.Errorf("backup addon: %w: %w", ErrInvalid, err)
@@ -869,7 +870,7 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app string) (Back
 
 // ListBackups returns recorded backups, newest first, from the control-plane database (ADR-0032).
 // An empty app lists every app's backups; a non-empty app restricts to that app. Read-only and safe
-// over MCP — it names the app, size, time, and on-PVC path, never a credential.
+// over the agent control channel — it names the app, size, time, and on-PVC path, never a credential.
 func (e *Engine) ListBackups(ctx context.Context, t AddonType, app string) ([]Backup, error) {
 	if t != AddonPostgres {
 		return nil, fmt.Errorf("list backups %s: only the postgres add-on supports backups: %w", t, ErrInvalid)
@@ -1638,7 +1639,8 @@ func (e *Engine) Guardrails(ctx context.Context, env string) ([]GuardrailInfo, e
 
 // SetGuardrail sets one guardrail's disposition (ADR-0020). It rejects an unknown guardrail
 // or an invalid disposition as ErrInvalid. This is the operator's lever — exposed via the
-// CLI, never as an MCP tool, so the agent cannot change its own guardrails.
+// `burrow` CLI's `guard set`; `burrow-agent` can only list guardrails, so the agent cannot
+// change its own.
 //
 // With an empty or "default" env it sets the global disposition for code (today's behavior). With a
 // named environment it stores the env-prefixed code (e.g. prod.app.delete) so the environment's

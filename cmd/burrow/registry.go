@@ -51,7 +51,7 @@ type dockerAuth struct {
 // newRegistryCmd manages the cluster's registry pull credentials. It is a setup command: it
 // acts with the developer's kubeconfig to provision a Kubernetes pull Secret, distinct from
 // the agent-driven operations that flow through burrowd (ADR-0017). The credential never
-// travels over MCP and burrowd never handles it. The login/logout/list subcommands share the
+// travels over the agent control channel and burrowd never handles it. The login/logout/list subcommands share the
 // namespace flags and resolve the app namespace from the install.
 func newRegistryCmd() *cobra.Command {
 	var namespace, appNamespace, kubeconfig string
@@ -248,7 +248,7 @@ func resolveLoginCredentials(cmd *cobra.Command, host, username, password string
 // registryTokenHint returns a one-line, provider-aware pointer to where the user creates a pull
 // token for the given registry host. Modern terminals linkify a full URL, so the user can click
 // straight through to the right page. Unknown hosts get a generic line with no URL. This mapping
-// is the single source of truth for provider token guidance; the MCP layer stays generic.
+// is the single source of truth for provider token guidance; the control-plane layer stays generic.
 func registryTokenHint(host string) string {
 	switch {
 	case host == "ghcr.io" || strings.HasSuffix(host, ".ghcr.io"):

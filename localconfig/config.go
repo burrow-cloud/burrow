@@ -7,12 +7,12 @@
 // namespace, app namespace}; the current selection is either a pinned handle or, by
 // default, whatever kube context kubectl points at ("follow"). This is selector state like
 // the kubeconfig, never agent configuration, so it lives client-side: both `burrow` (the
-// CLI) and `burrow-mcp` consume this package, hence it is a shared top-level package rather
-// than living under cmd/burrow.
+// operator CLI) and `burrow-agent` (the agent control channel) consume this package, hence it
+// is a shared top-level package rather than living under cmd/burrow.
 //
 // This package is foundation only (ADR-0036 slice 1): the config model plus the resolution
-// that decides the active target. Command wiring (`burrow env`, install, MCP) lands in
-// later slices.
+// that decides the active target. Command wiring (`burrow env`, install, `burrow-agent`)
+// lands in later slices.
 package localconfig
 
 import (
@@ -71,7 +71,7 @@ type Environment struct {
 	// mints for the scoped agent credential (ADR-0038), written under ~/.burrow/ (never
 	// ~/.kube/config). AgentContext names the single context inside it. Both are empty for handles
 	// created before the scoped credential existed or joined out of band; consumers fall back to
-	// the ambient kubeconfig then. The operate path (`burrow-mcp` and the CLI) reads them to reach
+	// the ambient kubeconfig then. The operate path (`burrow-agent` and the CLI) reads them to reach
 	// burrowd with the scoped credential; `install` (fresh mint or join), `env list --discover`, and `upgrade`
 	// write them.
 	AgentKubeconfig string `yaml:"agentKubeconfig,omitempty"`
@@ -205,7 +205,7 @@ func (c *Config) Lookup(name string) (Environment, bool) {
 
 // LookupByContext returns the handle registered for a kube context name, and whether one
 // matched. It backs follow-mode resolution, where the current context is matched to a handle,
-// and the MCP server's per-context resolution of the scoped agent kubeconfig (ADR-0038).
+// and `burrow-agent`'s per-context resolution of the scoped agent kubeconfig (ADR-0038).
 func (c *Config) LookupByContext(context string) (Environment, bool) {
 	for _, e := range c.Environments {
 		if e.Context == context {

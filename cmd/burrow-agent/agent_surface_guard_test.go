@@ -40,8 +40,12 @@ import (
 // TestAdminVerbsAbsent (commands_test.go) checks layer (a) against a hand-listed set of verbs
 // that must stay absent. This file is the complementary CLOSED check: the command tree must
 // match an explicit allow-list exactly, so ANY new verb fails — including one nobody predicted —
-// and its author has to state which side of the line it falls on. The MCP surface has the same
-// pair of guards in mcp/agent_surface_guard_test.go.
+// and its author has to state which side of the line it falls on.
+//
+// This is the ONLY place the rule is stated. Burrow once carried a second agent-facing surface,
+// the MCP server, with its own copy of these guards; ADR-0062 removed it precisely so a rule about
+// what an agent may do has one enforcement point instead of two that can drift apart. A new
+// agent-facing surface must not reintroduce a parallel allow-list.
 
 // agentSurfaceAllowList is the complete set of command paths burrow-agent may register, each with
 // the reason it is app lifecycle rather than cluster administration. Adding a command means adding
@@ -108,9 +112,9 @@ var agentSurfaceAllowList = map[string]string{
 // namespaces, writing RBAC, installing or replacing the control plane itself, or admitting nodes.
 // They are matched against the command path with its separators normalized to `_`, so `cluster
 // capacity` reads as `cluster_capacity`. This is a second, independent net under the allow-list,
-// so an obviously-wrong verb fails loudly even if the allow-list were updated carelessly. Its
-// sibling for the MCP tool names lives in mcp/agent_surface_guard_test.go; the two lists are
-// tuned to their own naming conventions and are deliberately kept separate.
+// so an obviously-wrong verb fails loudly even if the allow-list were updated carelessly. It is
+// tuned to this binary's naming convention, which is the only agent-facing one Burrow has
+// (ADR-0062).
 var adminVerbFragments = []string{
 	"install",     // control-plane and cluster-component installation
 	"uninstall",   //

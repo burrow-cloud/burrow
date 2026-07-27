@@ -6,7 +6,8 @@ package controlplane
 import "errors"
 
 // The control plane classifies its failures with these sentinels so a front end (the
-// HTTP API, the MCP server) can map them to the right status without parsing prose.
+// HTTP API, and through it the `burrow` CLI and `burrow-agent`) can map them to the
+// right status without parsing prose.
 // They complement the typed GuardrailError (a deliberate policy refusal).
 var (
 	// ErrInvalid marks a malformed request — a bad app name, an empty image

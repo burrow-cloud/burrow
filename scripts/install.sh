@@ -178,7 +178,7 @@ download_and_verify() {
 	fi
 
 	info "Extracting ${BIN_NAME}..."
-	# The archive bundles burrow and burrow-mcp; extract only the burrow binary.
+	# The archive bundles burrow and burrow-agent; extract only the burrow binary.
 	tar -xzf "${TMPDIR}/${archive}" -C "${TMPDIR}" "${BIN_NAME}" ||
 		fatal "extracting ${BIN_NAME} from ${archive} failed."
 	[ -f "${TMPDIR}/${BIN_NAME}" ] || fatal "${BIN_NAME} binary not found in ${archive}."

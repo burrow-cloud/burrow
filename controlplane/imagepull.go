@@ -39,7 +39,7 @@ func IsImagePullReason(reason string) bool {
 // "not found"), the Issue names the tag as the likely fix; otherwise it defaults to the common,
 // human-fixable cause — a private registry with no pull credentials (ADR-0017) — and names the
 // exact `burrow config registry login` command. The credential step is human- and CLI-only and
-// never crosses MCP (ADR-0017), so the message points at the user's terminal.
+// never crosses the agent control channel (ADR-0017), so the message points at the user's terminal.
 func ImagePullIssue(image, reason, message string) string {
 	if imagePullNotFound(message) {
 		return fmt.Sprintf("cannot pull image %q (%s): the registry has no such image — check the tag is correct and that it was pushed", image, reason)

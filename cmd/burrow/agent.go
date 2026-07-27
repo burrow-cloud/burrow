@@ -19,15 +19,28 @@ import (
 // the agent's scoped control channel (ADR-0049 §4). It is a subcommand of the HUMAN `burrow` admin
 // CLI, run once by a person; it is distinct from `burrow-agent`, the agent's runtime binary. Its sole
 // job is to write the agent's permission rules — allow the scoped `burrow-agent` binary, deny the
-// human `burrow` admin CLI — plus a concise orientation so the agent knows how to use it. Like
-// `burrow mcp` it previews by default and mutates only on `install`, applying idempotently and backing
-// up any file it edits.
+// human `burrow` admin CLI — plus a concise orientation so the agent knows how to use it. It previews
+// by default and mutates only on `install`, applying idempotently and backing up any file it edits.
+//
+// It is the only agent-wiring command Burrow ships: the MCP server and its `burrow mcp` command were
+// removed by [ADR-0062](../../docs/adr/0062-remove-the-mcp-server.md).
+
+// claudeSettingsPath resolves Claude Code's user settings file, where the wiring writes the
+// allow/deny permission rules. It is a package var so a test can point it at a temp dir and exercise
+// the real create/merge/backup logic without touching the real home directory.
+var claudeSettingsPath = func() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "settings.json"), nil
+}
 
 // claudeMemoryPath resolves Claude Code's user memory file (~/.claude/CLAUDE.md), where the wiring
 // installs the burrow-agent orientation block that Claude Code loads into every session — the CLI
-// analogue of the MCP server's always-loaded instructions (ADR-0049 §5). It is a package var so a
-// test can point it at a temp dir and exercise the real create/merge/backup logic without touching
-// the real home directory.
+// analogue of the always-loaded instructions the retired MCP server exposed (ADR-0049 §5). It is a
+// package var so a test can point it at a temp dir and exercise the real create/merge/backup logic
+// without touching the real home directory.
 var claudeMemoryPath = func() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -36,9 +49,12 @@ var claudeMemoryPath = func() (string, error) {
 	return filepath.Join(home, ".claude", "CLAUDE.md"), nil
 }
 
-// claudeMemoryDisplay is the tilde form shown in help and messages, independent of where the seam
-// resolves (a temp dir in tests), so the user always sees the familiar path.
-const claudeMemoryDisplay = "~/.claude/CLAUDE.md"
+// The tilde forms shown in help and messages, independent of where the seams actually resolve (a
+// temp dir in tests), so the user always sees the familiar path.
+const (
+	claudeSettingsDisplay = "~/.claude/settings.json"
+	claudeMemoryDisplay   = "~/.claude/CLAUDE.md"
+)
 
 // The exact Claude Code permission patterns the wiring writes. They are the security boundary between
 // the agent and the cluster, so the strings are load-bearing and asserted verbatim in tests.
@@ -72,6 +88,14 @@ const agentDenyKubectlRecommendation = "Recommended: also block the agent from r
 	"Burrow's guarded, audited path. Enable it with:\n" +
 	"  burrow agent claude install --deny-kubectl\n"
 
+// agentTryPrompt is appended after any successful wiring, giving the user a concrete first thing to
+// ask their agent. It leads with a blank line so it sits below the success line. No em-dashes.
+const agentTryPrompt = "\nThen open your agent and try:\n" +
+	"  \"Deploy ghcr.io/me/app:1.4 and serve it at example.com over HTTPS.\"\n"
+
+// agentIssuesURL is where a user whose agent has no built-in wiring can request first-class support.
+const agentIssuesURL = "https://github.com/burrow-cloud/burrow/issues/new"
+
 // agentOverview is what bare `burrow agent` prints: what it does, the supported tools, and how to
 // preview then apply. No em-dashes: it is user-facing CLI output.
 const agentOverview = "Wire your AI agent to burrow-agent, its scoped control channel to Burrow.\n\n" +
@@ -83,7 +107,7 @@ const agentOverview = "Wire your AI agent to burrow-agent, its scoped control ch
 	"  burrow agent <tool> install\n\n" +
 	"burrow-agent is a single binary on the agent's PATH; this writes the agent's permission rules to\n" +
 	"allow it and deny the human `burrow` admin CLI, keeping every cluster change on Burrow's guarded path.\n" +
-	"Using another agent? Request support: " + mcpIssuesURL + "\n"
+	"Using another agent? Request support: " + agentIssuesURL + "\n"
 
 // agentUnknownToolMessage is printed for `burrow agent <tool>` when the tool has no built-in wiring:
 // rather than error, it shows the exact rules to set by hand and invites a support request. The %q is
@@ -93,7 +117,7 @@ const agentUnknownToolMessage = "Burrow has no built-in agent wiring for %q yet.
 	"permission rules to ALLOW `%s` and DENY `%s` (and optionally `%s`), so the agent may run the\n" +
 	"scoped binary but not the human `burrow` admin CLI.\n\n" +
 	"Built-in wiring: claude.\n" +
-	"Request support: " + mcpIssuesURL + "\n"
+	"Request support: " + agentIssuesURL + "\n"
 
 func newAgentCmd() *cobra.Command {
 	var denyKubectl bool
@@ -242,7 +266,7 @@ func (t claudeAgentTool) install(w io.Writer) error {
 		// Denied only the burrow CLI: nudge the user toward the fuller lockdown they did not opt into.
 		fmt.Fprint(w, agentDenyKubectlRecommendation)
 	}
-	fmt.Fprint(w, mcpTryPrompt)
+	fmt.Fprint(w, agentTryPrompt)
 	return nil
 }
 
@@ -381,7 +405,7 @@ const (
 
 // agentInstructionsBody is the orientation the agent reads on every session: what burrow-agent is,
 // that output is JSON, that code never crosses the channel, and the outcome/confirm contract. It is
-// the CLI analogue of the MCP server's always-loaded instructions (ADR-0049 §5). It stays concise and
+// the instructions surface ADR-0049 §5 names, in the form a CLI can offer. It stays concise and
 // honest (ADR-0009): no invented commands, no secret values. No em-dashes: it is user-facing prose.
 const agentInstructionsBody = "## Burrow\n\n" +
 	"Operate the user's apps on their Kubernetes cluster through the `burrow-agent` CLI, your scoped\n" +
@@ -470,4 +494,16 @@ func upsertInstructionsBlock(content, block string) (string, bool) {
 		return block + "\n", true
 	}
 	return trimmed + "\n\n" + block + "\n", true
+}
+
+// backupFile copies path to path+".bak" before an edit, so a mistaken merge is always recoverable.
+func backupFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	if err := os.WriteFile(path+".bak", data, 0o644); err != nil {
+		return fmt.Errorf("writing backup %s: %w", path+".bak", err)
+	}
+	return nil
 }

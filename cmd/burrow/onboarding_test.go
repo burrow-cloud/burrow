@@ -31,7 +31,7 @@ func noConfig(t *testing.T) {
 }
 
 // TestRootHelpShowsGroups confirms `burrow --help` renders the labeled command groups, lists the
-// `agent` wiring command, hides the deprecated `mcp` command (ADR-0049) and the deprecated
+// `agent` wiring command, hides the removed `mcp` command's stub (ADR-0062) and the deprecated
 // top-level `install`/`upgrade` aliases (ADR-0060, now under `cluster`), and lists no retired
 // `system`/`context` command (ADR-0037).
 func TestRootHelpShowsGroups(t *testing.T) {
@@ -53,8 +53,9 @@ func TestRootHelpShowsGroups(t *testing.T) {
 		}
 	}
 
-	// The deprecated `mcp` command (ADR-0049) and the deprecated top-level `install`/`upgrade`
-	// aliases (ADR-0060) are hidden: none may appear as a command line in the main help.
+	// The `mcp` stub (ADR-0062 §2, which only redirects to `burrow agent`) and the deprecated
+	// top-level `install`/`upgrade` aliases (ADR-0060) are hidden: none may appear as a command
+	// line in the main help.
 	for _, line := range strings.Split(s, "\n") {
 		if f := strings.Fields(line); len(f) > 0 && (f[0] == "mcp" || f[0] == "install" || f[0] == "upgrade") {
 			t.Errorf("help lists the hidden deprecated %q command: %q", f[0], line)

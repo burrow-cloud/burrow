@@ -185,9 +185,9 @@ echo "--- env unset removed the variable from the store ---"
 # The whole group goes through burrowd's authenticated control-plane API; what differs is whether
 # a VALUE is carried:
 #   - `secret set` carries the value -> it travels over the authenticated control-plane API and
-#     burrowd writes it to the per-app Secret. The value is never carried over MCP, never logged,
-#     and never stored in the database (ADR-0029).
-#   - `secret list` (KEYS only) and `secret unset` (by KEY) carry no value -> also MCP-allowed.
+#     burrowd writes it to the per-app Secret. The value never crosses the agent control channel,
+#     is never logged, and is never stored in the database (ADR-0029).
+#   - `secret list` (KEYS only) and `secret unset` (by KEY) carry no value -> also on the agent surface.
 # Assertions, all deterministic and bounded, read straight off the live cluster:
 #   1. the value lands in the per-app Secret (kubectl reads burrow-app-web-secrets);
 #   2. the Deployment pod template carries the envFrom secretRef so the value is injected;

@@ -68,8 +68,8 @@ func (e *AmbiguousEnvironmentError) Error() string {
 }
 
 // AsAmbiguousEnvironment reports whether err is (or wraps) an AmbiguousEnvironmentError and returns
-// it, mirroring AsGuardrail and AsMissingPrerequisites so a front end (the HTTP API, the MCP server)
-// can surface the structured refusal without parsing prose.
+// it, mirroring AsGuardrail and AsMissingPrerequisites so a front end (the HTTP API, and through it
+// the `burrow` CLI and `burrow-agent`) can surface the structured refusal without parsing prose.
 func AsAmbiguousEnvironment(err error) (*AmbiguousEnvironmentError, bool) {
 	var a *AmbiguousEnvironmentError
 	if errors.As(err, &a) {

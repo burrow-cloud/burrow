@@ -2,11 +2,11 @@
 // Copyright 2026 Nicholas Phillips
 
 // Command burrow is the Burrow CLI: the human-facing way to operate Burrow. It calls the
-// same control-plane API the MCP server does (ADR-0002) — deploy by image reference,
-// status, logs, rollback, scale — and can build and push an image first (the client-side
-// build path, ADR-0008). Like the MCP server it carries no orchestration logic and no
-// cluster credentials, only the control-plane API token (ADR-0005). Its command surface is
-// built with Cobra (ADR-0019).
+// same control-plane API the agent's control channel does (ADR-0002) — deploy by image
+// reference, status, logs, rollback, scale — and can build and push an image first (the
+// client-side build path, ADR-0008). Like `burrow-agent` it carries no orchestration logic and
+// no cluster credentials, only the control-plane API token (ADR-0005, ADR-0049). Its command
+// surface is built with Cobra (ADR-0019).
 package main
 
 import (
@@ -126,7 +126,9 @@ func newRootCmd() *cobra.Command {
 		grouped(newJoinCmd(), groupGetStarted),
 		newInstallAliasCmd(),
 		newUpgradeAliasCmd(),
-		grouped(newMcpCmd(), groupGetStarted),
+		// A hidden stub that points an old guide's `burrow mcp ...` at `burrow agent <tool> install`
+		// (ADR-0062 §2). Temporary: remove it, with mcp_removed.go, after the next release.
+		newMcpRemovedCmd(),
 		grouped(newAgentCmd(), groupGetStarted),
 		grouped(newClusterCmd(), groupGetStarted),
 		grouped(newConfigCmd(), groupGetStarted),

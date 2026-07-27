@@ -6,11 +6,24 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// agentTempClaudeSettings points the settings.json seam at a fresh temp file and returns its path.
+// Nothing exists at the path until a test writes it, so a preview and a first install exercise the
+// create branch without touching the real ~/.claude/settings.json.
+func agentTempClaudeSettings(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "claude", "settings.json")
+	orig := claudeSettingsPath
+	claudeSettingsPath = func() (string, error) { return path, nil }
+	t.Cleanup(func() { claudeSettingsPath = orig })
+	return path
+}
 
 // agentTempClaudeMemory points the CLAUDE.md seam at a fresh temp file and returns its path. Nothing
 // exists at the path until a test writes it, so a preview and a first install exercise the create
@@ -27,9 +40,21 @@ func agentTempClaudeMemory(t *testing.T) string {
 // claudeAllow reads permissions.allow from a settings file as a slice of strings.
 func claudeAllow(t *testing.T, path string) []string {
 	t.Helper()
-	root := readCursor(t, path)
+	return claudeRuleList(t, path, "allow")
+}
+
+// claudeDeny reads permissions.deny from a settings file as a slice of strings.
+func claudeDeny(t *testing.T, path string) []string {
+	t.Helper()
+	return claudeRuleList(t, path, "deny")
+}
+
+// claudeRuleList reads permissions[key] from a settings file as a slice of strings.
+func claudeRuleList(t *testing.T, path, key string) []string {
+	t.Helper()
+	root := readJSONFile(t, path)
 	perms, _ := root["permissions"].(map[string]any)
-	raw, _ := perms["allow"].([]any)
+	raw, _ := perms[key].([]any)
 	out := make([]string, 0, len(raw))
 	for _, r := range raw {
 		if s, ok := r.(string); ok {
@@ -37,6 +62,40 @@ func claudeAllow(t *testing.T, path string) []string {
 		}
 	}
 	return out
+}
+
+// countRule reports how many times want appears in rules, so an idempotence test can assert a rule
+// was added exactly once rather than merely present.
+func countRule(rules []string, want string) int {
+	n := 0
+	for _, r := range rules {
+		if r == want {
+			n++
+		}
+	}
+	return n
+}
+
+// readJSONFile parses a JSON object file, failing the test if it is missing or malformed.
+func readJSONFile(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	root := map[string]any{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	return root
+}
+
+// assertNoFile fails if anything exists at path, pinning that a preview mutated nothing.
+func assertNoFile(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected no file at %s, but it exists (err=%v)", path, err)
+	}
 }
 
 // TestAgentRuleStringsAreExact pins the load-bearing permission strings: the allow of the scoped
@@ -70,7 +129,7 @@ func TestAgentRuleStringsAreExact(t *testing.T) {
 }
 
 func TestAgentOverviewMutatesNothing(t *testing.T) {
-	settings := mcpTempClaudeSettings(t)
+	settings := agentTempClaudeSettings(t)
 	memory := agentTempClaudeMemory(t)
 	var out bytes.Buffer
 	if err := run(context.Background(), []string{"agent"}, &out, &out); err != nil {
@@ -94,7 +153,7 @@ func TestAgentOverviewMutatesNothing(t *testing.T) {
 // TestAgentUnknownToolFallback confirms a tool with no built-in wiring does not error but prints the
 // wire-by-hand message naming the exact allow/deny rules, mutating nothing.
 func TestAgentUnknownToolFallback(t *testing.T) {
-	settings := mcpTempClaudeSettings(t)
+	settings := agentTempClaudeSettings(t)
 	memory := agentTempClaudeMemory(t)
 	var out bytes.Buffer
 	if err := run(context.Background(), []string{"agent", "cursor"}, &out, &out); err != nil {
@@ -116,7 +175,7 @@ func TestAgentUnknownToolFallback(t *testing.T) {
 }
 
 func TestAgentBadSecondArg(t *testing.T) {
-	mcpTempClaudeSettings(t)
+	agentTempClaudeSettings(t)
 	agentTempClaudeMemory(t)
 	var out bytes.Buffer
 	err := run(context.Background(), []string{"agent", "claude", "bogus"}, &out, &out)
@@ -126,7 +185,7 @@ func TestAgentBadSecondArg(t *testing.T) {
 }
 
 func TestAgentClaudePreviewMutatesNothing(t *testing.T) {
-	settings := mcpTempClaudeSettings(t)
+	settings := agentTempClaudeSettings(t)
 	memory := agentTempClaudeMemory(t)
 	var out bytes.Buffer
 	if err := run(context.Background(), []string{"agent", "claude"}, &out, &out); err != nil {
@@ -156,7 +215,7 @@ func TestAgentClaudePreviewMutatesNothing(t *testing.T) {
 // TestAgentClaudeInstallWritesRules is the default path: a fresh install writes the allow and deny
 // rules and the orientation block, and burrow-agent is never caught by the deny.
 func TestAgentClaudeInstallWritesRules(t *testing.T) {
-	settings := mcpTempClaudeSettings(t)
+	settings := agentTempClaudeSettings(t)
 	memory := agentTempClaudeMemory(t)
 
 	var out bytes.Buffer
@@ -216,7 +275,7 @@ func TestAgentClaudeInstallWritesRules(t *testing.T) {
 // TestAgentClaudeInstallDenyKubectl confirms --deny-kubectl adds the kubectl deny on top of the burrow
 // denies and does not print the recommendation to enable what is already enabled.
 func TestAgentClaudeInstallDenyKubectl(t *testing.T) {
-	settings := mcpTempClaudeSettings(t)
+	settings := agentTempClaudeSettings(t)
 	agentTempClaudeMemory(t)
 
 	var out bytes.Buffer
@@ -242,7 +301,7 @@ func TestAgentClaudeInstallDenyKubectl(t *testing.T) {
 // TestAgentClaudeInstallIsIdempotent runs install twice: the second run adds no duplicate rule and
 // makes no further orientation change, reporting nothing to do; it backs up the now-existing files.
 func TestAgentClaudeInstallIsIdempotent(t *testing.T) {
-	settings := mcpTempClaudeSettings(t)
+	settings := agentTempClaudeSettings(t)
 	memory := agentTempClaudeMemory(t)
 
 	var out bytes.Buffer
@@ -279,7 +338,7 @@ func TestAgentClaudeInstallIsIdempotent(t *testing.T) {
 // TestAgentClaudeInstallPreservesAndBacksUp confirms the merge keeps unrelated settings and pre-existing
 // rules, preserves the user's own CLAUDE.md, and backs both originals up byte-for-byte.
 func TestAgentClaudeInstallPreservesAndBacksUp(t *testing.T) {
-	settings := mcpTempClaudeSettings(t)
+	settings := agentTempClaudeSettings(t)
 	memory := agentTempClaudeMemory(t)
 	if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
 		t.Fatal(err)
@@ -321,7 +380,7 @@ func TestAgentClaudeInstallPreservesAndBacksUp(t *testing.T) {
 	}
 
 	// The merged settings keep the unrelated key, the pre-existing allow and deny rules, and add ours.
-	root := readCursor(t, settings)
+	root := readJSONFile(t, settings)
 	if root["model"] != "opus" {
 		t.Errorf("unrelated top-level key dropped: %#v", root)
 	}
@@ -351,7 +410,7 @@ func TestAgentClaudeInstallPreservesAndBacksUp(t *testing.T) {
 // its text drifted, without duplicating the block or disturbing the user's own memory.
 func TestAgentClaudeInstallRefreshesStaleBlock(t *testing.T) {
 	memory := agentTempClaudeMemory(t)
-	mcpTempClaudeSettings(t)
+	agentTempClaudeSettings(t)
 	if err := os.MkdirAll(filepath.Dir(memory), 0o755); err != nil {
 		t.Fatal(err)
 	}

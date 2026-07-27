@@ -3,9 +3,9 @@
 # root cause of a failing app from Burrow's aggregated logs, end to end. The flow stands up
 # a k3d cluster, installs Burrow, installs the logs add-on (VictoriaLogs store + Fluent Bit
 # collector), deploys a deliberately-failing app that logs an unambiguous root cause,
-# confirms the failure line is queryable back through Burrow, then runs `claude -p` pointed
-# at the burrow MCP server and asserts the agent BOTH queries the logs AND names the root
-# cause.
+# confirms the failure line is queryable back through Burrow, then runs `claude -p` wired to
+# the `burrow-agent` CLI (ADR-0049) and asserts the agent BOTH queries the logs AND names the
+# root cause.
 #
 # This COSTS ANTHROPIC API TOKENS, so it is run by hand, never in CI. See README.md.
 #
@@ -34,8 +34,8 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
-# Resolve the repo root from this script's location so absolute paths in the MCP config are
-# correct regardless of the caller's working directory.
+# Resolve the repo root from this script's location so the absolute binary paths handed to the
+# agent are correct regardless of the caller's working directory.
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 cd "$REPO_ROOT"
@@ -44,7 +44,6 @@ CLUSTER="${K3D_CLUSTER:-burrow-agent-diag}"
 WORK=$(mktemp -d)
 KCFG="$WORK/kubeconfig"
 AGENT_OUT="$WORK/agent-out.jsonl"
-MCP_CFG="$WORK/mcp-config.json"
 
 # --- 2. cluster + cleanup trap ------------------------------------------------------------
 # Dump cluster state on any failure (the install/poll waits otherwise exit before any
@@ -90,11 +89,13 @@ k3d cluster delete "$CLUSTER" >/dev/null 2>&1 || true
 k3d cluster create "$CLUSTER"
 k3d kubeconfig get "$CLUSTER" > "$KCFG"
 
-echo "=== build the burrow CLI and the burrow-mcp binary ==="
+echo "=== build the burrow and burrow-agent CLIs ==="
+# Two binaries by design (ADR-0049 §1/§3): this script drives `burrow`, the human admin CLI, and
+# the agent is given only `burrow-agent`, the scoped control channel.
 BURROW="$REPO_ROOT/bin/burrow"
-BURROW_MCP="$REPO_ROOT/bin/burrow-mcp"
+AGENT_BIN_DIR="$REPO_ROOT/bin"
 go build -o "$BURROW" ./cmd/burrow
-go build -o "$BURROW_MCP" ./cmd/burrow-mcp
+go build -o "$AGENT_BIN_DIR/burrow-agent" ./cmd/burrow-agent
 
 echo "=== build + import the burrowd image (ko) ==="
 # ko builds the Go binary on the host and loads it into the local docker daemon; capture the
@@ -121,7 +122,8 @@ kubectl --kubeconfig "$KCFG" -n burrow-addons rollout status deploy/burrow-logs 
 # --- 5. deploy the deliberately-failing app -----------------------------------------------
 echo "=== deploy a deliberately-failing 'checkout' app THROUGH Burrow (CrashLoopBackOff, logs root cause) ==="
 # Deploy via `burrow app deploy` with a -- command override, so checkout is a real
-# Burrow-managed workload the agent discovers via burrow_apps/burrow_status (not just logs).
+# Burrow-managed workload the agent discovers via `burrow-agent apps` / `burrow-agent status`
+# (not just logs).
 # busybox echoes an unambiguous root cause then exits non-zero, so the pod CrashLoopBackOffs
 # and keeps re-logging the line — a steady stream for Fluent Bit to ship. The deploy returns
 # once the release is recorded; it does not wait for readiness (the app never becomes ready,
@@ -154,34 +156,33 @@ fi
 echo "--- root-cause line round-tripped through the logs pipeline ---"
 printf '%s\n' "$last_out" | grep "FATAL: checkout cannot connect to database" | head -n 3
 
-# --- 7. write the MCP config for claude ---------------------------------------------------
-echo "=== write the MCP config (server key 'burrow' -> tool ids mcp__burrow__<tool>) ==="
-# burrow-mcp auto-connects to the in-cluster control plane through the API-server proxy using
-# BURROW_KUBECONFIG (the same kubeconfig the CLI uses). The server key MUST be "burrow" so
-# tool ids are mcp__burrow__<toolName>. Absolute paths so claude can launch it from any cwd.
-jq -n \
-  --arg cmd "$BURROW_MCP" \
-  --arg kcfg "$KCFG" \
-  '{mcpServers:{burrow:{command:$cmd,args:[],env:{BURROW_KUBECONFIG:$kcfg}}}}' \
-  > "$MCP_CFG"
+# --- 7. wire the agent to burrow-agent ----------------------------------------------------
+echo "=== wire the agent to burrow-agent (on PATH, pointed at this cluster) ==="
+# burrow-agent reaches the in-cluster control plane over the API-server proxy using the ambient
+# kubeconfig (localconfig.Resolve honours $KUBECONFIG), so exporting KUBECONFIG is the whole
+# connection setup — there is no server to launch and no config file to generate. Putting
+# $AGENT_BIN_DIR first on PATH makes plain `burrow-agent` resolve to the binary just built, which
+# is also the name the --allowedTools rule below matches.
+export PATH="$AGENT_BIN_DIR:$PATH"
+export KUBECONFIG="$KCFG"
 
 # --- 8. run the headless agent ------------------------------------------------------------
-echo "=== run the headless Claude agent against the burrow MCP server ==="
+echo "=== run the headless Claude agent against burrow-agent ==="
 # Flags confirmed via `claude --help`:
 #   -p/--print                 non-interactive: print response and exit
-#   --mcp-config <file>        load MCP servers from a JSON file
-#   --allowedTools <tools...>  space/comma-separated allowlist; whitelisting exactly the three
-#                              read-only burrow tools means the agent never hits an interactive
-#                              permission prompt (so the run cannot hang on approval).
+#   --allowedTools <tools...>  space/comma-separated allowlist; allowing exactly `burrow-agent`
+#                              means the agent never hits an interactive permission prompt (so the
+#                              run cannot hang on approval) and cannot reach the admin CLI or
+#                              kubectl — the same allow/deny split `burrow agent claude install`
+#                              writes for a real user (ADR-0049 §4).
 #   --output-format stream-json + --verbose  newline-delimited JSON event stream (required
 #                              together for the streamed events the jq assertions parse).
 # timeout bounds a hang so it fails instead of blocking forever.
-PROMPT="The 'checkout' app in my cluster is failing. Use the Burrow tools to inspect it and its logs, then tell me the single root cause."
+PROMPT="The 'checkout' app in my cluster is failing. Use the burrow-agent CLI to inspect it and its logs, then tell me the single root cause."
 
 set +e
 timeout 180 claude -p "$PROMPT" \
-  --mcp-config "$MCP_CFG" \
-  --allowedTools "mcp__burrow__burrow_apps" "mcp__burrow__burrow_status" "mcp__burrow__burrow_logs_query" \
+  --allowedTools "Bash(burrow-agent:*)" \
   --output-format stream-json \
   --verbose \
   > "$AGENT_OUT" 2>&1
@@ -198,19 +199,20 @@ fi
 # `claude --help`: --output-format stream-json + --verbose; standard Claude Code stream
 # schema):
 #   - assistant turn:  {"type":"assistant","message":{"content":[ {"type":"tool_use",
-#                       "name":"mcp__burrow__burrow_logs_query", ...}, {"type":"text",
-#                       "text":"..."} ]}, ...}
+#                       "name":"Bash","input":{"command":"burrow-agent logs-query ..."}},
+#                       {"type":"text","text":"..."} ]}, ...}
 #   - terminal result: {"type":"result","subtype":"success","result":"<final answer text>", ...}
-# `jq -s` slurps the whole stream into an array; the recursive descent `..|.name?` finds every
-# nested tool_use name regardless of exact wrapping.
+# `jq -s` slurps the whole stream into an array; the recursive descent `..|.command?` finds every
+# nested Bash command regardless of exact wrapping. The agent's channel is a CLI, so what is
+# asserted is the command line it ran, not a tool id.
 
-echo "=== assert (a): the agent USED the logs-query tool ==="
-if jq -s -r '.[]|.. | .name? // empty' "$AGENT_OUT" 2>/dev/null | grep -q 'burrow_logs_query'; then
-  echo "PASS: agent issued a mcp__burrow__burrow_logs_query tool call."
+echo "=== assert (a): the agent RAN the logs query ==="
+if jq -s -r '.[]|.. | .command? // empty' "$AGENT_OUT" 2>/dev/null | grep -q 'burrow-agent .*logs-query'; then
+  echo "PASS: agent ran a burrow-agent logs-query command."
 else
-  echo "FAIL: no burrow_logs_query tool_use found in the agent stream."
-  echo "--- tool names seen in the stream ---"
-  jq -s -r '.[]|.. | .name? // empty' "$AGENT_OUT" 2>/dev/null | sort -u || true
+  echo "FAIL: no 'burrow-agent logs-query' command found in the agent stream."
+  echo "--- commands seen in the stream ---"
+  jq -s -r '.[]|.. | .command? // empty' "$AGENT_OUT" 2>/dev/null | sort -u || true
   echo "--- agent output tail ---"
   tail -n 40 "$AGENT_OUT"
   exit 1 # the EXIT trap dumps diagnostics

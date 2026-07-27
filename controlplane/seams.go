@@ -160,7 +160,8 @@ type Builder interface {
 // login role inside it; the engine calls this on attach/detach. It is an optional seam — present
 // only when the Postgres add-on path is wired; the engine errors cleanly (ErrNotImplemented) on an
 // attach when it is nil. The connection string it returns is a secret VALUE: it is handed only to
-// SetSecretValue and never logged, audited, returned, or carried over MCP (ADR-0029/0031).
+// SetSecretValue and never logged, audited, returned, or carried over the agent control channel
+// (ADR-0029/0031).
 type DatabaseProvisioner interface {
 	// EnsureAppDatabase idempotently provisions an isolated database and login role for app on the
 	// shared instance and returns the app's DATABASE_URL (a postgres:// connection string carrying
@@ -259,8 +260,8 @@ type Kubernetes interface {
 	// Secret if absent (ADR-0029). The value arrives over burrowd's authenticated
 	// control-plane API and is written here to the Kubernetes Secret — it is NEVER
 	// logged, never audited (the audit log records the key name only), never stored in
-	// Postgres, and never carried over MCP. Any error this returns must name the app and
-	// key only, never the value.
+	// Postgres, and never carried over the agent control channel. Any error this returns
+	// must name the app and key only, never the value.
 	SetSecretValue(ctx context.Context, app, key, value string) error
 	// UnsetSecretKey removes one key from app's per-app Secret. A missing Secret or a
 	// missing key is a no-op, not an error — unsetting what is already absent succeeds.
@@ -442,9 +443,9 @@ type Credentials interface {
 	Token(ctx context.Context, key string) (string, error)
 	// SetToken upserts key=value into burrow-credentials, creating the Secret if absent
 	// (ADR-0030). The value arrives over burrowd's authenticated, TLS-protected control-plane
-	// API — never over MCP — and is written straight to the Secret: it is NEVER logged, never
-	// stored in Postgres, and never returned in a response. Any error names the key only, never
-	// the value.
+	// API — never over the agent control channel — and is written straight to the Secret: it is
+	// NEVER logged, never stored in Postgres, and never returned in a response. Any error names
+	// the key only, never the value.
 	SetToken(ctx context.Context, key, value string) error
 }
 

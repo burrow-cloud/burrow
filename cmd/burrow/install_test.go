@@ -456,8 +456,9 @@ func TestRenderManifests(t *testing.T) {
 	//      list/unset keys, write a secret value it received over the authenticated control-plane
 	//      API, and let a provisioned backend write a connection string; and
 	//   3. an add-on-namespace-scoped grant (ADR-0031) so burrowd can create/read/delete the
-	//      Postgres add-on's burrow-postgres superuser Secret. Secret values still never cross MCP
-	//      (no secret-set tool) and are never logged or stored in the DB (ADR-0029/0004); and
+	//      Postgres add-on's burrow-postgres superuser Secret. Secret values still never cross the
+	//      agent control channel (`burrow-agent` has no secret-set command) and are never logged or
+	//      stored in the DB (ADR-0029/0004); and
 	//   4. a build-namespace-scoped grant (ADR-0057, issue #278) so burrowd can create/read/delete
 	//      the short-lived Secret holding a private source's provider token for the git clone and
 	//      registry login — scoped to burrow-builds only.
@@ -818,8 +819,8 @@ func TestWaitForDeploymentMarksTimeout(t *testing.T) {
 
 // TestPostInstallGuidancePointsAtAgent confirms the post-install tail routes the user to wire their
 // agent to the scoped `burrow-agent` CLI (Burrow is agent-driven, not CLI-deploy-driven) rather than
-// at the old `burrow app deploy` message or the retired MCP server (ADR-0049), and stays free of
-// em-dashes as user-facing copy.
+// at the old `burrow app deploy` message or the removed MCP server (ADR-0049, ADR-0062), and stays
+// free of em-dashes as user-facing copy.
 func TestPostInstallGuidancePointsAtAgent(t *testing.T) {
 	for _, want := range []string{
 		"Burrow is ready. Wire your AI agent to operate it:",
@@ -834,7 +835,7 @@ func TestPostInstallGuidancePointsAtAgent(t *testing.T) {
 		t.Errorf("post-install guidance should no longer point at `burrow app deploy`:\n%s", postInstallGuidance)
 	}
 	if strings.Contains(postInstallGuidance, "burrow mcp") {
-		t.Errorf("post-install guidance should no longer point at the retired MCP server (ADR-0049):\n%s", postInstallGuidance)
+		t.Errorf("post-install guidance should no longer point at the removed MCP server (ADR-0062):\n%s", postInstallGuidance)
 	}
 	if strings.Contains(postInstallGuidance, "—") {
 		t.Errorf("post-install guidance must not contain an em-dash:\n%s", postInstallGuidance)

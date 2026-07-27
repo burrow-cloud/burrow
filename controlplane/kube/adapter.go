@@ -448,9 +448,9 @@ func (a *Adapter) SecretKeys(ctx context.Context, app string) ([]string, error) 
 // SetSecretValue upserts key=value into app's per-app Secret (controlplane.AppSecretName(app)) in
 // the app namespace, creating the Secret (Opaque, Burrow labels) if absent (ADR-0029). The value
 // arrives here over burrowd's authenticated control-plane API and is written to the Kubernetes
-// Secret; it never reaches a log, the audit log, Postgres, or MCP (ADR-0029/0004). The returned
-// error names the app and key only, never the value. It retries on conflict since a concurrent
-// set/unset can race the resourceVersion.
+// Secret; it never reaches a log, the audit log, Postgres, or the agent control channel
+// (ADR-0029/0004). The returned error names the app and key only, never the value. It retries on
+// conflict since a concurrent set/unset can race the resourceVersion.
 func (a *Adapter) SetSecretValue(ctx context.Context, app, key, value string) error {
 	secrets := a.client.CoreV1().Secrets(a.namespace)
 	name := controlplane.AppSecretName(app)

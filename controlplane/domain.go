@@ -51,10 +51,10 @@ const ReleaseAnnotation = "burrow.cloud/release"
 // AppSecretName is the per-app Kubernetes Secret that holds an app's secret env (ADR-0028): one
 // object per app in the app namespace, keys = env-var names, values = secret values. The values
 // live only here — never inlined into the Deployment spec, never written to Postgres, and never
-// carried over MCP (ADR-0029/0004). A value may transit burrowd's authenticated control-plane API
-// on `secret set`, which writes it here. The name is derived from the app (a DNS-1123 label, so
-// the result is always a valid Secret name), so every layer computes it the same way rather than
-// passing it around.
+// carried over the agent control channel (ADR-0029/0004). A value may transit burrowd's
+// authenticated control-plane API on `secret set`, which writes it here. The name is derived from
+// the app (a DNS-1123 label, so the result is always a valid Secret name), so every layer computes
+// it the same way rather than passing it around.
 func AppSecretName(app string) string {
 	return "burrow-app-" + app + "-secrets"
 }
@@ -167,8 +167,8 @@ func (t ReleaseTrigger) Valid() bool {
 
 // Release is one immutable deploy of an App: the unit recorded in the deploy history
 // and the handle rollback redeploys. It captures exactly what was asked for — the
-// pullable image, the resolved digest, and the small metadata that travels over MCP
-// (env, command, replica count) — never any code (ADR-0004).
+// pullable image, the resolved digest, and the small metadata that travels over the
+// agent control channel (env, command, replica count) — never any code (ADR-0004).
 type Release struct {
 	// ID is the control-plane-assigned identifier for this release. It is minted by
 	// the deploy engine, not here, so the domain type stays free of ambient identity.

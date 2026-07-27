@@ -141,8 +141,8 @@ func newAddonBackupsCmd() *cobra.Command {
 
 // newAddonRestoreCmd is `burrow addon restore postgres <app> --backup <id>`: restore an app's
 // database from a recorded backup, overwriting its live contents (ADR-0032). It is destructive, so it
-// is held for confirmation by the addon.restore guardrail by default. Restore is CLI-only — there is
-// no MCP tool for it.
+// is held for confirmation by the addon.restore guardrail by default. Restore is CLI-only — it is
+// deliberately absent from the agent surface.
 func newAddonRestoreCmd() *cobra.Command {
 	o := &commonOpts{}
 	var backup string
@@ -180,7 +180,8 @@ func newAddonRestoreCmd() *cobra.Command {
 // newAddonAttachCmd is `burrow addon attach postgres <app>`: give an app its own database on the
 // installed Postgres add-on (ADR-0031). The agent supplies only the add-on type and app name;
 // burrowd generates the DATABASE_URL server-side and writes it into the app's Secret — no secret
-// value is printed, returned, or carried over MCP. Attach provisions and destroys nothing, so it is
+// value is printed, returned, or carried over the agent control channel. Attach provisions and
+// destroys nothing, so it is
 // allowed by default.
 func newAddonAttachCmd() *cobra.Command {
 	o := &commonOpts{}
@@ -190,7 +191,8 @@ func newAddonAttachCmd() *cobra.Command {
 		Long: "attach gives an app its own database on the installed Postgres add-on: burrowd provisions\n" +
 			"an isolated database and login role, generates the connection string server-side, writes it\n" +
 			"into the app's Secret as DATABASE_URL, and restarts the app. No secret value is printed or\n" +
-			"sent over MCP — only the key name is reported. Re-attaching rotates the password.",
+			"sent over the agent control channel; only the key name is reported. Re-attaching rotates the\n" +
+			"password.",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -251,8 +253,8 @@ func newAddonConnectCmd() *cobra.Command {
 			"it connects rather than distributes. Pass the in-cluster endpoint with --endpoint.\n\n" +
 			"For an authenticated backend, pass --auth: you are prompted for a bearer token with the\n" +
 			"input hidden. The token travels over burrowd's authenticated control-plane API (TLS), which\n" +
-			"writes it into the burrow-credentials Secret; it never travels over MCP and is\n" +
-			"never logged.",
+			"writes it into the burrow-credentials Secret; it never travels over the agent control\n" +
+			"channel and is never logged.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -274,7 +276,7 @@ func newAddonConnectCmd() *cobra.Command {
 			// --auth: prompt for the token and send it to burrowd over its authenticated
 			// control-plane API (TLS). burrowd writes it into burrow-credentials under the key and
 			// records the registry entry (ADR-0030). The token travels only in the request body; it
-			// never crosses MCP and is never logged.
+			// never crosses the agent control channel and is never logged.
 			token, err := readToken(cmd.InOrStdin(), cmd.OutOrStdout(), fmt.Sprintf("Enter the %s bearer token: ", backend))
 			if err != nil {
 				return err

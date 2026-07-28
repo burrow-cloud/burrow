@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+✅ Accepted
 
 ## TL;DR
 
@@ -30,7 +30,9 @@ makes two capabilities safe by denying them *by default*, and states that the ti
 `guard set` is operator-only. If someone relaxes those denials, there is no record that it happened,
 when, or by whom.
 
-This decouples the two: **an operation is audited because it mutates, not because it is guarded.**
+This decouples the two: **an operation is audited because it mutates, not because it is guarded** —
+and §6 extends it to the reads that *disclose* something, chiefly `logs`, which is the one read that
+can return a credential an application printed.
 
 Refines [ADR-0027](0027-audit-log.md), which scoped the log to "agent operations and guardrail
 decisions" — a scope that was right for its purpose and is too narrow for what the log is now relied
@@ -129,12 +131,43 @@ An attempted mutation that fails is recorded with its outcome. A refused `guard 
 `secret set` are both things an operator investigating an incident needs to see, and a log that
 records only successes is a log that hides the interesting half.
 
+### 6. Reads are audited when they disclose data, not merely when they happen
+
+Auditing every read is the wrong shape: reads outnumber mutations by orders of magnitude, an agent
+polls `status` and `apps` continuously, and a log in which almost every row is a listing is harder to
+use for the question it exists to answer. Retention would become urgent immediately, and the signal
+this record adds would be buried under the noise.
+
+**The line is disclosure.** A read is audited when it returns data belonging to the thing being read,
+rather than Burrow's own account of its state:
+
+| Audited | Not audited |
+| --- | --- |
+| `logs` — an app's output, which may contain anything it printed | `apps`, `status`, `history` |
+| log and metric **queries** | `reachability` |
+| `secret` listing — key names are information even though values never appear | `guard` — the policy is not secret |
+| reading the **audit log itself** | `addons`, `backups` listings |
+
+`logs` is the clearest case and the reason this section exists: an application prints whatever it
+prints, so its log is the one read that can return a credential. "Who read production's logs" is a
+question worth being able to answer, and it is not answerable today.
+
+Reading the audit log is included deliberately. A record of who inspected the record is what stops
+the log being quietly consulted, and it costs one row per read of a rarely-read surface.
+
+**A read row is not a decision row.** There is no guardrail, no disposition, and nothing to hold — it
+records that data was disclosed, to whom, and when. Rows carry the target and the caller, never the
+disclosed content: an audited `logs` read must not embed log lines, which would put in the audit log
+precisely the secret the read might have exposed.
+
 ## Consequences
 
 - **The log becomes answerable for "who changed the rules"**, which is the question it could not
   answer and the one that matters when something has gone wrong.
-- **Volume grows**, though not sharply — the operations added are rare by nature. Retention becomes
-  a real question sooner than it otherwise would, and this record does not decide it.
+- **Volume grows.** The mutations added are rare by nature; §6's reads are not — `logs` in particular
+  is polled during any investigation, so it is the row type that will dominate. Retention therefore
+  becomes a real question with this record rather than eventually, and this record does not decide
+  it.
 - **`audit_log`'s shape stops being guardrail-centric.** `guardrail_code` and `disposition` become
   optional in meaning as well as in SQL, and anything reading the table that assumed a code is
   present needs to tolerate its absence.

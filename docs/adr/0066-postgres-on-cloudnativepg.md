@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+✅ Accepted
 
 ## TL;DR
 
@@ -13,8 +13,9 @@ them, so the disk fills and then new backups fail too; and the backup shares a f
 the thing it is backing up.
 
 This replaces the mechanism with **CloudNativePG** — a CNCF Postgres operator — while keeping
-[ADR-0031](0031-postgres-addon.md)'s user-facing contract exactly as it is: one shared instance, a
-database and a login role per app.
+[ADR-0031](0031-postgres-addon.md)'s user-facing contract intact: an instance shared by the apps in
+an environment, with a database and a login role per app. ([ADR-0067](0067-one-database-instance-per-environment.md)
+scopes that instance to one per environment; this record is about the *mechanism*, not the count.)
 
 The gain is not incremental. Continuous write-ahead-log archiving to object storage, scheduled
 backups, retention, point-in-time recovery and replicas are things the operator already does, and
@@ -100,7 +101,7 @@ Verified against CNPG's API types and documentation, not assumed:
   after the `Backup` and even the `Cluster` are gone. **Snapshot retention is the integrator's
   problem.**
 - **Recovery is never in-place, and it is never per-app.** It bootstraps a *new* `Cluster` from a
-  backup — the whole shared instance, every app's database, to one point in time. Today's
+  backup — the whole instance, every app's database in that environment, to one point in time. Today's
   `burrow addon restore <addon> <app> --backup <id>` restores **one app's database** from a logical
   dump, and physical recovery cannot express that. This is the sharpest mismatch between the two
   models and §4 addresses it directly.
@@ -111,12 +112,24 @@ Verified against CNPG's API types and documentation, not assumed:
 
 ### 1. The Postgres add-on is a CloudNativePG `Cluster`
 
-`addon install postgres` installs the CNPG operator if it is absent and creates a `Cluster`. The
-tenant-facing contract of ADR-0031 is unchanged: one shared instance, `addon attach` gives an app its
-own database and login role, and the app receives a `DATABASE_URL` in its own Secret.
+`addon install postgres` installs the CNPG operator if it is absent and creates a `Cluster`
+**per environment**, per [ADR-0067](0067-one-database-instance-per-environment.md) §1.
 
-Replica count, storage and resources become configuration rather than constants — a single instance
-stays the default for the small self-hoster ADR-0031 was written for.
+The tenant-facing contract of ADR-0031 is otherwise unchanged: within an environment the instance is
+shared, `addon attach` gives an app its own database and login role, and the app receives a
+`DATABASE_URL` in its own Secret. What ADR-0067 changed is the *scope* of "shared" — one instance per
+environment rather than one per cluster.
+
+Replica count, storage and resources become configuration rather than constants, and a single-replica
+instance stays the default for the small self-hoster ADR-0031 was written for.
+
+**CNPG makes ADR-0067's cost materially lower**, which is worth stating because the two records were
+written days apart and the interaction is easy to miss. ADR-0067 accepted a pod and a volume per
+environment as the price of server-level isolation. Under an operator that price buys more than it
+did: each environment's instance is independently upgradable — which is the rehearsal ADR-0067 §Context
+says a shared instance cannot provide — independently backed up on its own schedule, and
+independently sized. A hand-rolled Deployment per environment would have given isolation and little
+else.
 
 ### 2. Burrow creates custom resources and reads status; it never runs a backup tool
 
@@ -175,7 +188,8 @@ So the two coexist deliberately, and they answer different questions:
 | Logical dump (`pg_dump`) | one app's database | the moment of the dump | "this app's data is wrong" |
 | Physical (CNPG) | the whole instance | any point in the WAL window | "the instance is gone" |
 
-This is not a transitional compromise. A shared instance with a database per app (ADR-0031) has both
+This is not a transitional compromise. An instance shared by an environment's apps, with a database
+per app (ADR-0031, scoped by ADR-0067), has both
 failure modes, and neither backup kind covers the other's. Retiring the logical path would trade a
 scheduling and retention problem for a granularity problem, which is a worse trade than it looks.
 

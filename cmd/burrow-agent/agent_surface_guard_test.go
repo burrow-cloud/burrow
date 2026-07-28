@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
+	"github.com/burrow-cloud/burrow/internal/agentsurface"
 )
 
 // Burrow ships two command surfaces on purpose, and the split between them is a security
@@ -50,80 +50,28 @@ import (
 // guardrail denied by default (tier 2) rather than being removed; §5 prefers that, because a legible
 // `denied: app.delete` is a refusal an agent can relay while `unknown command` is a dead end that
 // invites it to reach for kubectl. `addon remove` is the tier-1 case: one add-on instance per type
-// per cluster, every app's database on it (ADR-0031), so removing it takes them all down.
+// per environment (ADR-0067 §1), every app in that environment's database on it (ADR-0031), so
+// removing it takes them all down.
 //
-// This is the ONLY place the rule is stated. Burrow once carried a second agent-facing surface,
+// This is the ONLY place the rule is ENFORCED. Burrow once carried a second agent-facing surface,
 // the MCP server, with its own copy of these guards; ADR-0062 removed it precisely so a rule about
 // what an agent may do has one enforcement point instead of two that can drift apart. A new
 // agent-facing surface must not reintroduce a parallel allow-list.
+//
+// The membership LIST it enforces against lives in internal/agentsurface rather than in this file,
+// because that table has a second reader: `guard` reports the capabilities absent from this binary,
+// with what each is and who can perform it, so an agent can relay a refusal instead of hitting
+// `unknown command` (ADR-0065 §7 — the reasoning is in that package's doc comment). Two
+// hand-maintained lists would drift, and the drift would be silent in the direction that matters:
+// one list would say a verb is off the surface while the other told an agent nothing about it.
+// One table, each entry tagged with the surface that carries it, cannot drift from itself.
 
-// agentSurfaceAllowList is the complete set of command paths burrow-agent may register, each with
-// the reason it is app lifecycle rather than cluster administration. Adding a command means adding
-// it here with its reason — see the failure message on TestAgentSurfaceIsClosed for how to decide
-// whether it belongs here at all.
-var agentSurfaceAllowList = map[string]string{
-	// Compute: the release lifecycle of an app that already has a namespace.
-	"deploy":    "deploys an existing app by image reference into its own namespace",
-	"build":     "builds an image from a git ref as a Job in the operator-provisioned build namespace",
-	"rollback":  "returns an app to a previous release",
-	"scale":     "sets an app's replica count",
-	"autoscale": "configures an app's HorizontalPodAutoscaler",
-	"run":       "runs a one-off command in the app's own image, guarded by app.run",
-	"delete":    "removes an app the control plane already manages, guarded",
-	"apps":      "read-only: the apps the control plane manages",
-	"status":    "read-only: one app's release and workload state",
-	"history":   "read-only: one app's release history",
-	"next-tag":  "read-only: the next semver tag to build",
-
-	// Config and secrets: app-scoped values. Setting a secret VALUE is deliberately absent
-	// (ADR-0029) and TestSecretSetStructurallyAbsent pins it.
-	"config":       "read-only: one app's non-secret config vars",
-	"config set":   "writes a non-secret config var on one app",
-	"config unset": "removes a non-secret config var from one app",
-	"secret":       "read-only: one app's secret KEY names, never values",
-	"secret unset": "removes one app secret by key; carries no value",
-	"addon attach": "gives one app a database on its environment's add-on instance; the URL is generated server-side",
-	"addon backup": "takes a backup of an add-on's data",
-	"backups":      "read-only: the backups taken of an add-on",
-
-	// Add-ons: in-cluster building blocks the control plane deploys into its OWN add-on
-	// namespace. burrowd holds only namespaced Roles and is forbidden from creating namespaces
-	// or RBAC, so an add-on install cannot widen anything — where an add-on needs a
-	// ServiceAccount (the metrics scraper), burrowd only VERIFIES the operator staged it and
-	// otherwise fails cleanly (controlplane/kube/addons.go).
-	//
-	// `addon remove` is deliberately NOT here. Add-ons are one instance per type per ENVIRONMENT
-	// (ADR-0067 §1) and ADR-0031 puts every app in an environment on its one Postgres, so removal
-	// takes every attached app in that environment down at once — it fails ADR-0065 §1's scope test unconditionally, which is
-	// tier 1: absent from the binary, not merely guarded
-	// ([ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) §2). Because this
-	// allow-list is closed, its omission here is what fails the test if the command comes back;
-	// `addon_remove` is also on adminVerbFragments below as the independent second net.
-	"addon":         "group: the add-on operations",
-	"addon install": "deploys a building block for one environment into the existing add-on namespace; creates no namespace and no RBAC",
-	"addons":        "read-only: the installed add-ons and their capabilities",
-
-	// Routing: Services, Ingresses, and DNS records for an app.
-	"expose":        "creates a Service and Ingress for one app, guarded",
-	"unexpose":      "removes an app's Service and Ingress",
-	"domain":        "group: the DNS operations",
-	"domain add":    "writes a DNS record at an already-configured provider, guarded",
-	"domain remove": "removes a DNS record at an already-configured provider",
-	"reachability":  "read-only: whether an app is reachable, link by link",
-
-	// Diagnosis: reads only.
-	"logs":             "read-only: one app's pod logs",
-	"logs-query":       "read-only: queries the installed logs add-on",
-	"metrics-query":    "read-only: queries the installed metrics add-on",
-	"cluster":          "read-only: the cluster's capabilities",
-	"cluster capacity": "read-only: scheduling headroom, from the Kubernetes API",
-	"audit":            "read-only: the audit record of guarded operations",
-	"guard":            "read-only: the current guardrail dispositions; `guard set` is operator-only (ADR-0020)",
-
-	// Targeting: selects among environments the OPERATOR registered.
-	"providers":    "read-only: the provider names already configured by the operator",
-	"environments": "read-only: lists the local environment handles; selects, never creates",
-}
+// agentSurfaceAllowList is the complete set of command paths burrow-agent may register, keyed by
+// path with the reason each one is app lifecycle rather than cluster administration. It is the
+// Agent half of the capability catalogue in internal/agentsurface; the Operator half is what
+// `guard` reports as absent. Adding a command means adding it to that catalogue with its reason —
+// see the failure message on TestAgentSurfaceIsClosed for how to decide whether it belongs at all.
+var agentSurfaceAllowList = agentsurface.AgentSurface()
 
 // adminVerbFragments are fragments that mark a command path as one the agent must not carry:
 // cluster administration — creating namespaces, writing RBAC, installing or replacing the control
@@ -210,15 +158,18 @@ What to do:
 
   - If the verb is CLUSTER ADMINISTRATION — it creates a namespace, writes or modifies RBAC,
     installs/upgrades/uninstalls the control plane, or admits a node — it belongs in
-    cmd/burrow (the operator CLI), run by a human with their own kubeconfig. Move it there.
+    cmd/burrow (the operator CLI), run by a human with their own kubeconfig. Move it there and
+    record it in internal/agentsurface as an Operator capability, so ` + "`guard`" + ` can tell an
+    agent what it is and who runs it instead of failing with ` + "`unknown command`" + `.
   - If its effect reaches BEYOND THE APP the agent was asked about, it is ADR-0065 tier 1: it
-    stays out of this binary and its absence is asserted here. ` + "`addon remove`" + ` is the case
-    that set the rule.
+    stays out of this binary, its absence is asserted here, and it is an Operator entry in the
+    catalogue. ` + "`addon remove`" + ` is the case that set the rule.
   - If it is app-scoped but IRREVERSIBLE, it is ADR-0065 tier 2: keep it on the surface and ship
     it with a guardrail whose default disposition is deny, so an operator can relax it per
     environment and the agent gets a refusal it can explain.
-  - If it genuinely is APP LIFECYCLE, add it to agentSurfaceAllowList in this file with a
-    one-line reason, name the tier it lands in, and make sure that reason is true.`
+  - If it genuinely is APP LIFECYCLE, add it to the catalogue in internal/agentsurface as an Agent
+    capability with a one-line reason, name the tier it lands in, and make sure that reason is
+    true.`
 
 // TestAgentSurfaceIsClosed asserts burrow-agent's command tree matches agentSurfaceAllowList
 // exactly, in both directions. It is a closed set on purpose: ANY new command fails this test, so
@@ -250,8 +201,13 @@ func TestAgentSurfaceIsClosed(t *testing.T) {
 	}
 	if len(stale) > 0 {
 		sort.Strings(stale)
-		t.Errorf("agentSurfaceAllowList names %d command(s) that are no longer registered: %s\n"+
-			"Remove them from the allow-list so it keeps describing the real surface.",
+		t.Errorf("the capability catalogue names %d command(s) as agent capabilities that are no longer "+
+			"registered: %s\n"+
+			"If the verb was deliberately taken off the agent surface, RETAG it in internal/agentsurface\n"+
+			"as an Operator capability with why it is held back and who can run it — do not delete the\n"+
+			"entry. Retagging keeps it legible in `guard`, which is what lets an agent say \"that is not\n"+
+			"something I can do, and here is who can\" instead of hitting `unknown command` and looking\n"+
+			"for a way around the control channel (ADR-0065 §5, §7).",
 			len(stale), strings.Join(quoteAll(stale), ", "))
 	}
 }
@@ -329,27 +285,13 @@ func matchAdminFragment(path string) string {
 	return ""
 }
 
-// registeredCommandPaths walks the real burrow-agent command tree and returns every command path
-// it registers (space-separated, root name omitted), so the test reads the shipped surface rather
-// than a copy of the registration code. Cobra's own `help` and `completion` commands are not part
-// of Burrow's surface and are skipped.
+// registeredCommandPaths returns every command path the real burrow-agent command tree registers,
+// so the test reads the shipped surface rather than a copy of the registration code. It walks the
+// tree with the same commandPaths helper `guard` uses to work out what is absent (surface.go), so
+// the enforcement below and the report an agent reads are computed from one traversal, not two
+// that could disagree about what "registered" means.
 func registeredCommandPaths() []string {
-	var paths []string
-	var walk func(c *cobra.Command, prefix string)
-	walk = func(c *cobra.Command, prefix string) {
-		for _, sub := range c.Commands() {
-			switch sub.Name() {
-			case "help", "completion":
-				continue
-			}
-			path := strings.TrimSpace(prefix + " " + sub.Name())
-			paths = append(paths, path)
-			walk(sub, path)
-		}
-	}
-	walk(newRootCmd(), "")
-	sort.Strings(paths)
-	return paths
+	return commandPaths(newRootCmd())
 }
 
 func quoteAll(in []string) []string {

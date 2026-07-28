@@ -479,6 +479,14 @@ environment, whether it came from the environment, the global policy, or the bui
 control-plane database. `burrow-agent guard` can **read** the policy and cannot set it —
 structurally, the verb does not exist on that binary.
 
+Both `guard` surfaces report a **second kind of limit** alongside the dispositions: the
+capabilities absent from the `burrow-agent` binary, each with what it is, why it is held back,
+and the operator command that performs it
+([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §7). The two groups are separate keys
+in `--json` — `guardrails` and `absent_capabilities` — because they are different answers: a
+`deny` is a limit an operator can move with `guard set`, an absent capability is not on the
+binary at all. See [The agent surface](#the-agent-surface).
+
 Limits:
 
 - **`app.delete` and `dns.delete` are denied, and a deny is not a hold** — no `--confirm`
@@ -553,9 +561,15 @@ pinned by tests that fail if a verb is added or removed.
 **Absent from the agent binary entirely** — these are operator actions on the `burrow` CLI:
 `cluster install`, `cluster upgrade`, `cluster bootstrap`, `cluster ingress install`,
 `cluster registry install`, `join`, `env add`, `guard set`, `app secret set`,
-`app auto-deploy`, `addon remove`, `addon connect`, `addon detach`, `addon restore`,
-`config provider add`, `config registry login`, `agent <tool> install`,
+`app auto-deploy`, `addon remove`, `addon remove --delete-data`, `addon connect`, `addon detach`,
+`addon restore`, `config provider add`, `config registry login`, `agent <tool> install`,
 `app publish`/`unpublish` under those names, and the client-side `--build` deploy path.
+
+Those verbs are not prose alone. They are entries in a capability catalogue
+(`internal/agentsurface`), which is also the table the surface-guard test reads as its closed
+allow-list: every capability appears once, tagged with the surface that carries it, so the two
+readers cannot disagree about where a verb sits. That is what lets `guard` report each absent
+capability with what it is and who can run it, below.
 
 What qualifies a verb for this surface is
 [ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md): a capability belongs unless its effect
@@ -571,11 +585,21 @@ The reversibility tier ships too: `app.delete` and `dns.delete` are `deny` by de
 `burrow-agent delete` and `burrow-agent domain remove` exist, are refused, and say what would
 change the answer (see [Guardrails](#guardrails)).
 
-One half of that record is **not built**, and it matters to what an agent actually sees.
-ADR-0065 §7 decides that `guard` should also report the capabilities **absent from the binary**
-and why, so an agent can tell a human "removing an add-on is not something I can do, and here is
-who can". `burrow-agent guard` returns the control plane's guardrail dispositions and nothing
-else, so an absent verb is still rejected by name with no account of what it was.
+**An absent capability is legible rather than a dead end** (ADR-0065 §7). `burrow guard list` and
+`burrow-agent guard` both report the absent capabilities alongside the dispositions: what each one
+is, why it is not on the agent surface, who can perform it ("the burrow operator CLI, run by a
+human with the cluster's admin kubeconfig"), and the exact command that person runs. So an agent
+asked to remove an add-on relays "that is not something I can do, and here is who can" instead of
+`unknown command`. That matters beyond politeness: ADR-0065 §5 notes a dead end is what invites an
+agent to route around the control channel entirely and reach for `kubectl` or a shell, which is
+the failure [ADR-0021](adr/0021-guardrails-require-control-plane-only-agent-access.md) says Burrow
+cannot close from the inside.
+
+`burrow-agent` derives the report by subtracting the command paths it actually registers from the
+catalogue, so a verb taken out of the binary becomes legible in `guard` with no second edit. The
+report enumerates the agent surface to anything that can read it, which ADR-0065 §7 accepts
+outright: the CLI is open source and `--help` already reveals it, so the read carries no access
+control.
 
 The narrowing is structural, not advisory: the binary lacks the verb, its
 kubeconfig lacks the permission, and the control plane gates the operation anyway.
@@ -691,7 +715,6 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
 | Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Not built — dumps land on an in-cluster PVC. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
 | A final backup before `--delete-data` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5 | Not built — it waits on an object-storage provider ([ADR-0063](adr/0063-object-storage-provider.md)); until then the retained backup claim is the only copy. The rest of ADR-0064 is built: removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and carries §2's typed confirmation, the backup claim always survives, and `addon list` reports retained volumes (§6). [#334](https://github.com/burrow-cloud/burrow/issues/334) |
-| `guard` reporting the capabilities absent from the agent binary | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §7 | Not built — tiers 1 and 2 are (`addon remove` is not compiled into `burrow-agent`; `app.delete` and `dns.delete` are denied by default), but `guard` still reports only guardrail dispositions. [#337](https://github.com/burrow-cloud/burrow/issues/337) |
 | The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
 | An install that creates one environment named `prod`, mapped to the existing app namespace | [0067](adr/0067-one-database-instance-per-environment.md) §2–§3 | **Partial** — §1 is built (one add-on instance per environment; the provisioning seam takes the environment non-optionally), so the shared-database hazard is closed. The first environment is still the synthesized `default`. [#340](https://github.com/burrow-cloud/burrow/issues/340) |
 

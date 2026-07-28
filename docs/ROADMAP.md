@@ -301,10 +301,6 @@ acceptance checklist. The theme and its sequencing stay here; the granularity is
   record is built, including `--delete-data`'s typed confirmation and the retained volumes the
   add-on listing now reports; the final backup before a data-deleting removal is not, and waits on
   object storage. [#334](https://github.com/burrow-cloud/burrow/issues/334) (blocked by #331).
-- **What belongs on the agent surface** ([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md)) —
-  tiers 1 and 2 are built (`addon remove` is not compiled into `burrow-agent`; `app.delete` and
-  `dns.delete` are denied by default); a `guard` that reports what the binary does not carry is not.
-  [#337](https://github.com/burrow-cloud/burrow/issues/337).
 - **The Postgres add-on runs on CloudNativePG** ([ADR-0066](adr/0066-postgres-on-cloudnativepg.md)) —
   the operator owns WAL archiving, schedules, retention and point-in-time recovery, and Burrow stops
   orchestrating backups altogether.

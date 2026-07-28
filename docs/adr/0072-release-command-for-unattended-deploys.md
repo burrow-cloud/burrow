@@ -19,6 +19,11 @@ This adds a **release command**: a command configured once on the app, run autom
 **before** an unattended deploy switches traffic, from the **new** image. **If it fails, the deploy
 does not happen** and the running version keeps serving.
 
+Rollback gets a **separate, optional command that defaults to nothing**, because whether a rollback
+should touch the schema depends on the application — forward-only teams want nothing to happen, and
+teams with reversible pairs may want the schema stepped back. When set, it runs from the image being
+rolled back *from*, since that is where the code that knows how to undo its own migration lives.
+
 It does not replace `burrow run`. ADR-0048 rejected a hook that would have *replaced* the explicit
 call; this is one that covers the case the explicit call cannot reach, and the two are for different
 situations — a sequenced release with a human or agent driving, versus a push at 3am.
@@ -91,14 +96,29 @@ happen** rather than a deploy that half-happened. The Job is left for diagnosis,
 reported as the deploy's failure, with the command's output, rather than as a mysterious crashloop
 afterwards.
 
-### 4. It does not run on rollback
+### 4. Rollback runs a separate command, or nothing, and the user decides which
 
-Rolling back re-deploys an earlier image, and running that image's release command would attempt to
-migrate a newer schema with older migration code. What that does is anyone's guess and none of the
-guesses are good.
+Whether a rollback should touch the schema is a property of the application, not of Burrow. Teams
+practising expand/contract migrate **forward only** and would be harmed by anything running on
+rollback. Teams whose tool maintains reversible pairs — `goose`, `migrate`, `alembic`, Rails all
+support a `down` — may legitimately want the schema stepped back.
 
-Rollback therefore skips it — and §Consequences records what that means, because it is the sharpest
-edge here.
+So there is a **separate, optional rollback command**, and **unset means nothing runs**. The safe
+default is the forward-only one, because a user who has not thought about it is likelier to be
+forward-only than to have reversible migrations they trust.
+
+**It runs from the image being rolled back FROM, not the one being rolled back to**, and this is the
+part that is easy to get wrong. Rolling back from B to A, the code that knows how to undo B's
+migration is in **B**. Running A's migration tool would not undo B's change — A does not know it
+exists — it would undo *A's* last migration instead, which is worse than doing nothing.
+
+**It runs before traffic moves back**, so the schema is stepped back before the older code begins
+serving. Where B's migration was additive this ordering does not matter; where it was destructive it
+is the difference between a restored app and a broken one.
+
+The reuse of the release-command machinery is deliberate — same Job, same image resolution, same
+config and Secret injection, same gating on exit code. What differs is which image it comes from and
+that it is opt-in.
 
 ### 5. It runs on every deploy path, not only unattended ones
 
@@ -131,11 +151,16 @@ ADR-0048 already declined a Postgres-only `burrow_run_sql` for the same reason.
   of those turns auto-deploy off for that release, or accepts two deploys. This is a real limit and
   the honest framing is that the hook covers the common case — additive, backward-compatible
   migrations — and not the hard one.
-- **A rollback does not undo a migration**, and §4 means it does not try. So rolling back after a
-  successful migration returns the *code* to its previous state and leaves the *schema* ahead of it.
-  If the migration was not backward-compatible, the rollback will not restore a working app. That is
-  inherent to schema changes rather than something this record introduces, but it becomes reachable
-  automatically now, and the rollback path should say so at the moment it matters.
+- **With no rollback command set, a rollback returns the code and leaves the schema ahead of it.**
+  If the forward migration was not backward-compatible, the rollback will not restore a working app.
+  That is inherent to schema changes rather than introduced here, but it becomes reachable
+  automatically now, so the rollback path should say what it did and did not do rather than reporting
+  a bare success.
+- **A rollback command that is set and wrong is worse than none.** It runs a schema change during an
+  incident, from an image being abandoned, against a database whose state is already the reason
+  someone is rolling back. It should be set only by a user whose migrations are genuinely reversible
+  and who has exercised the down path — and the documentation should say that rather than presenting
+  it as the tidier option.
 - **The blast radius of a bad release command is every deploy of that app.** It is configuration set
   once and then forgotten, and a command that starts failing blocks deploys until someone notices.
   That is the correct failure direction — better than shipping code whose schema is missing — but it
@@ -165,6 +190,16 @@ ADR-0048 already declined a Postgres-only `burrow_run_sql` for the same reason.
 - **Have Burrow detect and run migrations** by recognising common tools. Rejected per §7: it would
   make Burrow responsible for every ecosystem's migration semantics, and be wrong for somebody
   immediately.
+- **A single command used for both deploy and rollback**, with the tool told which direction to go.
+  Fewer concepts, and it matches how migration tools are actually invoked (`goose up` / `goose down`).
+  Rejected because the two differ in more than an argument: they run from **different images**, and
+  one must default to doing nothing while the other defaults to running. Collapsing them would make
+  the safe default impossible to express — a user who set a release command would silently acquire
+  rollback behaviour they never chose.
+- **Run the rollback command from the image being rolled back TO.** The intuitive reading of
+  "re-deploy A, run A's release command". Rejected in §4: A's migration tool does not know B's
+  migration exists, so it would step back one of A's own migrations instead. This is the failure that
+  looks correct in a diagram and corrupts a schema in practice.
 - **A separate `burrow migrate` verb**, distinct from both. Rejected as a third mechanism for the
   same job: it would still need a caller, which is the problem, and it would compete with `run`
   rather than complete it.

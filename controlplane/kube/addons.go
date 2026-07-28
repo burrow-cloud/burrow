@@ -615,6 +615,74 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string, deleteData bool)
 	return removal, nil
 }
 
+// AddonVolumes lists the add-on PersistentVolumeClaims in the add-on namespace — every claim Burrow
+// created for an add-on, including the ones whose add-on has since been removed. It is the read that
+// makes ADR-0064 §6 possible: a removed add-on leaves no registry row, so the claim it left behind
+// can only be found by looking at the cluster.
+//
+// Claims are identified by the LABELS Burrow writes at creation, never by a name prefix: a claim is
+// Burrow's when it carries app.kubernetes.io/managed-by=burrow, and it is attributed to an add-on by
+// the burrow.cloud/addon label recording the type. A user's own claim in this namespace carries
+// neither and is not reported.
+func (a *Adapter) AddonVolumes(ctx context.Context) ([]controlplane.AddonVolume, error) {
+	list, err := a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: managedByLabel + "=" + managedByValue,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kube: listing addon volumes in %q: %w", a.addonNamespace, err)
+	}
+	out := make([]controlplane.AddonVolume, 0, len(list.Items))
+	for i := range list.Items {
+		pvc := &list.Items[i]
+		addon, role, ok := addonVolumeOwner(pvc)
+		if !ok {
+			continue
+		}
+		out = append(out, controlplane.AddonVolume{
+			Name:      pvc.Name,
+			Namespace: a.addonNamespace,
+			Addon:     addon,
+			Role:      role,
+			Size:      addonVolumeSize(pvc),
+			// A data claim keeps the add-on's resource name, so a reinstall creates over it and the
+			// instance comes back with its data (ADR-0064 §1). The backup claim is mounted by the
+			// backup/restore Jobs instead, so a reinstall does not adopt it.
+			ReinstallAdopts: role == controlplane.AddonVolumeData,
+			CreatedAt:       pvc.CreationTimestamp.Time,
+		})
+	}
+	return out, nil
+}
+
+// addonVolumeOwner attributes a claim to the add-on it serves and says what it holds. The add-on
+// label is authoritative. The backup claim is the one exception: it is created on the backup path
+// (ensureBackupPVC) and claims created before that path carried the add-on label have only their
+// name — which is safe to match on because it is a compiled-in constant
+// (controlplane.PostgresBackupVolume), not a prefix guess about what a user might have named
+// something.
+func addonVolumeOwner(pvc *corev1.PersistentVolumeClaim) (controlplane.AddonType, string, bool) {
+	if pvc.Name == controlplane.PostgresBackupVolume {
+		return controlplane.AddonPostgres, controlplane.AddonVolumeBackup, true
+	}
+	if t := pvc.Labels[addonLabel]; t != "" {
+		return controlplane.AddonType(t), controlplane.AddonVolumeData, true
+	}
+	return "", "", false
+}
+
+// addonVolumeSize reports the claim's capacity: what the cluster actually provisioned once the claim
+// is bound, falling back to what was requested while it is not. Size is what a claim can honestly
+// report — cost would need the provider's per-GiB price, which Burrow does not have (ADR-0064).
+func addonVolumeSize(pvc *corev1.PersistentVolumeClaim) string {
+	if q, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
+		return q.String()
+	}
+	if q, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
+		return q.String()
+	}
+	return ""
+}
+
 // addonDataPath is the in-container data directory for a stateful add-on.
 func addonDataPath(t controlplane.AddonType) string {
 	switch t {

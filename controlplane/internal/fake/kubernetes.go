@@ -35,7 +35,7 @@ type Kubernetes struct {
 	addresses    map[string]string // app -> ingress external address (controller-assigned)
 	certReady    map[string]bool   // app -> whether the requested TLS certificate has been issued
 	addons       map[string]controlplane.AddonInfo
-	volumes      map[string]string                     // add-on name -> its data volume, present while the volume exists
+	volumes      map[string]fakeVolume                 // claim name -> the add-on volume, present while the claim exists
 	secrets      map[string]map[string]string          // app -> per-app Secret (key -> value)
 	autoscalers  map[string]controlplane.AutoscaleSpec // app -> applied HPA spec (namespace-keyed)
 	backups      *[]backupCall                         // RunBackupJob calls, in order
@@ -91,6 +91,15 @@ func (k *Kubernetes) WithNamespace(ns string) controlplane.Kubernetes {
 	v := *k
 	v.ns = ns
 	return &v
+}
+
+// fakeVolume is one PersistentVolumeClaim in the fake's add-on namespace. It carries what the real
+// adapter reads off a claim's labels and capacity, so a test asserting on retained volumes asserts
+// on the same shape production produces (ADR-0064 §6).
+type fakeVolume struct {
+	Addon controlplane.AddonType
+	Role  string
+	Size  string
 }
 
 // backupCall records one RunBackupJob/RunRestoreJob invocation so a test can assert the engine
@@ -161,7 +170,7 @@ func NewKubernetes() *Kubernetes {
 		addresses:    make(map[string]string),
 		certReady:    make(map[string]bool),
 		addons:       make(map[string]controlplane.AddonInfo),
-		volumes:      make(map[string]string),
+		volumes:      make(map[string]fakeVolume),
 		secrets:      make(map[string]map[string]string),
 		autoscalers:  make(map[string]controlplane.AutoscaleSpec),
 		backups:      &[]backupCall{},
@@ -234,7 +243,11 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 	// A stateful add-on gets a data volume named after it, like the adapter's PVC. Whether that
 	// volume survives a removal is the thing tests assert on, so the fake has to hold it.
 	if spec.StorageGi > 0 {
-		k.volumes[name] = name
+		k.volumes[name] = fakeVolume{
+			Addon: spec.Type,
+			Role:  controlplane.AddonVolumeData,
+			Size:  fmt.Sprintf("%dGi", spec.StorageGi),
+		}
 	}
 	return info, nil
 }
@@ -257,8 +270,34 @@ func (k *Kubernetes) AddonReady(ctx context.Context, name string) (bool, error) 
 func (k *Kubernetes) AddonVolume(name string) (string, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	v, ok := k.volumes[name]
-	return v, ok
+	if _, ok := k.volumes[name]; !ok {
+		return "", false
+	}
+	return name, true
+}
+
+// AddonVolumes returns every claim this fake cluster still holds, exactly as the adapter reads them
+// off the cluster: the ones whose add-on is gone are in here too, which is what makes a retained
+// volume findable at all (ADR-0064 §6).
+func (k *Kubernetes) AddonVolumes(ctx context.Context) ([]controlplane.AddonVolume, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpAddonVolumes]; err != nil {
+		return nil, err
+	}
+	out := make([]controlplane.AddonVolume, 0, len(k.volumes))
+	for name, v := range k.volumes {
+		out = append(out, controlplane.AddonVolume{
+			Name:            name,
+			Namespace:       fakeAddonNamespace,
+			Addon:           v.Addon,
+			Role:            v.Role,
+			Size:            v.Size,
+			ReinstallAdopts: v.Role == controlplane.AddonVolumeData,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 // DeleteAddon models the real teardown: the add-on always goes, its data volume only when deleteData
@@ -273,12 +312,12 @@ func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, deleteData bo
 		return removal, fmt.Errorf("fake: addon %q: %w", name, controlplane.ErrNotFound)
 	}
 	delete(k.addons, name)
-	if vol, hasVol := k.volumes[name]; hasVol {
+	if _, hasVol := k.volumes[name]; hasVol {
 		if deleteData {
 			delete(k.volumes, name)
 			removal.DataDeleted = true
 		} else {
-			removal.RetainedDataVolume = vol
+			removal.RetainedDataVolume = name
 		}
 	}
 	// The backup volume outlives the database either way (ADR-0032). It exists in this fake only
@@ -695,6 +734,14 @@ func (k *Kubernetes) RunBackupJob(ctx context.Context, app, backupID string) (in
 		return 0, err
 	}
 	*k.backups = append(*k.backups, backupCall{App: app, BackupID: backupID})
+	// The backup claim is created on first backup, exactly as the adapter creates it (ADR-0032), and
+	// from then on it is a claim in the add-on namespace like any other — including after the add-on
+	// that filled it is gone.
+	k.volumes[controlplane.PostgresBackupVolume] = fakeVolume{
+		Addon: controlplane.AddonPostgres,
+		Role:  controlplane.AddonVolumeBackup,
+		Size:  "10Gi",
+	}
 	return *k.backupSiz, nil
 }
 

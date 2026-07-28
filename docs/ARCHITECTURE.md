@@ -2,11 +2,12 @@
 
 > **Status:** the core is built and runs on a real cluster — install, deploy, rollout and
 > rollback, logs, status, scaling, and the guardrails — as the [validated
-> quickstart](QUICKSTART.md) exercises end to end. Earlier slices ship in tagged releases;
-> recent work like the `burrow-agent` control channel is on `main` ahead of its release.
-> Not every capability described here has shipped, so the [README](../README.md) status
-> table stays the authoritative record of what is released, what is on `main`, and what is
-> still planned ([ADR-0009](adr/0009-honest-status.md)).
+> quickstart](QUICKSTART.md) exercises end to end. This document describes the system's
+> *shape*, and some of that shape is decided ahead of the code, so it is not a statement of
+> what has shipped ([ADR-0009](adr/0009-honest-status.md)). The [README](../README.md) status
+> table is the authoritative record of what is released and what is planned, and
+> [CAPABILITIES.md](CAPABILITIES.md) is the reference for what is built today versus decided
+> but not yet built.
 
 Burrow is an agent-native cloud platform. It lets an AI coding agent deploy and operate
 real applications on a Kubernetes cluster by driving Burrow through the `burrow-agent` CLI,
@@ -95,8 +96,11 @@ These are the decisions everything else rests on. Each has an ADR.
    rollback handle live.
 5. **Two build paths for two users**
    ([ADR-0008](adr/0008-two-build-paths.md)). The agent or CLI builds the image and pushes
-   it (self-host developer, v0.1); or the platform builds from a git reference server-side
-   (managed user, later). Both converge on a reference in a registry.
+   it — the default; or the build runs from a git reference off the developer's machine.
+   The second path is served today by the optional in-cluster build
+   ([ADR-0053](adr/0053-in-cluster-build-from-source.md)), which builds inside the user's own
+   cluster; a Burrow-*hosted* build service is deferred. Both converge on a reference in a
+   registry.
 6. **Honest status** ([ADR-0009](adr/0009-honest-status.md)). Everything in the docs is a
    goal until it ships. Never describe unbuilt behavior as done.
 
@@ -105,11 +109,14 @@ These are the decisions everything else rests on. Each has an ADR.
 ### Deploy
 
 1. The image is already built and pushed to a registry the cluster can pull from — by the
-   agent or CLI in v0.1 ([ADR-0008](adr/0008-two-build-paths.md)). The bytes rode the
-   conveyor belt, not the control channel.
+   agent or CLI, or by the optional in-cluster build
+   ([ADR-0008](adr/0008-two-build-paths.md), [ADR-0053](adr/0053-in-cluster-build-from-source.md)).
+   The bytes rode the conveyor belt, not the control channel.
 2. The agent runs `burrow-agent deploy` with an **image reference** plus small
-   metadata (env vars, command, replica count) — no code
-   ([ADR-0004](adr/0004-code-never-over-mcp.md)).
+   metadata (command, replica count) — no code
+   ([ADR-0004](adr/0004-code-never-over-mcp.md)). Config and secrets are not passed here:
+   they are a separate store, sourced at deploy time
+   ([ADR-0028](adr/0028-app-config-and-secrets.md)).
 3. `burrow-agent` forwards the call to the control plane over the authenticated
    control-plane API. It holds no cluster credentials and makes no cluster calls itself.
 4. The control plane runs the guardrails
@@ -150,8 +157,7 @@ boundary, not a license boundary.
   orchestration and guardrails, and owns the deploy record and its database state; `operator`
   with `operator/internal` — the Kubernetes **operator** (CRD types and reconcilers).
 
-The intended shape (filled in with the v0.1 slice — see [PLAN.md](PLAN.md)) keeps
-control-plane logic **pure and seam-isolated**: anything that touches Kubernetes, the
+Control-plane logic is kept **pure and seam-isolated**: anything that touches Kubernetes, the
 container registry, the clock, or the database lives behind an interface so it can be
 faked in tests. See [CLAUDE.md](../CLAUDE.md) for the package conventions and
 [ADR-0010](adr/0010-testing-strategy.md) for the testing posture.
@@ -173,10 +179,10 @@ that holds both the credentials and the decision. Its arguments are redacted to 
 read-only through the API: the operator and the agent can review it with `burrow audit`, but
 nothing can write to or alter it.
 
-## What is in scope, and when
+## Where to look for what is built
 
-The v0.1 vertical slice — install into an existing cluster, wire an agent to `burrow-agent`,
-deploy an image by reference, then status, logs, rollback, and scale — and everything
-explicitly out of scope for it, are defined in [PLAN.md](PLAN.md). The version milestones
-toward v1.0 are in [ROADMAP.md](ROADMAP.md). This document describes the shape; those two
-describe the sequencing.
+This document describes the shape. What is actually built — every capability, the command that
+reaches it, and its limits — is [CAPABILITIES.md](CAPABILITIES.md), which also lists the
+decisions that are recorded but not yet implemented. The version milestones toward v1.0 are in
+[ROADMAP.md](ROADMAP.md) and the current front line is in [PLAN.md](PLAN.md); those describe
+the sequencing.

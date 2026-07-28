@@ -2,9 +2,10 @@
 
 ## Status
 
-Accepted. Upgrade-policy section (single-minor-step) superseded by ADR-0055; the migration
-mechanism (embedded goose, advisory-lock serialization, pgx via database/sql, forward-only,
-the burrow_meta version stamp) remains in force.
+Accepted. Upgrade-policy section (single-minor-step) superseded by ADR-0055, which is
+🟡 Proposed — until it is accepted and built, the single-minor-step policy stated here is the
+one in force. The migration mechanism (embedded goose, advisory-lock serialization, pgx via
+database/sql, forward-only, the burrow_meta version stamp) remains in force throughout.
 
 ## Context
 

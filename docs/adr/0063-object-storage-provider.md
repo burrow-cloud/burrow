@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+✅ Accepted
 
 ## TL;DR
 
@@ -82,10 +82,23 @@ maintaining a vendor list, and every vendor worth supporting speaks this API.
 
 **One wrinkle this record must not gloss.** ADR-0023's Secret is one *opaque token* per provider,
 and an S3 credential is a **pair** — an access key ID and a secret access key — plus non-secret
-endpoint/region/bucket. The pair is stored as a single structured value under the provider's key,
-with the non-secret parts in the `providers` row where they version cleanly and are inspectable
-without reading a Secret. This is a small extension of ADR-0023's "opaque bag" and is called out
-because a reader of that record will reasonably expect a bare token.
+endpoint, region and bucket.
+
+**The pair is two keys in the same `burrow-credentials` Secret**, not a structured blob under one
+key and not a Secret of its own. Two keys keep the Secret readable by a human with `kubectl` and
+need no parsing step, and the `providers` row records both key names rather than one. A **Secret per
+provider** was the tempting alternative and is rejected on RBAC: burrowd's grant names exactly one
+object (`resourceNames: ["burrow-credentials"]`), which is the tightest grant Kubernetes offers, and
+a Secret per provider would require widening it to a list or to the namespace. The credential layout
+is not worth that.
+
+The non-secret parts live in the `providers` row, where they version cleanly and can be inspected
+without reading a Secret at all.
+
+This generalizes: a provider needing *n* values contributes *n* keys to the one Secret. ADR-0023's
+"one key per provider" is thereby refined to "one **namespaced set** of keys per provider" — a small
+extension of the same opaque bag, called out because a reader of that record will reasonably expect
+a bare token.
 
 ### 2. The scope is a backup destination, not an object-storage product
 
@@ -124,15 +137,44 @@ Where Burrow cannot read a bucket's lifecycle configuration — the credential m
 to, and some S3-compatible implementations differ here — it says so plainly rather than implying it
 checked. An unverifiable invariant reported as verified is worse than one reported as unknown.
 
-### 4. Destructive object-storage operations are guardrailed
+### 4. Burrow's bucket is its own, and its name is globally unique
 
-Bucket creation and bucket deletion get guardrail codes, evaluated in the control plane like every
-other guarded operation. Deletion is **denied by default**: the blast radius is every backup the
-platform holds, and no agent-driven workflow has a legitimate reason to remove a bucket.
+Bucket namespaces are **global per vendor** — on S3 and on B2 alike, a name is claimed across every
+account, not within yours. So a fixed name like `burrow-backups` is unavailable the moment anyone
+else has taken it, and worse, a *guessable* name is one an attacker can claim first to deny you the
+one you were about to use.
+
+Burrow therefore creates its **own** bucket with a name carrying enough entropy to be collision-free
+and unguessable — a readable prefix so a human can tell what it is, plus a random component. It does
+not adopt a bucket that happens to be named conventionally, and it records the name it created in
+the `providers` row rather than deriving it.
+
+The consequence, and the reason this is its own section: **Burrow only ever writes to the bucket it
+knows about.** Pointing it at an existing bucket is supported (§2 verifies rather than assumes), but
+inferring a bucket by name is not — that is how a tool ends up writing into, or emptying, something
+that belonged to someone else.
+
+### 5. Destructive object-storage operations are guardrailed
+
+The two operations land in different tiers of
+[ADR-0065](0065-what-belongs-on-the-agent-surface.md), because they fail different tests.
+
+**Bucket creation is `confirm`.** It is additive, reversible, and part of a legitimate agent
+workflow — an agent setting up backups for an app should be able to ask for the destination it
+needs, with a human approving the operation and the cost that follows it.
+
+**Bucket deletion is absent from the agent binary.** Not denied by default — *absent*. It fails
+ADR-0065's **scope** test twice over: its blast radius is every backup the platform holds, which
+exceeds any app the agent was asked about, and a bucket is addressed by a name in a **global**
+namespace, so a mistaken argument does not merely delete the wrong bucket of yours — it can delete
+someone else's, outside the cluster and beyond anything Burrow's guardrails reach. That is the
+unbounded worst case ADR-0065 reserves the first tier for.
+
+Deleting a bucket therefore happens at the vendor, or through the operator CLI, by a human.
 
 This is what makes the operation agent-safe, and it is the property the vendor's CLI cannot have.
 
-### 5. One provider registration serves every consumer
+### 6. One provider registration serves every consumer
 
 Backups are the first consumer and the reason this exists. The registration is not backup-specific:
 an add-on that needs durable storage ([ADR-0025](0025-building-block-addons.md)) uses the same
@@ -141,6 +183,30 @@ provider rather than acquiring its own credential.
 Multiple providers may be registered — the registry is a table, not a singleton — so a user
 migrating between vendors, or holding backups somewhere other than their primary object store, is
 expressible rather than a special case.
+
+### 7. An unreachable store retries, then alerts, then fails loudly — and is inspectable
+
+A backup destination that is silently unavailable produces a silent gap in the backup history, which
+is discovered at restore time. The failure behaviour is therefore part of this decision rather than
+an implementation detail:
+
+- **Retry**, because object storage is a network dependency and a transient failure is the common
+  case. A retried-and-succeeded backup is not an incident.
+- **Alert**, because a retry that keeps failing is one. The signal is backup **age** — "no successful
+  backup in N hours" — not the count of failed attempts, since an alert on attempts goes quiet
+  exactly when the scheduler stops trying.
+- **Fail loudly**, never silently: a backup that did not reach the store is not a backup, and must
+  not be recorded as one. A `Backup` row that says "succeeded" for bytes that never left the cluster
+  is worse than no row at all.
+
+**And it is inspectable on demand**, not only when something alerts. The destination's reachability,
+the age of the last successful backup, and the last failure belong on a status surface a human or an
+agent can ask for — the same shape as the existing reachability check, which exists precisely because
+"is this working?" should not require reading logs.
+
+That surface matters more than it looks: CNPG's own backup metrics are deprecated and, under
+plugin-based backups, report **stale values rather than absent ones**. A health view that reports
+what Burrow itself last observed does not inherit that failure.
 
 ## Consequences
 
@@ -186,19 +252,3 @@ expressible rather than a special case.
   Arguably tidier given this key is more consequential than the others. Rejected because it forks
   ADR-0023's model for one provider type and would need its own RBAC grant; the tighter answer is
   scoping the credential at the vendor, not moving it.
-
-## Questions
-
-- **Is the credential pair stored as structured data under one Secret key, or as two keys?** §1
-  assumes the former to stay closest to ADR-0023's one-key-per-provider shape, but two keys is more
-  legible to a human reading the Secret and avoids a parsing step. Either is defensible; the choice
-  should be made before the first provider ships, because migrating it later is a credential
-  rotation for every user.
-- **Does bucket creation belong in Burrow at all, or only bucket *use*?** §2 permits creation, on
-  the grounds that a correctly-shaped bucket is part of the job. The narrower alternative — require
-  a bucket to exist, verify it, never create one — is a smaller surface and a defensible line, and
-  it removes the need for any create/delete guardrail.
-- **What does Burrow do when the object store is unreachable at backup time?** Retry, alert, fail
-  the backup loudly? This record establishes the destination; it does not decide the failure
-  behaviour, and that behaviour is what determines whether a silent outage becomes a silent gap in
-  the backup history.

@@ -610,24 +610,45 @@ func newAddonListCmd() *cobra.Command {
 // --delete-data lives on the operator CLI only. Destroying application data is a human decision, the
 // same line `addon detach` and `addon restore` already sit on — burrow-agent can stop an add-on but
 // cannot ask for its data to be destroyed (ADR-0049).
+//
+// On top of the addon.remove guardrail, --delete-data carries its own human gate (ADR-0064 §2): on a
+// terminal the add-on's name has to be typed back after a notice naming what goes, and off a terminal
+// it refuses unless --acknowledge-data-loss is passed. --confirm satisfies a guardrail; it is not that
+// acknowledgement, because a flag people already reach for reflexively is exactly the habit the gate
+// exists to interrupt.
 func newAddonRemoveCmd() *cobra.Command {
 	o := &commonOpts{}
-	var confirm, deleteData bool
+	var confirm, deleteData, ackDataLoss bool
 	cmd := &cobra.Command{
 		Use:   "remove <name>",
 		Short: "Remove an installed add-on (keeps its data volume)",
 		Long: "remove tears down an add-on's workload — its Deployment, Service, and collectors — and\n" +
 			"KEEPS its data volume, so reinstalling the add-on picks the data back up. Pass --delete-data\n" +
 			"to destroy the volume as well; for the postgres add-on that destroys every attached app's\n" +
-			"database. Recorded backups are on a separate volume and survive either way.",
+			"database. Recorded backups are on a separate volume and survive either way.\n\n" +
+			"--delete-data prints what it would destroy and asks for the add-on's name to be typed back.\n" +
+			"With no terminal to type into it refuses rather than proceeding; --acknowledge-data-loss is\n" +
+			"how a script says it means it.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			name := args[0]
+			// The off-terminal refusal runs BEFORE anything is contacted, so a script that never
+			// said it destroys databases cannot reach the removal call at all (ADR-0064 §2).
+			if deleteData && !ackDataLoss && !stdinIsTerminal(cmd.InOrStdin()) {
+				return errDeleteDataNeedsTerminal(name)
+			}
 			c, err := o.client(ctx)
 			if err != nil {
 				return err
 			}
-			res, err := c.RemoveAddon(ctx, args[0], deleteData, confirm)
+			// The typed-name gate goes to stderr so a --json run keeps a clean stdout.
+			if deleteData && !ackDataLoss {
+				if err := confirmDeleteData(ctx, c, name, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
+					return err
+				}
+			}
+			res, err := c.RemoveAddon(ctx, name, deleteData, confirm)
 			if err != nil {
 				return err
 			}
@@ -637,7 +658,134 @@ func newAddonRemoveCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	cmd.Flags().BoolVar(&deleteData, "delete-data", false, "also DESTROY the add-on's data volume (for postgres: every attached app's database)")
+	cmd.Flags().BoolVar(&ackDataLoss, dataLossAckFlag, false, "acknowledge that --delete-data destroys the add-on's data, so it proceeds without the typed-name prompt (this is how a script asks for it). No shorthand: destroying every attached app's database should not be a single keystroke.")
 	return cmd
+}
+
+// dataLossAckFlag is the non-interactive acknowledgement --delete-data requires when there is no
+// terminal to type the add-on's name into (ADR-0064 §2): "a script that destroys databases should
+// have had to say so in the script." It is named for what it acknowledges rather than reusing
+// --confirm (which satisfies a guardrail hold), --approve (which approves a billable cloud
+// resource), or a generic --yes, because the record's whole point is that a reflexive
+// blanket-agreement flag defeats the gate — a reader of the script has to see the words "data loss".
+// Like --approve it takes no shorthand.
+const dataLossAckFlag = "acknowledge-data-loss"
+
+// errDeleteDataNeedsTerminal is the refusal --delete-data returns off a terminal without the
+// acknowledgement flag (ADR-0064 §2). It refuses rather than proceeding, and names both ways out:
+// acknowledge the data loss explicitly, or drop the flag and keep the volume.
+func errDeleteDataNeedsTerminal(name string) error {
+	return fmt.Errorf("--delete-data destroys the add-on's data volume %q and asks for the add-on's name "+
+		"to be typed back, which needs an interactive terminal; re-run with --%s to say so explicitly "+
+		"in a script, or drop --delete-data to keep the volume", name, dataLossAckFlag)
+}
+
+// confirmDeleteData is --delete-data's human gate: it prints what the removal would destroy and
+// requires the add-on's name to be typed back before proceeding (ADR-0064 §2). The flag says what
+// the operator intends; the typed name says they read what it would do — which a yes/no prompt no
+// longer establishes once `-y` is muscle memory. Anything else typed, an empty line, or EOF aborts
+// and nothing is removed.
+//
+// THIS PROMPT IS FOR HUMANS AND IS NOT A SECURITY CONTROL. Anything with a shell can type a word,
+// so it adds nothing against an agent: what keeps an agent away from this is that `addon remove`
+// is not compiled into burrow-agent at all (ADR-0064 §2, ADR-0049 layer (a), ADR-0065 §2 tier 1).
+// That structural absence must never be relaxed on the grounds that "there's a confirmation anyway"
+// — the confirmation is a legibility device, not the boundary.
+func confirmDeleteData(ctx context.Context, c *client.Client, name string, in io.Reader, out io.Writer) error {
+	fmt.Fprintln(out, warning(out)+deleteDataConsequence(ctx, c, name))
+	fmt.Fprintln(out)
+	typed, err := readLine(in, out, fmt.Sprintf("Type the add-on's name (%s) to proceed, or anything else to abort: ", name))
+	if err != nil {
+		return err
+	}
+	if typed != name {
+		return fmt.Errorf("aborted: %q is not the add-on's name (%s); nothing was removed", typed, name)
+	}
+	return nil
+}
+
+// deleteDataConsequence renders what --delete-data is about to destroy, in the same terms the
+// addon.remove guardrail's held confirmation uses (ADR-0064 §3) — the volume by name, and for
+// postgres the apps whose databases live in it — so the operator reads one account of the
+// consequence rather than two differently-worded ones. "This is destructive" is not consent; "this
+// destroys the databases of api and web" is.
+//
+// Every lookup here is BEST-EFFORT and never blocking (ADR-0064 §3): an add-on is often removed
+// precisely because it is wedged, and a control plane that will not answer must degrade to the
+// volume-concrete message rather than make a broken add-on unremovable. The volume name is known
+// without asking anyone — a stateful add-on's claim carries the add-on's own name.
+func deleteDataConsequence(ctx context.Context, c *client.Client, name string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "--delete-data DESTROYS the data volume %q in namespace %s. This cannot be undone.",
+		name, connect.DefaultAddonNamespace)
+	if addonTypeOf(ctx, c, name) != string(controlplane.AddonPostgres) {
+		return b.String()
+	}
+	b.WriteString("\n  For the postgres add-on that volume holds every attached app's database")
+	if apps := attachedApps(ctx, c); len(apps) > 0 {
+		fmt.Fprintf(&b, ": %s", pluralApps(apps))
+	}
+	fmt.Fprintf(&b, ".\n  The backup volume %q is kept — recorded backups outlive the database they came from.",
+		controlplane.PostgresBackupVolume)
+	return b.String()
+}
+
+// addonTypeOf looks up the registered type of an installed add-on by name, returning "" when the
+// listing cannot be read or the name is not registered. Best-effort by contract: an unanswerable
+// lookup costs the notice its per-app detail, never the removal.
+func addonTypeOf(ctx context.Context, c *client.Client, name string) string {
+	addons, err := c.Addons(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, a := range addons {
+		if a.Name == name {
+			return a.Type
+		}
+	}
+	return ""
+}
+
+// attachedApps enumerates, best-effort, the apps holding a Burrow-provisioned database on the
+// Postgres add-on — the concrete blast radius of a data-deleting removal. Attachment leaves no
+// registry row (ADR-0064 §Context): it exists as a database on the instance and as the DATABASE_URL
+// KEY in the app's Secret, and the key is the half a CLI can read. Only key NAMES are listed, never
+// values (ADR-0028). Any app or listing that will not answer is skipped rather than failing the
+// notice.
+func attachedApps(ctx context.Context, c *client.Client) []string {
+	apps, err := c.Apps(ctx, "")
+	if err != nil {
+		return nil
+	}
+	var attached []string
+	for _, a := range apps {
+		keys, err := c.Secrets(ctx, a.App, "")
+		if err != nil {
+			continue
+		}
+		for _, k := range keys {
+			if k == databaseURLKey {
+				attached = append(attached, a.App)
+				break
+			}
+		}
+	}
+	sort.Strings(attached)
+	return attached
+}
+
+// databaseURLKey is the key `addon attach` writes an app's generated connection string under
+// (ADR-0031). Only the key name is ever read here; the value stays in the app's Secret.
+const databaseURLKey = "DATABASE_URL"
+
+// pluralApps renders an app list as "2 attached apps (api, web)" / "1 attached app (web)", matching
+// the phrasing the guardrail's held confirmation uses so the two read as one message.
+func pluralApps(apps []string) string {
+	noun := "attached apps"
+	if len(apps) == 1 {
+		noun = "attached app"
+	}
+	return fmt.Sprintf("%d %s (%s)", len(apps), noun, strings.Join(apps, ", "))
 }
 
 // removeAddonSummary renders the human outcome of a removal. It always says what happened to the

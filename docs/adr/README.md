@@ -29,6 +29,19 @@ Consequences, and Rejected alternatives. Status badges:
 Earlier records predate this format; it applies going forward (Accepted ADRs are immutable, so
 they are not reformatted).
 
+## Companion documents
+
+Some decisions and operational contracts live outside `docs/adr/`, because they track the code
+rather than freezing at a point in time. ADRs point at these files instead of restating them,
+so they are listed here:
+
+- [**docs/CAPABILITIES.md**](../CAPABILITIES.md) — the **"can Burrow do X?" reference**: what
+  each capability does, the command that reaches it, the ADR that decided it, and the sharp
+  limit next to it, organized by what a user wants to do rather than by package. Source of
+  truth for what is actually built versus decided-but-unbuilt, so a reader need not infer
+  absence from one code path (private-registry pull and the Postgres add-on both sit off the
+  deploy path) or presence from an Accepted ADR ([ADR-0009](0009-honest-status.md)).
+
 ## Index
 
 | ADR | Title | Status |

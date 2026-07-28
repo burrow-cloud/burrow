@@ -185,8 +185,12 @@ app served over the node's own IP through servicelb and the ingress on a 2GB dro
 - **Free LoadBalancer detection** ([ADR-0043](adr/0043-public-reachability-is-a-loadbalancer.md)) —
   servicelb and MetalLB are detected as real LoadBalancer providers, so a single node's public IP serves
   a `type=LoadBalancer` Service at no cloud cost; public reachability is a LoadBalancer, not NodePort.
-- **Existing ingress controller** ([ADR-0042](adr/0042-use-existing-ingress-controller.md)) and a flatter
-  path to a reachable app ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md)).
+- **No redundant second ingress controller** — `cluster ingress install` adopts an ingress-nginx
+  controller that is already running instead of installing another. The wider decisions this sits
+  under — detecting *any* running controller and binding to its IngressClass
+  ([ADR-0042](adr/0042-use-existing-ingress-controller.md)) and the one-operation path to a
+  reachable app ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md)) — are decided but not yet
+  built ([ROADMAP.md](ROADMAP.md#decided-not-yet-built)).
 - **Bootstrap safety** — a 2GB RAM preflight with a memory breakdown that steers away from undersized
   boxes, a wait for the k3s API instead of trusting the installer exit, and a confirm before turning a
   machine into a cluster node.
@@ -240,6 +244,11 @@ command to drop a stale environment:
   it was current and deleting the handle's orphaned scoped credential under `~/.burrow/`. Local-only:
   it does not tear down a namespace-per-env registration or any cluster namespace/RBAC.
 
+Phases 1 and 4 lived in the MCP selector and went with it when the MCP server was removed
+([ADR-0062](adr/0062-remove-the-mcp-server.md)). The burrowd-registry axis (phases 2 and 3) is the
+forcing function in force today; re-establishing the local-handle axis on `burrow-agent` is decided
+but not yet built.
+
 ## Shipped: v0.12 — the scoped agent CLI and one-off commands ✅
 
 Released as **v0.12.0**. The agent's control channel becomes a dedicated, capability-reduced CLI, and
@@ -259,10 +268,9 @@ one-off commands get a home.
   Proposed) — a captured direction for a programmatic runtime API bounded by capability envelopes, deferred
   behind the compute-first core; no code.
 
-## v0.13 — the optional in-cluster build (release being cut)
+## Shipped: v0.13 — the optional in-cluster build ✅
 
-Everything below landed on `main` since v0.12.0 and ships as **v0.13** — honest status, unreleased until the
-tag ([ADR-0009](adr/0009-honest-status.md)). The full record lives in [ROADMAP.md](ROADMAP.md), the
+Released as **v0.13.0** (patched by **v0.13.1**). The full record lives in [ROADMAP.md](ROADMAP.md), the
 [README](../README.md) status table, and the shipped ADRs; the headline:
 
 - **In-cluster build from a git source** ([ADR-0053](adr/0053-in-cluster-build-from-source.md)) — an optional
@@ -286,15 +294,22 @@ tag ([ADR-0009](adr/0009-honest-status.md)). The full record lives in [ROADMAP.m
   upgrades within a per-app, per-environment level (`burrow app auto-deploy <app> [patch|minor|major|off]`, off by
   default), firing the **same guarded deploy path**; a tag above the level surfaces as an available upgrade.
   Outbound-only. Also lands an app-history deploy timeline in both client binaries.
-- **Multi-version forward upgrades** ([ADR-0055](adr/0055-multi-version-upgrades.md)) — the database may jump
-  across any number of minors in one step; the startup gate still refuses downgrades and cross-major in-place moves.
 - **Postgres always exports metrics** ([ADR-0051](adr/0051-postgres-always-exports-metrics.md)) — the Postgres
   add-on always ships its metrics exporter and the scraper discovers the add-on namespace, so `addon attach`
   observability needs no separate wiring.
 
 ## Next — the front line after v0.13
 
-**Next — candidates for the theme after v0.13 ships** (unsequenced): **self-hoster day-2
+**Decided but not yet built,** and therefore candidates in their own right: multi-minor forward
+database upgrades ([ADR-0055](adr/0055-multi-version-upgrades.md), Proposed — the gate still allows
+one minor step), detecting the cluster's existing ingress controller
+([ADR-0042](adr/0042-use-existing-ingress-controller.md) — the IngressClass is still the literal
+`nginx`), and the flatter path to a reachable app
+([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md) — no port on `deploy`, and `publish` does
+not touch DNS or wait for the certificate). The full list is in
+[ROADMAP.md](ROADMAP.md#decided-not-yet-built) and [CAPABILITIES.md](CAPABILITIES.md).
+
+**Candidates for the theme after v0.13** (unsequenced): **self-hoster day-2
 hardening** (scheduled Postgres backups + retention — the [ADR-0032](adr/0032-postgres-backups.md) follow-on —
 richer blast-radius guardrails, cost visibility); **more building-block add-ons**
 ([ADR-0025](adr/0025-building-block-addons.md)) beyond Postgres / cache / logs / metrics; **database-provisioning
@@ -311,7 +326,9 @@ the OSS in-cluster build from a git source now exists via ADR-0053, above).
 
 Shipped in **v0.7.1** (patch): a `burrow mcp <tool> [install]` command that connects Burrow's MCP
 server to Claude Code, Cursor, Codex, Copilot, or OpenCode (preview by default, idempotent, and it
-backs up any file it edits), with a generic fallback for any other agent and a new
+backs up any file it edits) — since replaced by `burrow agent <tool> install`, the MCP server having
+been retired (ADR-0049) and then removed ([ADR-0062](adr/0062-remove-the-mcp-server.md)) — with a
+generic fallback for any other agent and a new
 [getting-started guide](getting-started.md); a kubectl-style `--help` layout (usage at the bottom,
 examples, a first-run `burrow` vs `burrow -h` split); a one-command `addon install` that stages an
 add-on's RBAC client-side then installs through the API (the metrics vmagent grant moved out of the

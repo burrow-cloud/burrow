@@ -134,3 +134,14 @@ burrow cluster upgrade
 ```
 
 `burrow cluster upgrade` updates the installed control plane in place and preserves your state.
+
+**Upgrade one minor version at a time.** The control plane's database moves forward by exactly one
+minor step per upgrade (`v0.12 → v0.13`); a wider jump, a downgrade, and a cross-major in-place move
+are refused at startup with an error naming the version to install first
+([ADR-0013](adr/0013-database-migrations-and-upgrade-policy.md)). If you are several minors behind,
+install each intervening minor in turn. Doing that in one step is decided but not yet built
+([ADR-0055](adr/0055-multi-version-upgrades.md), Proposed).
+
+Keep the CLI within one minor of the control plane, too: burrowd serves any client within one minor
+and tells you which side to upgrade otherwise
+([ADR-0039](adr/0039-cli-control-plane-version-skew.md)).

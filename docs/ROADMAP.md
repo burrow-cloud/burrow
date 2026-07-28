@@ -1,10 +1,11 @@
 # Burrow Roadmap
 
-> **Status: v0.1 through v0.12 shipped; v0.13 is the release being cut.** These are version
-> milestones; each unshipped one is a goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
+> **Status: v0.1 through v0.13 shipped.** These are version milestones; each unshipped one is a
+> goal until it ships ([ADR-0009](adr/0009-honest-status.md)). The
 > [README](../README.md) status table is the authoritative shipped/in-progress/planned
-> surface. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the current
-> execution detail.
+> surface, and [CAPABILITIES.md](CAPABILITIES.md) is the reference for what is built today versus
+> decided but not yet built. This file holds the coarse milestones; [PLAN.md](PLAN.md) holds the
+> current execution detail.
 
 Burrow follows semver from v0.1 toward v1.0. The theme of the 0.x series is **compute
 first**: deploy someone's code and run it well, safely, agent-driven. Databases, domains,
@@ -170,11 +171,14 @@ bootstrap` (installs k3s + burrowd, prints a `burrow join <token>`), and after t
 every operation runs from the laptop ([ADR-0044](adr/0044-single-vps-k3s-cluster.md)); Burrow never
 SSHes. servicelb and MetalLB are detected as real LoadBalancer providers, so a single node's public IP
 serves a `type=LoadBalancer` Service for free
-([ADR-0043](adr/0043-public-reachability-is-a-loadbalancer.md)); publish reuses the cluster's existing
-ingress controller ([ADR-0042](adr/0042-use-existing-ingress-controller.md)) on a flatter path to a
-reachable app ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md)). Bootstrap preflights RAM (a 2GB
-minimum with a memory breakdown), Postgres runs lean on small clusters, and the cost framing calls
-servicelb free. Proven end to end by dogfooding on a 2GB droplet.
+([ADR-0043](adr/0043-public-reachability-is-a-loadbalancer.md)); and `cluster ingress install` adopts an
+ingress-nginx controller that is already running rather than installing a second one. (The wider
+decisions those sit under — detecting *any* running controller and binding to its IngressClass
+([ADR-0042](adr/0042-use-existing-ingress-controller.md)), and the one-operation path to a reachable app
+([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md)) — are decided but not yet built; see
+"Decided, not yet built" below.) Bootstrap preflights RAM (a 2GB minimum with a memory breakdown),
+Postgres runs lean on small clusters, and the cost framing calls servicelb free. Proven end to end
+by dogfooding on a 2GB droplet.
 
 ## v0.10 — Internal: version-skew handshake and the OSS/enterprise transport seam ✅ shipped
 
@@ -200,6 +204,11 @@ so a human can redirect, but Burrow never switches, retries elsewhere, or auto-f
 tools echo the environment they read. And `burrow env remove` finally lets a user drop a stale local
 handle (clearing the pin and its scoped credential), closing the ADR-0036 gap.
 
+Since then, the local-handle half of that forcing function has gone: it lived in the MCP selector,
+which was removed with the MCP server ([ADR-0062](adr/0062-remove-the-mcp-server.md)). The
+burrowd-registry axis (namespace-per-env) is the one in force today; re-establishing the local-handle
+axis on `burrow-agent` is decided but not yet built.
+
 ## v0.12 — The scoped agent CLI and one-off commands ✅ shipped
 
 The agent's control channel is now **`burrow-agent`**, a scoped, capability-reduced, JSON-first CLI
@@ -214,12 +223,11 @@ it, **`burrow_run`** ([ADR-0048](adr/0048-one-off-command-runner.md)) runs a one
 laptop quickstart** on k3d, pinned by a CI e2e, takes a user from nothing to their agent deploying an
 app — and hitting the delete guardrail — on their own machine.
 
-## v0.13 — The optional in-cluster build 🚧 in progress
+## v0.13 — The optional in-cluster build ✅ shipped
 
-The release being cut. Burrow gains an **optional in-cluster build from a git source** and turns
-cluster provisioning into deliberate, standalone steps — the compute story now spans "build my code"
-as well as "run my image", without a CI dependency and without ever moving code over the control
-channel.
+Burrow gains an **optional in-cluster build from a git source** and turns cluster provisioning into
+deliberate, standalone steps — the compute story now spans "build my code" as well as "run my
+image", without a CI dependency and without ever moving code over the control channel.
 
 - **In-cluster build from a git source** ([ADR-0053](adr/0053-in-cluster-build-from-source.md)) — an
   optional path off the explicit deploy spine: `burrow app build <app> --source <git-ref>` (and a
@@ -247,12 +255,36 @@ channel.
   [patch|minor|major|off]`, off by default), firing the same guarded deploy path an explicit call uses; a
   tag above the level is surfaced as an available upgrade. Outbound-only, so it serves the private/NAT'd
   clusters push-from-CI cannot reach.
-- **Multi-version forward upgrades** ([ADR-0055](adr/0055-multi-version-upgrades.md)) — a database may
-  jump across any number of minors in one step, since the migrations are a linear forward-only chain; the
-  startup gate still refuses downgrades and cross-major in-place moves.
 - **Postgres always exports metrics** ([ADR-0051](adr/0051-postgres-always-exports-metrics.md)) — the
   Postgres add-on ships an always-on metrics exporter and the scraper discovers the add-on namespace, so
   installing metrics scrapes the database automatically regardless of install order.
+
+## Decided, not yet built
+
+Decisions that are recorded in an ADR but have no implementation. An ADR is a decision, not a
+capability ([ADR-0009](adr/0009-honest-status.md)); these are unsequenced work, not shipped
+behaviour. [CAPABILITIES.md](CAPABILITIES.md) carries the full list with the code detail.
+
+- **Multi-minor forward database upgrades in one step**
+  ([ADR-0055](adr/0055-multi-version-upgrades.md), Proposed) — a database would jump across any
+  number of minors at once, since the migrations are a linear forward-only chain. Today the
+  startup gate still permits **exactly one minor step forward** (a re-run of the same version, or
+  `vN.M → vN.(M+1)`) and refuses skips, downgrades, and cross-major in-place moves, per
+  [ADR-0013](adr/0013-database-migrations-and-upgrade-policy.md); crossing several minors means
+  installing each intervening minor in turn. ADR-0055 also widens
+  [ADR-0039](adr/0039-cli-control-plane-version-skew.md)'s CLI/control-plane compatibility band,
+  which likewise still stands at one minor.
+- **Detect the cluster's existing ingress controller and bind to its IngressClass**
+  ([ADR-0042](adr/0042-use-existing-ingress-controller.md)) — the app Ingress class and the
+  cert-manager HTTP-01 solver class are the literal `nginx`, capability probing recognizes an
+  ingress-nginx controller only, and `cluster bootstrap` disables k3s's Traefik so ingress-nginx
+  owns ingress. What is built is narrower: `cluster ingress install` adopts an ingress-nginx
+  controller that is already running instead of installing a second one. A cluster running
+  Traefik or another controller is not yet served.
+- **A flatter path to a reachable app** ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md))
+  — `deploy` has no port and creates no Service, so an app is addressable in-cluster only once it
+  is published; and `publish` creates the Service, Ingress, and TLS request but neither writes DNS
+  nor waits for the certificate, which stay `app domain add` and `app reachability --wait`.
 
 ## Deferred until requested
 

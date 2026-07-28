@@ -689,36 +689,134 @@ func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
 	return addons, nil
 }
 
-// RemoveAddon removes the named add-on instance. It is guarded by addon.remove (removing a
-// backing service can break dependent apps).
-func (e *Engine) RemoveAddon(ctx context.Context, name string, confirm bool) error {
+// RemoveAddon removes the named add-on instance. It tears the add-on's WORKLOAD down and, by
+// default, LEAVES ITS DATA VOLUME IN PLACE: for Postgres that volume holds every attached app's
+// database (ADR-0031), so a removal meant as "stop this and reinstall it cleanly" must not destroy
+// it. Passing deleteData is the explicit, separate ask that destroys the volume.
+//
+// It is guarded by addon.remove (ADR-0025), held for confirmation by default. The guardrail's
+// message carries the CONCRETE consequence — which volume goes or stays, and which apps are
+// affected by name — because a confirmation prompt that does not say what is destroyed is not
+// informed consent (ADR-0006: the gate hands back a reason the human and the agent can act on).
+// A hard refusal is deliberately NOT used for the attached-apps case: this system expresses "never"
+// as a policy disposition (`guard set addon.remove deny`, ADR-0020), not as a bespoke override flag,
+// and the destructive path already requires the caller to have typed deleteData.
+func (e *Engine) RemoveAddon(ctx context.Context, name string, deleteData, confirm bool) (RemoveAddonResult, error) {
 	pol, err := e.db.Policy(ctx)
 	if err != nil {
-		return fmt.Errorf("remove addon %s: loading guardrail policy: %w", name, err)
+		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: loading guardrail policy: %w", name, err)
 	}
-	if err := e.recordDecision(ctx, auditOpAddonRemove, name, nil, GuardrailAddonRemove,
-		pol.evaluateGuardrail("", "addon remove", GuardrailAddonRemove, confirm, fmt.Sprintf("removing the add-on %q", name))); err != nil {
-		return err
-	}
-	// The registry is the source of truth for what add-ons exist (ADR-0025): load it first so an
-	// unknown add-on is ErrNotFound, and only tear down cluster resources for an installed one.
+	// The registry is the source of truth for what add-ons exist (ADR-0025): load it BEFORE the
+	// guardrail so an unknown name is a plain ErrNotFound rather than a held confirmation for an
+	// add-on that does not exist, and so the confirmation message can describe what is actually
+	// there — its type, its volume, and who is attached to it.
 	info, err := e.db.Addon(ctx, name)
 	if err != nil {
-		e.recordExecution(ctx, auditOpAddonRemove, name, nil, err)
-		return fmt.Errorf("remove addon %s: %w", name, err)
+		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, err)
 	}
+	apps := e.attachedApps(ctx, info)
+
+	// The audit row records the destructive INTENT alongside the operation, so the log distinguishes
+	// "stopped the add-on" from "destroyed its data" and names who was attached (ADR-0027). App names
+	// are not secrets; no credential or connection string goes near this.
+	args := map[string]string{"type": string(info.Type), "delete_data": strconv.FormatBool(deleteData)}
+	if len(apps) > 0 {
+		args["attached_apps"] = strings.Join(apps, ",")
+	}
+	if err := e.recordDecision(ctx, auditOpAddonRemove, name, args, GuardrailAddonRemove,
+		pol.evaluateGuardrail("", "addon remove", GuardrailAddonRemove, confirm,
+			removalConsequence(info, deleteData, apps))); err != nil {
+		return RemoveAddonResult{}, err
+	}
+
+	res := RemoveAddonResult{Name: name, Type: info.Type, AttachedApps: apps}
 	if info.Mode == "installed" {
-		if err := e.k8s.DeleteAddon(ctx, name); err != nil {
-			e.recordExecution(ctx, auditOpAddonRemove, name, nil, err)
-			return fmt.Errorf("remove addon %s: %w", name, err)
+		removal, derr := e.k8s.DeleteAddon(ctx, name, deleteData)
+		if derr != nil {
+			e.recordExecution(ctx, auditOpAddonRemove, name, args, derr)
+			return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, derr)
 		}
+		res.AddonRemoval = removal
 	}
 	if err := e.db.DeleteAddon(ctx, name); err != nil {
-		e.recordExecution(ctx, auditOpAddonRemove, name, nil, err)
-		return fmt.Errorf("remove addon %s: %w", name, err)
+		e.recordExecution(ctx, auditOpAddonRemove, name, args, err)
+		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, err)
 	}
-	e.recordExecution(ctx, auditOpAddonRemove, name, nil, nil)
-	return nil
+	e.recordExecution(ctx, auditOpAddonRemove, name, args, nil)
+	return res, nil
+}
+
+// attachedApps enumerates the apps holding a Burrow-provisioned database on an installed Postgres
+// add-on (ADR-0031) — the set whose data a data-deleting removal destroys, and whose DATABASE_URL a
+// data-keeping removal leaves pointing at a stopped instance. Only the Postgres add-on has per-app
+// attachments; every other type returns none.
+//
+// It is BEST-EFFORT by contract: an unwired provisioner, a provisioner that does not implement
+// AppDatabaseLister, or an instance that will not answer all yield no apps rather than an error. An
+// add-on is often removed precisely because it is broken, and being unable to ask it who is attached
+// must never make it unremovable. The message the caller sees then falls back to the generic
+// consequence, which is still concrete about the volume.
+func (e *Engine) attachedApps(ctx context.Context, info AddonInfo) []string {
+	if info.Type != AddonPostgres || info.Mode != "installed" {
+		return nil
+	}
+	lister, ok := e.dbProvisioner.(AppDatabaseLister)
+	if !ok {
+		return nil
+	}
+	apps, err := lister.ListAppDatabases(ctx)
+	if err != nil {
+		return nil
+	}
+	return apps
+}
+
+// removalConsequence renders what this removal will actually do, for the guardrail's confirmation
+// message: which volume is destroyed or kept (by name), how many apps are affected and which, and
+// that the backups outlive the database either way. It is deliberately concrete — "this is
+// destructive" tells a human nothing they can decide on; "this destroys the databases of 2 attached
+// apps (api, web)" does.
+func removalConsequence(info AddonInfo, deleteData bool, apps []string) string {
+	spec, known := LookupAddon(info.Type)
+	hasVolume := info.Mode == "installed" && known && spec.StorageGi > 0
+	what := fmt.Sprintf("removing the add-on %q", info.Name)
+
+	switch {
+	case hasVolume && deleteData:
+		what += fmt.Sprintf(" AND DESTROYING its data volume %q", info.Name)
+		if info.Type == AddonPostgres {
+			what += ", " + destroyedDatabases(apps) +
+				fmt.Sprintf(" (the backup volume %q is kept)", PostgresBackupVolume)
+		}
+	case hasVolume:
+		what += fmt.Sprintf(" — its data volume %q is KEPT and reinstalling the add-on reuses it", info.Name)
+		if info.Type == AddonPostgres && len(apps) > 0 {
+			what += fmt.Sprintf("; %s cannot reach a database until it is reinstalled", pluralApps(apps))
+		}
+	default:
+		// A stateless add-on (cache) has no volume, so there is nothing for deleteData to destroy.
+		what += " (it holds no data volume)"
+	}
+	return what
+}
+
+// destroyedDatabases phrases the per-app data loss a data-deleting Postgres removal causes. An empty
+// app list is stated as such rather than silently omitted: "no app is attached" is exactly the fact
+// that makes the removal safe to approve, and the caller should see it.
+func destroyedDatabases(apps []string) string {
+	if len(apps) == 0 {
+		return "which holds every attached app's database (no app is currently attached)"
+	}
+	return "destroying the database of " + pluralApps(apps)
+}
+
+// pluralApps renders an app list as "N attached apps (api, web)" / "1 attached app (web)".
+func pluralApps(apps []string) string {
+	noun := "attached apps"
+	if len(apps) == 1 {
+		noun = "attached app"
+	}
+	return fmt.Sprintf("%d %s (%s)", len(apps), noun, strings.Join(apps, ", "))
 }
 
 // AttachResult is the outcome of attaching an app to an add-on (ADR-0031). It carries the KEY

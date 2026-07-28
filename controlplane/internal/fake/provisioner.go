@@ -11,7 +11,10 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-var _ controlplane.DatabaseProvisioner = (*Provisioner)(nil)
+var (
+	_ controlplane.DatabaseProvisioner = (*Provisioner)(nil)
+	_ controlplane.AppDatabaseLister   = (*Provisioner)(nil)
+)
 
 // Provisioner is an in-memory controlplane.DatabaseProvisioner. It records the apps it provisioned
 // and returns a deterministic connection string per app, so an attach test can assert the engine
@@ -21,8 +24,10 @@ type Provisioner struct {
 	mu        sync.Mutex
 	ensured   []string // apps passed to EnsureAppDatabase, in call order
 	dropped   []string // apps passed to DropAppDatabase, in call order
+	attached  []string // apps ListAppDatabases reports as holding a database on the instance
 	ensureErr error
 	dropErr   error
+	listErr   error
 }
 
 // NewProvisioner returns an empty fake provisioner.
@@ -70,6 +75,31 @@ func (p *Provisioner) EnsureAppDatabase(_ context.Context, app string) (string, 
 	}
 	p.ensured = append(p.ensured, app)
 	return URLFor(app), nil
+}
+
+// SetAttachedApps seeds the apps ListAppDatabases reports, modelling apps that were attached to the
+// shared instance — the set whose databases a data-deleting add-on removal would destroy.
+func (p *Provisioner) SetAttachedApps(apps ...string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.attached = append([]string(nil), apps...)
+}
+
+// SetListError makes ListAppDatabases return err (nil clears it), modelling an instance that is
+// wedged or gone — the case where removal must still succeed, just without naming who was attached.
+func (p *Provisioner) SetListError(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.listErr = err
+}
+
+func (p *Provisioner) ListAppDatabases(_ context.Context) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	return append([]string(nil), p.attached...), nil
 }
 
 func (p *Provisioner) DropAppDatabase(_ context.Context, app string) error {

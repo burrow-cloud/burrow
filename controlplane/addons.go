@@ -151,6 +151,49 @@ func LookupConnectBackend(name string) (ConnectBackend, bool) {
 	return b, ok
 }
 
+// PostgresBackupVolume is the PersistentVolumeClaim in the add-on namespace that holds the Postgres
+// add-on's dumps (ADR-0032). It is named here, next to BackupPath, so the engine can report that
+// removing the add-on deliberately LEFT IT IN PLACE without importing the kube package — the same
+// reason BackupPath lives in this package rather than in the Job builder.
+const PostgresBackupVolume = "burrow-postgres-backups"
+
+// AddonRemoval is what the cluster-side teardown of an add-on actually did: which namespace it
+// acted in, whether it destroyed the add-on's data volume, and which volumes it deliberately left
+// behind. Removal keeps the data volume unless the caller explicitly asks for it to go, so a
+// removal that was meant as "stop this and reinstall it" cannot silently destroy every attached
+// app's database (ADR-0025/0031); the retained names are reported so the caller can see what
+// survived and reclaim it later.
+type AddonRemoval struct {
+	// Namespace is the namespace the add-on's resources — and any retained volume — live in.
+	Namespace string `json:"namespace,omitempty"`
+	// DataDeleted reports whether the add-on's data volume was destroyed. It is true only when the
+	// caller explicitly asked for it AND the add-on had a volume to destroy.
+	DataDeleted bool `json:"data_deleted"`
+	// RetainedDataVolume names the PersistentVolumeClaim holding the add-on's data that was left in
+	// place. Empty when the add-on has no volume, or when the caller asked for it to be deleted.
+	RetainedDataVolume string `json:"retained_data_volume,omitempty"`
+	// RetainedBackupVolume names the backup PersistentVolumeClaim that was left in place — the
+	// Postgres add-on's dumps (ADR-0032). Backups deliberately outlive the database they came from,
+	// so this survives even a data-deleting removal; it is empty when no backup volume exists.
+	RetainedBackupVolume string `json:"retained_backup_volume,omitempty"`
+}
+
+// RemoveAddonResult is the structured outcome of removing an add-on (ADR-0025): what was torn down
+// and, just as importantly, what was kept. AttachedApps names the apps that held a Burrow-provisioned
+// database on the instance — the concrete scope of the consequence, whether that is "these lost their
+// data" or "these are disconnected until it is reinstalled".
+type RemoveAddonResult struct {
+	Name string    `json:"name"`
+	Type AddonType `json:"type"`
+	// AddonRemoval is embedded so its fields (namespace, retained volumes) flatten into the JSON the
+	// agent reads — the removal facts are the result, not a nested detail of it.
+	AddonRemoval
+	// AttachedApps are the apps with a Burrow-provisioned database on this instance at removal time,
+	// sorted. Empty for an add-on type that has no per-app attachments, and empty (not an error) when
+	// the instance could not be reached to enumerate them — a wedged add-on must stay removable.
+	AttachedApps []string `json:"attached_apps,omitempty"`
+}
+
 // AddonInfo is one installed add-on instance, as seen by `addon list` and the agent. It carries
 // no secret — when an add-on needs a credential it lives in a cluster Secret, never here.
 type AddonInfo struct {

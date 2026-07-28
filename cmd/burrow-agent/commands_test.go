@@ -251,3 +251,22 @@ func TestStructuralReduction(t *testing.T) {
 		t.Error("burrow-agent imports cmd/burrow (the human admin CLI); the agent binary must not pull the admin command tree")
 	}
 }
+
+// TestAddonRemoveCannotDeleteData pins the same rule one flag lower down. `addon remove` is on the
+// agent surface because stopping a backing service is app lifecycle and is reversible — reinstalling
+// it brings the data back. DESTROYING the add-on's volume is not: for postgres it takes every
+// attached app's database with it, the same irreversible class as `addon detach` and `addon restore`,
+// both of which are deliberately absent here. So the agent's remove carries no --delete-data flag and
+// asks the API not to delete data; the destructive form is `burrow addon remove --delete-data`, run by
+// a human at their own terminal (ADR-0049 layer (a): the binary structurally lacks the verb).
+func TestAddonRemoveCannotDeleteData(t *testing.T) {
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "remove", "burrow-postgres", "--delete-data"}, &out, &errb); err == nil {
+		t.Fatal("run(addon remove --delete-data) succeeded, want an error — the agent must not be able to ask for data destruction")
+	}
+	// The flag is genuinely not registered, rather than merely rejected at the API.
+	remove := newAddonRemoveCmd()
+	if remove.Flags().Lookup("delete-data") != nil {
+		t.Error("burrow-agent `addon remove` has a --delete-data flag; destroying an add-on's data is an operator action")
+	}
+}

@@ -189,22 +189,30 @@ func newAddonInstallCmd() *cobra.Command {
 
 // newAddonRemoveCmd removes an installed add-on by name. Guarded by addon.remove (removing a backing
 // service can break dependent apps), held for confirmation by default.
+//
+// It removes the add-on's WORKLOAD and always keeps its data volume. There is deliberately no
+// --delete-data flag on this surface: destroying an app's data is a human decision, the same line
+// `addon detach` and `addon restore` already sit on, and structural absence is the first of
+// ADR-0049's three layers — an agent that reads untrusted input cannot express a verb the binary does
+// not carry. Reclaiming a retained volume is `burrow addon remove --delete-data` at the operator's
+// own terminal.
 func newAddonRemoveCmd() *cobra.Command {
 	o := &connOpts{}
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "remove <name>",
-		Short: "Remove an installed add-on by name",
-		Long: "Remove an installed add-on instance by name. Guarded by the addon.remove guardrail, held for\n" +
-			"confirmation by default (removing a backing service can break dependent apps). When held, the\n" +
-			"outcome says so — relay it and re-run with --confirm ONLY after the human approves.",
+		Short: "Remove an installed add-on by name (its data volume is kept)",
+		Long: "Remove an installed add-on instance by name. This tears down the add-on's workload and KEEPS\n" +
+			"its data volume, so reinstalling the add-on picks the data back up — this command cannot\n" +
+			"destroy data. Destroying an add-on's volume is an operator action (`burrow addon remove\n" +
+			"--delete-data`), not one on this surface.\n\n" +
+			"Guarded by the addon.remove guardrail, held for confirmation by default (removing a backing\n" +
+			"service can break dependent apps). When held, the outcome says so — relay it and re-run with\n" +
+			"--confirm ONLY after the human approves.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "addon_remove", func(ctx context.Context, c *client.Client, _ string) (any, error) {
-				if err := c.RemoveAddon(ctx, args[0], confirm); err != nil {
-					return nil, err
-				}
-				return map[string]any{"removed": args[0]}, nil
+				return c.RemoveAddon(ctx, args[0], false, confirm)
 			})
 		},
 	}

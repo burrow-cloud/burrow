@@ -46,15 +46,15 @@ func TestStoreAutoDeployLevel(t *testing.T) {
 	// A different environment carries an independent level; the default env is untouched, and an env
 	// with no row still reads the default.
 	if err := s.SetAutoDeployLevel(ctx, app, "staging", cp.AutoDeployMajor); err != nil {
-		t.Fatalf("SetAutoDeployLevel prod: %v", err)
+		t.Fatalf("SetAutoDeployLevel staging: %v", err)
 	}
 	if got, _ := s.AutoDeployLevel(ctx, app, "staging"); got != cp.AutoDeployMajor {
-		t.Fatalf("prod level = %q, want major", got)
+		t.Fatalf("staging level = %q, want major", got)
 	}
 	if got, _ := s.AutoDeployLevel(ctx, app, cp.DefaultEnvironment); got != cp.AutoDeployOff {
-		t.Fatalf("default env level after prod set = %q, want off (independent)", got)
+		t.Fatalf("default env level after the staging set = %q, want off (independent)", got)
 	}
-	if got, _ := s.AutoDeployLevel(ctx, app, "staging"); got != cp.DefaultAutoDeployLevel {
+	if got, _ := s.AutoDeployLevel(ctx, app, "dev"); got != cp.DefaultAutoDeployLevel {
 		t.Fatalf("unset env level = %q, want %q", got, cp.DefaultAutoDeployLevel)
 	}
 
@@ -74,8 +74,9 @@ func TestStoreAutoDeployCandidates(t *testing.T) {
 	app := t.Name() + "-web"
 	api := t.Name() + "-api"
 
-	// Two apps: web has two releases in default (one distinct pair) and one in prod; api has one in
-	// default. Distinct pairs: (web, default), (web, prod), (api, default).
+	// Two apps: web has two releases in the default environment (one distinct pair) and one in
+	// staging; api has one in the default environment. Distinct pairs: (web, prod), (web, staging),
+	// (api, prod).
 	rels := []cp.Release{
 		{ID: app + "-r1", App: app, Image: "ghcr.io/u/web:1.0.0", Environment: cp.DefaultEnvironment, Status: cp.ReleaseSuperseded},
 		{ID: app + "-r2", App: app, Image: "ghcr.io/u/web:1.1.0", Environment: cp.DefaultEnvironment, Status: cp.ReleaseDeployed},

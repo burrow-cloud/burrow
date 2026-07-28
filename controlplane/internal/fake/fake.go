@@ -37,6 +37,7 @@ const (
 	OpAutoscalerActive     Op = "AutoscalerActive"
 	OpMetricsAPIAvailable  Op = "MetricsAPIAvailable"
 	OpAddonReady           Op = "AddonReady"
+	OpAddonVolumes         Op = "AddonVolumes"
 	OpSaveAddon            Op = "SaveAddon"
 	OpAddon                Op = "Addon"
 	OpAddons               Op = "Addons"

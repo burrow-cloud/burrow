@@ -252,6 +252,13 @@ type Kubernetes interface {
 	// usable again after a reinstall. It returns what was torn down and what was deliberately kept,
 	// so the caller can report it. Removing an add-on that is not installed returns ErrNotFound.
 	DeleteAddon(ctx context.Context, name string, deleteData bool) (AddonRemoval, error)
+	// AddonVolumes returns every PersistentVolumeClaim in the add-on namespace that Burrow created
+	// for an add-on, whether or not the add-on that owns it still exists. It reads the CLUSTER, not
+	// the registry, because that is the only place a volume outliving its add-on can be seen at all
+	// (ADR-0064 §6) — a removed add-on is no longer a registry row, but its claim is still there and
+	// still costing money. Deciding which of them are RETAINED is the engine's job. No claims is an
+	// empty slice, not an error.
+	AddonVolumes(ctx context.Context) ([]AddonVolume, error)
 	// ScaleWorkload sets the desired replica count for app's workload.
 	ScaleWorkload(ctx context.Context, app string, replicas int32) error
 

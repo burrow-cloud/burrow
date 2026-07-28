@@ -590,13 +590,46 @@ func (c *Client) ConnectAddon(ctx context.Context, backend, endpoint, secretKey,
 	return out, err
 }
 
-// Addons lists the installed add-on instances.
-func (c *Client) Addons(ctx context.Context) ([]Addon, error) {
-	var out struct {
-		Addons []Addon `json:"addons"`
-	}
+// RetainedVolume is an add-on volume an earlier `addon remove` deliberately left in place: storage
+// that is still allocated, and on a managed provider still billed, with no add-on left to use it
+// (ADR-0064 §6). Reporting it is what makes keeping data by default defensible — an invisible
+// leftover claim is a silent bill.
+type RetainedVolume struct {
+	// Name is the claim name — what `kubectl delete pvc` takes to reclaim the storage.
+	Name string `json:"name"`
+	// Namespace is the add-on namespace the claim lives in.
+	Namespace string `json:"namespace,omitempty"`
+	// Addon is the add-on type the volume belonged to.
+	Addon string `json:"addon"`
+	// Role is what the claim holds: "data" (the add-on's own volume) or "backup" (its dumps).
+	Role string `json:"role"`
+	// Size is the claim's capacity, e.g. "10Gi". Size, not cost: cost needs the provider's pricing.
+	Size string `json:"size,omitempty"`
+	// ReinstallAdopts reports whether reinstalling the add-on picks this volume back up with its
+	// data intact.
+	ReinstallAdopts bool `json:"reinstall_adopts"`
+}
+
+// AddonListing is the whole answer to `addon list`: the registered add-ons, plus the volumes an
+// earlier removal left behind. They are separate fields because they are different kinds of thing —
+// one is a running backing service, the other is storage with nothing attached to it.
+type AddonListing struct {
+	Addons          []Addon          `json:"addons"`
+	RetainedVolumes []RetainedVolume `json:"retained_volumes,omitempty"`
+}
+
+// AddonList returns the add-on listing: the registered instances and the retained volumes.
+func (c *Client) AddonList(ctx context.Context) (AddonListing, error) {
+	var out AddonListing
 	err := c.do(ctx, http.MethodGet, "/v1/addons", nil, &out)
-	return out.Addons, err
+	return out, err
+}
+
+// Addons lists the installed add-on instances. It is the add-ons alone, for callers that only ask
+// what is running; AddonList also carries the retained volumes.
+func (c *Client) Addons(ctx context.Context) ([]Addon, error) {
+	listing, err := c.AddonList(ctx)
+	return listing.Addons, err
 }
 
 // RemoveAddonResult is the outcome of removing an add-on: what was torn down, and what was

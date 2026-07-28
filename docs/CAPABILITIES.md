@@ -280,11 +280,26 @@ cluster and every app's database lives on the one shared `postgres`, removing it
 [ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §2 tier 1: not compiled into the agent
 binary at all.
 
-A retained volume is named **in that removal's output and nowhere afterwards.** `addon list`
-reports registered add-ons, not claims left behind by an earlier removal, so once the terminal
-scrolls the only way to find one is `kubectl get pvc -n burrow-addons`.
-[ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §6 decides the listing should report them —
-the claim, its size, and the add-on it belonged to — and that is **not built**.
+**A retained volume stays visible after the removal that created it.** `burrow addon list` reports
+the claims an earlier removal left behind in a section of their own, below the add-on table: the
+claim name, the add-on it belonged to, whether it holds the add-on's `data` or its `backup` dumps,
+its size, and its namespace — plus both ways out, reinstalling to get the data back or
+`kubectl delete pvc` to get the storage back. In `--json` they are a separate `retained_volumes`
+array alongside `addons`, so a retained claim is never readable as a running add-on. Nothing
+reclaims them automatically and nothing should
+([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §6).
+
+Retained claims are found by reading the **cluster**, not the registry: a removed add-on leaves no
+registry row, which is exactly why its volume used to be invisible. A claim is Burrow's because of
+the labels it was created with (`app.kubernetes.io/managed-by=burrow` plus `burrow.cloud/addon`
+naming the type), never because of its name, so a claim of your own in `burrow-addons` is not
+reported. A claim is *retained* when no installed add-on of its type owns it — which is what keeps
+a live add-on's own volume out of the section.
+
+The listing reports **size, not cost.** The claim knows its capacity; the price per GiB belongs to
+the provider, and ADR-0064 leaves that choice open. Reporting cost would need a per-provider price
+per storage class and region, obtained from the provider's API or a table Burrow would have to keep
+current — a confident wrong number about money is worse than an honest one about bytes.
 
 Two accepted decisions change the `postgres` row above and **neither is built.**
 [ADR-0066](adr/0066-postgres-on-cloudnativepg.md) replaces the mechanism with a CloudNativePG
@@ -297,7 +312,7 @@ is not ([#340](https://github.com/burrow-cloud/burrow/issues/340)).
 | Capability | Command | What it does |
 | --- | --- | --- |
 | Install | `burrow addon install <type> [--env]` | As above, for one environment — each gets its own instance (ADR-0067 §1). `metrics` additionally needs RBAC the CLI stages client-side first. |
-| List | `burrow addon list` / `burrow-agent addons` | Type, mode (`installed`/`connected`), backend, endpoint, capabilities. This is how an app is pointed at `cache` — read the endpoint and set it as config. |
+| List | `burrow addon list` / `burrow-agent addons` | Type, mode (`installed`/`connected`), backend, endpoint, capabilities. This is how an app is pointed at `cache` — read the endpoint and set it as config. `burrow addon list` additionally reports the volumes an earlier removal kept, in their own section (`retained_volumes` in `--json`). |
 | Attach an app | `burrow addon attach postgres <app> [--env]` | **Postgres only.** On the named environment's instance, creates role `app_<app>` and database `<app>` owned by it, revokes `CONNECT` from `PUBLIC`, grants it to the role, and writes the generated `DATABASE_URL` into the app's Secret in that environment's namespace, then restarts the workload there. Re-attaching rotates the password. The URL is never returned, logged, or audited. |
 | Detach | `burrow addon detach postgres <app> [--env]` | Removes `DATABASE_URL`, then `DROP DATABASE … WITH (FORCE)` and `DROP ROLE` **on that environment's instance**. Destructive; confirm-gated. |
 | Remove | `burrow addon remove <name> [--delete-data]` | Tears the add-on's workload down and **keeps its data volume** unless `--delete-data` is passed. Confirm-gated by `addon.remove`; the held message names the volume and, for `postgres`, the attached apps by name. `--delete-data` additionally requires the add-on's name typed back on a terminal, and refuses off one without `--acknowledge-data-loss`. **Operator CLI only** — absent from `burrow-agent` entirely (ADR-0065 §2). |
@@ -666,7 +681,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
 | Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Not built — dumps land on an in-cluster PVC. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
-| A final backup before `--delete-data`, and retained volumes reported by `addon list` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5, §6 | **Partial** — removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and now carries §2's typed confirmation, and the backup claim always survives. [#334](https://github.com/burrow-cloud/burrow/issues/334), [#335](https://github.com/burrow-cloud/burrow/issues/335) |
+| A final backup before `--delete-data` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5 | Not built — it waits on an object-storage provider ([ADR-0063](adr/0063-object-storage-provider.md)); until then the retained backup claim is the only copy. The rest of ADR-0064 is built: removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and carries §2's typed confirmation, the backup claim always survives, and `addon list` reports retained volumes (§6). [#334](https://github.com/burrow-cloud/burrow/issues/334) |
 | `app.delete` and `dns.delete` denied by default; `guard` reporting what the binary lacks | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §3, §7 | **Partial** — tier 1 is built (`addon remove` is not compiled into `burrow-agent`); the tier-2 defaults and the absent-capability report are not. [#336](https://github.com/burrow-cloud/burrow/issues/336), [#337](https://github.com/burrow-cloud/burrow/issues/337) |
 | The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
 | An install that creates one environment named `prod`, mapped to the existing app namespace | [0067](adr/0067-one-database-instance-per-environment.md) §2–§3 | **Partial** — §1 is built (one add-on instance per environment; the provisioning seam takes the environment non-optionally), so the shared-database hazard is closed. The first environment is still the synthesized `default`. [#340](https://github.com/burrow-cloud/burrow/issues/340) |

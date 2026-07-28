@@ -566,11 +566,15 @@ func ensureAddonRBAC(ctx context.Context, name, kubeconfig, kubeContext, control
 	return applyFn(ctx, kubeconfig, kubeContext, sb.String(), false, out, out)
 }
 
+// newAddonListCmd lists the add-ons registered on the cluster AND the volumes an earlier removal
+// left behind (ADR-0064 §6). The second half is not decoration: removal keeps the data volume by
+// default, so without a listing the only record of a retained claim is the removal output that
+// created it — and a bill is a worse way to find out than a listing.
 func newAddonListCmd() *cobra.Command {
 	o := &commonOpts{}
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List installed add-ons and their capabilities",
+		Short: "List installed add-ons, their capabilities, and volumes kept by an earlier removal",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -578,28 +582,70 @@ func newAddonListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			addons, err := c.Addons(ctx)
+			listing, err := c.AddonList(ctx)
 			if err != nil {
 				return err
 			}
 			out := cmd.OutOrStdout()
 			if o.json {
-				return emit(out, true, addons, "")
+				return emit(out, true, listing, "")
 			}
-			if len(addons) == 0 {
+			if len(listing.Addons) == 0 {
 				fmt.Fprintln(out, "No add-ons installed. Install one with `burrow addon install logs`.")
-				return nil
+			} else {
+				tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "NAME\tTYPE\tMODE\tENDPOINT\tCAPABILITIES")
+				for _, a := range listing.Addons {
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", a.Name, a.Type, a.Mode, a.Endpoint, strings.Join(a.Capabilities, ","))
+				}
+				if err := tw.Flush(); err != nil {
+					return err
+				}
 			}
-			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tTYPE\tMODE\tENDPOINT\tCAPABILITIES")
-			for _, a := range addons {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", a.Name, a.Type, a.Mode, a.Endpoint, strings.Join(a.Capabilities, ","))
-			}
-			return tw.Flush()
+			return printRetainedVolumes(out, listing.RetainedVolumes)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	return cmd
+}
+
+// printRetainedVolumes renders the retained-volume section of `addon list`. It is a SEPARATE table
+// under its own heading rather than extra rows in the add-on table, because a retained claim is not
+// an add-on: it has no workload, no endpoint, and nothing is serving from it. Each row says which
+// add-on it belonged to, what it holds, and how big it is, and the section closes with both ways out
+// — reinstall to get the data back, or delete the claim to get the storage back (ADR-0064 §1/§6).
+//
+// Size, not cost. The claim knows its capacity; the price per GiB belongs to the provider, and a
+// confident wrong number about money is worse than an honest one about bytes.
+func printRetainedVolumes(out io.Writer, vols []client.RetainedVolume) error {
+	if len(vols) == 0 {
+		return nil
+	}
+	fmt.Fprintf(out, "\nRetained volumes (%d) — kept by an earlier `addon remove`, still allocated and still billed:\n\n", len(vols))
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "CLAIM\tADD-ON\tHOLDS\tSIZE\tNAMESPACE")
+	adoptable := false
+	for _, v := range vols {
+		size := v.Size
+		if size == "" {
+			size = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", v.Name, v.Addon, v.Role, size, v.Namespace)
+		if v.ReinstallAdopts {
+			adoptable = true
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	fmt.Fprintln(out)
+	if adoptable {
+		fmt.Fprintln(out, "Reinstalling the add-on (`burrow addon install <add-on>`) reuses its data volume and the data\n"+
+			"  comes back — for postgres, the databases, roles, and role passwords with it.")
+	}
+	fmt.Fprintln(out, "To reclaim the storage instead: kubectl -n <namespace> delete pvc <claim>")
+	fmt.Fprintln(out, "Nothing deletes these for you.")
+	return nil
 }
 
 // newAddonRemoveCmd removes an installed add-on. It tears down the add-on's workload and KEEPS its
@@ -799,9 +845,12 @@ func removeAddonSummary(res client.RemoveAddonResult) string {
 	case res.DataDeleted:
 		b.WriteString("its data volume was DESTROYED\n")
 	case res.RetainedDataVolume != "":
+		// `burrow addon list` is named here because it is where this volume shows up from now on:
+		// the removal output must not be the only record of it (ADR-0064 §1/§6).
 		fmt.Fprintf(&b, "kept the data volume %q in namespace %s — reinstalling the add-on reuses it,\n"+
 			"  with the data (and, for postgres, the app roles and passwords) intact.\n"+
-			"  To reclaim the storage instead: kubectl -n %s delete pvc %s\n",
+			"  To reclaim the storage instead: kubectl -n %s delete pvc %s\n"+
+			"  `burrow addon list` reports it until then.\n",
 			res.RetainedDataVolume, res.Namespace, res.Namespace, res.RetainedDataVolume)
 	}
 	if res.RetainedBackupVolume != "" {

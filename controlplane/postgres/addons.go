@@ -13,7 +13,7 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-const addonColumns = `name, type, mode, backend, image, endpoint, capabilities, secret_key, created_at`
+const addonColumns = `name, type, environment, mode, backend, image, endpoint, capabilities, secret_key, created_at`
 
 // SaveAddon upserts an add-on in the registry by name (ADR-0025). It records the non-secret
 // registry entry — type, mode, backend, where it lives, and the capabilities it serves. Ready is
@@ -30,11 +30,19 @@ func (s *Store) SaveAddon(ctx context.Context, a controlplane.AddonInfo) error {
 	if err != nil {
 		return fmt.Errorf("postgres: save addon %s: encoding capabilities: %w", a.Name, err)
 	}
+	// An add-on row always names its environment: the registry key is the instance name, which is
+	// derived FROM the environment, so the environment is the fact and the name is what follows from
+	// it (ADR-0067 §1). A caller that leaves it empty means the implicit default environment.
+	env := a.Environment
+	if env == "" {
+		env = controlplane.DefaultEnvironment
+	}
 	const q = `
-INSERT INTO addons (name, type, mode, backend, image, endpoint, capabilities, secret_key, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+INSERT INTO addons (name, type, environment, mode, backend, image, endpoint, capabilities, secret_key, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
 ON CONFLICT (name) DO UPDATE SET
     type = EXCLUDED.type,
+    environment = EXCLUDED.environment,
     mode = EXCLUDED.mode,
     backend = EXCLUDED.backend,
     image = EXCLUDED.image,
@@ -42,7 +50,7 @@ ON CONFLICT (name) DO UPDATE SET
     capabilities = EXCLUDED.capabilities,
     secret_key = EXCLUDED.secret_key,
     created_at = EXCLUDED.created_at`
-	if _, err := s.db.ExecContext(ctx, q, a.Name, string(a.Type), a.Mode, a.Backend, a.Image, a.Endpoint, string(capsJSON), a.SecretKey, a.CreatedAt); err != nil {
+	if _, err := s.db.ExecContext(ctx, q, a.Name, string(a.Type), env, a.Mode, a.Backend, a.Image, a.Endpoint, string(capsJSON), a.SecretKey, a.CreatedAt); err != nil {
 		return fmt.Errorf("postgres: save addon %s: %w", a.Name, err)
 	}
 	return nil
@@ -107,7 +115,7 @@ func scanAddon(sc scanner) (controlplane.AddonInfo, error) {
 		typ      string
 		capsJSON []byte
 	)
-	if err := sc.Scan(&a.Name, &typ, &a.Mode, &a.Backend, &a.Image, &a.Endpoint, &capsJSON, &a.SecretKey, &a.CreatedAt); err != nil {
+	if err := sc.Scan(&a.Name, &typ, &a.Environment, &a.Mode, &a.Backend, &a.Image, &a.Endpoint, &capsJSON, &a.SecretKey, &a.CreatedAt); err != nil {
 		return controlplane.AddonInfo{}, err
 	}
 	a.Type = controlplane.AddonType(typ)

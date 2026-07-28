@@ -18,7 +18,7 @@ import (
 func installPostgres(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Database, *fake.Provisioner) {
 	t.Helper()
 	e, k, d, prov := newPostgresEngine(t)
-	if _, err := e.InstallAddon(context.Background(), cp.AddonPostgres, true); err != nil {
+	if _, err := e.InstallAddon(context.Background(), cp.AddonPostgres, "", true); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
 	if _, ok := k.AddonVolume("burrow-postgres"); !ok {
@@ -89,7 +89,7 @@ func TestRemoveAddonDeleteDataDestroysVolume(t *testing.T) {
 func TestRemoveAddonConfirmationNamesAttachedApps(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := installPostgres(t)
-	prov.SetAttachedApps("api", "web")
+	prov.SetAttachedApps(cp.DefaultEnvironment, "api", "web")
 
 	_, err := e.RemoveAddon(ctx, "burrow-postgres", true, false)
 	g, ok := cp.AsGuardrail(err)
@@ -116,7 +116,7 @@ func TestRemoveAddonConfirmationNamesAttachedApps(t *testing.T) {
 func TestRemoveAddonConfirmationSaysDataIsKept(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := installPostgres(t)
-	prov.SetAttachedApps("web")
+	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
 
 	_, err := e.RemoveAddon(ctx, "burrow-postgres", false, false)
 	g, ok := cp.AsGuardrail(err)
@@ -138,7 +138,7 @@ func TestRemoveAddonConfirmationSaysDataIsKept(t *testing.T) {
 func TestRemoveAddonReportsAttachedApps(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := installPostgres(t)
-	prov.SetAttachedApps("api", "web")
+	prov.SetAttachedApps(cp.DefaultEnvironment, "api", "web")
 
 	res, err := e.RemoveAddon(ctx, "burrow-postgres", false, true)
 	if err != nil {
@@ -176,7 +176,7 @@ func TestRemoveAddonSucceedsWhenInstanceUnreachable(t *testing.T) {
 func TestRemoveAddonBackupVolumeSurvivesDataDeletion(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := installPostgres(t)
-	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web"); err != nil {
+	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", ""); err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
 
@@ -198,7 +198,7 @@ func TestRemoveAddonBackupVolumeSurvivesDataDeletion(t *testing.T) {
 func TestRemoveStatelessAddonHasNoVolume(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newPostgresEngine(t)
-	if _, err := e.InstallAddon(ctx, cp.AddonCache, true); err != nil {
+	if _, err := e.InstallAddon(ctx, cp.AddonCache, "", true); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
 

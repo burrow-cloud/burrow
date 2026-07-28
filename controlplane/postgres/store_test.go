@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,29 @@ func openStore(t *testing.T) *postgres.Store {
 		t.Fatalf("Migrate: %v", err)
 	}
 	return s
+}
+
+// envLabel builds a per-test ENVIRONMENT name that is also a legal DNS-1123 label. The other store
+// tests isolate themselves by prefixing ids with t.Name(), but an environment name is not a free
+// string: it becomes a namespace and an add-on instance name (ADR-0035 phase 2, ADR-0067 §1), so it
+// must be lowercase alphanumeric-and-hyphen. A Go test name is neither — it carries capitals, and a
+// subtest's carries a slash — so it is lowercased and sanitised here rather than used raw. The
+// result is still derived from the test, so tests stay independent of one another against the shared
+// database.
+func envLabel(t *testing.T, suffix string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, r := range strings.ToLower(t.Name() + "-" + suffix) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	// A label must start and end alphanumeric; trimming is enough because the test-name prefix
+	// always contributes letters.
+	return strings.Trim(b.String(), "-")
 }
 
 // TestStoreUpgradeGate exercises the single-minor-step gate against a real database.

@@ -342,12 +342,15 @@ func newBackupsCmd() *cobra.Command {
 			if len(args) == 2 {
 				app = args[1]
 			}
-			return o.withClient(cmd, func(ctx context.Context, c *client.Client, _ string) (any, error) {
-				return c.Backups(ctx, args[0], app)
+			// A listing is a read, so an unnamed environment spans them all rather than being
+			// refused; each row says which environment its dump came from (ADR-0067 §1).
+			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.Backups(ctx, args[0], app, env)
 			})
 		},
 	}
 	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 

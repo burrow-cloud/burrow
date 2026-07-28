@@ -8,12 +8,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-const backupColumns = `id, app, created_at, path, size_bytes, status`
+const backupColumns = `id, app, environment, created_at, path, size_bytes, status`
 
 // RecordBackup persists a new backup row (ADR-0032). burrowd records it pending before starting the
 // backup Job, then SetBackupStatus moves it to completed/failed when the Job finishes. An existing
@@ -24,12 +25,16 @@ func (s *Store) RecordBackup(ctx context.Context, b controlplane.Backup) error {
 		return fmt.Errorf("postgres: record backup: empty ID")
 	}
 	const q = `
-INSERT INTO postgres_backups (id, app, created_at, path, size_bytes, status)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO postgres_backups (id, app, environment, created_at, path, size_bytes, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (id) DO UPDATE SET
-    app = EXCLUDED.app, created_at = EXCLUDED.created_at, path = EXCLUDED.path,
-    size_bytes = EXCLUDED.size_bytes, status = EXCLUDED.status`
-	if _, err := s.db.ExecContext(ctx, q, b.ID, b.App, b.CreatedAt, b.Path, b.SizeBytes, string(b.Status)); err != nil {
+    app = EXCLUDED.app, environment = EXCLUDED.environment, created_at = EXCLUDED.created_at,
+    path = EXCLUDED.path, size_bytes = EXCLUDED.size_bytes, status = EXCLUDED.status`
+	env := b.Environment
+	if env == "" {
+		env = controlplane.DefaultEnvironment
+	}
+	if _, err := s.db.ExecContext(ctx, q, b.ID, b.App, env, b.CreatedAt, b.Path, b.SizeBytes, string(b.Status)); err != nil {
 		return fmt.Errorf("postgres: record backup %s: %w", b.ID, err)
 	}
 	return nil
@@ -53,14 +58,25 @@ func (s *Store) SetBackupStatus(ctx context.Context, id string, status controlpl
 	return nil
 }
 
-// ListBackups returns recorded backups, newest first. An empty app lists every app's backups; a
-// non-empty app restricts to that app. No matches yields an empty slice and no error.
-func (s *Store) ListBackups(ctx context.Context, app string) ([]controlplane.Backup, error) {
+// ListBackups returns recorded backups, newest first. An empty app lists every app's backups and an
+// empty env every environment's; a non-empty value restricts to that app or environment (ADR-0067
+// §1). No matches yields an empty slice and no error.
+func (s *Store) ListBackups(ctx context.Context, app, env string) ([]controlplane.Backup, error) {
 	q := `SELECT ` + backupColumns + ` FROM postgres_backups`
-	var args []any
+	var (
+		args   []any
+		wheres []string
+	)
 	if app != "" {
-		q += ` WHERE app = $1`
 		args = append(args, app)
+		wheres = append(wheres, fmt.Sprintf("app = $%d", len(args)))
+	}
+	if env != "" {
+		args = append(args, env)
+		wheres = append(wheres, fmt.Sprintf("environment = $%d", len(args)))
+	}
+	if len(wheres) > 0 {
+		q += ` WHERE ` + strings.Join(wheres, " AND ")
 	}
 	q += ` ORDER BY created_at DESC, id DESC`
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -102,7 +118,7 @@ func scanBackup(sc scanner) (controlplane.Backup, error) {
 		created time.Time
 		status  string
 	)
-	if err := sc.Scan(&b.ID, &b.App, &created, &b.Path, &b.SizeBytes, &status); err != nil {
+	if err := sc.Scan(&b.ID, &b.App, &b.Environment, &created, &b.Path, &b.SizeBytes, &status); err != nil {
 		return controlplane.Backup{}, err
 	}
 	b.CreatedAt = created

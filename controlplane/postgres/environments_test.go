@@ -15,10 +15,12 @@ func TestStoreEnvironments(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t)
 
-	// Names are prefixed with the test name so the test is isolated and idempotent against the
-	// shared database (matching the other store tests).
-	staging := t.Name() + "-staging"
-	prod := t.Name() + "-prod"
+	// Names are derived from the test name so the test is isolated and idempotent against the shared
+	// database (matching the other store tests), but sanitised to a legal DNS-1123 label: an
+	// environment name becomes a namespace and an add-on instance name, so a fixture that could not
+	// be created through the CLI has no business in the store either (ADR-0035 phase 2, ADR-0067 §1).
+	staging := envLabel(t, "staging")
+	prod := envLabel(t, "prod")
 
 	if err := s.CreateEnvironment(ctx, staging, staging+"-ns"); err != nil {
 		t.Fatalf("CreateEnvironment(staging): %v", err)
@@ -40,7 +42,7 @@ func TestStoreEnvironments(t *testing.T) {
 	if got.CreatedAt.IsZero() {
 		t.Errorf("GetEnvironment created_at should be set, got zero")
 	}
-	if _, err := s.GetEnvironment(ctx, t.Name()+"-missing"); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := s.GetEnvironment(ctx, envLabel(t, "missing")); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("GetEnvironment(missing) err = %v, want ErrNotFound", err)
 	}
 

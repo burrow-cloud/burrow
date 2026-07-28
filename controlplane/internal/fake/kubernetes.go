@@ -103,9 +103,13 @@ type fakeVolume struct {
 }
 
 // backupCall records one RunBackupJob/RunRestoreJob invocation so a test can assert the engine
-// drove the in-cluster Job with the right app and backup id.
+// drove the in-cluster Job with the right app, ENVIRONMENT, and backup id. The environment is
+// recorded because it selects the instance the dump is read from or written into (ADR-0067 §1) — a
+// backup that named only the app could not be told apart from one taken against another
+// environment's server.
 type backupCall struct {
 	App      string
+	Env      string
 	BackupID string
 }
 
@@ -225,13 +229,21 @@ func (k *Kubernetes) RestartedAt(app string) (time.Time, bool) {
 	return d.restartedAt, true
 }
 
-func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) (controlplane.AddonInfo, error) {
+// DeployAddon models installing one add-on instance FOR ONE ENVIRONMENT: the instance is named by
+// controlplane.AddonInstanceName, so the default environment lands on the unqualified name an
+// existing install already has and any other environment gets a separate instance beside it
+// (ADR-0067 §1). Two environments therefore occupy two entries in this fake cluster, never one.
+func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string) (controlplane.AddonInfo, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	name := "burrow-" + string(spec.Type)
+	name, err := controlplane.AddonInstanceName(spec.Type, env)
+	if err != nil {
+		return controlplane.AddonInfo{}, err
+	}
 	info := controlplane.AddonInfo{
 		Name:         name,
 		Type:         spec.Type,
+		Environment:  env,
 		Mode:         "installed",
 		Backend:      spec.Backend,
 		Image:        spec.Image,
@@ -713,27 +725,27 @@ func (k *Kubernetes) SetBackupSize(n int64) {
 	*k.backupSiz = n
 }
 
-// BackupJobs returns the (app, backupID) pairs RunBackupJob was called with, in order.
+// BackupJobs returns the (app, environment, backupID) triples RunBackupJob was called with, in order.
 func (k *Kubernetes) BackupJobs() []backupCall {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return append([]backupCall(nil), *k.backups...)
 }
 
-// RestoreJobs returns the (app, backupID) pairs RunRestoreJob was called with, in order.
+// RestoreJobs returns the (app, environment, backupID) triples RunRestoreJob was called with, in order.
 func (k *Kubernetes) RestoreJobs() []backupCall {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return append([]backupCall(nil), *k.restores...)
 }
 
-func (k *Kubernetes) RunBackupJob(ctx context.Context, app, backupID string) (int64, error) {
+func (k *Kubernetes) RunBackupJob(ctx context.Context, app, env, backupID string) (int64, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.errs[OpRunBackupJob]; err != nil {
 		return 0, err
 	}
-	*k.backups = append(*k.backups, backupCall{App: app, BackupID: backupID})
+	*k.backups = append(*k.backups, backupCall{App: app, Env: env, BackupID: backupID})
 	// The backup claim is created on first backup, exactly as the adapter creates it (ADR-0032), and
 	// from then on it is a claim in the add-on namespace like any other — including after the add-on
 	// that filled it is gone.
@@ -745,13 +757,13 @@ func (k *Kubernetes) RunBackupJob(ctx context.Context, app, backupID string) (in
 	return *k.backupSiz, nil
 }
 
-func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, backupID string) error {
+func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, env, backupID string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.errs[OpRunRestoreJob]; err != nil {
 		return err
 	}
-	*k.restores = append(*k.restores, backupCall{App: app, BackupID: backupID})
+	*k.restores = append(*k.restores, backupCall{App: app, Env: env, BackupID: backupID})
 	return nil
 }
 

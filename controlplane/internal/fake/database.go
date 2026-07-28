@@ -535,8 +535,9 @@ func (d *Database) SetBackupStatus(ctx context.Context, id string, status contro
 	return nil
 }
 
-// ListBackups returns recorded backups newest first (reverse record order). An empty app lists all.
-func (d *Database) ListBackups(ctx context.Context, app string) ([]controlplane.Backup, error) {
+// ListBackups returns recorded backups newest first (reverse record order). An empty app lists every
+// app's and an empty env every environment's (ADR-0067 §1).
+func (d *Database) ListBackups(ctx context.Context, app, env string) ([]controlplane.Backup, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[OpListBackups]; err != nil {
@@ -546,6 +547,9 @@ func (d *Database) ListBackups(ctx context.Context, app string) ([]controlplane.
 	for i := len(d.backupSeq) - 1; i >= 0; i-- {
 		b := d.backups[d.backupSeq[i]]
 		if app != "" && b.App != app {
+			continue
+		}
+		if env != "" && b.Environment != env {
 			continue
 		}
 		out = append(out, b)

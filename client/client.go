@@ -554,8 +554,11 @@ func (c *Client) Apps(ctx context.Context, env string) ([]WorkloadStatus, error)
 
 // Addon is one installed (and, later, connected) add-on instance.
 type Addon struct {
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	// Environment is the environment this instance serves (ADR-0067 §1): each environment gets its
+	// own instance, so this is what distinguishes two rows of the same type.
+	Environment  string   `json:"environment,omitempty"`
 	Mode         string   `json:"mode"`
 	Image        string   `json:"image,omitempty"`
 	Endpoint     string   `json:"endpoint"`
@@ -563,10 +566,13 @@ type Addon struct {
 	Ready        bool     `json:"ready"`
 }
 
-// InstallAddon installs the vetted backing service for an add-on type (e.g. "logs").
-func (c *Client) InstallAddon(ctx context.Context, addonType string, confirm bool) (Addon, error) {
+// InstallAddon installs the vetted backing service for an add-on type (e.g. "logs") in one
+// environment. Each environment gets its own instance (ADR-0067 §1); an empty env targets the
+// default environment, which keeps the instance an existing install already has.
+func (c *Client) InstallAddon(ctx context.Context, addonType, env string, confirm bool) (Addon, error) {
 	var out Addon
-	err := c.do(ctx, http.MethodPost, "/v1/addons", map[string]any{"type": addonType, "confirm": confirm}, &out)
+	body := map[string]any{"type": addonType, "env": env, "confirm": confirm}
+	err := c.do(ctx, http.MethodPost, "/v1/addons", body, &out)
 	return out, err
 }
 
@@ -668,38 +674,45 @@ func (c *Client) RemoveAddon(ctx context.Context, name string, deleteData, confi
 // AttachResult is the non-secret outcome of attaching an app to an add-on (ADR-0031): the KEY NAME
 // the generated connection string was written under in the app's Secret — never the value.
 type AttachResult struct {
-	App       string `json:"app"`
-	Addon     string `json:"addon"`
-	SecretKey string `json:"secret_key"`
+	App   string `json:"app"`
+	Addon string `json:"addon"`
+	// Environment is the environment whose instance the database was provisioned on (ADR-0067 §1) —
+	// which is what says WHICH database the app was given, since databases keep their simple names.
+	Environment string `json:"environment,omitempty"`
+	SecretKey   string `json:"secret_key"`
 }
 
-// AttachAddon gives an app its own database on the installed Postgres add-on and wires it in
-// (ADR-0031). The agent supplies only the add-on type and app name; burrowd generates the
-// DATABASE_URL server-side and writes it into the app's Secret — no secret value crosses this API
-// or MCP. The result carries the KEY name only, never the value.
-func (c *Client) AttachAddon(ctx context.Context, addonType, app string) (AttachResult, error) {
+// AttachAddon gives an app its own database on ENVIRONMENT env's Postgres instance and wires it in
+// (ADR-0031/0067 §1). The caller supplies only the add-on type, app name, and environment; burrowd
+// generates the DATABASE_URL server-side and writes it into the app's Secret in that environment's
+// namespace — no secret value crosses this API or the agent control channel. The result carries the
+// environment and the KEY name, never the value.
+func (c *Client) AttachAddon(ctx context.Context, addonType, app, env string) (AttachResult, error) {
 	var out AttachResult
-	body := map[string]any{"addon": addonType, "app": app}
+	body := map[string]any{"addon": addonType, "app": app, "env": env}
 	err := c.do(ctx, http.MethodPost, "/v1/addons/attach", body, &out)
 	return out, err
 }
 
 // DetachAddon detaches an app from an add-on, dropping its data (e.g. its Postgres database). It is
 // held for confirmation by a guardrail by default; pass confirm=true to proceed past the hold.
-func (c *Client) DetachAddon(ctx context.Context, addonType, app string, confirm bool) error {
-	body := map[string]any{"addon": addonType, "app": app, "confirm": confirm}
+func (c *Client) DetachAddon(ctx context.Context, addonType, app, env string, confirm bool) error {
+	body := map[string]any{"addon": addonType, "app": app, "env": env, "confirm": confirm}
 	return c.do(ctx, http.MethodPost, "/v1/addons/detach", body, nil)
 }
 
 // Backup is one recorded per-app database backup (ADR-0032): the control-plane index row for a dump
 // on the backup PVC. It names the app, the on-PVC path, the size, and the status — never a credential.
 type Backup struct {
-	ID        string `json:"id"`
-	App       string `json:"app"`
-	CreatedAt string `json:"created_at"`
-	Path      string `json:"path,omitempty"`
-	SizeBytes int64  `json:"size_bytes,omitempty"`
-	Status    string `json:"status"`
+	ID  string `json:"id"`
+	App string `json:"app"`
+	// Environment is the environment whose instance the dump was taken from (ADR-0067 §1). A dump is
+	// only a valid source for the environment it came from.
+	Environment string `json:"environment,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	Path        string `json:"path,omitempty"`
+	SizeBytes   int64  `json:"size_bytes,omitempty"`
+	Status      string `json:"status"`
 }
 
 // BackupResult is the outcome of an on-demand backup (ADR-0032): the recorded backup row.
@@ -710,16 +723,17 @@ type BackupResult struct {
 // BackupAddon backs up an app's database on the installed Postgres add-on (ADR-0032). burrowd runs
 // an in-cluster Job that pg_dumps to the backup PVC and records the backup; no secret value crosses
 // this API. The result is the recorded backup (id, app, path, size, status), never a credential.
-func (c *Client) BackupAddon(ctx context.Context, addonType, app string) (BackupResult, error) {
+func (c *Client) BackupAddon(ctx context.Context, addonType, app, env string) (BackupResult, error) {
 	var out BackupResult
-	body := map[string]any{"addon": addonType, "app": app}
+	body := map[string]any{"addon": addonType, "app": app, "env": env}
 	err := c.do(ctx, http.MethodPost, "/v1/addons/backup", body, &out)
 	return out, err
 }
 
 // Backups lists recorded backups from the control-plane database (ADR-0032). An empty app lists
-// every app's backups; a non-empty app restricts to that app. Read-only; no secret value.
-func (c *Client) Backups(ctx context.Context, addonType, app string) ([]Backup, error) {
+// every app's backups and an empty env every environment's; a non-empty value restricts to that app
+// or environment (ADR-0067 §1). Read-only; no secret value.
+func (c *Client) Backups(ctx context.Context, addonType, app, env string) ([]Backup, error) {
 	var out struct {
 		Backups []Backup `json:"backups"`
 	}
@@ -727,14 +741,17 @@ func (c *Client) Backups(ctx context.Context, addonType, app string) ([]Backup, 
 	if app != "" {
 		path += "&app=" + url.QueryEscape(app)
 	}
+	if env != "" {
+		path += "&env=" + url.QueryEscape(env)
+	}
 	err := c.do(ctx, http.MethodGet, path, nil, &out)
 	return out.Backups, err
 }
 
 // RestoreAddon restores an app's database from a recorded backup, overwriting its live contents
 // (ADR-0032). It is held for confirmation by a guardrail by default; pass confirm=true to proceed.
-func (c *Client) RestoreAddon(ctx context.Context, addonType, app, backupID string, confirm bool) error {
-	body := map[string]any{"addon": addonType, "app": app, "backup": backupID, "confirm": confirm}
+func (c *Client) RestoreAddon(ctx context.Context, addonType, app, backupID, env string, confirm bool) error {
+	body := map[string]any{"addon": addonType, "app": app, "backup": backupID, "env": env, "confirm": confirm}
 	return c.do(ctx, http.MethodPost, "/v1/addons/restore", body, nil)
 }
 

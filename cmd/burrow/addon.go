@@ -84,16 +84,17 @@ func newAddonBackupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.BackupAddon(ctx, args[0], args[1])
+			res, err := c.BackupAddon(ctx, args[0], args[1], o.env)
 			if err != nil {
 				return err
 			}
 			b := res.Backup
-			human := fmt.Sprintf("backed up %q (backup %s, status %s)\nstored at %s", b.App, b.ID, b.Status, b.Path)
+			human := fmt.Sprintf("backed up %q in environment %s (backup %s, status %s)\nstored at %s", b.App, b.Environment, b.ID, b.Status, b.Path)
 			return emit(cmd.OutOrStdout(), o.json, res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 
@@ -115,7 +116,7 @@ func newAddonBackupsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			backups, err := c.Backups(ctx, args[0], app)
+			backups, err := c.Backups(ctx, args[0], app, o.env)
 			if err != nil {
 				return err
 			}
@@ -128,14 +129,15 @@ func newAddonBackupsCmd() *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "ID\tAPP\tCREATED\tSTATUS\tSIZE")
+			fmt.Fprintln(tw, "ID\tAPP\tENV\tCREATED\tSTATUS\tSIZE")
 			for _, b := range backups {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", b.ID, b.App, b.CreatedAt, b.Status, b.SizeBytes)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\n", b.ID, b.App, b.Environment, b.CreatedAt, b.Status, b.SizeBytes)
 			}
 			return tw.Flush()
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 
@@ -163,7 +165,7 @@ func newAddonRestoreCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.RestoreAddon(ctx, args[0], args[1], backup, confirm); err != nil {
+			if err := c.RestoreAddon(ctx, args[0], args[1], backup, o.env, confirm); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "restored %q from backup %s\n", args[1], backup)
@@ -171,28 +173,30 @@ func newAddonRestoreCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&backup, "backup", "", "the backup id to restore (from `burrow addon backups postgres <app>`)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	_ = cmd.MarkFlagRequired("backup")
 	return cmd
 }
 
-// newAddonAttachCmd is `burrow addon attach postgres <app>`: give an app its own database on the
-// installed Postgres add-on (ADR-0031). The agent supplies only the add-on type and app name;
-// burrowd generates the DATABASE_URL server-side and writes it into the app's Secret — no secret
-// value is printed, returned, or carried over the agent control channel. Attach provisions and
-// destroys nothing, so it is
-// allowed by default.
+// newAddonAttachCmd is `burrow addon attach postgres <app> [--env]`: give an app its own database on
+// the named environment's Postgres instance (ADR-0031/0067 §1). The caller supplies the add-on type,
+// the app name, and the environment; burrowd generates the DATABASE_URL server-side and writes it
+// into the app's Secret in that environment's namespace — no secret value is printed, returned, or
+// carried over the agent control channel. Attach provisions and destroys nothing, so it is allowed
+// by default.
 func newAddonAttachCmd() *cobra.Command {
 	o := &commonOpts{}
 	cmd := &cobra.Command{
 		Use:   "attach <addon> <app>",
 		Short: "Attach an app to an add-on (e.g. give it a Postgres database)",
-		Long: "attach gives an app its own database on the installed Postgres add-on: burrowd provisions\n" +
-			"an isolated database and login role, generates the connection string server-side, writes it\n" +
-			"into the app's Secret as DATABASE_URL, and restarts the app. No secret value is printed or\n" +
-			"sent over the agent control channel; only the key name is reported. Re-attaching rotates the\n" +
-			"password.",
+		Long: "attach gives an app its own database on an environment's Postgres instance: burrowd\n" +
+			"provisions an isolated database and login role, generates the connection string server-side,\n" +
+			"writes it into the app's Secret as DATABASE_URL, and restarts the app. No secret value is\n" +
+			"printed or sent over the agent control channel; only the key name is reported. Re-attaching\n" +
+			"rotates the password. Each environment has its own instance, so --env decides which server the\n" +
+			"app is given a database on; with several environments registered, naming one is required.",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -200,22 +204,23 @@ func newAddonAttachCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.AttachAddon(ctx, args[0], args[1])
+			res, err := c.AttachAddon(ctx, args[0], args[1], o.env)
 			if err != nil {
 				return err
 			}
-			human := fmt.Sprintf("attached %q to the %s add-on\nwrote the connection string into %s's Secret under key %q (the value is never shown)",
-				res.App, res.Addon, res.App, res.SecretKey)
+			human := fmt.Sprintf("attached %q to the %s add-on in environment %s\nwrote the connection string into %s's Secret under key %q (the value is never shown)",
+				res.App, res.Addon, res.Environment, res.App, res.SecretKey)
 			return emit(cmd.OutOrStdout(), o.json, res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 
-// newAddonDetachCmd is `burrow addon detach postgres <app>`: drop an app's database and role and
-// remove its DATABASE_URL. It is destructive (it destroys the app's data), so it is held for
-// confirmation by the addon.detach guardrail by default.
+// newAddonDetachCmd is `burrow addon detach postgres <app> [--env]`: drop an app's database and role
+// from the named environment's instance and remove its DATABASE_URL there. It is destructive (it
+// destroys the app's data), so it is held for confirmation by the addon.detach guardrail by default.
 func newAddonDetachCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm bool
@@ -229,7 +234,7 @@ func newAddonDetachCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.DetachAddon(ctx, args[0], args[1], confirm); err != nil {
+			if err := c.DetachAddon(ctx, args[0], args[1], o.env, confirm); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "detached %q from the %s add-on\n", args[1], args[0])
@@ -237,6 +242,7 @@ func newAddonDetachCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }
@@ -451,7 +457,7 @@ func newAddonInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := c.InstallAddon(ctx, name, confirm)
+			a, err := c.InstallAddon(ctx, name, o.env, confirm)
 			if err != nil {
 				return err
 			}
@@ -461,6 +467,7 @@ func newAddonInstallCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }

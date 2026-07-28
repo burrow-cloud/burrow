@@ -70,7 +70,7 @@ func TestRetainedVolumeAppearsAfterRemoval(t *testing.T) {
 func TestInstalledAddonVolumeNotReportedAsRetained(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := installPostgres(t)
-	if _, err := e.InstallAddon(ctx, cp.AddonLogs, true); err != nil {
+	if _, err := e.InstallAddon(ctx, cp.AddonLogs, cp.DefaultEnvironment, true); err != nil {
 		t.Fatalf("InstallAddon(logs): %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestRetainedVolumesEmptyWhenNothingWasRemoved(t *testing.T) {
 	}
 
 	// Installing and leaving it installed changes nothing: retention is about what a removal left.
-	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, true); err != nil {
+	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, cp.DefaultEnvironment, true); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
 	if retained, err := e.RetainedAddonVolumes(ctx); err != nil || len(retained) != 0 {
@@ -118,10 +118,10 @@ func TestRetainedVolumesEmptyWhenNothingWasRemoved(t *testing.T) {
 func TestRetainedBackupVolumeIsReportedSeparately(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := installPostgres(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web"); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
-	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web"); err != nil {
+	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment); err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
 	// A backup claim under a still-installed add-on is in use, not retained.

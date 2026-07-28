@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,13 @@ import (
 // points at a disposable cluster; it creates its own namespaces and cleans them up. The round-trip
 // runs inside the cluster because the add-on Service (burrow-postgres.<ns>.svc) is only reachable
 // from in-cluster.
+//
+// It then does the whole thing again in a SECOND environment with the SAME app name, which is the
+// end-to-end statement of ADR-0067 §1 (issue #339): staging gets its own instance, its own database,
+// and its own credential, and the two hold different rows. That collision is invisible to a unit
+// test with a fake provisioner in one important respect — the old code did not error, it silently
+// resolved to the other environment's live server — so it is worth paying for two real Postgres
+// instances here to see the data actually stay apart.
 func TestPostgresAddonE2E(t *testing.T) {
 	kubeconfig := os.Getenv("BURROW_TEST_KUBECONFIG")
 	if kubeconfig == "" {
@@ -51,8 +59,9 @@ func TestPostgresAddonE2E(t *testing.T) {
 
 	stamp := time.Now().UnixNano()
 	appNS := fmt.Sprintf("burrow-pg-app-%d", stamp)
+	stagingNS := fmt.Sprintf("burrow-pg-staging-%d", stamp)
 	addonNS := fmt.Sprintf("burrow-pg-addons-%d", stamp)
-	for _, ns := range []string{appNS, addonNS} {
+	for _, ns := range []string{appNS, stagingNS, addonNS} {
 		if _, err := client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, metav1.CreateOptions{}); err != nil {
 			t.Fatalf("create namespace %s: %v", ns, err)
 		}
@@ -62,15 +71,22 @@ func TestPostgresAddonE2E(t *testing.T) {
 
 	k8s := kube.New(client, appNS).WithAddonNamespace(addonNS)
 	prov := kube.NewPostgresProvisioner(client, addonNS)
+	db := fake.NewDatabase()
 	engine, err := cp.New(cp.Deps{
 		Kubernetes:          k8s,
-		Database:            fake.NewDatabase(),
+		Database:            db,
 		Clock:               fake.NewClock(time.Now()),
 		IDs:                 fake.NewIDs(),
 		Resolver:            fake.NewResolver(),
 		Credentials:         fake.NewCredentials(),
 		DNS:                 fake.NewDNSFactory(),
 		DatabaseProvisioner: prov,
+		// The app namespace is wired into the ENGINE as well as the adapter, exactly as burrowd
+		// wires it from BURROW_NAMESPACE (cmd/burrowd/main.go). The engine resolves an operation's
+		// environment to a namespace and acts through that view (ADR-0035 phase 2b), so an engine
+		// that did not know its own app namespace would route an app-scoped write — including the
+		// DATABASE_URL an attach writes — to the literal "default" namespace instead.
+		AppNamespace: appNS,
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)
@@ -80,7 +96,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 
 	// Install the Postgres instance and wait for it to become ready. confirm=true clears the
 	// addon.install guardrail (the fake DB's default policy holds it for confirmation).
-	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, true); err != nil {
+	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "", true); err != nil {
 		t.Fatalf("InstallAddon postgres: %v", err)
 	}
 	waitForCond(t, 180*time.Second, "postgres ready", func() (bool, error) {
@@ -93,29 +109,109 @@ func TestPostgresAddonE2E(t *testing.T) {
 	// connection at it; the app's DATABASE_URL still gets the in-cluster Service name, which the
 	// round-trip Job (a pod) resolves. A fresh forward per operation keeps the test robust against
 	// a single forward dropping mid-run.
-	pgSelector := "burrow.cloud/addon=postgres"
+	//
+	// With an instance per environment there can be more than one Postgres pod in the add-on
+	// namespace, so the forward must name the environment's own instance rather than "a postgres"
+	// (ADR-0067 §1). The instance carries the environment as a label.
+	pgSelector := "burrow.cloud/addon=postgres,burrow.cloud/environment=" + cp.DefaultEnvironment
 
 	// Attach the app: provisions the database/role and writes DATABASE_URL into the app's Secret.
 	var res cp.AttachResult
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "attach addon", func(localPort int) error {
 		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
 		var aerr error
-		res, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app)
+		res, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "")
 		return aerr
 	})
 	if res.SecretKey != "DATABASE_URL" {
 		t.Fatalf("attach SecretKey = %q, want DATABASE_URL", res.SecretKey)
+	}
+	// Assert the Secret landed in this environment's namespace BEFORE running a Job that mounts it.
+	// A Secret written to the wrong namespace does not fail the Job — the pod sits in
+	// CreateContainerConfigError and never starts, so the symptom is a three-minute timeout with
+	// nothing to read. Checking here turns that into an immediate, legible failure.
+	if _, err := client.CoreV1().Secrets(appNS).Get(ctx, cp.AppSecretName(app), metav1.GetOptions{}); err != nil {
+		t.Fatalf("attach did not write the app Secret into the environment's namespace %s: %v", appNS, err)
 	}
 
 	// Round-trip a row from inside the cluster using the app's DATABASE_URL (sourced from the
 	// per-app Secret), proving the credential and the database both work.
 	runRoundTripJob(t, ctx, client, appNS, app)
 
+	// ---- The same app name, in a second environment (ADR-0067 §1) ----
+	//
+	// Register `staging` against its own namespace and install ITS Postgres instance. This is the
+	// exact sequence that used to corrupt data: `env add staging`, then attach an app that already
+	// exists in the first environment. Provisioning is idempotent, so the second attach did not
+	// fail — it found the first environment's `shop` database, rotated the role password, and handed
+	// staging a DATABASE_URL pointing at the other environment's live rows.
+	if err := db.CreateEnvironment(ctx, "staging", stagingNS); err != nil {
+		t.Fatalf("CreateEnvironment(staging): %v", err)
+	}
+	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "staging", true); err != nil {
+		t.Fatalf("InstallAddon postgres (staging): %v", err)
+	}
+	stagingInstance, err := cp.AddonInstanceName(cp.AddonPostgres, "staging")
+	if err != nil {
+		t.Fatalf("AddonInstanceName(staging): %v", err)
+	}
+	if stagingInstance == "burrow-postgres" {
+		t.Fatalf("staging resolved to the default environment's instance %q", stagingInstance)
+	}
+	waitForCond(t, 180*time.Second, "staging postgres ready", func() (bool, error) {
+		return k8s.AddonReady(ctx, stagingInstance)
+	})
+
+	stagingSelector := "burrow.cloud/addon=postgres,burrow.cloud/environment=staging"
+	var stagingRes cp.AttachResult
+	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "attach addon (staging)", func(localPort int) error {
+		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
+		var aerr error
+		stagingRes, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging")
+		return aerr
+	})
+	if stagingRes.Environment != "staging" {
+		t.Errorf("staging attach reported environment %q, want staging", stagingRes.Environment)
+	}
+
+	// Staging's DATABASE_URL landed in STAGING's namespace, and it names staging's own instance.
+	// Reading the value here is test-only introspection of a Secret this test created; the engine
+	// never returns it.
+	stagingURL := secretValue(t, ctx, client, stagingNS, cp.AppSecretName(app), "DATABASE_URL")
+	defaultURL := secretValue(t, ctx, client, appNS, cp.AppSecretName(app), "DATABASE_URL")
+	if stagingURL == defaultURL {
+		t.Fatal("both environments were handed the same connection string — staging is pointed at the other environment's data (issue #339)")
+	}
+	if !strings.Contains(stagingURL, stagingInstance+".") {
+		t.Errorf("staging's DATABASE_URL does not name staging's instance %q", stagingInstance)
+	}
+
+	// Write a DIFFERENT row through staging's credential, then assert each environment's database
+	// holds exactly its own. Sharing one server would show up here as two rows, because both jobs
+	// insert into the same table name in a database with the same name.
+	runSQLJob(t, ctx, client, stagingNS, app, "roundtrip",
+		`psql "$DATABASE_URL" -c "CREATE TABLE IF NOT EXISTS t (id int);"
+psql "$DATABASE_URL" -c "INSERT INTO t VALUES (7);"
+test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t;")" = "1"
+psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 7`)
+	runSQLJob(t, ctx, client, appNS, app, "isolation",
+		`test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t;")" = "1"
+psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
+
+	// Detaching in staging drops staging's database only: the default environment's data survives,
+	// which is the destructive half of the same property.
+	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "detach addon (staging)", func(localPort int) error {
+		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
+		return engine.DetachAddon(ctx, cp.AddonPostgres, app, "staging", true)
+	})
+	runSQLJob(t, ctx, client, appNS, app, "survives",
+		`psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
+
 	// Detach: drops the database and role and removes the DATABASE_URL key (also an admin
 	// operation, so it runs through a fresh port-forward).
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "detach addon", func(localPort int) error {
 		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		return engine.DetachAddon(ctx, cp.AddonPostgres, app, true)
+		return engine.DetachAddon(ctx, cp.AddonPostgres, app, cp.DefaultEnvironment, true)
 	})
 	keys, err := k8s.SecretKeys(ctx, app)
 	if err != nil {
@@ -173,6 +269,9 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 		Credentials:         fake.NewCredentials(),
 		DNS:                 fake.NewDNSFactory(),
 		DatabaseProvisioner: prov,
+		// As in the attach e2e and in burrowd: the engine resolves an environment to a namespace
+		// and acts through that view, so it needs its own app namespace (ADR-0035 phase 2b).
+		AppNamespace: appNS,
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)
@@ -180,19 +279,21 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 
 	const app = "shop"
 
-	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, true); err != nil {
+	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "", true); err != nil {
 		t.Fatalf("InstallAddon postgres: %v", err)
 	}
 	waitForCond(t, 180*time.Second, "postgres ready", func() (bool, error) {
 		return k8s.AddonReady(ctx, "burrow-postgres")
 	})
 
-	pgSelector := "burrow.cloud/addon=postgres"
+	// One instance per environment, so the forward names this environment's own instance
+	// (ADR-0067 §1).
+	pgSelector := "burrow.cloud/addon=postgres,burrow.cloud/environment=" + cp.DefaultEnvironment
 
 	// Attach the app (an admin-SQL op, so it goes through a port-forward like the other e2e).
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "attach addon", func(localPort int) error {
 		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app)
+		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "")
 		return aerr
 	})
 
@@ -202,7 +303,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 psql "$DATABASE_URL" -c "INSERT INTO t VALUES (7);"`)
 
 	// Back up: burrowd creates an in-cluster pg_dump Job — NO port-forward needed.
-	res, err := engine.BackupAddon(ctx, cp.AddonPostgres, app)
+	res, err := engine.BackupAddon(ctx, cp.AddonPostgres, app, "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
@@ -216,13 +317,30 @@ psql "$DATABASE_URL" -c "INSERT INTO t VALUES (7);"`)
 test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t WHERE id = 7;")" = "0"`)
 
 	// Restore: burrowd creates an in-cluster pg_restore Job — again NO port-forward.
-	if err := engine.RestoreAddon(ctx, cp.AddonPostgres, app, res.Backup.ID, true); err != nil {
+	if err := engine.RestoreAddon(ctx, cp.AddonPostgres, app, res.Backup.ID, "", true); err != nil {
 		t.Fatalf("RestoreAddon: %v", err)
 	}
 
 	// Assert the row is back, in-cluster.
 	runSQLJob(t, ctx, client, appNS, app, "assert",
 		`psql "$DATABASE_URL" -tAc "SELECT id FROM t WHERE id = 7;" | grep -q 7`)
+}
+
+// secretValue reads one key out of a Secret in a named namespace — test-only introspection, so the
+// test can assert that two environments were handed DIFFERENT connection strings (ADR-0067 §1). The
+// value is compared and never printed: an assertion message that dumped it would put a live
+// credential in the CI log, which is the thing ADR-0031 keeps out of every other surface.
+func secretValue(t *testing.T, ctx context.Context, client kubernetes.Interface, ns, name, key string) string {
+	t.Helper()
+	sec, err := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read secret %s/%s: %v", ns, name, err)
+	}
+	v, ok := sec.Data[key]
+	if !ok {
+		t.Fatalf("secret %s/%s has no %q key", ns, name, key)
+	}
+	return string(v)
 }
 
 // runSQLJob runs a one-shot psql Job in the app namespace that reads DATABASE_URL from the app's

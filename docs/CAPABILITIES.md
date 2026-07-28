@@ -12,8 +12,9 @@ on. Two real examples, both of which have produced the wrong conclusion:
   `controlplane/kube/adapter.go` — the app Deployment carries no `imagePullSecrets` and no
   `serviceAccountName` — so reading the deploy path suggests private images are unsupported.
   They are supported.
-- **A database.** `burrow addon install postgres` stands up a shared instance with a database
-  and a role per app ([ADR-0031](adr/0031-postgres-addon.md)) and `pg_dump`/`pg_restore`
+- **A database.** `burrow addon install postgres` stands up an instance for one environment,
+  with a database and a role per app ([ADR-0031](adr/0031-postgres-addon.md),
+  [ADR-0067](adr/0067-one-database-instance-per-environment.md) §1) and `pg_dump`/`pg_restore`
   backups ([ADR-0032](adr/0032-postgres-backups.md)). Nothing in the deploy path mentions a
   database; the connection string arrives through the app's Secret at attach time.
 
@@ -249,7 +250,8 @@ ReadWriteOnce PVC when they need storage. **There are exactly four.**
 | `postgres` | `postgres:17-alpine` | 5432 | 10Gi PVC | an always-on `quay.io/prometheuscommunity/postgres-exporter:v0.20.1` sidecar on port 9187 |
 
 `burrow addon install <type>` takes **no tuning flags** — no `--size`, no `--storage-class`,
-no `--retention`, no version override. Sizes, images, and retention are compile-time
+no `--retention`, no version override. (`--env` selects which environment the instance serves, not
+how it is built.) Sizes, images, and retention are compile-time
 constants, and no PVC sets a `storageClassName`, so every volume lands on the cluster default
 StorageClass. `burrow addon remove <type>` deletes the Deployment, Service, and collectors and
 **keeps the data PVC**: reinstalling the add-on lands on the same claim and picks the data back
@@ -303,32 +305,35 @@ Two accepted decisions change the `postgres` row above and **neither is built.**
 [ADR-0066](adr/0066-postgres-on-cloudnativepg.md) replaces the mechanism with a CloudNativePG
 `Cluster` custom resource, handing WAL archiving, scheduled backups, retention and point-in-time
 recovery to the operator; the add-on is still the single-replica `postgres:17-alpine` Deployment
-in the table. [ADR-0067](adr/0067-one-database-instance-per-environment.md) §1 makes the instance
-one **per environment**; there is still exactly one for the whole cluster, which is the subject of
-the hazard below.
+in the table. [ADR-0067](adr/0067-one-database-instance-per-environment.md) §1 — one instance
+**per environment** — is built; §2–§3, the first environment being a registered one named `prod`,
+is not ([#340](https://github.com/burrow-cloud/burrow/issues/340)).
 
 | Capability | Command | What it does |
 | --- | --- | --- |
-| Install | `burrow addon install <type>` | As above. `metrics` additionally needs RBAC the CLI stages client-side first. |
+| Install | `burrow addon install <type> [--env]` | As above, for one environment — each gets its own instance (ADR-0067 §1). `metrics` additionally needs RBAC the CLI stages client-side first. |
 | List | `burrow addon list` / `burrow-agent addons` | Type, mode (`installed`/`connected`), backend, endpoint, capabilities. This is how an app is pointed at `cache` — read the endpoint and set it as config. `burrow addon list` additionally reports the volumes an earlier removal kept, in their own section (`retained_volumes` in `--json`). |
-| Attach an app | `burrow addon attach postgres <app>` | **Postgres only.** Creates role `app_<app>` and database `<app>` owned by it, revokes `CONNECT` from `PUBLIC`, grants it to the role, and writes the generated `DATABASE_URL` into the app's per-app Secret, then restarts the workload. Re-attaching rotates the password. The URL is never returned, logged, or audited. |
-| Detach | `burrow addon detach postgres <app>` | Removes `DATABASE_URL`, then `DROP DATABASE … WITH (FORCE)` and `DROP ROLE`. Destructive; confirm-gated. |
+| Attach an app | `burrow addon attach postgres <app> [--env]` | **Postgres only.** On the named environment's instance, creates role `app_<app>` and database `<app>` owned by it, revokes `CONNECT` from `PUBLIC`, grants it to the role, and writes the generated `DATABASE_URL` into the app's Secret in that environment's namespace, then restarts the workload there. Re-attaching rotates the password. The URL is never returned, logged, or audited. |
+| Detach | `burrow addon detach postgres <app> [--env]` | Removes `DATABASE_URL`, then `DROP DATABASE … WITH (FORCE)` and `DROP ROLE` **on that environment's instance**. Destructive; confirm-gated. |
 | Remove | `burrow addon remove <name> [--delete-data]` | Tears the add-on's workload down and **keeps its data volume** unless `--delete-data` is passed. Confirm-gated by `addon.remove`; the held message names the volume and, for `postgres`, the attached apps by name. `--delete-data` additionally requires the add-on's name typed back on a terminal, and refuses off one without `--acknowledge-data-loss`. **Operator CLI only** — absent from `burrow-agent` entirely (ADR-0065 §2). |
 | Connect an existing backend | `burrow addon connect <loki\|prometheus> --endpoint <url> [--auth]` | Registers a backend you already run — **deploys nothing**. Only `loki` (logs) and `prometheus` (metrics) are connectable. Operator CLI only. |
 | Query logs | `burrow addon logs [query] [--limit]` / `burrow-agent logs-query` | LogsQL against VictoriaLogs, or LogQL against Loki. Limit clamps to 200 when out of range or unset, capped at 1000. |
 | Query metrics | `burrow addon metrics <query>` / `burrow-agent metrics-query` | PromQL **instant** query against VictoriaMetrics or Prometheus. |
 
-**`attach` knows nothing about environments, and that is a live hazard, not a limitation.**
-`EnsureAppDatabase(ctx, app)` takes no environment and there is one instance for the whole
-cluster, so an app named `web` in a second environment resolves to the **same database owned by
-the same role** as `web` in the first. Provisioning is idempotent, so the second attach does not
-fail: it rotates the role's password and writes a `DATABASE_URL` pointing at the other
-environment's live data. Nothing errors and nothing warns, and both apps look correctly
-configured from every angle Burrow can show. It is inert today only because nothing has used a
-second environment yet — `burrow env add staging` and an attach are enough to trigger it.
-[ADR-0067](adr/0067-one-database-instance-per-environment.md) decides the fix (an instance per
-environment, with the environment threaded through the seam) and is **not built**. Until it is,
-do not attach the same app name to Postgres in two environments.
+**Add-on instances are per environment, and every add-on operation names one.**
+`burrow addon install postgres --env staging` stands up a second instance (`burrow-postgres-staging`)
+beside the default environment's `burrow-postgres`, with its own volume and its own superuser
+credential; attach, detach, backup and restore all act on the named environment's instance
+([ADR-0067](adr/0067-one-database-instance-per-environment.md) §1). Databases keep their simple
+names, so `web` in staging and `web` in production are two databases on two servers — the isolation
+is the instance, not a naming convention. An operation that names no environment while more than one
+is registered is refused rather than defaulted (ADR-0047 §1), and the provisioning seam takes the
+environment non-optionally: there is no value meaning "whichever instance is there".
+
+An install predating this keeps everything it had: the default environment resolves to
+`burrow-postgres`, the same pod, volume, and password, so nothing migrates. Sharing one instance
+across environments is not supported and cannot be expressed (ADR-0067 §5); a user who wants one
+server runs one environment.
 
 The Postgres exporter is always on and reports connection and transaction health plus
 `pg_stat_statements` slow-query stats, and the metrics scraper discovers the add-on namespace,
@@ -424,14 +429,15 @@ environment in burrowd is not reachable from either CLI. ADR-0047 also specifies
 forcing function on the *local handle* axis; that half is **not built** (it was specified for
 the MCP layer, since removed). Per-environment guardrails are real but partial — see below.
 
-Two further things about a second environment, both decided and both **not built**.
+One further thing about a second environment is decided and **not built**.
 [ADR-0067](adr/0067-one-database-instance-per-environment.md) §2–§3 replaces the synthesized
 `default` with one *registered* environment named `prod`, created at install and mapped to the
 existing app namespace; today `DefaultEnvironment` is still the literal `"default"`, it is
-synthesized rather than stored, and `cluster install` registers no environment at all. And
-adding a second environment today walks into the Postgres attach collision described under
-[Add-ons](#add-ons): stateful add-ons are not per-environment, so two environments' apps of the
-same name silently share one database.
+synthesized rather than stored, and `cluster install` registers no environment at all
+([#340](https://github.com/burrow-cloud/burrow/issues/340)). The Postgres collision that used to
+come with a second environment is closed: stateful add-ons are per-environment, so two
+environments' apps of the same name have separate databases on separate instances (§1, under
+[Add-ons](#add-ons)).
 
 ---
 
@@ -556,8 +562,9 @@ What qualifies a verb for this surface is
 reaches beyond the app the agent was asked about (**scope** — disqualifying outright, so the verb
 is not compiled in) or a human cannot restore the prior state afterwards (**reversibility** — the
 operator decides, so it ships as a guardrail denied by default). `addon remove` is the scope case:
-add-ons are one instance per type per cluster and every app's database sits on the one shared
-`postgres`, so it removes *the* add-on and takes every attached app with it. The surface-guard test
+add-ons are one instance per type per environment and every app in an environment has its database
+on that environment's `postgres`, so it removes *the* add-on for an environment and takes every
+attached app in it with it. The surface-guard test
 asserts its absence rather than leaving it to be a property of the current command tree.
 
 The reversibility tier ships too: `app.delete` and `dns.delete` are `deny` by default, so
@@ -686,7 +693,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | A final backup before `--delete-data` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5 | Not built — it waits on an object-storage provider ([ADR-0063](adr/0063-object-storage-provider.md)); until then the retained backup claim is the only copy. The rest of ADR-0064 is built: removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and carries §2's typed confirmation, the backup claim always survives, and `addon list` reports retained volumes (§6). [#334](https://github.com/burrow-cloud/burrow/issues/334) |
 | `guard` reporting the capabilities absent from the agent binary | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §7 | Not built — tiers 1 and 2 are (`addon remove` is not compiled into `burrow-agent`; `app.delete` and `dns.delete` are denied by default), but `guard` still reports only guardrail dispositions. [#337](https://github.com/burrow-cloud/burrow/issues/337) |
 | The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
-| One database instance per environment, and an install that creates one environment named `prod` | [0067](adr/0067-one-database-instance-per-environment.md) | Not built, **and the gap is a live data hazard** — the same app name in two environments silently shares one database, because provisioning takes no environment and is idempotent. [#339](https://github.com/burrow-cloud/burrow/issues/339), [#340](https://github.com/burrow-cloud/burrow/issues/340) |
+| An install that creates one environment named `prod`, mapped to the existing app namespace | [0067](adr/0067-one-database-instance-per-environment.md) §2–§3 | **Partial** — §1 is built (one add-on instance per environment; the provisioning seam takes the environment non-optionally), so the shared-database hazard is closed. The first environment is still the synthesized `default`. [#340](https://github.com/burrow-cloud/burrow/issues/340) |
 
 The rows above are summaries. Per-ADR implementation tracking — the code as it stands, the sections
 each issue covers, and an acceptance checklist — lives in the issues labelled

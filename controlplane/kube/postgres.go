@@ -57,13 +57,20 @@ func quoteLiteral(s string) string {
 	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
 }
 
-// PostgresProvisioner is the production controlplane.DatabaseProvisioner: it connects to the
-// installed Postgres add-on as the burrow_admin superuser and gives each app its own database and
-// login role (ADR-0031). It reads the superuser password from the burrow-postgres Secret in the
-// add-on namespace through a Kubernetes client (a pod can only mount a Secret in its own namespace,
-// so the password lives there), and reaches the instance in-cluster at
-// burrow-postgres.<addon-ns>.svc:5432. It holds no long-lived database handle — it opens a
-// short-lived connection per operation so a rotated superuser password is always picked up.
+// PostgresProvisioner is the production controlplane.DatabaseProvisioner: it connects to an
+// environment's Postgres add-on instance as the burrow_admin superuser and gives each app its own
+// database and login role (ADR-0031). It reads that instance's superuser password from the Secret of
+// the same name in the add-on namespace through a Kubernetes client (a pod can only mount a Secret
+// in its own namespace, so the password lives there), and reaches the instance in-cluster at
+// <instance>.<addon-ns>.svc:5432. It holds no long-lived database handle — it opens a short-lived
+// connection per operation so a rotated superuser password is always picked up.
+//
+// EVERY OPERATION IS SCOPED TO AN ENVIRONMENT (ADR-0067 §1). The provisioner has no notion of "the"
+// instance: the environment argument selects the host and the credential together, so a call cannot
+// reach an instance other than the named environment's, and a call that names no environment reaches
+// none at all. That is what makes the issue #339 collision unrepresentable rather than merely
+// avoided — `web` in staging and `web` in production are databases with the same name on different
+// servers, and no code path can resolve one to the other.
 type PostgresProvisioner struct {
 	client         kubernetes.Interface
 	addonNamespace string
@@ -99,66 +106,90 @@ func NewPostgresProvisionerFromConfig(cfg *rest.Config, addonNamespace string) (
 	return NewPostgresProvisioner(client, addonNamespace), nil
 }
 
-// instanceHost is the in-cluster host the add-on Postgres instance is reached at. This is what
-// goes into every app's DATABASE_URL — apps are pods and resolve it through cluster DNS.
-func (p *PostgresProvisioner) instanceHost() string {
-	return fmt.Sprintf("%s.%s.svc", PostgresSecretName, p.addonNamespace)
-}
-
-// adminHostPort is the host:port the provisioner DIALS to run admin SQL: the test override if set,
-// otherwise the in-cluster Service address. Distinct from instanceHost so the override never leaks
-// into an app's DATABASE_URL.
-func (p *PostgresProvisioner) adminHostPort() string {
-	if p.adminEndpoint != "" {
-		return p.adminEndpoint
+// instanceHost is the in-cluster host environment env's Postgres instance is reached at. This is
+// what goes into that environment's apps' DATABASE_URLs — apps are pods and resolve it through
+// cluster DNS. The environment is resolved to an instance by AddonInstanceName, the single
+// derivation shared with the installer and the registry (ADR-0067 §1), so the URL an app is handed
+// names the server its own environment runs.
+func (p *PostgresProvisioner) instanceHost(env string) (string, error) {
+	instance, err := postgresSecretName(env)
+	if err != nil {
+		return "", err
 	}
-	return p.instanceHost() + ":5432"
+	return fmt.Sprintf("%s.%s.svc", instance, p.addonNamespace), nil
 }
 
-// superuserPassword reads the generated superuser password from the burrow-postgres Secret. The
-// value is used only to open the admin connection; it is never logged or returned.
-func (p *PostgresProvisioner) superuserPassword(ctx context.Context) (string, error) {
-	s, err := p.client.CoreV1().Secrets(p.addonNamespace).Get(ctx, PostgresSecretName, metav1.GetOptions{})
+// adminHostPort is the host:port the provisioner DIALS to run admin SQL for env: the test override
+// if set, otherwise the in-cluster Service address. Distinct from instanceHost so the override never
+// leaks into an app's DATABASE_URL.
+func (p *PostgresProvisioner) adminHostPort(env string) (string, error) {
+	if p.adminEndpoint != "" {
+		return p.adminEndpoint, nil
+	}
+	host, err := p.instanceHost(env)
+	if err != nil {
+		return "", err
+	}
+	return host + ":5432", nil
+}
+
+// superuserPassword reads the generated superuser password from environment env's instance Secret.
+// Each instance has its own credential (ADR-0067 §1), so reading it is also how a wrong environment
+// fails closed: an environment with no instance installed has no Secret, and the operation stops
+// with ErrNotFound before any connection is opened. The value is used only to open the admin
+// connection; it is never logged or returned.
+func (p *PostgresProvisioner) superuserPassword(ctx context.Context, env string) (string, error) {
+	name, err := postgresSecretName(env)
+	if err != nil {
+		return "", err
+	}
+	s, err := p.client.CoreV1().Secrets(p.addonNamespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return "", fmt.Errorf("kube: postgres superuser secret %s/%s not found — is the postgres add-on installed?: %w", p.addonNamespace, PostgresSecretName, controlplane.ErrNotFound)
+		return "", fmt.Errorf("kube: postgres superuser secret %s/%s not found — is the postgres add-on installed in environment %q?: %w", p.addonNamespace, name, env, controlplane.ErrNotFound)
 	}
 	if err != nil {
-		return "", fmt.Errorf("kube: reading postgres superuser secret %s/%s: %w", p.addonNamespace, PostgresSecretName, err)
+		return "", fmt.Errorf("kube: reading postgres superuser secret %s/%s: %w", p.addonNamespace, name, err)
 	}
 	pw, ok := s.Data[PostgresPasswordKey]
 	if !ok {
-		return "", fmt.Errorf("kube: postgres superuser secret %s/%s has no %q key: %w", p.addonNamespace, PostgresSecretName, PostgresPasswordKey, controlplane.ErrNotFound)
+		return "", fmt.Errorf("kube: postgres superuser secret %s/%s has no %q key: %w", p.addonNamespace, name, PostgresPasswordKey, controlplane.ErrNotFound)
 	}
 	return string(pw), nil
 }
 
-// adminDSN composes the superuser connection string for the named maintenance database. The
-// password is URL-encoded into the userinfo; this string is never logged or returned.
-func (p *PostgresProvisioner) adminDSN(password, database string) string {
+// adminDSN composes the superuser connection string for the named maintenance database on env's
+// instance. The password is URL-encoded into the userinfo; this string is never logged or returned.
+func (p *PostgresProvisioner) adminDSN(password, database, hostPort string) string {
 	u := &url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(PostgresSuperuser, password),
-		Host:     p.adminHostPort(),
+		Host:     hostPort,
 		Path:     "/" + database,
 		RawQuery: "sslmode=disable",
 	}
 	return u.String()
 }
 
-// connectAdmin opens a short-lived superuser connection to the named maintenance database.
-func (p *PostgresProvisioner) connectAdmin(ctx context.Context, database string) (*sql.DB, error) {
-	pw, err := p.superuserPassword(ctx)
+// connectAdmin opens a short-lived superuser connection to the named maintenance database on
+// environment env's instance. Host and credential are resolved from env together, so there is no
+// state on the provisioner that could point one operation at a different server than another.
+func (p *PostgresProvisioner) connectAdmin(ctx context.Context, env, database string) (*sql.DB, error) {
+	hostPort, err := p.adminHostPort(env)
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("pgx", p.adminDSN(pw, database))
+	pw, err := p.superuserPassword(ctx, env)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("pgx", p.adminDSN(pw, database, hostPort))
 	if err != nil {
 		// sql.Open does not carry the DSN into the error, but be explicit: name no value.
-		return nil, fmt.Errorf("kube: opening admin connection to %s: %w", p.instanceHost(), err)
+		return nil, fmt.Errorf("kube: opening admin connection for environment %q: %w", env, err)
 	}
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("kube: connecting to %s: %w", p.instanceHost(), err)
+		return nil, fmt.Errorf("kube: connecting to the %q environment's postgres instance: %w", env, err)
 	}
 	return db, nil
 }
@@ -166,15 +197,28 @@ func (p *PostgresProvisioner) connectAdmin(ctx context.Context, database string)
 // roleName is the login role for app: app_<app>. app is already validated.
 func roleName(app string) string { return "app_" + app }
 
-// EnsureAppDatabase provisions (idempotently) an isolated database and login role for app and
-// returns its DATABASE_URL with a freshly generated password (ADR-0031). It validates app against
-// the strict identifier pattern and quotes every identifier BEFORE any SQL runs. On a fresh attach
-// it CREATEs the role and database and locks the database down to that role; on a re-attach (role
-// or database already present) it ALTERs the role's password to rotate, so the returned URL is
-// always current. The returned connection string is a SECRET value — the caller writes it straight
-// into the app's Secret and never logs, audits, or returns it.
-func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app string) (string, error) {
+// EnsureAppDatabase provisions (idempotently) an isolated database and login role for app on
+// environment env's instance and returns its DATABASE_URL with a freshly generated password
+// (ADR-0031). It validates env and app against the strict identifier patterns and quotes every
+// identifier BEFORE any SQL runs. On a fresh attach it CREATEs the role and database and locks the
+// database down to that role; on a re-attach (role or database already present) it ALTERs the role's
+// password to rotate, so the returned URL is always current. The returned connection string is a
+// SECRET value — the caller writes it straight into the app's Secret and never logs, audits, or
+// returns it.
+//
+// Idempotence is what made the missing environment dangerous rather than merely wrong (issue #339):
+// finding an existing database is the NORMAL case of a re-attach, so a second environment's attach
+// did not fail — it adopted the first environment's database and rotated its password. With the
+// environment selecting the instance, the only database this can find is one on that environment's
+// own server, and adopting it is again exactly what a re-attach should do.
+func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env string) (string, error) {
 	if err := validateAppIdentifier(app); err != nil {
+		return "", err
+	}
+	// The environment is resolved to an instance BEFORE any connection or SQL: an empty or malformed
+	// environment is ErrInvalid here, never a silent fallback to whichever instance exists.
+	instance, err := postgresSecretName(env)
+	if err != nil {
 		return "", err
 	}
 	role := roleName(app)
@@ -183,7 +227,7 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app string)
 		return "", err
 	}
 
-	db, err := p.connectAdmin(ctx, "postgres")
+	db, err := p.connectAdmin(ctx, env, "postgres")
 	if err != nil {
 		return "", err
 	}
@@ -232,15 +276,16 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app string)
 	appURL := &url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(role, password),
-		Host:     p.instanceHost() + ":5432",
+		Host:     fmt.Sprintf("%s.%s.svc:5432", instance, p.addonNamespace),
 		Path:     "/" + app,
 		RawQuery: "sslmode=disable",
 	}
 	return appURL.String(), nil
 }
 
-// ListAppDatabases returns the apps that hold a Burrow-provisioned database on the shared instance,
-// sorted (ADR-0031). It asks the instance itself rather than any registry, because the instance is
+// ListAppDatabases returns the apps that hold a Burrow-provisioned database on environment env's
+// instance, sorted (ADR-0031). It asks the instance itself rather than any registry, because the
+// instance is
 // the only place that knows: attach records the FACT of attachment nowhere but the app's own Secret
 // and the databases on this server, and it is these databases — not a row somewhere — that a
 // data-deleting add-on removal destroys.
@@ -249,8 +294,8 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app string)
 // login roles attach creates is a provisioned app database, and its name is the app's name. That
 // excludes the maintenance databases (postgres, template0/template1, all owned by the superuser) and
 // anything a human created by hand as the superuser, without needing a naming convention to hold.
-func (p *PostgresProvisioner) ListAppDatabases(ctx context.Context) ([]string, error) {
-	db, err := p.connectAdmin(ctx, "postgres")
+func (p *PostgresProvisioner) ListAppDatabases(ctx context.Context, env string) ([]string, error) {
+	db, err := p.connectAdmin(ctx, env, "postgres")
 	if err != nil {
 		return nil, err
 	}
@@ -283,17 +328,22 @@ ORDER BY d.datname`
 	return apps, nil
 }
 
-// DropAppDatabase drops app's database and login role from the shared instance (ADR-0031). It
-// validates app and quotes identifiers before any SQL. Dropping an already-absent database or role
-// is a no-op (IF EXISTS), not an error. The database is dropped WITH (FORCE) so live sessions do
-// not block teardown.
-func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app string) error {
+// DropAppDatabase drops app's database and login role from environment env's instance (ADR-0031).
+// It validates env and app and quotes identifiers before any SQL. Dropping an already-absent
+// database or role is a no-op (IF EXISTS), not an error. The database is dropped WITH (FORCE) so
+// live sessions do not block teardown. The environment is required and unvalidated values are
+// refused before the connection is opened: this is the destructive half of the pair, so reaching
+// another environment's server here would drop a database that is still in use (ADR-0067 §1).
+func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app, env string) error {
 	if err := validateAppIdentifier(app); err != nil {
+		return err
+	}
+	if _, err := postgresSecretName(env); err != nil {
 		return err
 	}
 	role := roleName(app)
 
-	db, err := p.connectAdmin(ctx, "postgres")
+	db, err := p.connectAdmin(ctx, env, "postgres")
 	if err != nil {
 		return err
 	}

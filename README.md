@@ -69,7 +69,7 @@ Building something new, or adding a capability? Ask your agent to stand up a bac
 - `Set up logging so I can see what my app is doing`
 - `Add a cache to speed up my site`
 
-Available today: **Postgres** (a cluster-shared database), **logs** (VictoriaLogs), **metrics** (VictoriaMetrics), and **cache** (ValKey).
+Available today: **Postgres** (one instance per environment, a database per app), **logs** (VictoriaLogs), **metrics** (VictoriaMetrics), and **cache** (ValKey).
 
 Postgres always exports its own metrics, so once you install the metrics addon your database is scraped automatically (connection and transaction health plus `pg_stat_statements` slow-query stats) — install the two in either order. Now when a page feels slow the agent can rule the database in or out instead of guessing.
 

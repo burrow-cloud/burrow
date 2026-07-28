@@ -157,7 +157,11 @@ jobs:
             exit 1
           fi
           go test ./controlplane/kube/ -run TestIntegration -v -timeout 280s
-          go test ./controlplane/e2e/ -v -timeout 300s
+          # The Postgres e2e now stands up TWO instances — one per environment (ADR-0067 §1) — and
+          # round-trips a row through each to prove two environments' apps of the same name do not
+          # share a database. Two Postgres pods, two attaches and several psql Jobs do not fit the
+          # previous budget, so the package gets a wider one; it is a ceiling, not a target.
+          go test ./controlplane/e2e/ -v -timeout 600s
           go test ./connect/ -run TestProxyForwardsCustomHeader -v -timeout 300s
       - name: capstone e2e (install + deploy through the CLI)
         run: bash test/e2e/install-and-deploy.sh

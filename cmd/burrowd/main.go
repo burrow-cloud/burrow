@@ -183,7 +183,8 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 
 	// The Postgres add-on provisioner connects to the installed instance as the superuser to give
 	// each app its own database and role (ADR-0031). It reads the superuser password from the
-	// burrow-postgres Secret in the add-on namespace, so it is scoped there.
+	// per-instance superuser Secret in the add-on namespace, so it is scoped there; which instance a
+	// call reaches is decided per operation by the environment it names (ADR-0067 §1).
 	dbProvisioner, err := kube.NewPostgresProvisionerFromConfig(kubeCfg, os.Getenv("BURROW_ADDON_NAMESPACE"))
 	if err != nil {
 		return err

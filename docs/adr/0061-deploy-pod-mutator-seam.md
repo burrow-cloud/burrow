@@ -20,15 +20,15 @@ Burrow already solved exactly this for **builds**: `WithBuildPodMutator` (ADR-00
 embeds the engine adjust the build pod before it is created. This adds the matching adjustment point
 for **deploys**.
 
-Realizes the extension model of [ADR-0045](0045-the-oss-enterprise-boundary-and-its-seams.md); mirrors
-[ADR-0053](0053-in-cluster-builds.md) §6 on the deploy path. Supersedes nothing.
+Realizes the extension model of [ADR-0045](0045-oss-enterprise-boundary.md); mirrors
+[ADR-0053](0053-in-cluster-build-from-source.md) §6 on the deploy path. Supersedes nothing.
 
 ## Context
 
-[ADR-0045](0045-the-oss-enterprise-boundary-and-its-seams.md) establishes that this repo is a
+[ADR-0045](0045-oss-enterprise-boundary.md) establishes that this repo is a
 control-plane **engine** — something other software embeds and configures, not only a binary run
 as-is. Extension happens through documented seams rather than by forking.
-[ADR-0053](0053-in-cluster-builds.md) §6 put that into practice for the build executor, and
+[ADR-0053](0053-in-cluster-build-from-source.md) §6 put that into practice for the build executor, and
 `BuildAdapter.WithBuildPodMutator` is the concrete hook: the build Job's pod spec can be adjusted
 after it is constructed and before it is created.
 

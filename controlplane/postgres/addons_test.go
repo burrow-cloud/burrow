@@ -53,13 +53,14 @@ func TestStoreAddonsRoundTripAndUpsert(t *testing.T) {
 	// A second environment's instance of the SAME type is a SEPARATE row: the registry is keyed by
 	// instance name, and the instance name is derived from the environment (ADR-0067 §1), so the two
 	// coexist rather than one upserting over the other.
-	stagingName, err := cp.AddonInstanceName(cp.AddonLogs, "staging-"+t.Name())
+	stagingEnv := envLabel(t, "staging")
+	stagingName, err := cp.AddonInstanceName(cp.AddonLogs, stagingEnv)
 	if err != nil {
 		t.Fatalf("AddonInstanceName: %v", err)
 	}
 	staging := a
 	staging.Name = stagingName
-	staging.Environment = "staging-" + t.Name()
+	staging.Environment = stagingEnv
 	if err := s.SaveAddon(ctx, staging); err != nil {
 		t.Fatalf("SaveAddon staging: %v", err)
 	}

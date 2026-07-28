@@ -298,9 +298,8 @@ acceptance checklist. The theme and its sequencing stay here; the granularity is
   scoped to that job and no further.
   [#331](https://github.com/burrow-cloud/burrow/issues/331).
 - **Removing an add-on keeps its data** ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md)) — most
-  of the record is built; the typed confirmation for `--delete-data`, the final backup before it, and
-  retained volumes in the add-on listing are not.
-  [#333](https://github.com/burrow-cloud/burrow/issues/333),
+  of the record is built, including `--delete-data`'s typed confirmation; the final backup before it
+  and retained volumes in the add-on listing are not.
   [#334](https://github.com/burrow-cloud/burrow/issues/334) (blocked by #331),
   [#335](https://github.com/burrow-cloud/burrow/issues/335).
 - **What belongs on the agent surface** ([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md)) —

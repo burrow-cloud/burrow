@@ -258,6 +258,19 @@ reconnect on their existing `DATABASE_URL`. Destroying the volume is the separat
 `--delete-data`. The removal output names the volume it kept and how to reclaim it; the
 confirmation the `addon.remove` guardrail holds names the affected apps.
 
+**`--delete-data` has a second gate the guardrail does not provide.** On a terminal it prints a
+warning naming the data volume, its namespace, the attached apps whose databases are in it, and
+the backup volume that survives — then requires the add-on's name to be **typed back** before
+anything is removed; anything else typed, an empty line, or EOF aborts and nothing is deleted.
+With no terminal to type into it **refuses** rather than proceeding, unless
+`--acknowledge-data-loss` is passed, so a script that destroys databases had to say so in the
+script. `--confirm` satisfies the `addon.remove` guardrail and is deliberately not that
+acknowledgement. The enumeration behind the notice is best-effort: a control plane that will not
+answer degrades it to the volume-concrete message rather than making a wedged add-on unremovable.
+The prompt is a legibility device for humans, **not a security control** — what keeps an agent
+away from this is that the whole verb is absent from `burrow-agent`
+([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §2).
+
 **Removal is operator CLI only** — the whole verb, not just `--delete-data`, is absent from
 `burrow-agent` like `detach` and `restore`. Because there is one add-on instance per type per
 cluster and every app's database lives on the one shared `postgres`, removing it is removing
@@ -285,7 +298,7 @@ the hazard below.
 | List | `burrow addon list` / `burrow-agent addons` | Type, mode (`installed`/`connected`), backend, endpoint, capabilities. This is how an app is pointed at `cache` — read the endpoint and set it as config. |
 | Attach an app | `burrow addon attach postgres <app>` | **Postgres only.** Creates role `app_<app>` and database `<app>` owned by it, revokes `CONNECT` from `PUBLIC`, grants it to the role, and writes the generated `DATABASE_URL` into the app's per-app Secret, then restarts the workload. Re-attaching rotates the password. The URL is never returned, logged, or audited. |
 | Detach | `burrow addon detach postgres <app>` | Removes `DATABASE_URL`, then `DROP DATABASE … WITH (FORCE)` and `DROP ROLE`. Destructive; confirm-gated. |
-| Remove | `burrow addon remove <name> [--delete-data]` | Tears the add-on's workload down and **keeps its data volume** unless `--delete-data` is passed. Confirm-gated by `addon.remove`; the held message names the volume and, for `postgres`, the attached apps by name. **Operator CLI only** — absent from `burrow-agent` entirely (ADR-0065 §2). |
+| Remove | `burrow addon remove <name> [--delete-data]` | Tears the add-on's workload down and **keeps its data volume** unless `--delete-data` is passed. Confirm-gated by `addon.remove`; the held message names the volume and, for `postgres`, the attached apps by name. `--delete-data` additionally requires the add-on's name typed back on a terminal, and refuses off one without `--acknowledge-data-loss`. **Operator CLI only** — absent from `burrow-agent` entirely (ADR-0065 §2). |
 | Connect an existing backend | `burrow addon connect <loki\|prometheus> --endpoint <url> [--auth]` | Registers a backend you already run — **deploys nothing**. Only `loki` (logs) and `prometheus` (metrics) are connectable. Operator CLI only. |
 | Query logs | `burrow addon logs [query] [--limit]` / `burrow-agent logs-query` | LogsQL against VictoriaLogs, or LogQL against Loki. Limit clamps to 200 when out of range or unset, capped at 1000. |
 | Query metrics | `burrow addon metrics <query>` / `burrow-agent metrics-query` | PromQL **instant** query against VictoriaMetrics or Prometheus. |
@@ -348,14 +361,12 @@ The limits are as important as the capability:
   came from is the point of taking them, and it is what makes destroying the data survivable.
   Their records stay listed, and the removal output names the volume so the storage is not a
   surprise. Reclaiming it is a manual `kubectl delete pvc`.
-- **`--delete-data` takes no backup first, and its only gate is the `addon.remove` guardrail.**
-  It destroys the data volume immediately; the only copy that survives is whatever the retained
-  backup PVC already held. [ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §5 decides that,
-  where an object-storage provider is configured, a final backup is taken **before** anything is
-  deleted and a failed one aborts the removal — **not built**, and neither is the destination it
-  needs (ADR-0063, above). §2's typed confirmation is not built either: `--delete-data --confirm`
-  proceeds without typing the add-on's name, and off a terminal it proceeds rather than refusing,
-  because the command does no terminal detection.
+- **`--delete-data` takes no backup first.** It destroys the data volume immediately once the
+  `addon.remove` guardrail and §2's typed confirmation are both satisfied; the only copy that
+  survives is whatever the retained backup PVC already held.
+  [ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §5 decides that, where an object-storage
+  provider is configured, a final backup is taken **before** anything is deleted and a failed one
+  aborts the removal — **not built**, and neither is the destination it needs (ADR-0063, above).
 - A failed backup or restore Job is left in place for diagnosis rather than reaped.
 
 Scheduled backups with retention are decided as a follow-on in ADR-0032 and are **not built**.
@@ -657,7 +668,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
 | Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Not built — dumps land on an in-cluster PVC. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
-| The typed confirmation for `--delete-data`, a final backup before it, and retained volumes reported by `addon list` | [0064](adr/0064-addon-removal-keeps-its-data.md) §2 (in part), §5, §6 | **Partial** — removal already keeps the data PVC and names it, `--delete-data` is operator-CLI-only, and the backup claim always survives. [#333](https://github.com/burrow-cloud/burrow/issues/333), [#334](https://github.com/burrow-cloud/burrow/issues/334), [#335](https://github.com/burrow-cloud/burrow/issues/335) |
+| A final backup before `--delete-data`, and retained volumes reported by `addon list` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5, §6 | **Partial** — removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and now carries §2's typed confirmation, and the backup claim always survives. [#334](https://github.com/burrow-cloud/burrow/issues/334), [#335](https://github.com/burrow-cloud/burrow/issues/335) |
 | `guard` reporting the capabilities absent from the agent binary | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §7 | Not built — tiers 1 and 2 are (`addon remove` is not compiled into `burrow-agent`; `app.delete` and `dns.delete` are denied by default), but `guard` still reports only guardrail dispositions. [#337](https://github.com/burrow-cloud/burrow/issues/337) |
 | The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
 | One database instance per environment, and an install that creates one environment named `prod` | [0067](adr/0067-one-database-instance-per-environment.md) | Not built, **and the gap is a live data hazard** — the same app name in two environments silently shares one database, because provisioning takes no environment and is idempotent. [#339](https://github.com/burrow-cloud/burrow/issues/339), [#340](https://github.com/burrow-cloud/burrow/issues/340) |

@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+✅ Accepted
 
 ## TL;DR
 
@@ -111,6 +111,15 @@ decisions — is where a reader looking for what happens today should find it.
 - **ADR-0065 now contains a sentence known to be false**, with the correction in a different record.
   That is the cost of immutability, and it is the right cost — but it means the index row and
   `CAPABILITIES.md` carry more weight, since they are what a reader consults first.
+- **Per-principal roles are the eventual principled answer, and are deliberately not this.** §2
+  rejects a caller-aware *bypass* — a boolean "is this a human" inside the evaluator. A real
+  authorization model is a different thing: burrowd deciding what a named principal may call,
+  regardless of which binary it came from. `docs/HARDENING.md` already names it as future work and
+  identifies the `principal` seam from [ADR-0038](0038-scoped-agent-credential.md) as its groundwork.
+  That would make "the operator may delete, the agent may not" expressible without the evaluator
+  guessing. It is a larger surface than this product needs today — closer to an enterprise concern
+  than a self-host or managed one — and it does not change this record's decision, which holds until
+  such a model exists.
 - **`dns.delete` is worse affected than `app.delete`.** `EnvScopable` keys on the `app.` prefix, so
   the two-step relaxation for DNS is necessarily cluster-wide.
   [ADR-0068](0068-operational-limits-are-configuration.md) §5 proposes widening that; until it lands,

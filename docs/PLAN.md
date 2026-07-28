@@ -310,7 +310,10 @@ not touch DNS or wait for the certificate). The full list is in
 [ROADMAP.md](ROADMAP.md#decided-not-yet-built) and [CAPABILITIES.md](CAPABILITIES.md).
 
 **Candidates for the theme after v0.13** (unsequenced): **self-hoster day-2
-hardening** (scheduled Postgres backups + retention — the [ADR-0032](adr/0032-postgres-backups.md) follow-on —
+hardening** (scheduled Postgres backups + retention, which
+[ADR-0066](adr/0066-postgres-on-cloudnativepg.md) routes through CloudNativePG rather than extending
+[ADR-0032](adr/0032-postgres-backups.md)'s `pg_dump` Jobs, and which needs
+[ADR-0063](adr/0063-object-storage-provider.md)'s destination first —
 richer blast-radius guardrails, cost visibility); **more building-block add-ons**
 ([ADR-0025](adr/0025-building-block-addons.md)) beyond Postgres / cache / logs / metrics; **database-provisioning
 depth** (managed Postgres as a first-class deploy dependency).

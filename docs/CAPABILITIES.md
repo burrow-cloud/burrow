@@ -118,7 +118,7 @@ Sharp edges on that path:
 - The **Buildpacks (no-Dockerfile) path cannot push to the plain-HTTP in-cluster registry.**
   It fails fast and says so; push to an external registry with `--image` instead.
 - **Private git works, over HTTPS only.** A source-provider credential
-  ([ADR-0057](adr/0057-source-provider-credentials.md), still 🟡 Proposed but implemented) is
+  ([ADR-0057](adr/0057-source-provider-credentials.md)) is
   mounted as a git credential helper and a registry auth file, keyed by host —
   `github.com`/`ghcr.io` and `gitlab.com`/`registry.gitlab.com` only. An `ssh://` or `git@`
   remote gets no credential, and self-hosted GitHub Enterprise or GitLab hosts are not mapped,
@@ -653,8 +653,7 @@ which sections shipped and which did not.
 | The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. |
 | One database instance per environment, and an install that creates one environment named `prod` | [0067](adr/0067-one-database-instance-per-environment.md) | Not built, **and the gap is a live data hazard**: `EnsureAppDatabase(ctx, app)` takes no environment and there is one instance per cluster, so the same app name in two environments silently shares one database (provisioning is idempotent, so it succeeds). `DefaultEnvironment` is still the synthesized `"default"`. |
 
-Two ADRs run the other way and are worth knowing: [ADR-0057](adr/0057-source-provider-credentials.md)
-(source-provider credentials) is 🟡 Proposed but **is** implemented, and
+One ADR runs the other way and is worth knowing:
 [ADR-0062](adr/0062-remove-the-mcp-server.md) is done — the MCP server is gone from the tree,
 with `burrow mcp` surviving for one release as a hidden stub that errors and names
 `burrow agent claude install`.

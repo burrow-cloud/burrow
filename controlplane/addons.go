@@ -157,6 +157,44 @@ func LookupConnectBackend(name string) (ConnectBackend, bool) {
 // reason BackupPath lives in this package rather than in the Job builder.
 const PostgresBackupVolume = "burrow-postgres-backups"
 
+// Add-on volume roles: what a claim in the add-on namespace holds. The role decides what a retained
+// claim is worth keeping for — a data claim comes back to life on reinstall, a backup claim is a
+// pile of dumps that outlives the database it came from (ADR-0032, ADR-0064 §4).
+const (
+	// AddonVolumeData is the add-on's own data volume: the claim its workload mounts.
+	AddonVolumeData = "data"
+	// AddonVolumeBackup is the Postgres add-on's dump volume (PostgresBackupVolume).
+	AddonVolumeBackup = "backup"
+)
+
+// AddonVolume is one PersistentVolumeClaim in the add-on namespace that belongs to an add-on: which
+// add-on it serves, what it holds, and how big it is. It is the unit `addon list` reports a RETAINED
+// volume in — a claim an earlier removal deliberately left behind (ADR-0064 §6). Keeping data by
+// default is only defensible while the leftovers are visible: an invisible claim is a silent bill,
+// and a bill is a worse way to find out than a listing.
+type AddonVolume struct {
+	// Name is the claim name, which is also what `kubectl delete pvc` takes.
+	Name string `json:"name"`
+	// Namespace is the add-on namespace the claim lives in.
+	Namespace string `json:"namespace,omitempty"`
+	// Addon is the add-on type the claim was created for, read from the claim's own Burrow labels —
+	// not inferred from its name.
+	Addon AddonType `json:"addon"`
+	// Role is what the claim holds: AddonVolumeData or AddonVolumeBackup.
+	Role string `json:"role"`
+	// Size is the claim's provisioned capacity where the cluster reports it, falling back to the
+	// requested size (e.g. "10Gi"). Empty when neither is known. Size, not cost: cost needs the
+	// provider's per-GiB price and can be wrong, and a wrong number about money is worse than an
+	// honest one about bytes (ADR-0064 §Deliberately left open).
+	Size string `json:"size,omitempty"`
+	// ReinstallAdopts reports whether reinstalling the add-on picks this claim back up with its data
+	// intact (ADR-0064 §1). True for a data claim — the reinstall lands on the same claim name — and
+	// false for a backup claim, which is read by the backup/restore Jobs rather than adopted.
+	ReinstallAdopts bool `json:"reinstall_adopts"`
+	// CreatedAt is the claim's creation time as the cluster records it.
+	CreatedAt time.Time `json:"created_at,omitempty"`
+}
+
 // AddonRemoval is what the cluster-side teardown of an add-on actually did: which namespace it
 // acted in, whether it destroyed the add-on's data volume, and which volumes it deliberately left
 // behind. Removal keeps the data volume unless the caller explicitly asks for it to go, so a

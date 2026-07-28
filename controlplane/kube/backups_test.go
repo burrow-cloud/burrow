@@ -51,9 +51,14 @@ func TestRunBackupJobSpecAndSecretRef(t *testing.T) {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
 
-	// The backup PVC was ensured in the add-on namespace.
-	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, backupPVCName, metav1.GetOptions{}); err != nil {
+	// The backup PVC was ensured in the add-on namespace, labelled as the Postgres add-on's so
+	// `addon list` can attribute it once the add-on is gone (ADR-0064 §6).
+	pvc, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, backupPVCName, metav1.GetOptions{})
+	if err != nil {
 		t.Fatalf("backup PVC not created: %v", err)
+	}
+	if pvc.Labels[addonLabel] != string(controlplane.AddonPostgres) {
+		t.Errorf("backup PVC labels = %v, want %s=postgres", pvc.Labels, addonLabel)
 	}
 
 	if len(created) != 1 {

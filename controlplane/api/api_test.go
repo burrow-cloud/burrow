@@ -1070,6 +1070,62 @@ func TestRemoveAddonEndpointDefaultsToKeepingData(t *testing.T) {
 	}
 }
 
+// TestListAddonsReportsRetainedVolumes asserts the wire shape of ADR-0064 §6: the add-on listing
+// carries the volumes an earlier removal left behind in their OWN field, so a reader (and an agent
+// parsing the JSON) cannot mistake allocated storage for a running add-on. Each entry names the
+// add-on it belonged to and its size — the reason the field exists is cost.
+func TestListAddonsReportsRetainedVolumes(t *testing.T) {
+	h, _, _ := newProviderAPI(t)
+	if rr := do(h, "POST", "/v1/addons", token, `{"type":"postgres","confirm":true}`); rr.Code != 200 {
+		t.Fatalf("install addon = %d %s", rr.Code, rr.Body.String())
+	}
+	// While it is installed there is nothing retained, and the field is absent rather than empty.
+	if rr := do(h, "GET", "/v1/addons", token, ""); rr.Code != 200 {
+		t.Fatalf("list addons = %d %s", rr.Code, rr.Body.String())
+	} else if strings.Contains(rr.Body.String(), "retained_volumes") {
+		t.Errorf("nothing was removed, so no retained volumes should be reported: %s", rr.Body.String())
+	}
+
+	if rr := do(h, "DELETE", "/v1/addons/burrow-postgres?confirm=true", token, ""); rr.Code != 200 {
+		t.Fatalf("remove addon = %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr := do(h, "GET", "/v1/addons", token, "")
+	if rr.Code != 200 {
+		t.Fatalf("list addons = %d %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Addons          []map[string]any `json:"addons"`
+		RetainedVolumes []struct {
+			Name            string `json:"name"`
+			Namespace       string `json:"namespace"`
+			Addon           string `json:"addon"`
+			Role            string `json:"role"`
+			Size            string `json:"size"`
+			ReinstallAdopts bool   `json:"reinstall_adopts"`
+		} `json:"retained_volumes"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding the listing: %v (%s)", err, rr.Body.String())
+	}
+	if len(body.Addons) != 0 {
+		t.Errorf("addons = %+v, want none after the removal", body.Addons)
+	}
+	if len(body.RetainedVolumes) != 1 {
+		t.Fatalf("retained_volumes = %+v, want the claim the removal kept", body.RetainedVolumes)
+	}
+	v := body.RetainedVolumes[0]
+	if v.Name != "burrow-postgres" || v.Addon != "postgres" || v.Role != "data" {
+		t.Errorf("retained volume = %+v, want the postgres data claim", v)
+	}
+	if v.Size == "" || v.Namespace == "" {
+		t.Errorf("retained volume = %+v, want a size and a namespace to act on", v)
+	}
+	if !v.ReinstallAdopts {
+		t.Errorf("retained volume = %+v, want reinstall_adopts true for a data claim", v)
+	}
+}
+
 // TestRemoveAddonEndpointHonoursDeleteData asserts the opt-in reaches the engine when it is asked for.
 func TestRemoveAddonEndpointHonoursDeleteData(t *testing.T) {
 	h, _, _ := newProviderAPI(t)

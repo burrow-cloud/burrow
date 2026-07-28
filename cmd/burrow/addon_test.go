@@ -616,3 +616,126 @@ func TestAddonRemoveDefaultNeedsNoTerminal(t *testing.T) {
 		t.Fatalf("expected one removal that does not ask to delete data, got %v", deletes)
 	}
 }
+
+// addonListingWith returns a stub control plane serving an add-on listing: one installed add-on plus
+// whatever retained volumes the test wants reported.
+func addonListingWith(t *testing.T, retained []map[string]any) *httptest.Server {
+	t.Helper()
+	body := map[string]any{
+		"addons": []map[string]any{
+			{"name": "burrow-logs", "type": "logs", "mode": "installed", "endpoint": "logs.svc:9428", "capabilities": []string{"logs"}, "ready": true},
+		},
+	}
+	if retained != nil {
+		body["retained_volumes"] = retained
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+}
+
+// TestAddonListReportsRetainedVolumes asserts `addon list` surfaces the volumes an earlier removal
+// kept (ADR-0064 §6) — in a section of their own, naming the claim, the add-on it belonged to, what
+// it holds, and its size, and saying both ways out: reinstall to get the data back, or delete the
+// claim to get the storage back. Without this the claim is named once, by the removal that created
+// it, and never again.
+func TestAddonListReportsRetainedVolumes(t *testing.T) {
+	isolateConfig(t)
+	srv := addonListingWith(t, []map[string]any{
+		{"name": "burrow-postgres", "namespace": "burrow-addons", "addon": "postgres", "role": "data", "size": "10Gi", "reinstall_adopts": true},
+		{"name": "burrow-postgres-backups", "namespace": "burrow-addons", "addon": "postgres", "role": "backup", "size": "10Gi", "reinstall_adopts": false},
+	})
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "list", "--control-plane", srv.URL, "--token", "tok"}, &out, &errb); err != nil {
+		t.Fatalf("addon list: %v (stderr: %s)", err, errb.String())
+	}
+	s := out.String()
+	for _, want := range []string{
+		// The installed add-on is still listed as before.
+		"burrow-logs", "logs.svc:9428",
+		// The retained volumes are a separate, labelled section — not extra rows in the add-on table.
+		"Retained volumes (2)", "still allocated and still billed",
+		"CLAIM", "ADD-ON", "HOLDS", "SIZE",
+		"burrow-postgres", "burrow-postgres-backups", "postgres", "data", "backup", "10Gi", "burrow-addons",
+		// Both ways out, per ADR-0064 §1 ("how to reclaim it later") and §6.
+		"burrow addon install", "kubectl -n <namespace> delete pvc <claim>",
+		"Nothing deletes these for you.",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("listing missing %q:\n%s", want, s)
+		}
+	}
+	// A retained claim must not be readable as a running add-on: it appears below the add-on table,
+	// never inside it.
+	hdr := strings.Index(s, "CAPABILITIES")
+	idx := strings.Index(s, "Retained volumes")
+	if hdr == -1 || idx == -1 || idx < hdr {
+		t.Errorf("the retained section must come after the add-on table, not inside or before it:\n%s", s)
+	}
+}
+
+// TestAddonListJSONSeparatesRetainedVolumes asserts the --json shape keeps the two kinds apart: the
+// add-ons under "addons", the leftovers under "retained_volumes", each carrying the add-on it
+// belonged to and its size.
+func TestAddonListJSONSeparatesRetainedVolumes(t *testing.T) {
+	isolateConfig(t)
+	srv := addonListingWith(t, []map[string]any{
+		{"name": "burrow-postgres", "namespace": "burrow-addons", "addon": "postgres", "role": "data", "size": "10Gi", "reinstall_adopts": true},
+	})
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "list", "--json", "--control-plane", srv.URL, "--token", "tok"}, &out, &errb); err != nil {
+		t.Fatalf("addon list --json: %v (stderr: %s)", err, errb.String())
+	}
+	var got struct {
+		Addons []struct {
+			Name string `json:"name"`
+		} `json:"addons"`
+		RetainedVolumes []struct {
+			Name            string `json:"name"`
+			Namespace       string `json:"namespace"`
+			Addon           string `json:"addon"`
+			Role            string `json:"role"`
+			Size            string `json:"size"`
+			ReinstallAdopts bool   `json:"reinstall_adopts"`
+		} `json:"retained_volumes"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decoding --json output: %v (%s)", err, out.String())
+	}
+	if len(got.Addons) != 1 || got.Addons[0].Name != "burrow-logs" {
+		t.Errorf("addons = %+v, want the installed add-on", got.Addons)
+	}
+	if len(got.RetainedVolumes) != 1 {
+		t.Fatalf("retained_volumes = %+v, want one", got.RetainedVolumes)
+	}
+	v := got.RetainedVolumes[0]
+	if v.Name != "burrow-postgres" || v.Addon != "postgres" || v.Role != "data" || v.Size != "10Gi" || v.Namespace != "burrow-addons" || !v.ReinstallAdopts {
+		t.Errorf("retained volume = %+v, want the postgres data claim with its size and namespace", v)
+	}
+}
+
+// TestAddonListCleanWithoutRetainedVolumes asserts a cluster that has removed nothing lists exactly
+// as it did before: no empty section, no heading with nothing under it, nothing to explain.
+func TestAddonListCleanWithoutRetainedVolumes(t *testing.T) {
+	isolateConfig(t)
+	srv := addonListingWith(t, nil)
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "list", "--control-plane", srv.URL, "--token", "tok"}, &out, &errb); err != nil {
+		t.Fatalf("addon list: %v (stderr: %s)", err, errb.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "burrow-logs") {
+		t.Errorf("listing does not show the installed add-on:\n%s", s)
+	}
+	for _, unwanted := range []string{"Retained", "kubectl", "CLAIM"} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("listing mentions %q with no retained volumes:\n%s", unwanted, s)
+		}
+	}
+}

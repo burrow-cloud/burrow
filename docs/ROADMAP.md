@@ -297,11 +297,10 @@ acceptance checklist. The theme and its sequencing stay here; the granularity is
   destination that is not the cluster the database lives in, on the existing credential registry,
   scoped to that job and no further.
   [#331](https://github.com/burrow-cloud/burrow/issues/331).
-- **Removing an add-on keeps its data** ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md)) — most
-  of the record is built, including `--delete-data`'s typed confirmation; the final backup before it
-  and retained volumes in the add-on listing are not.
-  [#334](https://github.com/burrow-cloud/burrow/issues/334) (blocked by #331),
-  [#335](https://github.com/burrow-cloud/burrow/issues/335).
+- **Removing an add-on keeps its data** ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md)) — the
+  record is built, including `--delete-data`'s typed confirmation and the retained volumes the
+  add-on listing now reports; the final backup before a data-deleting removal is not, and waits on
+  object storage. [#334](https://github.com/burrow-cloud/burrow/issues/334) (blocked by #331).
 - **What belongs on the agent surface** ([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md)) —
   tiers 1 and 2 are built (`addon remove` is not compiled into `burrow-agent`; `app.delete` and
   `dns.delete` are denied by default); a `guard` that reports what the binary does not carry is not.

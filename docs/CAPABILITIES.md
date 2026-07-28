@@ -265,6 +265,20 @@ cluster and every app's database lives on the one shared `postgres`, removing it
 [ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §2 tier 1: not compiled into the agent
 binary at all.
 
+A retained volume is named **in that removal's output and nowhere afterwards.** `addon list`
+reports registered add-ons, not claims left behind by an earlier removal, so once the terminal
+scrolls the only way to find one is `kubectl get pvc -n burrow-addons`.
+[ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §6 decides the listing should report them —
+the claim, its size, and the add-on it belonged to — and that is **not built**.
+
+Two accepted decisions change the `postgres` row above and **neither is built.**
+[ADR-0066](adr/0066-postgres-on-cloudnativepg.md) replaces the mechanism with a CloudNativePG
+`Cluster` custom resource, handing WAL archiving, scheduled backups, retention and point-in-time
+recovery to the operator; the add-on is still the single-replica `postgres:17-alpine` Deployment
+in the table. [ADR-0067](adr/0067-one-database-instance-per-environment.md) §1 makes the instance
+one **per environment**; there is still exactly one for the whole cluster, which is the subject of
+the hazard below.
+
 | Capability | Command | What it does |
 | --- | --- | --- |
 | Install | `burrow addon install <type>` | As above. `metrics` additionally needs RBAC the CLI stages client-side first. |
@@ -275,6 +289,18 @@ binary at all.
 | Connect an existing backend | `burrow addon connect <loki\|prometheus> --endpoint <url> [--auth]` | Registers a backend you already run — **deploys nothing**. Only `loki` (logs) and `prometheus` (metrics) are connectable. Operator CLI only. |
 | Query logs | `burrow addon logs [query] [--limit]` / `burrow-agent logs-query` | LogsQL against VictoriaLogs, or LogQL against Loki. Limit clamps to 200 when out of range or unset, capped at 1000. |
 | Query metrics | `burrow addon metrics <query>` / `burrow-agent metrics-query` | PromQL **instant** query against VictoriaMetrics or Prometheus. |
+
+**`attach` knows nothing about environments, and that is a live hazard, not a limitation.**
+`EnsureAppDatabase(ctx, app)` takes no environment and there is one instance for the whole
+cluster, so an app named `web` in a second environment resolves to the **same database owned by
+the same role** as `web` in the first. Provisioning is idempotent, so the second attach does not
+fail: it rotates the role's password and writes a `DATABASE_URL` pointing at the other
+environment's live data. Nothing errors and nothing warns, and both apps look correctly
+configured from every angle Burrow can show. It is inert today only because nothing has used a
+second environment yet — `burrow env add staging` and an attach are enough to trigger it.
+[ADR-0067](adr/0067-one-database-instance-per-environment.md) decides the fix (an instance per
+environment, with the environment threaded through the seam) and is **not built**. Until it is,
+do not attach the same app name to Postgres in two environments.
 
 The Postgres exporter is always on and reports connection and transaction health plus
 `pg_stat_statements` slow-query stats, and the metrics scraper discovers the add-on namespace,
@@ -306,7 +332,11 @@ The limits are as important as the capability:
 
 - **The dump never leaves the cluster.** It lands on a `burrow-postgres-backups` PVC, 10Gi,
   ReadWriteOnce, on the default StorageClass, in the same `burrow-addons` namespace as the
-  database it came from. There is no `--to`, no object-storage target, and no offsite copy.
+  database it came from. There is no `--to`, no object-storage target, and no offsite copy — so
+  a backup shares a failure domain with its source.
+  [ADR-0063](adr/0063-object-storage-provider.md) decides object storage as a provider type to
+  fix exactly that, and is **not built**: `knownProviderTypes` carries DNS and source providers
+  only, and there is no bucket or credential code of any kind.
 - **There is no scheduling.** No CronJob exists anywhere in the tree, and the control plane is
   not even granted `cronjobs` RBAC. Every backup is an explicit command.
 - **There is no retention or pruning.** No delete-backup command, no "keep last N", no
@@ -318,9 +348,21 @@ The limits are as important as the capability:
   came from is the point of taking them, and it is what makes destroying the data survivable.
   Their records stay listed, and the removal output names the volume so the storage is not a
   surprise. Reclaiming it is a manual `kubectl delete pvc`.
+- **`--delete-data` takes no backup first, and its only gate is the `addon.remove` guardrail.**
+  It destroys the data volume immediately; the only copy that survives is whatever the retained
+  backup PVC already held. [ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §5 decides that,
+  where an object-storage provider is configured, a final backup is taken **before** anything is
+  deleted and a failed one aborts the removal — **not built**, and neither is the destination it
+  needs (ADR-0063, above). §2's typed confirmation is not built either: `--delete-data --confirm`
+  proceeds without typing the add-on's name, and off a terminal it proceeds rather than refusing,
+  because the command does no terminal detection.
 - A failed backup or restore Job is left in place for diagnosis rather than reaped.
 
 Scheduled backups with retention are decided as a follow-on in ADR-0032 and are **not built**.
+[ADR-0066](adr/0066-postgres-on-cloudnativepg.md) decides they arrive by a different route
+entirely — CloudNativePG doing the archiving, scheduling, retention and point-in-time recovery,
+with Burrow creating a custom resource instead of orchestrating `pg_dump` — and it is **not
+built** either: every command in the table above is the ADR-0032 Job path.
 
 ---
 
@@ -355,6 +397,15 @@ Limits: `env remove` and `env add` are asymmetric, as noted above — unregister
 environment in burrowd is not reachable from either CLI. ADR-0047 also specifies the same
 forcing function on the *local handle* axis; that half is **not built** (it was specified for
 the MCP layer, since removed). Per-environment guardrails are real but partial — see below.
+
+Two further things about a second environment, both decided and both **not built**.
+[ADR-0067](adr/0067-one-database-instance-per-environment.md) §2–§3 replaces the synthesized
+`default` with one *registered* environment named `prod`, created at install and mapped to the
+existing app namespace; today `DefaultEnvironment` is still the literal `"default"`, it is
+synthesized rather than stored, and `cluster install` registers no environment at all. And
+adding a second environment today walks into the Postgres attach collision described under
+[Add-ons](#add-ons): stateful add-ons are not per-environment, so two environments' apps of the
+same name silently share one database.
 
 ---
 
@@ -398,6 +449,12 @@ structurally, the verb does not exist on that binary.
 
 Limits:
 
+- **`app.delete` and `dns.delete` are still `confirm`, and the table above is the shipped
+  behaviour.** [ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §3 decides both become
+  `deny` by default — deleting an app destroys its release history, and deleting a DNS record
+  takes an application off the internet, so neither should rest on an unread prompt.
+  `DefaultPolicy` has not changed, so both remain one `--confirm` away for the agent. **Not
+  built.**
 - **Only `app.*` guardrails can be scoped to an environment.** The six cluster-level codes
   (`dns.*`, `addon.*`) are global; setting one with `--env` is rejected.
 - **The replica ceiling is 50 and is not configurable.** `app.replica_ceiling` controls the
@@ -469,6 +526,14 @@ operator decides, so it ships as a guardrail denied by default). `addon remove` 
 add-ons are one instance per type per cluster and every app's database sits on the one shared
 `postgres`, so it removes *the* add-on and takes every attached app with it. The surface-guard test
 asserts its absence rather than leaving it to be a property of the current command tree.
+
+Two halves of that record are **not built**, and both matter to what an agent actually sees.
+The reversibility tier is unshipped — `app.delete` and `dns.delete` are still `confirm`, not
+`deny` (see [Guardrails](#guardrails)). And ADR-0065 §7 decides that `guard` should also report
+the capabilities **absent from the binary** and why, so an agent can tell a human "removing an
+add-on is not something I can do, and here is who can". `burrow-agent guard` returns the
+control plane's guardrail dispositions and nothing else, so an absent verb is still rejected by
+name with no account of what it was.
 
 The narrowing is structural, not advisory: the binary lacks the verb, its
 kubeconfig lacks the permission, and the control plane gates the operation anyway.
@@ -566,7 +631,9 @@ Consolidated, so a reader can stop looking:
 
 ## Decided but not built
 
-Accepted or proposed decisions with no implementation. An ADR alone is not a capability.
+Accepted or proposed decisions with no implementation, or with only part of one. An ADR alone is
+not a capability, and a partly built one is not two-thirds of a capability — the rows below say
+which sections shipped and which did not.
 
 | Decision | ADR | Status of the code |
 | --- | --- | --- |
@@ -580,6 +647,11 @@ Accepted or proposed decisions with no implementation. An ADR alone is not a cap
 | Registry onboarding via the developer's code-provider registry | [0046](adr/0046-registry-onboarding.md) | Proposed, held deliberately; only the in-cluster registry shipped, via ADR-0054. |
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
+| Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Not built — `knownProviderTypes` holds DNS and source providers only; there is no bucket or object-storage credential code, and dumps land on an in-cluster PVC. |
+| The typed confirmation for `--delete-data`, a final backup before it, and retained volumes reported by `addon list` | [0064](adr/0064-addon-removal-keeps-its-data.md) §2 (in part), §5, §6 | **Partial.** Built: removal keeps the data PVC and names it (§1), `--delete-data` is operator-CLI-only and the verb is absent from `burrow-agent` (§2's structural half), the held confirmation names the volume and the attached apps (§3), and the backup claim always survives (§4). Not built: `--delete-data --confirm` proceeds without typing the add-on's name and does not refuse off a terminal (`newAddonRemoveCmd` does no terminal detection); nothing backs up before it (and there is nowhere off-cluster to put a backup); and `ListAddons` reports registered add-ons, never a claim left by an earlier removal. |
+| `app.delete` and `dns.delete` denied by default; `guard` reporting what the binary lacks | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §3, §7 | **Partial.** Tier 1 is built: `addon remove` is not compiled into `burrow-agent`, asserted by the surface guard. Tier 2 is not — `DefaultPolicy` still maps both codes to `confirm` — and neither is §7: `guard` reports dispositions only, so an absent verb is a bare rejection. |
+| The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. |
+| One database instance per environment, and an install that creates one environment named `prod` | [0067](adr/0067-one-database-instance-per-environment.md) | Not built, **and the gap is a live data hazard**: `EnsureAppDatabase(ctx, app)` takes no environment and there is one instance per cluster, so the same app name in two environments silently shares one database (provisioning is idempotent, so it succeeds). `DefaultEnvironment` is still the synthesized `"default"`. |
 
 Two ADRs run the other way and are worth knowing: [ADR-0057](adr/0057-source-provider-credentials.md)
 (source-provider credentials) is 🟡 Proposed but **is** implemented, and

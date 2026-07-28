@@ -378,7 +378,8 @@ func TestAddonRemoveDefaultReportsKeptData(t *testing.T) {
 }
 
 // TestAddonRemoveDeleteDataAsksAndReports asserts --delete-data reaches the API and the output states
-// the destruction plainly, including which apps lost their database.
+// the destruction plainly, including which apps lost their database. It runs non-interactively, so it
+// carries the acknowledgement flag --delete-data requires with no terminal to type into (ADR-0064 §2).
 func TestAddonRemoveDeleteDataAsksAndReports(t *testing.T) {
 	isolateConfig(t)
 	var gotQuery string
@@ -393,7 +394,7 @@ func TestAddonRemoveDeleteDataAsksAndReports(t *testing.T) {
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"addon", "remove", "burrow-postgres", "--delete-data", "--confirm", "--control-plane", srv.URL, "--token", "tok"}, &out, &errb)
+	err := run(context.Background(), []string{"addon", "remove", "burrow-postgres", "--delete-data", "--acknowledge-data-loss", "--confirm", "--control-plane", srv.URL, "--token", "tok"}, &out, &errb)
 	if err != nil {
 		t.Fatalf("addon remove --delete-data: %v (stderr: %s)", err, errb.String())
 	}
@@ -405,5 +406,213 @@ func TestAddonRemoveDeleteDataAsksAndReports(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("removal output missing %q:\n%s", want, s)
 		}
+	}
+}
+
+// addonRemoveServer is a stub control plane for the `addon remove --delete-data` gate tests. It
+// answers the three read paths the pre-removal notice uses best-effort — the add-on listing, the app
+// listing, and each app's Secret KEY names (never values) — and records every DELETE it receives, so a
+// test can assert that a refused removal never reached the API at all. attachedApps names the apps
+// whose Secret carries a DATABASE_URL; every other app answers with an unrelated key.
+func addonRemoveServer(t *testing.T, apps, attachedApps []string, deletes *[]string) *httptest.Server {
+	t.Helper()
+	attached := map[string]bool{}
+	for _, a := range attachedApps {
+		attached[a] = true
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete:
+			*deletes = append(*deletes, r.URL.Path+"?"+r.URL.RawQuery)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "burrow-postgres", "type": "postgres", "namespace": "burrow-addons",
+				"data_deleted": true, "retained_backup_volume": "burrow-postgres-backups",
+				"attached_apps": attachedApps,
+			})
+		case r.URL.Path == "/v1/addons":
+			_ = json.NewEncoder(w).Encode(map[string]any{"addons": []map[string]any{
+				{"name": "burrow-postgres", "type": "postgres", "mode": "installed", "endpoint": "burrow-postgres:5432", "capabilities": []string{"database"}, "ready": true},
+			}})
+		case r.URL.Path == "/v1/apps":
+			rows := make([]map[string]any, 0, len(apps))
+			for _, a := range apps {
+				rows = append(rows, map[string]any{"app": a})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"apps": rows})
+		case strings.HasSuffix(r.URL.Path, "/secrets"):
+			app := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/apps/"), "/secrets")
+			keys := []string{"API_KEY"}
+			if attached[app] {
+				keys = []string{"DATABASE_URL"}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// execAddonRemove drives `addon remove` with an explicit stdin and interactive-terminal flag,
+// returning stdout, stderr, and the RunE error. The terminal flag drives the stdinIsTerminal seam so
+// both branches of ADR-0064 §2's gate are exercised without a real TTY.
+func execAddonRemove(t *testing.T, baseURL, stdin string, terminal bool, args ...string) (string, string, error) {
+	t.Helper()
+	isolateConfig(t)
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return terminal }
+	t.Cleanup(func() { stdinIsTerminal = origTerm })
+
+	var out, errb bytes.Buffer
+	cmd := newAddonRemoveCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	cmd.SetIn(strings.NewReader(stdin))
+	cmd.SetArgs(append(args, "--control-plane", baseURL, "--token", "tok"))
+	err := cmd.ExecuteContext(context.Background())
+	return out.String(), errb.String(), err
+}
+
+// TestAddonRemoveDeleteDataTypedNameProceeds asserts the interactive half of ADR-0064 §2: on a
+// terminal, --delete-data prints a warning-styled notice naming the data volume, its namespace, the
+// attached apps whose databases are in it, and the backup volume that survives — and proceeds once the
+// add-on's name is typed back.
+func TestAddonRemoveDeleteDataTypedNameProceeds(t *testing.T) {
+	var deletes []string
+	srv := addonRemoveServer(t, []string{"api", "static", "web"}, []string{"api", "web"}, &deletes)
+
+	out, errb, err := execAddonRemove(t, srv.URL, "burrow-postgres\n", true, "burrow-postgres", "--delete-data", "--confirm")
+	if err != nil {
+		t.Fatalf("addon remove --delete-data with the name typed back: %v (stderr: %s)", err, errb)
+	}
+	for _, want := range []string{
+		"DESTROYS the data volume \"burrow-postgres\"",
+		"burrow-addons",
+		"This cannot be undone",
+		"every attached app's database: 2 attached apps (api, web)",
+		"backup volume \"burrow-postgres-backups\" is kept",
+		"Type the add-on's name (burrow-postgres) to proceed",
+	} {
+		if !strings.Contains(errb, want) {
+			t.Errorf("the --delete-data notice is missing %q:\n%s", want, errb)
+		}
+	}
+	// The notice and the prompt go to stderr, so a --json run keeps a machine-readable stdout.
+	if strings.Contains(out, "Type the add-on's name") {
+		t.Errorf("the typed-name prompt must not land on stdout:\n%s", out)
+	}
+	if len(deletes) != 1 || !strings.Contains(deletes[0], "delete_data=true") {
+		t.Fatalf("expected one removal carrying delete_data=true, got %v", deletes)
+	}
+}
+
+// TestAddonRemoveDeleteDataWrongNameRefuses asserts a typed name that is not the add-on's aborts: the
+// command errors, says nothing was removed, and no removal reaches the API.
+func TestAddonRemoveDeleteDataWrongNameRefuses(t *testing.T) {
+	var deletes []string
+	srv := addonRemoveServer(t, []string{"web"}, []string{"web"}, &deletes)
+
+	for _, typed := range []string{"postgres\n", "\n", ""} { // a near-miss, an empty line, and EOF
+		_, _, err := execAddonRemove(t, srv.URL, typed, true, "burrow-postgres", "--delete-data", "--confirm")
+		if err == nil {
+			t.Fatalf("typing %q should abort the removal", typed)
+		}
+		if !strings.Contains(err.Error(), "nothing was removed") {
+			t.Errorf("the abort should say nothing was removed, got: %v", err)
+		}
+	}
+	if len(deletes) != 0 {
+		t.Errorf("an aborted --delete-data must not reach the API, got %v", deletes)
+	}
+}
+
+// TestAddonRemoveDeleteDataNonInteractiveRefuses asserts the other half of ADR-0064 §2: with no
+// terminal to type into, --delete-data refuses rather than proceeding, names the acknowledgement flag,
+// and — the property that matters — DELETES NOTHING. --confirm satisfies the addon.remove guardrail
+// and is deliberately not the acknowledgement, so it does not open this path on its own.
+func TestAddonRemoveDeleteDataNonInteractiveRefuses(t *testing.T) {
+	var deletes []string
+	srv := addonRemoveServer(t, []string{"web"}, []string{"web"}, &deletes)
+
+	_, _, err := execAddonRemove(t, srv.URL, "", false, "burrow-postgres", "--delete-data", "--confirm")
+	if err == nil {
+		t.Fatal("--delete-data without a terminal and without the acknowledgement flag must refuse")
+	}
+	for _, want := range []string{"--acknowledge-data-loss", "interactive terminal", "burrow-postgres"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should mention %q, got: %v", want, err)
+		}
+	}
+	if len(deletes) != 0 {
+		t.Fatalf("a refused --delete-data must not delete: the API saw %v", deletes)
+	}
+}
+
+// TestAddonRemoveDeleteDataAcknowledgedProceedsNonInteractively asserts the escape hatch: a script
+// that says out loud that it destroys data proceeds with no terminal and no prompt (ADR-0064 §2).
+func TestAddonRemoveDeleteDataAcknowledgedProceedsNonInteractively(t *testing.T) {
+	var deletes []string
+	srv := addonRemoveServer(t, []string{"web"}, []string{"web"}, &deletes)
+
+	out, errb, err := execAddonRemove(t, srv.URL, "", false, "burrow-postgres", "--delete-data", "--acknowledge-data-loss", "--confirm")
+	if err != nil {
+		t.Fatalf("--delete-data --acknowledge-data-loss without a terminal: %v (stderr: %s)", err, errb)
+	}
+	if strings.Contains(errb+out, "Type the add-on's name") {
+		t.Errorf("the acknowledgement flag should skip the prompt:\n%s%s", errb, out)
+	}
+	if len(deletes) != 1 || !strings.Contains(deletes[0], "delete_data=true") {
+		t.Fatalf("expected one removal carrying delete_data=true, got %v", deletes)
+	}
+}
+
+// TestAddonRemoveDeleteDataNoticeDegradesWhenUnreachable asserts the notice's enumeration is
+// best-effort and never blocking (ADR-0064 §3): a control plane that will not answer the add-on and
+// app lookups degrades the notice to the volume-concrete message, and the removal still goes through.
+// An add-on is often removed because it is wedged, so being unable to ask who is attached must not
+// make it unremovable.
+func TestAddonRemoveDeleteDataNoticeDegradesWhenUnreachable(t *testing.T) {
+	var deletes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes = append(deletes, r.URL.Path+"?"+r.URL.RawQuery)
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "burrow-postgres", "type": "postgres", "data_deleted": true})
+			return
+		}
+		http.Error(w, "the add-on is wedged", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, errb, err := execAddonRemove(t, srv.URL, "burrow-postgres\n", true, "burrow-postgres", "--delete-data", "--confirm")
+	if err != nil {
+		t.Fatalf("a removal whose enumeration failed should still proceed: %v (stderr: %s)", err, errb)
+	}
+	if !strings.Contains(errb, "DESTROYS the data volume \"burrow-postgres\"") {
+		t.Errorf("the degraded notice should still name the volume:\n%s", errb)
+	}
+	if strings.Contains(errb, "attached app") {
+		t.Errorf("the degraded notice must not claim an app enumeration it could not make:\n%s", errb)
+	}
+	if len(deletes) != 1 {
+		t.Fatalf("expected the removal to proceed, got %v", deletes)
+	}
+}
+
+// TestAddonRemoveDefaultNeedsNoTerminal asserts the gate is --delete-data's alone: a plain removal
+// keeps the data volume, so it neither prompts nor refuses without a terminal.
+func TestAddonRemoveDefaultNeedsNoTerminal(t *testing.T) {
+	var deletes []string
+	srv := addonRemoveServer(t, []string{"web"}, []string{"web"}, &deletes)
+
+	out, errb, err := execAddonRemove(t, srv.URL, "", false, "burrow-postgres", "--confirm")
+	if err != nil {
+		t.Fatalf("a data-keeping removal should need no terminal: %v (stderr: %s)", err, errb)
+	}
+	if strings.Contains(errb+out, "Type the add-on's name") {
+		t.Errorf("a removal without --delete-data must not prompt:\n%s%s", errb, out)
+	}
+	if len(deletes) != 1 || strings.Contains(deletes[0], "delete_data") {
+		t.Fatalf("expected one removal that does not ask to delete data, got %v", deletes)
 	}
 }

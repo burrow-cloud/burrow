@@ -2,10 +2,8 @@
 
 ## Status
 
-Proposed. The near-term `burrow upgrade` command (the in-cluster half) is decided and
-slated for a v0.1.x release; the CLI distribution mechanism (a Homebrew tap and signed
-release binaries) is the part this record proposes for a later release and awaits
-maintainer approval. This ADR does not track build status — see
+✅ Accepted — both halves: the `burrow upgrade` command and the CLI distribution mechanism
+(a Homebrew tap and signed release binaries). This ADR does not track build status — see
 [docs/ROADMAP.md](../ROADMAP.md) for sequencing.
 
 ## Context

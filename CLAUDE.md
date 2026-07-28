@@ -100,6 +100,13 @@ service themselves. CI runs the same checks plus both integration suites
 (`.github/workflows/ci.yml`) on GitHub's runners, so the heavy paths are always exercised
 remotely even if you only run `task check` locally.
 
+**A green `task check` is not a green CI.** The store suite *skips* without
+`BURROW_TEST_DATABASE_URL` rather than failing, so a store test that would fail runs nowhere
+locally and only surfaces in CI, where a Postgres service container is present. A skipped test
+looks identical to a passing one in the summary. Before opening a PR that touches
+`controlplane/postgres/` or anything a store test exercises, run it the way CI does:
+`bash scripts/with-test-postgres.sh go test ./...`.
+
 **Testing posture — this is where Burrow DIFFERS from the sibling project Hamster: there is
 no global simulation harness. The full rationale is [ADR-0010](docs/adr/0010-testing-strategy.md).**
 Burrow delegates consensus, durability, and leader election to Kubernetes (etcd) and

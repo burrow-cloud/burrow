@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+✅ Accepted
 
 ## TL;DR
 
@@ -104,6 +104,19 @@ Two changes to current defaults:
 
 Both remain fully available to the human operator CLI, which these dispositions do not gate.
 
+**A tier-2 default is a floor, not a fixed setting, and the expected usage is per environment.**
+`app.*` codes are environment-scopable, so the shape an operator actually wants is a gradient —
+`allow` in development, `confirm` in staging, `deny` in production — and the `deny` default is
+simply where an environment sits until someone says otherwise. A safe default that is relaxed
+deliberately, per environment, is the point of the tier.
+
+**`dns.delete` cannot express that today, and this record does not pretend otherwise.**
+`EnvScopable` keys on the `app.` prefix, so `dns.*`, `addon.*` and every other non-`app.` code is
+cluster-wide only. Its `deny` is therefore all-or-nothing: an operator who wants the agent managing
+DNS in development but not production must choose one answer for both. That is a real limitation of
+this decision, it argues for widening environment scoping beyond the `app.` prefix, and it is a
+separate change this record does not make.
+
 ### 4. Tier 3 — confirmed by default
 
 Unchanged, and named so the tiers are complete: consequential but routine operations stay at
@@ -125,6 +138,21 @@ Tier 1 is therefore for capabilities whose worst case is unbounded, not merely b
 A command added to the agent surface names its tier and the test it passes, in review. The
 surface-guard test already forces the surface to be edited deliberately; this makes the *argument*
 explicit rather than reconstructed later from what happened to be allowed.
+
+### 7. The agent can see what it cannot do, including what is absent
+
+`guard` reports denied verbs today. It also reports the capabilities that are **absent from the
+binary** and why, so an agent can tell a human "removing an add-on is not something I can do, and
+here is who can" rather than reporting an unhelpful `unknown command`.
+
+This is what makes tier 1 tolerable rather than merely safe. An absent verb is otherwise a dead end
+(§5), and a dead end is what pushes an agent toward routing around the control channel. A verb that
+is absent *and legible* is a refusal the agent can relay, which is the whole behaviour this record
+wants.
+
+It does enumerate the surface to anything that can read it. That is accepted: the surface is already
+public in an open-source CLI, and an attacker learns nothing from it that `--help` does not give
+them.
 
 ## Consequences
 
@@ -163,13 +191,3 @@ explicit rather than reconstructed later from what happened to be allowed.
   `addon remove --delete-data` could differ — and rejected because it introduces a second policy
   surface next to guardrails. ADR-0064's open question about a separate code for `--delete-data` is
   the narrower version of this and the right place to settle it.
-
-## Questions
-
-- **Does `app.delete` denied by default make the agent's own cleanup impractical enough that
-  operators will simply turn it on everywhere?** A default that is always relaxed is a default that
-  is wrong. Worth revisiting once there is usage to observe.
-- **Should tier assignments be visible to the agent as data** — could `guard` report which verbs are
-  absent as well as which are denied? It would let an agent explain to a human why something is
-  impossible rather than merely unavailable, though it also enumerates the surface to anything
-  reading it.

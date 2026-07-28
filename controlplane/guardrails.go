@@ -52,7 +52,13 @@ const (
 	// configured provider (ADR-0018).
 	GuardrailDNSWrite GuardrailCode = "dns.write"
 	// GuardrailDNSDelete: the operation would delete a public DNS record at a configured
-	// provider — the destructive side of DNS management (ADR-0018).
+	// provider — the destructive side of DNS management (ADR-0018). Denied by default
+	// (ADR-0065 §3): removing the record takes an application off the internet, and the record may
+	// not be one Burrow created, so a confirmation the caller can satisfy itself is too weak a
+	// control. An operator who wants the agent tidying up DNS sets it to confirm or allow with
+	// `guard set dns.delete ...` — cluster-wide, because EnvScopable keys on the `app.` prefix, so
+	// unlike app.delete this one cannot be relaxed for a single environment (ADR-0068 proposes
+	// widening that prefix).
 	GuardrailDNSDelete GuardrailCode = "dns.delete"
 	// GuardrailAddonInstall: the operation would install a building-block backing service
 	// (a vetted add-on like logs or metrics) onto the cluster (ADR-0025).
@@ -65,12 +71,16 @@ const (
 	// confirmation by default. (Attach is not guarded: it provisions, it destroys nothing.)
 	GuardrailAddonDetach GuardrailCode = "addon.detach"
 	// GuardrailAddonRestore: the operation would restore an app's database from a backup,
-	// overwriting its live contents (ADR-0032). Held for confirmation by default, like detach and
-	// app delete. (Backup and list are not guarded: they destroy nothing.)
+	// overwriting its live contents (ADR-0032). Held for confirmation by default, like detach.
+	// (Backup and list are not guarded: they destroy nothing.)
 	GuardrailAddonRestore GuardrailCode = "addon.restore"
 	// GuardrailAppDelete: the operation would delete an app entirely — its workload, routing,
 	// and release history — so it disappears from the apps listing. The destructive teardown
-	// of a deployed application.
+	// of a deployed application. Denied by default (ADR-0065 §3): destroying the release history
+	// leaves nothing to roll back to, so a confirmation protects only an attentive reader. The
+	// deny is a floor, not a fixed setting — app.delete is env-scopable, and the expected shape is
+	// a gradient set with `guard set --env <env> app.delete ...`: allow where the agent should tidy
+	// up after itself, confirm in staging, deny in production.
 	GuardrailAppDelete GuardrailCode = "app.delete"
 	// GuardrailRollback: the operation would roll an app back to its previous release. A
 	// production mutation, but a recovery one — allowed by default so an agent can restore a
@@ -282,9 +292,33 @@ func (p Policy) enforce(env, op string, code GuardrailCode, confirmed bool, what
 			Code:      code,
 			Requested: requested,
 			Limit:     limit,
-			Message:   what + " is denied by the current guardrail policy",
+			Message:   what + " is denied by the current guardrail policy" + relaxHint(env, code),
 		}
 	}
+}
+
+// relaxHint names the operator command that would relax a denied guardrail, appended to every
+// refusal so the agent has something concrete to relay to the human.
+//
+// It leads with the per-environment form wherever the code supports one. A deny default is a
+// floor, not a fixed setting (ADR-0065 §3): the shape an operator actually wants is a gradient —
+// allow in development, confirm in staging, deny in production — and the failure mode this text
+// exists to prevent is an operator meeting one refusal and reaching for a global `guard set
+// app.delete allow`, relaxing production to unblock a sandbox.
+//
+// A cluster-level code gets the global form instead, and says so, because EnvScopable keys on the
+// `app.` prefix: dns.*, addon.* and the rest are all-or-nothing today. ADR-0065 §3 records that as
+// a real limitation of the decision and ADR-0068 proposes widening the prefix; until then, naming
+// the reach honestly beats printing a `--env` flag the caller cannot use.
+func relaxHint(env string, code GuardrailCode) string {
+	if !EnvScopable(code) {
+		return fmt.Sprintf(" — an operator can relax it with `burrow guard set %s confirm`, which applies to the whole cluster: %s cannot be scoped to one environment", code, code)
+	}
+	target := "<env>"
+	if env != "" && env != DefaultEnvironment {
+		target = env
+	}
+	return fmt.Sprintf(" — a guardrail is a floor, not a fixed setting: an operator can relax it for one environment with `burrow guard set --env %s %s confirm`, which is preferable to relaxing it everywhere", target, code)
 }
 
 // evaluateGuardrail applies a categorical guardrail — one that always trips when its

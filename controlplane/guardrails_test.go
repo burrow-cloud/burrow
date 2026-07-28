@@ -6,6 +6,7 @@ package controlplane
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -217,5 +218,48 @@ func TestAsGuardrailWrapped(t *testing.T) {
 
 	if _, ok := AsGuardrail(errors.New("plain")); ok {
 		t.Fatalf("AsGuardrail matched a non-guardrail error")
+	}
+}
+
+// TestDenyRefusalSteersTowardScoping covers what a refused caller is told. A deny default is a floor
+// rather than a fixed setting (ADR-0065 §3), and the failure mode worth designing against is an
+// operator meeting one refusal and reaching for a global `guard set app.delete allow` — relaxing
+// production to unblock a sandbox. So an env-scopable code's refusal leads with the --env form and
+// names the environment it was refused in, while a cluster-level code's refusal offers the global
+// form and says plainly how far it reaches, because EnvScopable keys on the `app.` prefix and
+// dns.delete cannot be scoped today (ADR-0068 proposes widening it).
+func TestDenyRefusalSteersTowardScoping(t *testing.T) {
+	p := DefaultPolicy()
+
+	err := p.evaluateGuardrail("prod", "app delete", GuardrailAppDelete, true, "deleting the app")
+	g, ok := AsGuardrail(err)
+	if !ok {
+		t.Fatalf("app.delete under the default policy = %v, want a GuardrailError", err)
+	}
+	for _, want := range []string{"floor, not a fixed setting", "guard set --env prod app.delete confirm", "relaxing it everywhere"} {
+		if !strings.Contains(g.Message, want) {
+			t.Errorf("app.delete refusal %q missing %q", g.Message, want)
+		}
+	}
+
+	// With no named environment there is no name to print, so the placeholder keeps the --env shape.
+	err = p.evaluateGuardrail("", "app delete", GuardrailAppDelete, true, "deleting the app")
+	g, _ = AsGuardrail(err)
+	if !strings.Contains(g.Message, "guard set --env <env> app.delete confirm") {
+		t.Errorf("unscoped app.delete refusal %q should still show the --env form", g.Message)
+	}
+
+	err = p.evaluateGuardrail("", "domain remove", GuardrailDNSDelete, true, "removing the DNS record")
+	g, ok = AsGuardrail(err)
+	if !ok {
+		t.Fatalf("dns.delete under the default policy = %v, want a GuardrailError", err)
+	}
+	for _, want := range []string{"guard set dns.delete confirm", "whole cluster", "cannot be scoped to one environment"} {
+		if !strings.Contains(g.Message, want) {
+			t.Errorf("dns.delete refusal %q missing %q", g.Message, want)
+		}
+	}
+	if strings.Contains(g.Message, "--env") {
+		t.Errorf("dns.delete refusal %q offers a --env form it cannot honour", g.Message)
 	}
 }

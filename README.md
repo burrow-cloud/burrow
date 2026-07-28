@@ -52,12 +52,12 @@ Your agent can write your app. The real test is whether it can *keep it working*
 
 ## Guardrails
 
-Guardrails are how you decide what your agent can and cannot do. Every risky action (deploying to prod, deleting an app, rolling back, exposing publicly, DNS and add-on changes) can be gated by a guardrail you set: raise it to confirm to require your sign-off, or to deny to refuse it outright. You opt in, so the agent proposes and you decide.
+Guardrails are how you decide what your agent can and cannot do. Every risky action (deploying to prod, deleting an app, rolling back, exposing publicly, DNS and add-on changes) has a guardrail: allow it, hold it for your sign-off (confirm), or refuse it outright (deny). The ones you cannot undo — deleting an app, deleting a DNS record — start denied, and you open them where it suits you.
 
-    burrow guard set --env prod app.deploy confirm   # require your sign-off before any prod deploy
-    burrow guard set --env prod app.delete deny      # never let the agent delete an app in prod
+    burrow guard set --env prod app.deploy confirm    # require your sign-off before any prod deploy
+    burrow guard set --env dev app.delete allow       # let it clean up after itself in dev
+    burrow guard set --env staging app.delete confirm # ask you first in staging — prod stays denied
     burrow guard set dns.write allow                  # let it add DNS records
-    burrow guard set dns.delete deny                  # but never delete them
 
 App-level rules can be scoped per environment, so the agent moves fast in staging while prod stays locked down.
 

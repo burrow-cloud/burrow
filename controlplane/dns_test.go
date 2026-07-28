@@ -98,8 +98,12 @@ func TestAddDomainZoneNotFoundAndProviderError(t *testing.T) {
 }
 
 func TestRemoveDomain(t *testing.T) {
-	e, dnsF, _ := configuredDNSEngine(t)
+	e, dnsF, d := configuredDNSEngine(t)
 	ctx := context.Background()
+
+	// dns.delete is denied by default (ADR-0065 §3), so the removal this test is about is only
+	// reachable once an operator relaxes the guardrail. Say so rather than leaning on a default.
+	d.SetPolicy(permissive().With(cp.GuardrailDNSDelete, cp.DispositionConfirm))
 
 	// Create then remove.
 	if _, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "app.example.com", Provider: "digitalocean", Address: "203.0.113.5", Confirm: true}); err != nil {
@@ -118,13 +122,55 @@ func TestRemoveDomain(t *testing.T) {
 	}
 }
 
+// TestRemoveDomainDeniedByDefault confirms dns.delete is denied — not held — by the built-in policy
+// (ADR-0065 §3): removing a public DNS record takes an application off the internet, and the record
+// may not be one Burrow created. --confirm cannot open a deny, and the record survives.
+//
+// The refusal names the cluster-wide `guard set` form rather than a --env one, because EnvScopable
+// keys on the `app.` prefix: dns.delete's deny is all-or-nothing today. ADR-0065 §3 records the
+// limitation and ADR-0068 proposes lifting it.
+func TestRemoveDomainDeniedByDefault(t *testing.T) {
+	ctx := context.Background()
+	e, dnsF, d := configuredDNSEngine(t)
+	d.SetPolicy(cp.DefaultPolicy())
+
+	if _, err := e.AddDomain(ctx, cp.AddDomainRequest{Host: "app.example.com", Provider: "digitalocean", Address: "203.0.113.5", Confirm: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, confirm := range []bool{false, true} {
+		_, err := e.RemoveDomain(ctx, cp.RemoveDomainRequest{Host: "app.example.com", Provider: "digitalocean", Confirm: confirm})
+		mustGuardrail(t, err, cp.GuardrailDNSDelete)
+		g, _ := cp.AsGuardrail(err)
+		if g.NeedsConfirmation {
+			t.Errorf("confirm=%v: NeedsConfirmation = true, want a plain deny no confirm can satisfy", confirm)
+		}
+		if !strings.Contains(g.Message, "guard set dns.delete") || !strings.Contains(g.Message, "whole cluster") {
+			t.Errorf("confirm=%v: refusal %q should name the cluster-wide lever and its reach", confirm, g.Message)
+		}
+		if strings.Contains(g.Message, "--env") {
+			t.Errorf("confirm=%v: refusal %q offers --env, which dns.delete cannot be scoped with", confirm, g.Message)
+		}
+	}
+
+	if _, ok := dnsF.Provider().Record("app.example.com"); !ok {
+		t.Errorf("record should survive a denied RemoveDomain")
+	}
+}
+
+// TestRemoveDomainGuardrailHoldsWithoutConfirm covers the disposition an operator can set instead of
+// the deny default: with dns.delete at confirm, an unconfirmed removal is held rather than refused.
 func TestRemoveDomainGuardrailHoldsWithoutConfirm(t *testing.T) {
-	e, _, _ := configuredDNSEngine(t)
+	e, _, d := configuredDNSEngine(t)
+	d.SetPolicy(permissive().With(cp.GuardrailDNSDelete, cp.DispositionConfirm))
 	if _, err := e.AddDomain(context.Background(), cp.AddDomainRequest{Host: "app.example.com", Provider: "digitalocean", Address: "203.0.113.5", Confirm: true}); err != nil {
 		t.Fatal(err)
 	}
 	_, err := e.RemoveDomain(context.Background(), cp.RemoveDomainRequest{Host: "app.example.com", Provider: "digitalocean"})
 	mustGuardrail(t, err, cp.GuardrailDNSDelete)
+	if g, _ := cp.AsGuardrail(err); !g.NeedsConfirmation {
+		t.Errorf("NeedsConfirmation = false, want the operator-set confirm to hold rather than refuse")
+	}
 }
 
 func TestAddDomainDerivesAddressFromExposedApp(t *testing.T) {

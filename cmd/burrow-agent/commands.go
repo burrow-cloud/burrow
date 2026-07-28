@@ -18,7 +18,7 @@ import (
 const rootLong = `burrow-agent is your control channel to Burrow: it reports the state of the user's applications
 on their Kubernetes cluster so you can survey and diagnose, and it carries the operate-verbs so you
 can act — the compute verbs (deploy, build, rollback, scale, autoscale, run), the routing verbs (expose,
-unexpose, domain add/remove), the add-on operations (addon install/remove/attach/backup), the config
+unexpose, domain add/remove), the add-on operations (addon install/attach/backup), the config
 writes (config set/unset), secret unset, and the guarded destructive delete.
 
 Every command prints its result as indented JSON, so you can pipe, grep, and jq it

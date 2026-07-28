@@ -26,7 +26,7 @@ func TestAddonVolumesFindsClaimsAfterRemoval(t *testing.T) {
 	a := kube.New(client, ns).WithAddonNamespace(addonNS)
 
 	spec := cp.AddonSpec{Type: cp.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428, StorageGi: 5}
-	if _, err := a.DeployAddon(ctx, spec); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	if _, err := a.DeleteAddon(ctx, "burrow-logs", false); err != nil {

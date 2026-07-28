@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/burrow-cloud/burrow/client"
+	"github.com/burrow-cloud/burrow/internal/agentsurface"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -39,7 +40,10 @@ pushes no images: deploy names an image reference already on a registry the clus
 never code. A destructive verb like delete is still available, but it is guarded — held for the
 human's confirmation, never self-confirmed. The dangerous ADMIN verbs (install, bootstrap, cluster
 setup, guard set, credential writes, and — deliberately — setting a secret VALUE) are not part of
-this binary at all. Run -h on any command to see what it does and the flags it takes.`
+this binary at all. Run burrow-agent guard to see both kinds of limit at once: the guardrail
+dispositions, and the capabilities absent from this binary with what each one is and who can run
+it. Relay that to the human rather than reporting an unknown command or working around it.
+Run -h on any command to see what it does and the flags it takes.`
 
 // newRootCmd builds the burrow-agent command tree: the read-only operate-verbs and the mutating
 // compute verbs (deploy, build, rollback, scale, autoscale, run). The dangerous ADMIN verbs are structurally
@@ -396,15 +400,43 @@ func newMetricsQueryCmd() *cobra.Command {
 	return cmd
 }
 
+// newGuardCmd is the agent's read-only view of everything it cannot do, in one answer
+// ([ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) §7). It reports two
+// different kinds of limit and keeps them apart:
+//
+//   - "guardrails" — the control plane's dispositions. A `deny` here is a legible refusal the
+//     agent can anticipate and relay, and an operator can relax it with `burrow guard set`.
+//   - "absent_capabilities" — verbs that are not compiled into this binary at all, each with what
+//     it is, why it is held back, and who can perform it instead.
+//
+// The second group exists because an absent verb is otherwise a DEAD END: `unknown command`, with
+// no account of what the capability was or who has it. ADR-0065 §5 is blunt about where dead ends
+// lead — an agent that hits one may get creative and route around the control channel entirely,
+// reaching for `kubectl` or a shell, which is the failure ADR-0021 says Burrow cannot close from
+// the inside. Absent AND legible is a refusal the agent can hand to a human, and that is what
+// makes tier 1 tolerable rather than merely safe.
+//
+// Reading this enumerates the surface, which ADR-0065 §7 accepts outright: the CLI is open source
+// and `--help` already reveals it, so nothing is withheld and no access control guards the read.
+//
+// The command stays READ-ONLY. It has no subcommands and writes nothing: `guard set` is the
+// operator's lever, run with the admin kubeconfig, and its absence from this binary is what makes
+// every disposition above trustworthy rather than advisory.
 func newGuardCmd() *cobra.Command {
 	o := &connOpts{}
 	cmd := &cobra.Command{
 		Use:   "guard",
-		Short: "List the control-plane guardrails and their current dispositions",
+		Short: "List the control-plane guardrails, their dispositions, and the capabilities absent from this binary",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.Guardrails(ctx, env)
+				gs, err := c.Guardrails(ctx, env)
+				if err != nil {
+					return nil, err
+				}
+				// Derived from the command tree this binary actually registers, so a verb dropped
+				// from the binary becomes legible here with no second edit.
+				return agentsurface.NewGuardReport(gs, absentCapabilities(cmd.Root())), nil
 			})
 		},
 	}

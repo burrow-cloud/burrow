@@ -5,14 +5,21 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/burrow-cloud/burrow/internal/agentsurface"
 )
 
 // newGuardCmd inspects and configures the control-plane guardrail policy (ADR-0020).
 // `list` is read-only; `set` is the operator's lever — `burrow-agent` deliberately carries no
 // `guard set`, so an agent cannot change its own guardrails.
+//
+// `list` also reports the capabilities absent from the agent binary (ADR-0065 §7), which is the
+// other half of the boundary: a disposition is a limit this CLI can move, an absent capability is
+// one it cannot, and an operator asking "what can my agent do?" needs both.
 func newGuardCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "guard",
@@ -26,7 +33,7 @@ func newGuardListCmd() *cobra.Command {
 	o := &commonOpts{}
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List the guardrails and their dispositions",
+		Short: "List the guardrails and their dispositions, and the capabilities absent from burrow-agent",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -38,11 +45,17 @@ func newGuardListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The capabilities the agent binary does not carry, from the same catalogue
+			// burrow-agent reports (ADR-0065 §7). This CLI is a different binary and cannot walk
+			// the agent's command tree, so it reports the catalogue's declaration — which the
+			// surface-guard test pins to that tree, so the two answers agree.
+			absent := agentsurface.AbsentFromAgentSurface()
+			out := cmd.OutOrStdout()
 			if o.json {
-				return emit(cmd.OutOrStdout(), true, gs, "")
+				return emit(out, true, agentsurface.NewGuardReport(gs, absent), "")
 			}
 			named := o.env != "" && o.env != "default"
-			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			if named {
 				// The SOURCE column shows whether each effective disposition is set for this
 				// environment or inherited from the global policy or the built-in default.
@@ -56,12 +69,44 @@ func newGuardListCmd() *cobra.Command {
 					fmt.Fprintf(tw, "%s\t%s\t%s\n", g.Code, g.Disposition, g.Description)
 				}
 			}
-			return tw.Flush()
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+			writeAbsentCapabilities(out, absent)
+			return nil
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	return cmd
+}
+
+// writeAbsentCapabilities prints the capabilities the `burrow-agent` binary does not carry, under
+// the guardrail table ([ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) §7).
+//
+// It is the operator's side of the same answer the agent gets. Two limits govern what an agent can
+// do and they are not the same: a guardrail disposition above, which this CLI can change with
+// `guard set`, and a capability that is simply not compiled into the agent binary, which it
+// cannot. Showing them together is how an operator sees the whole boundary in one place, and the
+// RUN INSTEAD column is what a human does when the agent relays "that is not something I can do".
+//
+// The human table stays two columns so it fits a terminal; the per-capability detail the agent
+// reads (what it is, why it is held back, who can do it) is in the --json report. No em-dashes:
+// this is user-facing CLI output.
+func writeAbsentCapabilities(w io.Writer, absent []agentsurface.Capability) {
+	if len(absent) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nAbsent from burrow-agent: %d capabilities the agent binary cannot express.\n", len(absent))
+	fmt.Fprintln(w, "It reports each one to the agent with what it is and who can run it, so the agent")
+	fmt.Fprintln(w, "relays a refusal instead of an unknown command. Use --json for the full detail.")
+	fmt.Fprintln(w)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "CAPABILITY\tRUN INSTEAD")
+	for _, c := range absent {
+		fmt.Fprintf(tw, "%s\t%s\n", c.Path, c.Command)
+	}
+	_ = tw.Flush()
 }
 
 // guardSourceLabel renders a guardrail's source for the env-scoped listing. An env-specific override

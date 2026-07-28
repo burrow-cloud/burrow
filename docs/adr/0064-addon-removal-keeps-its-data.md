@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+✅ Accepted
 
 ## TL;DR
 
@@ -199,14 +199,16 @@ listing.
   Genuinely better, and out of scope here: it is a schema and a write path on every attach and
   detach, and this record should not be blocked on it. Worth doing separately.
 
-## Questions
+### Deliberately left open
 
-- **Does `--delete-data` deserve its own guardrail code** rather than sharing `addon.remove`'s
-  disposition? They are now materially different operations, and an operator who wants `remove`
-  allowed but `remove --delete-data` denied cannot express that today.
-- **§5 depends on ADR-0063**, which is Proposed. Until an object-storage provider exists there is
-  nowhere for a final backup to go except the retained backup claim, so §5 ships after it and §2's
-  typed confirmation carries the weight in the meantime.
-- **Should §6's listing show cost or only size?** Size is knowable from the claim; cost needs the
-  provider's pricing and is the number a user actually cares about. Reporting size is honest and
-  less useful; estimating cost is more useful and can be wrong.
+Three sub-decisions this record does not make, named so they are settled deliberately:
+
+- **Whether `--delete-data` deserves its own guardrail code** rather than sharing `addon.remove`'s
+  disposition. They are now materially different operations, and an operator who wants `remove`
+  allowed but `remove --delete-data` denied cannot express that.
+- **§5's ordering against [ADR-0063](0063-object-storage-provider.md).** Until an object-storage
+  provider exists there is nowhere for a final backup to go except the retained backup claim, so §5
+  ships after it and §2's typed confirmation carries the weight in the meantime.
+- **Whether §6's listing reports cost or only size.** Size is knowable from the claim; cost needs the
+  provider's pricing and is the number a user actually cares about. Size is honest and less useful;
+  an estimate is more useful and can be wrong.

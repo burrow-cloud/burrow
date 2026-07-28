@@ -252,6 +252,13 @@ type Policy struct {
 // replica ceiling that denies oversized scale-ups, and scale-to-zero held for confirmation
 // — recoverable with an explicit confirm rather than silently allowed or hard-denied. The
 // operator can relax or tighten any of these with `guard set`.
+//
+// The irreversible operations — deleting an app, deleting a public DNS record — are denied
+// rather than confirmed (ADR-0065 §3): a confirmation is a real control only for someone who
+// reads it, and these are the cases where the reader is busy or mid-incident. Those denies are
+// a floor, not a fixed setting: the expected use is a per-environment gradient (allow in
+// development, confirm in staging, deny in production), so an operator who finds one too strict
+// should scope it with `guard set --env <env> ...` rather than switch it off everywhere.
 func DefaultPolicy() Policy {
 	return Policy{
 		Dispositions: map[GuardrailCode]Disposition{
@@ -263,12 +270,32 @@ func DefaultPolicy() Policy {
 			GuardrailScaleToZero:    DispositionConfirm,
 			GuardrailExposePublic:   DispositionConfirm,
 			GuardrailDNSWrite:       DispositionConfirm,
-			GuardrailDNSDelete:      DispositionConfirm,
 			GuardrailAddonInstall:   DispositionConfirm,
 			GuardrailAddonRemove:    DispositionConfirm,
 			GuardrailAddonDetach:    DispositionConfirm,
 			GuardrailAddonRestore:   DispositionConfirm,
-			GuardrailAppDelete:      DispositionConfirm,
+			// Deleting a public DNS record is denied by default (ADR-0065 §3, tier 2): it takes an
+			// application off the internet, and the record may not be one Burrow created, so a confirm
+			// prompt protects only an attentive reader. It fails reversibility, not scope, so the
+			// operator decides — `guard set dns.delete confirm` turns it back on. That lever is on the
+			// operator CLI only, so relaxing it is a deliberate human act the agent cannot perform.
+			//
+			// This deny is cluster-wide and cannot be relaxed for one environment: EnvScopable keys on
+			// the `app.` prefix, so an operator who wants the agent managing DNS in development but not
+			// production must pick one answer for both. ADR-0065 §3 records that limitation and ADR-0068
+			// proposes lifting it; widening the prefix is that record's scope, not this one's.
+			GuardrailDNSDelete: DispositionDeny,
+			// Deleting an app is denied by default (ADR-0065 §3, tier 2): it destroys the release
+			// history along with the workload and routing, so there is no rollback afterwards and a
+			// confirm prompt protects only an attentive reader. Its blast radius is correctly scoped to
+			// the one app, so it fails reversibility rather than scope and the operator decides.
+			//
+			// A tier-2 default is a floor, not a fixed setting. app.delete is env-scopable, so the shape
+			// an operator wants is a gradient — `guard set --env dev app.delete allow`, `--env staging
+			// app.delete confirm`, and prod left denied — and `deny` is simply where an environment sits
+			// until someone says otherwise. Changing this default changes behaviour only for operators
+			// who never set the disposition; a row already in the policy table is untouched.
+			GuardrailAppDelete: DispositionDeny,
 			// Running a one-off command inside the app's own image is held for confirmation by default
 			// (ADR-0048 §4): a command runs opaquely and may make destructive changes, so the human sees
 			// and approves the exact command before it runs. An operator can relax it to allow in a safe

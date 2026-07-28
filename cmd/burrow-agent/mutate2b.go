@@ -127,7 +127,8 @@ func newDomainAddCmd() *cobra.Command {
 }
 
 // newDomainRemoveCmd removes the DNS record a configured provider holds for a hostname. Deleting a
-// public DNS record trips the dns.delete guardrail, held for confirmation by default.
+// public DNS record trips the dns.delete guardrail, DENIED by default (ADR-0065 §3) — the verb stays
+// on this surface so the refusal is legible, and an operator who wants it relaxes the guardrail.
 func newDomainRemoveCmd() *cobra.Command {
 	o := &connOpts{}
 	var provider string
@@ -136,8 +137,11 @@ func newDomainRemoveCmd() *cobra.Command {
 		Use:   "remove <host>",
 		Short: "Remove the DNS record a configured provider holds for a hostname",
 		Long: "Remove the DNS record a configured provider holds for a hostname. Deleting a public DNS record\n" +
-			"trips the dns.delete guardrail, held for confirmation by default. When held, the outcome says so\n" +
-			"— relay it and re-run with --confirm ONLY after the human approves.",
+			"trips the dns.delete guardrail, DENIED by default: removing the record takes an application off\n" +
+			"the internet, and the record may not be one Burrow created. A denied outcome is final — no\n" +
+			"--confirm opens it. Relay it; only the human, at the operator CLI, can relax the guardrail.\n" +
+			"If they have set it to confirm, the outcome says held instead — re-run with --confirm ONLY\n" +
+			"after they approve.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "domain_remove", func(ctx context.Context, c *client.Client, _ string) (any, error) {
@@ -344,9 +348,11 @@ func newSecretUnsetCmd() *cobra.Command {
 	return cmd
 }
 
-// newDeleteCmd deletes an app entirely — its workload, routing, and release history. It is destructive
-// but guarded by app.delete, held for confirmation by default, so it flows through the confirm envelope
-// like any other held op and a human approves every deletion.
+// newDeleteCmd deletes an app entirely — its workload, routing, and release history. It is guarded by
+// app.delete, DENIED by default (ADR-0065 §3) because destroying the release history leaves nothing to
+// roll back to. The verb stays on this surface rather than leaving the binary: a denial the agent can
+// read and relay beats an `unknown command` it might route around (ADR-0065 §5). An operator who wants
+// the agent tidying up after itself relaxes the guardrail, ideally per environment.
 func newDeleteCmd() *cobra.Command {
 	o := &connOpts{}
 	var confirm bool
@@ -356,9 +362,10 @@ func newDeleteCmd() *cobra.Command {
 		Long: "Delete an application entirely: its workload, its routing (Service and Ingress), and its\n" +
 			"recorded release history, so it disappears from the apps listing and from status. This is\n" +
 			"destructive and irreversible.\n\n" +
-			"Guarded by the app.delete guardrail, held for confirmation by default. When held, the outcome\n" +
-			"says so — relay it and re-run with --confirm ONLY after the human explicitly approves. Never\n" +
-			"self-confirm a deletion.",
+			"Guarded by the app.delete guardrail, DENIED by default. A denied outcome is final — no --confirm\n" +
+			"opens it. Relay it; only the human, at the operator CLI, can relax the guardrail, and the message\n" +
+			"names the per-environment way to do it. If they have set it to confirm, the outcome says held\n" +
+			"instead — re-run with --confirm ONLY after they explicitly approve. Never self-confirm a deletion.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "delete", func(ctx context.Context, c *client.Client, env string) (any, error) {

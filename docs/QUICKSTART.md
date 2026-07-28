@@ -122,18 +122,38 @@ burrow app delete hello
 ```
 
 ```
-burrow: control plane: guardrail holds app delete for confirmation: deleting the app "hello"
-(its workload, routing, and release history) requires confirmation to proceed (app.delete,
-http 422) — re-run with --confirm to proceed
+burrow: control plane: guardrail refused app delete: deleting the app "hello" (its workload,
+routing, and release history) is denied by the current guardrail policy — a guardrail is a
+floor, not a fixed setting: an operator can relax it for one environment with `burrow guard set
+--env <env> app.delete confirm`, which is preferable to relaxing it everywhere (app.delete,
+http 422)
 ```
 
-**This is the point of Burrow.** Deleting an app is destructive, so the control plane *holds* the
-operation instead of running it. `burrow app status hello` confirms the app is still there. Only
-an explicit confirm goes through:
+**This is the point of Burrow.** Deleting an app destroys its release history along with the
+workload, so there is nothing left to roll back to — the control plane refuses it outright
+rather than running it behind a prompt someone might not read. `burrow app status hello`
+confirms the app is still there, and `--confirm` will not change the answer: a deny is not a
+hold.
+
+**The deny is a starting point, not a verdict** — it is where a guardrail sits until you say
+otherwise. You relax it with `burrow guard set`, which only this CLI has, and the shape to reach
+for is one environment at a time:
 
 ```sh
-burrow app delete hello --confirm
+burrow guard set --env dev app.delete allow       # let the agent tidy up after itself in dev
+burrow guard set --env staging app.delete confirm # hold it for a human in staging
+                                                  # production keeps the deny
 ```
+
+Each `--env` name has to be a registered environment (`burrow env add`), which this
+single-environment quickstart cluster has none of yet. Relaxing it globally (`burrow guard set
+app.delete confirm`) needs no setup and relaxes production along with everything else — which is
+why the refusal points at `--env` first. `burrow guard list [--env <name>]` shows where every
+guardrail stands and whether it came from the environment, the global policy, or the built-in
+default.
+
+Leave the guardrail alone for now: the agent path below is where the deny earns its keep, and the
+cleanup at the end deletes the whole cluster anyway.
 
 ## The real thing (the agent path)
 
@@ -177,19 +197,22 @@ The agent runs `burrow-agent delete hello` and gets back, instead of a deletion:
 
 ```json
 {
-  "outcome": "held_for_confirmation",
+  "outcome": "denied",
   "operation": "delete",
   "code": "app.delete",
-  "message": "guardrail holds app delete for confirmation: deleting the app \"hello\" ... requires confirmation to proceed",
-  "confirm_required": true,
-  "hint": "relay this to the human; re-run with --confirm ONLY after they approve. Never self-confirm."
+  "message": "guardrail refused app delete: deleting the app \"hello\" ... is denied by the current guardrail policy — a guardrail is a floor, not a fixed setting: an operator can relax it for one environment with `burrow guard set --env <env> app.delete confirm` ..."
 }
 ```
 
-**This is the hero moment.** The agent cannot delete your app on its own. The control plane holds
-the destructive operation and tells the agent to come back to you; a well-behaved agent relays
-the hold and asks for your approval rather than self-confirming. You stay in the loop for the
-operations that matter, while the agent handles everything else.
+**This is the hero moment.** The agent cannot delete your app, and there is no flag it can add to
+change that: `denied` is final, and `guard set` is on the operator CLI the agent is not allowed
+to run. What it *can* do is read the refusal and tell you exactly which guardrail stopped it and
+how you would relax it — so the decision lands with you, in the environment you choose. You stay
+in the loop for the operations that matter, while the agent handles everything else.
+
+(Relax `app.delete` to `confirm` and the agent gets `held_for_confirmation` with
+`confirm_required: true` instead — a well-behaved agent relays the hold and waits for your
+approval rather than self-confirming.)
 
 ## Clean up
 

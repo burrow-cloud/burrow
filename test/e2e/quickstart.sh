@@ -2,8 +2,8 @@
 # Quickstart end-to-end test: pins the "fast path" of docs/QUICKSTART.md so the doc cannot rot.
 # It walks exactly the sequence a stranger follows on their laptop — stand up k3d, install
 # Burrow, build and import the examples/hello image, deploy it, confirm it is running, then try
-# to delete it and assert the guardrail HOLDS the delete for confirmation instead of executing
-# it (the payoff of the whole walkthrough).
+# to delete it and assert the guardrail REFUSES the delete instead of executing it (the payoff of
+# the whole walkthrough), and that relaxing the guardrail is what makes the delete reachable.
 #
 # Unlike the doc — which installs the PUBLISHED burrowd image so a stranger needs no source build
 # — this test builds burrowd FROM THE TREE with ko and imports it, so it exercises the PR's code,
@@ -123,29 +123,53 @@ echo "--- status ---"
 [ -n "$ok" ] || { echo "FAIL: hello never became available"; exit 1; }
 
 # =============================================================================
-# THE PAYOFF: app delete is HELD for confirmation, not executed.
-# `burrow app delete` without --confirm trips the app.delete guardrail (confirm-by-default). The
-# CLI surfaces the hold as a non-zero exit and a message naming app.delete and --confirm; the app
-# must still be there afterward. This is the exact "Burrow refuses a destructive op without an
-# explicit confirm" moment the doc ends on — assert it holds, not deletes.
+# THE PAYOFF: app delete is REFUSED, not executed — and --confirm does not open it.
+# app.delete is denied by default (ADR-0065 section 3): deleting an app destroys its release
+# history, so there is nothing to roll back to and a confirmation prompt protects only an
+# attentive reader. The CLI surfaces the refusal as a non-zero exit and a message naming
+# app.delete; the app must still be there afterward, WITH or WITHOUT --confirm. This is the exact
+# "Burrow refuses a destructive op" moment the doc ends on — assert it refuses, not deletes.
 # =============================================================================
-echo "=== burrow app delete hello (NO --confirm) must be HELD, not executed ==="
-set +e
-delete_out=$("$BURROW" app delete hello --kubeconfig "$KCFG" 2>&1)
-delete_rc=$?
-set -e
-printf '%s\n' "$delete_out"
-if [ "$delete_rc" -eq 0 ]; then
-  echo "FAIL: 'burrow app delete hello' succeeded without --confirm — the guardrail did not hold it"
+for flag in "" "--confirm"; do
+  label=${flag:-"NO --confirm"}
+  echo "=== burrow app delete hello ($label) must be REFUSED, not executed ==="
+  set +e
+  # shellcheck disable=SC2086 # $flag is deliberately word-split: empty means no flag at all.
+  delete_out=$("$BURROW" app delete hello $flag --kubeconfig "$KCFG" 2>&1)
+  delete_rc=$?
+  set -e
+  printf '%s\n' "$delete_out"
+  if [ "$delete_rc" -eq 0 ]; then
+    echo "FAIL: 'burrow app delete hello $flag' succeeded — the guardrail did not refuse it"
+    exit 1
+  fi
+  grep -q "app.delete" <<<"$delete_out" \
+    || { echo "FAIL: the refused delete did not name the app.delete guardrail"; exit 1; }
+  grep -q "denied" <<<"$delete_out" \
+    || { echo "FAIL: the refused delete did not report a denial"; exit 1; }
+  # A tier-2 deny is a floor, not a fixed setting: the refusal must point at scoping it to one
+  # environment, so an operator's first move is `guard set --env`, not a global relax.
+  grep -q -- "guard set --env" <<<"$delete_out" \
+    || { echo "FAIL: the refusal did not point at per-environment scoping"; exit 1; }
+
+  echo "=== assert hello still exists (the delete was refused, not performed) ==="
+  "$BURROW" app status hello --kubeconfig "$KCFG" | grep -q "ready, available" \
+    || { echo "FAIL: hello is gone — the delete executed instead of being refused"; exit 1; }
+done
+
+# The deny is the operator's starting point, not a wall: relaxing the guardrail is what makes the
+# verb reachable, and only this CLI can do it (`burrow-agent` has no `guard set`). The doc
+# describes this lever rather than pulling it — it leaves the app in place for the agent path —
+# so this is the one step the test takes beyond the walkthrough, and it is the half of the
+# guardrail story a deny-only assertion would leave unproven.
+echo "=== burrow guard set app.delete confirm, then the delete goes through with --confirm ==="
+"$BURROW" guard set app.delete confirm --kubeconfig "$KCFG" \
+  || { echo "FAIL: 'burrow guard set app.delete confirm' did not succeed"; exit 1; }
+"$BURROW" app delete hello --confirm --kubeconfig "$KCFG" \
+  || { echo "FAIL: the delete was still refused after the guardrail was relaxed to confirm"; exit 1; }
+if "$BURROW" app status hello --kubeconfig "$KCFG" 2>/dev/null | grep -q "ready, available"; then
+  echo "FAIL: hello survived a confirmed delete after the guardrail was relaxed"
   exit 1
 fi
-grep -qi "confirm" <<<"$delete_out" \
-  || { echo "FAIL: the held delete did not mention confirmation"; exit 1; }
-grep -q "app.delete" <<<"$delete_out" \
-  || { echo "FAIL: the held delete did not name the app.delete guardrail"; exit 1; }
 
-echo "=== assert hello still exists (the delete was held, not performed) ==="
-"$BURROW" app status hello --kubeconfig "$KCFG" | grep -q "ready, available" \
-  || { echo "FAIL: hello is gone — the delete executed instead of being held"; exit 1; }
-
-echo "=== QUICKSTART E2E PASSED: install -> build+import hello -> deploy -> status running -> delete HELD for confirmation ==="
+echo "=== QUICKSTART E2E PASSED: install -> build+import hello -> deploy -> status running -> delete DENIED -> relaxed -> deleted ==="

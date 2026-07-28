@@ -50,7 +50,7 @@ This file is the place both questions get answered together.
 | Status | `burrow app status <app>`, `burrow app list` | Live workload state: desired/ready/updated replicas, availability, and an actionable issue string for a stuck rollout (`ImagePullBackOff`, `ProgressDeadlineExceeded`). | [0011](adr/0011-kubernetes-integration.md) |
 | Run a one-off command | `burrow app run <app> -- ./migrate` | Runs the command as a `batch/v1` Job from the app's **currently deployed image**, in the app's namespace, with the app's config and per-app Secret injected. Waits synchronously, captures the exit code and combined output. | [0048](adr/0048-one-off-command-runner.md) |
 | Auto-deploy on a new tag | `burrow app auto-deploy <app> <patch\|minor\|major\|off>` | burrowd polls the registry (~5 min, jittered) and fires the same guarded deploy for an in-level upgrade. Outbound-only, so it works on a NAT'd cluster. | [0052](adr/0052-pull-based-passive-deploy.md), [0058](adr/0058-auto-deploy-is-opt-in.md) |
-| Delete an app | `burrow app delete <app>` | Removes the workload, its Service and Ingress, and its release history. | [0024](adr/0024-cli-command-taxonomy.md) |
+| Delete an app | `burrow app delete <app>` | Removes the workload, its Service and Ingress, and its release history. Guarded by `app.delete`, **denied by default** — relax the guardrail (ideally per environment) before the verb will run on either CLI. | [0024](adr/0024-cli-command-taxonomy.md), [0065](adr/0065-what-belongs-on-the-agent-surface.md) |
 
 Every verb above except `auto-deploy` also exists on `burrow-agent` (`deploy`, `scale`,
 `autoscale`, `rollback`, `run`, `delete`, `apps`, `status`, `history`). Setting the auto-deploy
@@ -457,12 +457,12 @@ These are all fourteen, in listing order, with their defaults:
 | `app.scale_to_zero` | scaling an app to zero | `confirm` | yes |
 | `app.expose_public` | exposing an app at a public hostname | `confirm` | yes |
 | `dns.write` | creating or updating a public DNS record | `confirm` | no |
-| `dns.delete` | deleting a public DNS record | `confirm` | no |
+| `dns.delete` | deleting a public DNS record | `deny` | no |
 | `addon.install` | installing an add-on | `confirm` | no |
 | `addon.remove` | removing an add-on | `confirm` | no |
 | `addon.detach` | detaching an app from an add-on, destroying its data | `confirm` | no |
 | `addon.restore` | restoring a database over its live contents | `confirm` | no |
-| `app.delete` | deleting an app entirely | `confirm` | yes |
+| `app.delete` | deleting an app entirely | `deny` | yes |
 | `app.rollback` | rolling back to the previous release | `allow` | yes |
 | `app.autoscale` | configuring autoscaling | `allow` | yes |
 | `app.run` | running a one-off command in the app's image | `confirm` | yes |
@@ -475,14 +475,21 @@ structurally, the verb does not exist on that binary.
 
 Limits:
 
-- **`app.delete` and `dns.delete` are still `confirm`, and the table above is the shipped
-  behaviour.** [ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §3 decides both become
-  `deny` by default — deleting an app destroys its release history, and deleting a DNS record
-  takes an application off the internet, so neither should rest on an unread prompt.
-  `DefaultPolicy` has not changed, so both remain one `--confirm` away for the agent. **Not
-  built.**
+- **`app.delete` and `dns.delete` are denied, and a deny is not a hold** — no `--confirm`
+  opens one, on either CLI ([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §3).
+  Deleting an app destroys its release history and deleting a DNS record takes an application
+  off the internet, so neither rests on a prompt someone might not read. **That default is a
+  floor, not a fixed setting.** The expected shape is a per-environment gradient — `burrow guard
+  set --env dev app.delete allow`, `--env staging app.delete confirm`, production left denied —
+  and the refusal message says so, because relaxing one guardrail globally to unblock a sandbox
+  relaxes production with it. `burrow app delete` is how a human deletes an app once the
+  guardrail permits it.
 - **Only `app.*` guardrails can be scoped to an environment.** The six cluster-level codes
-  (`dns.*`, `addon.*`) are global; setting one with `--env` is rejected.
+  (`dns.*`, `addon.*`) are global; setting one with `--env` is rejected. `dns.delete`'s deny is
+  therefore all-or-nothing: an operator who wants the agent managing DNS in development but not
+  production must pick one answer for both. ADR-0065 §3 names this as a real limitation of the
+  decision; [ADR-0068](adr/0068-operational-limits-are-configuration.md) proposes widening the
+  prefix and is not built.
 - **The replica ceiling is 50 and is not configurable.** `app.replica_ceiling` controls the
   *disposition* when the ceiling is exceeded, per environment; the number itself is compiled in
   and has no CLI, API, or per-environment surface.
@@ -553,13 +560,15 @@ add-ons are one instance per type per cluster and every app's database sits on t
 `postgres`, so it removes *the* add-on and takes every attached app with it. The surface-guard test
 asserts its absence rather than leaving it to be a property of the current command tree.
 
-Two halves of that record are **not built**, and both matter to what an agent actually sees.
-The reversibility tier is unshipped — `app.delete` and `dns.delete` are still `confirm`, not
-`deny` (see [Guardrails](#guardrails)). And ADR-0065 §7 decides that `guard` should also report
-the capabilities **absent from the binary** and why, so an agent can tell a human "removing an
-add-on is not something I can do, and here is who can". `burrow-agent guard` returns the
-control plane's guardrail dispositions and nothing else, so an absent verb is still rejected by
-name with no account of what it was.
+The reversibility tier ships too: `app.delete` and `dns.delete` are `deny` by default, so
+`burrow-agent delete` and `burrow-agent domain remove` exist, are refused, and say what would
+change the answer (see [Guardrails](#guardrails)).
+
+One half of that record is **not built**, and it matters to what an agent actually sees.
+ADR-0065 §7 decides that `guard` should also report the capabilities **absent from the binary**
+and why, so an agent can tell a human "removing an add-on is not something I can do, and here is
+who can". `burrow-agent guard` returns the control plane's guardrail dispositions and nothing
+else, so an absent verb is still rejected by name with no account of what it was.
 
 The narrowing is structural, not advisory: the binary lacks the verb, its
 kubeconfig lacks the permission, and the control plane gates the operation anyway.
@@ -675,7 +684,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
 | Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Not built — dumps land on an in-cluster PVC. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
 | A final backup before `--delete-data` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5 | Not built — it waits on an object-storage provider ([ADR-0063](adr/0063-object-storage-provider.md)); until then the retained backup claim is the only copy. The rest of ADR-0064 is built: removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and carries §2's typed confirmation, the backup claim always survives, and `addon list` reports retained volumes (§6). [#334](https://github.com/burrow-cloud/burrow/issues/334) |
-| `app.delete` and `dns.delete` denied by default; `guard` reporting what the binary lacks | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §3, §7 | **Partial** — tier 1 is built (`addon remove` is not compiled into `burrow-agent`); the tier-2 defaults and the absent-capability report are not. [#336](https://github.com/burrow-cloud/burrow/issues/336), [#337](https://github.com/burrow-cloud/burrow/issues/337) |
+| `guard` reporting the capabilities absent from the agent binary | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §7 | Not built — tiers 1 and 2 are (`addon remove` is not compiled into `burrow-agent`; `app.delete` and `dns.delete` are denied by default), but `guard` still reports only guardrail dispositions. [#337](https://github.com/burrow-cloud/burrow/issues/337) |
 | The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
 | One database instance per environment, and an install that creates one environment named `prod` | [0067](adr/0067-one-database-instance-per-environment.md) | Not built, **and the gap is a live data hazard** — the same app name in two environments silently shares one database, because provisioning takes no environment and is idempotent. [#339](https://github.com/burrow-cloud/burrow/issues/339), [#340](https://github.com/burrow-cloud/burrow/issues/340) |
 

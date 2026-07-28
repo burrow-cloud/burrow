@@ -161,7 +161,10 @@ func TestAutoDeployEndpoints(t *testing.T) {
 func newProviderAPI(t *testing.T) (http.Handler, *fake.Credentials, *fake.DNSFactory) {
 	t.Helper()
 	d := fake.NewDatabase()
-	d.SetPolicy(cp.DefaultPolicy()) // dns.write/dns.delete default to confirm
+	// dns.write defaults to confirm. dns.delete defaults to DENY (ADR-0065 §3), which no --confirm
+	// can open, so the removal leg of TestDomainEndpoints — a route-wiring test, not a policy one —
+	// carries the confirm an operator would have set to make the verb reachable at all.
+	d.SetPolicy(cp.DefaultPolicy().With(cp.GuardrailDNSDelete, cp.DispositionConfirm))
 	creds := fake.NewCredentials()
 	dnsF := fake.NewDNSFactory()
 	e, err := cp.New(cp.Deps{

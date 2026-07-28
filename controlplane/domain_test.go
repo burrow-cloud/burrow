@@ -93,6 +93,38 @@ func TestDefaultPolicyIsValid(t *testing.T) {
 	}
 }
 
+// TestDefaultPolicyDeniesIrreversibleDeletes pins ADR-0065 §3's tier-2 defaults: app.delete and
+// dns.delete ship as deny, not confirm. Both destroy something a human cannot restore afterwards —
+// an app's release history, a public DNS record Burrow may not have created — and a confirmation is
+// a real control only for someone who reads it. Each remains one deliberate `guard set` away.
+func TestDefaultPolicyDeniesIrreversibleDeletes(t *testing.T) {
+	p := DefaultPolicy()
+	for _, code := range []GuardrailCode{GuardrailAppDelete, GuardrailDNSDelete} {
+		if got := p.disposition("", code); got != DispositionDeny {
+			t.Errorf("DefaultPolicy() %s = %q, want %q (ADR-0065 §3)", code, got, DispositionDeny)
+		}
+	}
+
+	// The default is a floor: an explicit disposition in the policy table still wins, so an
+	// operator who deliberately chose confirm is not moved by the changed default.
+	relaxed := p.With(GuardrailAppDelete, DispositionConfirm).With(GuardrailDNSDelete, DispositionAllow)
+	if got := relaxed.disposition("", GuardrailAppDelete); got != DispositionConfirm {
+		t.Errorf("stored app.delete = %q, want the operator's confirm to win over the default", got)
+	}
+	if got := relaxed.disposition("", GuardrailDNSDelete); got != DispositionAllow {
+		t.Errorf("stored dns.delete = %q, want the operator's allow to win over the default", got)
+	}
+
+	// app.delete is env-scopable, so the deny is a per-environment floor a single environment can
+	// be lifted off; dns.delete is not, and its deny is cluster-wide (ADR-0065 §3, ADR-0068).
+	if !EnvScopable(GuardrailAppDelete) {
+		t.Errorf("app.delete should be env-scopable, so its deny can be relaxed per environment")
+	}
+	if EnvScopable(GuardrailDNSDelete) {
+		t.Errorf("dns.delete is expected to be cluster-wide; widening the prefix is ADR-0068's change, not this one's")
+	}
+}
+
 func TestPolicyValidate(t *testing.T) {
 	if err := (Policy{MaxReplicas: 0}).Validate(); err == nil {
 		t.Errorf("MaxReplicas 0 should be invalid")

@@ -71,7 +71,8 @@ What shipped:
 - **Connected-backend auth** — a bearer token in `burrow-credentials`, read at query time (its
   write transport moved through burrowd in v0.5 — [ADR-0030](adr/0030-credentials-through-the-control-plane.md)).
 - **Cache** — `addon install cache` (ValKey, BSD-3), a backing service the agent wires an app to.
-- **`app delete`** — remove an app, its routing, and release history behind a confirm guardrail;
+- **`app delete`** — remove an app, its routing, and release history behind the `app.delete`
+  guardrail (denied by default since [ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §3);
   **`app deploy -- <cmd>`** — container command override at parity with the MCP deploy tool.
 - **e2e** — deterministic k3d gates for install-logs, connect-Loki, connect-Prometheus,
   install-metrics + the full metrics loop, and cache; plus a local headless-agent diagnosis test

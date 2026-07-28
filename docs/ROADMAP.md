@@ -73,8 +73,9 @@ autonomous prod changes — and that most already run a cluster *with* logging) 
   query interface over the logs + metrics it set up or connected.
 - **Cache** ✅ shipped — `addon install cache` ([ValKey](https://valkey.io), BSD-3), a backing
   service the agent wires an app to (no query seam — apps connect to it directly).
-- **`app delete`** ✅ shipped — remove an app, its routing, and release history behind a confirm
-  guardrail.
+- **`app delete`** ✅ shipped — remove an app, its routing, and release history behind the
+  `app.delete` guardrail, denied by default ([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md)
+  §3) and relaxed per environment.
 
 Each shipped slice has a deterministic k3d e2e (install-logs, connect-Loki, connect-Prometheus,
 install-metrics + the full metrics loop, cache); a local headless-agent diagnosis test and a
@@ -301,9 +302,8 @@ acceptance checklist. The theme and its sequencing stay here; the granularity is
   add-on listing now reports; the final backup before a data-deleting removal is not, and waits on
   object storage. [#334](https://github.com/burrow-cloud/burrow/issues/334) (blocked by #331).
 - **What belongs on the agent surface** ([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md)) —
-  tier 1 is built (`addon remove` is not compiled into `burrow-agent`); the tier-2 defaults for
-  `app.delete` and `dns.delete`, and a `guard` that reports what the binary does not carry, are not.
-  [#336](https://github.com/burrow-cloud/burrow/issues/336),
+  tiers 1 and 2 are built (`addon remove` is not compiled into `burrow-agent`; `app.delete` and
+  `dns.delete` are denied by default); a `guard` that reports what the binary does not carry is not.
   [#337](https://github.com/burrow-cloud/burrow/issues/337).
 - **The Postgres add-on runs on CloudNativePG** ([ADR-0066](adr/0066-postgres-on-cloudnativepg.md)) —
   the operator owns WAL archiving, schedules, retention and point-in-time recovery, and Burrow stops

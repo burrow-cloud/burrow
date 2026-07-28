@@ -251,3 +251,30 @@ func TestStructuralReduction(t *testing.T) {
 		t.Error("burrow-agent imports cmd/burrow (the human admin CLI); the agent binary must not pull the admin command tree")
 	}
 }
+
+// TestAddonRemoveStructurallyAbsent pins ADR-0065 §2: `addon remove` is tier 1 — not compiled into
+// this binary at all, rather than compiled in and guarded.
+//
+// The reason is scope, and it does not depend on how the operator configured anything. Add-ons are
+// one instance per TYPE per cluster (InstallAddon takes a type; addons.name is the primary key), and
+// ADR-0031 puts every app's database on that one shared Postgres. So this is not "remove an add-on",
+// it is "remove THE add-on", taking every attached app down at once — the scope test in ADR-0065 §1,
+// failed unconditionally, with no agent workflow that legitimately needs it. `addon detach` and
+// `addon restore` are absent for the same reason, and `--delete-data` never existed here.
+//
+// The verb is fully available to the human operator, with and without `--delete-data`, as
+// `burrow addon remove` run with their own admin kubeconfig.
+func TestAddonRemoveStructurallyAbsent(t *testing.T) {
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "remove", "burrow-postgres"}, &out, &errb); err == nil {
+		t.Fatal("run(addon remove burrow-postgres) succeeded, want an error — removing the shared add-on must be structurally absent")
+	}
+	// The subcommand tree confirms it: `remove` is not registered under `addon`, so the failure is
+	// an unknown command rather than a refusal something could later relax.
+	addon := newAddonCmd()
+	for _, sub := range addon.Commands() {
+		if sub.Name() == "remove" {
+			t.Error("the addon command has a `remove` subcommand; removing the one shared add-on takes every attached app's data offline and is an operator action (ADR-0065 §2)")
+		}
+	}
+}

@@ -42,6 +42,16 @@ import (
 // match an explicit allow-list exactly, so ANY new verb fails — including one nobody predicted —
 // and its author has to state which side of the line it falls on.
 //
+// [ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) supplies the MEMBERSHIP rule
+// this file enforces. A capability qualifies unless it fails one of two tests: scope (its effect
+// reaches beyond the app the agent was asked about) or reversibility (a human cannot restore the
+// prior state). Failing scope is disqualifying outright — tier 1, absent from the binary and its
+// absence asserted here. Failing reversibility alone means the operator decides, so it ships as a
+// guardrail denied by default (tier 2) rather than being removed; §5 prefers that, because a legible
+// `denied: app.delete` is a refusal an agent can relay while `unknown command` is a dead end that
+// invites it to reach for kubectl. `addon remove` is the tier-1 case: one add-on instance per type
+// per cluster, every app's database on it (ADR-0031), so removing it takes them all down.
+//
 // This is the ONLY place the rule is stated. Burrow once carried a second agent-facing surface,
 // the MCP server, with its own copy of these guards; ADR-0062 removed it precisely so a rule about
 // what an agent may do has one enforcement point instead of two that can drift apart. A new
@@ -81,9 +91,16 @@ var agentSurfaceAllowList = map[string]string{
 	// or RBAC, so an add-on install cannot widen anything — where an add-on needs a
 	// ServiceAccount (the metrics scraper), burrowd only VERIFIES the operator staged it and
 	// otherwise fails cleanly (controlplane/kube/addons.go).
+	//
+	// `addon remove` is deliberately NOT here. Add-ons are one instance per type per cluster and
+	// ADR-0031 puts every app's database on the one shared Postgres, so removal takes every
+	// attached app down at once — it fails ADR-0065 §1's scope test unconditionally, which is
+	// tier 1: absent from the binary, not merely guarded
+	// ([ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) §2). Because this
+	// allow-list is closed, its omission here is what fails the test if the command comes back;
+	// `addon_remove` is also on adminVerbFragments below as the independent second net.
 	"addon":         "group: the add-on operations",
 	"addon install": "deploys a building block into the existing add-on namespace; creates no namespace and no RBAC",
-	"addon remove":  "removes a building block the control plane installed",
 	"addons":        "read-only: the installed add-ons and their capabilities",
 
 	// Routing: Services, Ingresses, and DNS records for an app.
@@ -108,13 +125,15 @@ var agentSurfaceAllowList = map[string]string{
 	"environments": "read-only: lists the local environment handles; selects, never creates",
 }
 
-// adminVerbFragments are fragments that mark a command path as cluster administration: creating
-// namespaces, writing RBAC, installing or replacing the control plane itself, or admitting nodes.
-// They are matched against the command path with its separators normalized to `_`, so `cluster
-// capacity` reads as `cluster_capacity`. This is a second, independent net under the allow-list,
-// so an obviously-wrong verb fails loudly even if the allow-list were updated carelessly. It is
-// tuned to this binary's naming convention, which is the only agent-facing one Burrow has
-// (ADR-0062).
+// adminVerbFragments are fragments that mark a command path as one the agent must not carry:
+// cluster administration — creating namespaces, writing RBAC, installing or replacing the control
+// plane itself, admitting nodes — plus the tier-1 verbs of
+// [ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) §2, whose blast radius
+// reaches past the app the agent was asked about. They are matched against the command path with
+// its separators normalized to `_`, so `cluster capacity` reads as `cluster_capacity`. This is a
+// second, independent net under the allow-list, so an obviously-wrong verb fails loudly even if the
+// allow-list were updated carelessly. It is tuned to this binary's naming convention, which is the
+// only agent-facing one Burrow has (ADR-0062).
 var adminVerbFragments = []string{
 	"install",     // control-plane and cluster-component installation
 	"uninstall",   //
@@ -145,17 +164,22 @@ var adminVerbFragments = []string{
 	"registry_login", // a registry credential is a human/CLI step (ADR-0030)
 	"provider_add",   // a provider credential is a human/CLI step (ADR-0030)
 	"secret_set",     // a secret VALUE never crosses the agent channel (ADR-0029)
+	// Add-ons are one instance per type per cluster, and ADR-0031 puts every app's database on
+	// the one shared Postgres, so this removes THE add-on and takes every attached app with it.
+	// ADR-0065 §2, tier 1. The whole path is the fragment on purpose: a bare "remove" would
+	// shadow `domain remove`, which is app-scoped and allowed.
+	"addon_remove",
 }
 
 // adminFragmentExceptions are the allow-listed paths that match an adminVerbFragments entry for a
 // reason that has been examined and does not put them on the operator's side of the line. Keep it
 // tiny and keep the reason next to it; an entry here is a claim that needs to stay true.
 var adminFragmentExceptions = map[string]string{
-	// Add-on install/remove deploy a building block (Postgres, logs, metrics) into the control
-	// plane's OWN add-on namespace through burrowd, which holds only namespaced Roles and is
-	// deliberately forbidden from creating namespaces or RBAC (controlplane/kube/addons.go).
+	// Add-on install deploys a building block (Postgres, logs, metrics) into the control plane's
+	// OWN add-on namespace through burrowd, which holds only namespaced Roles and is deliberately
+	// forbidden from creating namespaces or RBAC (controlplane/kube/addons.go). Its counterpart
+	// `addon remove` gets NO exception: it is tier 1 (ADR-0065 §2) and must stay caught.
 	"addon install": "deploys into the existing add-on namespace; burrowd cannot create a namespace or RBAC",
-	"addon remove":  "removes what `addon install` deployed",
 	// A read of scheduling headroom from the Kubernetes API. It changes nothing and is grouped
 	// under `cluster` for discoverability, not because it administers one.
 	"cluster capacity": "read-only scheduling headroom; creates nothing",
@@ -187,8 +211,14 @@ What to do:
   - If the verb is CLUSTER ADMINISTRATION — it creates a namespace, writes or modifies RBAC,
     installs/upgrades/uninstalls the control plane, or admits a node — it belongs in
     cmd/burrow (the operator CLI), run by a human with their own kubeconfig. Move it there.
+  - If its effect reaches BEYOND THE APP the agent was asked about, it is ADR-0065 tier 1: it
+    stays out of this binary and its absence is asserted here. ` + "`addon remove`" + ` is the case
+    that set the rule.
+  - If it is app-scoped but IRREVERSIBLE, it is ADR-0065 tier 2: keep it on the surface and ship
+    it with a guardrail whose default disposition is deny, so an operator can relax it per
+    environment and the agent gets a refusal it can explain.
   - If it genuinely is APP LIFECYCLE, add it to agentSurfaceAllowList in this file with a
-    one-line reason, and make sure that reason is true.`
+    one-line reason, name the tier it lands in, and make sure that reason is true.`
 
 // TestAgentSurfaceIsClosed asserts burrow-agent's command tree matches agentSurfaceAllowList
 // exactly, in both directions. It is a closed set on purpose: ANY new command fails this test, so
@@ -262,6 +292,7 @@ func TestAdminVerbFragmentsCatchTheObviousCases(t *testing.T) {
 		"service account token", "grant", "permission add", "kubeconfig", "kubectl",
 		"apply", "manifest apply", "helm install", "guard set", "env add", "environment create",
 		"credential add", "config registry login", "config provider add", "secret set",
+		"addon remove", // tier 1 (ADR-0065 §2): removes THE add-on, taking every attached app with it
 	}
 	for _, path := range mustCatch {
 		if matchAdminFragment(path) == "" {

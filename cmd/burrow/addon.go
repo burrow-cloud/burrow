@@ -595,27 +595,70 @@ func newAddonListCmd() *cobra.Command {
 	return cmd
 }
 
+// newAddonRemoveCmd removes an installed add-on. It tears down the add-on's workload and KEEPS its
+// data volume; --delete-data is the separate, explicit ask that destroys the data too. The default
+// had to be this way round: for `postgres` the data volume holds every attached app's database
+// (ADR-0031), and "remove it so I can reinstall it cleanly" is a normal thing to want.
+//
+// --delete-data lives on the operator CLI only. Destroying application data is a human decision, the
+// same line `addon detach` and `addon restore` already sit on — burrow-agent can stop an add-on but
+// cannot ask for its data to be destroyed (ADR-0049).
 func newAddonRemoveCmd() *cobra.Command {
 	o := &commonOpts{}
-	var confirm bool
+	var confirm, deleteData bool
 	cmd := &cobra.Command{
 		Use:   "remove <name>",
-		Short: "Remove an installed add-on",
-		Args:  exactArgs(1),
+		Short: "Remove an installed add-on (keeps its data volume)",
+		Long: "remove tears down an add-on's workload — its Deployment, Service, and collectors — and\n" +
+			"KEEPS its data volume, so reinstalling the add-on picks the data back up. Pass --delete-data\n" +
+			"to destroy the volume as well; for the postgres add-on that destroys every attached app's\n" +
+			"database. Recorded backups are on a separate volume and survive either way.",
+		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := o.client(ctx)
 			if err != nil {
 				return err
 			}
-			if err := c.RemoveAddon(ctx, args[0], confirm); err != nil {
+			res, err := c.RemoveAddon(ctx, args[0], deleteData, confirm)
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "removed add-on %q\n", args[0])
-			return nil
+			return emit(cmd.OutOrStdout(), o.json, res, removeAddonSummary(res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	cmd.Flags().BoolVar(&deleteData, "delete-data", false, "also DESTROY the add-on's data volume (for postgres: every attached app's database)")
 	return cmd
+}
+
+// removeAddonSummary renders the human outcome of a removal. It always says what happened to the
+// data, because "removed add-on X" alone leaves the one question that matters unanswered — and names
+// the retained volumes so the operator can reclaim them deliberately rather than discovering the
+// storage later.
+func removeAddonSummary(res client.RemoveAddonResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "removed add-on %q\n", res.Name)
+	switch {
+	case res.DataDeleted:
+		b.WriteString("its data volume was DESTROYED\n")
+	case res.RetainedDataVolume != "":
+		fmt.Fprintf(&b, "kept the data volume %q in namespace %s — reinstalling the add-on reuses it,\n"+
+			"  with the data (and, for postgres, the app roles and passwords) intact.\n"+
+			"  To reclaim the storage instead: kubectl -n %s delete pvc %s\n",
+			res.RetainedDataVolume, res.Namespace, res.Namespace, res.RetainedDataVolume)
+	}
+	if res.RetainedBackupVolume != "" {
+		fmt.Fprintf(&b, "kept the backup volume %q — recorded backups outlive the database and\n"+
+			"  `burrow addon backups postgres` still lists them.\n", res.RetainedBackupVolume)
+	}
+	if len(res.AttachedApps) > 0 {
+		verb := "still hold a DATABASE_URL for this instance and cannot reach a database until it is reinstalled"
+		if res.DataDeleted {
+			verb = "lost their database; their DATABASE_URL now points at nothing"
+		}
+		fmt.Fprintf(&b, "%d attached app(s) (%s) %s\n", len(res.AttachedApps), strings.Join(res.AttachedApps, ", "), verb)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

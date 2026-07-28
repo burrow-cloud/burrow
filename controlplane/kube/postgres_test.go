@@ -121,12 +121,13 @@ func TestDeployPostgresCreatesSuperuserSecretBeforeDeployment(t *testing.T) {
 		t.Error("AddonInfo leaks the generated password")
 	}
 
-	// DeleteAddon removes the superuser Secret too.
-	if err := a.DeleteAddon(ctx, "burrow-postgres"); err != nil {
+	// A data-deleting removal takes the superuser Secret with the volume: the Secret only opens the
+	// volume, so once the volume is gone it is dead weight.
+	if _, err := a.DeleteAddon(ctx, "burrow-postgres", true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.CoreV1().Secrets(addonNS).Get(ctx, PostgresSecretName, metav1.GetOptions{}); err == nil {
-		t.Error("the superuser secret should be removed on uninstall")
+		t.Error("the superuser secret should be removed by a data-deleting uninstall")
 	}
 }
 
@@ -262,12 +263,13 @@ func TestDeployPostgresAlwaysExportsMetrics(t *testing.T) {
 		t.Errorf("exporter env missing DATA_SOURCE_USER and/or DATA_SOURCE_PASS secretKeyRef: %+v", exp.Env)
 	}
 
-	// DeleteAddon removes the init ConfigMap too.
-	if err := a.DeleteAddon(ctx, "burrow-postgres"); err != nil {
+	// A data-deleting removal takes the init ConfigMap with the volume: it only ever runs during
+	// initdb on a fresh volume.
+	if _, err := a.DeleteAddon(ctx, "burrow-postgres", true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, PostgresInitConfigMap, metav1.GetOptions{}); err == nil {
-		t.Error("the init configmap should be removed on uninstall")
+		t.Error("the init configmap should be removed by a data-deleting uninstall")
 	}
 }
 
@@ -372,4 +374,115 @@ func indexOf(xs []string, s string) int {
 		}
 	}
 	return -1
+}
+
+// TestDeleteAddonKeepsVolumeAndCredentialByDefault is the adapter-level half of the data-survival
+// rule: a removal that did not ask for the data destroys the workload and nothing else. The
+// superuser Secret is checked alongside the volume on purpose — the official postgres image only
+// honours POSTGRES_PASSWORD during initdb, so a reinstall over a retained volume never re-runs it.
+// Deleting the Secret while keeping the volume would leave a database nobody — not burrowd, not the
+// exporter, not the backup Jobs — can authenticate to: data that is present and permanently
+// unreachable, which is worse than losing it cleanly (ADR-0031).
+func TestDeleteAddonKeepsVolumeAndCredentialByDefault(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
+	if _, err := a.DeployAddon(ctx, spec); err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+
+	removal, err := a.DeleteAddon(ctx, "burrow-postgres", false)
+	if err != nil {
+		t.Fatalf("DeleteAddon: %v", err)
+	}
+	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-postgres", metav1.GetOptions{}); err == nil {
+		t.Error("the workload should be gone")
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, "burrow-postgres", metav1.GetOptions{}); err != nil {
+		t.Errorf("the data volume should survive a removal that did not ask for it: %v", err)
+	}
+	if _, err := client.CoreV1().Secrets(addonNS).Get(ctx, PostgresSecretName, metav1.GetOptions{}); err != nil {
+		t.Errorf("the superuser secret must survive with the volume it opens: %v", err)
+	}
+	if _, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, PostgresInitConfigMap, metav1.GetOptions{}); err != nil {
+		t.Errorf("the init configmap should survive with the volume: %v", err)
+	}
+	if removal.DataDeleted {
+		t.Error("removal reports DataDeleted for a data-keeping removal")
+	}
+	if removal.RetainedDataVolume != "burrow-postgres" || removal.Namespace != addonNS {
+		t.Errorf("removal = %+v, want the retained volume named in %s", removal, addonNS)
+	}
+}
+
+// TestDeleteAddonDeleteDataDestroysVolume asserts the explicit opt-in destroys the volume and the
+// credentials that only exist to open it.
+func TestDeleteAddonDeleteDataDestroysVolume(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
+	if _, err := a.DeployAddon(ctx, spec); err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+
+	removal, err := a.DeleteAddon(ctx, "burrow-postgres", true)
+	if err != nil {
+		t.Fatalf("DeleteAddon: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, "burrow-postgres", metav1.GetOptions{}); err == nil {
+		t.Error("--delete-data did not destroy the data volume")
+	}
+	if !removal.DataDeleted || removal.RetainedDataVolume != "" {
+		t.Errorf("removal = %+v, want DataDeleted with no retained volume", removal)
+	}
+}
+
+// TestDeleteAddonKeepsBackupVolume asserts the backup PVC survives a data-deleting removal and is
+// reported (ADR-0032): the dumps are the safety net that makes destroying the database survivable, so
+// they deliberately outlive it. It is reported rather than silently left so the operator knows the
+// storage is still allocated.
+func TestDeleteAddonKeepsBackupVolume(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
+	if _, err := a.DeployAddon(ctx, spec); err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+	if err := a.ensureBackupPVC(ctx); err != nil {
+		t.Fatalf("ensureBackupPVC: %v", err)
+	}
+
+	removal, err := a.DeleteAddon(ctx, "burrow-postgres", true)
+	if err != nil {
+		t.Fatalf("DeleteAddon: %v", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, backupPVCName, metav1.GetOptions{}); err != nil {
+		t.Errorf("the backup volume must outlive the database: %v", err)
+	}
+	if removal.RetainedBackupVolume != backupPVCName {
+		t.Errorf("RetainedBackupVolume = %q, want %q", removal.RetainedBackupVolume, backupPVCName)
+	}
+}
+
+// TestDeleteAddonReportsNoBackupVolumeWhenAbsent asserts a cluster that never backed up is not told
+// it retained a backup volume that does not exist — the report has to be a fact, not a template.
+func TestDeleteAddonReportsNoBackupVolumeWhenAbsent(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
+	if _, err := a.DeployAddon(ctx, spec); err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+
+	removal, err := a.DeleteAddon(ctx, "burrow-postgres", false)
+	if err != nil {
+		t.Fatalf("DeleteAddon: %v", err)
+	}
+	if removal.RetainedBackupVolume != "" {
+		t.Errorf("RetainedBackupVolume = %q, want empty when no backup was ever taken", removal.RetainedBackupVolume)
+	}
 }

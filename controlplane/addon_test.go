@@ -140,7 +140,7 @@ func TestInstallListQueryRemoveAddon(t *testing.T) {
 	}
 
 	// Remove tears down and deletes the registry row.
-	if err := e.RemoveAddon(ctx, "burrow-logs", true); err != nil {
+	if _, err := e.RemoveAddon(ctx, "burrow-logs", false, true); err != nil {
 		t.Fatalf("RemoveAddon: %v", err)
 	}
 	if _, err := d.Addon(ctx, "burrow-logs"); !errors.Is(err, cp.ErrNotFound) {
@@ -253,7 +253,7 @@ func TestConnectAddonInvalid(t *testing.T) {
 func TestRemoveAddonUnknown(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _, _ := newAddonEngine(t)
-	if err := e.RemoveAddon(ctx, "burrow-logs", true); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.RemoveAddon(ctx, "burrow-logs", false, true); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("RemoveAddon unknown err = %v, want ErrNotFound", err)
 	}
 }

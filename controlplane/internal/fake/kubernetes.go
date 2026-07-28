@@ -35,6 +35,7 @@ type Kubernetes struct {
 	addresses    map[string]string // app -> ingress external address (controller-assigned)
 	certReady    map[string]bool   // app -> whether the requested TLS certificate has been issued
 	addons       map[string]controlplane.AddonInfo
+	volumes      map[string]string                     // add-on name -> its data volume, present while the volume exists
 	secrets      map[string]map[string]string          // app -> per-app Secret (key -> value)
 	autoscalers  map[string]controlplane.AutoscaleSpec // app -> applied HPA spec (namespace-keyed)
 	backups      *[]backupCall                         // RunBackupJob calls, in order
@@ -51,6 +52,10 @@ type Kubernetes struct {
 // before namespace-per-environment, and existing tests that introspect by app name keep working. It
 // matches the engine and adapter default app namespace ("default").
 const fakeBaseNamespace = "default"
+
+// fakeAddonNamespace is the namespace the fake reports add-on resources (and retained volumes) live
+// in, mirroring the adapter's default add-on namespace.
+const fakeAddonNamespace = "burrow-addons"
 
 // key namespace-qualifies app for this view: the base (default) namespace keys by the bare app name,
 // any other namespace prefixes it, so a named environment's resources are stored separately.
@@ -156,6 +161,7 @@ func NewKubernetes() *Kubernetes {
 		addresses:    make(map[string]string),
 		certReady:    make(map[string]bool),
 		addons:       make(map[string]controlplane.AddonInfo),
+		volumes:      make(map[string]string),
 		secrets:      make(map[string]map[string]string),
 		autoscalers:  make(map[string]controlplane.AutoscaleSpec),
 		backups:      &[]backupCall{},
@@ -225,6 +231,11 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 		Ready:        true,
 	}
 	k.addons[name] = info
+	// A stateful add-on gets a data volume named after it, like the adapter's PVC. Whether that
+	// volume survives a removal is the thing tests assert on, so the fake has to hold it.
+	if spec.StorageGi > 0 {
+		k.volumes[name] = name
+	}
 	return info, nil
 }
 
@@ -240,14 +251,42 @@ func (k *Kubernetes) AddonReady(ctx context.Context, name string) (bool, error) 
 	return ok, nil
 }
 
-func (k *Kubernetes) DeleteAddon(ctx context.Context, name string) error {
+// AddonVolume reports the data volume the named add-on still has in this fake cluster. It is how a
+// test asserts the load-bearing property of removal: the volume survives a plain remove and only
+// disappears when the caller explicitly asked for it (ADR-0025/0031).
+func (k *Kubernetes) AddonVolume(name string) (string, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if _, ok := k.addons[name]; !ok {
-		return fmt.Errorf("fake: addon %q: %w", name, controlplane.ErrNotFound)
+	v, ok := k.volumes[name]
+	return v, ok
+}
+
+// DeleteAddon models the real teardown: the add-on always goes, its data volume only when deleteData
+// is set. The retained-volume names it reports mirror the adapter's, so an engine test asserts on the
+// same shape production produces.
+func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, deleteData bool) (controlplane.AddonRemoval, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	removal := controlplane.AddonRemoval{Namespace: fakeAddonNamespace}
+	info, ok := k.addons[name]
+	if !ok {
+		return removal, fmt.Errorf("fake: addon %q: %w", name, controlplane.ErrNotFound)
 	}
 	delete(k.addons, name)
-	return nil
+	if vol, hasVol := k.volumes[name]; hasVol {
+		if deleteData {
+			delete(k.volumes, name)
+			removal.DataDeleted = true
+		} else {
+			removal.RetainedDataVolume = vol
+		}
+	}
+	// The backup volume outlives the database either way (ADR-0032). It exists in this fake only
+	// once a backup has been taken, exactly as the adapter creates it on first backup.
+	if info.Type == controlplane.AddonPostgres && len(*k.backups) > 0 {
+		removal.RetainedBackupVolume = controlplane.PostgresBackupVolume
+	}
+	return removal, nil
 }
 
 // Exposure returns the recorded exposure for app and whether one exists.

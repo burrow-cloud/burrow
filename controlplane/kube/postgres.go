@@ -21,7 +21,10 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-var _ controlplane.DatabaseProvisioner = (*PostgresProvisioner)(nil)
+var (
+	_ controlplane.DatabaseProvisioner = (*PostgresProvisioner)(nil)
+	_ controlplane.AppDatabaseLister   = (*PostgresProvisioner)(nil)
+)
 
 // appIdentifier is the strict pattern an app (and thus its database/role) name must match before
 // any SQL is built: a lowercase letter followed by lowercase letters, digits, or hyphens
@@ -234,6 +237,50 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app string)
 		RawQuery: "sslmode=disable",
 	}
 	return appURL.String(), nil
+}
+
+// ListAppDatabases returns the apps that hold a Burrow-provisioned database on the shared instance,
+// sorted (ADR-0031). It asks the instance itself rather than any registry, because the instance is
+// the only place that knows: attach records the FACT of attachment nowhere but the app's own Secret
+// and the databases on this server, and it is these databases — not a row somewhere — that a
+// data-deleting add-on removal destroys.
+//
+// The set is derived from ownership, not from names: a database whose owner is one of the app_<app>
+// login roles attach creates is a provisioned app database, and its name is the app's name. That
+// excludes the maintenance databases (postgres, template0/template1, all owned by the superuser) and
+// anything a human created by hand as the superuser, without needing a naming convention to hold.
+func (p *PostgresProvisioner) ListAppDatabases(ctx context.Context) ([]string, error) {
+	db, err := p.connectAdmin(ctx, "postgres")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	// The role prefix is matched with an explicit ESCAPE so the underscore in "app_" is a literal
+	// underscore rather than LIKE's single-character wildcard.
+	const q = `SELECT d.datname
+FROM pg_database d
+JOIN pg_roles r ON d.datdba = r.oid
+WHERE r.rolname LIKE 'app\_%' ESCAPE '\' AND NOT d.datistemplate
+ORDER BY d.datname`
+	rows, err := db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("kube: listing app databases: %w", err)
+	}
+	defer rows.Close()
+
+	apps := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("kube: listing app databases: %w", err)
+		}
+		apps = append(apps, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("kube: listing app databases: %w", err)
+	}
+	return apps, nil
 }
 
 // DropAppDatabase drops app's database and login role from the shared instance (ADR-0031). It

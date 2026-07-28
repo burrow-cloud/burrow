@@ -177,6 +177,24 @@ type DatabaseProvisioner interface {
 	DropAppDatabase(ctx context.Context, app string) error
 }
 
+// AppDatabaseLister enumerates the apps that hold a Burrow-provisioned database on the shared
+// Postgres instance — the concrete answer to "who is attached?", and therefore to "whose data does
+// removing this add-on destroy?". The engine reads it so a removal that would destroy the volume can
+// name the affected apps in its confirmation message rather than warning generically (ADR-0006:
+// a gate is only as good as the reason it hands back).
+//
+// It is a SEPARATE optional interface rather than a method on DatabaseProvisioner, for the same
+// reason MetricsRangeQuerier is separate from MetricsQuerier: an existing provisioner implementation
+// stays valid unchanged. The engine type-asserts its provisioner to it and degrades — reporting no
+// attached apps rather than failing — when it is absent or the instance cannot be reached. That
+// degradation is deliberate: an add-on is often removed precisely because it is wedged, and a
+// removal must not become impossible when the thing being removed will not answer.
+type AppDatabaseLister interface {
+	// ListAppDatabases returns the app names with a Burrow-provisioned database on the shared
+	// instance, sorted. None yields an empty slice and no error.
+	ListAppDatabases(ctx context.Context) ([]string, error)
+}
+
 // Kubernetes is the seam over the target cluster: the only path from the control plane
 // to the runtime. It is deliberately narrow — the v0.1 operations (deploy, status,
 // logs, scale, and the delete that supports teardown) and nothing more.
@@ -208,9 +226,14 @@ type Kubernetes interface {
 	// cheap single-Deployment readiness probe — readiness is a live property, not stored in the
 	// registry. A missing Deployment is reported as not ready (false, nil), not an error.
 	AddonReady(ctx context.Context, name string) (bool, error)
-	// DeleteAddon removes the named add-on instance and its resources. Removing an add-on
-	// that is not installed returns ErrNotFound.
-	DeleteAddon(ctx context.Context, name string) error
+	// DeleteAddon tears down the named add-on's WORKLOAD — its Deployment, Service, collector, and
+	// generated config — and, only when deleteData is true, destroys its data volume as well.
+	// Keeping the volume by default is the load-bearing part: for the Postgres add-on that volume
+	// holds every attached app's database (ADR-0031), and a removal meant as "stop this and put it
+	// back" must not destroy it. A retained volume is left with whatever the add-on needs to be
+	// usable again after a reinstall. It returns what was torn down and what was deliberately kept,
+	// so the caller can report it. Removing an add-on that is not installed returns ErrNotFound.
+	DeleteAddon(ctx context.Context, name string, deleteData bool) (AddonRemoval, error)
 	// ScaleWorkload sets the desired replica count for app's workload.
 	ScaleWorkload(ctx context.Context, app string, replicas int32) error
 

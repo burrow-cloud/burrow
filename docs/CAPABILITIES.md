@@ -251,8 +251,19 @@ ReadWriteOnce PVC when they need storage. **There are exactly four.**
 `burrow addon install <type>` takes **no tuning flags** — no `--size`, no `--storage-class`,
 no `--retention`, no version override. Sizes, images, and retention are compile-time
 constants, and no PVC sets a `storageClassName`, so every volume lands on the cluster default
-StorageClass. `burrow addon remove <type>` deletes the Deployment, Service, collectors, and
-**the data PVC** — for `postgres` that destroys every attached app's database.
+StorageClass. `burrow addon remove <type>` deletes the Deployment, Service, and collectors and
+**keeps the data PVC**: reinstalling the add-on lands on the same claim and picks the data back
+up, so for `postgres` the databases, roles, and role passwords survive and attached apps
+reconnect on their existing `DATABASE_URL`. Destroying the volume is the separate, explicit
+`--delete-data`. The removal output names the volume it kept and how to reclaim it; the
+confirmation the `addon.remove` guardrail holds names the affected apps.
+
+**Removal is operator CLI only** — the whole verb, not just `--delete-data`, is absent from
+`burrow-agent` like `detach` and `restore`. Because there is one add-on instance per type per
+cluster and every app's database lives on the one shared `postgres`, removing it is removing
+*the* add-on and takes every attached app down at once, which is
+[ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §2 tier 1: not compiled into the agent
+binary at all.
 
 | Capability | Command | What it does |
 | --- | --- | --- |
@@ -260,6 +271,7 @@ StorageClass. `burrow addon remove <type>` deletes the Deployment, Service, coll
 | List | `burrow addon list` / `burrow-agent addons` | Type, mode (`installed`/`connected`), backend, endpoint, capabilities. This is how an app is pointed at `cache` — read the endpoint and set it as config. |
 | Attach an app | `burrow addon attach postgres <app>` | **Postgres only.** Creates role `app_<app>` and database `<app>` owned by it, revokes `CONNECT` from `PUBLIC`, grants it to the role, and writes the generated `DATABASE_URL` into the app's per-app Secret, then restarts the workload. Re-attaching rotates the password. The URL is never returned, logged, or audited. |
 | Detach | `burrow addon detach postgres <app>` | Removes `DATABASE_URL`, then `DROP DATABASE … WITH (FORCE)` and `DROP ROLE`. Destructive; confirm-gated. |
+| Remove | `burrow addon remove <name> [--delete-data]` | Tears the add-on's workload down and **keeps its data volume** unless `--delete-data` is passed. Confirm-gated by `addon.remove`; the held message names the volume and, for `postgres`, the attached apps by name. **Operator CLI only** — absent from `burrow-agent` entirely (ADR-0065 §2). |
 | Connect an existing backend | `burrow addon connect <loki\|prometheus> --endpoint <url> [--auth]` | Registers a backend you already run — **deploys nothing**. Only `loki` (logs) and `prometheus` (metrics) are connectable. Operator CLI only. |
 | Query logs | `burrow addon logs [query] [--limit]` / `burrow-agent logs-query` | LogsQL against VictoriaLogs, or LogQL against Loki. Limit clamps to 200 when out of range or unset, capped at 1000. |
 | Query metrics | `burrow addon metrics <query>` / `burrow-agent metrics-query` | PromQL **instant** query against VictoriaMetrics or Prometheus. |
@@ -301,8 +313,11 @@ The limits are as important as the capability:
   expiry — dumps and their database rows accumulate until the PVC fills.
 - **There is no point-in-time recovery.** No WAL archiving, no `archive_command`, no
   `pg_basebackup`. Recovery granularity is "whenever someone last ran a backup".
-- Removing the Postgres add-on deletes the *data* PVC but **not** the backup PVC, so dumps
-  outlive the databases they came from — and their records stay listed.
+- **The backup PVC outlives everything, deliberately.** Removing the Postgres add-on keeps it,
+  and so does `burrow addon remove postgres --delete-data`: dumps outliving the database they
+  came from is the point of taking them, and it is what makes destroying the data survivable.
+  Their records stay listed, and the removal output names the volume so the storage is not a
+  surprise. Reclaiming it is a manual `kubectl delete pvc`.
 - A failed backup or restore Job is left in place for diagnosis rather than reaped.
 
 Scheduled backups with retention are decided as a follow-on in ADR-0032 and are **not built**.
@@ -436,15 +451,24 @@ pinned by tests that fail if a verb is added or removed.
 
 **Mutating** (each returns an outcome envelope — `executed` / `held_for_confirmation` /
 `denied` / `error`, exit codes 0/2/3/1): `deploy`, `build`, `rollback`, `scale`, `autoscale`,
-`run`, `expose`, `unexpose`, `domain add`, `domain remove`, `addon install`, `addon remove`,
-`addon attach`, `addon backup`, `config set`, `config unset`, `secret unset`, `delete`.
+`run`, `expose`, `unexpose`, `domain add`, `domain remove`, `addon install`, `addon attach`,
+`addon backup`, `config set`, `config unset`, `secret unset`, `delete`.
 
 **Absent from the agent binary entirely** — these are operator actions on the `burrow` CLI:
 `cluster install`, `cluster upgrade`, `cluster bootstrap`, `cluster ingress install`,
 `cluster registry install`, `join`, `env add`, `guard set`, `app secret set`,
-`app auto-deploy`, `addon connect`, `addon restore`, `config provider add`,
-`config registry login`, `agent <tool> install`, `app publish`/`unpublish` under those names,
-and the client-side `--build` deploy path.
+`app auto-deploy`, `addon remove`, `addon connect`, `addon detach`, `addon restore`,
+`config provider add`, `config registry login`, `agent <tool> install`,
+`app publish`/`unpublish` under those names, and the client-side `--build` deploy path.
+
+What qualifies a verb for this surface is
+[ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md): a capability belongs unless its effect
+reaches beyond the app the agent was asked about (**scope** — disqualifying outright, so the verb
+is not compiled in) or a human cannot restore the prior state afterwards (**reversibility** — the
+operator decides, so it ships as a guardrail denied by default). `addon remove` is the scope case:
+add-ons are one instance per type per cluster and every app's database sits on the one shared
+`postgres`, so it removes *the* add-on and takes every attached app with it. The surface-guard test
+asserts its absence rather than leaving it to be a property of the current command tree.
 
 The narrowing is structural, not advisory: the binary lacks the verb, its
 kubeconfig lacks the permission, and the control plane gates the operation anyway.

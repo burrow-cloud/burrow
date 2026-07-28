@@ -662,13 +662,19 @@ func (s *server) listAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, addonsResponse{Addons: addons})
 }
 
+// removeAddon tears an add-on down. delete_data is the explicit, separate opt-in that also destroys
+// the add-on's data volume; its absence is the safe default, so a caller that forgets it stops the
+// add-on rather than destroying every attached app's database (ADR-0025/0031). The response reports
+// what was kept so the caller can say so.
 func (s *server) removeAddon(w http.ResponseWriter, r *http.Request) {
 	confirm := r.URL.Query().Get("confirm") == "true"
-	if err := s.engine.RemoveAddon(r.Context(), r.PathValue("name"), confirm); err != nil {
+	deleteData := r.URL.Query().Get("delete_data") == "true"
+	res, err := s.engine.RemoveAddon(r.Context(), r.PathValue("name"), deleteData, confirm)
+	if err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"name": r.PathValue("name")})
+	writeJSON(w, http.StatusOK, res)
 }
 
 // attachAddon gives an app its own database on the installed Postgres add-on and wires it in

@@ -550,19 +550,31 @@ func (a *Adapter) AddonReady(ctx context.Context, name string) (bool, error) {
 	return deploymentAvailable(dep, 1), nil
 }
 
-func (a *Adapter) DeleteAddon(ctx context.Context, name string) error {
+// DeleteAddon tears an add-on's workload down and, only when deleteData is set, destroys its data
+// volume with it. The default is data-preserving: the PVC of a stateful add-on outlives the removal,
+// so `addon remove postgres` stops the instance without destroying every attached app's database
+// (ADR-0025/0031). The retained volume keeps its resource name, which is also the add-on name, so a
+// re-install lands on exactly the same claim and the instance comes back with its data.
+//
+// What is retained is deliberately consistent: for Postgres the superuser Secret and the init
+// ConfigMap are kept alongside the volume, because the official image only honours POSTGRES_PASSWORD
+// during initdb. A reinstall over a retained volume never re-runs initdb, so a FRESHLY generated
+// superuser password would not take — burrowd, the metrics exporter, and the backup Jobs would all
+// be locked out of a database that is still there. Keeping the volume therefore means keeping the
+// credential that opens it; the two are deleted together or kept together, never split.
+func (a *Adapter) DeleteAddon(ctx context.Context, name string, deleteData bool) (controlplane.AddonRemoval, error) {
+	removal := controlplane.AddonRemoval{Namespace: a.addonNamespace}
 	deps := a.client.AppsV1().Deployments(a.addonNamespace)
 	if _, err := deps.Get(ctx, name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
-		return fmt.Errorf("kube: addon %q: %w", name, controlplane.ErrNotFound)
+		return removal, fmt.Errorf("kube: addon %q: %w", name, controlplane.ErrNotFound)
 	} else if err != nil {
-		return fmt.Errorf("kube: reading addon %q: %w", name, err)
+		return removal, fmt.Errorf("kube: reading addon %q: %w", name, err)
 	}
-	// The Deployment is the source of truth for existence; remove all three resources.
+	// The Deployment is the source of truth for existence; the workload and its Service always go.
 	if err := deps.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("kube: deleting addon %q: %w", name, err)
+		return removal, fmt.Errorf("kube: deleting addon %q: %w", name, err)
 	}
 	_ = a.client.CoreV1().Services(a.addonNamespace).Delete(ctx, name, metav1.DeleteOptions{})
-	_ = a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace).Delete(ctx, name, metav1.DeleteOptions{})
 	// And the collector, if this add-on had one (harmless no-op otherwise). The logs collector
 	// is a DaemonSet and the metrics collector (vmagent) a Deployment, both named
 	// <name>-collector; delete both, one of which will NotFound harmlessly.
@@ -570,14 +582,37 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string) error {
 	_ = a.client.AppsV1().DaemonSets(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
 	_ = a.client.AppsV1().Deployments(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
 	_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
-	// The Postgres add-on owns the burrow-postgres superuser Secret (ADR-0031); remove it on
-	// uninstall. The name is fixed, so this is a harmless no-op for any other add-on type.
-	if name == addonName(controlplane.AddonPostgres) {
-		_ = a.client.CoreV1().Secrets(a.addonNamespace).Delete(ctx, PostgresSecretName, metav1.DeleteOptions{})
-		// And the pg_stat_statements init-script ConfigMap the exporter setup added (ADR-0051).
-		_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, PostgresInitConfigMap, metav1.DeleteOptions{})
+
+	isPostgres := name == addonName(controlplane.AddonPostgres)
+	pvcs := a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace)
+	if deleteData {
+		if err := pvcs.Delete(ctx, name, metav1.DeleteOptions{}); err == nil {
+			removal.DataDeleted = true
+		} else if !apierrors.IsNotFound(err) {
+			return removal, fmt.Errorf("kube: deleting addon volume %q: %w", name, err)
+		}
+		// The Postgres add-on owns the burrow-postgres superuser Secret (ADR-0031) and the
+		// pg_stat_statements init-script ConfigMap (ADR-0051). They exist to open and initialize the
+		// volume, so they go exactly when it does.
+		if isPostgres {
+			_ = a.client.CoreV1().Secrets(a.addonNamespace).Delete(ctx, PostgresSecretName, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, PostgresInitConfigMap, metav1.DeleteOptions{})
+		}
+	} else if _, err := pvcs.Get(ctx, name, metav1.GetOptions{}); err == nil {
+		removal.RetainedDataVolume = name
 	}
-	return nil
+
+	// The backup volume ALWAYS survives, including a data-deleting removal (ADR-0032). Backups
+	// outliving the database they were taken from is the whole point of taking them, and it is what
+	// makes destroying the data survivable: the recorded backup rows in the control-plane database
+	// still resolve to dumps that are still there. It is reported rather than silently left so the
+	// operator knows the storage is still allocated and can reclaim it deliberately.
+	if isPostgres {
+		if _, err := pvcs.Get(ctx, controlplane.PostgresBackupVolume, metav1.GetOptions{}); err == nil {
+			removal.RetainedBackupVolume = controlplane.PostgresBackupVolume
+		}
+	}
+	return removal, nil
 }
 
 // addonDataPath is the in-container data directory for a stateful add-on.

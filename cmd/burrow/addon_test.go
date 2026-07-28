@@ -333,3 +333,77 @@ func TestAddonConnectUnauthenticatedSendsNoToken(t *testing.T) {
 		t.Errorf("unauthenticated connect should send empty token and key: %s", gotBody)
 	}
 }
+
+// TestAddonRemoveDefaultReportsKeptData asserts the operator CLI says what happened to the data. A
+// removal that keeps the volume must SAY so — naming the volume, its namespace, and the fact that a
+// reinstall reuses it — or the operator cannot tell a preserved database from a destroyed one.
+func TestAddonRemoveDefaultReportsKeptData(t *testing.T) {
+	isolateConfig(t)
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "burrow-postgres", "type": "postgres", "namespace": "burrow-addons",
+			"data_deleted": false, "retained_data_volume": "burrow-postgres",
+			"retained_backup_volume": "burrow-postgres-backups",
+			"attached_apps":          []string{"api", "web"},
+		})
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"addon", "remove", "burrow-postgres", "--confirm", "--control-plane", srv.URL, "--token", "tok"}, &out, &errb)
+	if err != nil {
+		t.Fatalf("addon remove: %v (stderr: %s)", err, errb.String())
+	}
+	// Without --delete-data the request must not ask for deletion: the safe default is the wire
+	// default too.
+	if strings.Contains(gotQuery, "delete_data") {
+		t.Errorf("query %q asks to delete data without --delete-data", gotQuery)
+	}
+	s := out.String()
+	for _, want := range []string{
+		"removed add-on \"burrow-postgres\"",
+		"kept the data volume \"burrow-postgres\"",
+		"burrow-addons",
+		"reinstalling the add-on reuses it",
+		"kubectl -n burrow-addons delete pvc burrow-postgres",
+		"kept the backup volume \"burrow-postgres-backups\"",
+		"2 attached app(s) (api, web)",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("removal output missing %q:\n%s", want, s)
+		}
+	}
+}
+
+// TestAddonRemoveDeleteDataAsksAndReports asserts --delete-data reaches the API and the output states
+// the destruction plainly, including which apps lost their database.
+func TestAddonRemoveDeleteDataAsksAndReports(t *testing.T) {
+	isolateConfig(t)
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "burrow-postgres", "type": "postgres", "namespace": "burrow-addons",
+			"data_deleted": true, "retained_backup_volume": "burrow-postgres-backups",
+			"attached_apps": []string{"web"},
+		})
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"addon", "remove", "burrow-postgres", "--delete-data", "--confirm", "--control-plane", srv.URL, "--token", "tok"}, &out, &errb)
+	if err != nil {
+		t.Fatalf("addon remove --delete-data: %v (stderr: %s)", err, errb.String())
+	}
+	if !strings.Contains(gotQuery, "delete_data=true") {
+		t.Errorf("query %q does not carry delete_data=true", gotQuery)
+	}
+	s := out.String()
+	for _, want := range []string{"DESTROYED", "1 attached app(s) (web)", "lost their database", "kept the backup volume"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("removal output missing %q:\n%s", want, s)
+		}
+	}
+}

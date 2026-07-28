@@ -20,8 +20,10 @@ import (
 const (
 	// backupPVCName is the ReadWriteOnce volume in the add-on namespace that holds dump bytes
 	// (ADR-0032). Backup/restore Jobs mount it; the instance pod does not. burrowd is never mounted
-	// to it — the list of backups comes from the control-plane database, not this volume.
-	backupPVCName = "burrow-postgres-backups"
+	// to it — the list of backups comes from the control-plane database, not this volume. It is the
+	// controlplane constant, not a second copy, because add-on removal reports this volume by name as
+	// deliberately retained and the two sides must not drift.
+	backupPVCName = controlplane.PostgresBackupVolume
 	// backupMountPath is where the backup PVC is mounted inside the backup/restore Job container.
 	// It mirrors controlplane.BackupPath's prefix so the Job writes where the engine records.
 	backupMountPath = "/backups"

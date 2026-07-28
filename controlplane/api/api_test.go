@@ -1044,3 +1044,41 @@ func TestAutoscaleMaxOverCeilingDenied(t *testing.T) {
 		t.Errorf("body = %s, want the replica-ceiling code", rec.Body.String())
 	}
 }
+
+// TestRemoveAddonEndpointDefaultsToKeepingData asserts the wire contract of the removal: delete_data
+// is an explicit opt-in, so a DELETE without it keeps the add-on's data volume and the response says
+// which volume survived. The safe behaviour is what a caller that forgets the parameter gets
+// (ADR-0025/0031).
+func TestRemoveAddonEndpointDefaultsToKeepingData(t *testing.T) {
+	h, _, _ := newProviderAPI(t)
+	if rr := do(h, "POST", "/v1/addons", token, `{"type":"postgres","confirm":true}`); rr.Code != 200 {
+		t.Fatalf("install addon = %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr := do(h, "DELETE", "/v1/addons/burrow-postgres?confirm=true", token, "")
+	if rr.Code != 200 {
+		t.Fatalf("remove addon = %d %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"retained_data_volume":"burrow-postgres"`) {
+		t.Errorf("removal response does not report the retained data volume: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"data_deleted":false`) {
+		t.Errorf("removal without delete_data reports data_deleted true: %s", rr.Body.String())
+	}
+}
+
+// TestRemoveAddonEndpointHonoursDeleteData asserts the opt-in reaches the engine when it is asked for.
+func TestRemoveAddonEndpointHonoursDeleteData(t *testing.T) {
+	h, _, _ := newProviderAPI(t)
+	if rr := do(h, "POST", "/v1/addons", token, `{"type":"postgres","confirm":true}`); rr.Code != 200 {
+		t.Fatalf("install addon = %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr := do(h, "DELETE", "/v1/addons/burrow-postgres?confirm=true&delete_data=true", token, "")
+	if rr.Code != 200 {
+		t.Fatalf("remove addon = %d %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"data_deleted":true`) {
+		t.Errorf("delete_data=true did not delete the data: %s", rr.Body.String())
+	}
+}

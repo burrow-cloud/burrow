@@ -593,13 +593,43 @@ func (c *Client) Addons(ctx context.Context) ([]Addon, error) {
 	return out.Addons, err
 }
 
-// RemoveAddon removes the named add-on instance.
-func (c *Client) RemoveAddon(ctx context.Context, name string, confirm bool) error {
+// RemoveAddonResult is the outcome of removing an add-on: what was torn down, and what was
+// deliberately LEFT IN PLACE. Removal keeps the add-on's data volume unless deleteData is passed, so
+// this reports the retained volume names — the data volume a reinstall would reuse and the Postgres
+// backup volume, which outlives the database either way (ADR-0025/0031/0032).
+type RemoveAddonResult struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	// Namespace is where the add-on's resources, and any retained volume, live.
+	Namespace string `json:"namespace,omitempty"`
+	// DataDeleted reports whether the add-on's data volume was destroyed.
+	DataDeleted bool `json:"data_deleted"`
+	// RetainedDataVolume is the PVC left in place; empty when the add-on had no volume or it was
+	// deleted.
+	RetainedDataVolume string `json:"retained_data_volume,omitempty"`
+	// RetainedBackupVolume is the backup PVC left in place; empty when no backup volume exists.
+	RetainedBackupVolume string `json:"retained_backup_volume,omitempty"`
+	// AttachedApps are the apps that held a database on this instance at removal time.
+	AttachedApps []string `json:"attached_apps,omitempty"`
+}
+
+// RemoveAddon removes the named add-on instance. deleteData is the explicit opt-in that also
+// DESTROYS the add-on's data volume — for Postgres, every attached app's database. Without it the
+// removal tears down the workload and leaves the volume, so a reinstall picks the data back up.
+func (c *Client) RemoveAddon(ctx context.Context, name string, deleteData, confirm bool) (RemoveAddonResult, error) {
+	var out RemoveAddonResult
 	path := "/v1/addons/" + name
+	q := url.Values{}
 	if confirm {
-		path += "?confirm=true"
+		q.Set("confirm", "true")
 	}
-	return c.do(ctx, http.MethodDelete, path, nil, nil)
+	if deleteData {
+		q.Set("delete_data", "true")
+	}
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	return out, c.do(ctx, http.MethodDelete, path, nil, &out)
 }
 
 // AttachResult is the non-secret outcome of attaching an app to an add-on (ADR-0031): the KEY NAME

@@ -279,9 +279,9 @@ func TestMutatingVerbsPresent(t *testing.T) {
 		{"unexpose", "web"},
 		{"domain", "add", "web.example.com", "--address", "203.0.113.5"},
 		{"domain", "remove", "web.example.com"},
-		// Phase 2b add-on operations.
+		// Phase 2b add-on operations. `addon remove` is deliberately not here: it is ADR-0065 §2
+		// tier 1, absent from this binary, and TestAddonRemoveStructurallyAbsent asserts that.
 		{"addon", "install", "logs"},
-		{"addon", "remove", "logs"},
 		{"addon", "attach", "postgres", "web"},
 		{"addon", "backup", "postgres", "web"},
 		// Phase 2b config writes, secret-key removal, and the guarded delete.

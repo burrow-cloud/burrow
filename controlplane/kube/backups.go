@@ -49,7 +49,14 @@ func backupDumpPath(app, backupID string) string {
 // add-on data PVC). It is created on first backup so a cluster that never backs up carries no extra
 // volume.
 func (a *Adapter) ensureBackupPVC(ctx context.Context) error {
-	labels := map[string]string{nameLabel: backupPVCName, managedByLabel: managedByValue}
+	// The add-on label records which add-on this claim serves, so `addon list` can attribute a
+	// retained claim without reading its name (ADR-0064 §6). Claims created before this label was
+	// written are still attributed, by their compiled-in constant name (addonVolumeOwner).
+	labels := map[string]string{
+		nameLabel:      backupPVCName,
+		managedByLabel: managedByValue,
+		addonLabel:     string(controlplane.AddonPostgres),
+	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: backupPVCName, Namespace: a.addonNamespace, Labels: labels},
 		Spec: corev1.PersistentVolumeClaimSpec{

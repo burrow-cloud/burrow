@@ -653,13 +653,25 @@ func (s *server) connectAddon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
+// listAddonsHandler returns the registered add-ons and, alongside them, the volumes an earlier
+// removal left behind (ADR-0064 §6). The two are separate fields, not one merged list: a retained
+// claim is storage with no workload, and reading it as a running add-on would be worse than not
+// reporting it.
+//
+// The retained listing is best-effort. It is a live cluster read layered over a registry-backed
+// answer, so a cluster that cannot be read leaves it empty rather than failing the listing — the
+// same posture ListAddons already takes for its readiness probe.
 func (s *server) listAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	addons, err := s.engine.ListAddons(r.Context())
 	if err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, addonsResponse{Addons: addons})
+	retained, err := s.engine.RetainedAddonVolumes(r.Context())
+	if err != nil {
+		retained = nil
+	}
+	writeJSON(w, http.StatusOK, addonsResponse{Addons: addons, RetainedVolumes: retained})
 }
 
 // removeAddon tears an add-on down. delete_data is the explicit, separate opt-in that also destroys
@@ -813,6 +825,9 @@ type addonConnectRequest struct {
 // addonsResponse wraps the add-on list so the shape can grow without breaking object decoders.
 type addonsResponse struct {
 	Addons []controlplane.AddonInfo `json:"addons"`
+	// RetainedVolumes are the add-on volumes an earlier removal kept: allocated storage with no
+	// add-on left to use it (ADR-0064 §6). Omitted when there are none.
+	RetainedVolumes []controlplane.AddonVolume `json:"retained_volumes,omitempty"`
 }
 
 func (s *server) queryLogs(w http.ResponseWriter, r *http.Request) {

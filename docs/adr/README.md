@@ -14,9 +14,11 @@ alternatives that were rejected.
   not — new rationale belongs in a new ADR.
 - **ADRs record decisions, not implementation status.** "Accepted" means the decision
   is made, not that the code exists. An ADR ahead of the code is normal. Never write
-  "implemented / not yet implemented" into an ADR — track decided-but-unbuilt work in
-  [docs/ROADMAP.md](../ROADMAP.md) and [docs/PLAN.md](../PLAN.md), or as a skipped/failing
-  test that names the ADR.
+  "implemented / not yet implemented" into an ADR — on acceptance the work becomes
+  **GitHub issues labelled `adr`**, one per implementable unit, and the open set under
+  that label is the decided-but-unbuilt list ([ADR-0070](0070-implementation-status-lives-in-issues.md)).
+  The issue names its ADR; the ADR never names the issue. [docs/ROADMAP.md](../ROADMAP.md)
+  keeps the themes and the sequencing so the repository still describes itself offline.
 
 ## Format
 

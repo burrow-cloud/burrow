@@ -20,6 +20,7 @@ func TestStoreAddonsRoundTripAndUpsert(t *testing.T) {
 	a := cp.AddonInfo{
 		Name:         name,
 		Type:         cp.AddonLogs,
+		Environment:  cp.DefaultEnvironment,
 		Mode:         "installed",
 		Backend:      "victorialogs",
 		Image:        "victoria-logs:test",
@@ -45,6 +46,30 @@ func TestStoreAddonsRoundTripAndUpsert(t *testing.T) {
 	if got.Ready {
 		t.Errorf("Ready = true, want false — readiness is never persisted")
 	}
+	if got.Environment != cp.DefaultEnvironment {
+		t.Errorf("Environment = %q, want %q — the row records which environment the instance serves (ADR-0067 §1)", got.Environment, cp.DefaultEnvironment)
+	}
+
+	// A second environment's instance of the SAME type is a SEPARATE row: the registry is keyed by
+	// instance name, and the instance name is derived from the environment (ADR-0067 §1), so the two
+	// coexist rather than one upserting over the other.
+	stagingName, err := cp.AddonInstanceName(cp.AddonLogs, "staging-"+t.Name())
+	if err != nil {
+		t.Fatalf("AddonInstanceName: %v", err)
+	}
+	staging := a
+	staging.Name = stagingName
+	staging.Environment = "staging-" + t.Name()
+	if err := s.SaveAddon(ctx, staging); err != nil {
+		t.Fatalf("SaveAddon staging: %v", err)
+	}
+	if got, gerr := s.Addon(ctx, stagingName); gerr != nil || got.Environment != staging.Environment {
+		t.Errorf("staging row = %+v, err %v; want environment %q", got, gerr, staging.Environment)
+	}
+	if got, _ := s.Addon(ctx, name); got.Environment != cp.DefaultEnvironment {
+		t.Errorf("the default environment's row was overwritten by the staging install: environment = %q", got.Environment)
+	}
+	t.Cleanup(func() { _ = s.DeleteAddon(context.Background(), stagingName) })
 	if !got.CreatedAt.Equal(a.CreatedAt) {
 		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, a.CreatedAt)
 	}

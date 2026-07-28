@@ -90,8 +90,10 @@ subjects:
 ---
 # Add-ons live in their own namespace (ADR-0025), so burrowd's permission to manage them is
 # scoped there: a logs store is a Deployment + Service + PVC, its collector a DaemonSet +
-# ConfigMap; the Postgres add-on (ADR-0031) adds a Secret, burrow-postgres, holding the generated
-# superuser password — burrowd creates it before the pod and reads it back to run admin SQL. The
+# ConfigMap; the Postgres add-on (ADR-0031) adds a Secret per instance, named after it
+# (burrow-postgres for the default environment, burrow-postgres-<env> for any other — ADR-0067 §1),
+# holding that server's generated superuser password — burrowd creates it before the pod and reads it
+# back to run admin SQL. The
 # secrets grant is namespace-scoped to the add-on namespace ONLY (not name-scoped, not a
 # ClusterRole): none of these grants reach the app or control-plane namespaces.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -106,15 +108,16 @@ rules:
   - apiGroups: [""]
     resources: ["services", "persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
-  # The Postgres add-on's superuser Secret (burrow-postgres) lives in this namespace because a pod
-  # can only mount a Secret in its own namespace (ADR-0031). burrowd creates it, reads it to run
-  # admin SQL, and deletes it on uninstall — scoped to this add-on namespace only.
+  # A Postgres instance's superuser Secret lives in this namespace because a pod can only mount a
+  # Secret in its own namespace (ADR-0031); there is one per instance, and therefore one per
+  # environment (ADR-0067 §1). burrowd creates them, reads them to run admin SQL, and deletes them on
+  # uninstall — the grant is namespace-scoped, so no per-environment RBAC change is needed.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "update", "delete"]
   # Postgres backup/restore run as short-lived Jobs in this namespace that pg_dump/pg_restore an
   # app's database to the backup PVC (ADR-0032). burrowd creates and reaps them and reads their
-  # status; the Jobs read the superuser password from burrow-postgres via secretKeyRef.
+  # status; the Jobs read the superuser password from their instance's Secret via secretKeyRef.
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "create", "delete"]

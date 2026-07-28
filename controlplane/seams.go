@@ -155,29 +155,40 @@ type Builder interface {
 	Build(ctx context.Context, source SourceRef, targetImage string, insecure bool, cred SourceCredential) (digest string, err error)
 }
 
-// DatabaseProvisioner is the seam over the installed Postgres add-on's admin surface (ADR-0031).
-// burrowd connects to the shared instance as the superuser and gives each app its own database and
-// login role inside it; the engine calls this on attach/detach. It is an optional seam — present
-// only when the Postgres add-on path is wired; the engine errors cleanly (ErrNotImplemented) on an
-// attach when it is nil. The connection string it returns is a secret VALUE: it is handed only to
-// SetSecretValue and never logged, audited, returned, or carried over the agent control channel
-// (ADR-0029/0031).
+// DatabaseProvisioner is the seam over an installed Postgres add-on instance's admin surface
+// (ADR-0031). burrowd connects to the environment's instance as the superuser and gives each app its
+// own database and login role inside it; the engine calls this on attach/detach. It is an optional
+// seam — present only when the Postgres add-on path is wired; the engine errors cleanly
+// (ErrNotImplemented) on an attach when it is nil. The connection string it returns is a secret
+// VALUE: it is handed only to SetSecretValue and never logged, audited, returned, or carried over
+// the agent control channel (ADR-0029/0031).
+//
+// EVERY METHOD TAKES THE ENVIRONMENT, AND IT IS NOT OPTIONAL (ADR-0067 §1). Databases keep their
+// simple names — an app called web has a database called web — so the environment is the only thing
+// that distinguishes web-in-staging from web-in-production. Without it, provisioning web a second
+// time found the first one, and because provisioning is IDEMPOTENT it did not fail: it rotated the
+// role password and handed back a URL pointing at the other environment's data (issue #339). The
+// environment selects the INSTANCE, so an implementation cannot reach another environment's server
+// at all; an empty environment is rejected before any SQL, because "a signature that can omit it is
+// a signature that will omit it".
 type DatabaseProvisioner interface {
-	// EnsureAppDatabase idempotently provisions an isolated database and login role for app on the
-	// shared instance and returns the app's DATABASE_URL (a postgres:// connection string carrying
-	// a freshly generated role password). It rotates the role password on every call, so a re-attach
-	// returns a fresh, working URL with no orphaned state. The app name is validated against a strict
-	// identifier pattern and every SQL identifier is quoted BEFORE any SQL runs, so a name can never
-	// carry SQL. The returned string is a secret value — the caller writes it straight into the app's
-	// Secret and never logs, audits, or returns it.
-	EnsureAppDatabase(ctx context.Context, app string) (databaseURL string, err error)
-	// DropAppDatabase removes app's database and login role from the shared instance — the
+	// EnsureAppDatabase idempotently provisions an isolated database and login role for app on
+	// environment env's own instance and returns the app's DATABASE_URL (a postgres:// connection
+	// string carrying a freshly generated role password). It rotates the role password on every call,
+	// so a re-attach returns a fresh, working URL with no orphaned state. env and app are both
+	// validated against a strict identifier pattern and every SQL identifier is quoted BEFORE any SQL
+	// runs, so neither can carry SQL; an empty env is ErrInvalid, never the default environment. The
+	// returned string is a secret value — the caller writes it straight into the app's Secret and
+	// never logs, audits, or returns it.
+	EnsureAppDatabase(ctx context.Context, app, env string) (databaseURL string, err error)
+	// DropAppDatabase removes app's database and login role from environment env's instance — the
 	// destructive side of detach. Dropping a database/role that is already absent is a no-op, not an
-	// error. The app name is validated before any SQL, exactly as in EnsureAppDatabase.
-	DropAppDatabase(ctx context.Context, app string) error
+	// error. env and app are validated before any SQL, exactly as in EnsureAppDatabase, so a detach
+	// can no more reach another environment's server than an attach can.
+	DropAppDatabase(ctx context.Context, app, env string) error
 }
 
-// AppDatabaseLister enumerates the apps that hold a Burrow-provisioned database on the shared
+// AppDatabaseLister enumerates the apps that hold a Burrow-provisioned database on one environment's
 // Postgres instance — the concrete answer to "who is attached?", and therefore to "whose data does
 // removing this add-on destroy?". The engine reads it so a removal that would destroy the volume can
 // name the affected apps in its confirmation message rather than warning generically (ADR-0006:
@@ -190,9 +201,11 @@ type DatabaseProvisioner interface {
 // degradation is deliberate: an add-on is often removed precisely because it is wedged, and a
 // removal must not become impossible when the thing being removed will not answer.
 type AppDatabaseLister interface {
-	// ListAppDatabases returns the app names with a Burrow-provisioned database on the shared
-	// instance, sorted. None yields an empty slice and no error.
-	ListAppDatabases(ctx context.Context) ([]string, error)
+	// ListAppDatabases returns the app names with a Burrow-provisioned database on environment env's
+	// instance, sorted. None yields an empty slice and no error. env is required for the same reason
+	// it is on DatabaseProvisioner: the answer to "who is attached?" is only true of one instance,
+	// and a removal names the apps it is about to affect (ADR-0067 §1).
+	ListAppDatabases(ctx context.Context, env string) ([]string, error)
 }
 
 // Kubernetes is the seam over the target cluster: the only path from the control plane
@@ -217,11 +230,16 @@ type Kubernetes interface {
 	// namespace (for an apps listing). No workloads is an empty slice, not an error.
 	ListWorkloads(ctx context.Context) ([]WorkloadStatus, error)
 
-	// DeployAddon installs a building-block backing service per spec — a workload, a
-	// ClusterIP Service, and a persistent volume when the spec asks for one — and returns
+	// DeployAddon installs a building-block backing service per spec for environment env — a
+	// workload, a ClusterIP Service, and a persistent volume when the spec asks for one — and returns
 	// the instance's connection info (ADR-0025). Installing an already-installed add-on is
 	// idempotent.
-	DeployAddon(ctx context.Context, spec AddonSpec) (AddonInfo, error)
+	//
+	// env is required and names which environment's instance this is (ADR-0067 §1): the resources are
+	// named by AddonInstanceName, so the default environment lands on exactly the names an existing
+	// install already has and any other environment gets its own instance beside it — its own pod,
+	// its own volume, and for Postgres its own superuser credential.
+	DeployAddon(ctx context.Context, spec AddonSpec, env string) (AddonInfo, error)
 	// AddonReady reports whether the named add-on's backing Deployment is available. It is a
 	// cheap single-Deployment readiness probe — readiness is a live property, not stored in the
 	// registry. A missing Deployment is reported as not ready (false, nil), not an error.
@@ -296,20 +314,24 @@ type Kubernetes interface {
 	// Deployment returns ErrNotFound; the caller treats that as "nothing running to roll".
 	RestartWorkload(ctx context.Context, app string, at time.Time) error
 
-	// RunBackupJob runs a one-shot Job in the add-on namespace that pg_dumps app's database on the
-	// installed Postgres instance to /<backup-pvc>/<app>/<backupID>.dump (custom format), ensuring
-	// the backup PVC first (ADR-0032). The Job connects as the superuser, reading the password from
-	// the burrow-postgres Secret via secretKeyRef env — never a CLI argument, never logged. It
-	// blocks until the Job completes, returns an error if the Job fails or times out, and reaps the
-	// Job on success. It returns the dump's size in bytes when the dump container reported it (the
-	// pod's terminated-state message), or 0 when unknown. app is validated before any Job is built.
-	RunBackupJob(ctx context.Context, app, backupID string) (sizeBytes int64, err error)
+	// RunBackupJob runs a one-shot Job in the add-on namespace that pg_dumps app's database on
+	// environment env's Postgres instance to /<backup-pvc>/<app>/<backupID>.dump (custom format),
+	// ensuring the backup PVC first (ADR-0032). The Job connects as the superuser, reading the
+	// password from that instance's Secret via secretKeyRef env — never a CLI argument, never logged.
+	// It blocks until the Job completes, returns an error if the Job fails or times out, and reaps
+	// the Job on success. It returns the dump's size in bytes when the dump container reported it
+	// (the pod's terminated-state message), or 0 when unknown. env and app are validated before any
+	// Job is built: a dump names the server it came from, so it is as environment-scoped as the
+	// database it reads (ADR-0067 §1).
+	RunBackupJob(ctx context.Context, app, env, backupID string) (sizeBytes int64, err error)
 	// RunRestoreJob runs a one-shot Job in the add-on namespace that pg_restores
-	// /<backup-pvc>/<app>/<backupID>.dump into app's database (--clean --if-exists, so it replaces
-	// current contents). Like RunBackupJob it reads the superuser password only via secretKeyRef,
-	// blocks until the Job completes, errors on failure or timeout, and reaps the Job on success.
-	// app is validated before any Job is built.
-	RunRestoreJob(ctx context.Context, app, backupID string) error
+	// /<backup-pvc>/<app>/<backupID>.dump into app's database on environment env's instance (--clean
+	// --if-exists, so it replaces current contents). Like RunBackupJob it reads the superuser password
+	// only via secretKeyRef, blocks until the Job completes, errors on failure or timeout, and reaps
+	// the Job on success. env and app are validated before any Job is built — restoring is the one
+	// operation where reaching the wrong environment's server overwrites live data with another
+	// environment's.
+	RunRestoreJob(ctx context.Context, app, env, backupID string) error
 
 	// RunJob runs spec.Command as a one-shot Job in the app namespace (this seam view's namespace),
 	// built from the app's own current image (spec.Image) and its config env plus per-app Secret via
@@ -431,9 +453,12 @@ type Database interface {
 	// completed/failed transition burrowd writes when the Job finishes. Setting the status of an
 	// unknown backup id returns ErrNotFound.
 	SetBackupStatus(ctx context.Context, id string, status BackupStatus, sizeBytes int64) error
-	// ListBackups returns recorded backups, newest first. An empty app lists every app's backups;
-	// a non-empty app restricts to that app. No matches yields an empty slice and no error.
-	ListBackups(ctx context.Context, app string) ([]Backup, error)
+	// ListBackups returns recorded backups, newest first. An empty app lists every app's backups and
+	// an empty env every environment's; a non-empty value restricts to that app or that environment.
+	// A listing is a read, not a target, so an unfiltered call spans environments deliberately —
+	// unlike backup and restore, which act on exactly one instance and take the environment as a
+	// required argument (ADR-0067 §1). No matches yields an empty slice and no error.
+	ListBackups(ctx context.Context, app, env string) ([]Backup, error)
 	// GetBackup returns the backup with the given id, or ErrNotFound.
 	GetBackup(ctx context.Context, id string) (Backup, error)
 

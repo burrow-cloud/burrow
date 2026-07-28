@@ -151,14 +151,16 @@ func newDomainRemoveCmd() *cobra.Command {
 	return cmd
 }
 
-// newAddonCmd groups the add-on operations exposed to the agent (install/attach/backup). Add-ons
-// are a cluster-level concern, so the subcommands bind only the connection flags, not --env.
+// newAddonCmd groups the add-on operations exposed to the agent (install/attach/backup). Add-ons are
+// per ENVIRONMENT rather than per cluster (ADR-0067 §1), so the subcommands bind --env as well as the
+// connection flags: which environment an add-on operation targets is which server it reaches, and a
+// call that names none while several environments are registered is refused rather than guessed
+// (ADR-0047 §1).
 //
 // There is deliberately NO `remove` here, and it is not an oversight to be corrected for symmetry
-// with `install`. Add-ons are one instance per type per cluster — InstallAddon takes a TYPE and
-// addons.name is the primary key — and ADR-0031 puts every app's database on that one shared
-// Postgres. So removal is not "remove an add-on", it is "remove THE add-on", taking every attached
-// app down at once. That fails ADR-0065 §1's scope test unconditionally (no configuration makes the
+// with `install`. Every app in an environment has its database on that environment's one Postgres
+// instance (ADR-0031/0067 §1), so removal is not "remove an add-on", it is "remove THE add-on for
+// this environment", taking every attached app in it down at once. That fails ADR-0065 §1's scope test unconditionally (no configuration makes the
 // blast radius small) and no agent workflow legitimately needs it, which is what puts it in ADR-0065
 // §2's tier 1: absent from this binary rather than merely guarded. `detach` and `restore` are absent
 // for the same reason. Removing an add-on is `burrow addon remove` at the operator's own terminal.
@@ -197,12 +199,13 @@ func newAddonInstallCmd() *cobra.Command {
 			"says so — relay it and re-run with --confirm ONLY after the human approves.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return o.mutate(cmd, "addon_install", func(ctx context.Context, c *client.Client, _ string) (any, error) {
-				return c.InstallAddon(ctx, args[0], confirm)
+			return o.mutate(cmd, "addon_install", func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.InstallAddon(ctx, args[0], env, confirm)
 			})
 		},
 	}
 	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an add-on install a guardrail holds for confirmation (supply only after the human approves)")
 	return cmd
 }
@@ -220,15 +223,18 @@ func newAddonAttachCmd() *cobra.Command {
 			"only the add-on type (\"postgres\") and the app name — NO secret. Burrow generates the database,\n" +
 			"role, and connection string server-side and writes it into the app's Secret as DATABASE_URL; the\n" +
 			"value is never returned or shown. Re-attaching rotates the password. The result carries only the\n" +
-			"app, the add-on, and the KEY name — never the value. Attach is not guarded (it destroys nothing).",
+			"app, the add-on, the environment, and the KEY name — never the value. Attach is not guarded (it\n" +
+			"destroys nothing). Each environment has its OWN database instance, so --env decides which server\n" +
+			"the app is given a database on; with several environments registered, naming one is required.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return o.mutate(cmd, "addon_attach", func(ctx context.Context, c *client.Client, _ string) (any, error) {
-				return c.AttachAddon(ctx, args[0], args[1])
+			return o.mutate(cmd, "addon_attach", func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.AttachAddon(ctx, args[0], args[1], env)
 			})
 		},
 	}
 	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 
@@ -248,12 +254,13 @@ func newAddonBackupCmd() *cobra.Command {
 			"`burrow addon restore postgres <app> --backup <id>` — restore is CLI-only.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return o.mutate(cmd, "addon_backup", func(ctx context.Context, c *client.Client, _ string) (any, error) {
-				return c.BackupAddon(ctx, args[0], args[1])
+			return o.mutate(cmd, "addon_backup", func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.BackupAddon(ctx, args[0], args[1], env)
 			})
 		},
 	}
 	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 

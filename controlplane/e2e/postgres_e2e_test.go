@@ -80,7 +80,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 
 	// Install the Postgres instance and wait for it to become ready. confirm=true clears the
 	// addon.install guardrail (the fake DB's default policy holds it for confirmation).
-	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, true); err != nil {
+	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "", true); err != nil {
 		t.Fatalf("InstallAddon postgres: %v", err)
 	}
 	waitForCond(t, 180*time.Second, "postgres ready", func() (bool, error) {
@@ -100,7 +100,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "attach addon", func(localPort int) error {
 		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
 		var aerr error
-		res, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app)
+		res, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "")
 		return aerr
 	})
 	if res.SecretKey != "DATABASE_URL" {
@@ -115,7 +115,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 	// operation, so it runs through a fresh port-forward).
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "detach addon", func(localPort int) error {
 		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		return engine.DetachAddon(ctx, cp.AddonPostgres, app, true)
+		return engine.DetachAddon(ctx, cp.AddonPostgres, app, "", true)
 	})
 	keys, err := k8s.SecretKeys(ctx, app)
 	if err != nil {
@@ -180,7 +180,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 
 	const app = "shop"
 
-	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, true); err != nil {
+	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "", true); err != nil {
 		t.Fatalf("InstallAddon postgres: %v", err)
 	}
 	waitForCond(t, 180*time.Second, "postgres ready", func() (bool, error) {
@@ -192,7 +192,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 	// Attach the app (an admin-SQL op, so it goes through a port-forward like the other e2e).
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "attach addon", func(localPort int) error {
 		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app)
+		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "")
 		return aerr
 	})
 
@@ -202,7 +202,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 psql "$DATABASE_URL" -c "INSERT INTO t VALUES (7);"`)
 
 	// Back up: burrowd creates an in-cluster pg_dump Job — NO port-forward needed.
-	res, err := engine.BackupAddon(ctx, cp.AddonPostgres, app)
+	res, err := engine.BackupAddon(ctx, cp.AddonPostgres, app, "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
@@ -216,7 +216,7 @@ psql "$DATABASE_URL" -c "INSERT INTO t VALUES (7);"`)
 test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t WHERE id = 7;")" = "0"`)
 
 	// Restore: burrowd creates an in-cluster pg_restore Job — again NO port-forward.
-	if err := engine.RestoreAddon(ctx, cp.AddonPostgres, app, res.Backup.ID, true); err != nil {
+	if err := engine.RestoreAddon(ctx, cp.AddonPostgres, app, res.Backup.ID, "", true); err != nil {
 		t.Fatalf("RestoreAddon: %v", err)
 	}
 

@@ -626,7 +626,7 @@ func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), req.Confirm)
+	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), req.Env, req.Confirm)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -687,7 +687,7 @@ func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.AttachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App)
+	res, err := s.engine.AttachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -702,7 +702,7 @@ func (s *server) detachAddon(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if err := s.engine.DetachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Confirm); err != nil {
+	if err := s.engine.DetachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env, req.Confirm); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -718,7 +718,7 @@ func (s *server) backupAddon(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.BackupAddon(r.Context(), controlplane.AddonType(req.Addon), req.App)
+	res, err := s.engine.BackupAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -727,13 +727,14 @@ func (s *server) backupAddon(w http.ResponseWriter, r *http.Request) {
 }
 
 // listBackupsHandler lists recorded backups from the control-plane database (ADR-0032). An app query
-// param restricts to one app; absent, it lists every app's backups. Read-only; no secret value.
+// param restricts to one app and an env query param to one environment; absent, they list every
+// app's and every environment's (ADR-0067 §1). Read-only; no secret value.
 func (s *server) listBackupsHandler(w http.ResponseWriter, r *http.Request) {
 	addon := r.URL.Query().Get("addon")
 	if addon == "" {
 		addon = string(controlplane.AddonPostgres)
 	}
-	backups, err := s.engine.ListBackups(r.Context(), controlplane.AddonType(addon), r.URL.Query().Get("app"))
+	backups, err := s.engine.ListBackups(r.Context(), controlplane.AddonType(addon), r.URL.Query().Get("app"), r.URL.Query().Get("env"))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -750,25 +751,33 @@ func (s *server) restoreAddon(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if err := s.engine.RestoreAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Backup, req.Confirm); err != nil {
+	if err := s.engine.RestoreAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Backup, req.Env, req.Confirm); err != nil {
 		writeEngineError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"addon": req.Addon, "app": req.App, "backup": req.Backup})
 }
 
-// addonBackupRequest is the body of an addon backup: the add-on type and the app. No secret.
+// addonBackupRequest is the body of an addon backup: the add-on type, the app, and the environment
+// whose instance is dumped. No secret.
 type addonBackupRequest struct {
 	Addon string `json:"addon"`
 	App   string `json:"app"`
+	// Env is the environment whose Postgres instance the dump is taken from (ADR-0067 §1); empty
+	// targets the default environment, and is refused when more than one environment is registered.
+	Env string `json:"env,omitempty"`
 }
 
 // addonRestoreRequest is the body of an addon restore: the add-on type, the app, the backup id, and
 // confirm (restore is held by a confirm guardrail).
 type addonRestoreRequest struct {
-	Addon   string `json:"addon"`
-	App     string `json:"app"`
-	Backup  string `json:"backup"`
+	Addon  string `json:"addon"`
+	App    string `json:"app"`
+	Backup string `json:"backup"`
+	// Env is the environment whose instance is restored INTO (ADR-0067 §1). The backup must have been
+	// taken from the same environment: a dump from another environment's instance is not a valid
+	// source for this one's live database.
+	Env     string `json:"env,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
 }
 
@@ -777,23 +786,36 @@ type backupsResponse struct {
 	Backups []controlplane.Backup `json:"backups"`
 }
 
-// addonAttachRequest is the body of an addon attach: the add-on type and the app name. It carries
-// no secret — burrowd generates the connection string server-side (ADR-0031).
+// addonAttachRequest is the body of an addon attach: the add-on type, the app name, and the
+// environment whose instance the database is provisioned on. It carries no secret — burrowd
+// generates the connection string server-side (ADR-0031).
 type addonAttachRequest struct {
 	Addon string `json:"addon"`
 	App   string `json:"app"`
+	// Env is the environment whose Postgres instance the app's database is created on, and whose
+	// namespace the DATABASE_URL Secret lands in (ADR-0067 §1). Empty targets the default
+	// environment, and is refused when more than one environment is registered (ADR-0047 §1).
+	Env string `json:"env,omitempty"`
 }
 
-// addonDetachRequest is the body of an addon detach: the add-on type, the app, and confirm.
+// addonDetachRequest is the body of an addon detach: the add-on type, the app, the environment, and
+// confirm.
 type addonDetachRequest struct {
-	Addon   string `json:"addon"`
-	App     string `json:"app"`
+	Addon string `json:"addon"`
+	App   string `json:"app"`
+	// Env is the environment whose instance the app's database is dropped from (ADR-0067 §1).
+	Env     string `json:"env,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
 }
 
-// addonInstallRequest is the body of an addon install (the type names the catalog entry).
+// addonInstallRequest is the body of an addon install (the type names the catalog entry, the
+// environment names which environment's instance to stand up).
 type addonInstallRequest struct {
-	Type    string `json:"type"`
+	Type string `json:"type"`
+	// Env is the environment the instance serves (ADR-0067 §1). Each environment gets its own
+	// instance, so this decides both the registry key and the cluster resource names; empty targets
+	// the default environment, whose instance keeps the names an existing install already has.
+	Env     string `json:"env,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
 }
 

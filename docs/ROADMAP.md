@@ -311,11 +311,11 @@ acceptance checklist. The theme and its sequencing stay here; the granularity is
   the operator owns WAL archiving, schedules, retention and point-in-time recovery, and Burrow stops
   orchestrating backups altogether.
   [#338](https://github.com/burrow-cloud/burrow/issues/338) (blocked by #331).
-- **One database instance per environment, and a first environment named `prod`**
-  ([ADR-0067](adr/0067-one-database-instance-per-environment.md)) — **this one records a latent
-  data-corruption bug, not a missing convenience:** the provisioning seam takes no environment and
-  there is one instance per cluster, so the same app name in two environments silently resolves to
-  one database. [#339](https://github.com/burrow-cloud/burrow/issues/339),
+- **A first environment named `prod`, created at install**
+  ([ADR-0067](adr/0067-one-database-instance-per-environment.md) §2–§3) — the implicit environment is
+  still the synthesized `default`, so ADR-0065's per-environment safe defaults have nothing to hang
+  on. §1 (one add-on instance per environment, with the environment threaded through the provisioning
+  seam) is built, which closes the shared-database hazard.
   [#340](https://github.com/burrow-cloud/burrow/issues/340).
 
 ## Deferred until requested

@@ -4,6 +4,7 @@
 package controlplane
 
 import (
+	"fmt"
 	"sort"
 	"time"
 )
@@ -20,9 +21,11 @@ const (
 	// AddonCache is an in-memory cache (ValKey, BSD-3) the agent wires an app to — a backing
 	// service the app connects to, not one the agent queries, so it has no query seam.
 	AddonCache AddonType = "cache"
-	// AddonPostgres is a cluster-shared PostgreSQL instance (the official postgres image, PostgreSQL
-	// License) the agent attaches an app to — Burrow provisions a database and login role per app
-	// inside the one instance and writes the app's DATABASE_URL into its per-app Secret (ADR-0031).
+	// AddonPostgres is a PostgreSQL instance (the official postgres image, PostgreSQL License) the
+	// agent attaches an app to — Burrow provisions a database and login role per app inside it and
+	// writes the app's DATABASE_URL into the app's per-environment Secret (ADR-0031). There is one
+	// instance PER ENVIRONMENT, not one per cluster: the environment, not a naming convention inside
+	// a shared server, is what isolates one environment's data from another's (ADR-0067 §1).
 	AddonPostgres AddonType = "postgres"
 )
 
@@ -91,8 +94,41 @@ var addonCatalog = map[AddonType]AddonSpec{
 		// database provisioning are handled by the install/attach special-cases (ADR-0031).
 		StorageGi:    10,
 		Capabilities: []string{"database"},
-		Summary:      "PostgreSQL database (one shared instance, a database and role per app)",
+		Summary:      "PostgreSQL database (one instance per environment, a database and role per app)",
 	},
+}
+
+// AddonInstanceName is the name of add-on type t's instance in environment env: the registry key
+// (addons.name) and the resource name the instance's Deployment, Service, volume and — for Postgres
+// — its superuser Secret carry in the cluster. It is the ONE place an environment is turned into an
+// instance (ADR-0067 §1). Isolation comes from the instance rather than from a naming convention
+// inside a shared server, so there is deliberately no name two environments can both resolve to:
+// sharing one instance across environments is not merely discouraged, it is inexpressible
+// (ADR-0067 §5).
+//
+// The implicit default environment keeps the unqualified name (burrow-postgres), which is what lets
+// an install predating environments carry on against the instance, the volume, and the superuser
+// credential it already has — it gains an environment, and nothing moves (ADR-0067 §3). Every other
+// environment is suffixed with its own name.
+//
+// env is REQUIRED: an empty value is an error, not a synonym for the default environment. "A
+// signature that can omit it is a signature that will omit it" (ADR-0067 §1) — callers canonicalize
+// an operation's environment first (envName), so an empty value here only ever arrives from a path
+// that forgot, which is exactly the path that must not silently land on another environment's data.
+func AddonInstanceName(t AddonType, env string) (string, error) {
+	if t == "" {
+		return "", fmt.Errorf("add-on instance: add-on type is empty: %w", ErrInvalid)
+	}
+	switch env {
+	case "":
+		return "", fmt.Errorf("add-on instance for %s: no environment named; every add-on instance belongs to exactly one environment: %w", t, ErrInvalid)
+	case DefaultEnvironment:
+		return "burrow-" + string(t), nil
+	}
+	if len(env) > maxNameLen || !dns1123Label.MatchString(env) {
+		return "", fmt.Errorf("add-on instance for %s: environment %q is not a valid DNS-1123 label: %w", t, env, ErrInvalid)
+	}
+	return "burrow-" + string(t) + "-" + env, nil
 }
 
 // AddonCatalog returns the catalog entries in a stable order.
@@ -199,6 +235,12 @@ type RemoveAddonResult struct {
 type AddonInfo struct {
 	Name string    `json:"name"`
 	Type AddonType `json:"type"`
+	// Environment is the environment this instance serves — the canonical name, with the reserved
+	// "default" for the implicit one (ADR-0067 §1). Each environment gets its own instance, so this
+	// is what says which one this row is, and it is what an attach reads to decide which server to
+	// provision a database on. It is recorded rather than parsed back out of Name: the name is
+	// derived from the environment, never the other way round.
+	Environment string `json:"environment,omitempty"`
 	// Mode is how the backend is provided: "installed" (Burrow deployed it) or "connected"
 	// (an existing backend the user runs). Installed-only for now; connect lands later (ADR-0026).
 	Mode string `json:"mode"`

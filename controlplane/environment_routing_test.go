@@ -253,9 +253,10 @@ func TestSetGuardrailEnvValidation(t *testing.T) {
 	}
 }
 
-// TestClusterLevelGuardrailIgnoresEnv confirms a cluster-level operation (an add-on install) is
-// gated by the global disposition regardless of any environment, since it is set without env and
-// evaluated with an empty env (ADR-0035 phase 2c).
+// TestClusterLevelGuardrailIgnoresEnv confirms the add-on guardrails stay CLUSTER-LEVEL even though
+// an add-on instance now belongs to one environment (ADR-0067 §1): the install names the environment
+// it targets, but its disposition comes from the global policy, since addon.* is not EnvScopable and
+// no environment can relax it (ADR-0035 phase 2c).
 func TestClusterLevelGuardrailIgnoresEnv(t *testing.T) {
 	ctx := context.Background()
 	e, _, _ := newRoutingEngine(t, "burrow-apps")
@@ -266,7 +267,7 @@ func TestClusterLevelGuardrailIgnoresEnv(t *testing.T) {
 	if err := e.SetGuardrail(ctx, "", cp.GuardrailAddonInstall, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(addon.install): %v", err)
 	}
-	_, err := e.InstallAddon(ctx, cp.AddonLogs, false)
+	_, err := e.InstallAddon(ctx, cp.AddonLogs, "prod", false)
 	g, ok := cp.AsGuardrail(err)
 	if !ok {
 		t.Fatalf("InstallAddon = %v, want a GuardrailError from the global deny", err)

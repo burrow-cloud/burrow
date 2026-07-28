@@ -25,8 +25,19 @@ import (
 // same way ListWorkloads reads apps (ADR-0025).
 const addonLabel = "burrow.cloud/addon"
 
-// addonName is the deterministic resource name for an add-on of type t (one instance per type).
-func addonName(t controlplane.AddonType) string { return "burrow-" + string(t) }
+// addonEnvLabel records which ENVIRONMENT an add-on instance serves (ADR-0067 §1), so the cluster
+// carries the same fact the registry row does and an operator reading `kubectl get deploy -n
+// burrow-addons` can tell two instances of the same type apart by more than a name suffix.
+const addonEnvLabel = "burrow.cloud/environment"
+
+// addonName is the deterministic resource name for the instance of add-on type t serving
+// environment env — one instance PER TYPE PER ENVIRONMENT (ADR-0067 §1). The derivation lives in the
+// controlplane package (AddonInstanceName) so the engine, the registry, and this adapter cannot
+// drift on which server an environment means; the default environment keeps the unqualified name an
+// existing install already carries, so nothing migrates.
+func addonName(t controlplane.AddonType, env string) (string, error) {
+	return controlplane.AddonInstanceName(t, env)
+}
 
 // vmagentServiceAccount is the ServiceAccount the metrics add-on's vmagent scraper runs as. It and
 // its pod-discovery Role/RoleBinding are NOT created by burrowd: burrowd holds only namespaced Roles
@@ -36,9 +47,16 @@ func addonName(t controlplane.AddonType) string { return "burrow-" + string(t) }
 // read-only Get before deploying the scraper.
 const vmagentServiceAccount = "burrow-vmagent"
 
-func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) (controlplane.AddonInfo, error) {
-	name := addonName(spec.Type)
-	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(spec.Type)}
+func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string) (controlplane.AddonInfo, error) {
+	name, err := addonName(spec.Type, env)
+	if err != nil {
+		return controlplane.AddonInfo{}, err
+	}
+	// Every resource this creates is named after the INSTANCE, not the type, so a second
+	// environment's add-on lands beside the first rather than on top of it (ADR-0067 §1). The
+	// environment label records which environment the instance serves, so the cluster view agrees
+	// with the registry row.
+	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(spec.Type), addonEnvLabel: env}
 
 	// The metrics add-on's vmagent scraper references a pre-provisioned ServiceAccount whose RBAC
 	// only a kubeconfig-holder can apply (burrowd cannot create RBAC). The CLI self-heals this
@@ -76,7 +94,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 	// Deployment and points the pod's POSTGRES_PASSWORD at it via secretKeyRef, so the password is
 	// never inlined in the pod spec, never logged, and never returned (ADR-0031). Other add-ons
 	// add no env.
-	var env []corev1.EnvVar
+	var podEnv []corev1.EnvVar
 	// readiness gates the Service (and AddonReady) on the backing service actually accepting
 	// connections, not merely on the container running. Postgres needs it: on first boot the
 	// official image runs initdb and a temporary socket-only server before binding TCP 5432, so a
@@ -92,8 +110,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 	var extraContainers []corev1.Container
 	var podAnnotations map[string]string
 	if spec.Type == controlplane.AddonPostgres {
-		var err error
-		if env, err = a.ensurePostgresSuperuserEnv(ctx, labels); err != nil {
+		if podEnv, err = a.ensurePostgresSuperuserEnv(ctx, name, labels); err != nil {
 			return controlplane.AddonInfo{}, err
 		}
 		resources = postgresResources()
@@ -109,7 +126,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		// Always export metrics: a postgres_exporter sidecar connects to the local server as the
 		// superuser and exposes Prometheus metrics on :9187, including pg_stat_statements slow-query
 		// stats. The password is wired via secretKeyRef into burrow-postgres, never inlined (ADR-0031).
-		extraContainers = append(extraContainers, postgresExporterContainer())
+		extraContainers = append(extraContainers, postgresExporterContainer(name))
 		// Annotate the pod so the metrics add-on's vmagent scrapes the exporter's /metrics on :9187 —
 		// the same annotation style app pods use (adapter.go buildDeployment). Discovery is namespace
 		// based, so install order (metrics before or after Postgres) does not matter (ADR-0051).
@@ -120,7 +137,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 		}
 		// Create the pg_stat_statements extension on first boot via an init script the official image
 		// runs during initdb; shared_preload_libraries (set in addonArgs) loads the module itself.
-		initVol, initMount, ierr := a.ensurePostgresInitScript(ctx, labels)
+		initVol, initMount, ierr := a.ensurePostgresInitScript(ctx, name, labels)
 		if ierr != nil {
 			return controlplane.AddonInfo{}, ierr
 		}
@@ -144,7 +161,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 						Name:           string(spec.Type),
 						Image:          spec.Image,
 						Args:           addonArgs(spec),
-						Env:            env,
+						Env:            podEnv,
 						Ports:          []corev1.ContainerPort{{ContainerPort: spec.Port}},
 						VolumeMounts:   mounts,
 						ReadinessProbe: readiness,
@@ -192,6 +209,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec) 
 	return controlplane.AddonInfo{
 		Name:         name,
 		Type:         spec.Type,
+		Environment:  env,
 		Mode:         "installed",
 		Backend:      spec.Backend,
 		Image:        spec.Image,
@@ -223,10 +241,27 @@ func (a *Adapter) requireAddonServiceAccount(ctx context.Context, name string) e
 // role: a distinct, Burrow-owned admin role keeps the boundary clear.
 const PostgresSuperuser = "burrow_admin"
 
-// PostgresSecretName is the Secret in the add-on namespace that holds the generated superuser
-// password (ADR-0031). It lives in the add-on namespace — not the control-plane credentials Secret
-// — because a pod can only mount a Secret in its own namespace.
+// PostgresSecretName is the Secret in the add-on namespace that holds the DEFAULT environment's
+// generated superuser password (ADR-0031). It lives in the add-on namespace — not the control-plane
+// credentials Secret — because a pod can only mount a Secret in its own namespace.
+//
+// The Secret is named after the INSTANCE, so every environment's instance has its own superuser
+// credential and this constant is the default environment's case of that rule (ADR-0067 §1) — which
+// is why an install predating environments keeps the Secret, the volume, and the password it already
+// has. Use postgresSecretName(env) on any path that can serve more than the default environment.
 const PostgresSecretName = "burrow-postgres"
+
+// postgresSecretName is the superuser Secret for environment env's Postgres instance: the instance's
+// own name, since the credential that opens a server belongs to that server alone (ADR-0067 §1).
+func postgresSecretName(env string) (string, error) {
+	return addonName(controlplane.AddonPostgres, env)
+}
+
+// postgresInitConfigMap is the first-boot SQL ConfigMap for environment env's instance. It is
+// per-instance for the same reason the Secret is: it is consumed during that server's initdb, and a
+// removal that destroys one environment's data must not delete the script another environment's
+// instance would need on its next fresh boot.
+func postgresInitConfigMap(instance string) string { return instance + "-init" }
 
 // PostgresPasswordKey is the key under which the superuser password is stored in PostgresSecretName.
 const PostgresPasswordKey = "password"
@@ -249,31 +284,31 @@ func generatePassword() (string, error) {
 // from a secretKeyRef into that Secret, and PGDATA under a subdirectory of the mounted volume. The
 // generated password is written ONLY into the Secret — it is never inlined into the pod spec,
 // returned, or logged (ADR-0031).
-func (a *Adapter) ensurePostgresSuperuserEnv(ctx context.Context, labels map[string]string) ([]corev1.EnvVar, error) {
+func (a *Adapter) ensurePostgresSuperuserEnv(ctx context.Context, instance string, labels map[string]string) ([]corev1.EnvVar, error) {
 	secrets := a.client.CoreV1().Secrets(a.addonNamespace)
-	if _, err := secrets.Get(ctx, PostgresSecretName, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+	if _, err := secrets.Get(ctx, instance, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		pw, gerr := generatePassword()
 		if gerr != nil {
 			return nil, gerr
 		}
 		sec := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: a.addonNamespace, Labels: labels},
+			ObjectMeta: metav1.ObjectMeta{Name: instance, Namespace: a.addonNamespace, Labels: labels},
 			Type:       corev1.SecretTypeOpaque,
 			Data:       map[string][]byte{PostgresPasswordKey: []byte(pw)},
 		}
 		if _, cerr := secrets.Create(ctx, sec, metav1.CreateOptions{}); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
 			// The error names the Secret only — never the generated value.
-			return nil, fmt.Errorf("kube: creating postgres superuser secret %q: %w", PostgresSecretName, cerr)
+			return nil, fmt.Errorf("kube: creating postgres superuser secret %q: %w", instance, cerr)
 		}
 	} else if err != nil {
-		return nil, fmt.Errorf("kube: reading postgres superuser secret %q: %w", PostgresSecretName, err)
+		return nil, fmt.Errorf("kube: reading postgres superuser secret %q: %w", instance, err)
 	}
 
 	return []corev1.EnvVar{
 		{Name: "POSTGRES_USER", Value: PostgresSuperuser},
 		{Name: "POSTGRES_PASSWORD", ValueFrom: &corev1.EnvVarSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: PostgresSecretName},
+				LocalObjectReference: corev1.LocalObjectReference{Name: instance},
 				Key:                  PostgresPasswordKey,
 			},
 		}},
@@ -300,9 +335,10 @@ const postgresExporterImage = "quay.io/prometheuscommunity/postgres-exporter:v0.
 const postgresExporterPort int32 = 9187
 
 // PostgresInitConfigMap is the ConfigMap whose first-boot SQL the official postgres image runs
-// during initdb (mounted into /docker-entrypoint-initdb.d). It creates the pg_stat_statements
-// extension so the metrics exporter's slow-query collector has data (ADR-0051). It lives in the
-// add-on namespace and is removed with the add-on.
+// during initdb (mounted into /docker-entrypoint-initdb.d) for the DEFAULT environment's instance.
+// It creates the pg_stat_statements extension so the metrics exporter's slow-query collector has
+// data (ADR-0051). It lives in the add-on namespace and is removed with the add-on it belongs to;
+// every other environment's instance gets its own, named by postgresInitConfigMap (ADR-0067 §1).
 const PostgresInitConfigMap = "burrow-postgres-init"
 
 // postgresExporterContainer builds the always-on postgres_exporter sidecar. It connects to the local
@@ -310,7 +346,7 @@ const PostgresInitConfigMap = "burrow-postgres-init"
 // burrow-postgres Secret — never inlined into the pod spec (ADR-0031) — and enables the
 // stat_statements collector so slow-query metrics are exported. Its footprint is tiny (32Mi request,
 // 64Mi limit) so the always-on cost is negligible.
-func postgresExporterContainer() corev1.Container {
+func postgresExporterContainer(instance string) corev1.Container {
 	return corev1.Container{
 		Name:  "metrics-exporter",
 		Image: postgresExporterImage,
@@ -324,7 +360,7 @@ func postgresExporterContainer() corev1.Container {
 			{Name: "DATA_SOURCE_USER", Value: PostgresSuperuser},
 			{Name: "DATA_SOURCE_PASS", ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: PostgresSecretName},
+					LocalObjectReference: corev1.LocalObjectReference{Name: instance},
 					Key:                  PostgresPasswordKey,
 				},
 			}},
@@ -341,15 +377,15 @@ func postgresExporterContainer() corev1.Container {
 // creates the pg_stat_statements extension, and returns the pod volume + mount that hands it to the
 // official image's /docker-entrypoint-initdb.d hook. The script runs only on a fresh initdb; on a
 // re-install over an existing volume it is a harmless no-op (CREATE EXTENSION IF NOT EXISTS).
-func (a *Adapter) ensurePostgresInitScript(ctx context.Context, labels map[string]string) (corev1.Volume, corev1.VolumeMount, error) {
+func (a *Adapter) ensurePostgresInitScript(ctx context.Context, instance string, labels map[string]string) (corev1.Volume, corev1.VolumeMount, error) {
 	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: PostgresInitConfigMap, Namespace: a.addonNamespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: postgresInitConfigMap(instance), Namespace: a.addonNamespace, Labels: labels},
 		Data:       map[string]string{"10-pg-stat-statements.sql": "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\n"},
 	}
 	if _, err := a.client.CoreV1().ConfigMaps(a.addonNamespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("kube: creating postgres init config %q: %w", PostgresInitConfigMap, err)
+		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("kube: creating postgres init config %q: %w", postgresInitConfigMap(instance), err)
 	}
-	vol := corev1.Volume{Name: "init", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: PostgresInitConfigMap}}}}
+	vol := corev1.Volume{Name: "init", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: postgresInitConfigMap(instance)}}}}
 	mount := corev1.VolumeMount{Name: "init", MountPath: "/docker-entrypoint-initdb.d"}
 	return vol, mount, nil
 }
@@ -565,11 +601,17 @@ func (a *Adapter) AddonReady(ctx context.Context, name string) (bool, error) {
 func (a *Adapter) DeleteAddon(ctx context.Context, name string, deleteData bool) (controlplane.AddonRemoval, error) {
 	removal := controlplane.AddonRemoval{Namespace: a.addonNamespace}
 	deps := a.client.AppsV1().Deployments(a.addonNamespace)
-	if _, err := deps.Get(ctx, name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+	// The instance's own label says what it is. Reading it beats comparing the name against a
+	// derived one: with an instance per environment (ADR-0067 §1) the Postgres instances are
+	// burrow-postgres, burrow-postgres-staging, and so on, and a removal must recognize every one of
+	// them without reconstructing which environment it came from.
+	dep, err := deps.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
 		return removal, fmt.Errorf("kube: addon %q: %w", name, controlplane.ErrNotFound)
 	} else if err != nil {
 		return removal, fmt.Errorf("kube: reading addon %q: %w", name, err)
 	}
+	isPostgres := dep.Labels[addonLabel] == string(controlplane.AddonPostgres)
 	// The Deployment is the source of truth for existence; the workload and its Service always go.
 	if err := deps.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return removal, fmt.Errorf("kube: deleting addon %q: %w", name, err)
@@ -583,7 +625,6 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string, deleteData bool)
 	_ = a.client.AppsV1().Deployments(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
 	_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, collector, metav1.DeleteOptions{})
 
-	isPostgres := name == addonName(controlplane.AddonPostgres)
 	pvcs := a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace)
 	if deleteData {
 		if err := pvcs.Delete(ctx, name, metav1.DeleteOptions{}); err == nil {
@@ -591,12 +632,14 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string, deleteData bool)
 		} else if !apierrors.IsNotFound(err) {
 			return removal, fmt.Errorf("kube: deleting addon volume %q: %w", name, err)
 		}
-		// The Postgres add-on owns the burrow-postgres superuser Secret (ADR-0031) and the
-		// pg_stat_statements init-script ConfigMap (ADR-0051). They exist to open and initialize the
-		// volume, so they go exactly when it does.
+		// A Postgres instance owns its superuser Secret (ADR-0031) and its pg_stat_statements
+		// init-script ConfigMap (ADR-0051), both named after the instance. They exist to open and
+		// initialize THIS volume, so they go exactly when it does — and another environment's
+		// instance keeps its own, which is the point of the credential being per-instance
+		// (ADR-0067 §1).
 		if isPostgres {
-			_ = a.client.CoreV1().Secrets(a.addonNamespace).Delete(ctx, PostgresSecretName, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, PostgresInitConfigMap, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Secrets(a.addonNamespace).Delete(ctx, name, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, postgresInitConfigMap(name), metav1.DeleteOptions{})
 		}
 	} else if _, err := pvcs.Get(ctx, name, metav1.GetOptions{}); err == nil {
 		removal.RetainedDataVolume = name

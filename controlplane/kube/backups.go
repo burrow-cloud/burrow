@@ -65,48 +65,70 @@ func (a *Adapter) ensureBackupPVC(ctx context.Context) error {
 	return nil
 }
 
-// backupInstanceHost is the in-cluster host:port the backup/restore Jobs dial: the add-on Postgres
-// Service. The Jobs run in-cluster, so they resolve the .svc name directly (no port-forward).
-func (a *Adapter) backupInstanceHost() string {
-	return fmt.Sprintf("%s.%s.svc", PostgresSecretName, a.addonNamespace)
+// backupInstanceHost is the in-cluster host the backup/restore Jobs dial for environment env: that
+// environment's Postgres Service (ADR-0067 §1). The Jobs run in-cluster, so they resolve the .svc
+// name directly (no port-forward). A dump is only meaningful against the server it came from, so the
+// environment travels with the Job exactly as it does with the provisioner.
+func (a *Adapter) backupInstanceHost(env string) (string, error) {
+	instance, err := postgresSecretName(env)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s.%s.svc", instance, a.addonNamespace), nil
 }
 
-// superuserPasswordEnv wires PGPASSWORD from the burrow-postgres Secret via secretKeyRef (ADR-0032).
+// superuserPasswordEnv wires PGPASSWORD from the instance's Secret via secretKeyRef (ADR-0032).
 // libpq reads PGPASSWORD, so pg_dump/pg_restore authenticate with the superuser password WITHOUT it
 // ever appearing in an argv or a log — it is injected by Kubernetes into the container env from the
-// existing Secret, exactly as the provisioner reads it.
-func superuserPasswordEnv() corev1.EnvVar {
+// existing Secret, exactly as the provisioner reads it. Each environment's instance has its own
+// Secret, named after the instance (ADR-0067 §1), so the Job is given the credential for the one
+// server it is meant to talk to.
+func superuserPasswordEnv(instance string) corev1.EnvVar {
 	return corev1.EnvVar{
 		Name: "PGPASSWORD",
 		ValueFrom: &corev1.EnvVarSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: PostgresSecretName},
+				LocalObjectReference: corev1.LocalObjectReference{Name: instance},
 				Key:                  PostgresPasswordKey,
 			},
 		},
 	}
 }
 
-// backupConnEnv is the connection env shared by the backup and restore Jobs: the host, port, user,
-// and database — all non-secret. The password is added separately via secretKeyRef. PGHOST/PGPORT/
-// PGUSER/PGDATABASE are libpq variables, so pg_dump/pg_restore need no host or credential on the
-// command line.
-func (a *Adapter) backupConnEnv(app string) []corev1.EnvVar {
+// backupConnEnv is the connection env shared by the backup and restore Jobs for environment env: the
+// host, port, user, and database — all non-secret. The password is added separately via
+// secretKeyRef. PGHOST/PGPORT/PGUSER/PGDATABASE are libpq variables, so pg_dump/pg_restore need no
+// host or credential on the command line.
+func (a *Adapter) backupConnEnv(app, env string) ([]corev1.EnvVar, error) {
+	host, err := a.backupInstanceHost(env)
+	if err != nil {
+		return nil, err
+	}
+	instance, err := postgresSecretName(env)
+	if err != nil {
+		return nil, err
+	}
 	return []corev1.EnvVar{
-		{Name: "PGHOST", Value: a.backupInstanceHost()},
+		{Name: "PGHOST", Value: host},
 		{Name: "PGPORT", Value: "5432"},
 		{Name: "PGUSER", Value: PostgresSuperuser},
 		{Name: "PGDATABASE", Value: app},
-		superuserPasswordEnv(),
-	}
+		superuserPasswordEnv(instance),
+	}, nil
 }
 
 // RunBackupJob pg_dumps app's database to the backup PVC via a one-shot Job and waits for it to
 // finish (ADR-0032). The dump command names no host or password — those come from libpq env, the
 // password via secretKeyRef. The container also writes the dump's byte size to the termination-log
 // so burrowd can read size_bytes from the pod's terminated state without mounting the volume.
-func (a *Adapter) RunBackupJob(ctx context.Context, app, backupID string) (int64, error) {
+func (a *Adapter) RunBackupJob(ctx context.Context, app, env, backupID string) (int64, error) {
 	if err := validateAppIdentifier(app); err != nil {
+		return 0, err
+	}
+	// The environment is resolved to an instance before the PVC is touched or a Job is built, so a
+	// dump can never be taken from a server other than the named environment's (ADR-0067 §1).
+	connEnv, err := a.backupConnEnv(app, env)
+	if err != nil {
 		return 0, err
 	}
 	if err := a.ensureBackupPVC(ctx); err != nil {
@@ -122,15 +144,19 @@ pg_dump -Fc -f %q
 stat -c%%s %q > /dev/termination-log`, dir, dump, dump)
 
 	name := fmt.Sprintf("burrow-pg-backup-%s", backupID)
-	job := a.backupJob(name, app, script)
+	job := a.backupJob(name, script, connEnv)
 	return a.runJobAwaitSize(ctx, job, name)
 }
 
 // RunRestoreJob pg_restores app's dump from the backup PVC into its database via a one-shot Job and
 // waits for it (ADR-0032). --clean --if-exists replaces current contents. Like backup, the command
 // names no host or password.
-func (a *Adapter) RunRestoreJob(ctx context.Context, app, backupID string) error {
+func (a *Adapter) RunRestoreJob(ctx context.Context, app, env, backupID string) error {
 	if err := validateAppIdentifier(app); err != nil {
+		return err
+	}
+	connEnv, err := a.backupConnEnv(app, env)
+	if err != nil {
 		return err
 	}
 	dump := backupDumpPath(app, backupID)
@@ -143,15 +169,17 @@ func (a *Adapter) RunRestoreJob(ctx context.Context, app, backupID string) error
 pg_restore --clean --if-exists -d %q %q`, app, dump)
 
 	name := fmt.Sprintf("burrow-pg-restore-%s", backupID)
-	job := a.backupJob(name, app, script)
-	_, err := a.runJobAwaitSize(ctx, job, name)
-	return err
+	job := a.backupJob(name, script, connEnv)
+	_, rerr := a.runJobAwaitSize(ctx, job, name)
+	return rerr
 }
 
 // backupJob builds a one-shot Job in the add-on namespace running the postgres image with script,
-// mounting the backup PVC and the connection env (host/user/db non-secret, password via
-// secretKeyRef). BackoffLimit 0: a failed attempt fails the Job rather than retrying forever.
-func (a *Adapter) backupJob(name, app, script string) *batchv1.Job {
+// mounting the backup PVC and the caller-resolved connection env (host/user/db non-secret, password
+// via secretKeyRef). The env is resolved by the caller so the environment's instance is settled
+// before any Job exists (ADR-0067 §1). BackoffLimit 0: a failed attempt fails the Job rather than
+// retrying forever.
+func (a *Adapter) backupJob(name, script string, connEnv []corev1.EnvVar) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(controlplane.AddonPostgres)}
 	var backoff int32
 	return &batchv1.Job{
@@ -166,7 +194,7 @@ func (a *Adapter) backupJob(name, app, script string) *batchv1.Job {
 						Name:    "pg",
 						Image:   backupImage,
 						Command: []string{"sh", "-c", script},
-						Env:     a.backupConnEnv(app),
+						Env:     connEnv,
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "backups", MountPath: backupMountPath},
 						},

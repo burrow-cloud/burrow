@@ -37,7 +37,7 @@ func TestDeployPostgresCreatesSuperuserSecretBeforeDeployment(t *testing.T) {
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	info, err := a.DeployAddon(ctx, spec)
+	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestDeployPostgresReusesExistingSecret(t *testing.T) {
 	})
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	sec, _ := client.CoreV1().Secrets(addonNS).Get(ctx, PostgresSecretName, metav1.GetOptions{})
@@ -159,7 +159,7 @@ func TestDeployPostgresAlwaysExportsMetrics(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -283,7 +283,7 @@ func TestMetricsCollectorDiscoversAppAndAddonNamespaces(t *testing.T) {
 	})
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
-	if _, err := a.DeployAddon(ctx, spec); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	cm, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
@@ -305,7 +305,7 @@ func TestMetricsCollectorDedupesWhenNamespacesEqual(t *testing.T) {
 	})
 	a := New(client, addonNS).WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
-	if _, err := a.DeployAddon(ctx, spec); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	cm, _ := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
@@ -329,10 +329,10 @@ func TestProvisionerRejectsBadIdentifiers(t *testing.T) {
 
 	bad := []string{"a; DROP DATABASE x", "App", "1x", "", "-web", "web name", "web\"; --", "WEB", "web_db", "web;"}
 	for _, name := range bad {
-		if _, err := p.EnsureAppDatabase(ctx, name); !errors.Is(err, controlplane.ErrInvalid) {
+		if _, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("EnsureAppDatabase(%q) err = %v, want ErrInvalid", name, err)
 		}
-		if err := p.DropAppDatabase(ctx, name); !errors.Is(err, controlplane.ErrInvalid) {
+		if err := p.DropAppDatabase(ctx, name, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("DropAppDatabase(%q) err = %v, want ErrInvalid", name, err)
 		}
 	}
@@ -345,7 +345,7 @@ func TestProvisionerAcceptsValidIdentifiers(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	p := NewPostgresProvisioner(client, addonNS)
 	for _, name := range []string{"web", "my-app", "a", "web2", "a1b2-c3"} {
-		_, err := p.EnsureAppDatabase(ctx, name)
+		_, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment)
 		if errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("EnsureAppDatabase(%q) was rejected as invalid, want it accepted", name)
 		}
@@ -388,7 +388,7 @@ func TestDeleteAddonKeepsVolumeAndCredentialByDefault(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -423,7 +423,7 @@ func TestDeleteAddonDeleteDataDestroysVolume(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -448,7 +448,7 @@ func TestDeleteAddonKeepsBackupVolume(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	if err := a.ensureBackupPVC(ctx); err != nil {
@@ -474,7 +474,7 @@ func TestDeleteAddonReportsNoBackupVolumeWhenAbsent(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -484,5 +484,140 @@ func TestDeleteAddonReportsNoBackupVolumeWhenAbsent(t *testing.T) {
 	}
 	if removal.RetainedBackupVolume != "" {
 		t.Errorf("RetainedBackupVolume = %q, want empty when no backup was ever taken", removal.RetainedBackupVolume)
+	}
+}
+
+// TestProvisionerRequiresAnEnvironment asserts every provisioning method refuses an unnamed or
+// malformed environment as ErrInvalid BEFORE any Secret read or connection (ADR-0067 §1). This is
+// the seam-level statement of "a signature that can omit it is a signature that will omit it": there
+// is no environment value that means "whichever instance is there", so a caller that forgets cannot
+// silently land on another environment's server.
+func TestProvisionerRequiresAnEnvironment(t *testing.T) {
+	ctx := context.Background()
+	// A Secret for the DEFAULT environment's instance exists, so a call that fell back to it would
+	// get past validation and fail later (on the connection) rather than as ErrInvalid. That is what
+	// distinguishes "refused" from "quietly defaulted".
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
+		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
+	})
+	p := NewPostgresProvisioner(client, addonNS)
+
+	for _, env := range []string{"", "Staging", "not a label", "staging/prod"} {
+		if _, err := p.EnsureAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
+			t.Errorf("EnsureAppDatabase(web, %q) err = %v, want ErrInvalid", env, err)
+		}
+		if err := p.DropAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
+			t.Errorf("DropAppDatabase(web, %q) err = %v, want ErrInvalid", env, err)
+		}
+		if _, err := p.ListAppDatabases(ctx, env); !errors.Is(err, controlplane.ErrInvalid) {
+			t.Errorf("ListAppDatabases(%q) err = %v, want ErrInvalid", env, err)
+		}
+	}
+}
+
+// TestProvisionerReachesTheEnvironmentsOwnInstance asserts the environment selects the host AND the
+// credential together: the default environment resolves to the instance an existing install already
+// has, and another environment resolves to its own — never to the default's (ADR-0067 §1).
+func TestProvisionerReachesTheEnvironmentsOwnInstance(t *testing.T) {
+	ctx := context.Background()
+	// Only the DEFAULT environment's instance is installed.
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
+		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
+	})
+	p := NewPostgresProvisioner(client, addonNS)
+
+	defHost, err := p.instanceHost(controlplane.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("instanceHost(default): %v", err)
+	}
+	if defHost != PostgresSecretName+"."+addonNS+".svc" {
+		t.Errorf("default-environment host = %q, want the pre-existing %s.%s.svc", defHost, PostgresSecretName, addonNS)
+	}
+	stgHost, err := p.instanceHost("staging")
+	if err != nil {
+		t.Fatalf("instanceHost(staging): %v", err)
+	}
+	if stgHost == defHost {
+		t.Fatalf("staging and the default environment dial the same host %q", stgHost)
+	}
+
+	// Staging has no instance installed, so provisioning there fails closed — naming staging's own
+	// Secret — rather than falling back to the instance that does exist.
+	_, err = p.EnsureAppDatabase(ctx, "web", "staging")
+	if !errors.Is(err, controlplane.ErrNotFound) {
+		t.Fatalf("EnsureAppDatabase(web, staging) err = %v, want ErrNotFound for staging's absent instance", err)
+	}
+	if !strings.Contains(err.Error(), "burrow-postgres-staging") {
+		t.Errorf("error %q does not name staging's own instance", err)
+	}
+}
+
+// TestDeployPostgresPerEnvironmentIsASeparateInstance asserts installing Postgres for a second
+// environment creates a WHOLE second instance — its own Deployment, Service, volume, superuser
+// Secret, and init ConfigMap — and leaves the first environment's untouched (ADR-0067 §1). The
+// superuser credential is per instance because it is what opens that server's data directory.
+func TestDeployPostgresPerEnvironmentIsASeparateInstance(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
+
+	def, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("DeployAddon(default): %v", err)
+	}
+	stg, err := a.DeployAddon(ctx, spec, "staging")
+	if err != nil {
+		t.Fatalf("DeployAddon(staging): %v", err)
+	}
+	if def.Name != "burrow-postgres" {
+		t.Errorf("default-environment instance = %q, want the name an existing install already has", def.Name)
+	}
+	if stg.Name != "burrow-postgres-staging" || stg.Endpoint == def.Endpoint {
+		t.Fatalf("staging instance = %q endpoint %q, want its own instance and endpoint", stg.Name, stg.Endpoint)
+	}
+
+	for _, name := range []string{def.Name, stg.Name} {
+		if _, derr := client.AppsV1().Deployments(addonNS).Get(ctx, name, metav1.GetOptions{}); derr != nil {
+			t.Errorf("Deployment %q: %v", name, derr)
+		}
+		if _, serr := client.CoreV1().Services(addonNS).Get(ctx, name, metav1.GetOptions{}); serr != nil {
+			t.Errorf("Service %q: %v", name, serr)
+		}
+		if _, verr := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, name, metav1.GetOptions{}); verr != nil {
+			t.Errorf("volume %q: %v", name, verr)
+		}
+		if _, cerr := client.CoreV1().ConfigMaps(addonNS).Get(ctx, postgresInitConfigMap(name), metav1.GetOptions{}); cerr != nil {
+			t.Errorf("init ConfigMap for %q: %v", name, cerr)
+		}
+	}
+
+	// Two superuser Secrets with DIFFERENT passwords: one server's credential never opens another's.
+	defSec, err := client.CoreV1().Secrets(addonNS).Get(ctx, def.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("default superuser secret: %v", err)
+	}
+	stgSec, err := client.CoreV1().Secrets(addonNS).Get(ctx, stg.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("staging superuser secret: %v", err)
+	}
+	if string(defSec.Data[PostgresPasswordKey]) == string(stgSec.Data[PostgresPasswordKey]) {
+		t.Error("both instances share a superuser password — the credential is not per instance")
+	}
+
+	// Removing staging's instance with its data takes only staging's credential and init script.
+	if _, rerr := a.DeleteAddon(ctx, stg.Name, true); rerr != nil {
+		t.Fatalf("DeleteAddon(staging): %v", rerr)
+	}
+	if _, gerr := client.CoreV1().Secrets(addonNS).Get(ctx, stg.Name, metav1.GetOptions{}); gerr == nil {
+		t.Error("staging's superuser secret survived a data-deleting removal of staging's instance")
+	}
+	if _, gerr := client.CoreV1().Secrets(addonNS).Get(ctx, def.Name, metav1.GetOptions{}); gerr != nil {
+		t.Errorf("removing staging's instance deleted the DEFAULT environment's superuser secret: %v", gerr)
+	}
+	if _, gerr := client.AppsV1().Deployments(addonNS).Get(ctx, def.Name, metav1.GetOptions{}); gerr != nil {
+		t.Errorf("removing staging's instance deleted the default environment's Deployment: %v", gerr)
 	}
 }

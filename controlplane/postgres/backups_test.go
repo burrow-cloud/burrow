@@ -21,20 +21,33 @@ func TestStoreBackupsRoundTrip(t *testing.T) {
 	app := t.Name() + "-app"
 
 	older := cp.Backup{
-		ID:        t.Name() + "-b1",
-		App:       app,
-		CreatedAt: time.Date(2026, 6, 25, 1, 0, 0, 0, time.UTC),
-		Path:      "/backups/" + app + "/" + t.Name() + "-b1.dump",
-		Status:    cp.BackupPending,
+		ID:          t.Name() + "-b1",
+		App:         app,
+		Environment: cp.DefaultEnvironment,
+		CreatedAt:   time.Date(2026, 6, 25, 1, 0, 0, 0, time.UTC),
+		Path:        "/backups/" + app + "/" + t.Name() + "-b1.dump",
+		Status:      cp.BackupPending,
 	}
 	newer := cp.Backup{
-		ID:        t.Name() + "-b2",
-		App:       app,
-		CreatedAt: time.Date(2026, 6, 25, 2, 0, 0, 0, time.UTC),
-		Path:      "/backups/" + app + "/" + t.Name() + "-b2.dump",
-		Status:    cp.BackupPending,
+		ID:          t.Name() + "-b2",
+		App:         app,
+		Environment: cp.DefaultEnvironment,
+		CreatedAt:   time.Date(2026, 6, 25, 2, 0, 0, 0, time.UTC),
+		Path:        "/backups/" + app + "/" + t.Name() + "-b2.dump",
+		Status:      cp.BackupPending,
 	}
-	for _, b := range []cp.Backup{older, newer} {
+	// A dump of the SAME app in another environment: a separate instance, therefore separate
+	// contents, and it must not turn up when the caller asks for the default environment's backups
+	// (ADR-0067 §1).
+	staging := cp.Backup{
+		ID:          t.Name() + "-b3",
+		App:         app,
+		Environment: "staging",
+		CreatedAt:   time.Date(2026, 6, 25, 3, 0, 0, 0, time.UTC),
+		Path:        "/backups/" + app + "/" + t.Name() + "-b3.dump",
+		Status:      cp.BackupPending,
+	}
+	for _, b := range []cp.Backup{older, newer, staging} {
 		if err := s.RecordBackup(ctx, b); err != nil {
 			t.Fatalf("RecordBackup %s: %v", b.ID, err)
 		}
@@ -60,17 +73,36 @@ func TestStoreBackupsRoundTrip(t *testing.T) {
 		t.Errorf("after SetBackupStatus = status %q size %d, want completed/4096", got.Status, got.SizeBytes)
 	}
 
-	// Per-app listing, newest first.
-	list, err := s.ListBackups(ctx, app)
+	// Per-app listing across environments, newest first.
+	list, err := s.ListBackups(ctx, app, "")
 	if err != nil {
 		t.Fatalf("ListBackups: %v", err)
 	}
-	if len(list) != 2 || list[0].ID != newer.ID || list[1].ID != older.ID {
-		t.Errorf("ListBackups order = %v, want [%s %s] (newest first)", ids(list), newer.ID, older.ID)
+	if len(list) != 3 || list[0].ID != staging.ID || list[1].ID != newer.ID || list[2].ID != older.ID {
+		t.Errorf("ListBackups order = %v, want [%s %s %s] (newest first)", ids(list), staging.ID, newer.ID, older.ID)
+	}
+
+	// Restricted to one environment, the other environment's dump of the same app is not listed.
+	def, err := s.ListBackups(ctx, app, cp.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("ListBackups default env: %v", err)
+	}
+	if len(def) != 2 || def[0].ID != newer.ID || def[1].ID != older.ID {
+		t.Errorf("ListBackups(%s, default) = %v, want [%s %s]", app, ids(def), newer.ID, older.ID)
+	}
+	stg, err := s.ListBackups(ctx, app, "staging")
+	if err != nil {
+		t.Fatalf("ListBackups staging: %v", err)
+	}
+	if len(stg) != 1 || stg[0].ID != staging.ID {
+		t.Errorf("ListBackups(%s, staging) = %v, want [%s]", app, ids(stg), staging.ID)
+	}
+	if stg[0].Environment != "staging" {
+		t.Errorf("round-tripped environment = %q, want staging", stg[0].Environment)
 	}
 
 	// All-apps listing includes our app's backups.
-	all, err := s.ListBackups(ctx, "")
+	all, err := s.ListBackups(ctx, "", "")
 	if err != nil {
 		t.Fatalf("ListBackups all: %v", err)
 	}
@@ -80,8 +112,8 @@ func TestStoreBackupsRoundTrip(t *testing.T) {
 			seen++
 		}
 	}
-	if seen != 2 {
-		t.Errorf("all-apps listing saw %d backups for %s, want 2", seen, app)
+	if seen != 3 {
+		t.Errorf("all-apps listing saw %d backups for %s, want 3", seen, app)
 	}
 
 	// Unknown ids are ErrNotFound for both GetBackup and SetBackupStatus.

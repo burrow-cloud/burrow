@@ -328,6 +328,11 @@ type Backup struct {
 	ID string `json:"id"`
 	// App is the application whose database was dumped.
 	App string `json:"app"`
+	// Environment is the environment whose instance the dump was taken from (the reserved "default"
+	// for the implicit one). Each environment has its own Postgres instance (ADR-0067 §1), so a dump
+	// is only meaningful against the one it came from: restore requires the two to agree rather than
+	// letting one environment's contents be written over another's.
+	Environment string `json:"environment,omitempty"`
 	// CreatedAt is when the backup was recorded, read from the injected clock.
 	CreatedAt time.Time `json:"created_at"`
 	// Path is the on-PVC location of the dump (e.g. /backups/<app>/<id>.dump). It is a path on a

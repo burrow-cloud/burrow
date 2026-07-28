@@ -82,7 +82,7 @@ var agentSurfaceAllowList = map[string]string{
 	"config unset": "removes a non-secret config var from one app",
 	"secret":       "read-only: one app's secret KEY names, never values",
 	"secret unset": "removes one app secret by key; carries no value",
-	"addon attach": "gives one app a database on the installed add-on; the URL is generated server-side",
+	"addon attach": "gives one app a database on its environment's add-on instance; the URL is generated server-side",
 	"addon backup": "takes a backup of an add-on's data",
 	"backups":      "read-only: the backups taken of an add-on",
 
@@ -92,15 +92,15 @@ var agentSurfaceAllowList = map[string]string{
 	// ServiceAccount (the metrics scraper), burrowd only VERIFIES the operator staged it and
 	// otherwise fails cleanly (controlplane/kube/addons.go).
 	//
-	// `addon remove` is deliberately NOT here. Add-ons are one instance per type per cluster and
-	// ADR-0031 puts every app's database on the one shared Postgres, so removal takes every
-	// attached app down at once — it fails ADR-0065 §1's scope test unconditionally, which is
+	// `addon remove` is deliberately NOT here. Add-ons are one instance per type per ENVIRONMENT
+	// (ADR-0067 §1) and ADR-0031 puts every app in an environment on its one Postgres, so removal
+	// takes every attached app in that environment down at once — it fails ADR-0065 §1's scope test unconditionally, which is
 	// tier 1: absent from the binary, not merely guarded
 	// ([ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) §2). Because this
 	// allow-list is closed, its omission here is what fails the test if the command comes back;
 	// `addon_remove` is also on adminVerbFragments below as the independent second net.
 	"addon":         "group: the add-on operations",
-	"addon install": "deploys a building block into the existing add-on namespace; creates no namespace and no RBAC",
+	"addon install": "deploys a building block for one environment into the existing add-on namespace; creates no namespace and no RBAC",
 	"addons":        "read-only: the installed add-ons and their capabilities",
 
 	// Routing: Services, Ingresses, and DNS records for an app.

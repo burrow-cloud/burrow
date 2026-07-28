@@ -52,7 +52,7 @@ func TestAutoDeployStatusReportsTargetAndUpgrade(t *testing.T) {
 	seedRunningRelease(t, d, "web", "ghcr.io/u/web:1.2.5")
 	// Opt in at minor (auto-deploy is off by default — ADR-0058): 1.3.0 is the highest within the
 	// current major, 2.0.0 is the held upgrade above the cap.
-	if err := d.SetAutoDeployLevel(ctx, "web", "default", cp.AutoDeployMinor); err != nil {
+	if err := d.SetAutoDeployLevel(ctx, "web", cp.DefaultEnvironment, cp.AutoDeployMinor); err != nil {
 		t.Fatalf("SetAutoDeployLevel: %v", err)
 	}
 
@@ -86,7 +86,7 @@ func TestAutoDeployStatusUpToDate(t *testing.T) {
 	reg.SetTags("1.0.0", "1.2.0", "1.2.5")
 	e, d := newEngineWithRegistry(t, reg)
 	seedRunningRelease(t, d, "web", "ghcr.io/u/web:1.2.5")
-	if err := d.SetAutoDeployLevel(ctx, "web", "default", cp.AutoDeployMinor); err != nil {
+	if err := d.SetAutoDeployLevel(ctx, "web", cp.DefaultEnvironment, cp.AutoDeployMinor); err != nil {
 		t.Fatalf("SetAutoDeployLevel: %v", err)
 	}
 
@@ -227,24 +227,24 @@ func TestAutoDeployDefaultAndSet(t *testing.T) {
 	}
 }
 
-// TestAutoDeployPerEnvironment proves the level is keyed per environment: prod and the default
+// TestAutoDeployPerEnvironment proves the level is keyed per environment: staging and the default
 // environment carry independent levels, and an unknown environment is a clear ErrNotFound on both the
 // read and the write (ADR-0052 §2).
 func TestAutoDeployPerEnvironment(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newEngine(t, permissive())
-	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
+	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 
-	// prod at patch leaves the default environment at its default (off — auto-deploy is opt-in).
-	if err := e.SetAutoDeploy(ctx, "web", "prod", cp.AutoDeployPatch); err != nil {
-		t.Fatalf("SetAutoDeploy prod: %v", err)
+	// staging at patch leaves the default environment at its default (off — auto-deploy is opt-in).
+	if err := e.SetAutoDeploy(ctx, "web", "staging", cp.AutoDeployPatch); err != nil {
+		t.Fatalf("SetAutoDeploy staging: %v", err)
 	}
-	if got, _ := e.AutoDeploy(ctx, "web", "prod"); got != cp.AutoDeployPatch {
-		t.Fatalf("prod level = %q, want patch", got)
+	if got, _ := e.AutoDeploy(ctx, "web", "staging"); got != cp.AutoDeployPatch {
+		t.Fatalf("staging level = %q, want patch", got)
 	}
-	if got, _ := e.AutoDeploy(ctx, "web", "default"); got != cp.DefaultAutoDeployLevel {
+	if got, _ := e.AutoDeploy(ctx, "web", cp.DefaultEnvironment); got != cp.DefaultAutoDeployLevel {
 		t.Fatalf("default env level = %q, want %q", got, cp.DefaultAutoDeployLevel)
 	}
 

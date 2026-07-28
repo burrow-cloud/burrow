@@ -32,7 +32,7 @@ func (s *Store) SaveAddon(ctx context.Context, a controlplane.AddonInfo) error {
 	}
 	// An add-on row always names its environment: the registry key is the instance name, which is
 	// derived FROM the environment, so the environment is the fact and the name is what follows from
-	// it (ADR-0067 §1). A caller that leaves it empty means the implicit default environment.
+	// it (ADR-0067 §1). A caller that leaves it empty means the default environment (ADR-0067 §2).
 	env := a.Environment
 	if env == "" {
 		env = controlplane.DefaultEnvironment

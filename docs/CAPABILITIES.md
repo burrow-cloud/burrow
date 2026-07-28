@@ -301,13 +301,13 @@ the provider, and ADR-0064 leaves that choice open. Reporting cost would need a 
 per storage class and region, obtained from the provider's API or a table Burrow would have to keep
 current — a confident wrong number about money is worse than an honest one about bytes.
 
-Two accepted decisions change the `postgres` row above and **neither is built.**
+One accepted decision changes the `postgres` row above and is **not built.**
 [ADR-0066](adr/0066-postgres-on-cloudnativepg.md) replaces the mechanism with a CloudNativePG
 `Cluster` custom resource, handing WAL archiving, scheduled backups, retention and point-in-time
 recovery to the operator; the add-on is still the single-replica `postgres:17-alpine` Deployment
-in the table. [ADR-0067](adr/0067-one-database-instance-per-environment.md) §1 — one instance
-**per environment** — is built; §2–§3, the first environment being a registered one named `prod`,
-is not ([#340](https://github.com/burrow-cloud/burrow/issues/340)).
+in the table. [ADR-0067](adr/0067-one-database-instance-per-environment.md) is built in full: one
+instance **per environment** (§1), and the first environment a registered one named `prod` mapped
+to the existing app namespace (§2–§3).
 
 | Capability | Command | What it does |
 | --- | --- | --- |
@@ -322,18 +322,19 @@ is not ([#340](https://github.com/burrow-cloud/burrow/issues/340)).
 
 **Add-on instances are per environment, and every add-on operation names one.**
 `burrow addon install postgres --env staging` stands up a second instance (`burrow-postgres-staging`)
-beside the default environment's `burrow-postgres`, with its own volume and its own superuser
-credential; attach, detach, backup and restore all act on the named environment's instance
+beside `prod`'s `burrow-postgres`, with its own volume and its own superuser credential; attach,
+detach, backup and restore all act on the named environment's instance
 ([ADR-0067](adr/0067-one-database-instance-per-environment.md) §1). Databases keep their simple
 names, so `web` in staging and `web` in production are two databases on two servers — the isolation
 is the instance, not a naming convention. An operation that names no environment while more than one
 is registered is refused rather than defaulted (ADR-0047 §1), and the provisioning seam takes the
 environment non-optionally: there is no value meaning "whichever instance is there".
 
-An install predating this keeps everything it had: the default environment resolves to
-`burrow-postgres`, the same pod, volume, and password, so nothing migrates. Sharing one instance
-across environments is not supported and cannot be expressed (ADR-0067 §5); a user who wants one
-server runs one environment.
+An install predating this keeps everything it had: the default environment (`prod`) resolves to
+`burrow-postgres`, the same pod, volume, and password, so nothing migrates. The unqualified instance
+name belongs to whichever environment is the default, so renaming that environment from `default`
+to `prod` (§2) renamed no instance. Sharing one instance across environments is not supported and
+cannot be expressed (ADR-0067 §5); a user who wants one server runs one environment.
 
 The Postgres exporter is always on and reports connection and transaction health plus
 `pg_stat_statements` slow-query stats, and the metrics scraper discovers the add-on namespace,
@@ -406,7 +407,10 @@ Two distinct things share the name, and conflating them is the usual source of c
   namespace, an app namespace, a burrowd environment name, and the scoped agent kubeconfig.
   Client-side state; no cluster contact.
 - A **registered environment** in burrowd — a row mapping a name to the Kubernetes namespace
-  its apps deploy into. `default` is synthesized and reserved.
+  its apps deploy into. Install creates one, named **`prod`**, mapped to the app namespace
+  (`burrow-apps`) — not to `burrow-apps-prod`
+  ([ADR-0067](adr/0067-one-database-instance-per-environment.md) §2–§3). `prod` and the retired
+  `default` are both reserved names for `burrow env add`.
 
 | Command | What it does |
 | --- | --- |
@@ -424,19 +428,30 @@ listing the alternatives, rather than falling back to the ambient default. Read-
 operations are exempt by design. An unreachable target names the other environments but never
 switches.
 
+The name is a guardrail decision rather than naming taste.
+[ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) makes `app.delete` and `dns.delete`
+deny-by-default and expects the operator to relax them per environment; an environment called
+`default` invites `guard set --env default app.delete allow` as the obvious way to stop the
+friction, and production has then been relaxed without the word ever being typed. A consequence
+worth stating: someone whose only cluster is genuinely a sandbox gets an environment called `prod`
+with production-grade defaults and will find them strict. Install says so in its output. The default
+environment's guardrail policy **is** the global policy, so `guard set --env prod app.delete deny`
+and `guard set app.delete deny` are the same write; an environment added later diverges from that
+baseline with its own `--env` row.
+
+An install predating ADR-0067 gains `prod` on its first start under a version that carries it,
+pointing at the namespace its apps are already in. Its stored environment name moves from `default` to
+`prod` in one migration; **nothing in the cluster moves or is renamed** — apps stay in `burrow-apps`
+and the Postgres instance stays `burrow-postgres`, with the same volume and superuser credential.
+
 Limits: `env remove` and `env add` are asymmetric, as noted above — unregistering an
 environment in burrowd is not reachable from either CLI. ADR-0047 also specifies the same
 forcing function on the *local handle* axis; that half is **not built** (it was specified for
 the MCP layer, since removed). Per-environment guardrails are real but partial — see below.
 
-One further thing about a second environment is decided and **not built**.
-[ADR-0067](adr/0067-one-database-instance-per-environment.md) §2–§3 replaces the synthesized
-`default` with one *registered* environment named `prod`, created at install and mapped to the
-existing app namespace; today `DefaultEnvironment` is still the literal `"default"`, it is
-synthesized rather than stored, and `cluster install` registers no environment at all
-([#340](https://github.com/burrow-cloud/burrow/issues/340)). The Postgres collision that used to
-come with a second environment is closed: stateful add-ons are per-environment, so two
-environments' apps of the same name have separate databases on separate instances (§1, under
+The Postgres collision that used to come with a second environment is closed: stateful add-ons are
+per-environment, so two environments' apps of the same name have separate databases on separate
+instances ([ADR-0067](adr/0067-one-database-instance-per-environment.md) §1, under
 [Add-ons](#add-ons)).
 
 ---
@@ -693,7 +708,6 @@ is built and what is not, and link the issue tracking the rest where there is on
 | A final backup before `--delete-data` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5 | Not built — it waits on an object-storage provider ([ADR-0063](adr/0063-object-storage-provider.md)); until then the retained backup claim is the only copy. The rest of ADR-0064 is built: removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and carries §2's typed confirmation, the backup claim always survives, and `addon list` reports retained volumes (§6). [#334](https://github.com/burrow-cloud/burrow/issues/334) |
 | `guard` reporting the capabilities absent from the agent binary | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §7 | Not built — tiers 1 and 2 are (`addon remove` is not compiled into `burrow-agent`; `app.delete` and `dns.delete` are denied by default), but `guard` still reports only guardrail dispositions. [#337](https://github.com/burrow-cloud/burrow/issues/337) |
 | The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
-| An install that creates one environment named `prod`, mapped to the existing app namespace | [0067](adr/0067-one-database-instance-per-environment.md) §2–§3 | **Partial** — §1 is built (one add-on instance per environment; the provisioning seam takes the environment non-optionally), so the shared-database hazard is closed. The first environment is still the synthesized `default`. [#340](https://github.com/burrow-cloud/burrow/issues/340) |
 
 The rows above are summaries. Per-ADR implementation tracking — the code as it stands, the sections
 each issue covers, and an acceptance checklist — lives in the issues labelled

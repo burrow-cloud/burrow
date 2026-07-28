@@ -38,8 +38,8 @@ func TestDeployRecordsManualProvenance(t *testing.T) {
 	if res.Release.Trigger != cp.TriggerManual {
 		t.Errorf("release trigger = %q, want manual", res.Release.Trigger)
 	}
-	if res.Release.Environment != "default" {
-		t.Errorf("release environment = %q, want default", res.Release.Environment)
+	if res.Release.Environment != cp.DefaultEnvironment {
+		t.Errorf("release environment = %q, want %q", res.Release.Environment, cp.DefaultEnvironment)
 	}
 	if res.Release.AutoLevel != "" || res.Release.AutoTag != "" {
 		t.Errorf("manual release carries auto fields level=%q tag=%q, want none", res.Release.AutoLevel, res.Release.AutoTag)
@@ -96,7 +96,7 @@ func TestRollbackDisablesAutoDeploy(t *testing.T) {
 	if lvl, _ := e.AutoDeploy(ctx, "web", ""); lvl != cp.AutoDeployOff {
 		t.Errorf("level after rollback = %q, want off", lvl)
 	}
-	if reason, err := d.AutoDeployReason(ctx, "web", "default"); err != nil || reason != "disabled by rollback" {
+	if reason, err := d.AutoDeployReason(ctx, "web", cp.DefaultEnvironment); err != nil || reason != "disabled by rollback" {
 		t.Errorf("AutoDeployReason = %q, err=%v, want disabled by rollback", reason, err)
 	}
 	st, err := e.AutoDeployStatus(ctx, "web", "")
@@ -123,7 +123,7 @@ func TestManualDowngradeDisablesAutoDeploy(t *testing.T) {
 	if lvl, _ := e.AutoDeploy(ctx, "web", ""); lvl != cp.AutoDeployOff {
 		t.Errorf("level after downgrade = %q, want off", lvl)
 	}
-	if reason, _ := d.AutoDeployReason(ctx, "web", "default"); reason != "disabled by downgrade" {
+	if reason, _ := d.AutoDeployReason(ctx, "web", cp.DefaultEnvironment); reason != "disabled by downgrade" {
 		t.Errorf("AutoDeployReason = %q, want disabled by downgrade", reason)
 	}
 }
@@ -147,7 +147,7 @@ func TestForwardManualDeployKeepsAutoDeploy(t *testing.T) {
 	if lvl, _ := e.AutoDeploy(ctx, "web", ""); lvl != cp.AutoDeployPatch {
 		t.Errorf("level after forward deploy = %q, want patch (unchanged)", lvl)
 	}
-	if reason, _ := d.AutoDeployReason(ctx, "web", "default"); reason != "" {
+	if reason, _ := d.AutoDeployReason(ctx, "web", cp.DefaultEnvironment); reason != "" {
 		t.Errorf("AutoDeployReason = %q, want empty (forward deploy does not disable)", reason)
 	}
 }
@@ -157,11 +157,11 @@ func TestForwardManualDeployKeepsAutoDeploy(t *testing.T) {
 func TestRollbackDisableIsPerEnvironment(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newEngine(t, permissive())
-	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
+	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 
-	// Two deploys in the default environment, then a rollback there. With prod also registered the
+	// Two deploys in the default environment, then a rollback there. With staging also registered the
 	// default must be named explicitly (ADR-0047).
 	for _, img := range []string{"ghcr.io/u/web:1.0.0", "ghcr.io/u/web:1.1.0"} {
 		if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Env: cp.DefaultEnvironment, Image: img, Replicas: 1}); err != nil {
@@ -175,8 +175,8 @@ func TestRollbackDisableIsPerEnvironment(t *testing.T) {
 	if lvl, _ := e.AutoDeploy(ctx, "web", cp.DefaultEnvironment); lvl != cp.AutoDeployOff {
 		t.Errorf("default level after rollback = %q, want off", lvl)
 	}
-	// prod was never touched, so it stays at the built-in default.
-	if lvl, _ := e.AutoDeploy(ctx, "web", "prod"); lvl != cp.DefaultAutoDeployLevel {
-		t.Errorf("prod level = %q, want the default (isolated from the default-env rollback)", lvl)
+	// staging was never touched, so it stays at the built-in default.
+	if lvl, _ := e.AutoDeploy(ctx, "web", "staging"); lvl != cp.DefaultAutoDeployLevel {
+		t.Errorf("staging level = %q, want the default (isolated from the default-env rollback)", lvl)
 	}
 }

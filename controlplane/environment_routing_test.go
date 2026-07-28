@@ -145,8 +145,10 @@ func TestSecretLandsInEnvironmentNamespace(t *testing.T) {
 	}
 }
 
-// TestDefaultEnvironmentResolvesToAppNamespace confirms an empty env and the reserved "default" both
-// resolve to the engine's app namespace, the implicit default environment (ADR-0035 phase 2b).
+// TestDefaultEnvironmentResolvesToAppNamespace confirms an empty env and the name `prod` both resolve
+// to the engine's app namespace (ADR-0035 phase 2b, ADR-0067 §3). §3 is the load-bearing half: the
+// environment install creates maps to the app namespace the install ALREADY uses, never to
+// `burrow-apps-prod`, which is what keeps an install predating the change from moving anything.
 func TestDefaultEnvironmentResolvesToAppNamespace(t *testing.T) {
 	ctx := context.Background()
 	e, k, _ := newRoutingEngine(t, "burrow-apps")
@@ -154,8 +156,8 @@ func TestDefaultEnvironmentResolvesToAppNamespace(t *testing.T) {
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "empty", Image: "registry.example.com/web:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy(empty env): %v", err)
 	}
-	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "named", Env: "default", Image: "registry.example.com/web:1", Replicas: 1}); err != nil {
-		t.Fatalf("Deploy(default env): %v", err)
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "named", Env: cp.DefaultEnvironment, Image: "registry.example.com/web:1", Replicas: 1}); err != nil {
+		t.Fatalf("Deploy(%s): %v", cp.DefaultEnvironment, err)
 	}
 	if _, ok := k.SpecInNamespace("burrow-apps", "empty"); !ok {
 		t.Errorf("empty-env deploy did not land in the app namespace burrow-apps")
@@ -165,14 +167,14 @@ func TestDefaultEnvironmentResolvesToAppNamespace(t *testing.T) {
 	}
 }
 
-// TestPerEnvironmentGuardrailGatesOnlyThatEnv is the headline of ADR-0035 phase 2c: a prod-scoped
-// rule denies an operation in prod while the same operation runs in another environment under the
-// permissive global policy. It locks app.delete in prod, leaves it allowed globally, then deletes the
-// same app in staging (allowed) and prod (denied).
+// TestPerEnvironmentGuardrailGatesOnlyThatEnv is the headline of ADR-0035 phase 2c: an env-scoped
+// rule denies an operation in one environment while the same operation runs in another under the
+// permissive global policy. It locks app.delete in staging, leaves it allowed globally, then deletes
+// the same app in dev (allowed) and staging (denied).
 func TestPerEnvironmentGuardrailGatesOnlyThatEnv(t *testing.T) {
 	ctx := context.Background()
 	e, _, _ := newRoutingEngine(t, "burrow-apps")
-	for _, env := range []string{"prod", "staging"} {
+	for _, env := range []string{"staging", "dev"} {
 		if _, err := e.AddEnvironment(ctx, env, "burrow-apps-"+env); err != nil {
 			t.Fatalf("AddEnvironment(%s): %v", env, err)
 		}
@@ -181,26 +183,26 @@ func TestPerEnvironmentGuardrailGatesOnlyThatEnv(t *testing.T) {
 		}
 	}
 
-	// Permissive globally, locked in prod.
+	// Permissive globally, locked in staging.
 	if err := e.SetGuardrail(ctx, "", cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
 		t.Fatalf("SetGuardrail(global): %v", err)
 	}
-	if err := e.SetGuardrail(ctx, "prod", cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
-		t.Fatalf("SetGuardrail(prod): %v", err)
+	if err := e.SetGuardrail(ctx, "staging", cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
+		t.Fatalf("SetGuardrail(staging): %v", err)
 	}
 
-	// staging inherits the permissive global rule: the delete runs.
-	if err := e.DeleteApp(ctx, "web", "staging", false); err != nil {
-		t.Errorf("DeleteApp(staging) = %v, want it to proceed under the global allow", err)
+	// dev inherits the permissive global rule: the delete runs.
+	if err := e.DeleteApp(ctx, "web", "dev", false); err != nil {
+		t.Errorf("DeleteApp(dev) = %v, want it to proceed under the global allow", err)
 	}
-	// prod has its own deny: the same delete is refused outright.
-	err := e.DeleteApp(ctx, "web", "prod", false)
+	// staging has its own deny: the same delete is refused outright.
+	err := e.DeleteApp(ctx, "web", "staging", false)
 	g, ok := cp.AsGuardrail(err)
 	if !ok {
-		t.Fatalf("DeleteApp(prod) = %v, want a GuardrailError", err)
+		t.Fatalf("DeleteApp(staging) = %v, want a GuardrailError", err)
 	}
 	if g.Code != cp.GuardrailAppDelete || g.NeedsConfirmation {
-		t.Errorf("prod delete guardrail = %+v, want a plain deny on app.delete", g)
+		t.Errorf("staging delete guardrail = %+v, want a plain deny on app.delete", g)
 	}
 }
 
@@ -210,29 +212,29 @@ func TestPerEnvironmentGuardrailGatesOnlyThatEnv(t *testing.T) {
 func TestSetGuardrailEnvValidation(t *testing.T) {
 	ctx := context.Background()
 	e, _, _ := newRoutingEngine(t, "burrow-apps")
-	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
+	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 
-	// A registered env + app-level code stores the env-prefixed disposition, visible in prod's listing.
-	if err := e.SetGuardrail(ctx, "prod", cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
-		t.Fatalf("SetGuardrail(prod, app.delete): %v", err)
+	// A registered env + app-level code stores the env-prefixed disposition, visible in staging's listing.
+	if err := e.SetGuardrail(ctx, "staging", cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
+		t.Fatalf("SetGuardrail(staging, app.delete): %v", err)
 	}
-	gs, err := e.Guardrails(ctx, "prod")
+	gs, err := e.Guardrails(ctx, "staging")
 	if err != nil {
-		t.Fatalf("Guardrails(prod): %v", err)
+		t.Fatalf("Guardrails(staging): %v", err)
 	}
 	var saw bool
 	for _, g := range gs {
 		if g.Code == cp.GuardrailAppDelete {
 			saw = true
 			if g.Disposition != cp.DispositionDeny || g.Source != "env" {
-				t.Errorf("prod app.delete = (%q, %q), want (deny, env)", g.Disposition, g.Source)
+				t.Errorf("staging app.delete = (%q, %q), want (deny, env)", g.Disposition, g.Source)
 			}
 		}
 	}
 	if !saw {
-		t.Errorf("prod listing missing app.delete")
+		t.Errorf("staging listing missing app.delete")
 	}
 
 	// An unknown environment is a clear ErrNotFound (catches typos).
@@ -240,11 +242,11 @@ func TestSetGuardrailEnvValidation(t *testing.T) {
 		t.Errorf("SetGuardrail(ghost) = %v, want ErrNotFound", err)
 	}
 	// A cluster-level guardrail cannot be scoped to an environment.
-	if err := e.SetGuardrail(ctx, "prod", cp.GuardrailAddonInstall, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("SetGuardrail(prod, addon.install) = %v, want ErrInvalid (cluster-level)", err)
+	if err := e.SetGuardrail(ctx, "staging", cp.GuardrailAddonInstall, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("SetGuardrail(staging, addon.install) = %v, want ErrInvalid (cluster-level)", err)
 	}
-	if err := e.SetGuardrail(ctx, "prod", cp.GuardrailDNSWrite, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("SetGuardrail(prod, dns.write) = %v, want ErrInvalid (cluster-level)", err)
+	if err := e.SetGuardrail(ctx, "staging", cp.GuardrailDNSWrite, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
+		t.Errorf("SetGuardrail(staging, dns.write) = %v, want ErrInvalid (cluster-level)", err)
 	}
 
 	// Listing an unknown environment is likewise a clear error.
@@ -260,14 +262,14 @@ func TestSetGuardrailEnvValidation(t *testing.T) {
 func TestClusterLevelGuardrailIgnoresEnv(t *testing.T) {
 	ctx := context.Background()
 	e, _, _ := newRoutingEngine(t, "burrow-apps")
-	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
+	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 	// Deny add-on install globally; there is no way to make it depend on an environment.
 	if err := e.SetGuardrail(ctx, "", cp.GuardrailAddonInstall, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(addon.install): %v", err)
 	}
-	_, err := e.InstallAddon(ctx, cp.AddonLogs, "prod", false)
+	_, err := e.InstallAddon(ctx, cp.AddonLogs, "staging", false)
 	g, ok := cp.AsGuardrail(err)
 	if !ok {
 		t.Fatalf("InstallAddon = %v, want a GuardrailError from the global deny", err)

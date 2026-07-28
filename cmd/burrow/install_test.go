@@ -841,3 +841,37 @@ func TestPostInstallGuidancePointsAtAgent(t *testing.T) {
 		t.Errorf("post-install guidance must not contain an em-dash:\n%s", postInstallGuidance)
 	}
 }
+
+// TestInstallNamesTheProdEnvironment confirms install says what it created: one environment, called
+// `prod`, mapped to the app namespace, carrying production-grade guardrail defaults (ADR-0067 §2–§3).
+//
+// ADR-0067 asks for this explicitly, and the reason is the user it gets wrong. Someone whose only
+// cluster is a sandbox now has an environment called `prod` and will find the defaults stricter than
+// they want; being told is the difference between a considered default and a surprise. The notice
+// must also name the namespace, since the whole point of §3 is that the name and the namespace are
+// different values.
+func TestInstallNamesTheProdEnvironment(t *testing.T) {
+	var buf bytes.Buffer
+	writeDefaultEnvironmentNotice(&buf, "burrow-apps")
+	out := buf.String()
+
+	for _, want := range []string{
+		`"prod"`,
+		`"burrow-apps"`,
+		"production-grade",
+		"denied until you relax it",
+		"burrow env add staging",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("install environment notice missing %q:\n%s", want, out)
+		}
+	}
+	// The namespace is the app namespace as installed, never one derived from the environment name:
+	// that separation is what keeps an existing install from migrating (ADR-0067 §3).
+	if strings.Contains(out, "burrow-apps-prod") {
+		t.Errorf("notice suggests burrow-apps-prod; prod maps to the EXISTING app namespace:\n%s", out)
+	}
+	if strings.Contains(out, "—") {
+		t.Errorf("install output must not contain an em-dash:\n%s", out)
+	}
+}

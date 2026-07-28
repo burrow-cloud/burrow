@@ -81,12 +81,12 @@ func TestGuardEndpoints(t *testing.T) {
 // cannot be env-scoped (400) (ADR-0035 phase 2c).
 func TestGuardEndpointsEnvScoped(t *testing.T) {
 	h, _, d := newAPI(t)
-	if err := d.CreateEnvironment(context.Background(), "prod", "burrow-apps-prod"); err != nil {
+	if err := d.CreateEnvironment(context.Background(), "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
 
-	// Scope app.delete to prod: the response reflects the env-specific disposition with its source.
-	rr := do(h, "PUT", "/v1/guard/app.delete?env=prod", token, `{"disposition":"deny"}`)
+	// Scope app.delete to staging: the response reflects the env-specific disposition with its source.
+	rr := do(h, "PUT", "/v1/guard/app.delete?env=staging", token, `{"disposition":"deny"}`)
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"source":"env"`) {
 		t.Fatalf("env guard set = %d %s", rr.Code, rr.Body.String())
 	}
@@ -102,7 +102,7 @@ func TestGuardEndpointsEnvScoped(t *testing.T) {
 		t.Errorf("unknown env list code = %d, want 404", rr.Code)
 	}
 	// A cluster-level guardrail cannot be env-scoped (400).
-	if rr := do(h, "PUT", "/v1/guard/addon.install?env=prod", token, `{"disposition":"deny"}`); rr.Code != 400 {
+	if rr := do(h, "PUT", "/v1/guard/addon.install?env=staging", token, `{"disposition":"deny"}`); rr.Code != 400 {
 		t.Errorf("cluster-level env scope code = %d, want 400", rr.Code)
 	}
 }
@@ -116,7 +116,7 @@ func TestAutoDeployEndpoints(t *testing.T) {
 	// A brand-new app reads the built-in default (off — auto-deploy is opt-in, ADR-0058), keyed to the
 	// default environment.
 	rr := do(h, "GET", "/v1/apps/web/auto-deploy", token, "")
-	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"level":"off"`) || !strings.Contains(rr.Body.String(), `"env":"default"`) {
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"level":"off"`) || !strings.Contains(rr.Body.String(), `"env":"`+cp.DefaultEnvironment+`"`) {
 		t.Fatalf("auto-deploy get = %d %s", rr.Code, rr.Body.String())
 	}
 
@@ -135,16 +135,16 @@ func TestAutoDeployEndpoints(t *testing.T) {
 	}
 
 	// The optional env query routes through to a registered environment, independent of the default.
-	if err := d.CreateEnvironment(context.Background(), "prod", "burrow-apps-prod"); err != nil {
+	if err := d.CreateEnvironment(context.Background(), "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
-	rr = do(h, "PUT", "/v1/apps/web/auto-deploy?env=prod", token, `{"level":"patch"}`)
-	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"level":"patch"`) || !strings.Contains(rr.Body.String(), `"env":"prod"`) {
+	rr = do(h, "PUT", "/v1/apps/web/auto-deploy?env=staging", token, `{"level":"patch"}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"level":"patch"`) || !strings.Contains(rr.Body.String(), `"env":"staging"`) {
 		t.Fatalf("env-scoped auto-deploy set = %d %s", rr.Code, rr.Body.String())
 	}
-	// The default environment is untouched by the prod set.
+	// The default environment is untouched by the staging set.
 	if rr := do(h, "GET", "/v1/apps/web/auto-deploy", token, ""); !strings.Contains(rr.Body.String(), `"level":"off"`) {
-		t.Errorf("default env level after prod set = %s", rr.Body.String())
+		t.Errorf("default env level after staging set = %s", rr.Body.String())
 	}
 	// An unknown environment is a 404.
 	if rr := do(h, "PUT", "/v1/apps/web/auto-deploy?env=ghost", token, `{"level":"patch"}`); rr.Code != 404 {
@@ -288,7 +288,7 @@ func TestEnvironmentEndpoints(t *testing.T) {
 		t.Fatalf("add environment = %d %s", rr.Code, rr.Body.String())
 	}
 
-	// List returns the implicit default first, then the registered one.
+	// List returns the default environment first, then the one added later.
 	rr := do(h, "GET", "/v1/environments", token, "")
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"staging"`) {
 		t.Fatalf("list environments = %d %s", rr.Code, rr.Body.String())
@@ -298,14 +298,14 @@ func TestEnvironmentEndpoints(t *testing.T) {
 	if rr := do(h, "DELETE", "/v1/environments/staging", token, ""); rr.Code != 200 {
 		t.Errorf("remove environment = %d %s", rr.Code, rr.Body.String())
 	}
-	// After removal only the implicit default remains.
+	// After removal only the default environment remains.
 	rr = do(h, "GET", "/v1/environments", token, "")
 	if rr.Code != 200 || strings.Contains(rr.Body.String(), `"staging"`) {
 		t.Errorf("list after remove = %d %s, want no staging", rr.Code, rr.Body.String())
 	}
-	// Removing the implicit default is refused (400 ErrInvalid).
-	if rr := do(h, "DELETE", "/v1/environments/default", token, ""); rr.Code != 400 {
-		t.Errorf("remove default = %d %s, want 400", rr.Code, rr.Body.String())
+	// Removing the environment install created is refused (400 ErrInvalid).
+	if rr := do(h, "DELETE", "/v1/environments/"+cp.DefaultEnvironment, token, ""); rr.Code != 400 {
+		t.Errorf("remove %s = %d %s, want 400", cp.DefaultEnvironment, rr.Code, rr.Body.String())
 	}
 	// Removing an unregistered environment is 404.
 	if rr := do(h, "DELETE", "/v1/environments/nope", token, ""); rr.Code != 404 {
@@ -473,9 +473,9 @@ func TestEnvironmentEndpointsRoundTrip(t *testing.T) {
 		t.Fatalf("ListEnvironments: %v", err)
 	}
 	if len(envs) != 2 {
-		t.Fatalf("environments = %+v, want 2 (default + staging)", envs)
+		t.Fatalf("environments = %+v, want 2 (the default environment + staging)", envs)
 	}
-	if envs[0].Name != "default" || !envs[0].Default || envs[0].Namespace != "burrow-apps" {
+	if envs[0].Name != cp.DefaultEnvironment || !envs[0].Default || envs[0].Namespace != "burrow-apps" {
 		t.Errorf("first environment should be the default in the app namespace: %+v", envs[0])
 	}
 	if envs[1].Name != "staging" || envs[1].Default || envs[1].Namespace != "burrow-apps-staging" {

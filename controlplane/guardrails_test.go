@@ -66,8 +66,9 @@ func TestEvaluateReplicas(t *testing.T) {
 func TestEvaluateDeploy(t *testing.T) {
 	deny := DefaultPolicy().With(GuardrailAppDeploy, DispositionDeny)
 	confirm := DefaultPolicy().With(GuardrailAppDeploy, DispositionConfirm)
-	// prod locked to confirm, default env inherits the allow default.
-	envScoped := DefaultPolicy().With(GuardrailCode("prod."+string(GuardrailAppDeploy)), DispositionConfirm)
+	// staging locked to confirm; the default environment (`prod`) inherits the allow default, since
+	// its policy IS the global policy (ADR-0067 §2).
+	envScoped := DefaultPolicy().With(GuardrailCode("staging."+string(GuardrailAppDeploy)), DispositionConfirm)
 
 	cases := []struct {
 		name        string
@@ -83,9 +84,10 @@ func TestEvaluateDeploy(t *testing.T) {
 		{"confirm needs confirmation", confirm, "", 3, false, GuardrailAppDeploy, true},
 		{"confirm confirmed proceeds", confirm, "", 3, true, "", false},
 		{"allowed deploy still bounded by ceiling", DefaultPolicy(), "", 51, false, GuardrailReplicaCeiling, false},
-		{"env-scoped prod holds for confirmation", envScoped, "prod", 3, false, GuardrailAppDeploy, true},
+		{"env-scoped staging holds for confirmation", envScoped, "staging", 3, false, GuardrailAppDeploy, true},
 		{"env-scoped default env stays allow", envScoped, "", 3, false, "", false},
-		{"env-scoped staging inherits allow", envScoped, "staging", 3, false, "", false},
+		{"the default environment prod is the global policy", envScoped, DefaultEnvironment, 3, false, "", false},
+		{"env-scoped dev inherits allow", envScoped, "dev", 3, false, "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -115,22 +117,22 @@ func TestEvaluateDeploy(t *testing.T) {
 
 // TestDispositionEnvFallback exercises the env to global to default lookup order (ADR-0035 phase 2c):
 // an env-specific override wins; absent one, a named env falls back to the global override; and the
-// empty and reserved "default" envs reproduce the global lookup exactly.
+// empty env and the default environment `prod` reproduce the global lookup exactly (ADR-0067 §2).
 func TestDispositionEnvFallback(t *testing.T) {
-	// Global app.delete = allow; prod overrides it to deny. Staging has no override.
+	// Global app.delete = allow; staging overrides it to deny. Dev has no override.
 	p := Policy{MaxReplicas: 10}.
 		With(GuardrailAppDelete, DispositionAllow).
-		With(GuardrailCode("prod."+string(GuardrailAppDelete)), DispositionDeny)
+		With(GuardrailCode("staging."+string(GuardrailAppDelete)), DispositionDeny)
 
 	cases := []struct {
 		name string
 		env  string
 		want Disposition
 	}{
-		{"prod env-specific override wins", "prod", DispositionDeny},
-		{"staging falls back to global", "staging", DispositionAllow},
+		{"staging env-specific override wins", "staging", DispositionDeny},
+		{"dev falls back to global", "dev", DispositionAllow},
 		{"empty env is the global lookup", "", DispositionAllow},
-		{"default env is the global lookup", DefaultEnvironment, DispositionAllow},
+		{"the default environment prod is the global lookup", DefaultEnvironment, DispositionAllow},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -141,8 +143,8 @@ func TestDispositionEnvFallback(t *testing.T) {
 	}
 
 	// A guardrail with no override anywhere reads as the deny-when-unset default, in any env.
-	if got := p.disposition("prod", GuardrailRollback); got != DispositionDeny {
-		t.Errorf("unset guardrail in prod = %q, want deny (the safe default)", got)
+	if got := p.disposition("staging", GuardrailRollback); got != DispositionDeny {
+		t.Errorf("unset guardrail in staging = %q, want deny (the safe default)", got)
 	}
 }
 
@@ -151,30 +153,30 @@ func TestDispositionEnvFallback(t *testing.T) {
 func TestDispositionSource(t *testing.T) {
 	p := Policy{MaxReplicas: 10}.
 		With(GuardrailAppDelete, DispositionAllow).
-		With(GuardrailCode("prod."+string(GuardrailAppDelete)), DispositionDeny)
+		With(GuardrailCode("staging."+string(GuardrailAppDelete)), DispositionDeny)
 
-	if d, src := p.dispositionSource("prod", GuardrailAppDelete); d != DispositionDeny || src != "env" {
-		t.Errorf("prod app.delete = (%q, %q), want (deny, env)", d, src)
+	if d, src := p.dispositionSource("staging", GuardrailAppDelete); d != DispositionDeny || src != "env" {
+		t.Errorf("staging app.delete = (%q, %q), want (deny, env)", d, src)
 	}
-	if d, src := p.dispositionSource("staging", GuardrailAppDelete); d != DispositionAllow || src != "global" {
-		t.Errorf("staging app.delete = (%q, %q), want (allow, global)", d, src)
+	if d, src := p.dispositionSource("dev", GuardrailAppDelete); d != DispositionAllow || src != "global" {
+		t.Errorf("dev app.delete = (%q, %q), want (allow, global)", d, src)
 	}
-	if d, src := p.dispositionSource("prod", GuardrailRollback); d != DispositionDeny || src != "default" {
-		t.Errorf("prod app.rollback (unset) = (%q, %q), want (deny, default)", d, src)
+	if d, src := p.dispositionSource("staging", GuardrailRollback); d != DispositionDeny || src != "default" {
+		t.Errorf("staging app.rollback (unset) = (%q, %q), want (deny, default)", d, src)
 	}
 }
 
 // TestGuardrailsForMarksSource confirms the env-scoped listing carries a Source per guardrail while
 // the global listing leaves it empty (ADR-0035 phase 2c).
 func TestGuardrailsForMarksSource(t *testing.T) {
-	p := DefaultPolicy().With(GuardrailCode("prod."+string(GuardrailAppDelete)), DispositionDeny)
+	p := DefaultPolicy().With(GuardrailCode("staging."+string(GuardrailAppDelete)), DispositionDeny)
 
-	for _, g := range p.GuardrailsFor("prod") {
+	for _, g := range p.GuardrailsFor("staging") {
 		if g.Source == "" {
 			t.Errorf("env listing left Source empty for %s", g.Code)
 		}
 		if g.Code == GuardrailAppDelete && (g.Disposition != DispositionDeny || g.Source != "env") {
-			t.Errorf("prod app.delete = (%q, %q), want (deny, env)", g.Disposition, g.Source)
+			t.Errorf("staging app.delete = (%q, %q), want (deny, env)", g.Disposition, g.Source)
 		}
 	}
 	for _, g := range p.Guardrails() {
@@ -231,12 +233,12 @@ func TestAsGuardrailWrapped(t *testing.T) {
 func TestDenyRefusalSteersTowardScoping(t *testing.T) {
 	p := DefaultPolicy()
 
-	err := p.evaluateGuardrail("prod", "app delete", GuardrailAppDelete, true, "deleting the app")
+	err := p.evaluateGuardrail("staging", "app delete", GuardrailAppDelete, true, "deleting the app")
 	g, ok := AsGuardrail(err)
 	if !ok {
 		t.Fatalf("app.delete under the default policy = %v, want a GuardrailError", err)
 	}
-	for _, want := range []string{"floor, not a fixed setting", "guard set --env prod app.delete confirm", "relaxing it everywhere"} {
+	for _, want := range []string{"floor, not a fixed setting", "guard set --env staging app.delete confirm", "relaxing it everywhere"} {
 		if !strings.Contains(g.Message, want) {
 			t.Errorf("app.delete refusal %q missing %q", g.Message, want)
 		}

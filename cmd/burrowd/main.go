@@ -268,12 +268,30 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		// `burrow cluster registry install --host` wires it via BURROW_BUILD_PUBLIC_REGISTRY; empty
 		// falls back to referencing the internal push endpoint.
 		BuildPublicRegistry: os.Getenv("BURROW_BUILD_PUBLIC_REGISTRY"),
-		// The app namespace is the implicit `default` environment (ADR-0035 phase 2).
+		// The app namespace is the namespace the default environment `prod` maps to (ADR-0067 §3).
 		AppNamespace: namespace,
 	})
 	if err != nil {
 		return err
 	}
+
+	// Register the one environment an install has: `prod`, mapped to the app namespace (ADR-0067
+	// §2–§3). It runs here rather than from `burrow cluster install` so that a fresh install, a
+	// re-run, a restart and an UPGRADE all take the same path — an install predating ADR-0067 gains
+	// the environment on its first start under this version, pointing at the namespace its apps are
+	// already in, with nothing moved and nothing renamed. It is idempotent, so a second replica or a
+	// hundredth restart changes nothing.
+	//
+	// A failure here leaves burrowd not-ready rather than serving. That is deliberate: the only way
+	// it fails is a database that is unreachable (the same condition the migration above already
+	// gates on) or a `prod` registered against a different namespace, which means unqualified
+	// operations would land somewhere other than where this control plane deploys apps. Serving in
+	// either state is worse than not serving.
+	defaultEnv, err := engine.EnsureDefaultEnvironment(ctx)
+	if err != nil {
+		return err
+	}
+	log.Printf("burrowd: environment %q serves namespace %q", defaultEnv.Name, defaultEnv.Namespace)
 
 	handler, err := api.New(api.Config{Engine: engine, Token: token, Version: version})
 	if err != nil {

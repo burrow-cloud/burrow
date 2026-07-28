@@ -176,7 +176,7 @@ type Release struct {
 	// App is the name of the App this release belongs to.
 	App string `json:"app"`
 	// Environment is the canonical environment this release was deployed into (ADR-0052 §5):
-	// a named environment, or "default" for the implicit default environment. Releases are
+	// an environment added later, or "prod" for the default one (ADR-0067 §2). Releases are
 	// keyed per (app, environment), so an app can have an independent history in each.
 	Environment string `json:"environment,omitempty"`
 	// Image is the pullable container image reference the deploy named (ADR-0007).

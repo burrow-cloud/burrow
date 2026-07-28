@@ -64,7 +64,17 @@ Waiting for Burrow to become ready...
   control plane ... ✓
 
 Burrow is installed and ready in namespace "burrow".
+
+Apps deploy into the environment "prod" (namespace "burrow-apps").
+It is called "prod" because a single environment is production, and it carries production-grade
+guardrails: deleting an app or a DNS record is denied until you relax it. Loosen one with
+  burrow guard set app.delete confirm
+Add a second environment when you want one:  burrow env add staging
 ```
+
+Your one environment is called `prod` on purpose. A single environment *is* production, and
+naming it so is what makes the guardrails below read as what they are
+([ADR-0067](adr/0067-one-database-instance-per-environment.md) §2).
 
 ### 3. Build the sample app and load it into the cluster
 
@@ -145,10 +155,11 @@ burrow guard set --env staging app.delete confirm # hold it for a human in stagi
                                                   # production keeps the deny
 ```
 
-Each `--env` name has to be a registered environment (`burrow env add`), which this
-single-environment quickstart cluster has none of yet. Relaxing it globally (`burrow guard set
+Each `--env` name has to be a registered environment (`burrow env add`), and this quickstart
+cluster has only the one install created, `prod`. Relaxing it globally (`burrow guard set
 app.delete confirm`) needs no setup and relaxes production along with everything else — which is
-why the refusal points at `--env` first. `burrow guard list [--env <name>]` shows where every
+why the refusal points at `--env` first. `--env prod` is the same write as the global one: the
+environment install created is the baseline the others diverge from. `burrow guard list [--env <name>]` shows where every
 guardrail stands and whether it came from the environment, the global policy, or the built-in
 default.
 

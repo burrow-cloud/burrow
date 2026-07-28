@@ -162,8 +162,11 @@ func (p Policy) Guardrails() []GuardrailInfo {
 // environment (ADR-0035 phase 2c): the disposition under the env-prefixed override, falling back to
 // the global override, then the built-in default. Each entry's Source records where the effective
 // disposition came from ("env", "global", or "default") so `guard list --env` can show which
-// guardrails are env-specific and which are inherited. An empty or "default" env reproduces the
-// global policy exactly (and leaves Source unset, as for Guardrails).
+// guardrails are env-specific and which are inherited. An empty env, or `prod` — the environment
+// install created (ADR-0067 §2) — reproduces the global policy exactly and leaves Source unset, as
+// for Guardrails: with one environment there is nothing for a per-environment override to differ
+// FROM, so the default environment's policy IS the global policy rather than a second layer over
+// it. `guard set --env staging …` then reads as the deliberate divergence it is.
 func (p Policy) GuardrailsFor(env string) []GuardrailInfo {
 	return p.guardrails(env)
 }
@@ -268,8 +271,8 @@ func (p Policy) evaluateAutoscale(env string, spec AutoscaleSpec, confirmed bool
 
 // enforce applies the configured disposition for a tripped guardrail, producing the right
 // structured outcome: proceed (nil), confirmation required, or denied. The env scopes the
-// disposition lookup (ADR-0035 phase 2c): a named environment's override wins, falling back to the
-// global policy; an empty or "default" env consults the global policy only.
+// disposition lookup (ADR-0035 phase 2c): an added environment's override wins, falling back to the
+// global policy; an empty env, or `prod`, consults the global policy only.
 func (p Policy) enforce(env, op string, code GuardrailCode, confirmed bool, what string, requested, limit int32) error {
 	switch p.disposition(env, code) {
 	case DispositionAllow:
@@ -315,6 +318,9 @@ func relaxHint(env string, code GuardrailCode) string {
 		return fmt.Sprintf(" — an operator can relax it with `burrow guard set %s confirm`, which applies to the whole cluster: %s cannot be scoped to one environment", code, code)
 	}
 	target := "<env>"
+	// `prod` takes the placeholder rather than its own name: its disposition IS the global one
+	// (ADR-0067 §2), so pointing the operator at `--env prod` would suggest an override that does
+	// not exist as a separate row.
 	if env != "" && env != DefaultEnvironment {
 		target = env
 	}
@@ -336,9 +342,11 @@ func (p Policy) disposition(env string, code GuardrailCode) Disposition {
 
 // dispositionSource resolves a guardrail's effective disposition for env and reports where it came
 // from (ADR-0035 phase 2c). For a named environment it first consults the env-prefixed code
-// (e.g. prod.app.delete), so an environment can lock down or relax an operation independently;
-// absent that, it falls back to the global code, then to the deny-when-unset default. An empty or
-// "default" env skips the env-prefixed lookup, reproducing the pre-environments behavior exactly.
+// (e.g. staging.app.delete), so an environment can lock down or relax an operation independently;
+// absent that, it falls back to the global code, then to the deny-when-unset default. An empty env,
+// or `prod`, skips the env-prefixed lookup and reads the global policy: the default environment's
+// policy is the baseline the others diverge from, so a deny that protects production is a deny
+// everywhere until an environment opts out of it by name (ADR-0067 §2, ADR-0065 §3).
 func (p Policy) dispositionSource(env string, code GuardrailCode) (Disposition, string) {
 	if env != "" && env != DefaultEnvironment {
 		if d, ok := p.Dispositions[GuardrailCode(env+"."+string(code))]; ok && d.Valid() {

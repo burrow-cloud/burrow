@@ -93,7 +93,7 @@ func (e *APIError) Error() string {
 // DeployRequest carries a deploy's code-free metadata. The non-secret config is deliberately absent:
 // an app's config is an independently-managed store, set with SetConfig and sourced at apply time
 // rather than passed per deploy (ADR-0028). Env names the target environment (ADR-0035 phase 2b):
-// empty or "default" targets the default environment's namespace, a registered name targets that
+// empty or "prod" targets the default environment's namespace, a name added later targets that
 // environment's namespace.
 type DeployRequest struct {
 	Env         string   `json:"env,omitempty"`
@@ -568,7 +568,7 @@ type Addon struct {
 
 // InstallAddon installs the vetted backing service for an add-on type (e.g. "logs") in one
 // environment. Each environment gets its own instance (ADR-0067 §1); an empty env targets the
-// default environment, which keeps the instance an existing install already has.
+// default environment `prod`, which keeps the instance an existing install already has.
 func (c *Client) InstallAddon(ctx context.Context, addonType, env string, confirm bool) (Addon, error) {
 	var out Addon
 	body := map[string]any{"type": addonType, "env": env, "confirm": confirm}
@@ -1128,7 +1128,7 @@ func (c *Client) RemoveDomain(ctx context.Context, host, provider string, confir
 
 // Environment mirrors a control-plane environment (ADR-0035 phase 2): a namespace-per-environment
 // target. Name is the handle (a DNS-1123 label), Namespace the Kubernetes namespace its apps deploy
-// into, and Default marks the implicit `default` environment (the app namespace burrowd runs
+// into, and Default marks the default environment `prod` (the app namespace burrowd runs
 // against).
 type Environment struct {
 	Name      string `json:"name"`
@@ -1145,7 +1145,7 @@ func (c *Client) AddEnvironment(ctx context.Context, name, namespace string) err
 }
 
 // ListEnvironments lists the environments the cluster's burrowd knows about (ADR-0035 phase 2): the
-// implicit `default` environment first, then the registered ones in name order.
+// default environment `prod` first, then the ones added later in name order.
 func (c *Client) ListEnvironments(ctx context.Context) ([]Environment, error) {
 	var out struct {
 		Environments []Environment `json:"environments"`

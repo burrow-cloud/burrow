@@ -36,7 +36,7 @@ func assertAmbiguous(t *testing.T, err error, wantNames ...string) {
 
 // TestMutatingRefusesAmbiguousEnvironment confirms a mutating operation with no environment named is
 // refused with the structured AmbiguousEnvironmentError once more than one environment is registered
-// (the implicit default plus a named one) — burrowd will not silently pick the default (ADR-0047 §1).
+// (`prod` plus one added later) — burrowd will not silently pick the default (ADR-0047 §1).
 func TestMutatingRefusesAmbiguousEnvironment(t *testing.T) {
 	ctx := context.Background()
 	e, _, _ := newRoutingEngine(t, "burrow-apps")
@@ -44,17 +44,17 @@ func TestMutatingRefusesAmbiguousEnvironment(t *testing.T) {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 
-	// Deploy with no env is refused: default + staging are both registered.
+	// Deploy with no env is refused: prod + staging are both registered.
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "registry.example.com/web:1", Replicas: 1})
-	assertAmbiguous(t, err, "default", "staging")
+	assertAmbiguous(t, err, cp.DefaultEnvironment, "staging")
 
 	// Delete likewise. The guard runs before the app-existence check, so even a missing app refuses on
 	// the ambiguous target rather than reporting not-found — the target question is answered first.
-	assertAmbiguous(t, e.DeleteApp(ctx, "web", "", false), "default", "staging")
+	assertAmbiguous(t, e.DeleteApp(ctx, "web", "", false), cp.DefaultEnvironment, "staging")
 }
 
 // TestSingleEnvironmentMutatesWithoutEnv confirms the common single-environment self-hoster is
-// unaffected: with only the implicit default registered there is no ambiguity, so a bare mutating call
+// unaffected: with only the default environment registered there is no ambiguity, so a bare mutating call
 // proceeds against it with no forcing function (ADR-0047 §2).
 func TestSingleEnvironmentMutatesWithoutEnv(t *testing.T) {
 	ctx := context.Background()

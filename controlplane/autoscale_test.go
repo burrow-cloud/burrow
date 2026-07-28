@@ -105,15 +105,15 @@ func TestAutoscaleGuardrail(t *testing.T) {
 	}
 
 	// A per-environment deny blocks the operation in that environment only.
-	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
+	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
-	if err := e.SetGuardrail(ctx, "prod", cp.GuardrailAutoscale, cp.DispositionDeny); err != nil {
-		t.Fatalf("SetGuardrail(prod, app.autoscale): %v", err)
+	if err := e.SetGuardrail(ctx, "staging", cp.GuardrailAutoscale, cp.DispositionDeny); err != nil {
+		t.Fatalf("SetGuardrail(staging, app.autoscale): %v", err)
 	}
-	_, err := e.Autoscale(ctx, "web", "prod", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false)
+	_, err := e.Autoscale(ctx, "web", "staging", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false)
 	mustGuardrail(t, err, cp.GuardrailAutoscale)
-	// The default environment is unaffected. With prod also registered the target is ambiguous, so
+	// The default environment is unaffected. With staging also registered the target is ambiguous, so
 	// the default must be named explicitly (ADR-0047 §1).
 	if _, err := e.Autoscale(ctx, "web", cp.DefaultEnvironment, cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false); err != nil {
 		t.Fatalf("default env still allowed: %v", err)

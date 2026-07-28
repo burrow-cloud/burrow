@@ -363,8 +363,7 @@ type Database interface {
 	Release(ctx context.Context, id string) (Release, error)
 	// LatestRelease returns the most recently saved release for app in env, or ErrNotFound if
 	// the app has no releases there. Releases are keyed per (app, environment) (ADR-0052 Phase 4a):
-	// env is the canonical environment name (the reserved "default" for the implicit default
-	// environment).
+	// env is the canonical environment name ("prod" for the default environment, ADR-0067 §2).
 	LatestRelease(ctx context.Context, app, env string) (Release, error)
 	// Releases returns all releases for app in env, oldest first, keyed per (app, environment).
 	// An app with no releases there yields an empty slice and no error.
@@ -400,7 +399,7 @@ type Database interface {
 	// AutoDeployLevel returns the auto-deploy level configured for app in the named environment
 	// (ADR-0052 §2). A missing configuration resolves to DefaultAutoDeployLevel (off): auto-deploy is
 	// opt-in, so an app with no stored row is off and is never polled (ADR-0058). env is the canonical
-	// environment name (the reserved "default" for the implicit default environment).
+	// environment name ("prod" for the default environment, ADR-0067 §2).
 	AutoDeployLevel(ctx context.Context, app, env string) (AutoDeployLevel, error)
 	// SetAutoDeployLevel upserts the auto-deploy level for app in the named environment — the write
 	// behind `burrow app auto-deploy <app> <level>`. It rejects an invalid level. It CLEARS any
@@ -471,17 +470,18 @@ type Database interface {
 
 	// CreateEnvironment registers a named environment mapping name to namespace (ADR-0035 phase 2).
 	// It rejects a duplicate name (the name is the primary key) with an ErrInvalid-wrapped error.
-	// The reserved `default` environment is never stored here — it is synthesized by the engine.
+	// The default environment `prod` IS stored here, written once by Engine.EnsureDefaultEnvironment
+	// at burrowd startup (ADR-0067 §2) rather than synthesized on every read.
 	CreateEnvironment(ctx context.Context, name, namespace string) error
-	// ListEnvironments returns the registered environments ordered by name. None yields an empty
-	// slice and no error. The synthesized `default` environment is not included; the engine
-	// prepends it.
+	// ListEnvironments returns the registered environments ordered by name, INCLUDING the default
+	// environment `prod`; the engine hoists that one first and marks it. None yields an empty slice
+	// and no error.
 	ListEnvironments(ctx context.Context) ([]Environment, error)
 	// GetEnvironment returns the registered environment with the given name, or ErrNotFound.
 	GetEnvironment(ctx context.Context, name string) (Environment, error)
 	// DeleteEnvironment removes the registered environment with the given name, or ErrNotFound when
-	// no such environment is registered. The synthesized `default` environment is never stored here,
-	// so it is never removed (the engine rejects it before this call).
+	// no such environment is registered. The default environment `prod` is stored here but is never
+	// removed: the engine rejects it before this call (ADR-0067 §2).
 	DeleteEnvironment(ctx context.Context, name string) error
 }
 

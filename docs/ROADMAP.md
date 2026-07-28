@@ -263,7 +263,8 @@ image", without a CI dependency and without ever moving code over the control ch
 
 Decisions that are recorded in an ADR but have no implementation. An ADR is a decision, not a
 capability ([ADR-0009](adr/0009-honest-status.md)); these are unsequenced work, not shipped
-behaviour. [CAPABILITIES.md](CAPABILITIES.md) carries the full list with the code detail.
+behaviour. [CAPABILITIES.md](CAPABILITIES.md) carries the full list and answers "can Burrow do this
+today?" for each.
 
 - **Multi-minor forward database upgrades in one step**
   ([ADR-0055](adr/0055-multi-version-upgrades.md), Proposed) — a database would jump across any
@@ -285,64 +286,37 @@ behaviour. [CAPABILITIES.md](CAPABILITIES.md) carries the full list with the cod
   — `deploy` has no port and creates no Service, so an app is addressable in-cluster only once it
   is published; and `publish` creates the Service, Ingress, and TLS request but neither writes DNS
   nor waits for the certificate, which stay `app domain add` and `app reachability --wait`.
-- **Object storage as a provider type, so a backup can leave the cluster**
-  ([ADR-0063](adr/0063-object-storage-provider.md)) — the credential registry would carry an
-  object-storage provider alongside DNS and source, and Burrow would put the credential where the
-  backup engine looks for it, create a bucket shaped for the job, and refuse a lifecycle rule that
-  deletes objects a restore still needs. None of it exists: `knownProviderTypes` in
-  `controlplane/provider.go` holds `digitalocean`, `cloudflare`, `github` and `gitlab` — DNS and
-  source capabilities only — there is no object-storage capability, no bucket code, and no
-  credential shape for one. `burrow addon backup postgres` still writes its dump to the
-  `burrow-postgres-backups` PersistentVolumeClaim in `burrow-addons`, which shares a failure
-  domain with the database it came from.
-- **The typed confirmation for `--delete-data`, a final backup before it, and retained volumes in
-  the add-on listing** ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §2 in part, §5, §6) —
-  most of the record **is** built. `addon remove` tears down the add-on's Deployment and Service
-  and leaves its PersistentVolumeClaim in place, reporting it as
-  `RemoveAddonResult.RetainedDataVolume` (§1); `--delete-data` exists only on `burrow addon
-  remove` and the whole verb is absent from `burrow-agent` (§2's structural half); the held
-  `addon.remove` confirmation names the volume and the attached apps by name (§3); and
-  `burrow-postgres-backups` survives even a data-deleting removal (§4). Three pieces are not.
-  **§2's interactive half:** `newAddonRemoveCmd` does no terminal detection, so `--delete-data
-  --confirm` proceeds without typing the add-on's name and does not refuse off a terminal — the
-  `confirm` disposition is the only gate. **§5:** nothing takes a backup before `--delete-data`
-  destroys the volume; removal has no path into the backup code, and there is no off-cluster
-  destination for one to write to (ADR-0063, above). **§6:** `Engine.ListAddons` reads the
-  registry of *installed* add-ons and probes their readiness, so a volume left behind by an
-  earlier removal appears in that removal's output and nowhere afterwards; finding it later is
-  still `kubectl get pvc`.
-- **`app.delete` and `dns.delete` denied by default, and a `guard` that reports what the binary
-  does not carry** ([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §3, §7) — the tier-1
-  half **is** built: `addon remove` is not compiled into `burrow-agent` (`newAddonCmd` wires
-  `install`, `attach` and `backup` only), and `TestAddonRemoveStructurallyAbsent` plus the closed
-  surface guard assert the absence rather than leaving it to be a property of the command tree.
-  The tier-2 half is not: `DefaultPolicy` in `controlplane/domain.go` still maps
-  `GuardrailAppDelete` and `GuardrailDNSDelete` to `DispositionConfirm`, so both remain one
-  `--confirm` away for the agent. Nor is §7: `burrow-agent guard` returns the control plane's
-  guardrail dispositions and nothing else, so an absent verb is still rejected by name with no
-  account of what it was or who can run it.
-- **The Postgres add-on runs on CloudNativePG**
-  ([ADR-0066](adr/0066-postgres-on-cloudnativepg.md)) — `addon install postgres` would install the
-  CNPG operator and create a `Cluster` custom resource, and Burrow would stop orchestrating backups
-  altogether: WAL archiving, schedules, retention and point-in-time recovery become the operator's
-  work through a pgBackRest-based plugin. Today the add-on is ADR-0031's shape unchanged — a
-  single-replica `Recreate` Deployment of `postgres:17-alpine` with a 10Gi PVC and a
-  `postgres-exporter` sidecar (`controlplane/addons.go`) — and backups are `pg_dump -Fc` /
-  `pg_restore` Jobs Burrow runs itself (`controlplane/kube/backups.go`): unscheduled, unpruned,
-  with no WAL archiving and no point-in-time recovery.
+
+**The decisions below are tracked as issues.** Per-ADR implementation tracking lives in GitHub
+issues labelled [`adr`](https://github.com/burrow-cloud/burrow/labels/adr), one per decision or per
+coherent slice of one, each carrying the code as it stands today, the ADR sections it covers, and an
+acceptance checklist. The theme and its sequencing stay here; the granularity is in the issues.
+
+- **Object storage as a provider type** ([ADR-0063](adr/0063-object-storage-provider.md)) — a backup
+  destination that is not the cluster the database lives in, on the existing credential registry,
+  scoped to that job and no further.
+  [#331](https://github.com/burrow-cloud/burrow/issues/331).
+- **Removing an add-on keeps its data** ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md)) — most
+  of the record is built; the typed confirmation for `--delete-data`, the final backup before it, and
+  retained volumes in the add-on listing are not.
+  [#333](https://github.com/burrow-cloud/burrow/issues/333),
+  [#334](https://github.com/burrow-cloud/burrow/issues/334) (blocked by #331),
+  [#335](https://github.com/burrow-cloud/burrow/issues/335).
+- **What belongs on the agent surface** ([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md)) —
+  tier 1 is built (`addon remove` is not compiled into `burrow-agent`); the tier-2 defaults for
+  `app.delete` and `dns.delete`, and a `guard` that reports what the binary does not carry, are not.
+  [#336](https://github.com/burrow-cloud/burrow/issues/336),
+  [#337](https://github.com/burrow-cloud/burrow/issues/337).
+- **The Postgres add-on runs on CloudNativePG** ([ADR-0066](adr/0066-postgres-on-cloudnativepg.md)) —
+  the operator owns WAL archiving, schedules, retention and point-in-time recovery, and Burrow stops
+  orchestrating backups altogether.
+  [#338](https://github.com/burrow-cloud/burrow/issues/338) (blocked by #331).
 - **One database instance per environment, and a first environment named `prod`**
   ([ADR-0067](adr/0067-one-database-instance-per-environment.md)) — **this one records a latent
-  data-corruption bug, not a missing convenience.** The provisioning seam is still
-  `EnsureAppDatabase(ctx context.Context, app string)` (`controlplane/seams.go`), with no
-  environment in it, and there is one Postgres instance for the whole cluster. So an app named
-  `web` in one environment and an app named `web` in another resolve to the same database owned by
-  the same role — and because provisioning is idempotent the second `addon attach postgres web`
-  does not fail: it rotates the role's password and hands back a `DATABASE_URL` pointing at the
-  other environment's live data. Nothing errors and nothing warns. It is inert only because
-  nothing has used a second environment yet; `burrow env add staging` followed by an attach is
-  enough to hit it. The second half is unbuilt too: `controlplane/environment.go` still defines
-  `DefaultEnvironment = "default"` as a synthesized, reserved name and `cluster install` registers
-  no environment, so there is no `prod` for a per-environment guardrail gradient to hang on.
+  data-corruption bug, not a missing convenience:** the provisioning seam takes no environment and
+  there is one instance per cluster, so the same app name in two environments silently resolves to
+  one database. [#339](https://github.com/burrow-cloud/burrow/issues/339),
+  [#340](https://github.com/burrow-cloud/burrow/issues/340).
 
 ## Deferred until requested
 

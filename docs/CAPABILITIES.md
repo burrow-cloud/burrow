@@ -632,8 +632,8 @@ Consolidated, so a reader can stop looking:
 ## Decided but not built
 
 Accepted or proposed decisions with no implementation, or with only part of one. An ADR alone is
-not a capability, and a partly built one is not two-thirds of a capability — the rows below say
-which sections shipped and which did not.
+not a capability, and a partly built one is not two-thirds of a capability — the rows below say what
+is built and what is not, and link the issue tracking the rest where there is one.
 
 | Decision | ADR | Status of the code |
 | --- | --- | --- |
@@ -647,11 +647,16 @@ which sections shipped and which did not.
 | Registry onboarding via the developer's code-provider registry | [0046](adr/0046-registry-onboarding.md) | Proposed, held deliberately; only the in-cluster registry shipped, via ADR-0054. |
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
-| Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Not built — `knownProviderTypes` holds DNS and source providers only; there is no bucket or object-storage credential code, and dumps land on an in-cluster PVC. |
-| The typed confirmation for `--delete-data`, a final backup before it, and retained volumes reported by `addon list` | [0064](adr/0064-addon-removal-keeps-its-data.md) §2 (in part), §5, §6 | **Partial.** Built: removal keeps the data PVC and names it (§1), `--delete-data` is operator-CLI-only and the verb is absent from `burrow-agent` (§2's structural half), the held confirmation names the volume and the attached apps (§3), and the backup claim always survives (§4). Not built: `--delete-data --confirm` proceeds without typing the add-on's name and does not refuse off a terminal (`newAddonRemoveCmd` does no terminal detection); nothing backs up before it (and there is nowhere off-cluster to put a backup); and `ListAddons` reports registered add-ons, never a claim left by an earlier removal. |
-| `app.delete` and `dns.delete` denied by default; `guard` reporting what the binary lacks | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §3, §7 | **Partial.** Tier 1 is built: `addon remove` is not compiled into `burrow-agent`, asserted by the surface guard. Tier 2 is not — `DefaultPolicy` still maps both codes to `confirm` — and neither is §7: `guard` reports dispositions only, so an absent verb is a bare rejection. |
-| The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. |
-| One database instance per environment, and an install that creates one environment named `prod` | [0067](adr/0067-one-database-instance-per-environment.md) | Not built, **and the gap is a live data hazard**: `EnsureAppDatabase(ctx, app)` takes no environment and there is one instance per cluster, so the same app name in two environments silently shares one database (provisioning is idempotent, so it succeeds). `DefaultEnvironment` is still the synthesized `"default"`. |
+| Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Not built — dumps land on an in-cluster PVC. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
+| The typed confirmation for `--delete-data`, a final backup before it, and retained volumes reported by `addon list` | [0064](adr/0064-addon-removal-keeps-its-data.md) §2 (in part), §5, §6 | **Partial** — removal already keeps the data PVC and names it, `--delete-data` is operator-CLI-only, and the backup claim always survives. [#333](https://github.com/burrow-cloud/burrow/issues/333), [#334](https://github.com/burrow-cloud/burrow/issues/334), [#335](https://github.com/burrow-cloud/burrow/issues/335) |
+| `app.delete` and `dns.delete` denied by default; `guard` reporting what the binary lacks | [0065](adr/0065-what-belongs-on-the-agent-surface.md) §3, §7 | **Partial** — tier 1 is built (`addon remove` is not compiled into `burrow-agent`); the tier-2 defaults and the absent-capability report are not. [#336](https://github.com/burrow-cloud/burrow/issues/336), [#337](https://github.com/burrow-cloud/burrow/issues/337) |
+| The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
+| One database instance per environment, and an install that creates one environment named `prod` | [0067](adr/0067-one-database-instance-per-environment.md) | Not built, **and the gap is a live data hazard** — the same app name in two environments silently shares one database, because provisioning takes no environment and is idempotent. [#339](https://github.com/burrow-cloud/burrow/issues/339), [#340](https://github.com/burrow-cloud/burrow/issues/340) |
+
+The rows above are summaries. Per-ADR implementation tracking — the code as it stands, the sections
+each issue covers, and an acceptance checklist — lives in the issues labelled
+[`adr`](https://github.com/burrow-cloud/burrow/labels/adr); this file stays the answer to "can Burrow
+do X today?" rather than a second tracker.
 
 One ADR runs the other way and is worth knowing:
 [ADR-0062](adr/0062-remove-the-mcp-server.md) is done — the MCP server is gone from the tree,

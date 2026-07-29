@@ -26,6 +26,10 @@ type Engine struct {
 	resolver    Resolver
 	credentials Credentials
 	dns         DNSFactory
+	// objectStore builds an ObjectStore for an S3-compatible endpoint and credential pair
+	// (ADR-0063 §1). Optional: nil is allowed, and registering an object-storage provider errors
+	// cleanly (ErrNotImplemented) when it is not wired.
+	objectStore ObjectStoreFactory
 	// logs maps a backend id (e.g. "victorialogs", "loki") to the querier that serves it.
 	// Optional: a logs query errors cleanly when the map is empty or has no querier for the
 	// add-on's backend (ADR-0026).
@@ -86,6 +90,11 @@ type Deps struct {
 	Credentials Credentials
 	// DNS builds a DNSProvider for a vendor type and token (ADR-0023).
 	DNS DNSFactory
+	// ObjectStore builds an ObjectStore for an S3-compatible endpoint and credential pair, so a
+	// backup can be written outside the cluster it came from (ADR-0063). Optional — nil is allowed,
+	// and registering an object-storage provider errors cleanly (ErrNotImplemented) when it is not
+	// wired, exactly as the build path does without a Builder.
+	ObjectStore ObjectStoreFactory
 	// Logs maps a backend id (e.g. "victorialogs", "loki") to the querier serving an installed
 	// or connected logs add-on. Optional — an empty or nil map is allowed, and the engine errors
 	// cleanly on a logs query when no querier is wired for the add-on's backend (ADR-0026).
@@ -167,6 +176,7 @@ func New(d Deps) (*Engine, error) {
 		resolver:            d.Resolver,
 		credentials:         d.Credentials,
 		dns:                 d.DNS,
+		objectStore:         d.ObjectStore,
 		logs:                d.Logs,
 		metrics:             d.Metrics,
 		dbProvisioner:       d.DatabaseProvisioner,

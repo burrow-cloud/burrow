@@ -29,7 +29,13 @@ var providerCatalog = []struct {
 	{"digitalocean", []string{"dns"}},
 	{"github", []string{"source"}},
 	{"gitlab", []string{"source"}},
+	{"s3", []string{"object-storage"}},
 }
+
+// objectStorageType is the provider type whose credential is a PAIR and whose configuration names a
+// destination rather than a vendor (ADR-0063 §1), so `provider add` reads it differently: an
+// endpoint, a region, a bucket, an access key id, and a secret access key from stdin.
+const objectStorageType = "s3"
 
 func supportedProviderTypes() []string {
 	out := make([]string, len(providerCatalog))
@@ -83,6 +89,9 @@ func newProviderTypesCmd() *cobra.Command {
 func newProviderAddCmd() *cobra.Command {
 	o := &commonOpts{}
 	var name, secretKey string
+	var endpoint, region, bucket, accessKeyID string
+	var createBucket, confirm bool
+	var retentionDays int
 	cmd := &cobra.Command{
 		Use:   "add <type>",
 		Short: "Register a provider credential (type: " + providerTypesHint() + ")",
@@ -98,15 +107,38 @@ func newProviderAddCmd() *cobra.Command {
 			"registry; a fine-grained token scoped to the repos you build (plus\n" +
 			"read:packages where the registry is shared) keeps the blast radius small. Pass --name\n" +
 			"to register more than one provider of the same type.\n\n" +
+			"An s3 provider is a BACKUP DESTINATION, so a backup can leave the cluster it came from.\n" +
+			"It is addressed by S3-compatible endpoint rather than by vendor, its credential is a\n" +
+			"PAIR (--access-key-id plus a secret access key read from stdin), and registering it\n" +
+			"verifies the destination: Burrow creates or checks the bucket, writes and deletes a\n" +
+			"probe object so a wrong key fails now rather than at the first backup, and refuses a\n" +
+			"bucket whose lifecycle rules would expire a backup that must stay restorable. Scope the\n" +
+			"credential to one bucket at the vendor where it permits that — it is the most\n" +
+			"consequential key in burrow-credentials.\n\n" +
 			"Supported types: " + providerTypesHint() + " (see `burrow config provider types`).",
 		Example: "  burrow config provider add cloudflare\n" +
 			"  burrow config provider add digitalocean --name do-dns\n" +
-			"  echo \"$GH_PAT\" | burrow config provider add github",
+			"  echo \"$GH_PAT\" | burrow config provider add github\n" +
+			"  printf '%s' \"$B2_SECRET\" | burrow config provider add s3 \\\n" +
+			"      --endpoint https://s3.us-west-002.backblazeb2.com --region us-west-002 \\\n" +
+			"      --access-key-id \"$B2_KEY_ID\" --create-bucket --retention-days 30 --confirm",
 		ValidArgs: supportedProviderTypes(),
 		Args:      exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			providerType := args[0]
+			if providerType == objectStorageType {
+				return addObjectStorageProvider(cmd, o, objectStorageOpts{
+					name:          name,
+					endpoint:      endpoint,
+					region:        region,
+					bucket:        bucket,
+					createBucket:  createBucket,
+					retentionDays: retentionDays,
+					accessKeyID:   accessKeyID,
+					confirm:       confirm,
+				})
+			}
 			token, err := readToken(cmd.InOrStdin(), cmd.OutOrStdout(), fmt.Sprintf("Enter the %s API token: ", providerType))
 			if err != nil {
 				return err
@@ -147,7 +179,105 @@ func newProviderAddCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	cmd.Flags().StringVar(&name, "name", "", "name for this provider (default: the type)")
 	cmd.Flags().StringVar(&secretKey, "secret-key", "", "key in the burrow-credentials Secret to store the token under (default: the name)")
+	cmd.Flags().StringVar(&endpoint, "endpoint", "", "s3: the S3-compatible API endpoint (the vendor is whoever answers it)")
+	cmd.Flags().StringVar(&region, "region", "", "s3: the region the request is signed for (default: us-east-1)")
+	cmd.Flags().StringVar(&bucket, "bucket", "", "s3: an existing bucket to use; mutually exclusive with --create-bucket")
+	cmd.Flags().BoolVar(&createBucket, "create-bucket", false, "s3: have Burrow create and record its own bucket (guardrail: bucket.create)")
+	cmd.Flags().IntVar(&retentionDays, "retention-days", 0, "s3: how long backups here must stay restorable; bucket lifecycle rules are refused if they expire sooner")
+	cmd.Flags().StringVar(&accessKeyID, "access-key-id", "", "s3: the access key id (its secret access key is read from stdin)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
+}
+
+// objectStorageOpts are the flags of an object-storage registration. The secret access key is NOT
+// among them: it is read from stdin like every other credential value, so it never lands in shell
+// history or the process table.
+type objectStorageOpts struct {
+	name          string
+	endpoint      string
+	region        string
+	bucket        string
+	createBucket  bool
+	retentionDays int
+	accessKeyID   string
+	confirm       bool
+}
+
+// addObjectStorageProvider registers an S3-compatible backup destination (ADR-0063). The control
+// plane does the work that matters — it creates or verifies the bucket, writes and deletes a probe
+// object so a wrong key fails NOW rather than at the first scheduled backup, and refuses a bucket
+// whose lifecycle rules would expire a backup that must stay restorable. This side reads the
+// credential pair and reports what the control plane observed.
+func addObjectStorageProvider(cmd *cobra.Command, o *commonOpts, opts objectStorageOpts) error {
+	ctx := cmd.Context()
+	if opts.accessKeyID == "" {
+		return errors.New("--access-key-id is required for an s3 provider (the secret access key is read from stdin)")
+	}
+	secret, err := readToken(cmd.InOrStdin(), cmd.OutOrStdout(), "Enter the S3 secret access key: ")
+	if err != nil {
+		return err
+	}
+	if secret == "" {
+		return errors.New("no secret access key provided")
+	}
+
+	providerName := opts.name
+	if providerName == "" {
+		providerName = objectStorageType
+	}
+	c, err := o.client(ctx)
+	if err != nil {
+		return err
+	}
+	p, err := c.AddProvider(ctx, client.AddProviderRequest{
+		Name:            providerName,
+		Type:            objectStorageType,
+		Endpoint:        opts.endpoint,
+		Region:          opts.region,
+		Bucket:          opts.bucket,
+		CreateBucket:    opts.createBucket,
+		RetentionDays:   opts.retentionDays,
+		AccessKeyID:     opts.accessKeyID,
+		SecretAccessKey: secret,
+		Confirm:         opts.confirm,
+	})
+	if err != nil {
+		return err
+	}
+	return emit(cmd.OutOrStdout(), o.json, p, objectStorageSummary(p))
+}
+
+// objectStorageSummary is what a human is told after a registration. It reports the bucket Burrow
+// RECORDED (the only one it will ever write to), that the probe object was written and deleted, and
+// the lifecycle verdict — including, and especially, that the verdict is unknown, since ADR-0063 §3
+// forbids reporting an unverifiable invariant as verified.
+func objectStorageSummary(p client.Provider) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "registered provider %q (type %s, capabilities %s)\n",
+		p.Name, p.Type, strings.Join(p.Capabilities, ", "))
+	if p.ObjectStore != nil {
+		fmt.Fprintf(&b, "bucket %s at %s\n", p.ObjectStore.Bucket, p.ObjectStore.Endpoint)
+		fmt.Fprintf(&b, "credential stored in burrow-credentials under keys %q and %q\n",
+			p.ObjectStore.AccessKeyIDKey, p.ObjectStore.SecretAccessKeyKey)
+	}
+	if p.Verification == nil {
+		return strings.TrimRight(b.String(), "\n")
+	}
+	if p.Verification.BucketCreated {
+		fmt.Fprintf(&b, "created this bucket; Burrow writes only to the bucket it recorded\n")
+	}
+	if p.Verification.ProbeObject {
+		fmt.Fprintf(&b, "verified: a probe object was written and deleted\n")
+	}
+	switch p.Verification.Lifecycle.Status {
+	case "unknown":
+		fmt.Fprintf(&b, "lifecycle: UNKNOWN — %s\n", p.Verification.Lifecycle.Detail)
+	default:
+		fmt.Fprintf(&b, "lifecycle: %s — %s\n", p.Verification.Lifecycle.Status, p.Verification.Lifecycle.Detail)
+	}
+	b.WriteString("scope this credential to this one bucket at the vendor where it permits it: " +
+		"it is the most consequential key in burrow-credentials")
+	return b.String()
 }
 
 func newProviderListCmd() *cobra.Command {

@@ -97,3 +97,118 @@ func TestProviderTypesCommand(t *testing.T) {
 		}
 	}
 }
+
+// TestProviderAddS3SendsPairAndReportsVerification covers the operator side of ADR-0063: the
+// credential is a PAIR, its secret half is read from stdin (never a flag, so it stays out of shell
+// history and the process table), and what the control plane observed is reported back — including,
+// and especially, a lifecycle check it could not perform.
+func TestProviderAddS3SendsPairAndReportsVerification(t *testing.T) {
+	var gotBody, gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "s3", "type": "s3", "capabilities": []string{"object-storage"},
+			"secret_key": "s3.access-key-id",
+			"object_store": map[string]any{
+				"endpoint":              "https://s3.example.com",
+				"region":                "us-west-002",
+				"bucket":                "burrow-backups-9f2c1ab3",
+				"created":               true,
+				"access_key_id_key":     "s3.access-key-id",
+				"secret_access_key_key": "s3.secret-access-key",
+				"retention_days":        30,
+			},
+			"verification": map[string]any{
+				"bucket": "burrow-backups-9f2c1ab3", "bucket_created": true, "probe_object": true,
+				"lifecycle": map[string]any{
+					"status": "unknown",
+					"detail": "Burrow could not read the lifecycle configuration of bucket burrow-backups-9f2c1ab3",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetIn(strings.NewReader("s3-secret-access-key\n")) // piped secret half
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	cmd.SetArgs([]string{
+		"config", "provider", "add", "s3",
+		"--endpoint", "https://s3.example.com", "--region", "us-west-002",
+		"--access-key-id", "AKIAEXAMPLE", "--create-bucket", "--retention-days", "30", "--confirm",
+		"--control-plane", srv.URL, "--token", "api-tok",
+	})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("provider add s3: %v (stderr: %s)", err, errb.String())
+	}
+
+	if gotPath != "/v1/providers" {
+		t.Errorf("path = %q, want /v1/providers", gotPath)
+	}
+	if strings.Contains(gotPath+gotQuery, "s3-secret-access-key") {
+		t.Error("the secret access key leaked into the request path or query")
+	}
+	for _, want := range []string{
+		`"access_key_id":"AKIAEXAMPLE"`,
+		`"secret_access_key":"s3-secret-access-key"`,
+		`"endpoint":"https://s3.example.com"`,
+		`"create_bucket":true`,
+		`"retention_days":30`,
+		`"confirm":true`,
+	} {
+		if !strings.Contains(gotBody, want) {
+			t.Errorf("request body missing %s:\n%s", want, gotBody)
+		}
+	}
+
+	human := out.String()
+	if strings.Contains(human, "s3-secret-access-key") {
+		t.Errorf("the CLI output leaked the secret access key:\n%s", human)
+	}
+	for _, want := range []string{
+		"burrow-backups-9f2c1ab3",  // the recorded bucket — the only one Burrow writes to
+		"s3.access-key-id",         // the key NAMES, never the values
+		"s3.secret-access-key",     //
+		"probe object was written", // the destination was proven, not assumed
+		"UNKNOWN",                  // an unverifiable invariant is never reported as verified
+		"most consequential key",   // the credential-scoping advice ADR-0063 asks for
+	} {
+		if !strings.Contains(human, want) {
+			t.Errorf("provider add output missing %q:\n%s", want, human)
+		}
+	}
+}
+
+// TestProviderAddS3RequiresAccessKeyID: the pair's identifier half is a flag and the secret half is
+// stdin, so a missing identifier must fail before anything is read or sent.
+func TestProviderAddS3RequiresAccessKeyID(t *testing.T) {
+	var out, errb bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetIn(strings.NewReader("secret\n"))
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	cmd.SetArgs([]string{"config", "provider", "add", "s3", "--endpoint", "https://s3.example.com"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("provider add s3 succeeded without --access-key-id")
+	}
+	if !strings.Contains(err.Error(), "access-key-id") {
+		t.Errorf("error does not name the missing flag: %v", err)
+	}
+}
+
+// TestProviderTypesListsObjectStorage: the type is discoverable before it is configured.
+func TestProviderTypesListsObjectStorage(t *testing.T) {
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"config", "provider", "types"}, &out, &errb); err != nil {
+		t.Fatalf("provider types: %v", err)
+	}
+	if !strings.Contains(out.String(), "s3") || !strings.Contains(out.String(), "object-storage") {
+		t.Errorf("provider types does not list the object-storage type:\n%s", out.String())
+	}
+}

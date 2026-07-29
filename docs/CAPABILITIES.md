@@ -214,6 +214,7 @@ and unsurfaced. Neither store is guardrailed.
 | | `burrow config registry logout <host>` | Removes one host; removing the last one deletes the Secret and detaches it from the ServiceAccount. | [0017](adr/0017-private-registry-authentication.md) |
 | | `burrow config registry list` | Lists configured hosts. Credentials are never printed. | [0017](adr/0017-private-registry-authentication.md) |
 | Vendor tokens | `burrow config provider add <cloudflare\|digitalocean\|github\|gitlab> [--name]` | Reads the token hidden from a TTY or from stdin, sends it over the control-plane API, and burrowd writes it into the `burrow-credentials` Secret. DNS tokens are **verified against the vendor before anything is written**; `github`/`gitlab` tokens are not. | [0023](adr/0023-provider-credentials.md), [0030](adr/0030-credentials-through-the-control-plane.md), [0057](adr/0057-source-provider-credentials.md) |
+| Object-storage destination | `burrow config provider add s3 --endpoint <url> --access-key-id <id> [--region] [--bucket \| --create-bucket] [--retention-days N] [--confirm]` | Registers an S3-compatible backup destination. The credential is a **pair**: the id is a flag, the secret access key is read hidden from a TTY or from stdin, and both land as **two keys in the same `burrow-credentials` Secret**. Before anything is written it creates or verifies the bucket, **writes and deletes a probe object**, and reconciles the bucket's lifecycle rules against `--retention-days`. Nothing yet WRITES backups there. | [0063](adr/0063-object-storage-provider.md), [0023](adr/0023-provider-credentials.md) |
 | In-cluster registry | `burrow cluster registry install --host <fqdn>` | Deploys Zot (`ghcr.io/project-zot/zot-linux-amd64:v2.1.2`), a 5Gi PVC, a ClusterIP Service on 5000, and an nginx Ingress with cert-manager TLS and basic auth. Wires burrowd's default build push target, and installs the generated pull credential through the `registry login` path. `uninstall` reverses it. | [0054](adr/0054-install-is-control-plane-only.md) |
 
 Three things about this area that are easy to get wrong:
@@ -232,6 +233,56 @@ Three things about this area that are easy to get wrong:
 [ADR-0046](adr/0046-registry-onboarding.md) (auto-wiring the developer's existing code-provider
 registry) is 🟡 Proposed and deliberately unbuilt; only its in-cluster-registry half shipped,
 via ADR-0054.
+
+### The object-storage provider is a backup destination, and only that
+
+`burrow config provider add s3` registers somewhere **outside the cluster** for a backup to go
+([ADR-0063](adr/0063-object-storage-provider.md)). What exists today is the **registration** —
+the credential, the bucket, and the checks. Nothing writes backups to it yet: `addon backup`
+still writes to the in-cluster PVC, and the write path is a separate change.
+
+What registration does, and why each part is there:
+
+- **It is addressed by endpoint, not by vendor.** `--endpoint` is the S3-compatible API URL and
+  the vendor is whoever answers it, so there is no vendor list to maintain. S3 compatibility is
+  a spectrum rather than a standard, so a vendor is supported when it has been *tested*, not
+  when it claims compatibility.
+- **The credential is a pair, held as two keys in the one `burrow-credentials` Secret.** Not a
+  second Secret — that would have meant widening burrowd's `resourceNames: ["burrow-credentials"]`
+  grant, which is the tightest grant Kubernetes offers. The `providers` row records the two key
+  *names* plus the non-secret endpoint, region and bucket, so the destination can be inspected
+  without reading a Secret at all.
+- **It verifies the destination by writing and deleting a probe object.** A wrong key or a
+  typo'd endpoint fails *there*, while somebody is watching — not at the first scheduled backup,
+  silently.
+- **The bucket is recorded, never inferred.** `--create-bucket` has Burrow create its own with a
+  readable prefix and a random component (bucket namespaces are global per vendor, so a fixed
+  name is both likely taken and guessable) and record the name it created. `--bucket` points it
+  at one that already exists, which is verified rather than assumed. Burrow only ever writes to
+  the bucket it recorded.
+- **It reconciles bucket lifecycle against backup retention, and refuses disagreement.** A rule
+  that expires objects sooner than a retained backup needs them leaves a backup set that lists
+  fine and cannot be restored — discovered during recovery. `--retention-days` declares how long
+  backups must stay restorable; with no window declared, nothing prunes Burrow's backups, so any
+  age-expiring rule is refused. Where the lifecycle configuration **cannot be read** — the vendor
+  does not serve the API, or the credential may not read it — the check is reported as
+  **unknown**, never as verified.
+- **Creating a bucket is `confirm`-guarded (`bucket.create`); deleting one is not a Burrow
+  operation at all.** Deletion's blast radius is every backup the platform holds, and a bucket
+  name lives in a global namespace, so a mistaken argument could reach outside the cluster
+  entirely. It is absent from both CLIs and `burrow-agent`'s `guard` reports it as such, naming
+  the vendor's own tool as what performs it.
+
+**Scope this credential to one bucket at the vendor wherever the vendor permits it.** It grants
+write access to the store that will hold every backup, which makes it the most consequential key
+in `burrow-credentials` — more so than a DNS token, whose worst case is a record you can put
+back. The Secret's RBAC is the same scoped grant as every other provider's; the tighter control
+available is at the vendor, and it is worth taking.
+
+And what it deliberately does **not** do, which is as much of the decision as the feature:
+no object browser, no `cp`/`sync`/`ls` of arbitrary prefixes, no presigned URLs, and no bucket
+policy, IAM, replication or cross-region surface. The vendor's own CLI is better at all of those.
+A capability enters here only when a Burrow feature requires it.
 
 ---
 
@@ -369,8 +420,9 @@ The limits are as important as the capability:
   database it came from. There is no `--to`, no object-storage target, and no offsite copy — so
   a backup shares a failure domain with its source.
   [ADR-0063](adr/0063-object-storage-provider.md) decides object storage as a provider type to
-  fix exactly that, and is **not built**: `knownProviderTypes` carries DNS and source providers
-  only, and there is no bucket or credential code of any kind.
+  fix exactly that, and is **half built**: the DESTINATION can now be registered and verified
+  (`burrow config provider add s3`, above), but nothing writes a backup to it — `addon backup`
+  still writes only to the PVC, and there is still no `--to`.
 - **There is no scheduling.** No CronJob exists anywhere in the tree, and the control plane is
   not even granted `cronjobs` RBAC. Every backup is an explicit command.
 - **There is no retention or pruning.** No delete-backup command, no "keep last N", no
@@ -487,6 +539,7 @@ These are all fourteen, in listing order, with their defaults:
 | `app.rollback` | rolling back to the previous release | `allow` | yes |
 | `app.autoscale` | configuring autoscaling | `allow` | yes |
 | `app.run` | running a one-off command in the app's image | `confirm` | yes |
+| `bucket.create` | creating a bucket at an object-storage provider | `confirm` | no |
 
 `burrow guard list [--env <name>]` shows the effective disposition and, for a named
 environment, whether it came from the environment, the global policy, or the built-in default.
@@ -579,6 +632,10 @@ pinned by tests that fail if a verb is added or removed.
 `app auto-deploy`, `addon remove`, `addon remove --delete-data`, `addon connect`, `addon detach`,
 `addon restore`, `config provider add`, `config registry login`, `agent <tool> install`,
 `app publish`/`unpublish` under those names, and the client-side `--build` deploy path.
+**Bucket deletion** is in that list too and is the one entry Burrow does not carry on *either*
+CLI ([ADR-0063](adr/0063-object-storage-provider.md) §5): it destroys every backup the platform
+holds, and a bucket name lives in a global namespace, so a mistaken argument can reach outside
+the cluster entirely. `guard` reports it with the vendor's own tool as the answer to "who can".
 
 Those verbs are not prose alone. They are entries in a capability catalogue
 (`internal/agentsurface`), which is also the table the surface-guard test reads as its closed
@@ -728,7 +785,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Registry onboarding via the developer's code-provider registry | [0046](adr/0046-registry-onboarding.md) | Proposed, held deliberately; only the in-cluster registry shipped, via ADR-0054. |
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
-| Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Not built — dumps land on an in-cluster PVC. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
+| Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Partly built. The destination registration is built: the `s3` provider type and object-storage capability, the credential pair as two keys in `burrow-credentials`, the configuration-time probe write/delete, the recorded globally-unique bucket, lifecycle-versus-retention reconciliation, and `bucket.create` at `confirm` with bucket deletion absent from both CLIs. The backup WRITE path (§7 — retry, alerting on backup age, never recording an unwritten backup, and the status surface) is not built, so dumps still land on the in-cluster PVC. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
 | A final backup before `--delete-data` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5 | Not built — it waits on an object-storage provider ([ADR-0063](adr/0063-object-storage-provider.md)); until then the retained backup claim is the only copy. The rest of ADR-0064 is built: removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and carries §2's typed confirmation, the backup claim always survives, and `addon list` reports retained volumes (§6). [#334](https://github.com/burrow-cloud/burrow/issues/334) |
 | The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
 

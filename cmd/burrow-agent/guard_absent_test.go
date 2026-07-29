@@ -146,3 +146,46 @@ func findCommand(t *testing.T, parent *cobra.Command, name string) *cobra.Comman
 	t.Fatalf("command %q has no subcommand %q", strings.TrimSpace(parent.CommandPath()), name)
 	return nil
 }
+
+// TestBucketDeletionIsAbsentAndLegible asserts ADR-0063 §5's tier-1 half directly, rather than
+// leaving it as a property of whatever the command tree happens to register today.
+//
+// The two bucket operations sit in different tiers on purpose. Creating a bucket is additive and
+// reversible, so it ships as a `confirm` guardrail and a human approves the cost. DELETING one
+// fails ADR-0065's scope test twice over: it destroys every backup the platform holds, and a bucket
+// name lives in a GLOBAL namespace, so a mistaken argument can delete something outside this
+// cluster entirely — past the reach of any guardrail. That is the unbounded worst case tier 1 is
+// reserved for, so no verb for it is compiled in, and `guard` reports it with who can do it
+// instead: the vendor, and a human.
+func TestBucketDeletionIsAbsentAndLegible(t *testing.T) {
+	for _, path := range commandPaths(newRootCmd()) {
+		normalized := strings.NewReplacer(" ", "_", "-", "_").Replace(path)
+		if !strings.Contains(normalized, "bucket") {
+			continue
+		}
+		for _, verb := range []string{"delete", "remove", "destroy", "rb"} {
+			if strings.Contains(normalized, verb) {
+				t.Errorf("burrow-agent registers %q, which deletes a bucket. That is ADR-0065 tier 1: "+
+					"the blast radius is every backup Burrow holds, and a bucket name is global, so a "+
+					"mistaken argument reaches outside the cluster (ADR-0063 §5). It must not be "+
+					"compiled into this binary at all.", path)
+			}
+		}
+	}
+
+	var deletion *agentsurface.Capability
+	for _, c := range absentCapabilities(newRootCmd()) {
+		if c.Path == "bucket delete" {
+			cap := c
+			deletion = &cap
+		}
+	}
+	if deletion == nil {
+		t.Fatal("`guard` does not report bucket deletion as an absent capability; an agent asked to " +
+			"clean up storage would get `unknown command` with no account of what it was or who can " +
+			"do it, which is the dead end ADR-0065 §7 exists to prevent")
+	}
+	if deletion.What == "" || deletion.Why == "" || deletion.Who == "" || deletion.Command == "" {
+		t.Errorf("bucket deletion is reported absent without what/why/who/command (%+v)", *deletion)
+	}
+}

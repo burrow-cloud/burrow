@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+✅ Accepted
 
 ## TL;DR
 
@@ -45,6 +45,12 @@ reverse — one taint, twenty unschedulable pods — so the listing groups by sh
 oldest-first, since the earliest row in a cascade is usually the one worth fixing. It stops there:
 **Burrow shows correlation and refuses to claim causation**, because a confidently wrong root cause
 during an incident is worse than none.
+
+That refusal is a **division of labour, not a shortfall**. Burrow does not run a model and must not
+acquire one: its half is to report every failure completely, in a shape something else can reason
+over; **the agent's half is to turn twenty rows into a cause and a fix.** So the ledger optimises for
+completeness over tidiness — the boring rows are the ones an agent needs — and an inference engine
+inside burrowd is explicitly out of scope.
 
 It is **not** the audit log ([ADR-0027](0027-audit-log.md)) and must not merge with it: audit records
 what Burrow was *asked to do* and what it *decided*; this records what the cluster *did afterwards*.
@@ -223,6 +229,24 @@ other: same reason, same window, same node, and the ordering that says which cam
 restraint applied to presentation — report the blocking thing that is known, not the plausible thing
 that is inferred.
 
+**And forming a cause and a fix is the agent's job, not Burrow's.** This is a division of labour, not
+a limitation Burrow should work around: **Burrow does not run a model, and must not acquire one to do
+this.** Its half is to report every failure it observes, completely and in a shape something else can
+reason over — a stable reason vocabulary, real timestamps, stable object identity, and no editorial.
+The agent's half is to read twenty rows and conclude "the node pool was tainted at 02:14; remove the
+taint or add the toleration" — synthesis across incomplete evidence, which is what a language model is
+good at and a control plane is not.
+
+Two things follow. **Completeness matters more than curation**: the ledger's job is to leave nothing
+out, because a fact withheld to keep a listing tidy is a fact the agent cannot reason from, and the
+agent is the consumer that benefits most from the boring rows. And **an inference engine inside
+burrowd is out of scope** — it would be a worse version of something the caller already has, and
+building it would undercut the reason the surface is structured for machines in the first place.
+
+This is the same boundary the rest of the control plane draws. Burrow does not decide *what* to
+deploy either; it makes deploying safe, legible and reversible, and leaves the judgement to whoever
+is driving.
+
 ### 6. What Burrow intended, compared with what the cluster has
 
 The observer diffs the registry against the cluster and records the discrepancies as failures in
@@ -294,6 +318,13 @@ output rather than implying Burrow has sanitised it.
   was down from 02:00 to 03:00, an empty ledger for that hour reads as "nothing broke". The ledger
   must record its own observation coverage, so that a stale or interrupted observer is visible as
   such. A reliability surface that fails silently would be a particularly poor joke.
+- **The ledger's most important consumer is an agent, not a person**, so the schema is designed for
+  one: a closed reason vocabulary that can be branched on without parsing prose, real timestamps, and
+  stable object identity. A surface tuned for a human reader — collapsed rows, summarised text, a
+  tidy verdict — would be the wrong artifact, and §5 makes completeness the priority for that reason.
+- **Burrow will look less clever than a tool that guesses a root cause**, and that is a deliberate
+  trade. The comparison to make is not against a control plane that prints a diagnosis, but against
+  that control plane's wrong diagnoses at 3am.
 - **Grouping by shared reason is a heuristic and will sometimes be wrong.** Two unrelated apps
   crashlooping for unrelated bugs in the same minute will be shown together. That is an acceptable
   cost of never asserting causation — the grouping is a hint about where to look, not a claim, and
@@ -346,8 +377,9 @@ output rather than implying Burrow has sanitised it.
   information is partly there. Rejected in §5: the graph is incomplete (it knows registered add-on
   bindings, not that app A calls app B), so the inference would be confident and sometimes wrong, and
   an incident is the worst possible place to be led somewhere plausible. Grouping by shared reason
-  and time gets most of the benefit while only ever asserting things Burrow observed. A dependency
-  graph good enough to support causation is its own record.
+  and time gets most of the benefit while only ever asserting things Burrow observed. The deeper
+  reason is §5's: synthesising a cause from partial evidence is the agent's half of the work, and
+  Burrow does not run a model. A dependency graph good enough to support causation is its own record.
 - **Observe and remediate.** Restart the crashlooper; reschedule the Pending pod. Rejected in §9 as a
   separate decision with a much higher bar — it is a mutation with nobody present, and the remedies
   are usually wrong for the failures that most invite them.

@@ -53,7 +53,7 @@ func newPollerHarness(t *testing.T, cfg cp.AutoDeployConfig) *pollerHarness {
 func seedRelease(t *testing.T, d *fake.Database, id, app, image string) {
 	t.Helper()
 	if err := d.SaveRelease(context.Background(), cp.Release{
-		ID: id, App: app, Image: image, Environment: "default", Status: cp.ReleaseDeployed,
+		ID: id, App: app, Image: image, Environment: cp.DefaultEnvironment, Status: cp.ReleaseDeployed,
 	}); err != nil {
 		t.Fatalf("SaveRelease: %v", err)
 	}
@@ -64,7 +64,7 @@ func seedRelease(t *testing.T, d *fake.Database, id, app, image string) {
 // level first.
 func optIn(t *testing.T, d *fake.Database, app string, level cp.AutoDeployLevel) {
 	t.Helper()
-	if err := d.SetAutoDeployLevel(context.Background(), app, "default", level); err != nil {
+	if err := d.SetAutoDeployLevel(context.Background(), app, cp.DefaultEnvironment, level); err != nil {
 		t.Fatalf("SetAutoDeployLevel(%s, %s): %v", app, level, err)
 	}
 }
@@ -72,7 +72,7 @@ func optIn(t *testing.T, d *fake.Database, app string, level cp.AutoDeployLevel)
 // latest returns the newest release for app in the default environment.
 func latest(t *testing.T, d *fake.Database, app string) cp.Release {
 	t.Helper()
-	r, err := d.LatestRelease(context.Background(), app, "default")
+	r, err := d.LatestRelease(context.Background(), app, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("LatestRelease(%s): %v", app, err)
 	}
@@ -82,7 +82,7 @@ func latest(t *testing.T, d *fake.Database, app string) cp.Release {
 // releaseCount returns how many releases app has in the default environment.
 func releaseCount(t *testing.T, d *fake.Database, app string) int {
 	t.Helper()
-	rels, err := d.Releases(context.Background(), app, "default")
+	rels, err := d.Releases(context.Background(), app, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("Releases(%s): %v", app, err)
 	}
@@ -93,7 +93,7 @@ func releaseCount(t *testing.T, d *fake.Database, app string) int {
 // skipping any failed attempt left on top of the history.
 func runningImage(t *testing.T, d *fake.Database, app string) string {
 	t.Helper()
-	rels, err := d.Releases(context.Background(), app, "default")
+	rels, err := d.Releases(context.Background(), app, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("Releases(%s): %v", app, err)
 	}
@@ -163,7 +163,7 @@ func TestPollerDoesNotDeployAboveLevel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPollerHarness(t, cp.AutoDeployConfig{})
 			seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
-			if err := h.db.SetAutoDeployLevel(context.Background(), "web", "default", tc.level); err != nil {
+			if err := h.db.SetAutoDeployLevel(context.Background(), "web", cp.DefaultEnvironment, tc.level); err != nil {
 				t.Fatalf("SetAutoDeployLevel: %v", err)
 			}
 			h.reg.SetTags(tc.tags...)
@@ -187,7 +187,7 @@ func TestPollerSkipsOffAndDisabled(t *testing.T) {
 	t.Run("explicit off", func(t *testing.T) {
 		h := newPollerHarness(t, cp.AutoDeployConfig{})
 		seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
-		if err := h.db.SetAutoDeployLevel(ctx, "web", "default", cp.AutoDeployOff); err != nil {
+		if err := h.db.SetAutoDeployLevel(ctx, "web", cp.DefaultEnvironment, cp.AutoDeployOff); err != nil {
 			t.Fatalf("SetAutoDeployLevel off: %v", err)
 		}
 		h.reg.SetTags("1.2.5", "1.2.6", "1.3.0")
@@ -204,7 +204,7 @@ func TestPollerSkipsOffAndDisabled(t *testing.T) {
 	t.Run("disabled by rollback stays disabled", func(t *testing.T) {
 		h := newPollerHarness(t, cp.AutoDeployConfig{})
 		seedRelease(t, h.db, "web-1", "web", "ghcr.io/u/web:1.2.5")
-		if err := h.db.DisableAutoDeploy(ctx, "web", "default", "disabled by rollback"); err != nil {
+		if err := h.db.DisableAutoDeploy(ctx, "web", cp.DefaultEnvironment, "disabled by rollback"); err != nil {
 			t.Fatalf("DisableAutoDeploy: %v", err)
 		}
 		h.reg.SetTags("1.2.5", "1.2.6")
@@ -214,10 +214,10 @@ func TestPollerSkipsOffAndDisabled(t *testing.T) {
 		if n := releaseCount(t, h.db, "web"); n != 1 {
 			t.Fatalf("release count = %d, want 1 (a disabled app never deploys)", n)
 		}
-		if lvl, _ := h.db.AutoDeployLevel(ctx, "web", "default"); lvl != cp.AutoDeployOff {
+		if lvl, _ := h.db.AutoDeployLevel(ctx, "web", cp.DefaultEnvironment); lvl != cp.AutoDeployOff {
 			t.Errorf("level = %q, want still off (poller must not re-enable)", lvl)
 		}
-		if reason, _ := h.db.AutoDeployReason(ctx, "web", "default"); reason != "disabled by rollback" {
+		if reason, _ := h.db.AutoDeployReason(ctx, "web", cp.DefaultEnvironment); reason != "disabled by rollback" {
 			t.Errorf("reason = %q, want preserved 'disabled by rollback'", reason)
 		}
 	})
@@ -235,7 +235,7 @@ func TestPollerSkipsAppWithNoLevelSet(t *testing.T) {
 	h.reg.SetTags("1.2.5", "1.2.6", "1.3.0") // newer in-scope tags are available, but must be ignored
 
 	// Sanity: with no row the level reads off, matching the opt-in default.
-	if lvl, _ := h.db.AutoDeployLevel(ctx, "web", "default"); lvl != cp.AutoDeployOff {
+	if lvl, _ := h.db.AutoDeployLevel(ctx, "web", cp.DefaultEnvironment); lvl != cp.AutoDeployOff {
 		t.Fatalf("unset level = %q, want off (the opt-in default)", lvl)
 	}
 
@@ -499,7 +499,7 @@ func TestPollerAdversarialSchedule(t *testing.T) {
 	}
 	for i, a := range apps {
 		seedRelease(t, h.db, fmt.Sprintf("%s-seed-%d", a.name, i), a.name, a.repo+":1.0.0")
-		if err := h.db.SetAutoDeployLevel(ctx, a.name, "default", a.level); err != nil {
+		if err := h.db.SetAutoDeployLevel(ctx, a.name, cp.DefaultEnvironment, a.level); err != nil {
 			t.Fatalf("SetAutoDeployLevel(%s): %v", a.name, err)
 		}
 	}

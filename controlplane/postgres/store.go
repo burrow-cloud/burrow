@@ -72,7 +72,7 @@ func (s *Store) SaveRelease(ctx context.Context, r controlplane.Release) error {
 		cmd = []string{}
 	}
 	// A release always stores a canonical environment and a trigger: an empty Environment is the
-	// implicit default environment, and an empty Trigger is a manual (explicit) deploy — the default
+	// default environment `prod`, and an empty Trigger is a manual (explicit) deploy — the default
 	// for every deploy today (ADR-0052 §5).
 	environment := r.Environment
 	if environment == "" {
@@ -479,8 +479,8 @@ func (s *Store) CreateEnvironment(ctx context.Context, name, namespace string) e
 	return nil
 }
 
-// ListEnvironments returns the registered environments ordered by name (ADR-0035 phase 2). The
-// synthesized `default` environment is not stored here; the engine prepends it.
+// ListEnvironments returns the registered environments ordered by name (ADR-0035 phase 2),
+// including the default environment `prod`, which burrowd writes here at startup (ADR-0067 §2).
 func (s *Store) ListEnvironments(ctx context.Context) ([]controlplane.Environment, error) {
 	const q = `SELECT name, namespace, created_at FROM environments ORDER BY name ASC`
 	rows, err := s.db.QueryContext(ctx, q)
@@ -518,8 +518,8 @@ func (s *Store) GetEnvironment(ctx context.Context, name string) (controlplane.E
 }
 
 // DeleteEnvironment removes the registered environment with the given name, or ErrNotFound when no
-// such environment is registered. The synthesized `default` environment is never stored here, so it
-// is never removed (the engine rejects it before this call).
+// such environment is registered. The default environment `prod` is stored here but is never removed:
+// the engine rejects it before this call (ADR-0067 §2).
 func (s *Store) DeleteEnvironment(ctx context.Context, name string) error {
 	const q = `DELETE FROM environments WHERE name = $1`
 	res, err := s.db.ExecContext(ctx, q, name)

@@ -28,6 +28,12 @@ const addonLabel = "burrow.cloud/addon"
 // addonEnvLabel records which ENVIRONMENT an add-on instance serves (ADR-0067 §1), so the cluster
 // carries the same fact the registry row does and an operator reading `kubectl get deploy -n
 // burrow-addons` can tell two instances of the same type apart by more than a name suffix.
+//
+// It is descriptive only: nothing selects on it, and the instance is always found by its NAME
+// (addonName). That is what let ADR-0067 §2 rename the default environment from `default` to `prod`
+// without touching a running instance — an add-on installed before the rename still carries
+// `burrow.cloud/environment=default` until it is reinstalled, and reads nothing wrong from it,
+// because the label is a note to a human rather than an index.
 const addonEnvLabel = "burrow.cloud/environment"
 
 // addonName is the deterministic resource name for the instance of add-on type t serving

@@ -142,21 +142,21 @@ func TestDatabaseSaveAndQuery(t *testing.T) {
 		t.Fatalf("Release(r1) = %+v, err=%v", got, err)
 	}
 
-	latest, err := d.LatestRelease(ctx, "web", "default")
+	latest, err := d.LatestRelease(ctx, "web", controlplane.DefaultEnvironment)
 	if err != nil || latest.ID != "r2" {
 		t.Fatalf("LatestRelease(web) = %+v, err=%v, want r2", latest, err)
 	}
 
-	all, err := d.Releases(ctx, "web", "default")
+	all, err := d.Releases(ctx, "web", controlplane.DefaultEnvironment)
 	if err != nil || len(all) != 2 || all[0].ID != "r1" || all[1].ID != "r2" {
 		t.Fatalf("Releases(web) = %+v, err=%v, want [r1 r2] oldest first", all, err)
 	}
 
-	none, err := d.Releases(ctx, "nobody", "default")
+	none, err := d.Releases(ctx, "nobody", controlplane.DefaultEnvironment)
 	if err != nil || len(none) != 0 {
 		t.Fatalf("Releases(nobody) = %+v, err=%v, want empty", none, err)
 	}
-	if _, err := d.LatestRelease(ctx, "nobody", "default"); !errors.Is(err, controlplane.ErrNotFound) {
+	if _, err := d.LatestRelease(ctx, "nobody", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrNotFound) {
 		t.Fatalf("LatestRelease(nobody) err = %v, want ErrNotFound", err)
 	}
 	if _, err := d.Release(ctx, "missing"); !errors.Is(err, controlplane.ErrNotFound) {
@@ -166,40 +166,41 @@ func TestDatabaseSaveAndQuery(t *testing.T) {
 
 // TestDatabaseReleasesPerEnvironment proves the fake keys releases per (app, environment): a save in
 // one environment is invisible to another, a release stored with an empty Environment reads back under
-// "default", and LatestRelease/Releases/ListReleases all filter by env (ADR-0052 Phase 4a).
+// the default environment `prod`, and LatestRelease/Releases/ListReleases all filter by env
+// (ADR-0052 Phase 4a, ADR-0067 §2).
 func TestDatabaseReleasesPerEnvironment(t *testing.T) {
 	ctx := context.Background()
 	d := NewDatabase()
 
-	// One release with no Environment set (reads back as "default"), one explicitly in prod.
+	// One release with no Environment set (reads back as the default environment), one in staging.
 	def := controlplane.Release{ID: "d1", App: "web", Image: "img:1", Status: controlplane.ReleaseDeployed}
-	prod := controlplane.Release{ID: "p1", App: "web", Environment: "prod", Image: "img:2", Status: controlplane.ReleaseDeployed}
-	for _, r := range []controlplane.Release{def, prod} {
+	staging := controlplane.Release{ID: "p1", App: "web", Environment: "staging", Image: "img:2", Status: controlplane.ReleaseDeployed}
+	for _, r := range []controlplane.Release{def, staging} {
 		if err := d.SaveRelease(ctx, r); err != nil {
 			t.Fatalf("SaveRelease(%s): %v", r.ID, err)
 		}
 	}
 
-	// The default environment sees only the empty-Environment release, under "default".
-	if got, err := d.Releases(ctx, "web", "default"); err != nil || len(got) != 1 || got[0].ID != "d1" {
+	// The default environment sees only the empty-Environment release, canonicalized to its name.
+	if got, err := d.Releases(ctx, "web", controlplane.DefaultEnvironment); err != nil || len(got) != 1 || got[0].ID != "d1" {
 		t.Fatalf("Releases(web, default) = %+v, err=%v, want [d1]", got, err)
 	}
-	if got, err := d.LatestRelease(ctx, "web", "default"); err != nil || got.ID != "d1" {
+	if got, err := d.LatestRelease(ctx, "web", controlplane.DefaultEnvironment); err != nil || got.ID != "d1" {
 		t.Fatalf("LatestRelease(web, default) = %+v, err=%v, want d1", got, err)
 	}
-	// prod sees only its own release.
-	if got, err := d.Releases(ctx, "web", "prod"); err != nil || len(got) != 1 || got[0].ID != "p1" {
-		t.Fatalf("Releases(web, prod) = %+v, err=%v, want [p1]", got, err)
+	// staging sees only its own release.
+	if got, err := d.Releases(ctx, "web", "staging"); err != nil || len(got) != 1 || got[0].ID != "p1" {
+		t.Fatalf("Releases(web, staging) = %+v, err=%v, want [p1]", got, err)
 	}
-	if got, err := d.ListReleases(ctx, "web", "prod"); err != nil || len(got) != 1 || got[0].ID != "p1" {
-		t.Fatalf("ListReleases(web, prod) = %+v, err=%v, want [p1]", got, err)
+	if got, err := d.ListReleases(ctx, "web", "staging"); err != nil || len(got) != 1 || got[0].ID != "p1" {
+		t.Fatalf("ListReleases(web, staging) = %+v, err=%v, want [p1]", got, err)
 	}
 	// An environment with no releases: empty slice from the lists, ErrNotFound from LatestRelease.
-	if got, err := d.Releases(ctx, "web", "staging"); err != nil || len(got) != 0 {
-		t.Fatalf("Releases(web, staging) = %+v, err=%v, want empty", got, err)
+	if got, err := d.Releases(ctx, "web", "dev"); err != nil || len(got) != 0 {
+		t.Fatalf("Releases(web, dev) = %+v, err=%v, want empty", got, err)
 	}
-	if _, err := d.LatestRelease(ctx, "web", "staging"); !errors.Is(err, controlplane.ErrNotFound) {
-		t.Fatalf("LatestRelease(web, staging) err = %v, want ErrNotFound", err)
+	if _, err := d.LatestRelease(ctx, "web", "dev"); !errors.Is(err, controlplane.ErrNotFound) {
+		t.Fatalf("LatestRelease(web, dev) err = %v, want ErrNotFound", err)
 	}
 }
 
@@ -210,24 +211,24 @@ func TestDatabaseDisableAutoDeploy(t *testing.T) {
 	ctx := context.Background()
 	d := NewDatabase()
 
-	if err := d.DisableAutoDeploy(ctx, "web", "default", "disabled by rollback"); err != nil {
+	if err := d.DisableAutoDeploy(ctx, "web", controlplane.DefaultEnvironment, "disabled by rollback"); err != nil {
 		t.Fatalf("DisableAutoDeploy: %v", err)
 	}
-	if lvl, _ := d.AutoDeployLevel(ctx, "web", "default"); lvl != controlplane.AutoDeployOff {
+	if lvl, _ := d.AutoDeployLevel(ctx, "web", controlplane.DefaultEnvironment); lvl != controlplane.AutoDeployOff {
 		t.Fatalf("level after disable = %q, want off", lvl)
 	}
-	if reason, _ := d.AutoDeployReason(ctx, "web", "default"); reason != "disabled by rollback" {
+	if reason, _ := d.AutoDeployReason(ctx, "web", controlplane.DefaultEnvironment); reason != "disabled by rollback" {
 		t.Fatalf("reason = %q, want disabled by rollback", reason)
 	}
 	// A different environment is untouched.
-	if reason, _ := d.AutoDeployReason(ctx, "web", "prod"); reason != "" {
-		t.Fatalf("prod reason = %q, want empty (isolated)", reason)
+	if reason, _ := d.AutoDeployReason(ctx, "web", "staging"); reason != "" {
+		t.Fatalf("staging reason = %q, want empty (isolated)", reason)
 	}
 	// A human re-enable clears the reason.
-	if err := d.SetAutoDeployLevel(ctx, "web", "default", controlplane.AutoDeployMinor); err != nil {
+	if err := d.SetAutoDeployLevel(ctx, "web", controlplane.DefaultEnvironment, controlplane.AutoDeployMinor); err != nil {
 		t.Fatalf("SetAutoDeployLevel: %v", err)
 	}
-	if reason, _ := d.AutoDeployReason(ctx, "web", "default"); reason != "" {
+	if reason, _ := d.AutoDeployReason(ctx, "web", controlplane.DefaultEnvironment); reason != "" {
 		t.Fatalf("reason after re-enable = %q, want empty", reason)
 	}
 }
@@ -241,7 +242,7 @@ func TestDatabaseOverwriteKeepsOrder(t *testing.T) {
 	// and r1 must not be duplicated.
 	_ = d.SaveRelease(ctx, controlplane.Release{ID: "r1", App: "web", Image: "img:1", Status: controlplane.ReleaseSuperseded})
 
-	all, _ := d.Releases(ctx, "web", "default")
+	all, _ := d.Releases(ctx, "web", controlplane.DefaultEnvironment)
 	if len(all) != 2 || all[0].ID != "r1" || all[1].ID != "r2" {
 		t.Fatalf("Releases after overwrite = %+v, want [r1 r2]", all)
 	}

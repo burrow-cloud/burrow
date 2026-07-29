@@ -18,9 +18,9 @@ import (
 // rather than passed per deploy (ADR-0028) — set it with SetConfig before deploying.
 type DeployRequest struct {
 	App string `json:"app"`
-	// Env is the environment to deploy into (ADR-0035 phase 2b): empty or "default" targets the
-	// implicit default environment's namespace, a registered name targets that environment's
-	// namespace. An unregistered name is an error.
+	// Env is the environment to deploy into (ADR-0035 phase 2b): empty or "prod" targets the default
+	// environment's namespace — the one install created (ADR-0067 §2) — and a name added later targets
+	// that environment's namespace. An unregistered name is an error.
 	Env     string   `json:"env,omitempty"`
 	Image   string   `json:"image"`
 	Command []string `json:"command,omitempty"`
@@ -54,9 +54,9 @@ type DeployResult struct {
 // deploy begins.
 type BuildRequest struct {
 	App string `json:"app"`
-	// Env is the environment to deploy the built image into (ADR-0035): empty or "default" targets the
-	// implicit default environment, a registered name targets that environment. An unregistered name
-	// is an error, surfaced by the deploy the build hands off to.
+	// Env is the environment to deploy the built image into (ADR-0035): empty or "prod" targets the
+	// default environment, a name added later targets that environment. An unregistered name is an
+	// error, surfaced by the deploy the build hands off to.
 	Env string `json:"env,omitempty"`
 	// Source is the git reference the builder clones and checks out inside the cluster.
 	Source SourceRef `json:"source"`
@@ -87,8 +87,8 @@ type BuildResult struct {
 // already exists in the app's image.
 type RunRequest struct {
 	App string `json:"app"`
-	// Env is the environment whose namespace the command runs in (ADR-0035): empty or "default"
-	// targets the default environment, a registered name targets that environment.
+	// Env is the environment whose namespace the command runs in (ADR-0035): empty or "prod" targets
+	// the default environment, a name added later targets that environment.
 	Env string `json:"env,omitempty"`
 	// Command is the command and its arguments to run, as an argv. It must be non-empty.
 	Command []string `json:"command"`
@@ -132,7 +132,7 @@ type StatusResult struct {
 type ExposeRequest struct {
 	App string `json:"app"`
 	// Env is the environment whose namespace the app lives in (ADR-0035 phase 2b): empty or
-	// "default" targets the default environment, a registered name targets that environment.
+	// "prod" targets the default environment, a name added later targets that environment.
 	Env  string `json:"env,omitempty"`
 	Host string `json:"host"`
 	Port int32  `json:"port"`
@@ -328,8 +328,8 @@ type Backup struct {
 	ID string `json:"id"`
 	// App is the application whose database was dumped.
 	App string `json:"app"`
-	// Environment is the environment whose instance the dump was taken from (the reserved "default"
-	// for the implicit one). Each environment has its own Postgres instance (ADR-0067 §1), so a dump
+	// Environment is the environment whose instance the dump was taken from ("prod" for the default
+	// one). Each environment has its own Postgres instance (ADR-0067 §1), so a dump
 	// is only meaningful against the one it came from: restore requires the two to agree rather than
 	// letting one environment's contents be written over another's.
 	Environment string `json:"environment,omitempty"`

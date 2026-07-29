@@ -56,7 +56,9 @@ func newEnvPostgresEngine(t *testing.T, appNamespace string) (*cp.Engine, *fake.
 // has, and no two environments can resolve to the same one (ADR-0067 §1/§5).
 func TestAddonInstanceNamePerEnvironment(t *testing.T) {
 	// The default environment keeps today's unqualified name, which is what makes this change a
-	// no-op for an install that predates environments: same pod, same volume, same credential.
+	// no-op for an install that predates environments: same pod, same volume, same credential. It
+	// survived ADR-0067 §2 renaming that environment from `default` to `prod` precisely because the
+	// unqualified case keys on the CONSTANT and not on its value.
 	def, err := cp.AddonInstanceName(cp.AddonPostgres, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("AddonInstanceName(default): %v", err)
@@ -77,7 +79,7 @@ func TestAddonInstanceNamePerEnvironment(t *testing.T) {
 	// across environments is not supported, so there must be no name that two environments produce
 	// (ADR-0067 §5).
 	seen := map[string]string{}
-	for _, env := range []string{cp.DefaultEnvironment, "staging", "prod", "dev"} {
+	for _, env := range []string{cp.DefaultEnvironment, "staging", "preprod", "dev"} {
 		for _, typ := range []cp.AddonType{cp.AddonPostgres, cp.AddonLogs, cp.AddonMetrics, cp.AddonCache} {
 			name, nerr := cp.AddonInstanceName(typ, env)
 			if nerr != nil {

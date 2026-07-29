@@ -106,10 +106,16 @@ var addonCatalog = map[AddonType]AddonSpec{
 // sharing one instance across environments is not merely discouraged, it is inexpressible
 // (ADR-0067 §5).
 //
-// The implicit default environment keeps the unqualified name (burrow-postgres), which is what lets
-// an install predating environments carry on against the instance, the volume, and the superuser
+// The DEFAULT environment keeps the unqualified name (burrow-postgres), which is what lets an
+// install predating environments carry on against the instance, the volume, and the superuser
 // credential it already has — it gains an environment, and nothing moves (ADR-0067 §3). Every other
 // environment is suffixed with its own name.
+//
+// Note the switch is on the CONSTANT DefaultEnvironment, not on its value. That is load-bearing:
+// ADR-0067 §2 renamed the default environment from `default` to `prod`, and because the unqualified
+// case keys on the constant, `burrow-postgres` stayed `burrow-postgres` through the rename. What a
+// user sees the environment called and what the instance is called are decoupled on purpose — a
+// name is legibility, a resource name is live state, and only one of the two is safe to change.
 //
 // env is REQUIRED: an empty value is an error, not a synonym for the default environment. "A
 // signature that can omit it is a signature that will omit it" (ADR-0067 §1) — callers canonicalize

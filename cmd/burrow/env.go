@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -443,6 +444,18 @@ func newEnvAddCmd() *cobra.Command {
 }
 
 func runEnvAdd(ctx context.Context, o *commonOpts, name, envNamespace string, verbose bool, stdout, stderr io.Writer) error {
+	// The reserved names are rejected HERE, before step (a), not only by burrowd in step (b). Step
+	// (a) creates a namespace and RBAC with the user's own kubeconfig, and a refusal that arrives
+	// after it has run leaves an empty `burrow-apps-prod` namespace behind for a command that never
+	// took effect. burrowd still enforces this — the CLI is not the boundary — but the boundary
+	// being the second check does not make it the only place worth checking (ADR-0067 §2).
+	if name == controlplane.DefaultEnvironment {
+		return fmt.Errorf("environment %q already exists: install creates it, mapped to your app namespace.\nAdd a different one, e.g. `burrow env add staging`", name)
+	}
+	if name == "default" {
+		return fmt.Errorf("environment name %q is retired: the environment it named is now called %q, and install already created it.\nAdd a different one, e.g. `burrow env add staging`", name, controlplane.DefaultEnvironment)
+	}
+
 	// (a) Privileged kubeconfig-side setup: create the environment's namespace and grant burrowd a
 	// Role there. o.namespace is the control-plane namespace where burrowd's ServiceAccount lives.
 	manifests, err := renderEnvManifests(envOptions{Namespace: o.namespace, AppNamespace: envNamespace})

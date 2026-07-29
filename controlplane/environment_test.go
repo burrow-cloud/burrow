@@ -50,8 +50,9 @@ func TestAddEnvironmentValidation(t *testing.T) {
 	}{
 		{"Staging", "ns", "uppercase is not a DNS-1123 label"},
 		{"stg_1", "ns", "underscore is not a DNS-1123 label"},
-		{"default", "ns", "default is reserved"},
-		{"prod", "", "empty namespace"},
+		{"default", "ns", "the retired name of the first environment is reserved (ADR-0067 §2)"},
+		{"prod", "ns", "install already created prod (ADR-0067 §2)"},
+		{"dev", "", "empty namespace"},
 	}
 	for _, c := range cases {
 		if _, err := e.AddEnvironment(ctx, c.name, c.ns); !errors.Is(err, cp.ErrInvalid) {
@@ -69,7 +70,8 @@ func TestListEnvironmentsDefaultFirst(t *testing.T) {
 	e, _ := newEnvEngine(t, "burrow-apps")
 	ctx := context.Background()
 
-	// With nothing registered, only the implicit default is listed, with the engine's app namespace.
+	// With nothing registered, the default environment is still listed — synthesized against the
+	// engine's app namespace until the startup ensure writes its row (ADR-0067 §2).
 	envs, err := e.ListEnvironments(ctx)
 	if err != nil {
 		t.Fatalf("ListEnvironments: %v", err)
@@ -82,8 +84,8 @@ func TestListEnvironmentsDefaultFirst(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("add staging: %v", err)
 	}
-	if _, err := e.AddEnvironment(ctx, "prod", "burrow-apps-prod"); err != nil {
-		t.Fatalf("add prod: %v", err)
+	if _, err := e.AddEnvironment(ctx, "dev", "burrow-apps-dev"); err != nil {
+		t.Fatalf("add dev: %v", err)
 	}
 	envs, err = e.ListEnvironments(ctx)
 	if err != nil {
@@ -93,7 +95,7 @@ func TestListEnvironmentsDefaultFirst(t *testing.T) {
 	for _, en := range envs {
 		gotNames = append(gotNames, en.Name)
 	}
-	want := []string{"default", "prod", "staging"}
+	want := []string{cp.DefaultEnvironment, "dev", "staging"}
 	if len(gotNames) != len(want) {
 		t.Fatalf("names = %v, want %v", gotNames, want)
 	}
@@ -117,7 +119,7 @@ func TestRemoveEnvironment(t *testing.T) {
 		t.Fatalf("add staging: %v", err)
 	}
 
-	// Removing a registered environment leaves only the implicit default.
+	// Removing a registered environment leaves only the default environment.
 	if err := e.RemoveEnvironment(ctx, "staging"); err != nil {
 		t.Fatalf("RemoveEnvironment(staging): %v", err)
 	}
@@ -129,9 +131,9 @@ func TestRemoveEnvironment(t *testing.T) {
 		t.Fatalf("after remove, listing = %+v, want default only", envs)
 	}
 
-	// The implicit default cannot be removed (it is synthesized, never stored).
+	// The environment install created cannot be removed: every unqualified operation resolves to it.
 	if err := e.RemoveEnvironment(ctx, cp.DefaultEnvironment); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("RemoveEnvironment(default) err = %v, want ErrInvalid", err)
+		t.Errorf("RemoveEnvironment(%s) err = %v, want ErrInvalid", cp.DefaultEnvironment, err)
 	}
 	// An empty name is invalid too.
 	if err := e.RemoveEnvironment(ctx, ""); !errors.Is(err, cp.ErrInvalid) {

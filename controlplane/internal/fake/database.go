@@ -586,8 +586,8 @@ func (d *Database) CreateEnvironment(ctx context.Context, name, namespace string
 	return nil
 }
 
-// ListEnvironments returns the registered environments ordered by name. The synthesized `default`
-// environment is not stored here; the engine prepends it.
+// ListEnvironments returns the registered environments ordered by name, including the default
+// environment `prod` once burrowd's startup ensure has written it (ADR-0067 §2).
 func (d *Database) ListEnvironments(ctx context.Context) ([]controlplane.Environment, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -621,7 +621,7 @@ func (d *Database) GetEnvironment(ctx context.Context, name string) (controlplan
 }
 
 // DeleteEnvironment removes the registered environment with the given name, or ErrNotFound when it
-// is not registered, matching the store. The synthesized `default` environment is never stored here.
+// is not registered, matching the store. The default environment is rejected by the engine first.
 func (d *Database) DeleteEnvironment(ctx context.Context, name string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

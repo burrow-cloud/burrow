@@ -137,7 +137,7 @@ func TestDeleteAppDeniedByDefault(t *testing.T) {
 func TestDeleteAppDenyDefaultIsAPerEnvironmentFloor(t *testing.T) {
 	ctx := context.Background()
 	e, _, _ := newRoutingEngine(t, "burrow-apps")
-	for _, env := range []string{"dev", "prod"} {
+	for _, env := range []string{"dev", "staging"} {
 		if _, err := e.AddEnvironment(ctx, env, "burrow-apps-"+env); err != nil {
 			t.Fatalf("AddEnvironment(%s): %v", env, err)
 		}
@@ -154,16 +154,16 @@ func TestDeleteAppDenyDefaultIsAPerEnvironmentFloor(t *testing.T) {
 	if err := e.DeleteApp(ctx, "web", "dev", false); err != nil {
 		t.Errorf("DeleteApp(dev) = %v, want it to proceed under the environment's allow", err)
 	}
-	// prod inherits the default: still denied, and --confirm does not help.
-	err := e.DeleteApp(ctx, "web", "prod", true)
+	// staging inherits the default: still denied, and --confirm does not help.
+	err := e.DeleteApp(ctx, "web", "staging", true)
 	g, ok := cp.AsGuardrail(err)
 	if !ok {
-		t.Fatalf("DeleteApp(prod) = %v, want a GuardrailError", err)
+		t.Fatalf("DeleteApp(staging) = %v, want a GuardrailError", err)
 	}
 	if g.Code != cp.GuardrailAppDelete || g.NeedsConfirmation {
-		t.Errorf("prod delete guardrail = %+v, want a plain deny on app.delete", g)
+		t.Errorf("staging delete guardrail = %+v, want a plain deny on app.delete", g)
 	}
-	if !strings.Contains(g.Message, "guard set --env prod app.delete") {
+	if !strings.Contains(g.Message, "guard set --env staging app.delete") {
 		t.Errorf("refusal %q should name the environment it was refused in", g.Message)
 	}
 }

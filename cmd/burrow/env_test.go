@@ -17,6 +17,7 @@ import (
 
 	"k8s.io/client-go/tools/clientcmd/api"
 
+	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -542,20 +543,20 @@ func TestEnvAddNamespaceOverride(t *testing.T) {
 	defer func() { applyFn = orig }()
 
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"env", "add", "prod", "--namespace", "team-prod", "--context", "prod-ctx", "--control-plane", srv.URL, "--token", "t"}, &out, &errb)
+	err := run(context.Background(), []string{"env", "add", "preprod", "--namespace", "team-preprod", "--context", "preprod-ctx", "--control-plane", srv.URL, "--token", "t"}, &out, &errb)
 	if err != nil {
 		t.Fatalf("env add: %v\n%s", err, errb.String())
 	}
-	if addedNs != "team-prod" {
-		t.Errorf("--namespace override: registered namespace = %q, want team-prod", addedNs)
+	if addedNs != "team-preprod" {
+		t.Errorf("--namespace override: registered namespace = %q, want team-preprod", addedNs)
 	}
 	cfg, err := localconfig.Load()
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	h, ok := cfg.Lookup("prod")
-	if !ok || h.AppNamespace != "team-prod" {
-		t.Errorf("local handle = %+v (found=%v), want app namespace team-prod", h, ok)
+	h, ok := cfg.Lookup("preprod")
+	if !ok || h.AppNamespace != "team-preprod" {
+		t.Errorf("local handle = %+v (found=%v), want app namespace team-preprod", h, ok)
 	}
 }
 
@@ -630,6 +631,32 @@ func TestWriteEnvList(t *testing.T) {
 	} {
 		if !strings.Contains(es, want) {
 			t.Errorf("empty-state missing %q\n%s", want, es)
+		}
+	}
+}
+
+// TestEnvAddRefusesTheReservedNames confirms `burrow env add prod` (and the retired `default`) is
+// refused BEFORE the kubeconfig-side namespace/RBAC apply, not only by burrowd afterwards
+// (ADR-0067 §2). The order is the point: step (a) creates a namespace with the user's own
+// credentials, so a refusal that arrived after it would leave an empty `burrow-apps-prod` behind for
+// a command that never took effect.
+func TestEnvAddRefusesTheReservedNames(t *testing.T) {
+	applied := false
+	restore := applyFn
+	applyFn = func(_ context.Context, _, _, _ string, _ bool, _, _ io.Writer) error {
+		applied = true
+		return nil
+	}
+	t.Cleanup(func() { applyFn = restore })
+
+	for _, name := range []string{controlplane.DefaultEnvironment, "default"} {
+		var out, errb bytes.Buffer
+		err := runEnvAdd(context.Background(), &commonOpts{}, name, "burrow-apps-"+name, false, &out, &errb)
+		if err == nil {
+			t.Errorf("env add %q succeeded, want a refusal", name)
+		}
+		if applied {
+			t.Fatalf("env add %q applied cluster manifests before refusing; the reserved-name check must come first", name)
 		}
 	}
 }

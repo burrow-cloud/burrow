@@ -66,8 +66,10 @@ type Engine struct {
 	// endpoint (an in-cluster registry installed without a public ingress).
 	buildPublicRegistry string
 	// appNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace
-	// of the implicit `default` environment (ADR-0035 phase 2). It mirrors the kube Adapter's
-	// namespace so the engine can synthesize the default environment in ListEnvironments.
+	// the default environment `prod` maps to (ADR-0067 §3: the environment's NAME and its NAMESPACE
+	// are separate values, which is what lets an install predating the change gain `prod` without
+	// anything moving). It mirrors the kube Adapter's namespace, and it is what
+	// EnsureDefaultEnvironment registers `prod` against.
 	appNamespace string
 }
 
@@ -126,9 +128,10 @@ type Deps struct {
 	// internal push endpoint. burrowd sets it from BURROW_BUILD_PUBLIC_REGISTRY, which
 	// `burrow cluster registry install --host` wires to the registry's public ingress hostname.
 	BuildPublicRegistry string
-	// AppNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace of
-	// the implicit `default` environment (ADR-0035 phase 2). Optional — an empty value defaults to
-	// "default", matching the kube Adapter.
+	// AppNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace the
+	// default environment `prod` maps to (ADR-0067 §3). Optional — an empty value defaults to the
+	// Kubernetes namespace "default", matching the kube Adapter. That is a NAMESPACE name and has
+	// nothing to do with the retired environment name of the same spelling.
 	AppNamespace string
 }
 
@@ -1798,11 +1801,12 @@ func (e *Engine) Unexpose(ctx context.Context, app, env string) error {
 	return nil
 }
 
-// Guardrails returns the guardrail policy as a list for inspection (ADR-0020). With an empty or
-// "default" env it returns the global policy; with a named environment it returns that
-// environment's effective policy under the env to global to default fallback, each entry marking
-// whether its disposition is env-specific or inherited (ADR-0035 phase 2c). A named environment
-// must be registered; an unknown one is a clear ErrNotFound.
+// Guardrails returns the guardrail policy as a list for inspection (ADR-0020). With an empty env, or
+// with `prod` — the environment install created, whose policy IS the global policy (ADR-0067 §2) —
+// it returns the global policy; with an environment added later it returns that environment's
+// effective policy under the env to global to default fallback, each entry marking whether its
+// disposition is env-specific or inherited (ADR-0035 phase 2c). That environment must be registered;
+// an unknown one is a clear ErrNotFound.
 func (e *Engine) Guardrails(ctx context.Context, env string) ([]GuardrailInfo, error) {
 	if env != "" && env != DefaultEnvironment {
 		if _, err := e.db.GetEnvironment(ctx, env); err != nil {
@@ -1824,12 +1828,16 @@ func (e *Engine) Guardrails(ctx context.Context, env string) ([]GuardrailInfo, e
 // `burrow` CLI's `guard set`; `burrow-agent` can only list guardrails, so the agent cannot
 // change its own.
 //
-// With an empty or "default" env it sets the global disposition for code (today's behavior). With a
-// named environment it stores the env-prefixed code (e.g. prod.app.delete) so the environment's
-// policy can diverge from the global one (ADR-0035 phase 2c). A named environment must be registered
-// (an unknown one is ErrNotFound, catching typos), and only the app-level guardrails are
-// env-scopable: a cluster-level guardrail (addon.*, dns.*) gates a cluster-wide operation and can
-// only be set globally, so env-scoping one is rejected as ErrInvalid.
+// With an empty env, or with `prod`, it sets the GLOBAL disposition for code: `prod` is the
+// environment install created and the baseline every other environment inherits, so `guard set --env
+// prod app.delete deny` and `guard set app.delete deny` are deliberately the same write (ADR-0067
+// §2). An environment added later stores the env-prefixed code (e.g. staging.app.delete) so its
+// policy can diverge from that baseline (ADR-0035 phase 2c) — which is the gradient ADR-0065 §3
+// expects, written as an opt-OUT of production's setting rather than a set of unrelated ones. Such
+// an environment must be registered (an unknown one is ErrNotFound, catching typos), and only the
+// app-level guardrails are env-scopable: a cluster-level guardrail (addon.*, dns.*) gates a
+// cluster-wide operation and can only be set globally, so env-scoping one is rejected as
+// ErrInvalid.
 func (e *Engine) SetGuardrail(ctx context.Context, env string, code GuardrailCode, d Disposition) error {
 	if !KnownGuardrail(code) {
 		return fmt.Errorf("set guardrail: unknown guardrail %q: %w", code, ErrInvalid)
@@ -2000,8 +2008,9 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 }
 
 // AddEnvironment registers a named environment mapping name to namespace (ADR-0035 phase 2). It
-// validates name as a DNS-1123-label-safe lowercase token and rejects the reserved `default`
-// (which is implicit), then records it. The namespace and burrowd's Role there are created
+// validates name as a DNS-1123-label-safe lowercase token and rejects `prod` (install already
+// created it — ADR-0067 §2) and the retired `default`, then records it. The namespace and burrowd's
+// Role there are created
 // kubeconfig-side by `burrow env add` before this call — burrowd holds only namespaced Roles and
 // cannot create namespaces or RBAC itself (least privilege), so the engine only records the
 // registry entry. A duplicate name is rejected by the store.
@@ -2018,25 +2027,86 @@ func (e *Engine) AddEnvironment(ctx context.Context, name, namespace string) (En
 	return Environment{Name: name, Namespace: namespace, CreatedAt: e.clock.Now()}, nil
 }
 
-// ListEnvironments returns the environments the cluster's burrowd knows about (ADR-0035 phase 2):
-// the implicit `default` environment first (the app namespace burrowd runs against, behaving like
-// today), followed by the registered environments in name order. The default is synthesized rather
-// than stored, so multi-environment is opt-in with no regression.
+// EnsureDefaultEnvironment registers the environment install creates — `prod`, mapped to the app
+// namespace burrowd runs against — and returns it (ADR-0067 §2–§3). burrowd calls it once at
+// startup, after the migrations, so the registry row exists on a FRESH install and is BACKFILLED on
+// an existing one by the same code path: an install predating ADR-0067 gains an environment named
+// `prod` pointing at the namespace its apps are already in, and nothing in the cluster moves or is
+// renamed. Registering it here rather than from `burrow cluster install` is what makes the upgrade
+// case free — a re-run, a restart, and an upgrade all arrive at the same one row.
+//
+// It is idempotent, and deliberately not a plain CreateEnvironment: an existing row is read back
+// rather than treated as a duplicate error, so a second burrowd replica racing the first is a no-op
+// rather than a failed startup.
+//
+// A row that already maps `prod` to a DIFFERENT namespace is refused rather than repointed. It can
+// only exist on an install that ran `burrow env add prod --namespace …` before this change — an
+// install where `prod` already means a namespace of its own, and silently redefining it would send
+// every unqualified operation into the wrong namespace. Migration 00018 refuses the same case up
+// front, so this is the second net rather than the first.
+func (e *Engine) EnsureDefaultEnvironment(ctx context.Context) (Environment, error) {
+	got, err := e.db.GetEnvironment(ctx, DefaultEnvironment)
+	switch {
+	case err == nil:
+		if got.Namespace != e.appNamespace {
+			return Environment{}, fmt.Errorf(
+				"ensure default environment: %q is registered against namespace %q but this control plane deploys apps into %q; the name %q belongs to the environment mapped to the app namespace (ADR-0067 §2), so re-register the other one under a different name: %w",
+				DefaultEnvironment, got.Namespace, e.appNamespace, DefaultEnvironment, ErrInvalid)
+		}
+		got.Default = true
+		return got, nil
+	case !errors.Is(err, ErrNotFound):
+		return Environment{}, fmt.Errorf("ensure default environment: %w", err)
+	}
+	if err := e.db.CreateEnvironment(ctx, DefaultEnvironment, e.appNamespace); err != nil {
+		// A concurrent replica won the race; the row it wrote is the same one, so read it back
+		// rather than failing a startup that has nothing left to do.
+		if got, gerr := e.db.GetEnvironment(ctx, DefaultEnvironment); gerr == nil {
+			got.Default = true
+			return got, nil
+		}
+		return Environment{}, fmt.Errorf("ensure default environment: %w", err)
+	}
+	return Environment{Name: DefaultEnvironment, Namespace: e.appNamespace, Default: true, CreatedAt: e.clock.Now()}, nil
+}
+
+// ListEnvironments returns the environments the cluster's burrowd knows about (ADR-0035 phase 2,
+// ADR-0067 §2): the default environment `prod` first, followed by the environments added later in
+// name order. Unlike before ADR-0067 the default is a REGISTERED row like any other — install
+// creates it (EnsureDefaultEnvironment) — so a fresh install lists exactly one environment and a
+// single-environment user never meets the ambiguity refusal.
+//
+// It is synthesized only when its row is missing, which is a burrowd that has not yet run its
+// startup ensure. That fallback is not cosmetic: without it a cluster with `staging` registered and
+// no `prod` row would list ONE environment, and ADR-0047's forcing function — which counts
+// environments — would let an unqualified mutating operation through instead of refusing it.
 func (e *Engine) ListEnvironments(ctx context.Context) ([]Environment, error) {
 	registered, err := e.db.ListEnvironments(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list environments: %w", err)
 	}
 	out := make([]Environment, 0, len(registered)+1)
-	out = append(out, Environment{Name: DefaultEnvironment, Namespace: e.appNamespace, Default: true})
-	out = append(out, registered...)
-	return out, nil
+	rest := make([]Environment, 0, len(registered))
+	found := false
+	for _, env := range registered {
+		if env.Name == DefaultEnvironment {
+			env.Default = true
+			out = append(out, env)
+			found = true
+			continue
+		}
+		rest = append(rest, env)
+	}
+	if !found {
+		out = append(out, Environment{Name: DefaultEnvironment, Namespace: e.appNamespace, Default: true})
+	}
+	return append(out, rest...), nil
 }
 
 // RemoveEnvironment unregisters a named environment (ADR-0035 phase 2), the inverse of
-// AddEnvironment. It rejects the reserved `default` environment (which is implicit and synthesized,
-// never stored) and an empty name, and returns ErrNotFound for an unknown name (from the store).
-// Like AddEnvironment it only touches the registry entry: the environment's namespace and any apps
+// AddEnvironment. It rejects `prod` — the environment install creates, which every unqualified
+// operation resolves to (ADR-0067 §2) — and an empty name, and returns ErrNotFound for an unknown
+// name (from the store). Like AddEnvironment it only touches the registry entry: the environment's namespace and any apps
 // in it are managed out of band — kubeconfig-side by the operator in the single-tenant install, or
 // by the managed control plane's own teardown in the cloud — so removing the mapping does not delete
 // the namespace. A removed environment can be re-added later.
@@ -2045,7 +2115,7 @@ func (e *Engine) RemoveEnvironment(ctx context.Context, name string) error {
 	case "":
 		return fmt.Errorf("remove environment: name is empty: %w", ErrInvalid)
 	case DefaultEnvironment:
-		return fmt.Errorf("remove environment %q: the default environment is implicit and cannot be removed: %w", name, ErrInvalid)
+		return fmt.Errorf("remove environment %q: the environment install created cannot be removed; every operation that names none resolves to it (ADR-0067 §2): %w", name, ErrInvalid)
 	}
 	if err := e.db.DeleteEnvironment(ctx, name); err != nil {
 		return fmt.Errorf("remove environment %s: %w", name, err)
@@ -2055,12 +2125,12 @@ func (e *Engine) RemoveEnvironment(ctx context.Context, name string) error {
 
 // resolveMutatingNamespace maps a mutating operation's environment name to its namespace, first
 // applying the ADR-0047 forcing function: when the operation names no environment (an empty env) and
-// more than one environment is registered — the implicit `default` plus at least one named
-// environment — it refuses with a structured AmbiguousEnvironmentError that lists the environments
-// and tells the caller to name one, rather than silently defaulting to `default`. With only the
-// implicit default registered there is no ambiguity, so it resolves exactly like resolveNamespace and
-// the common single-environment self-hoster is unaffected (ADR-0047 §2). The check is on
-// registration, not reachability (ADR-0047 §1). Every env-scoped mutating engine method routes its
+// more than one environment is registered — `prod` plus at least one added later — it refuses with a
+// structured AmbiguousEnvironmentError that lists the environments and tells the caller to name one,
+// rather than silently defaulting to `prod`. With only `prod` registered there is no ambiguity, so
+// it resolves exactly like resolveNamespace and the common single-environment self-hoster is
+// unaffected (ADR-0047 §2, ADR-0067 §4). The check is on registration, not reachability
+// (ADR-0047 §1). Every env-scoped mutating engine method routes its
 // namespace through this; read-only methods call resolveNamespace directly and are not guarded
 // (ADR-0047 §3).
 func (e *Engine) resolveMutatingNamespace(ctx context.Context, env string) (string, error) {
@@ -2081,9 +2151,9 @@ func (e *Engine) resolveMutatingNamespace(ctx context.Context, env string) (stri
 // resolveMutatingNamespace does (it is the same call). The name is what an operation that acts on an
 // environment's own resources — an add-on instance, an app's database on it — needs: the namespace
 // alone cannot say which instance to reach, and deriving one from the other is what let a second
-// environment's attach land on the first environment's database (ADR-0067 §1, issue #339). The
-// reserved "default" comes back for the implicit environment, so a single-environment install keeps
-// resolving to the instance and the namespace it already has.
+// environment's attach land on the first environment's database (ADR-0067 §1, issue #339). An
+// unnamed environment comes back as `prod`, the one install created, so a single-environment install
+// keeps resolving to the instance and the namespace it already has (ADR-0067 §3).
 func (e *Engine) resolveMutatingEnvironment(ctx context.Context, env string) (name, namespace string, err error) {
 	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
@@ -2093,10 +2163,13 @@ func (e *Engine) resolveMutatingEnvironment(ctx context.Context, env string) (na
 }
 
 // resolveNamespace maps an environment name to the namespace its apps operate in (ADR-0035 phase
-// 2b). An empty name or the reserved "default" resolves to the engine's app namespace — the
-// implicit default environment, behaving exactly like before environments existed. Any other name
-// must be a registered environment; an unregistered name is a clear ErrNotFound. Guardrail policy is
-// not consulted here: it stays global until phase 2c, so resolution only routes the namespace.
+// 2b). An empty name or `prod` resolves to the engine's app namespace WITHOUT a registry read: the
+// name and the namespace are separate values, and ADR-0067 §3 fixes the mapping between these two —
+// `prod` is the app namespace the install already uses (`burrow-apps`), never `burrow-apps-prod`.
+// Short-circuiting is what makes an install predating ADR-0067 resolve correctly in the window
+// between its migration and its startup backfill. Any other name must be a registered environment;
+// an unregistered name is a clear ErrNotFound. Guardrail policy is not consulted here: resolution
+// only routes the namespace.
 func (e *Engine) resolveNamespace(ctx context.Context, env string) (string, error) {
 	if env == "" || env == DefaultEnvironment {
 		return e.appNamespace, nil
@@ -2111,11 +2184,13 @@ func (e *Engine) resolveNamespace(ctx context.Context, env string) (string, erro
 	return got.Namespace, nil
 }
 
-// envName canonicalizes an environment name for the audit trail: an empty name reads as the
-// reserved "default" environment, any other name passes through. The environment is salient,
-// non-secret metadata, so it is recorded in the redacted audit args of a guarded operation
-// (ADR-0027). A dedicated audit column can follow when phase 2c makes the environment a
-// guardrail-code prefix.
+// envName canonicalizes an environment name for storage and the audit trail: an empty name reads as
+// `prod`, the environment install created (ADR-0067 §2); any other name passes through. It is the
+// key control-plane rows are stored under (releases, add-ons, backups, auto-deploy levels), which is
+// why migration 00018 rewrote the rows an older install stored under the retired `default` — the
+// canonical name has to be one string, not two read in parallel. The environment is salient,
+// non-secret metadata, so it is also recorded in the redacted audit args of a guarded operation
+// (ADR-0027).
 func envName(env string) string {
 	if env == "" {
 		return DefaultEnvironment

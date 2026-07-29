@@ -231,8 +231,8 @@ command to drop a stale environment:
   handles when more than one is registered; a single handle proceeds without ceremony. No silent
   fall-back to the ambient context (ADR-0047 §1–2). This is the axis the incident lived on.
 - **Phase 2 — the same guard in burrowd (namespace-per-env).** A mutating request with no environment
-  is refused when burrowd's registry holds more than one environment (the implicit `default` plus any
-  named one), rather than defaulting to `default`; the sole-`default` case proceeds unchanged
+  is refused when burrowd's registry holds more than one environment (the one install created plus
+  any added later), rather than defaulting to it; the single-environment case proceeds unchanged
   (ADR-0047 §1–2).
 - **Phase 3 — unreachable errors name the alternatives.** When a target's control plane is unreachable
   or a call errors, the result names the other registered environments (and, where cheap, their

@@ -117,7 +117,7 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/audit", s.audit)
 	// Environments register namespace-per-environment targets (ADR-0035 phase 2). add records a
 	// name->namespace mapping (the namespace and burrowd's Role there are created kubeconfig-side by
-	// `burrow env add`); list returns them with the implicit `default` first. They move no secret.
+	// `burrow env add`); list returns them with the default environment `prod` first. They move no secret.
 	v1.HandleFunc("POST /v1/environments", s.addEnvironment)
 	v1.HandleFunc("GET /v1/environments", s.listEnvironments)
 	v1.HandleFunc("DELETE /v1/environments/{name}", s.removeEnvironment)
@@ -551,7 +551,7 @@ func (s *server) nextTag(w http.ResponseWriter, r *http.Request) {
 }
 
 // envName canonicalizes an environment name for a response body: an empty name reads as the reserved
-// default environment, any other name passes through. It mirrors the engine's own canonicalization so
+// default environment `prod` (ADR-0067 §2), any other name passes through. It mirrors the engine's own canonicalization so
 // the recorded environment is legible on both sides.
 func envName(env string) string {
 	if env == "" {

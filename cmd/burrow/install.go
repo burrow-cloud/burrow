@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
@@ -323,6 +324,7 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	} else {
 		fmt.Fprintf(stdout, "\nBurrow installed into namespace %q (not waiting for readiness).\n", a.namespace)
 	}
+	writeDefaultEnvironmentNotice(stdout, a.appNamespace)
 
 	// Installing tells you what your cluster can do (ADR-0034): probe the cluster's capabilities
 	// kubeconfig-side and print a one-line summary. The probe is read-only and best-effort — a
@@ -358,6 +360,28 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 		fmt.Fprintf(stdout, "%s %s", okMark(stdout), postInstallGuidance)
 	}
 	return nil
+}
+
+// writeDefaultEnvironmentNotice states what install just created: one environment, called `prod`,
+// mapped to the app namespace, carrying production-grade guardrail defaults (ADR-0067 §2–§3).
+//
+// ADR-0067 asks for this to be said plainly, and the reason is the case it gets wrong. Someone whose
+// only cluster is genuinely a sandbox now has an environment called `prod` and will find the
+// defaults stricter than they want. That is the intended direction of error — over-strict on a
+// sandbox is an annoyance a `guard set` fixes; under-strict on real production is not recoverable —
+// but being told is the difference between a considered default and a surprise.
+//
+// It leads with what the environment DOES ("apps deploy into") and names the namespace, because a
+// few lines further on `recordEnvironment` prints a second thing also called an environment: the
+// LOCAL handle for this cluster in ~/.burrow/config (ADR-0036). Two different things share the word,
+// so this one is described by its effect rather than by the word alone.
+func writeDefaultEnvironmentNotice(w io.Writer, appNamespace string) {
+	fmt.Fprintf(w, "\nApps deploy into the environment %q (namespace %q).\n", controlplane.DefaultEnvironment, appNamespace)
+	fmt.Fprintf(w, "It is called %q because a single environment is production, and it carries production-grade\n"+
+		"guardrails: deleting an app or a DNS record is denied until you relax it. Loosen one with\n"+
+		"  burrow guard set app.delete confirm\n"+
+		"Add a second environment when you want one:  burrow env add staging\n",
+		controlplane.DefaultEnvironment)
 }
 
 // postInstallGuidance is the tail a successful `install --wait` prints: Burrow is operated by an AI

@@ -42,8 +42,8 @@ const (
 const DefaultAutoDeployLevel = AutoDeployOff
 
 // AppEnvRef names one (app, environment) pair — a unit the pull-based watcher reconciles
-// (ADR-0052 Phase 4b). Env is the canonical environment name (the reserved "default" for the
-// implicit default environment).
+// (ADR-0052 Phase 4b). Env is the canonical environment name ("prod" for the default environment,
+// ADR-0067 §2).
 type AppEnvRef struct {
 	App string `json:"app"`
 	Env string `json:"env"`

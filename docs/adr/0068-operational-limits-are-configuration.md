@@ -44,7 +44,10 @@ surface, placed in its tier 1). Supersedes nothing.
   with a disposition and nowhere to put a number.
 - **Other operational limits are constants too**, each in whatever file needed it: the build Job's
   three-day TTL in `controlplane/kube/build.go`, the metrics add-on's one-month retention in
-  `controlplane/kube/addons.go`.
+  `controlplane/kube/addons.go`, and — added after this record was drafted — the thirty-second
+  unschedulable grace period in `controlplane/kube/adapter.go`
+  ([ADR-0074](0074-burrow-observes-what-it-manages.md) §2). The pattern is still producing new
+  instances, which is the argument for settling it.
 - **There is no configuration store.** `burrow_meta` is a single-row table (`CHECK (id)`) holding the
   schema version for the upgrade gate, and nothing else.
 - **`burrow cluster` has no `config` subcommand** — it carries `capacity`, `bootstrap`,
@@ -126,6 +129,26 @@ it is wrong.
 - **Replica ceiling** — environment-scoped. The case that prompted this.
 - **Build-Job retention** — cluster-scoped; currently three days in `build.go`.
 - **Add-on metric retention** — cluster-scoped; currently one month in `addons.go`.
+- **Status thresholds** — cluster-scoped; currently one constant, the thirty-second unschedulable
+  grace period in `adapter.go`, with more to come as the rest of
+  [ADR-0074](0074-burrow-observes-what-it-manages.md) §2's vocabulary is settled (how many restarts
+  before a crash loop is an Issue, how long an unbound claim before it is a volume failure).
+
+**Status thresholds are the clearest case for the cluster tier rather than the environment one**, and
+worth stating because §3's default pulls the other way. How long a pod may sit unschedulable before
+something is actually wrong is a property of **the cluster's scheduler and whether it has an
+autoscaler** — a cluster that provisions a node in ninety seconds needs a longer grace than one with
+fixed capacity — and not of whether the workload is staging or production. An operator who tuned this
+per environment would be encoding the same cluster fact twice and would eventually disagree with
+themselves.
+
+They also carry an obligation the other occupants do not: **whatever value applies has to apply
+everywhere the same fact is judged.** ADR-0074's ledger is a second consumer of exactly this
+threshold, and a status surface that stays silent for thirty seconds while the ledger records a row
+at twenty does not merely disagree on tuning — the two hold different definitions of "failure", and
+an agent reading both gets contradictory answers about one pod at one moment. A single configured
+value is what keeps them honest, which is a stronger reason to move this out of a constant than mere
+tidiness.
 
 Each is a constant today, and moving it is a small change that makes an invisible decision visible.
 Backup retention ([ADR-0063](0063-object-storage-provider.md) §3) joins them as environment-scoped

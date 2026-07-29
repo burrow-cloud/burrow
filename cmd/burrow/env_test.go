@@ -649,7 +649,10 @@ func TestEnvAddRefusesTheReservedNames(t *testing.T) {
 	}
 	t.Cleanup(func() { applyFn = restore })
 
-	for _, name := range []string{controlplane.DefaultEnvironment, "default"} {
+	// Driven off the control plane's own set, not a copy of it: the property under test is that this
+	// command refuses exactly what burrowd refuses, and a hand-written list here would stop testing
+	// that the moment burrowd reserves another name.
+	for _, name := range controlplane.ReservedEnvironmentNames() {
 		var out, errb bytes.Buffer
 		err := runEnvAdd(context.Background(), &commonOpts{}, name, "burrow-apps-"+name, false, &out, &errb)
 		if err == nil {

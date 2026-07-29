@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"text/template"
@@ -449,11 +450,17 @@ func runEnvAdd(ctx context.Context, o *commonOpts, name, envNamespace string, ve
 	// after it has run leaves an empty `burrow-apps-prod` namespace behind for a command that never
 	// took effect. burrowd still enforces this — the CLI is not the boundary — but the boundary
 	// being the second check does not make it the only place worth checking (ADR-0067 §2).
-	if name == controlplane.DefaultEnvironment {
-		return fmt.Errorf("environment %q already exists: install creates it, mapped to your app namespace.\nAdd a different one, e.g. `burrow env add staging`", name)
-	}
-	if name == "default" {
-		return fmt.Errorf("environment name %q is retired: the environment it named is now called %q, and install already created it.\nAdd a different one, e.g. `burrow env add staging`", name, controlplane.DefaultEnvironment)
+	//
+	// WHICH names are reserved is asked of the control plane rather than restated here. The list this
+	// used to carry was a copy, and a copy of a list that lives somewhere else is only correct until
+	// that list grows: a name reserved in burrowd but missing from the copy passes this check, step
+	// (a) creates the namespace, and burrowd refuses in step (b) — the exact leftover this early
+	// check exists to prevent, reintroduced by the check itself.
+	if slices.Contains(controlplane.ReservedEnvironmentNames(), name) {
+		if name == controlplane.DefaultEnvironment {
+			return fmt.Errorf("environment %q already exists: install creates it, mapped to your app namespace.\nAdd a different one, e.g. `burrow env add staging`", name)
+		}
+		return fmt.Errorf("environment name %q is reserved and cannot be added: install already created %q, the environment every unqualified operation resolves to.\nAdd a different one, e.g. `burrow env add staging`", name, controlplane.DefaultEnvironment)
 	}
 
 	// (a) Privileged kubeconfig-side setup: create the environment's namespace and grant burrowd a

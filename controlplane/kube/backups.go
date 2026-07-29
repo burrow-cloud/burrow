@@ -186,10 +186,16 @@ pg_restore --clean --if-exists -d %q %q`, app, dump)
 // via secretKeyRef). The env is resolved by the caller so the environment's instance is settled
 // before any Job exists (ADR-0067 §1). BackoffLimit 0: a failed attempt fails the Job rather than
 // retrying forever.
+//
+// The pod runs the postgres image — Burrow's choice, not the app's — so it takes the PLATFORM hook
+// (ADR-0073 §2), not the app one. Putting a pg_dump on the tenant pool is not what an operator who
+// sandboxed the tenant's image asked for. Both callers build their Job here, so backup and restore
+// necessarily share one placement policy; that matters most for restore, where an unschedulable Job
+// is discovered during an incident.
 func (a *Adapter) backupJob(name, script string, connEnv []corev1.EnvVar) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(controlplane.AddonPostgres)}
 	var backoff int32
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: labels},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff,
@@ -214,6 +220,12 @@ func (a *Adapter) backupJob(name, script string, connEnv []corev1.EnvVar) *batch
 			},
 		},
 	}
+	// Applied last, over the fully-constructed pod spec, so the hook can key off the container and
+	// volume the engine composed. The mutator must leave RestartPolicy Never alone: it is already
+	// set above, and a Job whose pod restarts is rejected by the API server. No mutator leaves the
+	// Job exactly as built (ADR-0073 §4).
+	a.applyPlatformPodMutator(&job.Spec.Template.Spec)
+	return job
 }
 
 // runJobAwaitSize creates the Job, polls until it succeeds or fails (or times out), and on success

@@ -178,6 +178,14 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 			},
 		},
 	}
+	// An add-on instance runs an image BURROW chose (Postgres, VictoriaLogs, VictoriaMetrics,
+	// Valkey), not the app's, so it takes the PLATFORM hook (ADR-0073 §2) — an operator who
+	// sandboxed the tenant's image on tenant-only nodes did not ask for their own Postgres there.
+	// Applied last, over the fully-constructed pod spec, so it sees the containers, volumes, and
+	// exporter sidecar composed above; a nil mutator leaves the Deployment exactly as built (§4).
+	// This is also the hook's most dangerous reach: the Postgres instance is stateful, and moving it
+	// to a pool where its volume cannot attach breaks the add-on rather than one deploy.
+	a.applyPlatformPodMutator(&dep.Spec.Template.Spec)
 	if _, err := a.client.AppsV1().Deployments(a.addonNamespace).Create(ctx, dep, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return controlplane.AddonInfo{}, fmt.Errorf("kube: creating addon %q: %w", name, err)
 	}
@@ -446,6 +454,10 @@ func (a *Adapter) deployLogsCollector(ctx context.Context, store string, labels 
 				ObjectMeta: metav1.ObjectMeta{Labels: cmLabels},
 				Spec: corev1.PodSpec{
 					// Run on every node, including control-plane nodes (k3d's single node is one).
+					// This blanket toleration is hard-coded on purpose and stays (ADR-0073 §3): a
+					// node-log collector that skips tainted nodes silently loses exactly those
+					// nodes' logs, and it is the one placement field the engine legitimately knows
+					// the answer to. The platform hook below still runs over it.
 					Tolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
 					Containers: []corev1.Container{{
 						Name:  "fluent-bit",
@@ -463,6 +475,13 @@ func (a *Adapter) deployLogsCollector(ctx context.Context, store string, labels 
 			},
 		},
 	}
+	// Fluent Bit is Burrow's image, not the app's, so the collector takes the PLATFORM hook
+	// (ADR-0073 §2). Applied last, over the fully-constructed pod spec — which means the mutator
+	// meets the blanket toleration above and must tolerate it: replacing the toleration slice
+	// outright leaves the collector unable to run on tainted nodes, which is a collector that
+	// quietly stops collecting rather than an error. A nil mutator leaves the DaemonSet exactly as
+	// built (§4).
+	a.applyPlatformPodMutator(&ds.Spec.Template.Spec)
 	if _, err := a.client.AppsV1().DaemonSets(a.addonNamespace).Create(ctx, ds, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("kube: creating collector %q: %w", name, err)
 	}
@@ -560,6 +579,12 @@ func (a *Adapter) deployMetricsCollector(ctx context.Context, store string, labe
 			},
 		},
 	}
+	// vmagent is Burrow's image, not the app's, so the collector takes the PLATFORM hook (ADR-0073
+	// §2) — it scrapes the tenant's pods but is not one, and belongs wherever the operator puts
+	// Burrow's own workloads. Applied last, over the fully-constructed pod spec, so the hook can see
+	// the ServiceAccount and config mount above; a nil mutator leaves the Deployment exactly as
+	// built (§4).
+	a.applyPlatformPodMutator(&dep.Spec.Template.Spec)
 	if _, err := a.client.AppsV1().Deployments(a.addonNamespace).Create(ctx, dep, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("kube: creating collector %q: %w", name, err)
 	}

@@ -6,6 +6,7 @@ package kube
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -227,5 +228,150 @@ func TestBackupJobTargetsTheEnvironmentsInstance(t *testing.T) {
 	}
 	if len(created) != 2 {
 		t.Errorf("a refused backup/restore still created a Job: %d jobs", len(created))
+	}
+}
+
+// TestBackupJobNoPlatformPodMutatorUnchanged is ADR-0073 §4's obligation on the backup path: with no
+// platform mutator wired, the Job the adapter authors is byte-for-byte what it was before the hook
+// existed. The whole expected object is spelled out, so any accidental change to the backup pod's
+// shape fails here rather than on a cluster.
+func TestBackupJobNoPlatformPodMutatorUnchanged(t *testing.T) {
+	a := New(fake.NewSimpleClientset(), "apps").WithAddonNamespace(addonNS)
+
+	connEnv := []corev1.EnvVar{{Name: "PGHOST", Value: "burrow-postgres." + addonNS + ".svc"}}
+	got := a.backupJob("burrow-pg-backup-bk1", "pg_dump -Fc", connEnv)
+
+	labels := map[string]string{
+		nameLabel:      "burrow-pg-backup-bk1",
+		managedByLabel: managedByValue,
+		addonLabel:     string(controlplane.AddonPostgres),
+	}
+	var backoff int32
+	want := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "burrow-pg-backup-bk1", Namespace: addonNS, Labels: labels},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: &backoff,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{{
+						Name:         "pg",
+						Image:        backupImage,
+						Command:      []string{"sh", "-c", "pg_dump -Fc"},
+						Env:          connEnv,
+						VolumeMounts: []corev1.VolumeMount{{Name: "backups", MountPath: backupMountPath}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name:         "backups",
+						VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: backupPVCName}},
+					}},
+				},
+			},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("backup Job built with no platform mutator differs from the pre-hook output (ADR-0073 §4)\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+// TestBackupAndRestoreJobsCarryThePlatformMutator covers both callers of the one shared builder. A
+// backup Job that cannot schedule burns RunBackupJob's full timeout with Failed and Succeeded both
+// zero, so it reports a timeout rather than an unschedulable pod; the restore is worse, because the
+// operator finds out during an incident. Sharing the builder means the two necessarily share one
+// placement policy, which is what this asserts.
+func TestBackupAndRestoreJobsCarryThePlatformMutator(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	var created []*batchv1.Job
+	succeedJobs(client, &created)
+
+	tol := corev1.Toleration{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "platform", Effect: corev1.TaintEffectNoSchedule}
+	a := New(client, "apps").WithAddonNamespace(addonNS).WithPlatformPodMutator(func(pod *corev1.PodSpec) {
+		// Idempotent: replaces rather than appends, as a hook that runs on every write must.
+		pod.Tolerations = []corev1.Toleration{tol}
+		pod.RuntimeClassName = ptrTo("kata")
+		pod.NodeSelector = map[string]string{"pool": "platform"}
+	})
+
+	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1"); err != nil {
+		t.Fatalf("RunBackupJob: %v", err)
+	}
+	if err := a.RunRestoreJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1"); err != nil {
+		t.Fatalf("RunRestoreJob: %v", err)
+	}
+	if len(created) != 2 {
+		t.Fatalf("created %d jobs, want 2 (backup and restore)", len(created))
+	}
+	for _, job := range created {
+		pod := job.Spec.Template.Spec
+		if len(pod.Tolerations) != 1 || pod.Tolerations[0] != tol {
+			t.Errorf("job %q tolerations = %+v, want exactly %+v", job.Name, pod.Tolerations, tol)
+		}
+		if pod.RuntimeClassName == nil || *pod.RuntimeClassName != "kata" {
+			t.Errorf("job %q runtimeClassName = %v, want kata", job.Name, pod.RuntimeClassName)
+		}
+		if pod.NodeSelector["pool"] != "platform" {
+			t.Errorf("job %q nodeSelector = %v, want pool=platform", job.Name, pod.NodeSelector)
+		}
+		// The hook adjusts placement; it must not have cost the Job what it depends on.
+		if pod.RestartPolicy != corev1.RestartPolicyNever {
+			t.Errorf("job %q restart policy = %q, want Never", job.Name, pod.RestartPolicy)
+		}
+		if len(pod.Containers) != 1 || pod.Containers[0].Image != backupImage {
+			t.Errorf("job %q containers = %+v, want the one postgres container", job.Name, pod.Containers)
+		}
+	}
+}
+
+// TestBackupJobPlatformMutatorSeesConstructedPodSpec pins the ordering (ADR-0073 §6): the hook runs
+// over the FULLY-built pod spec, so a mutator can key its decision off the container and the mounted
+// backup volume the engine composed. It also documents what the mutator author must expect to find
+// already set — RestartPolicy Never — since overwriting it produces a Job the API server rejects.
+func TestBackupJobPlatformMutatorSeesConstructedPodSpec(t *testing.T) {
+	var sawContainers int
+	var sawImage string
+	var sawVolume bool
+	var sawRestartPolicy corev1.RestartPolicy
+
+	a := New(fake.NewSimpleClientset(), "apps").WithAddonNamespace(addonNS).WithPlatformPodMutator(func(pod *corev1.PodSpec) {
+		sawContainers = len(pod.Containers)
+		sawRestartPolicy = pod.RestartPolicy
+		if len(pod.Containers) > 0 {
+			sawImage = pod.Containers[0].Image
+		}
+		for _, v := range pod.Volumes {
+			if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == backupPVCName {
+				sawVolume = true
+			}
+		}
+	})
+	a.backupJob("burrow-pg-backup-bk1", "pg_dump -Fc", nil)
+
+	if sawContainers != 1 {
+		t.Errorf("mutator saw %d containers, want 1 — it ran before the pod was built", sawContainers)
+	}
+	if sawImage != backupImage {
+		t.Errorf("mutator saw image %q, want %q", sawImage, backupImage)
+	}
+	if !sawVolume {
+		t.Error("mutator did not see the mounted backup volume")
+	}
+	if sawRestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("mutator saw restart policy %q, want Never — a Job pod arrives with it already set", sawRestartPolicy)
+	}
+}
+
+// TestBackupJobIgnoresAppPodMutator holds the classification (ADR-0073 §2): the backup Job runs
+// Burrow's postgres image, not the app's, so it takes the platform hook and NOT the app one. An
+// operator who sandboxed the tenant's image on tenant-only nodes did not ask for their pg_dump
+// there, and a path wired to the wrong hook gives them policy they never intended.
+func TestBackupJobIgnoresAppPodMutator(t *testing.T) {
+	a := New(fake.NewSimpleClientset(), "apps").WithAddonNamespace(addonNS).
+		WithPodMutator(func(pod *corev1.PodSpec) { pod.NodeSelector = map[string]string{"pool": "tenant"} })
+
+	pod := a.backupJob("burrow-pg-backup-bk1", "pg_dump -Fc", nil).Spec.Template.Spec
+	if len(pod.NodeSelector) != 0 {
+		t.Errorf("nodeSelector = %v, want none: the app hook must not reach a Burrow-image pod", pod.NodeSelector)
 	}
 }

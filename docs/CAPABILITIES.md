@@ -80,8 +80,20 @@ API. A nil mutator leaves the Deployment byte-for-byte unchanged, which is pinne
 It also covers the **one-off command Job** of `burrow app run`
 ([ADR-0048](adr/0048-one-off-command-runner.md)), which runs the app's own image in the app's
 namespace with the app's environment and therefore faces the same admission and scheduling
-constraints as the app itself. It does **not** cover add-on workloads, backup or restore Jobs, or
-the build Job — the build path has its own hook, `WithBuildPodMutator`.
+constraints as the app itself.
+
+Pods running **Burrow's own images** take a second hook, `Adapter.WithPlatformPodMutator`
+([ADR-0073](adr/0073-placement-policy-reaches-every-authored-pod.md)): the add-on instance
+Deployment, the log-collector DaemonSet, the metrics-collector Deployment, and the backup and
+restore Jobs. Two hooks rather than one because the two sets take different placement policy — an
+operator may want the tenant's image on tenant-only nodes and their own Postgres and collectors
+somewhere else — and one hook could serve that only by having the operator guess which kind of pod
+it was handed. The build Job has a third hook of its own, `WithBuildPodMutator`.
+
+Both hooks are equally unwired here, and a nil mutator leaves every one of those objects
+byte-for-byte unchanged, pinned per path by a test. **Wiring nothing sandboxes nothing**: this is a
+seam that makes an operator's isolation reachable, not isolation Burrow enforces. Enforcement is
+admission policy on the cluster, not a hook the same binary can decline to wire.
 
 ### Deploy does not wait for the rollout
 

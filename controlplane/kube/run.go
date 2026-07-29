@@ -103,6 +103,10 @@ func (a *Adapter) captureRun(ctx context.Context, jobName string) controlplane.R
 // and its per-app Secret via envFrom (ADR-0048 §2), in the adapter's app namespace. RestartPolicy
 // Never and BackoffLimit 0 make a single attempt whose exit code is the result — no retry masking a
 // non-zero exit. TTLSecondsAfterFinished sets the native garbage-collection window (ADR-0048 §7).
+//
+// The pod is then handed to the ADR-0061 mutator, exactly as the app Deployment's pod template is:
+// a run is the app's own image in the app's namespace with the app's environment, so it belongs
+// under the same placement and runtime policy the app itself was deployed under.
 func (a *Adapter) runJob(name string, spec controlplane.RunSpec) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
 	var backoff int32
@@ -121,7 +125,7 @@ func (a *Adapter) runJob(name string, spec controlplane.RunSpec) *batchv1.Job {
 		},
 	}}
 
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoff,
@@ -141,4 +145,14 @@ func (a *Adapter) runJob(name string, spec controlplane.RunSpec) *batchv1.Job {
 			},
 		},
 	}
+
+	// Apply the ADR-0061 extension point last, over the fully-constructed pod spec, exactly as
+	// buildDeployment does — same adapter, same hook, same app. Without it a run Job is authored with
+	// no toleration and no runtimeClassName on a cluster whose app pods only schedule with them, and
+	// the failure is quiet: the Job sits Pending until RunJob's ten-minute deadline and reports a
+	// timeout rather than an unschedulable pod. No mutator leaves the Job exactly as built above.
+	if a.podMutator != nil {
+		a.podMutator(&job.Spec.Template.Spec)
+	}
+	return job
 }

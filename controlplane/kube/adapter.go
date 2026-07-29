@@ -55,11 +55,12 @@ type Adapter struct {
 	client         kubernetes.Interface
 	namespace      string
 	addonNamespace string
-	// podMutator is the ADR-0061 deploy-path extension point: an OPTIONAL hook applied to the app
-	// Deployment's pod template spec after it is constructed and before the object is sent to the
-	// API server. It carries cluster requirements the engine cannot know about — a toleration for a
-	// tainted node pool, a mandated runtimeClassName, a priority or topology policy. nil (the
-	// default) leaves the constructed Deployment exactly as it is. Wired via WithPodMutator.
+	// podMutator is the ADR-0061 deploy-path extension point: an OPTIONAL hook applied to every pod
+	// spec this adapter authors for an app — the Deployment's pod template and the one-off run Job
+	// (ADR-0048) — after it is constructed and before the object is sent to the API server. It
+	// carries cluster requirements the engine cannot know about — a toleration for a tainted node
+	// pool, a mandated runtimeClassName, a priority or topology policy. nil (the default) leaves the
+	// constructed object exactly as it is. Wired via WithPodMutator.
 	podMutator func(*corev1.PodSpec)
 }
 
@@ -83,22 +84,33 @@ func (a *Adapter) WithAddonNamespace(ns string) *Adapter {
 	return a
 }
 
-// WithPodMutator registers a hook the adapter applies to the app Deployment's pod template spec
-// after it is constructed and before the object is sent to the API server (ADR-0061). It is the
+// WithPodMutator registers a hook the adapter applies to the pod specs it authors for an app, after
+// each is constructed and before the object is sent to the API server (ADR-0061). It is the
 // deploy-path counterpart of BuildAdapter.WithBuildPodMutator (ADR-0053 §6).
+//
+// Its reach is every pod this adapter runs the app's own image in: the Deployment's pod template,
+// and the one-off command Job of ADR-0048. A run is the app's image, in the app's namespace, with
+// the app's environment — the same workload for one command — so it is admitted and scheduled under
+// the same cluster constraints, and a hook that covered only the Deployment would leave `burrow app
+// run` unschedulable on precisely the clusters this seam exists for. Add-ons, backup Jobs, and the
+// build Job are NOT covered: they run images Burrow chooses rather than the app's, and the build
+// path has its own hook.
 //
 // It exists for cluster requirements the engine cannot know about, because they are properties of a
 // cluster rather than of Burrow: a toleration for a tainted node pool (a GPU pool, spot capacity, a
 // pool reserved for one team), a mandated runtimeClassName, a priorityClassName, a
 // topologySpreadConstraint, a nodeSelector, an image-pull secret for a private base registry. Burrow
 // hard-codes none of these — the operator embedding the engine supplies what their cluster requires.
-// A nil mutator (the default) leaves the constructed Deployment exactly as-is.
+// A nil mutator (the default) leaves every object this adapter constructs exactly as-is.
 //
 // Unlike the build seam, whose Job is created once, this hook runs on EVERY write of the pod
 // template — creates and updates alike, so a rollout does not drop what the deploy was given
-// (ADR-0061 §2). The mutator must therefore be idempotent: appending to a slice (tolerations,
-// volumes, env) without first checking whether the entry is already there will drift across
-// redeploys. Set or replace rather than append blindly.
+// (ADR-0061 §2), and once more per run. The mutator must therefore be idempotent: appending to a
+// slice (tolerations, volumes, env) without first checking whether the entry is already there will
+// drift across redeploys. Set or replace rather than append blindly.
+//
+// It must also tolerate a Job pod, not only a Deployment's: a run pod arrives with RestartPolicy
+// Never already set, and a mutator that overwrites it produces a Job the API server rejects.
 //
 // The hook is trusted and unvalidated: it can set anything on the pod spec, including breaking it.
 // It is compiled into the binary by whoever operates that binary, not supplied at runtime.

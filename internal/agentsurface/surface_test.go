@@ -39,8 +39,16 @@ func TestCatalogueEntriesAreComplete(t *testing.T) {
 		if strings.TrimSpace(c.Command) == "" {
 			t.Errorf("%q has no operator command; \"here is who can\" needs something a human can actually run", c.Path)
 		}
-		if !strings.HasPrefix(c.Command, "burrow ") {
-			t.Errorf("%q names operator command %q, want a `burrow ...` invocation", c.Path, c.Command)
+		// A capability held back from the agent normally lives on the operator CLI, so its command
+		// is a `burrow ...` invocation. The exception is a capability Burrow does not perform AT ALL
+		// — bucket deletion is the first (ADR-0063 §5) — where the honest answer is the vendor's own
+		// tool. Such an entry must say so in `who`, since the default operator answer would be a lie:
+		// there is no burrow command to run.
+		if c.Who == "" || c.Who == WhoOperator {
+			if !strings.HasPrefix(c.Command, "burrow ") {
+				t.Errorf("%q names operator command %q, want a `burrow ...` invocation (or an explicit "+
+					"`who` naming whoever performs it instead)", c.Path, c.Command)
+			}
 		}
 	}
 }
@@ -165,5 +173,36 @@ func TestGuardReportKeepsTheTwoGroupsApart(t *testing.T) {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("guard report JSON is missing %s: %s", want, b)
 		}
+	}
+}
+
+// TestBucketDeletionIsHeldBackFromEveryBurrowSurface pins ADR-0063 §5's tier-1 half in the table
+// that both readers derive from. Bucket deletion is the first capability Burrow performs NOWHERE:
+// its blast radius is every backup the platform holds, and a bucket name lives in a global
+// namespace, so a mistaken argument can reach past the cluster entirely. It is therefore held back
+// from the agent binary AND absent from the operator CLI, and the answer to "who can" names the
+// vendor rather than a burrow command that does not exist.
+func TestBucketDeletionIsHeldBackFromEveryBurrowSurface(t *testing.T) {
+	var got *Capability
+	for _, c := range AbsentFromAgentSurface() {
+		if c.Path == "bucket delete" {
+			cap := c
+			got = &cap
+		}
+	}
+	if got == nil {
+		t.Fatal("bucket deletion is not reported as absent; an agent asked to clean up storage would " +
+			"hit `unknown command` with no account of who can do it (ADR-0065 §7)")
+	}
+	if got.Who == WhoOperator || !strings.Contains(strings.ToLower(got.Who), "vendor") {
+		t.Errorf("bucket deletion reports who = %q; Burrow has no such command on either CLI, so the "+
+			"answer must name the vendor", got.Who)
+	}
+	if !strings.Contains(strings.ToLower(got.Why), "global") {
+		t.Errorf("the reason does not name the global bucket namespace, which is half of why this is "+
+			"tier 1 rather than a guardrail: %q", got.Why)
+	}
+	if _, onAgent := AgentSurface()["bucket delete"]; onAgent {
+		t.Error("bucket deletion is on the agent allow-list")
 	}
 }

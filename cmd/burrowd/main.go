@@ -31,6 +31,7 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane/kube"
 	"github.com/burrow-cloud/burrow/controlplane/logs"
 	"github.com/burrow-cloud/burrow/controlplane/metrics"
+	"github.com/burrow-cloud/burrow/controlplane/objectstore"
 	"github.com/burrow-cloud/burrow/controlplane/postgres"
 	"github.com/burrow-cloud/burrow/controlplane/registry"
 	"github.com/burrow-cloud/burrow/controlplane/sys"
@@ -230,6 +231,10 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		Resolver:    sys.Resolver{},
 		Credentials: creds,
 		DNS:         dns.NewFactory(),
+		// ObjectStore reaches an S3-compatible endpoint so a backup destination outside this cluster
+		// can be registered and verified (ADR-0063). It is outbound-only and is never on the deploy
+		// path, which stays independent of any third party being reachable (ADR-0040).
+		ObjectStore: objectstore.NewFactory(),
 		Logs: map[string]controlplane.LogsQuerier{
 			"victorialogs": logs.NewVictoriaLogs(obsHTTP),
 			"loki":         logs.NewLoki(obsHTTP),

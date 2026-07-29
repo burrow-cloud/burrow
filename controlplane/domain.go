@@ -301,6 +301,11 @@ func DefaultPolicy() Policy {
 			// and approves the exact command before it runs. An operator can relax it to allow in a safe
 			// environment (e.g. staging) or harden it to deny in prod with `guard set --env prod app.run`.
 			GuardrailAppRun: DispositionConfirm,
+			// Creating a bucket at an object-storage provider is held for confirmation (ADR-0063 §5,
+			// ADR-0065 tier 3): it is additive and reversible, but it creates a billable resource at a
+			// third party, so a human approves it. Deleting a bucket has no disposition here because
+			// it is not an operation Burrow performs — tier 1, absent rather than denied.
+			GuardrailBucketCreate: DispositionConfirm,
 			// Rollback is a recovery action, so it is allowed by default — an agent should be
 			// able to restore a broken app without friction. An operator who wants sign-off can
 			// raise it to confirm or deny with `guard set app.rollback ...`.

@@ -261,6 +261,36 @@ type AddProviderRequest struct {
 	// Token is the vendor API token VALUE. It is written to burrow-credentials after validation and
 	// is never logged, stored in Postgres, or echoed back (ADR-0030).
 	Token string `json:"token,omitempty"`
+
+	// The fields below configure an OBJECT-STORAGE provider (ADR-0063), whose credential is a PAIR
+	// rather than one opaque token and whose configuration names a destination. They are ignored
+	// for every other provider type.
+
+	// Endpoint is the S3-compatible API endpoint. Object storage is addressed by endpoint rather
+	// than by vendor (ADR-0063 §1): the vendor is whoever answers it.
+	Endpoint string `json:"endpoint,omitempty"`
+	// Region is the region the S3 request is signed for.
+	Region string `json:"region,omitempty"`
+	// Bucket names an EXISTING bucket to use. Mutually exclusive with CreateBucket: Burrow either
+	// creates the bucket it will own or is pointed at one, and never infers a bucket by name
+	// (ADR-0063 §4).
+	Bucket string `json:"bucket,omitempty"`
+	// CreateBucket asks Burrow to create its own bucket, with a readable prefix and a random
+	// component, and record the name it created (ADR-0063 §4). It trips the bucket.create guardrail.
+	CreateBucket bool `json:"create_bucket,omitempty"`
+	// RetentionDays is how long backups written to this destination must stay restorable — the
+	// window the bucket's lifecycle rules are reconciled against (ADR-0063 §3). Zero declares no
+	// window, under which any age-expiring lifecycle rule conflicts, because nothing prunes
+	// Burrow's backups today.
+	RetentionDays int `json:"retention_days,omitempty"`
+	// AccessKeyID is one half of the object-storage credential VALUE. Like Token it travels only in
+	// this request body, is written to burrow-credentials after the destination is verified, and is
+	// never logged, stored in Postgres, or echoed back.
+	AccessKeyID string `json:"access_key_id,omitempty"`
+	// SecretAccessKey is the other half of the credential VALUE, held to exactly the same rules.
+	SecretAccessKey string `json:"secret_access_key,omitempty"`
+	// Confirm acknowledges the bucket.create guardrail so a bucket creation proceeds past it.
+	Confirm bool `json:"confirm,omitempty"`
 }
 
 // AddDomainRequest points a host at an address through a configured DNS provider (ADR-0018).

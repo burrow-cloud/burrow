@@ -528,3 +528,80 @@ type DNSProvider interface {
 type DNSFactory interface {
 	DNS(t ProviderType, token string) (DNSProvider, error)
 }
+
+// ObjectStoreCredential is one S3-compatible credential: the pair an S3 API call is signed with
+// (ADR-0063 §1). Both halves are SECRET VALUES — they are read from the burrow-credentials Secret
+// at call time, handed straight to an adapter, and never logged, audited, returned in a response,
+// or placed in an error.
+type ObjectStoreCredential struct {
+	AccessKeyID     string
+	SecretAccessKey string
+}
+
+// IsZero reports whether the credential carries neither half, so a caller can tell "not configured"
+// from "configured with an empty value".
+func (c ObjectStoreCredential) IsZero() bool {
+	return c.AccessKeyID == "" && c.SecretAccessKey == ""
+}
+
+// LifecycleRule is one rule read from a bucket's lifecycle configuration — the vendor-side policy
+// that decides when objects in the bucket are deleted (ADR-0063 §3). It carries only what Burrow
+// reconciles against backup retention: whether the rule is in force, what it applies to, and how
+// long an object survives under it.
+type LifecycleRule struct {
+	// ID is the rule's identifier at the vendor, quoted back in a refusal so the operator can find
+	// the rule they have to change.
+	ID string `json:"id,omitempty"`
+	// Prefix is the key prefix the rule applies to; empty means the whole bucket.
+	Prefix string `json:"prefix,omitempty"`
+	// Enabled reports whether the rule is in force. A disabled rule deletes nothing and so cannot
+	// conflict with retention.
+	Enabled bool `json:"enabled"`
+	// ExpireAfterDays is how many days after creation the rule deletes an object, or 0 when the
+	// rule expires nothing by age (e.g. it only aborts incomplete multipart uploads).
+	ExpireAfterDays int `json:"expire_after_days,omitempty"`
+}
+
+// ObjectStore is the seam over ONE bucket's vendor, addressed by S3-compatible endpoint rather than
+// by vendor name (ADR-0063 §1). Its surface is deliberately the whole of what ADR-0063 §2 permits
+// Burrow to do with object storage and no more: create the bucket it will own, verify the
+// destination works by writing and deleting a probe object, and read the lifecycle configuration it
+// must reconcile against backup retention. There is no cp, no sync, no listing of arbitrary
+// prefixes, no presigned URL, and no policy/IAM/replication surface — a capability enters here only
+// when a Burrow feature requires it, never because the S3 API offers it.
+//
+// It is an OPTIONAL seam: nil is allowed, and registering an object-storage provider errors cleanly
+// (ErrNotImplemented) when it is not wired.
+type ObjectStore interface {
+	// BucketExists reports whether the bucket is present and reachable with this credential. A
+	// bucket that exists but belongs to someone else is reported as absent-or-unreachable rather
+	// than present, since Burrow can do nothing with it either way.
+	BucketExists(ctx context.Context, bucket string) (bool, error)
+	// CreateBucket creates the bucket. The NAME is the engine's to choose (ADR-0063 §4: a readable
+	// prefix plus a random component, recorded in the providers row) — an implementation creates
+	// exactly the name it is given and never derives or adopts one.
+	CreateBucket(ctx context.Context, bucket string) error
+	// PutObject writes body at key. It exists for the configuration-time probe of ADR-0063 §2 and
+	// for the backup path that follows; it is not a general upload surface.
+	PutObject(ctx context.Context, bucket, key string, body []byte) error
+	// DeleteObject removes key. Deleting an object that is already absent is a no-op, not an error,
+	// so the probe's cleanup is idempotent.
+	DeleteObject(ctx context.Context, bucket, key string) error
+	// LifecycleRules returns the bucket's lifecycle rules. NO rules is an empty slice and no error.
+	//
+	// A store that cannot ANSWER — the vendor does not implement the lifecycle API, or this
+	// credential is not permitted to read it — returns an error wrapping ErrLifecycleUnknown, and
+	// the engine reports the reconciliation as unknown rather than as verified (ADR-0063 §3: an
+	// unverifiable invariant reported as verified is worse than one reported as unknown). Any other
+	// error is a genuine failure.
+	LifecycleRules(ctx context.Context, bucket string) ([]LifecycleRule, error)
+}
+
+// ObjectStoreFactory builds an ObjectStore for an S3-compatible endpoint and credential pair
+// (ADR-0063 §1) — the object-storage sibling of DNSFactory, and for the same reason: the engine
+// reaches a vendor without importing its adapter, so production wires controlplane/objectstore and
+// a test substitutes a fake. region is the S3 region the request is signed for; endpoint is the
+// API endpoint that answers, and the vendor is whoever that is.
+type ObjectStoreFactory interface {
+	ObjectStore(endpoint, region string, cred ObjectStoreCredential) (ObjectStore, error)
+}

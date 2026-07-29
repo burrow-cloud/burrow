@@ -117,6 +117,15 @@ var adminVerbFragments = []string{
 	// ADR-0065 §2, tier 1. The whole path is the fragment on purpose: a bare "remove" would
 	// shadow `domain remove`, which is app-scoped and allowed.
 	"addon_remove",
+	// Deleting a bucket takes every backup the platform holds, and a bucket name is GLOBAL, so a
+	// mistaken argument can reach outside the cluster entirely (ADR-0063 §5, ADR-0065 tier 1).
+	// Burrow performs no bucket deletion on either CLI; these fragments assert its absence here
+	// rather than leaving it a property of what the command tree happens to register today.
+	"bucket_delete",
+	"bucket_remove",
+	"bucket_destroy",
+	"delete_bucket",
+	"remove_bucket",
 }
 
 // adminFragmentExceptions are the allow-listed paths that match an adminVerbFragments entry for a
@@ -249,6 +258,8 @@ func TestAdminVerbFragmentsCatchTheObviousCases(t *testing.T) {
 		"apply", "manifest apply", "helm install", "guard set", "env add", "environment create",
 		"credential add", "config registry login", "config provider add", "secret set",
 		"addon remove", // tier 1 (ADR-0065 §2): removes THE add-on, taking every attached app with it
+		// tier 1 (ADR-0063 §5): a bucket holds every backup, and its name is in a global namespace.
+		"bucket delete", "delete bucket", "bucket remove", "storage bucket delete",
 	}
 	for _, path := range mustCatch {
 		if matchAdminFragment(path) == "" {

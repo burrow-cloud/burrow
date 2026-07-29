@@ -25,6 +25,11 @@ const (
 	// hosts a registry — to authenticate the build's image push/pull (ADR-0057). One provider token
 	// covers both, so a single credential serves the clone and the provider registry.
 	CapabilitySource Capability = "source"
+	// CapabilityObjectStorage is durable storage OUTSIDE the cluster, reached over the S3-compatible
+	// API (ADR-0063). It exists so a backup can leave the failure domain of the database it came
+	// from; it is a backup DESTINATION and not an object-storage product, and ADR-0063 §2 fixes that
+	// scope deliberately — no browser, no cp/sync/ls of arbitrary prefixes, no policy or IAM surface.
+	CapabilityObjectStorage Capability = "object-storage"
 )
 
 // ProviderType identifies a vendor Burrow knows how to talk to. The type implies the
@@ -44,6 +49,12 @@ const (
 	// ProviderGitLab is GitLab: a source provider whose one token covers both gitlab.com private-git
 	// clones and its container registry (ADR-0057).
 	ProviderGitLab ProviderType = "gitlab"
+	// ProviderS3 is any S3-compatible object store — AWS S3, Backblaze B2, Cloudflare R2, MinIO,
+	// and the rest. It is deliberately NOT a vendor: ADR-0063 §1 addresses object storage by
+	// ENDPOINT, so the vendor is whoever answers it and Burrow maintains no vendor list. S3
+	// compatibility is a spectrum rather than a standard, so a vendor is supported when it has been
+	// tested, not when it claims compatibility.
+	ProviderS3 ProviderType = "s3"
 )
 
 // knownProviderTypes maps each supported vendor to the capabilities it serves. It is the
@@ -54,6 +65,7 @@ var knownProviderTypes = map[ProviderType][]Capability{
 	ProviderCloudflare:   {CapabilityDNS},
 	ProviderGitHub:       {CapabilitySource},
 	ProviderGitLab:       {CapabilitySource},
+	ProviderS3:           {CapabilityObjectStorage},
 }
 
 // sourceProviderHosts maps a source provider to the git host it clones from and the registry host
@@ -139,10 +151,21 @@ type Provider struct {
 	Type ProviderType `json:"type"`
 	// Capabilities are the services this provider serves, derived from its type.
 	Capabilities []Capability `json:"capabilities"`
-	// SecretKey is the key under which this provider's token lives in burrow-credentials.
+	// SecretKey is the key under which this provider's token lives in burrow-credentials. For a
+	// provider whose credential is a PAIR rather than one opaque token (object storage, ADR-0063
+	// §1) it names the first of the pair's two keys, and ObjectStore records both by name.
 	SecretKey string `json:"secret_key"`
+	// ObjectStore is the non-secret object-storage configuration — endpoint, region, the RECORDED
+	// bucket, and the names of the two burrow-credentials keys holding the credential pair
+	// (ADR-0063 §1). Nil for a provider that serves no object storage.
+	ObjectStore *ObjectStoreConfig `json:"object_store,omitempty"`
 	// CreatedAt is when the provider was registered, read from the injected clock.
 	CreatedAt time.Time `json:"created_at"`
+	// Verification reports what configuration-time verification OBSERVED — the probe object, the
+	// bucket, the lifecycle reconciliation (ADR-0063 §2-§4). It is populated by the registration
+	// that performed the checks and is deliberately NOT stored: it describes one moment, and a
+	// stored copy would go stale while still reading as current.
+	Verification *ProviderVerification `json:"verification,omitempty"`
 }
 
 // Serves reports whether the provider serves capability c.
@@ -201,6 +224,15 @@ func (e *Engine) AddProvider(ctx context.Context, req AddProviderRequest) (Provi
 	if err := p.Validate(); err != nil {
 		return Provider{}, fmt.Errorf("add provider: %w: %w", ErrInvalid, err)
 	}
+
+	// An object-storage provider's credential is a PAIR and its configuration is a destination
+	// rather than a token, so it registers through its own path: create-or-verify the bucket, probe
+	// it, reconcile lifecycle against retention, then write two keys into the SAME
+	// burrow-credentials Secret (ADR-0063 §1-§4). No new Secret and no new RBAC.
+	if p.Serves(CapabilityObjectStorage) {
+		return e.addObjectStorageProvider(ctx, p, req)
+	}
+
 	if req.Token == "" {
 		return Provider{}, fmt.Errorf("add provider %s: a token is required: %w", name, ErrInvalid)
 	}

@@ -875,3 +875,40 @@ func TestInstallNamesTheProdEnvironment(t *testing.T) {
 		t.Errorf("install output must not contain an em-dash:\n%s", out)
 	}
 }
+
+// TestObjectStorageCredentialWidensNoRBAC pins the reason ADR-0063 §1 chose two keys in the
+// existing Secret over a Secret per provider.
+//
+// An S3 credential is a PAIR where every other provider's is one opaque token, and the tempting
+// answer — give object storage its own Secret — would have required widening burrowd's grant from
+// `resourceNames: ["burrow-credentials"]` to a list or to the namespace. That grant naming exactly
+// one object is the tightest thing Kubernetes offers, and a credential layout is not worth loosening
+// it for. So the pair lands as two keys in the SAME Secret, and this test is what says so: the
+// install renders one credential Secret, one scoped grant, and nothing else.
+func TestObjectStorageCredentialWidensNoRBAC(t *testing.T) {
+	out, err := renderManifests(installOptions{
+		Namespace: "burrow", AppNamespace: "apps", Image: "img:1",
+		Token: "t", DBPassword: "p", Port: 8080,
+	})
+	if err != nil {
+		t.Fatalf("renderManifests: %v", err)
+	}
+
+	if c := strings.Count(out, `resourceNames: ["burrow-credentials"]`); c != 1 {
+		t.Errorf("expected exactly one resourceNames-scoped grant on burrow-credentials, found %d", c)
+	}
+	if c := strings.Count(out, "name: burrow-credentials"); c != 1 {
+		t.Errorf("expected exactly one burrow-credentials object, found %d; an object-storage "+
+			"credential is two KEYS in that one Secret, never a second Secret (ADR-0063 §1)", c)
+	}
+	for _, banned := range []string{
+		"burrow-object-storage",
+		"burrow-s3",
+		`resourceNames: ["burrow-credentials", `,
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("the install renders %q; the object-storage credential must not add a Secret or "+
+				"widen burrowd's grant (ADR-0063 §1)", banned)
+		}
+	}
+}

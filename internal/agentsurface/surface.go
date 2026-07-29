@@ -227,6 +227,29 @@ var catalogue = []Capability{
 		Command: "burrow addon restore <addon> <app> --backup <id>",
 	},
 
+	// Object storage. ADR-0063 §5 splits the two bucket operations across two tiers, and the split
+	// is the point of the record. CREATION is tier 3: additive, reversible, part of a legitimate
+	// workflow, so it ships as the `bucket.create` guardrail at `confirm` and a human approves the
+	// billable resource. DELETION is tier 1 and is not compiled into either binary — it is not an
+	// operation Burrow performs at all, which is why the entry below names the vendor rather than
+	// an operator command.
+	{
+		Surface: Operator,
+		Path:    "bucket delete",
+		What:    "deletes a bucket at an object-storage provider, and every backup in it",
+		Why: "tier 1 (ADR-0065 §2, ADR-0063 §5): it fails the scope test twice over. Its blast radius " +
+			"is every backup the platform holds, far beyond the app the agent was asked about; and a " +
+			"bucket is addressed by a name in a GLOBAL namespace, so a mistaken argument does not " +
+			"merely delete the wrong bucket of yours — it can reach outside the cluster entirely, " +
+			"beyond anything Burrow's guardrails cover. Burrow therefore has no such command on " +
+			"either CLI",
+		Who: "a human, at the object-storage vendor's own console or CLI",
+		// Burrow ships no bucket-deletion command, so there is no Burrow invocation to hand over.
+		// Naming the vendor's own tool IS the answer here, and it is a better one than a Burrow
+		// command would be: the vendor's CLI is what should perform it.
+		Command: "the vendor's own CLI (e.g. `aws s3 rb`, `b2 bucket delete`), run by a human",
+	},
+
 	// Governance. `guard set` is load-bearing twice over: it is what an operator uses to relax or
 	// tighten a guardrail, and its absence here is what makes every tier-2 `deny` trustworthy
 	// rather than advisory (ADR-0065 "Consequences"). If the agent could set its own guardrails,

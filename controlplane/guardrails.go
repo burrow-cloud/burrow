@@ -99,6 +99,17 @@ const (
 	// the human sees and approves the exact command before it runs, and prod is the environment to
 	// keep gated. The guardrail gates whether the command runs, not what it does (ADR-0048 §5).
 	GuardrailAppRun GuardrailCode = "app.run"
+	// GuardrailBucketCreate: the operation would create a bucket at an object-storage provider
+	// (ADR-0063 §5). Held for confirmation by default, which is ADR-0065's THIRD tier: creating a
+	// bucket is additive, reversible, and part of a legitimate workflow, but it costs money at a
+	// vendor, so a human approves it.
+	//
+	// Its counterpart is deliberately absent rather than guarded. Bucket DELETION is not a
+	// guardrail code, because it is not an operation Burrow performs at all: its blast radius is
+	// every backup the platform holds, and a bucket name lives in a GLOBAL namespace, so a mistaken
+	// argument could reach outside the cluster entirely — ADR-0065's tier 1, where the worst case is
+	// unbounded rather than merely bad. Deleting a bucket happens at the vendor, by a human.
+	GuardrailBucketCreate GuardrailCode = "bucket.create"
 )
 
 // GuardrailInfo describes a guardrail and its current disposition, for inspection through
@@ -131,6 +142,7 @@ var knownGuardrails = []GuardrailInfo{
 	{Code: GuardrailRollback, Description: "roll an application back to its previous release"},
 	{Code: GuardrailAutoscale, Description: "configure autoscaling for an application"},
 	{Code: GuardrailAppRun, Description: "run a one-off command inside an application's own image and environment"},
+	{Code: GuardrailBucketCreate, Description: "create a bucket at an object-storage provider (deleting one is not a Burrow operation at all)"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.

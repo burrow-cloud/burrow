@@ -295,6 +295,48 @@ type Provider struct {
 	Capabilities []string  `json:"capabilities"`
 	SecretKey    string    `json:"secret_key"`
 	CreatedAt    time.Time `json:"created_at"`
+	// ObjectStore is the non-secret destination an object-storage provider was registered with —
+	// endpoint, region, the RECORDED bucket, and the NAMES of the two burrow-credentials keys
+	// holding the credential pair (ADR-0063 §1). Nil for every other provider type.
+	ObjectStore *ObjectStoreConfig `json:"object_store,omitempty"`
+	// Verification is what configuration-time verification observed: the probe object written and
+	// deleted, the bucket, and the lifecycle reconciliation (ADR-0063 §2-§4). It is present on the
+	// registration that performed the checks and absent from a listing, because it describes one
+	// moment rather than a stored fact.
+	Verification *ProviderVerification `json:"verification,omitempty"`
+}
+
+// ObjectStoreConfig mirrors the non-secret object-storage configuration on a provider row
+// (ADR-0063 §1). It carries key NAMES, never key values.
+type ObjectStoreConfig struct {
+	Endpoint           string `json:"endpoint"`
+	Region             string `json:"region,omitempty"`
+	Bucket             string `json:"bucket"`
+	Created            bool   `json:"created,omitempty"`
+	AccessKeyIDKey     string `json:"access_key_id_key"`
+	SecretAccessKeyKey string `json:"secret_access_key_key"`
+	RetentionDays      int    `json:"retention_days,omitempty"`
+}
+
+// ProviderVerification mirrors what the control plane observed while registering an object-storage
+// provider: it wrote and deleted a probe object, it created or was pointed at a bucket, and it
+// reconciled the bucket's lifecycle rules against backup retention (ADR-0063 §2-§4).
+type ProviderVerification struct {
+	Bucket        string         `json:"bucket"`
+	BucketCreated bool           `json:"bucket_created"`
+	ProbeObject   bool           `json:"probe_object"`
+	Lifecycle     LifecycleCheck `json:"lifecycle"`
+}
+
+// LifecycleCheck mirrors the outcome of reconciling a bucket's lifecycle rules against backup
+// retention (ADR-0063 §3). Status is "ok", "conflict", or "unknown" — and "unknown" means the
+// configuration could not be READ, so the invariant is not verified and must not be reported as
+// though it were.
+type LifecycleCheck struct {
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+	Rule   string `json:"rule,omitempty"`
+	Backup string `json:"backup,omitempty"`
 }
 
 // AddProviderRequest registers a vendor credential. The token VALUE travels in this request over
@@ -306,6 +348,19 @@ type AddProviderRequest struct {
 	Type      string `json:"type"`
 	SecretKey string `json:"secret_key,omitempty"`
 	Token     string `json:"token,omitempty"`
+
+	// The fields below configure an OBJECT-STORAGE provider (ADR-0063), whose credential is a PAIR
+	// and whose configuration names a destination. AccessKeyID and SecretAccessKey are credential
+	// VALUES and are held to exactly the same rules as Token: body only, never logged, never
+	// echoed back.
+	Endpoint        string `json:"endpoint,omitempty"`
+	Region          string `json:"region,omitempty"`
+	Bucket          string `json:"bucket,omitempty"`
+	CreateBucket    bool   `json:"create_bucket,omitempty"`
+	RetentionDays   int    `json:"retention_days,omitempty"`
+	AccessKeyID     string `json:"access_key_id,omitempty"`
+	SecretAccessKey string `json:"secret_access_key,omitempty"`
+	Confirm         bool   `json:"confirm,omitempty"`
 }
 
 // DomainResult mirrors the control plane's DNS-record outcome (ADR-0018).

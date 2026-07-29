@@ -77,6 +77,12 @@ a `func(*corev1.PodSpec)` applied on both create and update. It is a **compile-t
 embedder**: nothing in this repository wires one, and it is not reachable from the CLI or the
 API. A nil mutator leaves the Deployment byte-for-byte unchanged, which is pinned by a test.
 
+It also covers the **one-off command Job** of `burrow app run`
+([ADR-0048](adr/0048-one-off-command-runner.md)), which runs the app's own image in the app's
+namespace with the app's environment and therefore faces the same admission and scheduling
+constraints as the app itself. It does **not** cover add-on workloads, backup or restore Jobs, or
+the build Job — the build path has its own hook, `WithBuildPodMutator`.
+
 ### Deploy does not wait for the rollout
 
 `deploy` returns once the Kubernetes API server accepts the Deployment write. A release marked

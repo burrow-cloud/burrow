@@ -6,6 +6,7 @@ package controlplane_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -63,6 +64,50 @@ func TestAddEnvironmentValidation(t *testing.T) {
 	// A duplicate name is rejected (ErrInvalid).
 	if _, err := e.AddEnvironment(ctx, "staging", "other-ns"); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("duplicate AddEnvironment err = %v, want ErrInvalid", err)
+	}
+}
+
+// TestReservedEnvironmentNamesAreRefused pins the exported set to the refusal it claims to describe,
+// which is the only thing that makes the accessor worth reading. A caller that refuses BEFORE it
+// provisions — `burrow env add`, which creates the environment's namespace and RBAC first, or an
+// operator embedding the engine — asks ReservedEnvironmentNames what to refuse and never reaches
+// AddEnvironment for those names. If the two ever disagree, that caller creates cluster state for a
+// request the control plane was always going to reject, and nothing errors where the state is made.
+// So: every name the accessor reports is actually rejected, and a name it does not report is
+// accepted — a set that grew to swallow ordinary names would pass the first half alone.
+func TestReservedEnvironmentNamesAreRefused(t *testing.T) {
+	e, _ := newEnvEngine(t, "burrow-apps")
+	ctx := context.Background()
+
+	reserved := cp.ReservedEnvironmentNames()
+	if len(reserved) == 0 {
+		t.Fatal("ReservedEnvironmentNames is empty; at least the default environment is reserved (ADR-0067 §2)")
+	}
+	if !slices.Contains(reserved, cp.DefaultEnvironment) {
+		t.Errorf("ReservedEnvironmentNames = %q, missing the default environment %q", reserved, cp.DefaultEnvironment)
+	}
+	// The retired `default` stays reserved so a re-added `default` cannot collide with a row
+	// migration 00018 rewrote (ADR-0067 §2). It is named literally here on purpose: this is the
+	// assertion that the set has not quietly shrunk, so it must not read the set to check it.
+	if !slices.Contains(reserved, "default") {
+		t.Errorf("ReservedEnvironmentNames = %q, missing the retired `default` (ADR-0067 §2)", reserved)
+	}
+
+	for _, name := range reserved {
+		if _, err := e.AddEnvironment(ctx, name, "burrow-apps-"+name); !errors.Is(err, cp.ErrInvalid) {
+			t.Errorf("AddEnvironment(%q) err = %v, want ErrInvalid: the accessor reports it reserved", name, err)
+		}
+	}
+
+	// A name the accessor does NOT report registers, so "refuses everything" cannot pass above.
+	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
+		t.Errorf("AddEnvironment(staging): %v, want success (staging is not reserved)", err)
+	}
+
+	// The returned slice is the caller's own: mutating it does not edit the package's set.
+	reserved[0] = "clobbered"
+	if slices.Contains(cp.ReservedEnvironmentNames(), "clobbered") {
+		t.Error("ReservedEnvironmentNames returns the backing slice; a caller can rewrite the reserved set")
 	}
 }
 

@@ -23,10 +23,26 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # predicate-quantifier: every is LOAD-BEARING — do not drop it, and do not "simplify"
+          # this list back to a bare set of patterns. The action's default quantifier is `some`,
+          # under which a file matches the filter if it matches ANY line. Because '**' matches
+          # every path, the '!' lines were dead: `code` evaluated true for every change on every
+          # event, so the docs-only skip below never once fired. It looked like it worked only
+          # because kube-integration is separately gated on merge_group, which hid the always-true
+          # `code` on PRs; in the queue nothing hid it and a two-file docs-only change (PR #356)
+          # ran the ~10 min k3d job. `every` makes all lines conjunctive, which is what turns the
+          # '!' lines back into real exclusions.
+          predicate-quantifier: every
+          # Docs-only is deliberately NARROW: only the root README.md and anything under docs/.
+          # A markdown file anywhere else — CLAUDE.md, LICENSING.md, a nested README.md — counts as
+          # code and runs the full checks. This replaces a broader '!**/*.md' that treated every
+          # markdown file in the tree as docs; widening it back is a silent way to stop testing
+          # changes that matter. Erring toward running the suite is the safe direction here: a
+          # needless 10-minute run only costs time, a wrongly skipped one merges untested code.
           filters: |
             code:
               - '**'
-              - '!**/*.md'
+              - '!README.md'
               - '!docs/**'
 
   build:

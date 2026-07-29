@@ -38,6 +38,14 @@ Current state stays **derived and never cached**, because a cache lies during ex
 exists to help. History must be **stored**, because nothing can reconstruct it afterwards. That split
 is the design; the rest follows from it.
 
+**Failures arrive in bunches, and the record is built for that** (§5). Keying on object *and* reason
+is what lets one pod be OOM-killed and unschedulable at the same time without either being lost, and
+what makes a pod flapping between two reasons legible as the one bug it is. The harder case is the
+reverse — one taint, twenty unschedulable pods — so the listing groups by shared reason and orders
+oldest-first, since the earliest row in a cascade is usually the one worth fixing. It stops there:
+**Burrow shows correlation and refuses to claim causation**, because a confidently wrong root cause
+during an incident is worse than none.
+
 It is **not** the audit log ([ADR-0027](0027-audit-log.md)) and must not merge with it: audit records
 what Burrow was *asked to do* and what it *decided*; this records what the cluster *did afterwards*.
 And burrowd **observes without remediating** — noticing a crashloop is a read; restarting it is a
@@ -48,7 +56,7 @@ a surface that reports "not available" without saying why, and a history that ca
 "nothing broke" from "nobody was watching", are the same dishonesty ADR-0009 refuses in prose.
 Widens the Issue vocabulary [ADR-0017](0017-private-registry-authentication.md) introduced for one
 failure class. Distinct from [ADR-0026](0026-observability-query-adapters.md)'s query seam and from
-[ADR-0027](0027-audit-log.md)'s audit log, and §6 says why. Answers the quiet-failure problem
+[ADR-0027](0027-audit-log.md)'s audit log, and §7 says why. Answers the quiet-failure problem
 [ADR-0073](0073-placement-policy-reaches-every-authored-pod.md) describes from the other side.
 Supersedes nothing.
 
@@ -158,10 +166,10 @@ burrowd gains a watch over the objects Burrow manages, and this is the significa
 first thing in Burrow that runs **when nobody asked it to**.
 
 **What it watches is bounded by the registry, not by a namespace or a label.** Burrow watches what it
-believes it owns. That is what makes §5 expressible — a label selector can only find things that
+believes it owns. That is what makes §6 expressible — a label selector can only find things that
 exist, and the interesting failure is the thing that does not.
 
-**It is read-only against the cluster, and it must stay that way** — see §8.
+**It is read-only against the cluster, and it must stay that way** — see §9.
 
 ### 4. A failure is a transition, recorded once, with a lifetime
 
@@ -180,7 +188,42 @@ transition themselves. A ledger answers the two questions people actually ask in
 **Retention is bounded** — resolved failures are pruned after a fixed window. This lives in the
 control plane's own database, and unbounded growth there is not a tidiness problem, it is an outage.
 
-### 5. What Burrow intended, compared with what the cluster has
+### 5. Many failures at once is the normal case, not the exception
+
+Failures do not arrive one at a time, and a surface designed around the single-failure case is
+useless during the incidents it was built for.
+
+**Concurrency on one object is why the key is `(object, reason)` and not a status field.** A pod can
+be OOM-killed *and* unschedulable; those are two rows with independent first-seen, resolution and
+count, and either may end without the other. A single status per object would silently drop the
+second, which is the failure this record is about. It also makes alternation legible: a pod flapping
+between `CrashLoopBackOff` and `OOMKilled` produces two rows whose counts both climb, and **together
+they name the bug** — the memory limit — where either alone points somewhere unhelpful.
+
+**One cause routinely produces many rows, and that is the harder problem.** A taint added to a node
+pool makes every backup Job, the add-on and the collector unschedulable in the same minute —
+[ADR-0073](0073-placement-policy-reaches-every-authored-pod.md)'s scenario exactly. A database that
+goes down crashloops every app that depends on it. The ledger will hold *N* rows for one problem, and
+a listing that prints them flat is a wall of red at the moment someone can least afford to read one.
+
+**So the listing groups by shared reason and orders oldest-first.** The same reason appearing across
+many objects inside one window is the signature of a common cause, and the earliest `first_seen` in a
+cascade is the likeliest thing to actually fix. A burst is itself information: thirty rows in one
+minute is a cluster-level event, not thirty application problems, and should read as one.
+
+**Grouping is presentation; the rows are the record.** Resolving the taint resolves each row on its
+own schedule, so they stay separate underneath — and an agent reading the API gets the rows, not the
+grouping, so it can correlate on its own terms rather than inheriting a human-facing heuristic.
+
+**Burrow presents correlation and does not claim causation.** It will not assert that the Postgres
+add-on being down *caused* an app's crashloop, however obvious that is to a reader, because it cannot
+verify the dependency and **a confidently wrong root cause sends someone down the wrong path during
+an incident** — worse than offering none. What it can do honestly is place the facts beside each
+other: same reason, same window, same node, and the ordering that says which came first. This is §2's
+restraint applied to presentation — report the blocking thing that is known, not the plausible thing
+that is inferred.
+
+### 6. What Burrow intended, compared with what the cluster has
 
 The observer diffs the registry against the cluster and records the discrepancies as failures in
 their own right:
@@ -194,7 +237,7 @@ None of these is visible from the cluster side, because in each case the evidenc
 is the diagnosis that genuinely requires a control plane, and it is the strongest single argument for
 this record over "just read the events".
 
-### 6. This is not the audit log, and they must not be merged
+### 7. This is not the audit log, and they must not be merged
 
 [ADR-0027](0027-audit-log.md)'s audit log records **what Burrow was asked to do and what it decided**
 — the operation, the guardrail disposition, whether it was allowed, held, denied or executed. It is a
@@ -206,7 +249,7 @@ They are read together during an incident, and that is an argument for a shared 
 object identity, **not** a shared table. Merging them would subject a security-relevant append-only
 record to the retention pruning §4 requires, and would make "the audit log is complete" false.
 
-### 7. `burrow status` widens; a new listing answers the cluster-wide question
+### 8. `burrow status` widens; a new listing answers the cluster-wide question
 
 `burrow status <app>` stays what it is — one app, live — and gains the widened Issue plus a short
 recent-failure history for that app.
@@ -221,7 +264,7 @@ reads better as a heading and worse as a thing that lists rows, and it invites a
 green/red verdict for a cluster, which is not a claim Burrow should make. The naming should be
 revisited alongside the wider command-organization question rather than settled definitively here.
 
-### 8. burrowd observes; it does not remediate
+### 9. burrowd observes; it does not remediate
 
 The observer is read-only against the cluster and takes no corrective action.
 
@@ -251,6 +294,11 @@ output rather than implying Burrow has sanitised it.
   was down from 02:00 to 03:00, an empty ledger for that hour reads as "nothing broke". The ledger
   must record its own observation coverage, so that a stale or interrupted observer is visible as
   such. A reliability surface that fails silently would be a particularly poor joke.
+- **Grouping by shared reason is a heuristic and will sometimes be wrong.** Two unrelated apps
+  crashlooping for unrelated bugs in the same minute will be shown together. That is an acceptable
+  cost of never asserting causation — the grouping is a hint about where to look, not a claim, and
+  the rows underneath stay individually addressable — but the surface must present it as such rather
+  than as a diagnosis.
 - **Something has to watch the watcher.** The observer's own failure is silent by exactly the argument
   this record makes about everything else, and the answer cannot be another observer.
 - **Real API-server load.** A watch over every managed pod in a large cluster is not free, and the
@@ -273,7 +321,7 @@ output rather than implying Burrow has sanitised it.
 - **Kubernetes Events as the record.** They already exist, are already structured, and need no
   storage. Rejected because they expire (one hour by default), so the history is not there to read;
   because reading them is precisely the "reach for `kubectl`" this record removes; and because they
-  cannot express §5 — an Event is emitted by a controller about an object that exists, and the
+  cannot express §6 — an Event is emitted by a controller about an object that exists, and the
   interesting failure is an object that does not.
 - **Ship metrics and alerting instead**, or serve failures through
   [ADR-0026](0026-observability-query-adapters.md)'s query seam — the collectors and the seam already
@@ -290,10 +338,17 @@ output rather than implying Burrow has sanitised it.
 - **An append-only event stream instead of a transition ledger.** Higher fidelity; flap counts become
   derivable rather than stored. Rejected in §4: unreadable at the moment it matters, and it turns
   retention into a volume problem inside the control plane's database.
-- **Put failures in the audit log.** One timeline, one table, one query. Rejected in §6: it would
+- **Put failures in the audit log.** One timeline, one table, one query. Rejected in §7: it would
   subject an append-only security record to retention pruning and break the completeness property
   that gives the audit log its value.
-- **Observe and remediate.** Restart the crashlooper; reschedule the Pending pod. Rejected in §8 as a
+- **Infer root cause from a dependency graph** — Burrow knows which apps use which add-on, so it
+  could say "these six crashloops are the Postgres outage". Genuinely useful when right, and the
+  information is partly there. Rejected in §5: the graph is incomplete (it knows registered add-on
+  bindings, not that app A calls app B), so the inference would be confident and sometimes wrong, and
+  an incident is the worst possible place to be led somewhere plausible. Grouping by shared reason
+  and time gets most of the benefit while only ever asserting things Burrow observed. A dependency
+  graph good enough to support causation is its own record.
+- **Observe and remediate.** Restart the crashlooper; reschedule the Pending pod. Rejected in §9 as a
   separate decision with a much higher bar — it is a mutation with nobody present, and the remedies
   are usually wrong for the failures that most invite them.
 - **A Kubernetes controller with CRDs, storing status on custom resources.** Idiomatic, and the

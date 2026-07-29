@@ -18,16 +18,44 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      quickstart: ${{ steps.filter.outputs.quickstart }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # predicate-quantifier: every is LOAD-BEARING — do not drop it, and do not "simplify"
+          # this list back to a bare set of patterns. The action's default quantifier is `some`,
+          # under which a file matches the filter if it matches ANY line. Because '**' matches
+          # every path, the '!' lines were dead: `code` evaluated true for every change on every
+          # event, so the docs-only skip below never once fired. It looked like it worked only
+          # because kube-integration is separately gated on merge_group, which hid the always-true
+          # `code` on PRs; in the queue nothing hid it and a two-file docs-only change (PR #356)
+          # ran the ~10 min k3d job. `every` makes all lines conjunctive, which is what turns the
+          # '!' lines back into real exclusions.
+          predicate-quantifier: every
+          # Docs-only is deliberately NARROW: only the root README.md and anything under docs/.
+          # A markdown file anywhere else — CLAUDE.md, LICENSING.md, a nested README.md — counts as
+          # code and runs the full checks. This replaces a broader '!**/*.md' that treated every
+          # markdown file in the tree as docs; widening it back is a silent way to stop testing
+          # changes that matter. Erring toward running the suite is the safe direction here: a
+          # needless 10-minute run only costs time, a wrongly skipped one merges untested code.
+          # The `quickstart` filter is the ONE exception to "anything under docs/ is docs-only",
+          # and it is deliberate, not an oversight. docs/QUICKSTART.md is executable documentation:
+          # test/e2e/quickstart.sh walks the doc's fast path command for command to keep it from
+          # rotting, and that script is a STEP INSIDE kube-integration, not a job of its own. So
+          # without this filter, editing QUICKSTART.md would be classified docs-only, skip
+          # kube-integration, and skip the very test that proves the doc's commands still work —
+          # on the one page a brand-new user runs first, where a broken command is most expensive.
+          # `predicate-quantifier: every` is conjunctive and cannot express "docs, except this one
+          # file" inside `code`, hence a second named filter OR'd into the job condition below.
           filters: |
             code:
               - '**'
-              - '!**/*.md'
+              - '!README.md'
               - '!docs/**'
+            quickstart:
+              - 'docs/QUICKSTART.md'
 
   build:
     name: build, vet, fmt, test
@@ -82,7 +110,13 @@ jobs:
     # just doubles the wait (PR run, then queue run). A skipped required check still counts as
     # passing for branch protection and the queue (same as the docs-only skip above), so PRs stay
     # green on the fast checks and this gate runs once, at merge.
-    if: needs.changes.outputs.code == 'true' && github.event_name == 'merge_group'
+    #
+    # The `quickstart` disjunct is what keeps docs/QUICKSTART.md honest: it is docs-only by the
+    # `code` filter, but the quickstart e2e step below is the test that pins it, so a change to
+    # that doc has to run this job or the doc could rot unnoticed. Only THIS job gets the
+    # disjunct — `build` stays gated on `code` alone, because editing a markdown file cannot
+    # break gofmt, go vet, or go test, and this job recompiles the tree anyway.
+    if: (needs.changes.outputs.code == 'true' || needs.changes.outputs.quickstart == 'true') && github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     # Make the `go test` steps compile with the same flags ko uses for the burrowd build, so ko
     # reuses the client-go objects the tests already compiled instead of a cold recompile. ko

@@ -62,6 +62,15 @@ type Adapter struct {
 	// pool, a mandated runtimeClassName, a priority or topology policy. nil (the default) leaves the
 	// constructed object exactly as it is. Wired via WithPodMutator.
 	podMutator func(*corev1.PodSpec)
+	// platformPodMutator is the ADR-0073 §2 extension point for the other half of the split: an
+	// OPTIONAL hook applied to every pod spec this adapter authors that runs BURROW's own image
+	// rather than the app's — the add-on instances, the log and metrics collectors, and the backup
+	// and restore Jobs. It is a second hook rather than a widening of podMutator because the two
+	// sets take genuinely different placement policy: an operator may want the tenant's image
+	// sandboxed on tenant-only nodes and their own Postgres and collectors somewhere the tenant's
+	// code is not. nil (the default) leaves the constructed object exactly as it is. Wired via
+	// WithPlatformPodMutator.
+	platformPodMutator func(*corev1.PodSpec)
 }
 
 // New returns an Adapter over the given clientset and namespace (defaulting to
@@ -92,9 +101,10 @@ func (a *Adapter) WithAddonNamespace(ns string) *Adapter {
 // and the one-off command Job of ADR-0048. A run is the app's image, in the app's namespace, with
 // the app's environment — the same workload for one command — so it is admitted and scheduled under
 // the same cluster constraints, and a hook that covered only the Deployment would leave `burrow app
-// run` unschedulable on precisely the clusters this seam exists for. Add-ons, backup Jobs, and the
-// build Job are NOT covered: they run images Burrow chooses rather than the app's, and the build
-// path has its own hook.
+// run` unschedulable on precisely the clusters this seam exists for. Add-ons, collectors, and the
+// backup and restore Jobs are NOT covered: they run images Burrow chooses rather than the app's, so
+// they take WithPlatformPodMutator (ADR-0073 §2). The build Job has its own hook again
+// (BuildAdapter.WithBuildPodMutator), for Burrow's builder image over the app's source.
 //
 // It exists for cluster requirements the engine cannot know about, because they are properties of a
 // cluster rather than of Burrow: a toleration for a tainted node pool (a GPU pool, spot capacity, a
@@ -121,13 +131,75 @@ func (a *Adapter) WithPodMutator(fn func(*corev1.PodSpec)) *Adapter {
 	return a
 }
 
+// WithPlatformPodMutator registers a hook the adapter applies to the pod specs it authors that run
+// BURROW's own images, after each is constructed and before the object is sent to the API server
+// (ADR-0073 §2, §6). It is the platform-side counterpart of WithPodMutator, which covers the app's
+// own image.
+//
+// Its reach is every pod this adapter runs on Burrow's behalf rather than the app's: the add-on
+// instance Deployment (Postgres, the logs and metrics stores, the cache), the log-collector
+// DaemonSet, the metrics-collector Deployment, and the backup and restore Jobs. Without it those
+// pods carry no placement fields at all, so on the tainted-pool cluster ADR-0061 was written for an
+// operator has working deploys and a backup that never runs — and each failure is quiet. A Pending
+// Job leaves both Failed and Succeeded at zero, so the waiter burns its full timeout and reports a
+// timeout rather than an unschedulable pod; a Pending add-on reports zero ready replicas, which
+// reads like a slow start. The worst case is the restore, discovered during an incident.
+//
+// Two hooks rather than one, because the two sets take genuinely different policy: a managed
+// operator may want the tenant's image under a sandboxed runtime on tenant-only nodes, and their
+// own Postgres and collectors somewhere the tenant's code is not. One hook could serve that only by
+// having the operator key off a container image or a label to reconstruct a classification this
+// package already has, and a wrong branch puts the tenant's code on the platform pool. Which hook a
+// path gets is decided here, and stated at each call site.
+//
+// The mutator runs over the FULLY-constructed pod spec and on every write of it, so two obligations
+// follow. It must be **idempotent** — appending to a slice (tolerations, volumes, env) without
+// first checking whether the entry is already there will drift; set or replace rather than append
+// blindly. And it must **tolerate pod specs it did not expect**: a backup or restore Job pod
+// arrives with RestartPolicy Never already set, and the log-collector DaemonSet pod arrives with a
+// blanket `Operator: Exists` toleration it is meant to keep (ADR-0073 §3 — a collector that skips
+// tainted nodes silently loses exactly those nodes' logs). Overwriting either produces an object
+// the API server rejects or a collector that stops collecting.
+//
+// This hook is more dangerous than the app one, because it reaches STATEFUL workloads: the Postgres
+// add-on holds tenant data, and a mutator that moves that pod to a pool where its volume cannot
+// attach breaks the add-on rather than one deploy. The trust model is unchanged — the hook is
+// compiled into the binary by whoever operates that binary, not supplied at runtime — but the blast
+// radius is not.
+//
+// Wiring nothing sandboxes nothing (ADR-0073 §5). This is a seam, not enforcement: the engine wires
+// neither hook itself, and an operator who needs isolation enforced wants admission policy. A nil
+// mutator (the default) leaves every object this adapter constructs byte-for-byte as it is today
+// (ADR-0073 §4).
+//
+// Returns the adapter for chaining.
+func (a *Adapter) WithPlatformPodMutator(fn func(*corev1.PodSpec)) *Adapter {
+	a.platformPodMutator = fn
+	return a
+}
+
+// applyPlatformPodMutator runs the ADR-0073 §2 platform hook over a fully-constructed pod spec, if
+// one is wired. Every site that authors a pod running Burrow's own image calls this as its last
+// step before the object is written, so the hook sees what the engine composed and a path that
+// later grows an update alongside its create carries the mutation on both (ADR-0073 §6). A nil
+// mutator is a no-op, which is what makes §4's byte-for-byte guarantee hold everywhere at once.
+func (a *Adapter) applyPlatformPodMutator(pod *corev1.PodSpec) {
+	if a.platformPodMutator != nil {
+		a.platformPodMutator(pod)
+	}
+}
+
 // WithNamespace returns a copy of the Adapter whose app-resource operations act in ns instead of
 // the configured app namespace — the mechanism that routes an operation to a named environment's
 // namespace (ADR-0035 phase 2). The add-on namespace is unchanged, so add-ons still land in their
 // own namespace. An empty ns, or ns equal to the current app namespace, returns the receiver
 // unchanged, so default-environment behavior is identical to before environments existed. The copy
-// is shallow: it shares the same client (and the pod mutator, so an environment-scoped view applies
-// the same hook), so no new connection is made per operation.
+// is shallow: it shares the same client and BOTH pod mutators — the app hook of ADR-0061 and the
+// platform hook of ADR-0073 — so an environment-scoped view applies the same hooks, and a hook
+// wired once at construction reaches every per-tenant view of the adapter. That is load-bearing: a
+// hook that survived only on the receiver would work in a single-namespace install and silently
+// stop applying the moment an operation was routed to a named environment. No new connection is
+// made per operation.
 func (a *Adapter) WithNamespace(ns string) controlplane.Kubernetes {
 	if ns == "" || ns == a.namespace {
 		return a

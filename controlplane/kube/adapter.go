@@ -255,12 +255,12 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 // True throughout a rolling update as long as the PREVIOUS ReplicaSet still meets minimum
 // availability, so a new release whose image cannot be pulled reads as healthy while the old
 // pods keep serving (issue #307). When the newest revision has not finished rolling out, this
-// inspects the app's pods for a blocking image-pull failure and checks the progress deadline:
-// either means the current release is not serving, so it is reported not-available with the
-// actionable Issue. A merely-in-progress rollout — a new pod still ContainerCreating, deadline
-// not yet exceeded — has no blocking reason, so availability is left as reported and a normal
-// deploy is not flagged as broken. Enrichment is best-effort: a pod-list error leaves the base
-// status untouched. It is shared by WorkloadStatus and ListWorkloads so both surfaces agree.
+// inspects the app's pods for a blocking condition and checks the progress deadline: either means
+// the current release is not serving, so it is reported not-available with the actionable Issue. A
+// merely-in-progress rollout — a new pod still ContainerCreating, deadline not yet exceeded — has
+// no blocking reason, so availability is left as reported and a normal deploy is not flagged as
+// broken. Enrichment is best-effort: a pod-list error leaves the base status untouched. It is
+// shared by WorkloadStatus and ListWorkloads so both surfaces agree.
 func (a *Adapter) workloadStatus(ctx context.Context, dep *appsv1.Deployment) controlplane.WorkloadStatus {
 	var desired int32
 	if dep.Spec.Replicas != nil {
@@ -282,40 +282,237 @@ func (a *Adapter) workloadStatus(ctx context.Context, dep *appsv1.Deployment) co
 	if deploymentRolledOut(dep, desired) {
 		return st // the current release is fully rolled out and serving
 	}
-	// The newest revision has not completed. A blocking pull failure on the app's pods is the
-	// immediate, reliable signal that the current release is wedged; an exceeded progress
-	// deadline is the general one. Either downgrades availability so a broken deploy does not
-	// read as healthy on the strength of the superseded release still serving.
-	if issue, reason := a.pullIssue(ctx, dep.Name); reason != "" {
+	// The newest revision has not completed. A blocking pod condition is the immediate, reliable
+	// signal that the current release is wedged; an exceeded progress deadline is the general one.
+	// Either downgrades availability so a broken deploy does not read as healthy on the strength of
+	// the superseded release still serving. The pod condition is checked first because it names the
+	// fix, where the deadline only reports that time ran out.
+	if issue, reason := a.podIssue(ctx, dep.Name); reason != "" {
 		st.Issue, st.IssueReason = issue, reason
 		st.Available = false
 	} else if deploymentProgressStalled(dep) {
+		// A stalled rollout with no blocking pod condition left an empty Issue before ADR-0074 §2:
+		// the surface said "not available" and nothing else, which is the exact silence that record
+		// is about. It carries the deadline as the reason now, and the message says plainly that
+		// Burrow found nothing more specific rather than implying it knows the cause.
+		ev := controlplane.IssueEvidence{Reason: controlplane.ReasonProgressDeadlineExceeded}
+		st.Issue, st.IssueReason = ev.Message(), ev.Reason
 		st.Available = false
 	}
 	return st
 }
 
-// pullIssue inspects the app's pods for a blocking image-pull failure and, if one is found,
-// returns the actionable Issue message and the raw Kubernetes reason. It selects the app's pods
-// by the same label the workload sets (nameLabel=app) and reads each container's waiting state.
-// It is best-effort: a list error, or no blocking waiting reason, yields ("", ""), and the raw
-// reason drives the message rather than the image, so a genuinely blocking pull is reported and
-// a transient ContainerCreating is not.
-func (a *Adapter) pullIssue(ctx context.Context, app string) (issue, reason string) {
+// podIssue inspects the app's pods for a blocking, human-fixable condition and, if one is found,
+// returns the actionable Issue message and its reason from the closed set (ADR-0074 §2). It selects
+// the app's pods by the same label the workload sets (nameLabel=app), reads each container's
+// waiting and termination state, and falls back to the pod's scheduling condition when no container
+// has started at all.
+//
+// It is best-effort by contract: a list error, or no blocking condition, yields ("", ""), so a
+// status call never fails on its enrichment. Only the CRITERION decides what is reported — blocking
+// and human-fixable, never self-resolving — so a transient ContainerCreating stays invisible here
+// no matter how long it lasts.
+func (a *Adapter) podIssue(ctx context.Context, app string) (issue, reason string) {
 	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: nameLabel + "=" + app})
 	if err != nil {
 		return "", "" // best-effort: never fail Status on enrichment
 	}
+	var best controlplane.IssueEvidence
+	var bestPod string
+	bestRank := 0
 	for i := range pods.Items {
-		for _, cs := range pods.Items[i].Status.ContainerStatuses {
-			w := cs.State.Waiting
-			if w == nil || !controlplane.IsImagePullReason(w.Reason) {
-				continue
-			}
-			return controlplane.ImagePullIssue(cs.Image, w.Reason, w.Message), w.Reason
+		ev, ok := podIssueEvidence(&pods.Items[i])
+		if !ok {
+			continue
+		}
+		if r := issueRank(ev.Reason); r > bestRank {
+			best, bestPod, bestRank = ev, pods.Items[i].Name, r
 		}
 	}
-	return "", ""
+	if bestRank == 0 {
+		return "", ""
+	}
+	// The log tail is fetched only once a crash loop has actually been selected, so a healthy app
+	// (and every other failure class) costs no extra API call. It is the app's own output, so it is
+	// bounded on the way in as well as in the message — see previousLogTail.
+	if best.Reason == controlplane.ReasonCrashLoopBackOff {
+		best.LogTail = a.previousLogTail(ctx, bestPod, best.Container)
+	}
+	return best.Message(), best.Reason
+}
+
+// issueRank orders the blocking reasons by how directly each names the fix. WorkloadStatus carries
+// ONE Issue, and a broken pod routinely reports several at once — an OOM kill is also a crash loop;
+// ADR-0074 §5 keeps both only because the ledger can, and the ledger is not this. So the surface
+// picks, and it picks the reason that points at the actual cause: the memory limit over the restart
+// it caused, the missing key over the container that could not be created for want of it. A reason
+// outside the closed set ranks 0 and is not an Issue at all.
+func issueRank(reason string) int {
+	switch reason {
+	case controlplane.ReasonImagePullBackOff, controlplane.ReasonErrImagePull:
+		return 6
+	case controlplane.ReasonCreateContainerConfigError:
+		return 5
+	case controlplane.ReasonOOMKilled:
+		return 4
+	case controlplane.ReasonCrashLoopBackOff:
+		return 3
+	case controlplane.ReasonVolumeUnavailable:
+		return 2
+	case controlplane.ReasonUnschedulable:
+		return 1
+	}
+	return 0
+}
+
+// podIssueEvidence reads one pod for the highest-ranked blocking condition it reports. Container
+// state is preferred over the pod's scheduling condition because a pod with running containers has
+// obviously been scheduled; the scheduling condition is what explains a pod with no container state
+// at all.
+func podIssueEvidence(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
+	var best controlplane.IssueEvidence
+	bestRank := 0
+	for _, cs := range pod.Status.ContainerStatuses {
+		ev, ok := containerIssueEvidence(pod, cs)
+		if !ok {
+			continue
+		}
+		if r := issueRank(ev.Reason); r > bestRank {
+			best, bestRank = ev, r
+		}
+	}
+	if bestRank > 0 {
+		return best, true
+	}
+	return schedulingIssueEvidence(pod)
+}
+
+// containerIssueEvidence reads one container's status for a blocking condition.
+//
+// An OOM kill is read from the LAST termination rather than treated as a state of its own, because
+// that is where the kernel's verdict is recorded: the pod's visible state is CrashLoopBackOff and
+// the kill is what names the fix. It is only reported while the container is CURRENTLY blocked —
+// waiting in a back-off, or terminated and not restarting — so a container that was OOM-killed an
+// hour ago and has been serving since is not reported as broken now. That is the criterion applied
+// to a fact that outlives the failure it describes.
+func containerIssueEvidence(pod *corev1.Pod, cs corev1.ContainerStatus) (controlplane.IssueEvidence, bool) {
+	if w := cs.State.Waiting; w != nil {
+		switch {
+		case controlplane.IsImagePullReason(w.Reason):
+			return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, Image: cs.Image, Detail: w.Message}, true
+		case w.Reason == controlplane.ReasonCreateContainerConfigError:
+			// The kubelet's message names the missing ConfigMap/Secret and the missing KEY, which is
+			// the actionable part and carries no value (ADR-0074 §9).
+			return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, Detail: w.Message}, true
+		case w.Reason == controlplane.ReasonCrashLoopBackOff:
+			if t := cs.LastTerminationState.Terminated; t != nil {
+				if t.Reason == controlplane.ReasonOOMKilled {
+					return oomEvidence(pod, cs.Name), true
+				}
+				return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, ExitCode: t.ExitCode}, true
+			}
+			return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name}, true
+		}
+	}
+	// A container that is terminated and staying that way (a run Job's pod, or a Deployment pod
+	// between the kill and the restart) still reports the kill that ended it.
+	if t := cs.State.Terminated; t != nil && t.Reason == controlplane.ReasonOOMKilled {
+		return oomEvidence(pod, cs.Name), true
+	}
+	return controlplane.IssueEvidence{}, false
+}
+
+// oomEvidence names the memory limit the container was killed for exceeding, read from the pod's own
+// spec — the limit IS the fix, and a message that reported only "OOMKilled" would send the reader to
+// `kubectl describe` for the one number they need. An empty detail means no limit is set, which the
+// message reports as node pressure rather than as a limit it could not read.
+func oomEvidence(pod *corev1.Pod, container string) controlplane.IssueEvidence {
+	return controlplane.IssueEvidence{Reason: controlplane.ReasonOOMKilled, Container: container, Detail: containerMemoryLimit(pod, container)}
+}
+
+func containerMemoryLimit(pod *corev1.Pod, container string) string {
+	for _, c := range pod.Spec.Containers {
+		if c.Name != container {
+			continue
+		}
+		if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+			return q.String()
+		}
+	}
+	return ""
+}
+
+// unschedulableGrace is how long a pod must have been unschedulable before Burrow calls it an Issue.
+// The scheduler marks a pod Unschedulable after ONE failed attempt, which a rolling update can hit
+// for a few seconds while the old pods still hold the capacity the new one wants, and on a cluster
+// with an autoscaler while a node is being provisioned. Reporting those would flip a healthy app to
+// not-available mid-deploy — the noise the criterion exists to prevent. A pod still unschedulable
+// after this has stopped resolving on its own.
+const unschedulableGrace = 30 * time.Second
+
+// schedulingIssueEvidence reads the pod's PodScheduled condition for a scheduling failure, and
+// separates the volume case out of it: Kubernetes reports "no node can run this pod" for both a
+// cluster with no room and a claim that will not bind, but the fixes have nothing in common, and an
+// agent branching on the reason should not have to grep the scheduler's prose to tell them apart.
+func schedulingIssueEvidence(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
+	for _, c := range pod.Status.Conditions {
+		if c.Type != corev1.PodScheduled || c.Status != corev1.ConditionFalse || c.Reason != corev1.PodReasonUnschedulable {
+			continue
+		}
+		if !c.LastTransitionTime.IsZero() && time.Since(c.LastTransitionTime.Time) < unschedulableGrace {
+			return controlplane.IssueEvidence{}, false
+		}
+		reason := controlplane.ReasonUnschedulable
+		if isVolumeUnavailable(c.Message) {
+			reason = controlplane.ReasonVolumeUnavailable
+		}
+		return controlplane.IssueEvidence{Reason: reason, Detail: c.Message}, true
+	}
+	return controlplane.IssueEvidence{}, false
+}
+
+// isVolumeUnavailable reports whether the scheduler's verdict is about a volume rather than about
+// capacity or placement. Matching on the scheduler's phrasing is a heuristic, and a deliberately
+// conservative one: an unmatched volume failure falls back to ReasonUnschedulable carrying the same
+// message, so the reader still gets the scheduler's words — the classification degrades, the
+// information does not.
+func isVolumeUnavailable(message string) bool {
+	m := strings.ToLower(message)
+	for _, s := range []string{"persistentvolumeclaim", "volume node affinity conflict", "had volume node affinity", "no available persistent volumes"} {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// previousLogTail captures the last lines of a crash-looping container's PREVIOUS run — the output
+// from the run that actually failed, which the current, backing-off container no longer has. It is
+// bounded twice: by tailLines at the API server, and by a LimitReader here, because the line bound
+// alone bounds nothing when one line of application output can be megabytes. Best-effort: a pod
+// whose previous log has already been rotated away, or a cluster that refuses the read, yields "",
+// and the Issue still names the exit code.
+func (a *Adapter) previousLogTail(ctx context.Context, pod, container string) string {
+	if pod == "" {
+		return ""
+	}
+	lines := int64(controlplane.IssueLogTailLines)
+	stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod, &corev1.PodLogOptions{
+		Container: container,
+		Previous:  true,
+		TailLines: &lines,
+	}).Stream(ctx)
+	if err != nil {
+		return ""
+	}
+	defer stream.Close()
+	// One byte over the budget, so the message can mark the cut rather than present a truncated
+	// tail as a complete one.
+	data, err := io.ReadAll(io.LimitReader(stream, controlplane.IssueLogTailBytes+1))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func (a *Adapter) ListWorkloads(ctx context.Context) ([]controlplane.WorkloadStatus, error) {
@@ -771,20 +968,17 @@ func deploymentRolledOut(dep *appsv1.Deployment, desired int32) bool {
 		dep.Status.AvailableReplicas >= desired
 }
 
-// progressDeadlineExceeded is the Progressing-condition reason Kubernetes sets when a rollout has
-// not made progress within .spec.progressDeadlineSeconds. It is a string constant in
-// deploymentutil, not exported by appsv1, so it is named here.
-const progressDeadlineExceeded = "ProgressDeadlineExceeded"
-
 // deploymentProgressStalled reports whether the Deployment's rollout has stalled past its progress
 // deadline: the Progressing condition goes False with reason ProgressDeadlineExceeded when the
-// newest revision has not made progress in time. It is the deadline-bounded signal that a rollout
-// is wedged for a reason other than an image pull (e.g. a crash loop), complementing the immediate
-// pull-failure pod inspection.
+// newest revision has not made progress in time. It is the deadline-bounded backstop for a rollout
+// wedged for a reason no pod reports — the last resort after the pod inspection, which names the
+// fix where this only reports that time ran out. The reason string is a constant in deploymentutil
+// and not exported by appsv1, so it is the vocabulary's own member that names it — one spelling for
+// the condition Burrow reads and the IssueReason it reports.
 func deploymentProgressStalled(dep *appsv1.Deployment) bool {
 	for _, c := range dep.Status.Conditions {
 		if c.Type == appsv1.DeploymentProgressing {
-			return c.Status == corev1.ConditionFalse && c.Reason == progressDeadlineExceeded
+			return c.Status == corev1.ConditionFalse && c.Reason == controlplane.ReasonProgressDeadlineExceeded
 		}
 	}
 	return false

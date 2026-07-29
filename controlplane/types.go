@@ -93,14 +93,21 @@ type WorkloadStatus struct {
 	// condition (enough ready replicas to serve).
 	Available bool `json:"available"`
 	// Issue is a human- and agent-actionable explanation of why an unavailable workload is
-	// blocked, when the cluster reports a genuinely blocking pod condition — e.g. a pull
-	// failure that names the image, the registry host, and the `burrow config registry login`
-	// fix (ADR-0006). It is best-effort enrichment: empty when the workload is healthy or
-	// when no blocking condition was observed, so it never becomes a required field.
+	// blocked, when the cluster reports a genuinely blocking pod condition — a pull failure that
+	// names the image, the registry host and the `burrow config registry login` fix (ADR-0006); a
+	// scheduling failure that names the taint or the resource; a crash loop that names the exit
+	// code (ADR-0074 §2). It is best-effort enrichment: empty when the workload is healthy or when
+	// no blocking condition was observed, so it never becomes a required field.
+	//
+	// It never contains a secret VALUE. A missing config or secret key is named, because the key is
+	// the actionable part; a crash-loop log tail is the application's own output, bounded and
+	// labelled as such (ADR-0074 §9).
 	Issue string `json:"issue,omitempty"`
-	// IssueReason is the raw, machine-usable Kubernetes reason behind Issue (e.g.
-	// "ImagePullBackOff" or "ErrImagePull"), for an agent that wants to branch on the cause
-	// rather than parse the prose. Empty whenever Issue is empty.
+	// IssueReason is the machine-usable reason behind Issue — a member of the closed set
+	// IssueReasons() enumerates (e.g. "ImagePullBackOff", "Unschedulable", "CrashLoopBackOff") —
+	// for an agent that wants to branch on the cause rather than parse the prose (ADR-0074 §5).
+	// Each value is the raw Kubernetes reason string wherever Kubernetes has one. Empty whenever
+	// Issue is empty.
 	IssueReason string `json:"issue_reason,omitempty"`
 }
 

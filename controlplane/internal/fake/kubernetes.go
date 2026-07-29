@@ -124,24 +124,27 @@ type runCall struct {
 }
 
 type deployState struct {
-	spec           controlplane.WorkloadSpec
-	ready          int32
-	logs           []controlplane.LogLine
-	restartedAt    time.Time // last RestartWorkload timestamp; zero until rolled
-	waitingReason  string    // injected blocking pod waiting reason (e.g. ImagePullBackOff); empty when healthy
-	waitingMessage string    // injected kubelet waiting message, if any — distinguishes not-found from unauthorized
+	spec        controlplane.WorkloadSpec
+	ready       int32
+	logs        []controlplane.LogLine
+	restartedAt time.Time // last RestartWorkload timestamp; zero until rolled
+	// issue is the injected blocking pod condition, in the same evidence shape the real adapter
+	// reads off a pod (SetImagePullFailure/SetWedgedRollout/SetIssue); nil when healthy.
+	issue *controlplane.IssueEvidence
 }
 
 // status builds the observed WorkloadStatus for this deploy state, mirroring the real adapter:
-// availability comes from the ready/desired replicas, and an injected blocking pod waiting
-// reason (SetImagePullFailure/SetWedgedRollout) becomes the same actionable Issue the real
-// adapter attaches. It centralizes the shape so WorkloadStatus and ListWorkloads agree.
+// availability comes from the ready/desired replicas, and an injected blocking pod condition
+// (SetImagePullFailure/SetWedgedRollout/SetIssue) becomes the same actionable Issue the real
+// adapter attaches — the SAME message, because both sides render it through
+// controlplane.IssueEvidence.Message rather than each writing its own prose. It centralizes the
+// shape so WorkloadStatus and ListWorkloads agree.
 //
-// A blocking image-pull reason forces the workload not-available and surfaces the Issue even when
-// ready still meets desired: that is the wedged rolling update of issue #307, where the NEW
-// release cannot pull its image while the PREVIOUS release's pods keep serving, so a naive
-// ready>=desired check would wrongly read healthy. The real adapter reaches the same verdict by
-// inspecting the updated pods; the fake models it directly.
+// A blocking condition forces the workload not-available and surfaces the Issue even when ready
+// still meets desired: that is the wedged rolling update of issue #307, where the NEW release
+// cannot pull its image while the PREVIOUS release's pods keep serving, so a naive ready>=desired
+// check would wrongly read healthy. The real adapter reaches the same verdict by inspecting the
+// updated pods; the fake models it directly.
 func (d *deployState) status(app string) controlplane.WorkloadStatus {
 	st := controlplane.WorkloadStatus{
 		App:             app,
@@ -152,10 +155,17 @@ func (d *deployState) status(app string) controlplane.WorkloadStatus {
 		UpdatedReplicas: d.ready,
 		Available:       d.spec.Replicas > 0 && d.ready >= d.spec.Replicas,
 	}
-	if controlplane.IsImagePullReason(d.waitingReason) {
+	if d.issue != nil {
+		ev := *d.issue
+		if ev.Image == "" {
+			// An image-pull Issue names the CURRENTLY deployed image, so a redeploy after the
+			// injection is reflected — the same thing the real adapter does by reading the image
+			// off the pod each time it is asked.
+			ev.Image = d.spec.Image
+		}
 		st.Available = false
-		st.Issue = controlplane.ImagePullIssue(d.spec.Image, d.waitingReason, d.waitingMessage)
-		st.IssueReason = d.waitingReason
+		st.Issue = ev.Message()
+		st.IssueReason = ev.Reason
 	}
 	return st
 }
@@ -419,9 +429,45 @@ func (k *Kubernetes) setImagePullFailure(app, reason, message string) {
 	defer k.mu.Unlock()
 	if d := k.deploys[k.key(app)]; d != nil {
 		d.ready = 0
-		d.waitingReason = reason
-		d.waitingMessage = message
+		d.issue = imagePullEvidence(reason, message)
 	}
+}
+
+// imagePullEvidence builds the injected condition for the image-pull setters, or nil to clear it.
+// They stay image-pull-ONLY now that the vocabulary is wider (ADR-0074 §2): passing any other
+// reason has always meant "clear the failure" here, and a setter that silently started injecting a
+// crash loop because a test passed "CrashLoopBackOff" to it would be a trap. SetIssue is the way to
+// inject the other classes.
+func imagePullEvidence(reason, message string) *controlplane.IssueEvidence {
+	if !controlplane.IsImagePullReason(reason) {
+		return nil
+	}
+	return &controlplane.IssueEvidence{Reason: reason, Detail: message}
+}
+
+// SetIssue injects an arbitrary blocking pod condition for app, in the same evidence shape the real
+// adapter reads off a pod: the workload reports not-available carrying the message
+// controlplane.IssueEvidence.Message renders for it — byte for byte the message production
+// produces, since there is only one renderer (ADR-0074 §2). It is how a test drives an
+// unschedulable pod, a crash loop, a missing config key, an OOM kill or an unavailable volume
+// without a cluster.
+//
+// A zero IssueEvidence (or one whose Reason is outside the closed set) clears the condition. Unlike
+// SetImagePullFailure it leaves the ready count alone, so a test can model either a wholly failed
+// workload or a wedged rollout whose previous release still serves. It is a no-op if app has no
+// workload.
+func (k *Kubernetes) SetIssue(app string, ev controlplane.IssueEvidence) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	d := k.deploys[k.key(app)]
+	if d == nil {
+		return
+	}
+	if !controlplane.IsIssueReason(ev.Reason) {
+		d.issue = nil
+		return
+	}
+	d.issue = &ev
 }
 
 // SetWedgedRollout models issue #307: a NEW release whose image cannot be pulled while the
@@ -434,8 +480,7 @@ func (k *Kubernetes) SetWedgedRollout(app, reason string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if d := k.deploys[k.key(app)]; d != nil {
-		d.waitingReason = reason
-		d.waitingMessage = ""
+		d.issue = imagePullEvidence(reason, "")
 	}
 }
 

@@ -185,9 +185,12 @@ type WorkloadStatus struct {
 	UpdatedReplicas int32  `json:"updated_replicas"`
 	Available       bool   `json:"available"`
 	// Issue is a human- and agent-actionable explanation of why an unavailable workload is
-	// blocked (e.g. an image the cluster cannot pull, naming the registry and the
-	// `burrow config registry login` fix); empty when the workload is healthy. IssueReason is the
-	// raw Kubernetes reason behind it (e.g. "ImagePullBackOff"). See ADR-0006.
+	// blocked — an image the cluster cannot pull (naming the registry and the
+	// `burrow config registry login` fix), a pod no node can run (naming the taint or the
+	// resource), a container crash-looping (naming the exit code); empty when the workload is
+	// healthy. IssueReason is the machine-usable reason behind it, a member of the closed set
+	// controlplane.IssueReasons() enumerates (e.g. "ImagePullBackOff", "Unschedulable",
+	// "CrashLoopBackOff"), for branching without parsing the prose. See ADR-0006, ADR-0074 §2.
 	Issue       string `json:"issue,omitempty"`
 	IssueReason string `json:"issue_reason,omitempty"`
 }

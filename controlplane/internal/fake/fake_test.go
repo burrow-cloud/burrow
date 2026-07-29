@@ -124,6 +124,60 @@ func TestKubernetesErrorInjection(t *testing.T) {
 	}
 }
 
+// TestKubernetesInjectedIssueReachesBothSurfaces is the fake's half of ADR-0074 §2's acceptance:
+// every blocking class can be injected without a cluster, and the SAME Issue reaches both the
+// per-app status and the listing. A class that surfaced in one and not the other would leave
+// `burrow app list` saying "not available" and nothing else, which is the state the record ends.
+func TestKubernetesInjectedIssueReachesBothSurfaces(t *testing.T) {
+	ctx := context.Background()
+	for _, ev := range []controlplane.IssueEvidence{
+		{Reason: controlplane.ReasonUnschedulable, Detail: "0/3 nodes are available: 3 Insufficient cpu"},
+		{Reason: controlplane.ReasonVolumeUnavailable, Detail: "pod has unbound immediate PersistentVolumeClaims"},
+		{Reason: controlplane.ReasonCrashLoopBackOff, Container: "web", ExitCode: 2, LogTail: "panic: bad config"},
+		{Reason: controlplane.ReasonCreateContainerConfigError, Container: "web", Detail: "couldn't find key API_KEY in Secret default/burrow-app-web-secrets"},
+		{Reason: controlplane.ReasonOOMKilled, Container: "web", Detail: "128Mi"},
+		{Reason: controlplane.ReasonProgressDeadlineExceeded},
+	} {
+		t.Run(ev.Reason, func(t *testing.T) {
+			k := NewKubernetes()
+			if err := k.ApplyWorkload(ctx, controlplane.WorkloadSpec{App: "web", Image: "img:1", Replicas: 1}); err != nil {
+				t.Fatalf("ApplyWorkload: %v", err)
+			}
+			k.SetIssue("web", ev)
+
+			st, err := k.WorkloadStatus(ctx, "web")
+			if err != nil {
+				t.Fatalf("WorkloadStatus: %v", err)
+			}
+			if st.Available {
+				t.Errorf("workload with a blocking %s reported available", ev.Reason)
+			}
+			if st.IssueReason != ev.Reason || st.Issue != ev.Message() {
+				t.Errorf("status issue = %q / %q, want %q / %q", st.Issue, st.IssueReason, ev.Message(), ev.Reason)
+			}
+
+			apps, err := k.ListWorkloads(ctx)
+			if err != nil {
+				t.Fatalf("ListWorkloads: %v", err)
+			}
+			if len(apps) != 1 {
+				t.Fatalf("got %d apps, want 1", len(apps))
+			}
+			if apps[0].Issue != st.Issue || apps[0].IssueReason != st.IssueReason {
+				t.Errorf("list issue = %q / %q, want the same as status: %q / %q",
+					apps[0].Issue, apps[0].IssueReason, st.Issue, st.IssueReason)
+			}
+
+			// A reason outside the closed set clears the condition rather than surfacing an
+			// unexplained one.
+			k.SetIssue("web", controlplane.IssueEvidence{Reason: "ContainerCreating"})
+			if st, _ = k.WorkloadStatus(ctx, "web"); st.Issue != "" || st.IssueReason != "" {
+				t.Errorf("issue = %q / %q after clearing, want empty", st.Issue, st.IssueReason)
+			}
+		})
+	}
+}
+
 func TestDatabaseSaveAndQuery(t *testing.T) {
 	ctx := context.Background()
 	d := NewDatabase()

@@ -15,9 +15,11 @@ import (
 // identical, host-naming Issue without a cluster.
 
 // Blocking image-pull waiting reasons a container reports when the cluster cannot fetch the
-// image. These are the only reasons Burrow surfaces as an Issue: a private registry with no
-// pull credentials is the common, human-fixable cause (ADR-0017). Transient reasons like
-// ContainerCreating or PodInitializing are deliberately excluded — they resolve on their own.
+// image: a private registry with no pull credentials is the common, human-fixable cause
+// (ADR-0017). They are two members of the closed IssueReason set, which issues.go enumerates —
+// ADR-0074 §2 widened it to the other blocking classes. Transient reasons like ContainerCreating
+// or PodInitializing remain deliberately excluded, on the criterion issues.go now states for the
+// whole vocabulary: they resolve on their own.
 const (
 	// ReasonImagePullBackOff is the kubelet's back-off state after repeated pull failures.
 	ReasonImagePullBackOff = "ImagePullBackOff"

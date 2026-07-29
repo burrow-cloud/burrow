@@ -9,11 +9,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -924,6 +926,245 @@ func TestListWorkloadsSurfacesWedgedRollout(t *testing.T) {
 	}
 	if !strings.Contains(apps[0].Issue, image) {
 		t.Errorf("issue = %q, want it to name the image %q", apps[0].Issue, image)
+	}
+}
+
+// The tests below cover the blocking classes ADR-0074 §2 added to the Issue vocabulary. Each pins
+// the ACTIONABLE part of the message — the taint, the exit code, the missing key, the memory limit
+// — because a reason with no actionable detail is the silence the record is about. Before the
+// change every one of these produced Available:false with an EMPTY Issue.
+
+// appPod is a pod labelled for app "web", so the adapter's pod inspection selects it.
+func appPod(name string) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: ns,
+		Labels: map[string]string{"app.kubernetes.io/name": "web"},
+	}}
+}
+
+// unschedulablePod is a pod the scheduler has rejected, carrying the scheduler's own verdict.
+// transitioned is how long ago it became unschedulable — the adapter ignores a pod that has only
+// just been rejected, since a rolling update and a scaling cluster both produce those transiently.
+func unschedulablePod(message string, transitioned time.Duration) *corev1.Pod {
+	pod := appPod("web-pending")
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodPending,
+		Conditions: []corev1.PodCondition{{
+			Type:               corev1.PodScheduled,
+			Status:             corev1.ConditionFalse,
+			Reason:             corev1.PodReasonUnschedulable,
+			Message:            message,
+			LastTransitionTime: metav1.NewTime(time.Now().Add(-transitioned)),
+		}},
+	}
+	return pod
+}
+
+// TestWorkloadStatusUnschedulableIssue: a pod no node can run must say WHAT could not be satisfied
+// — the scheduler already names the taint and the resource, and before ADR-0074 §2 Burrow threw
+// that away and reported only "not available".
+func TestWorkloadStatusUnschedulableIssue(t *testing.T) {
+	const verdict = "0/3 nodes are available: 1 node(s) had untolerated taint {workload: gpu}, 2 Insufficient cpu."
+	a := kube.New(fake.NewSimpleClientset(unavailableDeployment("img:1"), unschedulablePod(verdict, time.Hour)), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.Available {
+		t.Fatalf("status = %+v, want not available", st)
+	}
+	if st.IssueReason != cp.ReasonUnschedulable {
+		t.Errorf("issue reason = %q, want %q", st.IssueReason, cp.ReasonUnschedulable)
+	}
+	for _, want := range []string{"untolerated taint {workload: gpu}", "Insufficient cpu"} {
+		if !strings.Contains(st.Issue, want) {
+			t.Errorf("issue = %q, want it to contain %q", st.Issue, want)
+		}
+	}
+}
+
+// TestWorkloadStatusRecentlyUnschedulableNoIssue is the other half of the criterion: a pod the
+// scheduler rejected moments ago is a rollout in progress or a cluster adding a node, not a problem
+// a person has to fix, so it must not flip a serving app to not-available.
+func TestWorkloadStatusRecentlyUnschedulableNoIssue(t *testing.T) {
+	a := kube.New(fake.NewSimpleClientset(
+		wedgedRolloutDeployment("img:2"),
+		unschedulablePod("0/3 nodes are available: 3 Insufficient cpu.", time.Second),
+	), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if !st.Available {
+		t.Fatalf("a pod unschedulable for one second flagged the app not-available: %+v", st)
+	}
+	if st.Issue != "" || st.IssueReason != "" {
+		t.Errorf("issue = %q / %q, want empty inside the grace period", st.Issue, st.IssueReason)
+	}
+}
+
+// TestWorkloadStatusVolumeUnavailableIssue: the scheduler reports an unbindable claim as
+// "unschedulable" too, but the fix is a claim or a StorageClass rather than capacity, so it gets
+// its own reason an agent can branch on.
+func TestWorkloadStatusVolumeUnavailableIssue(t *testing.T) {
+	const verdict = "0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims."
+	a := kube.New(fake.NewSimpleClientset(unavailableDeployment("img:1"), unschedulablePod(verdict, time.Hour)), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.IssueReason != cp.ReasonVolumeUnavailable {
+		t.Errorf("issue reason = %q, want %q", st.IssueReason, cp.ReasonVolumeUnavailable)
+	}
+	if !strings.Contains(st.Issue, "unbound immediate PersistentVolumeClaims") {
+		t.Errorf("issue = %q, want it to carry the scheduler's verdict", st.Issue)
+	}
+}
+
+// crashLoopPod is a pod whose container is backing off after a failed run, carrying the exit code
+// of the run that failed — the fact that separates a rejected config from a signalled process.
+func crashLoopPod(exitCode int32) *corev1.Pod {
+	pod := appPod("web-crash")
+	pod.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "img:1"}}}
+	pod.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		Name:  "web",
+		Image: "img:1",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason: cp.ReasonCrashLoopBackOff, Message: "back-off 5m0s restarting failed container",
+		}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: "Error", ExitCode: exitCode,
+		}},
+	}}}
+	return pod
+}
+
+// TestWorkloadStatusCrashLoopIssue: the exit code and the previous run's output are what a crash
+// loop is actually about, and they are exactly what `burrow status` used to omit.
+func TestWorkloadStatusCrashLoopIssue(t *testing.T) {
+	a := kube.New(fake.NewSimpleClientset(unavailableDeployment("img:1"), crashLoopPod(2)), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.Available {
+		t.Fatalf("status = %+v, want not available", st)
+	}
+	if st.IssueReason != cp.ReasonCrashLoopBackOff {
+		t.Errorf("issue reason = %q, want %q", st.IssueReason, cp.ReasonCrashLoopBackOff)
+	}
+	for _, want := range []string{
+		`container "web"`,
+		"exited with code 2",
+		"application's own output", // the tail is labelled, never implied to be sanitised
+		"fake logs",                // what the fake clientset's log stream returns
+	} {
+		if !strings.Contains(st.Issue, want) {
+			t.Errorf("issue = %q, want it to contain %q", st.Issue, want)
+		}
+	}
+}
+
+// TestWorkloadStatusOOMKilledOutranksCrashLoop: an OOM-killed container reports CrashLoopBackOff
+// too, and reporting the restart rather than the kill would point the reader at the wrong fix. The
+// single Issue field takes the more specific of the pair, and it names the limit (ADR-0074 §5).
+func TestWorkloadStatusOOMKilledOutranksCrashLoop(t *testing.T) {
+	pod := crashLoopPod(137)
+	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
+	}
+	pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.Reason = cp.ReasonOOMKilled
+	a := kube.New(fake.NewSimpleClientset(unavailableDeployment("img:1"), pod), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.IssueReason != cp.ReasonOOMKilled {
+		t.Errorf("issue reason = %q, want %q", st.IssueReason, cp.ReasonOOMKilled)
+	}
+	if !strings.Contains(st.Issue, "128Mi") {
+		t.Errorf("issue = %q, want it to name the memory limit that was hit", st.Issue)
+	}
+}
+
+// TestWorkloadStatusConfigErrorNamesTheKeyNotTheValue: the missing KEY is the actionable part and
+// is safe to print; a value never is (ADR-0074 §9). The kubelet's message carries the key, so this
+// also asserts the value the Secret would hold does not appear.
+func TestWorkloadStatusConfigErrorNamesTheKeyNotTheValue(t *testing.T) {
+	pod := appPod("web-config")
+	pod.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		Name:  "web",
+		Image: "img:1",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason:  cp.ReasonCreateContainerConfigError,
+			Message: `couldn't find key STRIPE_API_KEY in Secret default/burrow-app-web-secrets`,
+		}},
+	}}}
+	a := kube.New(fake.NewSimpleClientset(unavailableDeployment("img:1"), pod), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.IssueReason != cp.ReasonCreateContainerConfigError {
+		t.Errorf("issue reason = %q, want %q", st.IssueReason, cp.ReasonCreateContainerConfigError)
+	}
+	if !strings.Contains(st.Issue, "STRIPE_API_KEY") {
+		t.Errorf("issue = %q, want it to name the missing key", st.Issue)
+	}
+	if strings.Contains(st.Issue, "sk_live") {
+		t.Fatalf("issue = %q, must never carry a secret value", st.Issue)
+	}
+}
+
+// TestWorkloadStatusProgressDeadlineExceededIssue: a rollout that ran out of time with no blocking
+// pod condition used to report not-available and nothing else. It now carries the deadline as its
+// reason, and says plainly that Burrow found nothing more specific rather than guessing a cause.
+func TestWorkloadStatusProgressDeadlineExceededIssue(t *testing.T) {
+	dep := wedgedRolloutDeployment("img:2")
+	dep.Status.Conditions = append(dep.Status.Conditions, appsv1.DeploymentCondition{
+		Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse, Reason: "ProgressDeadlineExceeded",
+	})
+	a := kube.New(fake.NewSimpleClientset(dep), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.IssueReason != cp.ReasonProgressDeadlineExceeded {
+		t.Errorf("issue reason = %q, want %q", st.IssueReason, cp.ReasonProgressDeadlineExceeded)
+	}
+	if !strings.Contains(st.Issue, "progress deadline") {
+		t.Errorf("issue = %q, want it to explain the deadline", st.Issue)
+	}
+}
+
+// TestListWorkloadsSurfacesCrashLoop is the list-path half of ADR-0074 §2's acceptance: the widened
+// vocabulary has to reach `burrow app list` too, not only `burrow app status`, or the cluster-wide
+// question still sends the user to kubectl.
+func TestListWorkloadsSurfacesCrashLoop(t *testing.T) {
+	a := kube.New(fake.NewSimpleClientset(wedgedRolloutDeployment("img:2"), crashLoopPod(1)), ns)
+
+	apps, err := a.ListWorkloads(context.Background())
+	if err != nil {
+		t.Fatalf("ListWorkloads: %v", err)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("got %d apps, want 1: %+v", len(apps), apps)
+	}
+	if apps[0].Available {
+		t.Fatalf("list reported a crash-looping app available: %+v", apps[0])
+	}
+	if apps[0].IssueReason != cp.ReasonCrashLoopBackOff {
+		t.Errorf("issue reason = %q, want %q", apps[0].IssueReason, cp.ReasonCrashLoopBackOff)
+	}
+	if !strings.Contains(apps[0].Issue, "exited with code 1") {
+		t.Errorf("issue = %q, want it to name the exit code", apps[0].Issue)
 	}
 }
 

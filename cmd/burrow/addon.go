@@ -55,8 +55,11 @@ var metricsRBACTemplate = template.Must(template.New("addon-metrics-rbac").Parse
 // registers it as a capability the agent can query; `connect` (later) adapts an existing backend.
 func newAddonCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "addon",
-		Short: "Install and manage backing services (logs, metrics, …)",
+		Use: "addon",
+		// `burrow addons` reads naturally when listing them, so accept the plural rather than
+		// answering it with a "did you mean" suggestion. The canonical name stays singular (ADR-0024).
+		Aliases: []string{"addons"},
+		Short:   "Install and manage backing services (logs, metrics, …)",
 		Long: "addon installs and operates vetted, self-hostable backing services on your cluster —\n" +
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",

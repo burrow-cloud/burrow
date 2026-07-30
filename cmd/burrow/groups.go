@@ -71,8 +71,11 @@ const firstRunBanner = rootShortDesc + "\n\n" +
 // newAppCmd groups the operations on a deployed application.
 func newAppCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "app",
-		Short: "Deploy and operate applications",
+		Use: "app",
+		// `burrow apps` reads naturally when listing them, so accept the plural rather than answering
+		// it with a "did you mean" suggestion. The canonical name stays singular (ADR-0024).
+		Aliases: []string{"apps"},
+		Short:   "Deploy and operate applications",
 		Long: "app groups everything you do to a deployed application: deploy and roll back, read\n" +
 			"status and logs, scale, and make it reachable at a hostname (publish + domain).",
 	}

@@ -1291,3 +1291,36 @@ func TestAutoscaleOff(t *testing.T) {
 		t.Errorf("output = %q", out)
 	}
 }
+
+// TestPluralGroupAliases confirms the plural spelling of each command group resolves to the same
+// command as the canonical singular, so `burrow addons` and `burrow apps` work instead of erroring
+// with a "did you mean" suggestion. The canonical names stay singular (ADR-0024); these are only
+// aliases.
+func TestPluralGroupAliases(t *testing.T) {
+	for _, tc := range []struct{ singular, plural string }{
+		{"addon", "addons"},
+		{"app", "apps"},
+	} {
+		root := newRootCmd()
+		want, _, err := root.Find([]string{tc.singular})
+		if err != nil {
+			t.Fatalf("find %q: %v", tc.singular, err)
+		}
+		got, _, err := root.Find([]string{tc.plural})
+		if err != nil {
+			t.Fatalf("find %q: %v", tc.plural, err)
+		}
+		if got != want {
+			t.Errorf("%q resolved to %q, want the same command as %q", tc.plural, got.Name(), tc.singular)
+		}
+
+		// The plural also routes through to a subcommand, not just to the group itself.
+		sub, _, err := root.Find([]string{tc.plural, "list"})
+		if err != nil {
+			t.Fatalf("find %q list: %v", tc.plural, err)
+		}
+		if sub.Name() != "list" {
+			t.Errorf("%q list resolved to %q, want the group's list subcommand", tc.plural, sub.Name())
+		}
+	}
+}

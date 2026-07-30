@@ -10,16 +10,19 @@ Auto-deploy ships a new image with nobody present, and there is **no hook at any
 enables it and changes their schema has no supported way to migrate, and no way to hear that the
 deploy then crashlooped.
 
-This adds **lifecycle hooks named for the moment they run** — `pre-deploy`, `post-deploy`, `pre-run`,
-`post-run`, `pre-rollback` — as one command with a phase you name.
+This adds **lifecycle hooks named for the moment they run** — `pre-deploy`, `post-deploy`,
+`pre-rollback` — as one command with a phase you name.
 
 - **Not "release".** That word means a tag and a changelog. A phase name says *when*, which is the
   only thing a reader needs.
 - **`pre-deploy` runs on every deploy, automated or not**, from the new image, before traffic moves.
   Failure aborts the deploy and the running version keeps serving.
-- **`post-deploy` and `post-run` are told the outcome** — and, on failure, the reason from
+- **A rollback fires `pre-rollback`, never `pre-deploy`.** `pre` phases are direction-specific
+  because they run from different images; `post` phases are not, so `post-deploy` fires after a
+  rollback too, told that it was one.
+- **`post-deploy` is told the outcome** — and, on failure, the reason from
   [ADR-0074](0074-burrow-observes-what-it-manages.md) §2's vocabulary (`CrashLoopBackOff`,
-  `Unschedulable`, `OOMKilled`). **They run either way**; a post hook that fires only on success cannot
+  `Unschedulable`, `OOMKilled`). **It runs either way**; a post hook that fires only on success cannot
   report the case it exists for.
 - **Burrow never rolls back by itself.** It reports; the hook decides.
 - **`pre-rollback` defaults to nothing**, and runs from the image being rolled back *from* — that is
@@ -84,7 +87,7 @@ What hooks exist, when each runs, what they are told, and what Burrow does with 
 
 ### 1. Hooks are named for when they run
 
-`pre-deploy`, `post-deploy`, `pre-run`, `post-run`, `pre-rollback`.
+`pre-deploy`, `post-deploy`, `pre-rollback`.
 
 **Not "release".** In every other tool a release is an artifact — a tag, a changelog, the thing that
 records what shipped. Borrowing the word for a command that happens to run during a deploy asks the
@@ -116,20 +119,21 @@ happen** rather than a deploy that half-happened. The Job is left for diagnosis,
 reported as the deploy's failure, with the command's output, rather than as a mysterious crashloop
 afterwards.
 
-### 4. `post-deploy` and `post-run` receive the outcome, and run either way
+### 4. `post-deploy` receives the outcome, and runs either way
 
-They run **after the rollout settles**, and they run **whether it succeeded or failed**. A post hook
+It runs **after the rollout settles**, and it runs **whether it succeeded or failed**. A post hook
 that fires only on success cannot report a failure, which is the case it exists for.
 
-What they receive:
+**It fires after a rollback too**, told that the deploy it is reporting on was one. "Did this settle
+and is it serving?" is the same question whichever direction the image moved, and a separate
+`post-rollback` phase would be a fourth name for an identical answer.
+
+What it receives:
 
 - **the outcome** — succeeded or failed;
 - **the reason**, when it failed, from ADR-0074 §2's closed vocabulary, so a hook can branch on the
   cause without parsing prose;
 - **the app, environment and image**, so a hook can report what it is talking about.
-
-For `post-run` the outcome is the command's exit code, which needs none of this machinery — it is
-included because the asymmetry would be arbitrary, not because it is hard.
 
 **This depends on ADR-0074 §2 and could not have been specified before it.** Until the Issue
 vocabulary was widened, an unavailable workload reported `Available: false` and an empty reason, so a
@@ -198,6 +202,12 @@ worse than doing nothing.
 
 **It runs before traffic moves back**, so the schema is stepped back before the older code serves.
 
+**A rollback fires this and never `pre-deploy`**, which §2's "every deploy path" would otherwise imply,
+since a rollback is mechanically a deploy of an older image. Firing `pre-deploy` on a rollback would
+run **A's** migration tool while returning to A — and A does not know B's migration exists, so it would
+step back one of *A's own* migrations instead. That is the failure this section already warns about,
+arriving through a different door, which is why the exclusion is stated rather than left to inference.
+
 ### 9. One at a time, per app and environment
 
 Two pushes in quick succession must not run two migration Jobs concurrently against one database. A
@@ -222,9 +232,11 @@ already declined a Postgres-only `burrow_run_sql` for the same reason.
 - **Auto-deploy becomes usable by an app with a database**, which is most of them.
 - **An unattended deploy stops being silent.** `post-deploy` is the first mechanism by which a push at
   3am can tell anyone it went wrong, and it is fed a reason rather than a boolean.
-- **Five phases is real surface**, mitigated by their being one command with a phase argument rather
-  than five commands. It is still five things to document and five places a user can put a command that
-  blocks their deploys.
+- **Three phases is modest surface**, mitigated further by their being one command with a phase
+  argument rather than three commands. An earlier draft carried `pre-run` and `post-run` as well; they
+  were dropped because this record's premise is *there is no caller*, and `burrow app run` is
+  synchronous and always has one — the caller already sees the exit code. Symmetry is not a
+  justification when the argument for the feature does not apply.
 - **Expand/contract is still not expressible unattended.** A pre-deploy hook fires once per deploy, so
   a migration needing run → deploy → run still requires the sequenced path. Hooks cover the common case
   — additive, backward-compatible migrations — and not the hard one.
@@ -258,6 +270,10 @@ already declined a Postgres-only `burrow_run_sql` for the same reason.
 - **Pre-deploy only, no post phase.** Smaller, and it covers the migration case that motivated this.
   Rejected because it leaves the unattended path as silent as it is today for everything after the
   deploy starts — the failure a push at 3am actually produces is a crashloop, not a failed migration.
+- **`pre-run` and `post-run` hooks**, for symmetry with the deploy phases. Rejected because the whole
+  argument for hooks is that auto-deploy has no caller, and `burrow app run` is a synchronous call that
+  always does — the caller sees the exit code and can sequence whatever comes next, which is precisely
+  what ADR-0048 says the explicit call is for. A hook there would duplicate the caller.
 - **A post hook that runs only on success.** Simpler, and it matches how many CI "on success" steps
   work. Rejected in §4 as self-defeating: the case a post hook is most needed for is the one it would
   not fire in.

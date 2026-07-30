@@ -176,7 +176,7 @@ func TestRemoveAddonSucceedsWhenInstanceUnreachable(t *testing.T) {
 func TestRemoveAddonBackupVolumeSurvivesDataDeletion(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := installPostgres(t)
-	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", ""); err != nil {
+	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
 

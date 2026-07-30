@@ -69,17 +69,23 @@ func newAddonCmd() *cobra.Command {
 }
 
 // newAddonBackupCmd is `burrow addon backup postgres <app>`: back up an app's database on the
-// installed Postgres add-on (ADR-0032). burrowd runs an in-cluster Job that pg_dumps the database to
-// the backup PVC and records the backup; no secret value crosses the API. Backup destroys nothing,
-// so it is allowed by default.
+// installed Postgres add-on (ADR-0032, ADR-0063 §7). burrowd runs an in-cluster Job that pg_dumps
+// the database to the backup PVC and, when an object-storage destination is registered, writes it on
+// to the store and reads it back before the backup is recorded as completed; no secret value crosses
+// the API. Backup destroys nothing, so it is allowed by default.
 func newAddonBackupCmd() *cobra.Command {
 	o := &commonOpts{}
+	var destination string
 	cmd := &cobra.Command{
 		Use:   "backup <addon> <app>",
 		Short: "Back up an app's database (e.g. on the Postgres add-on)",
 		Long: "backup runs an in-cluster Job that pg_dumps an app's database on the installed Postgres\n" +
 			"add-on to a backup volume and records the backup in the control plane. No secret value crosses\n" +
-			"the API — the Job reads the superuser password from the add-on's Secret in-cluster.",
+			"the API — the Job reads the superuser password from the add-on's Secret in-cluster.\n\n" +
+			"With an object-storage provider registered, the same Job writes the dump to that store and\n" +
+			"reads it back before the backup is recorded as completed, so a completed backup is one whose\n" +
+			"bytes left the cluster. With none registered the dump stays on the in-cluster volume, which\n" +
+			"shares a failure domain with the database it came from — the recorded backup says which.",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -87,18 +93,32 @@ func newAddonBackupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.BackupAddon(ctx, args[0], args[1], o.env)
+			res, err := c.BackupAddon(ctx, args[0], args[1], o.env, destination)
 			if err != nil {
 				return err
 			}
 			b := res.Backup
-			human := fmt.Sprintf("backed up %q in environment %s (backup %s, status %s)\nstored at %s", b.App, b.Environment, b.ID, b.Status, b.Path)
+			human := fmt.Sprintf("backed up %q in environment %s (backup %s, status %s)\n%s",
+				b.App, b.Environment, b.ID, b.Status, backupWhere(b))
 			return emit(cmd.OutOrStdout(), o.json, res, human)
 		},
 	}
+	cmd.Flags().StringVar(&destination, "destination", "",
+		"the object-storage `provider` to write this backup to (only needed when more than one is registered)")
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	return cmd
+}
+
+// backupWhere says where a backup actually went, in one line. An in-cluster backup says so plainly:
+// "stored at /backups/..." reads like an address rather than a warning, and the fact worth surfacing
+// is that this dump does not survive losing the cluster.
+func backupWhere(b client.Backup) string {
+	if b.Destination == "object-store" && b.ObjectKey != "" {
+		return fmt.Sprintf("written to the %s object store at %s", b.Provider, b.ObjectKey)
+	}
+	return fmt.Sprintf("stored at %s, on a volume in this cluster — register an object-storage provider\n"+
+		"  with `burrow config provider add --type s3` to keep backups outside it", b.Path)
 }
 
 // newAddonBackupsCmd is `burrow addon backups postgres [<app>]`: list recorded backups, newest
@@ -132,9 +152,16 @@ func newAddonBackupsCmd() *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "ID\tAPP\tENV\tCREATED\tSTATUS\tSIZE")
+			// WHERE is a column rather than a footnote: the difference between a backup that survives
+			// losing this cluster and one that does not is the most important thing on the row, and a
+			// listing that hid it would let a set of in-cluster dumps read as a backup strategy.
+			fmt.Fprintln(tw, "ID\tAPP\tENV\tCREATED\tSTATUS\tWHERE\tSIZE")
 			for _, b := range backups {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\n", b.ID, b.App, b.Environment, b.CreatedAt, b.Status, b.SizeBytes)
+				where := b.Destination
+				if where == "" {
+					where = "cluster"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", b.ID, b.App, b.Environment, b.CreatedAt, b.Status, where, b.SizeBytes)
 			}
 			return tw.Flush()
 		},

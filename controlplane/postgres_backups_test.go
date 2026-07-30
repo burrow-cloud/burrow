@@ -21,7 +21,7 @@ func TestBackupAddonRecordsPendingThenCompleted(t *testing.T) {
 	e, k, d, _ := newPostgresEngine(t)
 	k.SetBackupSize(2048)
 
-	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "")
+	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestBackupAddonJobFailureMarksFailed(t *testing.T) {
 	e, k, d, _ := newPostgresEngine(t)
 	k.SetError(fake.OpRunBackupJob, errors.New("boom"))
 
-	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", ""); err == nil {
+	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", ""); err == nil {
 		t.Fatal("BackupAddon should error when the Job fails")
 	}
 	list, err := d.ListBackups(ctx, "web", "")
@@ -71,10 +71,10 @@ func TestBackupAddonJobFailureMarksFailed(t *testing.T) {
 func TestBackupRejectsBadInput(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newPostgresEngine(t)
-	if _, err := e.BackupAddon(ctx, cp.AddonCache, "web", ""); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.BackupAddon(ctx, cp.AddonCache, "web", "", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("backup non-postgres err = %v, want ErrInvalid", err)
 	}
-	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "Bad_Name", ""); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "Bad_Name", "", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("backup bad app name err = %v, want ErrInvalid", err)
 	}
 	if jobs := k.BackupJobs(); len(jobs) != 0 {
@@ -88,11 +88,11 @@ func TestListBackupsReadsRegistry(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newPostgresEngine(t)
 
-	first, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "")
+	first, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon 1: %v", err)
 	}
-	second, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "")
+	second, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon 2: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestRestoreAddonConfirmGated(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newPostgresEngine(t)
 
-	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "")
+	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestRestoreAddonConfirmGated(t *testing.T) {
 	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", "no-such-id", "", true); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("restore unknown backup err = %v, want ErrNotFound", err)
 	}
-	other, err := e.BackupAddon(ctx, cp.AddonPostgres, "shop", "")
+	other, err := e.BackupAddon(ctx, cp.AddonPostgres, "shop", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon shop: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestBackupRestoreAuditRedacted(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, _ := newPostgresEngine(t)
 
-	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "")
+	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}

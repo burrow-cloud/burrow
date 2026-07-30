@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -427,6 +428,107 @@ func validateObjectStoreRequest(name string, cfg ObjectStoreConfig, cred ObjectS
 			name, cfg.AccessKeyIDKey, cfg.SecretAccessKeyKey, ErrInvalid)
 	}
 	return nil
+}
+
+// BackupDestination is everything the in-cluster backup Job needs to write one dump to the object
+// store: which provider it is, where the bucket is, and the credential to sign with (ADR-0063 §7).
+//
+// It carries a SECRET VALUE and is therefore an internal, in-memory shape only: it has no JSON tags
+// and is never returned over the control-plane API, never audited, never logged, and never placed
+// in an error. The engine assembles it at call time from the provider row and the credential store,
+// hands it to the Kubernetes seam, and the adapter puts the pair into a Job-owned Secret the pod
+// mounts — the same shape ADR-0057 §4 established for a build's source token, and the same reason:
+// a credential in a Job's env or command line is visible to anything that can read the Job.
+type BackupDestination struct {
+	// Provider is the registry name of the object-storage provider. It is not secret, and it is what
+	// gets recorded on the Backup row.
+	Provider string
+	// Config is the provider's non-secret configuration — endpoint, region, bucket.
+	Config ObjectStoreConfig
+	// Credential is the pair the S3 request is signed with. Secret; see the type's own comment.
+	Credential ObjectStoreCredential
+	// Key is the object key this backup occupies, from BackupObjectKey.
+	Key string
+}
+
+// BackupJobOutcome is what the backup Job reported: the dump's size, and on a failure the closed
+// reason and a Burrow-authored detail (ADR-0063 §7, ADR-0074 §5).
+//
+// It exists so a failed backup is recorded with WHY rather than with a wrapped error string a
+// caller would have to parse. Reason is a member of the closed BackupFailureReason set, or of
+// ADR-0074 §2's IssueReason set when the Job never started at all. Detail never carries a vendor
+// response body and never carries a credential.
+type BackupJobOutcome struct {
+	SizeBytes int64
+	Reason    string
+	Detail    string
+}
+
+// resolveBackupDestination returns the object-storage destination a backup should be written to, or
+// a nil destination when none is registered (ADR-0063 §7).
+//
+// A nil destination is NOT an error. An install with no object-storage provider keeps taking the
+// in-cluster dumps ADR-0032 gives it, and the row records BackupDestinationCluster so the listing
+// says plainly that those backups share a failure domain with the database. Refusing to back up at
+// all because nothing durable is configured would remove the weaker backup as well as the stronger
+// one.
+//
+// Ambiguity IS an error. ADR-0063 §6 allows several object-storage providers on purpose — a user
+// migrating between vendors has two — and choosing one of them silently is how the backups quietly
+// stop arriving at the destination somebody is watching. So the rule mirrors resolveDNSProvider: one
+// registered provider is the destination, several means the operation names one.
+func (e *Engine) resolveBackupDestination(ctx context.Context, name, app, env, backupID string) (*BackupDestination, error) {
+	all, err := e.db.Providers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading providers: %w", err)
+	}
+	var stores []Provider
+	for _, p := range all {
+		if p.Serves(CapabilityObjectStorage) && p.ObjectStore != nil {
+			stores = append(stores, p)
+		}
+	}
+
+	var chosen Provider
+	switch {
+	case strings.TrimSpace(name) != "":
+		found := false
+		for _, p := range stores {
+			if p.Name == name {
+				chosen, found = p, true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("no object-storage provider named %q is registered — add one with `burrow config provider add --type s3`: %w", name, ErrNotFound)
+		}
+	case len(stores) == 0:
+		// Nothing durable is configured: back up to the cluster, and let the row say so.
+		return nil, nil
+	case len(stores) == 1:
+		chosen = stores[0]
+	default:
+		names := make([]string, len(stores))
+		for i, p := range stores {
+			names[i] = p.Name
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("multiple object-storage providers are registered (%s) — pass --destination to say which one holds this backup; Burrow will not guess, because guessing wrong writes the backup somewhere nobody is watching: %w",
+			strings.Join(names, ", "), ErrInvalid)
+	}
+
+	// Read at call time so a rotated key is picked up with no restart (ADR-0023). The pair lives in
+	// memory from here to the Job-owned Secret and goes nowhere else.
+	cred, err := e.ObjectStoreCredentialFor(ctx, chosen)
+	if err != nil {
+		return nil, err
+	}
+	return &BackupDestination{
+		Provider:   chosen.Name,
+		Config:     *chosen.ObjectStore,
+		Credential: cred,
+		Key:        BackupObjectKey(app, env, backupID),
+	}, nil
 }
 
 // ObjectStoreCredentialFor reads an object-storage provider's credential PAIR from

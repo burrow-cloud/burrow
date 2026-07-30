@@ -5,6 +5,7 @@ package controlplane
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -326,11 +327,20 @@ type Kubernetes interface {
 	// ensuring the backup PVC first (ADR-0032). The Job connects as the superuser, reading the
 	// password from that instance's Secret via secretKeyRef env — never a CLI argument, never logged.
 	// It blocks until the Job completes, returns an error if the Job fails or times out, and reaps
-	// the Job on success. It returns the dump's size in bytes when the dump container reported it
-	// (the pod's terminated-state message), or 0 when unknown. env and app are validated before any
-	// Job is built: a dump names the server it came from, so it is as environment-scoped as the
-	// database it reads (ADR-0067 §1).
-	RunBackupJob(ctx context.Context, app, env, backupID string) (sizeBytes int64, err error)
+	// the Job on success. env and app are validated before any Job is built: a dump names the server
+	// it came from, so it is as environment-scoped as the database it reads (ADR-0067 §1).
+	//
+	// dest, when non-nil, adds the SECOND half of the Job: after the dump lands on the PVC, the same
+	// pod writes it to the object store and reads it back, retrying a write that did not complete
+	// (ADR-0063 §7). The Job then succeeds only if the object is there, which is what lets the
+	// caller record a completed backup without lying. dest carries a credential PAIR and therefore
+	// never crosses an API boundary — the adapter puts it in a Job-owned Secret and nowhere else.
+	//
+	// The returned BackupJobOutcome carries the dump's size in bytes (0 when unknown) and, on the
+	// error path, the closed reason the Job reported for its failure, so the caller can record WHY a
+	// backup failed rather than that it did. A non-nil error always accompanies a failure reason;
+	// the outcome is still returned so the caller does not have to parse the error to record it.
+	RunBackupJob(ctx context.Context, app, env, backupID string, dest *BackupDestination) (BackupJobOutcome, error)
 	// RunRestoreJob runs a one-shot Job in the add-on namespace that pg_restores
 	// /<backup-pvc>/<app>/<backupID>.dump into app's database on environment env's instance (--clean
 	// --if-exists, so it replaces current contents). Like RunBackupJob it reads the superuser password
@@ -452,13 +462,23 @@ type Database interface {
 	Audit(ctx context.Context, filter AuditFilter) ([]AuditEntry, error)
 
 	// RecordBackup persists a new backup row (ADR-0032). burrowd records it pending before
-	// starting the backup Job. The row names the app, the on-PVC path, and the status — never a
-	// credential. An existing row with the same ID is overwritten.
+	// starting the backup Job. The row names the app, the on-PVC path, the destination it is
+	// being written to, and the status — never a credential. An existing row with the same ID is
+	// overwritten.
 	RecordBackup(ctx context.Context, b Backup) error
 	// SetBackupStatus updates a recorded backup's status (and, when known, its size) — the
-	// completed/failed transition burrowd writes when the Job finishes. Setting the status of an
+	// completed transition burrowd writes when the Job finishes. Setting the status of an
 	// unknown backup id returns ErrNotFound.
 	SetBackupStatus(ctx context.Context, id string, status BackupStatus, sizeBytes int64) error
+	// FailBackup marks a recorded backup failed AND records why: reason is a member of the closed
+	// BackupFailureReason set, or of ADR-0074 §2's IssueReason set when the Job never started, and
+	// detail is one Burrow-authored line. It is a separate method from SetBackupStatus because a
+	// failure without a reason is the thing ADR-0063 §7 exists to stop — "it did not work" sends the
+	// reader to the logs, which is where the destination's silence was hiding in the first place.
+	//
+	// Neither argument may carry a secret value or a vendor response body. Failing an unknown backup
+	// id returns ErrNotFound.
+	FailBackup(ctx context.Context, id, reason, detail string) error
 	// ListBackups returns recorded backups, newest first. An empty app lists every app's backups and
 	// an empty env every environment's; a non-empty value restricts to that app or that environment.
 	// A listing is a read, not a target, so an unfiltered call spans environments deliberately —
@@ -584,6 +604,30 @@ type ObjectStore interface {
 	// PutObject writes body at key. It exists for the configuration-time probe of ADR-0063 §2 and
 	// for the backup path that follows; it is not a general upload surface.
 	PutObject(ctx context.Context, bucket, key string, body []byte) error
+	// PutObjectStream writes size bytes read from body at key, without holding them in memory. It
+	// is PutObject's shape for the one payload that is not small — a pg_dump, which is routinely
+	// gigabytes and would OOM the container that buffered it.
+	//
+	// sha256Hex is the hex SHA-256 of exactly those bytes, computed by the caller before the read
+	// begins. It is not an optimisation: an S3-compatible endpoint validates the body against the
+	// hash it was signed with and REFUSES a transfer that does not match, so passing it is what
+	// makes "the store accepted the write" mean "the store accepted these bytes" rather than "the
+	// store accepted some bytes". A caller that cannot compute it cannot use this method.
+	//
+	// It reports whether the write was REFUSED (the endpoint answered, and said no) as opposed to
+	// failing to complete, because ADR-0063 §7 retries the second and must not retry the first: a
+	// revoked credential does not become a valid one by being asked again, and spending the retry
+	// budget on it delays the loud failure that is the whole point.
+	PutObjectStream(ctx context.Context, bucket, key string, body io.Reader, size int64, sha256Hex string) (refused bool, err error)
+	// StatObject returns the size of the object at key, or ErrNotFound when it is not there.
+	//
+	// It exists so a backup can be VERIFIED rather than assumed (ADR-0063 §7). A 200 on a write is
+	// the endpoint's word that it accepted the request; reading the object back afterwards is the
+	// separate fact that it can serve it, at the key Burrow recorded, at the length Burrow sent.
+	// Those come apart in practice — an eventually-consistent listing, a bucket policy that permits
+	// writes and not reads, a multipart upload that completed into nothing — and the difference is
+	// only ever discovered at restore time unless something looks.
+	StatObject(ctx context.Context, bucket, key string) (int64, error)
 	// DeleteObject removes key. Deleting an object that is already absent is a no-op, not an error,
 	// so the probe's cleanup is idempotent.
 	DeleteObject(ctx context.Context, bucket, key string) error

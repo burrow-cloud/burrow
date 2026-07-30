@@ -984,14 +984,32 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	return nil
 }
 
-// BackupAddon backs up app's database on the installed Postgres add-on (ADR-0032): burrowd records a
-// pending backup, runs an in-cluster Job that pg_dumps the database to the backup PVC, and marks the
-// backup completed (or failed). The backup is recorded in the control-plane database — burrowd is not
-// mounted to the backup PVC, so the database, not the volume, is the index of backups. It moves no
-// secret value: the Job reads the superuser password only via secretKeyRef, and the audit row and the
-// returned result name the add-on, app, backup id, path, and size — never a credential. Backup is
-// allowed by default (it destroys nothing) and safe over the agent control channel.
-func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env string) (BackupResult, error) {
+// BackupAddon backs up app's database on the installed Postgres add-on (ADR-0032, ADR-0063 §7):
+// burrowd resolves where the backup is to go, records a pending backup, runs an in-cluster Job that
+// pg_dumps the database to the backup PVC and — when an object-storage destination is registered —
+// writes it to the store and reads it back, and only then marks the backup completed. The backup is
+// recorded in the control-plane database: burrowd is not mounted to the backup PVC, so the database,
+// not the volume, is the index of backups.
+//
+// THE ROW IS NOT ALLOWED TO SAY SUCCEEDED FOR BYTES THAT DID NOT ARRIVE. Every path off the Job that
+// is not "the Job succeeded" writes BackupFailed with the closed reason the Job reported, because a
+// backup recorded as completed when the store never got it is worse than no row at all: it converts a
+// missing backup into a false assurance, and the assurance is only tested at restore time. Nothing
+// in this function has a path that leaves the row pending on a known failure, and pending is never
+// read as success — the age of the last SUCCESSFUL backup counts completed rows only, so a row
+// stranded pending by a burrowd that died mid-Job keeps the age growing rather than resetting it.
+//
+// destination names which object-storage provider holds this backup; empty resolves it, which
+// succeeds when exactly one is registered and refuses when several are (ADR-0063 §6). No object
+// storage at all is not a failure — the dump still lands on the PVC, and the row records that it
+// only ever reached the cluster.
+//
+// It moves no secret value: the Job reads the superuser password only via secretKeyRef, the
+// object-storage credential reaches the pod only through a Job-owned Secret, and the audit row and
+// the returned result name the add-on, app, backup id, path, destination, and size — never a
+// credential. Backup is allowed by default (it destroys nothing) and safe over the agent control
+// channel.
+func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, destination string) (BackupResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return BackupResult{}, fmt.Errorf("backup addon: %w: %w", ErrInvalid, err)
 	}
@@ -1007,9 +1025,17 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env string) 
 	}
 
 	backupID := e.ids.NewID()
-	// The redacted audit args carry the add-on, app, environment, and backup NAMES only — never a
-	// credential (ADR-0032).
+	// The redacted audit args carry the add-on, app, environment, backup, and destination NAMES only
+	// — never a credential (ADR-0032, ADR-0063 §1).
 	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "backup": backupID}
+
+	// Resolved BEFORE the row is written, so an ambiguous or misnamed destination fails without
+	// leaving a pending backup behind that nothing will ever finish.
+	dest, err := e.resolveBackupDestination(ctx, destination, app, targetEnv, backupID)
+	if err != nil {
+		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
+		return BackupResult{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
+	}
 
 	backup := Backup{
 		ID:          backupID,
@@ -1018,24 +1044,42 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env string) 
 		CreatedAt:   e.clock.Now(),
 		Path:        BackupPath(app, backupID),
 		Status:      BackupPending,
+		Destination: BackupDestinationCluster,
+	}
+	if dest != nil {
+		backup.Destination = BackupDestinationObjectStore
+		backup.Provider = dest.Provider
+		backup.ObjectKey = dest.Key
+		args["destination"] = dest.Provider
 	}
 	if err := e.db.RecordBackup(ctx, backup); err != nil {
 		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
 		return BackupResult{}, fmt.Errorf("backup addon %s for %s: recording backup: %w", t, app, err)
 	}
 
-	size, err := e.k8s.RunBackupJob(ctx, app, targetEnv, backupID)
+	outcome, err := e.k8s.RunBackupJob(ctx, app, targetEnv, backupID, dest)
 	if err != nil {
-		_ = e.db.SetBackupStatus(ctx, backupID, BackupFailed, 0)
+		// Best-effort, and deliberately not gated on succeeding: a failed status write leaves the row
+		// pending, which still does not read as a successful backup anywhere.
+		//
+		// An empty reason is left empty rather than filled in with a guess. It means the backup never
+		// got as far as a running Job — a rejected identifier, an unresolvable instance, a claim that
+		// could not be created — and inventing "the store refused it" for that would send the next
+		// reader somewhere the failure is not.
+		_ = e.db.FailBackup(ctx, backupID, outcome.Reason, outcome.Detail)
 		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
 		return BackupResult{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
 	}
-	if err := e.db.SetBackupStatus(ctx, backupID, BackupCompleted, size); err != nil {
+	if err := e.db.SetBackupStatus(ctx, backupID, BackupCompleted, outcome.SizeBytes); err != nil {
+		// The bytes reached the destination and the registry did not hear about it. Say so on the row
+		// if we can, so the failure is legible rather than being an unexplained pending; the operator
+		// has a backup they cannot see, which is the harmless direction of this failure.
+		_ = e.db.FailBackup(ctx, backupID, BackupReasonNotRecorded, "the backup reached its destination but its completion could not be written to the registry")
 		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
 		return BackupResult{}, fmt.Errorf("backup addon %s for %s: recording completion: %w", t, app, err)
 	}
 	backup.Status = BackupCompleted
-	backup.SizeBytes = size
+	backup.SizeBytes = outcome.SizeBytes
 	e.recordExecution(ctx, auditOpAddonBackup, app, args, nil)
 	return BackupResult{Backup: backup}, nil
 }

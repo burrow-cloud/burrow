@@ -132,3 +132,85 @@ func ids(bs []cp.Backup) []string {
 	}
 	return out
 }
+
+// TestStoreBackupDestinationAndFailureRoundTrip exercises the columns ADR-0063 §7 adds: where a
+// backup went, and — when it did not get there — the closed reason and the Burrow-authored detail.
+//
+// The two transitions are asserted in the order they happen in a retry: a run that fails and is
+// re-recorded as completed must not keep a stale reason beside it, and a failed row must not keep a
+// size, because a length on a failed backup reads like a partial success.
+func TestStoreBackupDestinationAndFailureRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-app"
+
+	b := cp.Backup{
+		ID:          t.Name() + "-b1",
+		App:         app,
+		Environment: cp.DefaultEnvironment,
+		CreatedAt:   time.Date(2026, 7, 25, 1, 0, 0, 0, time.UTC),
+		Path:        "/backups/" + app + "/b1.dump",
+		Status:      cp.BackupPending,
+		Destination: cp.BackupDestinationObjectStore,
+		Provider:    "backups",
+		ObjectKey:   "burrow/backups/prod/" + app + "/b1.dump",
+	}
+	if err := s.RecordBackup(ctx, b); err != nil {
+		t.Fatalf("RecordBackup: %v", err)
+	}
+	got, err := s.GetBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("GetBackup: %v", err)
+	}
+	if got.Destination != cp.BackupDestinationObjectStore || got.Provider != "backups" || got.ObjectKey != b.ObjectKey {
+		t.Errorf("destination round trip = %+v", got)
+	}
+
+	if err := s.FailBackup(ctx, b.ID, cp.BackupReasonStoreUnreachable, "the destination did not complete the write after 4 attempts"); err != nil {
+		t.Fatalf("FailBackup: %v", err)
+	}
+	got, _ = s.GetBackup(ctx, b.ID)
+	if got.Status != cp.BackupFailed || got.FailureReason != cp.BackupReasonStoreUnreachable {
+		t.Errorf("after FailBackup = %+v, want failed/%s", got, cp.BackupReasonStoreUnreachable)
+	}
+	if got.SizeBytes != 0 {
+		t.Errorf("size = %d on a failed backup, want 0", got.SizeBytes)
+	}
+	if got.FailureDetail == "" {
+		t.Error("the detail did not survive")
+	}
+	// The destination is still on the failed row: "this did not reach the store" is a more useful
+	// fact than "this failed".
+	if got.Destination != cp.BackupDestinationObjectStore {
+		t.Errorf("destination = %q on a failed backup, want it preserved", got.Destination)
+	}
+
+	// A later success clears the reason; a completed row must never carry an explanation of a
+	// failure beside it.
+	if err := s.SetBackupStatus(ctx, b.ID, cp.BackupCompleted, 4096); err != nil {
+		t.Fatalf("SetBackupStatus: %v", err)
+	}
+	got, _ = s.GetBackup(ctx, b.ID)
+	if got.FailureReason != "" || got.FailureDetail != "" {
+		t.Errorf("a completed backup kept a failure reason: %+v", got)
+	}
+
+	// A backup recorded with no destination named reached the cluster and nowhere else; the row says
+	// so rather than leaving the field blank for a reader to interpret.
+	plain := cp.Backup{
+		ID: t.Name() + "-b2", App: app, Environment: cp.DefaultEnvironment,
+		CreatedAt: time.Date(2026, 7, 25, 2, 0, 0, 0, time.UTC),
+		Path:      "/backups/" + app + "/b2.dump", Status: cp.BackupPending,
+	}
+	if err := s.RecordBackup(ctx, plain); err != nil {
+		t.Fatalf("RecordBackup: %v", err)
+	}
+	got, _ = s.GetBackup(ctx, plain.ID)
+	if got.Destination != cp.BackupDestinationCluster {
+		t.Errorf("destination = %q, want %q", got.Destination, cp.BackupDestinationCluster)
+	}
+
+	if err := s.FailBackup(ctx, "no-such-backup", cp.BackupReasonDumpFailed, "x"); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("FailBackup on an unknown id = %v, want ErrNotFound", err)
+	}
+}

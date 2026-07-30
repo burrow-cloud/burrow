@@ -721,16 +721,18 @@ func (s *server) detachAddon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"addon": req.Addon, "app": req.App})
 }
 
-// backupAddon backs up an app's database on the installed Postgres add-on (ADR-0032). burrowd runs
-// an in-cluster Job that pg_dumps to the backup PVC and records the backup in the control-plane
-// database; the response is the recorded backup (id, app, path, size, status) — no secret value. The
-// backup Job reads the superuser password only via secretKeyRef, never logged or returned.
+// backupAddon backs up an app's database on the installed Postgres add-on (ADR-0032, ADR-0063 §7).
+// burrowd runs an in-cluster Job that pg_dumps to the backup PVC and, when an object-storage
+// destination is registered, writes it on to the store and reads it back before the backup is
+// recorded as completed; the response is the recorded backup (id, app, path, destination, size,
+// status) — no secret value. The backup Job reads the superuser password only via secretKeyRef and
+// the destination credential only from a Job-owned Secret; neither is logged or returned.
 func (s *server) backupAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonBackupRequest
 	if !decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.BackupAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env)
+	res, err := s.engine.BackupAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env, req.Destination)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -778,6 +780,10 @@ type addonBackupRequest struct {
 	// Env is the environment whose Postgres instance the dump is taken from (ADR-0067 §1); empty
 	// targets the default environment, and is refused when more than one environment is registered.
 	Env string `json:"env,omitempty"`
+	// Destination NAMES the object-storage provider this backup is written to (ADR-0063 §6). Empty
+	// resolves it, which works when exactly one is registered and is refused when several are — the
+	// destination of a backup is not a thing to guess at. It is a registry name, never a credential.
+	Destination string `json:"destination,omitempty"`
 }
 
 // addonRestoreRequest is the body of an addon restore: the add-on type, the app, the backup id, and

@@ -328,7 +328,7 @@ func exerciseBackupJob(t *testing.T) corev1.PodSpec {
 	client := fake.NewSimpleClientset()
 	var jobs []*batchv1.Job
 	succeedJobs(client, &jobs)
-	if _, err := markedAdapter(client).RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1"); err != nil {
+	if _, err := markedAdapter(client).RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", nil); err != nil {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
 	return onlyJob(t, jobs).Spec.Template.Spec

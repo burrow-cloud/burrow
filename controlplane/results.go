@@ -328,14 +328,27 @@ type DomainResult struct {
 // BackupStatus is the lifecycle state of a recorded Postgres backup (ADR-0032). A backup is
 // recorded pending when its Job is started and moves to completed on the Job's success or failed
 // on its failure.
+//
+// Completed means THE BYTES REACHED THE BACKUP'S DESTINATION, and it means nothing weaker
+// (ADR-0063 §7). Where the destination is an object store, the Job has written the object and read
+// it back before this row is allowed to say completed: a row claiming success for bytes that never
+// left the cluster is worse than no row at all, because it converts a missing backup into a false
+// assurance, discovered at restore time by somebody who cannot restore a database.
 type BackupStatus string
 
 const (
-	// BackupPending is a backup whose Job has been started but has not yet completed.
+	// BackupPending is a backup whose Job has been started but has not yet completed. It covers the
+	// whole of the dump AND the retried write to the destination: a retry in flight is a backup
+	// still in progress, not a failure and certainly not a success. Nothing reads pending as
+	// successful — the age of the last SUCCESSFUL backup counts completed rows only — so a row left
+	// pending by a burrowd that died mid-Job keeps the backup age growing, which is the safe
+	// direction for it to fail in.
 	BackupPending BackupStatus = "pending"
-	// BackupCompleted is a backup whose Job finished successfully; the dump is on the PVC.
+	// BackupCompleted is a backup that reached its destination: the dump is on the PVC and, when an
+	// object-storage destination is configured, in the store and verified readable there.
 	BackupCompleted BackupStatus = "completed"
-	// BackupFailed is a backup whose Job did not complete successfully.
+	// BackupFailed is a backup that did not reach its destination. FailureReason says why in
+	// machine-readable terms.
 	BackupFailed BackupStatus = "failed"
 )
 
@@ -349,10 +362,92 @@ func (s BackupStatus) Valid() bool {
 	}
 }
 
+// BackupDestinationKind names where a backup's bytes ended up, so a listing can distinguish a dump
+// that survives losing the cluster from one that does not (ADR-0063).
+//
+// The two are a TIER, not alternatives. The PVC is where pg_dump writes and where pg_restore reads:
+// a same-cluster staging copy that keeps the single-app logical restore ADR-0066 §4 deliberately
+// retains both cheap and available when the vendor is not. The object store is the durable
+// destination that takes the backup out of the database's failure domain, which is the entire point
+// of ADR-0063. Recording which one a row reached is what stops "we have backups" from meaning two
+// different things on the same listing.
+type BackupDestinationKind string
+
+const (
+	// BackupDestinationCluster is a backup that only ever reached the in-cluster PVC, because no
+	// object-storage provider is registered. It is recorded rather than left blank: a backup sharing
+	// a failure domain with the database it came from is a fact an operator should be able to read
+	// off the row, not one they have to infer from an absence.
+	BackupDestinationCluster BackupDestinationKind = "cluster"
+	// BackupDestinationObjectStore is a backup that reached the registered object store. On a
+	// completed row it means the object was written AND read back at ObjectKey.
+	BackupDestinationObjectStore BackupDestinationKind = "object-store"
+)
+
+// The closed BackupFailureReason set: why a backup did not reach its destination, in terms a caller
+// can BRANCH on rather than parse (ADR-0074 §5). It is deliberately a separate vocabulary from
+// ADR-0074 §2's IssueReason set, which describes why a POD is blocked; these describe what happened
+// once the pod was running. Both sets travel on the same row — a backup whose Job never started
+// records the IssueReason the waiter returned (issue #352), and one whose Job ran records one of
+// these — so a reader gets the closed reason either way, and IsBackupFailureReason is how a caller
+// tells which vocabulary it is holding.
+//
+// NO SECRET VALUE ENTERS A REASON OR ITS DETAIL. The detail is Burrow-authored — an HTTP status, an
+// attempt count, a byte count — and never the vendor's response body, which is the one place an
+// access key id is known to be echoed back. The body goes to the Job's pod log, which is the
+// operator's to read and is no wider an exposure than the credential the pod already mounts.
+const (
+	// BackupReasonDumpFailed is pg_dump itself failing: the database refused the connection, ran out
+	// of disk on the PVC, or the dump command errored. Nothing was offered to the store.
+	BackupReasonDumpFailed = "DumpFailed"
+	// BackupReasonStoreUnreachable is the destination not answering — DNS, TLS, connection refused,
+	// or a 5xx — after every retry. This is the one ADR-0063 §7 says to retry, because a transient
+	// network failure is the common case; reaching this reason means the retries were used up.
+	BackupReasonStoreUnreachable = "StoreUnreachable"
+	// BackupReasonStoreRejected is the destination answering, and saying no: a credential that is
+	// wrong or has been revoked, a bucket that is gone, a write the policy forbids. It is NOT
+	// retried — a 403 does not become a 200 by being asked again — so it fails on the first answer
+	// and says so, rather than spending the retry budget proving it.
+	BackupReasonStoreRejected = "StoreRejected"
+	// BackupReasonObjectNotReadable is the destination accepting the write and then failing to serve
+	// the object back, or serving it back at the wrong length. It is the reason that exists because
+	// a 200 on a PUT is not the same fact as a durable, readable object, and a Backup row is only
+	// allowed to claim the second one.
+	BackupReasonObjectNotReadable = "ObjectNotReadable"
+	// BackupReasonNotRecorded is the backup that reached the store but whose completion could not be
+	// written to the registry. The bytes are safe and the row is not, which is the harmless
+	// direction: an under-reported backup age is a false alarm, and a false assurance is not.
+	BackupReasonNotRecorded = "NotRecorded"
+)
+
+// BackupFailureReasons returns every member of the closed set, so a caller (or a generated agent
+// schema) can enumerate the vocabulary instead of hard-coding it.
+func BackupFailureReasons() []string {
+	return []string{
+		BackupReasonDumpFailed,
+		BackupReasonStoreUnreachable,
+		BackupReasonStoreRejected,
+		BackupReasonObjectNotReadable,
+		BackupReasonNotRecorded,
+	}
+}
+
+// IsBackupFailureReason reports whether reason is a member of the closed backup set — which is also
+// how a caller tells a backup reason from an ADR-0074 §2 IssueReason arriving on the same field.
+func IsBackupFailureReason(reason string) bool {
+	for _, r := range BackupFailureReasons() {
+		if r == reason {
+			return true
+		}
+	}
+	return false
+}
+
 // Backup is one recorded per-app database backup (ADR-0032): the control-plane index row for a
-// logical dump written to the backup PVC. It names the app, the on-PVC path, the byte size (0 when
-// unknown), and the lifecycle status — never a credential or a connection string. burrowd is not
-// mounted to the backup PVC, so this row, not the volume, is what `addon backups` lists.
+// logical dump written to the backup PVC and, when one is registered, on to an object store
+// (ADR-0063). It names the app, the on-PVC path, the destination, the byte size (0 when unknown),
+// and the lifecycle status — never a credential or a connection string. burrowd is not mounted to
+// the backup PVC, so this row, not the volume, is what `addon backups` lists.
 type Backup struct {
 	// ID is the backup identifier, minted from the IDs seam — also the dump filename stem.
 	ID string `json:"id"`
@@ -372,10 +467,31 @@ type Backup struct {
 	SizeBytes int64 `json:"size_bytes,omitempty"`
 	// Status is the lifecycle state of this backup.
 	Status BackupStatus `json:"status"`
+	// Destination is where this backup's bytes ended up. It is written when the row is created, from
+	// what was registered AT THAT MOMENT, so a listing says what each backup actually did rather
+	// than what the current configuration would do — registering a destination today does not make
+	// last month's in-cluster dumps durable, and the rows must not imply that it did.
+	Destination BackupDestinationKind `json:"destination,omitempty"`
+	// Provider is the name of the object-storage provider this backup was written to, empty for an
+	// in-cluster one. It is a registry name, never a credential or an endpoint secret.
+	Provider string `json:"provider,omitempty"`
+	// ObjectKey is the key the dump occupies in the provider's bucket, empty for an in-cluster
+	// backup. It is the address a restore reads from and the thing an operator checks at the vendor;
+	// the bucket and endpoint it hangs off live on the provider row, not repeated here.
+	ObjectKey string `json:"object_key,omitempty"`
+	// FailureReason is why a failed backup failed — a member of the closed BackupFailureReason set,
+	// or of ADR-0074 §2's IssueReason set when the Job never started. Empty on a pending or
+	// completed row.
+	FailureReason string `json:"failure_reason,omitempty"`
+	// FailureDetail is one Burrow-authored line elaborating the reason, safe to print: an HTTP
+	// status, an attempt count, a length mismatch. Never a vendor response body and never a
+	// credential.
+	FailureDetail string `json:"failure_detail,omitempty"`
 }
 
 // BackupResult reports the outcome of an on-demand backup (ADR-0032): the recorded backup row. It
-// carries the backup id, the app, the path, the size, and the status — never a secret value.
+// carries the backup id, the app, the path, the destination, the size, and the status — never a
+// secret value.
 type BackupResult struct {
 	Backup Backup `json:"backup"`
 }
@@ -390,3 +506,22 @@ func BackupPath(app, id string) string {
 // backupMountPath is where the backup PVC is mounted inside the backup/restore Job container; it
 // prefixes every recorded backup path so the engine and the kube Job builder agree on the layout.
 const backupMountPath = "/backups"
+
+// BackupObjectKey is the object-store key of app's dump for id in environment env, recorded on the
+// backup row and handed to the Job that writes it (ADR-0063). It is derived here, next to
+// BackupPath, so the engine and the Job builder cannot disagree about where a backup lives.
+//
+// The layout is <prefix>/<env>/<app>/<id>.dump: the environment leads because it is the coarsest
+// thing an operator or a lifecycle rule ever scopes to, and the id is unique on its own, so the
+// path is legible at the vendor rather than being a flat bucket of opaque names. The prefix keeps
+// Burrow's objects together in a bucket the operator may have pointed at rather than let Burrow
+// create (ADR-0063 §4).
+func BackupObjectKey(app, env, id string) string {
+	if env == "" {
+		env = DefaultEnvironment
+	}
+	return backupObjectPrefix + "/" + env + "/" + app + "/" + id + ".dump"
+}
+
+// backupObjectPrefix is where every backup object Burrow writes lives in the bucket.
+const backupObjectPrefix = "burrow/backups"

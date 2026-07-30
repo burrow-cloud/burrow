@@ -71,6 +71,12 @@ type Adapter struct {
 	// code is not. nil (the default) leaves the constructed object exactly as it is. Wired via
 	// WithPlatformPodMutator.
 	platformPodMutator func(*corev1.PodSpec)
+	// shipperImage is the image the backup Job's shipping container runs — burrowd's own, under the
+	// ship-backup subcommand (ADR-0063 §7). Empty (the default) leaves the floating
+	// defaultShipperImage; a released burrowd pins its own version, and BURROW_SHIPPER_IMAGE
+	// overrides both for a dev or e2e cluster where no published image applies. Wired via
+	// WithShipperImage.
+	shipperImage string
 }
 
 // New returns an Adapter over the given clientset and namespace (defaulting to
@@ -81,6 +87,16 @@ func New(client kubernetes.Interface, namespace string) *Adapter {
 		namespace = "default"
 	}
 	return &Adapter{client: client, namespace: namespace, addonNamespace: defaultAddonNamespace}
+}
+
+// WithShipperImage overrides the image the backup Job's shipping container runs (ADR-0063 §7). An
+// empty value leaves the default, so a caller can pass an unresolved override through without
+// having to branch on it. Returns the Adapter for chaining.
+func (a *Adapter) WithShipperImage(image string) *Adapter {
+	if image != "" {
+		a.shipperImage = image
+	}
+	return a
 }
 
 // WithAddonNamespace sets the namespace Burrow deploys add-ons (and their collectors) into,

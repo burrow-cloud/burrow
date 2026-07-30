@@ -5,6 +5,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -44,26 +45,24 @@ func (a *Adapter) RunJob(ctx context.Context, spec controlplane.RunSpec) (contro
 		return controlplane.RunResult{}, fmt.Errorf("kube: creating run job %q: %w", name, err)
 	}
 
-	deadline := time.Now().Add(runJobTimeout)
-	for {
-		j, err := jobs.Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return controlplane.RunResult{}, fmt.Errorf("kube: reading run job %q: %w", name, err)
+	// awaitJob returns as soon as the Job is terminal, or as soon as its pod reports a condition that
+	// means it will never start (issue #352). `burrow app run` is the sharpest case for that: it is
+	// synchronous with a TEN-MINUTE bound (ADR-0048 §3), so before this a misconfigured app meant a
+	// user or an agent waited ten minutes to be told "timed out", with nothing anywhere naming the
+	// Secret that was missing.
+	if _, err := awaitJob(ctx, a.client, a.namespace, name, runJobTimeout, runJobPoll); err != nil {
+		// The deadline backstop keeps its TimedOut result: a caller distinguishes "we stopped
+		// waiting" from "the pod could not start", and only the former is a candidate for a retry.
+		var blocked *controlplane.JobBlockedError
+		if errors.As(err, &blocked) && blocked.TimedOut() {
+			return controlplane.RunResult{TimedOut: true}, err
 		}
-		if j.Status.Succeeded > 0 || j.Status.Failed > 0 {
-			// Terminal (Complete or Failed): capture the pod's output and exit code before the TTL
-			// controller garbage-collects it. Both terminal states carry the same answer (ADR-0048 §3).
-			return a.captureRun(ctx, name), nil
-		}
-		if time.Now().After(deadline) {
-			return controlplane.RunResult{TimedOut: true}, fmt.Errorf("kube: run job %q did not complete within %s", name, runJobTimeout)
-		}
-		select {
-		case <-ctx.Done():
-			return controlplane.RunResult{}, ctx.Err()
-		case <-time.After(runJobPoll):
-		}
+		return controlplane.RunResult{}, err
 	}
+	// Terminal (Complete or Failed): capture the pod's output and exit code before the TTL controller
+	// garbage-collects it. Both terminal states carry the same answer (ADR-0048 §3) — a non-zero exit
+	// is a result, not an error, which is why awaitJob deliberately ignores terminated containers.
+	return a.captureRun(ctx, name), nil
 }
 
 // captureRun reads a finished run Job's pod for the container's exit code and its combined log output

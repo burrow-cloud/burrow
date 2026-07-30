@@ -228,42 +228,33 @@ func (a *Adapter) backupJob(name, script string, connEnv []corev1.EnvVar) *batch
 	return job
 }
 
-// runJobAwaitSize creates the Job, polls until it succeeds or fails (or times out), and on success
-// reaps it and returns the byte size the container wrote to its termination-log (0 when absent or
-// unparsable). On failure it returns an error WITHOUT deleting the Job, so its pod logs remain for
-// diagnosis.
+// runJobAwaitSize creates the Job, waits for it, and on success reaps it and returns the byte size
+// the container wrote to its termination-log (0 when absent or unparsable). On failure it returns an
+// error WITHOUT deleting the Job, so its pod logs remain for diagnosis.
+//
+// The wait is awaitJob's, so a backup or restore whose pod cannot start — a missing superuser
+// Secret, an unpullable postgres image, an add-on namespace with no room — fails in seconds naming
+// the fix, instead of burning ten minutes and reporting elapsed time (issue #352). That matters most
+// for RESTORE, which is run during an incident by someone who has already lost something.
 func (a *Adapter) runJobAwaitSize(ctx context.Context, job *batchv1.Job, name string) (int64, error) {
 	jobs := a.client.BatchV1().Jobs(a.addonNamespace)
 	if _, err := jobs.Create(ctx, job, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return 0, fmt.Errorf("kube: creating job %q: %w", name, err)
 	}
 
-	deadline := time.Now().Add(backupJobTimeout)
-	for {
-		j, err := jobs.Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return 0, fmt.Errorf("kube: reading job %q: %w", name, err)
-		}
-		if j.Status.Failed > 0 {
-			// Leave the Job (and its pod logs) for diagnosis; do not reap a failure.
-			return 0, fmt.Errorf("kube: job %q failed", name)
-		}
-		if j.Status.Succeeded > 0 {
-			size := a.jobTerminationSize(ctx, name)
-			// Reap on success: delete the Job and its pods so they do not accumulate.
-			policy := metav1.DeletePropagationBackground
-			_ = jobs.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy})
-			return size, nil
-		}
-		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("kube: job %q did not complete within %s", name, backupJobTimeout)
-		}
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		case <-time.After(backupJobPoll):
-		}
+	j, err := awaitJob(ctx, a.client, a.addonNamespace, name, backupJobTimeout, backupJobPoll)
+	if err != nil {
+		return 0, err
 	}
+	if j.Status.Failed > 0 {
+		// Leave the Job (and its pod logs) for diagnosis; do not reap a failure.
+		return 0, fmt.Errorf("kube: job %q failed", name)
+	}
+	size := a.jobTerminationSize(ctx, name)
+	// Reap on success: delete the Job and its pods so they do not accumulate.
+	policy := metav1.DeletePropagationBackground
+	_ = jobs.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy})
+	return size, nil
 }
 
 // jobTerminationSize reads the byte size the backup container wrote to /dev/termination-log from the

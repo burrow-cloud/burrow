@@ -353,39 +353,31 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 		}
 	}
 
-	deadline := time.Now().Add(buildJobTimeout)
-	for {
-		j, err := jobs.Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return "", fmt.Errorf("kube: reading build job %q: %w", name, err)
-		}
-		if j.Status.Failed > 0 {
-			// Leave the failed Job (and its pod logs) for diagnosis; the TTL controller reaps it after
-			// buildJobTTLSeconds so failures no longer accumulate indefinitely (issue #280).
-			return "", fmt.Errorf("kube: build job %q failed", name)
-		}
-		if j.Status.Succeeded > 0 {
-			digest := b.jobTerminationDigest(ctx, name)
-			if digest == "" {
-				// The Job reported success but wrote no digest — treat it as a build failure rather
-				// than pinning a deploy to nothing. Leave the Job for diagnosis.
-				return "", fmt.Errorf("kube: build job %q reported success but produced no image digest", name)
-			}
-			// Reap on success immediately (a clean cluster: a good build has nothing to diagnose) —
-			// the TTL is only the backstop for the failures left behind above (issue #280).
-			policy := metav1.DeletePropagationBackground
-			_ = jobs.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy})
-			return digest, nil
-		}
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("kube: build job %q did not complete within %s", name, buildJobTimeout)
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(buildJobPoll):
-		}
+	// awaitJob fails fast when the build pod cannot start rather than waiting out the thirty-minute
+	// deadline (issue #352). The capacity pre-flight above catches the "no node has room" case before
+	// any Job exists, but it cannot catch the rest: a clone init container whose credential Secret is
+	// missing, an unreachable builder image, a taint the build pod does not tolerate. Those all leave
+	// both Job counters at zero, and thirty minutes is a long time to learn nothing.
+	j, err := awaitJob(ctx, b.client, b.namespace, name, buildJobTimeout, buildJobPoll)
+	if err != nil {
+		return "", err
 	}
+	if j.Status.Failed > 0 {
+		// Leave the failed Job (and its pod logs) for diagnosis; the TTL controller reaps it after
+		// buildJobTTLSeconds so failures no longer accumulate indefinitely (issue #280).
+		return "", fmt.Errorf("kube: build job %q failed", name)
+	}
+	digest := b.jobTerminationDigest(ctx, name)
+	if digest == "" {
+		// The Job reported success but wrote no digest — treat it as a build failure rather
+		// than pinning a deploy to nothing. Leave the Job for diagnosis.
+		return "", fmt.Errorf("kube: build job %q reported success but produced no image digest", name)
+	}
+	// Reap on success immediately (a clean cluster: a good build has nothing to diagnose) —
+	// the TTL is only the backstop for the failures left behind above (issue #280).
+	policy := metav1.DeletePropagationBackground
+	_ = jobs.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy})
+	return digest, nil
 }
 
 // replaceFailedJob deletes the failed build Job left behind by a previous re-run and creates a fresh

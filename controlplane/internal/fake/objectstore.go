@@ -6,6 +6,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 
@@ -69,6 +70,22 @@ type ObjectStore struct {
 	PutErr       error
 	DeleteErr    error
 	LifecycleErr error
+
+	// StreamErrs are returned by successive PutObjectStream calls, one per call, so a test can model
+	// the case ADR-0063 §7 is built around: a destination that fails and then works. A nil entry is a
+	// success; calls past the end of the slice succeed. StreamRefused pairs with it, marking which of
+	// those failures the endpoint REFUSED (not retryable) rather than failed to complete.
+	StreamErrs    []error
+	StreamRefused []bool
+	// StatErr, when set, is returned by StatObject — the store that accepted the write and then
+	// cannot serve it back.
+	StatErr error
+	// StatSize, when non-zero, is the length StatObject reports instead of the object's real one, so
+	// a test can model a store that serves the object back at the wrong length.
+	StatSize int64
+	// Streamed is the log of keys PutObjectStream was called with, in order, INCLUDING the calls
+	// that failed — how a test asserts a retry actually happened.
+	Streamed []string
 }
 
 // NewObjectStore returns an empty store: no buckets, no objects, no rules.
@@ -144,6 +161,52 @@ func (s *ObjectStore) PutObject(ctx context.Context, bucket, key string, body []
 	s.objects[bucket+"/"+key] = body
 	s.Wrote = append(s.Wrote, key)
 	return nil
+}
+
+// PutObjectStream reads the body and stores it, honouring the per-call StreamErrs script so a test
+// can make the first attempt fail and the second succeed. A refused attempt is reported as refused,
+// which the caller must NOT retry.
+func (s *ObjectStore) PutObjectStream(ctx context.Context, bucket, key string, body io.Reader, size int64, sha256Hex string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.Streamed)
+	s.Streamed = append(s.Streamed, key)
+	if n < len(s.StreamErrs) && s.StreamErrs[n] != nil {
+		refused := n < len(s.StreamRefused) && s.StreamRefused[n]
+		return refused, s.StreamErrs[n]
+	}
+	if sha256Hex == "" {
+		return true, fmt.Errorf("fake: a payload sha256 is required: %w", controlplane.ErrInvalid)
+	}
+	if !s.buckets[bucket] {
+		// A bucket that is not there is an answer, not a network failure: refused, not retryable.
+		return true, fmt.Errorf("fake: bucket %s does not exist: %w", bucket, controlplane.ErrNotFound)
+	}
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return false, err
+	}
+	s.objects[bucket+"/"+key] = buf
+	s.Wrote = append(s.Wrote, key)
+	return false, nil
+}
+
+// StatObject reports the stored object's length, or the seeded StatErr/StatSize — the store that
+// took the write and then cannot serve it back, or serves it back at the wrong length.
+func (s *ObjectStore) StatObject(ctx context.Context, bucket, key string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.StatErr != nil {
+		return 0, s.StatErr
+	}
+	if s.StatSize != 0 {
+		return s.StatSize, nil
+	}
+	body, ok := s.objects[bucket+"/"+key]
+	if !ok {
+		return 0, fmt.Errorf("fake: %s is not in bucket %s: %w", key, bucket, controlplane.ErrNotFound)
+	}
+	return int64(len(body)), nil
 }
 
 func (s *ObjectStore) DeleteObject(ctx context.Context, bucket, key string) error {

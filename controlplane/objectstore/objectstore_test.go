@@ -4,8 +4,12 @@
 package objectstore
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -311,3 +315,145 @@ func TestFactoryRejectsMalformedConfiguration(t *testing.T) {
 		}
 	}
 }
+
+// TestPutObjectStreamSignsThePayloadAndDoesNotBuffer asserts the streaming write carries the
+// caller's payload hash and a real Content-Length. Both are what let the endpoint reject a truncated
+// or altered transfer instead of storing a backup that will not restore (ADR-0063 §7).
+func TestPutObjectStreamSignsThePayloadAndDoesNotBuffer(t *testing.T) {
+	body := []byte("PGDMP fake custom-format dump")
+	sum := sha256.Sum256(body)
+	hexSum := hex.EncodeToString(sum[:])
+
+	var got *http.Request
+	var received []byte
+	store, _ := newTestStore(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.Clone(r.Context())
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(r.Body)
+		received = buf.Bytes()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	refused, err := store.PutObjectStream(context.Background(), "bucket", "burrow/backups/prod/web/bk1.dump",
+		bytes.NewReader(body), int64(len(body)), hexSum)
+	if err != nil || refused {
+		t.Fatalf("PutObjectStream: refused=%v err=%v", refused, err)
+	}
+	if !bytes.Equal(received, body) {
+		t.Error("the endpoint did not receive the body")
+	}
+	if got.Header.Get("X-Amz-Content-Sha256") != hexSum {
+		t.Errorf("x-amz-content-sha256 = %q, want the caller's hash", got.Header.Get("X-Amz-Content-Sha256"))
+	}
+	if got.ContentLength != int64(len(body)) {
+		t.Errorf("Content-Length = %d, want %d; without it the endpoint cannot reject a truncated stream", got.ContentLength, len(body))
+	}
+	// The secret half still never appears on the wire.
+	if strings.Contains(got.Header.Get("Authorization"), testSecret) {
+		t.Fatal("the Authorization header carries the secret access key")
+	}
+}
+
+// TestPutObjectStreamRequiresAPayloadHash asserts the method refuses to write without one. A write
+// signed with no payload hash completes without the endpoint checking anything, so "the store
+// accepted it" would stop meaning "the store accepted these bytes" — which is the claim the Backup
+// row is about to make.
+func TestPutObjectStreamRequiresAPayloadHash(t *testing.T) {
+	var called bool
+	store, _ := newTestStore(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	if _, err := store.PutObjectStream(context.Background(), "bucket", "k", strings.NewReader("x"), 1, ""); !errors.Is(err, controlplane.ErrInvalid) {
+		t.Errorf("err = %v, want ErrInvalid", err)
+	}
+	if called {
+		t.Error("an unhashed write reached the endpoint")
+	}
+}
+
+// TestPutObjectStreamDistinguishesRefusalFromFailure asserts the split the retry policy rests on: a
+// 403 is an answer and is not worth retrying, a 500 or a 429 is the endpoint asking to be asked
+// again. Getting this backwards either burns the retry budget on a revoked credential or gives up on
+// a blip.
+func TestPutObjectStreamDistinguishesRefusalFromFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		wantRefused bool
+	}{
+		{"forbidden", http.StatusForbidden, true},
+		{"no such bucket", http.StatusNotFound, true},
+		{"bad request", http.StatusBadRequest, true},
+		{"too many requests", http.StatusTooManyRequests, false},
+		{"internal error", http.StatusInternalServerError, false},
+		{"gateway timeout", http.StatusGatewayTimeout, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _ := newTestStore(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte("<Error><Code>x</Code></Error>"))
+			})
+			refused, err := store.PutObjectStream(context.Background(), "bucket", "k", strings.NewReader("x"), 1, "abc")
+			if err == nil {
+				t.Fatal("a non-2xx write should error")
+			}
+			if refused != tc.wantRefused {
+				t.Errorf("refused = %v, want %v for http %d", refused, tc.wantRefused, tc.status)
+			}
+		})
+	}
+}
+
+// TestStatObjectReadsTheObjectBack asserts the verification read: the length on success, ErrNotFound
+// for an object the store will not serve. It is the difference between a write the endpoint accepted
+// and an object a restore could find.
+func TestStatObjectReadsTheObjectBack(t *testing.T) {
+	store, _ := newTestStore(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Errorf("method = %s, want HEAD; a full GET would re-transfer the whole dump to learn nothing more", r.Method)
+		}
+		w.Header().Set("Content-Length", "4096")
+		w.WriteHeader(http.StatusOK)
+	})
+	n, err := store.StatObject(context.Background(), "bucket", "burrow/backups/prod/web/bk1.dump")
+	if err != nil {
+		t.Fatalf("StatObject: %v", err)
+	}
+	if n != 4096 {
+		t.Errorf("size = %d, want 4096", n)
+	}
+
+	missing, _ := newTestStore(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	if _, err := missing.StatObject(context.Background(), "bucket", "k"); !errors.Is(err, controlplane.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPutObjectStreamDoesNotCloseTheCallersReader pins a property the retry depends on and that is
+// invisible until the second attempt: net/http CLOSES a request body that is an io.ReadCloser, so
+// handing the transport the caller's *os.File directly would leave the retry holding a closed file
+// and reporting the store as the thing that failed. The shipper reuses one handle across attempts,
+// so this is asserted rather than assumed.
+func TestPutObjectStreamDoesNotCloseTheCallersReader(t *testing.T) {
+	store, _ := newTestStore(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	body := &closeCountingReader{Reader: strings.NewReader("dump")}
+	if _, err := store.PutObjectStream(context.Background(), "bucket", "k", body, 4, "abc"); err == nil {
+		t.Fatal("a 500 should error")
+	}
+	if body.closes != 0 {
+		t.Errorf("the caller's reader was closed %d times; a retry would then send nothing", body.closes)
+	}
+}
+
+type closeCountingReader struct {
+	io.Reader
+	closes int
+}
+
+func (r *closeCountingReader) Close() error { r.closes++; return nil }

@@ -43,6 +43,7 @@ type Kubernetes struct {
 	runs         *[]runCall                            // RunJob calls, in order
 	runResult    *controlplane.RunResult               // canned result RunJob returns
 	backupSiz    *int64                                // size RunBackupJob reports
+	backupReason *controlplane.BackupJobOutcome        // reason/detail RunBackupJob reports on failure
 	metricsAvail *bool                                 // whether metrics-server is reported present
 	errs         map[Op]error
 }
@@ -111,6 +112,11 @@ type backupCall struct {
 	App      string
 	Env      string
 	BackupID string
+	// Dest is the object-storage destination the engine resolved for this backup, nil when none is
+	// registered. A test asserts on it because "which destination did this backup go to" is the
+	// question a Backup row must answer honestly (ADR-0063 §7), and the engine deciding it is where
+	// that answer is settled.
+	Dest *controlplane.BackupDestination
 }
 
 // runCall records one RunJob invocation so a test can assert the engine drove the one-off command
@@ -192,6 +198,7 @@ func NewKubernetes() *Kubernetes {
 		runs:         &[]runCall{},
 		runResult:    &controlplane.RunResult{},
 		backupSiz:    new(int64),
+		backupReason: new(controlplane.BackupJobOutcome),
 		metricsAvail: &metricsAvail,
 		errs:         make(map[Op]error),
 	}
@@ -784,13 +791,23 @@ func (k *Kubernetes) RestoreJobs() []backupCall {
 	return append([]backupCall(nil), *k.restores...)
 }
 
-func (k *Kubernetes) RunBackupJob(ctx context.Context, app, env, backupID string) (int64, error) {
+// SetBackupFailure sets the closed reason and detail RunBackupJob reports alongside its injected
+// error, modelling the Job telling burrowd WHY a backup did not reach its destination (ADR-0063 §7).
+func (k *Kubernetes) SetBackupFailure(reason, detail string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	*k.backupReason = controlplane.BackupJobOutcome{Reason: reason, Detail: detail}
+}
+
+func (k *Kubernetes) RunBackupJob(ctx context.Context, app, env, backupID string, dest *controlplane.BackupDestination) (controlplane.BackupJobOutcome, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	*k.backups = append(*k.backups, backupCall{App: app, Env: env, BackupID: backupID, Dest: dest})
 	if err := k.errs[OpRunBackupJob]; err != nil {
-		return 0, err
+		// The call is recorded BEFORE the injected failure so a test can assert what the engine asked
+		// for even on the path where the Job fails — which is the path this issue is about.
+		return *k.backupReason, err
 	}
-	*k.backups = append(*k.backups, backupCall{App: app, Env: env, BackupID: backupID})
 	// The backup claim is created on first backup, exactly as the adapter creates it (ADR-0032), and
 	// from then on it is a claim in the add-on namespace like any other — including after the add-on
 	// that filled it is gone.
@@ -799,7 +816,7 @@ func (k *Kubernetes) RunBackupJob(ctx context.Context, app, env, backupID string
 		Role:  controlplane.AddonVolumeBackup,
 		Size:  "10Gi",
 	}
-	return *k.backupSiz, nil
+	return controlplane.BackupJobOutcome{SizeBytes: *k.backupSiz}, nil
 }
 
 func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, env, backupID string) error {

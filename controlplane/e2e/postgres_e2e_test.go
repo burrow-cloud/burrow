@@ -303,7 +303,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 psql "$DATABASE_URL" -c "INSERT INTO t VALUES (7);"`)
 
 	// Back up: burrowd creates an in-cluster pg_dump Job — NO port-forward needed.
-	res, err := engine.BackupAddon(ctx, cp.AddonPostgres, app, "")
+	res, err := engine.BackupAddon(ctx, cp.AddonPostgres, app, "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}

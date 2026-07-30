@@ -531,6 +531,30 @@ func (d *Database) SetBackupStatus(ctx context.Context, id string, status contro
 	}
 	b.Status = status
 	b.SizeBytes = sizeBytes
+	// Reaching completed clears any reason left by an earlier attempt, so a successful row never
+	// carries a stale explanation of a failure beside it.
+	b.FailureReason, b.FailureDetail = "", ""
+	d.backups[id] = b
+	return nil
+}
+
+// FailBackup marks a recorded backup failed and records the closed reason and detail beside it. The
+// size is zeroed, so a failed row never carries a length that would read as a partial success. An
+// unknown id is ErrNotFound.
+func (d *Database) FailBackup(ctx context.Context, id, reason, detail string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpFailBackup]; err != nil {
+		return err
+	}
+	b, ok := d.backups[id]
+	if !ok {
+		return fmt.Errorf("database: backup %q: %w", id, controlplane.ErrNotFound)
+	}
+	b.Status = controlplane.BackupFailed
+	b.SizeBytes = 0
+	b.FailureReason = reason
+	b.FailureDetail = detail
 	d.backups[id] = b
 	return nil
 }

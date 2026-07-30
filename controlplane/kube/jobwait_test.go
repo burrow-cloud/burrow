@@ -148,7 +148,7 @@ func TestRunBackupJobFailsFastOnMissingSecret(t *testing.T) {
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	err := mustReturnWithin(t, "RunBackupJob", func() error {
-		_, e := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1")
+		_, e := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", nil)
 		return e
 	})
 	requireBlocked(t, err, controlplane.ReasonCreateContainerConfigError, `secret "burrow-pg-superuser" not found`)
@@ -255,7 +255,7 @@ func TestJobWaitKeepsWaitingThroughTransientStates(t *testing.T) {
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	err := mustReturnWithin(t, "RunBackupJob", func() error {
-		_, e := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1")
+		_, e := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", nil)
 		return e
 	})
 	if err != nil {

@@ -121,7 +121,7 @@ func TestRetainedBackupVolumeIsReportedSeparately(t *testing.T) {
 	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
-	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment); err != nil {
+	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
 	// A backup claim under a still-installed add-on is in use, not retained.

@@ -232,7 +232,7 @@ and unsurfaced. Neither store is guardrailed.
 | | `burrow config registry logout <host>` | Removes one host; removing the last one deletes the Secret and detaches it from the ServiceAccount. | [0017](adr/0017-private-registry-authentication.md) |
 | | `burrow config registry list` | Lists configured hosts. Credentials are never printed. | [0017](adr/0017-private-registry-authentication.md) |
 | Vendor tokens | `burrow config provider add <cloudflare\|digitalocean\|github\|gitlab> [--name]` | Reads the token hidden from a TTY or from stdin, sends it over the control-plane API, and burrowd writes it into the `burrow-credentials` Secret. DNS tokens are **verified against the vendor before anything is written**; `github`/`gitlab` tokens are not. | [0023](adr/0023-provider-credentials.md), [0030](adr/0030-credentials-through-the-control-plane.md), [0057](adr/0057-source-provider-credentials.md) |
-| Object-storage destination | `burrow config provider add s3 --endpoint <url> --access-key-id <id> [--region] [--bucket \| --create-bucket] [--retention-days N] [--confirm]` | Registers an S3-compatible backup destination. The credential is a **pair**: the id is a flag, the secret access key is read hidden from a TTY or from stdin, and both land as **two keys in the same `burrow-credentials` Secret**. Before anything is written it creates or verifies the bucket, **writes and deletes a probe object**, and reconciles the bucket's lifecycle rules against `--retention-days`. Nothing yet WRITES backups there. | [0063](adr/0063-object-storage-provider.md), [0023](adr/0023-provider-credentials.md) |
+| Object-storage destination | `burrow config provider add s3 --endpoint <url> --access-key-id <id> [--region] [--bucket \| --create-bucket] [--retention-days N] [--confirm]` | Registers an S3-compatible backup destination. The credential is a **pair**: the id is a flag, the secret access key is read hidden from a TTY or from stdin, and both land as **two keys in the same `burrow-credentials` Secret**. Before anything is written it creates or verifies the bucket, **writes and deletes a probe object**, and reconciles the bucket's lifecycle rules against `--retention-days`. Once registered, `burrow addon backup postgres <app>` writes there and verifies the object before recording the backup. | [0063](adr/0063-object-storage-provider.md), [0023](adr/0023-provider-credentials.md) |
 | In-cluster registry | `burrow cluster registry install --host <fqdn>` | Deploys Zot (`ghcr.io/project-zot/zot-linux-amd64:v2.1.2`), a 5Gi PVC, a ClusterIP Service on 5000, and an nginx Ingress with cert-manager TLS and basic auth. Wires burrowd's default build push target, and installs the generated pull credential through the `registry login` path. `uninstall` reverses it. | [0054](adr/0054-install-is-control-plane-only.md) |
 
 Three things about this area that are easy to get wrong:
@@ -255,9 +255,8 @@ via ADR-0054.
 ### The object-storage provider is a backup destination, and only that
 
 `burrow config provider add s3` registers somewhere **outside the cluster** for a backup to go
-([ADR-0063](adr/0063-object-storage-provider.md)). What exists today is the **registration** —
-the credential, the bucket, and the checks. Nothing writes backups to it yet: `addon backup`
-still writes to the in-cluster PVC, and the write path is a separate change.
+([ADR-0063](adr/0063-object-storage-provider.md)), and with one registered `burrow addon backup
+postgres <app>` writes there — see [Backups](#backups) for what "wrote there" is allowed to mean.
 
 What registration does, and why each part is there:
 
@@ -427,20 +426,42 @@ Logical `pg_dump` / `pg_restore` backups for the Postgres add-on
 
 | Capability | Command | What it does |
 | --- | --- | --- |
-| Back up an app's database | `burrow addon backup postgres <app>` | Runs `pg_dump -Fc` in a one-shot Job (`postgres:17-alpine`), writing `/backups/<app>/<id>.dump` on the PVC. Waits up to 10 minutes; records id, path, size, and status in the control-plane database. |
-| List backups | `burrow addon backups postgres [<app>]` | Reads the control-plane database, newest first. |
+| Back up an app's database | `burrow addon backup postgres <app> [--destination <provider>]` | Runs `pg_dump -Fc` in a one-shot Job (`postgres:17-alpine`), writing `/backups/<app>/<id>.dump` on the PVC. With an object-storage provider registered, the same Job then writes that dump to the store and **reads it back** before the backup is recorded as completed. Waits up to 10 minutes; records id, path, destination, object key, size, and status in the control-plane database. |
+| List backups | `burrow addon backups postgres [<app>]` | Reads the control-plane database, newest first, with a `WHERE` column saying which backups left the cluster. |
 | Restore | `burrow addon restore postgres <app> --backup <id> --confirm` | Runs `pg_restore --clean --if-exists` into the app's database, overwriting live contents. Confirm-gated by the `addon.restore` guardrail. **Operator CLI only** — absent from `burrow-agent`. |
 
 The limits are as important as the capability:
 
-- **The dump never leaves the cluster.** It lands on a `burrow-postgres-backups` PVC, 10Gi,
-  ReadWriteOnce, on the default StorageClass, in the same `burrow-addons` namespace as the
-  database it came from. There is no `--to`, no object-storage target, and no offsite copy — so
-  a backup shares a failure domain with its source.
-  [ADR-0063](adr/0063-object-storage-provider.md) decides object storage as a provider type to
-  fix exactly that, and is **half built**: the DESTINATION can now be registered and verified
-  (`burrow config provider add s3`, above), but nothing writes a backup to it — `addon backup`
-  still writes only to the PVC, and there is still no `--to`.
+- **With no object-storage provider registered, the dump never leaves the cluster.** It lands on
+  a `burrow-postgres-backups` PVC, 10Gi, ReadWriteOnce, on the default StorageClass, in the same
+  `burrow-addons` namespace as the database it came from — so it shares a failure domain with its
+  source. That is recorded on the row (`destination: cluster`) rather than left to be inferred,
+  and the listing shows it, because a set of in-cluster dumps should not be able to read as a
+  backup strategy. Registering a destination (`burrow config provider add s3`) is what fixes it.
+- **The PVC and the store are a tier, not alternatives.** `pg_dump` always writes to the volume,
+  and `pg_restore` reads from it: [ADR-0066](adr/0066-postgres-on-cloudnativepg.md) §4 keeps the
+  single-app logical restore deliberately, and it is the thing that reads the volume. The object
+  store is what takes the backup out of the database's failure domain.
+- **A completed backup means the bytes reached the destination, and nothing weaker.** The write
+  is signed with the dump's own SHA-256, so the endpoint validates the bytes it stored and
+  refuses a truncated transfer; the object is then **read back** and its length compared before
+  anything is recorded. A write that does not complete is retried (four attempts, exponential
+  backoff) because a transient network failure is the common case and a retried-and-succeeded
+  backup is not an incident — but a destination that ANSWERS and refuses is not retried, since a
+  revoked credential does not become a valid one by being asked again. Every path that is not a
+  verified object records `failed` with a reason from a closed set (`StoreUnreachable`,
+  `StoreRejected`, `ObjectNotReadable`, `DumpFailed`, `NotRecorded`) or an
+  [ADR-0074](adr/0074-burrow-observes-what-it-manages.md) §2 `IssueReason` when the Job never started. **No
+  row ever says `completed` for bytes that did not arrive.**
+- **The destination credential reaches the pod only through a Job-owned Secret**, mounted
+  read-only, never as a Job env var or a command-line argument, and it is deleted on every path
+  out of the backup — success or failure. The vendor's own error text goes to the Job's pod log,
+  never into the `Backup` row: a vendor error body is the one place an access key id is known to
+  be echoed back.
+- **Nothing yet ALERTS on backup age.** [ADR-0063](adr/0063-object-storage-provider.md) §7 also
+  calls for a status surface reporting destination reachability, the age of the last successful
+  backup, and the last failure. The rows those answers are computed from are now written; the
+  surface itself is not built.
 - **There is no scheduling.** No CronJob exists anywhere in the tree, and the control plane is
   not even granted `cronjobs` RBAC. Every backup is an explicit command.
 - **There is no retention or pruning.** No delete-backup command, no "keep last N", no

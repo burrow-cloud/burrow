@@ -44,6 +44,18 @@ import (
 var version = "v0.0.0"
 
 func main() {
+	// `burrowd ship-backup` is not the control plane: it is the same binary run inside a backup Job's
+	// pod to write one dump to the object store and read it back (ADR-0063 §7). It is dispatched
+	// before any flag or database wiring because it connects to nothing this process normally needs —
+	// no Postgres, no cluster, no API token — and a failure to reach any of those must not be able to
+	// fail a backup for a reason unrelated to the backup.
+	if len(os.Args) > 1 && os.Args[1] == "ship-backup" {
+		if err := shipBackup(context.Background(), os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "burrowd ship-backup:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "burrowd:", err)
 		os.Exit(1)
@@ -173,6 +185,16 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	}
 	// Add-ons live in their own namespace, set by the install manifest (ADR-0025).
 	k8s.WithAddonNamespace(os.Getenv("BURROW_ADDON_NAMESPACE"))
+	// Pin the backup Job's shipping container to burrowd's own stamped version, for the same reason
+	// the builder image is pinned: a released control plane ships backups with the binary published
+	// under the SAME release tag, not a floating :latest a later republish could change under it. An
+	// explicit BURROW_SHIPPER_IMAGE always wins, which is how a dev or e2e cluster (version "v0.0.0",
+	// where no published image exists at a pseudo-version) points at a locally loaded one.
+	shipperImage := os.Getenv("BURROW_SHIPPER_IMAGE")
+	if shipperImage == "" {
+		shipperImage = kube.ShipperImageForVersion(version)
+	}
+	k8s.WithShipperImage(shipperImage)
 
 	// Vendor tokens live in the burrow-credentials Secret in burrowd's own (control-plane)
 	// namespace — not the app namespace — read through a get scoped to that one object

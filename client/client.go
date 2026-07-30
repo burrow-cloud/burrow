@@ -771,6 +771,18 @@ type Backup struct {
 	Path        string `json:"path,omitempty"`
 	SizeBytes   int64  `json:"size_bytes,omitempty"`
 	Status      string `json:"status"`
+	// Destination is where this backup's bytes ended up: "object-store" for one that left the
+	// cluster, "cluster" for one that did not (ADR-0063). It is recorded per backup rather than
+	// derived from the current configuration, so registering a destination today does not make
+	// yesterday's in-cluster dumps read as durable.
+	Destination string `json:"destination,omitempty"`
+	// Provider and ObjectKey address the dump at the vendor. Names and a key, never a credential.
+	Provider  string `json:"provider,omitempty"`
+	ObjectKey string `json:"object_key,omitempty"`
+	// FailureReason is why a failed backup failed, from a closed set a caller can branch on;
+	// FailureDetail is one Burrow-authored line. Neither carries a vendor response body.
+	FailureReason string `json:"failure_reason,omitempty"`
+	FailureDetail string `json:"failure_detail,omitempty"`
 }
 
 // BackupResult is the outcome of an on-demand backup (ADR-0032): the recorded backup row.
@@ -778,12 +790,15 @@ type BackupResult struct {
 	Backup Backup `json:"backup"`
 }
 
-// BackupAddon backs up an app's database on the installed Postgres add-on (ADR-0032). burrowd runs
-// an in-cluster Job that pg_dumps to the backup PVC and records the backup; no secret value crosses
-// this API. The result is the recorded backup (id, app, path, size, status), never a credential.
-func (c *Client) BackupAddon(ctx context.Context, addonType, app, env string) (BackupResult, error) {
+// BackupAddon backs up an app's database on the installed Postgres add-on (ADR-0032, ADR-0063 §7).
+// burrowd runs an in-cluster Job that pg_dumps to the backup PVC and, when an object-storage
+// destination is registered, writes it on to the store and reads it back before recording the backup
+// as completed — so a returned completed backup is one whose bytes actually arrived. destination
+// names the provider to write to; empty resolves it, which works when exactly one is registered. No
+// secret value crosses this API; the result is the recorded backup, never a credential.
+func (c *Client) BackupAddon(ctx context.Context, addonType, app, env, destination string) (BackupResult, error) {
 	var out BackupResult
-	body := map[string]any{"addon": addonType, "app": app, "env": env}
+	body := map[string]any{"addon": addonType, "app": app, "env": env, "destination": destination}
 	err := c.do(ctx, http.MethodPost, "/v1/addons/backup", body, &out)
 	return out, err
 }

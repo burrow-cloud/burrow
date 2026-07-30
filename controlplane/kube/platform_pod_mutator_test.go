@@ -443,7 +443,7 @@ func TestWithNamespacePropagatesPlatformPodMutator(t *testing.T) {
 	assertPlatformPlacement(t, "scoped collector", ds.Spec.Template.Spec)
 
 	// The backup path too: it is the one an operator discovers has lost the hook during an incident.
-	if _, err := scoped.RunBackupJob(ctx, "shop", "staging", "bk1"); err != nil {
+	if _, err := scoped.RunBackupJob(ctx, "shop", "staging", "bk1", nil); err != nil {
 		t.Fatalf("RunBackupJob on the scoped view: %v", err)
 	}
 	if len(jobs) != 1 {

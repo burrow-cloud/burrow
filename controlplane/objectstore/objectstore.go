@@ -134,6 +134,90 @@ func (s *Store) PutObject(ctx context.Context, bucket, key string, body []byte) 
 	return nil
 }
 
+// PutObjectStream writes size bytes read from body at key, streaming rather than buffering: the one
+// payload Burrow puts here that is not small is a pg_dump, and a container that held a multi-gigabyte
+// dump in memory to write it would be OOM-killed by the limit that protects the rest of the node.
+//
+// sha256Hex is the hex SHA-256 of exactly those bytes, computed by the caller in a pass over the
+// same file. It goes into x-amz-content-sha256, which the endpoint VALIDATES the body against and
+// rejects on a mismatch — so a truncated or corrupted transfer is refused by the vendor rather than
+// being stored as a backup that will not restore. That is the first of the two facts ADR-0063 §7
+// needs; the second is StatObject reading the object back afterwards.
+//
+// refused distinguishes "the endpoint answered and said no" from "the write did not complete". Only
+// the second is worth retrying. A 403, a 404 on the bucket, or a malformed request will answer the
+// same way however many times it is asked, and spending the retry budget on it only delays the loud
+// failure. A 429 or a 5xx is the endpoint asking to be asked again, so those are NOT refusals.
+func (s *Store) PutObjectStream(ctx context.Context, bucket, key string, body io.Reader, size int64, sha256Hex string) (bool, error) {
+	if sha256Hex == "" {
+		// Without the hash there is no vendor-side integrity check, so a completed PUT would not
+		// establish that the bytes arrived intact — which is exactly the claim the Backup row makes.
+		return false, fmt.Errorf("objectstore: writing %s to bucket %s: a payload sha256 is required: %w", key, bucket, controlplane.ErrInvalid)
+	}
+	url := s.endpoint + objectPath(bucket, key)
+	// LimitReader does two things, and the second is the load-bearing one. It bounds the body to
+	// exactly size, and it hands net/http a plain io.Reader rather than the caller's ReadCloser — the
+	// transport CLOSES a ReadCloser body, so passing an *os.File straight through would leave a
+	// retrying caller holding a closed file and reporting the second attempt as a store failure.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.LimitReader(body, size))
+	if err != nil {
+		return false, fmt.Errorf("objectstore: building the request: %w", err)
+	}
+	// ContentLength (rather than a chunked body) is what lets the endpoint reject a truncated
+	// stream, and every S3-compatible vendor requires it on a single-part PUT.
+	req.ContentLength = size
+	sign(req, s.cred, s.region, sha256Hex, s.now())
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		// Transport failure: nothing was answered, so it is retryable by definition.
+		return false, fmt.Errorf("objectstore: PUT %s: %w", redactedURL(url), err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return false, nil
+	}
+	retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+	return !retryable, fmt.Errorf("objectstore: writing %s to bucket %s (http %d): %s", key, bucket, resp.StatusCode, snippet(respBody))
+}
+
+// StatObject returns the size of the object at key, or ErrNotFound when it is not there.
+//
+// This is the read-back that lets a Backup row claim the object is retrievable rather than merely
+// accepted (ADR-0063 §7). It is a HEAD and not a full GET on purpose: the body's integrity is
+// already established by the signed payload hash the write was validated against, so re-reading
+// gigabytes would double the transfer and the egress bill to learn nothing the PUT did not already
+// prove. What a HEAD adds — and the PUT cannot — is that the object is VISIBLE at the key Burrow
+// recorded, with the length Burrow sent, to a subsequent request.
+func (s *Store) StatObject(ctx context.Context, bucket, key string) (int64, error) {
+	url := s.endpoint + objectPath(bucket, key)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("objectstore: building the request: %w", err)
+	}
+	sign(req, s.cred, s.region, emptyPayloadHash, s.now())
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("objectstore: HEAD %s: %w", redactedURL(url), err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return 0, fmt.Errorf("objectstore: %s is not in bucket %s: %w", key, bucket, controlplane.ErrNotFound)
+	case resp.StatusCode < 200 || resp.StatusCode >= 300:
+		return 0, fmt.Errorf("objectstore: reading %s back from bucket %s (http %d)", key, bucket, resp.StatusCode)
+	}
+	if resp.ContentLength < 0 {
+		// A HEAD with no Content-Length answers "it is there" but not "it is the right length". Report
+		// it as unknown (0) rather than inventing a number the caller would compare against.
+		return 0, nil
+	}
+	return resp.ContentLength, nil
+}
+
 // DeleteObject removes key. S3 answers 204 whether or not the object was there, so deleting an
 // absent object is a no-op rather than an error.
 func (s *Store) DeleteObject(ctx context.Context, bucket, key string) error {

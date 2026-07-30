@@ -242,27 +242,39 @@ func newAddonAttachCmd() *cobra.Command {
 	return cmd
 }
 
-// newAddonBackupCmd backs up an app's database on the installed Postgres add-on (ADR-0032). No secret
-// crosses this channel; the result is the recorded backup row (id, app, path, size, status), never a
-// credential. Backup destroys nothing, so it is not guarded.
+// newAddonBackupCmd backs up an app's database on the installed Postgres add-on (ADR-0032,
+// ADR-0063 §7). No secret crosses this channel; the result is the recorded backup row (id, app,
+// path, destination, size, status), never a credential. Backup destroys nothing, so it is not
+// guarded.
+//
+// The result's `destination` and `status` are the two fields worth reading together: a completed
+// backup whose destination is the object store is one whose bytes left the cluster, and a completed
+// backup whose destination is the cluster is a dump sharing a failure domain with the database. A
+// failed one carries a reason from a closed set, so the agent can tell a transient outage from a
+// credential that will never work without parsing prose (ADR-0074 §5).
 func newAddonBackupCmd() *cobra.Command {
 	o := &connOpts{}
+	var destination string
 	cmd := &cobra.Command{
 		Use:   "backup <addon> <app>",
 		Short: "Back up an app's database on the installed Postgres add-on",
 		Long: "Back up an application's database on the installed Postgres add-on. You supply only the add-on\n" +
 			"type (\"postgres\") and the app name — NO secret. Burrow runs an in-cluster Job that dumps the\n" +
-			"database to a backup volume and records the backup; no credential crosses this channel or appears\n" +
-			"in the result. The result is the recorded backup (id, app, path, size, status). Backup destroys\n" +
-			"nothing, so it is not guarded. To RESTORE a backup (which overwrites live data), the human runs\n" +
+			"database to a backup volume and, when an object-storage provider is registered, writes that dump\n" +
+			"to the store and reads it back before the backup is recorded as completed; no credential crosses\n" +
+			"this channel or appears in the result. The result is the recorded backup (id, app, path,\n" +
+			"destination, size, status); a failure carries a machine-readable reason. Backup destroys nothing,\n" +
+			"so it is not guarded. To RESTORE a backup (which overwrites live data), the human runs\n" +
 			"`burrow addon restore postgres <app> --backup <id>` — restore is CLI-only.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "addon_backup", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.BackupAddon(ctx, args[0], args[1], env)
+				return c.BackupAddon(ctx, args[0], args[1], env, destination)
 			})
 		},
 	}
+	cmd.Flags().StringVar(&destination, "destination", "",
+		"the object-storage `provider` to write this backup to (only needed when more than one is registered)")
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	return cmd

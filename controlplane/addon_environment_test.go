@@ -341,7 +341,7 @@ func TestBackupAndRestoreAreEnvironmentScoped(t *testing.T) {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 
-	stgBackup, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging")
+	stgBackup, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "")
 	if err != nil {
 		t.Fatalf("BackupAddon(staging): %v", err)
 	}

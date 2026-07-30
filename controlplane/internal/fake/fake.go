@@ -69,6 +69,7 @@ const (
 	OpAudit                Op = "Audit"
 	OpRecordBackup         Op = "RecordBackup"
 	OpSetBackupStatus      Op = "SetBackupStatus"
+	OpFailBackup           Op = "FailBackup"
 	OpListBackups          Op = "ListBackups"
 	OpGetBackup            Op = "GetBackup"
 	OpRunBackupJob         Op = "RunBackupJob"

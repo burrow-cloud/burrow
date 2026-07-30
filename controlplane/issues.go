@@ -56,10 +56,11 @@ const (
 	// ReasonProgressDeadlineExceeded is the Deployment Progressing-condition reason when a rollout
 	// has not made progress within .spec.progressDeadlineSeconds.
 	ReasonProgressDeadlineExceeded = "ProgressDeadlineExceeded"
-	// ReasonDeadlineExceeded is the Job Failed-condition reason when a Job ran past its
-	// activeDeadlineSeconds. It is the Job member of the vocabulary, settled here so the set is
-	// decided in one place; the Job wait path that will carry it is issue #352's, which reports a
-	// client-side timeout today and cannot yet say what the Job was actually blocked on.
+	// ReasonDeadlineExceeded is the reason a Job ran out of time — the Job Failed-condition reason
+	// when Kubernetes enforces activeDeadlineSeconds, and the reason Burrow's own Job waiters carry
+	// when their client-side deadline expires (issue #352). It is the BACKSTOP member: a waiter
+	// reaches it only when no pod reported anything blocking, so its detail carries what the waiter
+	// did observe rather than a bare elapsed time.
 	ReasonDeadlineExceeded = "DeadlineExceeded"
 )
 
@@ -89,6 +90,40 @@ func IsIssueReason(reason string) bool {
 		}
 	}
 	return false
+}
+
+// JobBlockedError is what a Job waiter returns instead of waiting out its deadline, when the Job's
+// pod reports a blocking, human-fixable condition (issue #352). Before it, a Job whose pod could not
+// start — a missing Secret, an unpullable image, no node with room — left Job.Status.Failed and
+// .Succeeded both at zero, so a waiter polling only those two counters could not tell "still
+// working" from "will never start" and reported a bare timeout minutes later. ADR-0074 names that
+// shape: a waiter that burns its full deadline when the cluster was saying exactly what was wrong
+// has converted a diagnosis into a shrug.
+//
+// Reason is a member of the closed IssueReason set so a CALLER CAN BRANCH ON IT rather than parse
+// the prose (ADR-0074 §5) — an agent that sees ReasonCreateContainerConfigError knows retrying is
+// pointless, where a timeout string invites exactly that retry. Issue is IssueEvidence.Message()'s
+// output, so the wording a user reads for a blocked Job is the wording they read for a blocked
+// Deployment; there is one renderer, not two that can drift apart.
+type JobBlockedError struct {
+	// Job is the Job's name, so a reader can go straight to it (a blocked Job is deliberately left
+	// undeleted for diagnosis).
+	Job string
+	// Reason is the member of the closed set. ReasonDeadlineExceeded is the backstop: the waiter ran
+	// out of time without any pod reporting a blocking condition.
+	Reason string
+	// Issue is the rendered, actionable explanation — the same prose the status surface shows.
+	Issue string
+}
+
+func (e *JobBlockedError) Error() string {
+	return fmt.Sprintf("job %q: %s", e.Job, e.Issue)
+}
+
+// TimedOut reports whether this error is the deadline backstop rather than an observed blocking
+// condition. It is the one distinction a caller makes on the reason without knowing the whole set.
+func (e *JobBlockedError) TimedOut() bool {
+	return e.Reason == ReasonDeadlineExceeded
 }
 
 const (
@@ -157,7 +192,11 @@ func (e IssueEvidence) Message() string {
 		return fmt.Sprintf("the current release did not finish rolling out within the Deployment's progress deadline (%s), and no blocking pod condition was reported. Check the app's logs for what the new pods are doing",
 			e.Reason)
 	case ReasonDeadlineExceeded:
-		return fmt.Sprintf("the job did not finish within its deadline (%s) and was terminated%s",
+		// Deliberately does NOT claim the Job was terminated: Burrow's waiters stop waiting, they do
+		// not kill the Job, and a message that said otherwise would send a reader looking for a pod
+		// that is still running. The detail is what the waiter last observed, which is the whole
+		// point of the reason existing (issue #352).
+		return fmt.Sprintf("the job did not finish within its deadline (%s)%s",
 			e.Reason, e.suffixDetail())
 	}
 	return ""

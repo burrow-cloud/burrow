@@ -313,24 +313,9 @@ func (a *Adapter) workloadStatus(ctx context.Context, dep *appsv1.Deployment) co
 // and human-fixable, never self-resolving — so a transient ContainerCreating stays invisible here
 // no matter how long it lasts.
 func (a *Adapter) podIssue(ctx context.Context, app string) (issue, reason string) {
-	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: nameLabel + "=" + app})
-	if err != nil {
+	best, bestPod, ok := selectPodIssue(ctx, a.client, a.namespace, nameLabel+"="+app, podIssueEvidence)
+	if !ok {
 		return "", "" // best-effort: never fail Status on enrichment
-	}
-	var best controlplane.IssueEvidence
-	var bestPod string
-	bestRank := 0
-	for i := range pods.Items {
-		ev, ok := podIssueEvidence(&pods.Items[i])
-		if !ok {
-			continue
-		}
-		if r := issueRank(ev.Reason); r > bestRank {
-			best, bestPod, bestRank = ev, pods.Items[i].Name, r
-		}
-	}
-	if bestRank == 0 {
-		return "", ""
 	}
 	// The log tail is fetched only once a crash loop has actually been selected, so a healthy app
 	// (and every other failure class) costs no extra API call. It is the app's own output, so it is
@@ -339,6 +324,34 @@ func (a *Adapter) podIssue(ctx context.Context, app string) (issue, reason strin
 		best.LogTail = a.previousLogTail(ctx, bestPod, best.Container)
 	}
 	return best.Message(), best.Reason
+}
+
+// selectPodIssue lists the pods matching selector and returns the single highest-ranked piece of
+// evidence any of them reports, with the name of the pod it came from. It is the shared half of
+// "which of these pods is broken, and why": the Deployment status path passes podIssueEvidence, and
+// the Job waiters of issue #352 pass a narrower reader that only considers a pod that has not
+// started. Factoring it here rather than copying the loop is deliberate — a second implementation of
+// this inspection could disagree with the status surface about the same pod, which is worse than the
+// bug either one fixes.
+//
+// A list error yields ok=false rather than an error: EVERY caller treats this as enrichment that
+// must not become the thing that fails, whether it is a status read or a Job wait.
+func selectPodIssue(ctx context.Context, client kubernetes.Interface, namespace, selector string, read func(*corev1.Pod) (controlplane.IssueEvidence, bool)) (ev controlplane.IssueEvidence, pod string, ok bool) {
+	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return controlplane.IssueEvidence{}, "", false
+	}
+	bestRank := 0
+	for i := range pods.Items {
+		e, found := read(&pods.Items[i])
+		if !found {
+			continue
+		}
+		if r := issueRank(e.Reason); r > bestRank {
+			ev, pod, bestRank = e, pods.Items[i].Name, r
+		}
+	}
+	return ev, pod, bestRank > 0
 }
 
 // issueRank orders the blocking reasons by how directly each names the fix. WorkloadStatus carries
@@ -396,28 +409,43 @@ func podIssueEvidence(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
 // hour ago and has been serving since is not reported as broken now. That is the criterion applied
 // to a fact that outlives the failure it describes.
 func containerIssueEvidence(pod *corev1.Pod, cs corev1.ContainerStatus) (controlplane.IssueEvidence, bool) {
-	if w := cs.State.Waiting; w != nil {
-		switch {
-		case controlplane.IsImagePullReason(w.Reason):
-			return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, Image: cs.Image, Detail: w.Message}, true
-		case w.Reason == controlplane.ReasonCreateContainerConfigError:
-			// The kubelet's message names the missing ConfigMap/Secret and the missing KEY, which is
-			// the actionable part and carries no value (ADR-0074 §9).
-			return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, Detail: w.Message}, true
-		case w.Reason == controlplane.ReasonCrashLoopBackOff:
-			if t := cs.LastTerminationState.Terminated; t != nil {
-				if t.Reason == controlplane.ReasonOOMKilled {
-					return oomEvidence(pod, cs.Name), true
-				}
-				return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, ExitCode: t.ExitCode}, true
-			}
-			return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name}, true
-		}
+	if ev, ok := waitingContainerIssueEvidence(pod, cs); ok {
+		return ev, true
 	}
 	// A container that is terminated and staying that way (a run Job's pod, or a Deployment pod
 	// between the kill and the restart) still reports the kill that ended it.
 	if t := cs.State.Terminated; t != nil && t.Reason == controlplane.ReasonOOMKilled {
 		return oomEvidence(pod, cs.Name), true
+	}
+	return controlplane.IssueEvidence{}, false
+}
+
+// waitingContainerIssueEvidence reads a container's WAITING state — the half of the inspection that
+// describes a container which has not run. It is split out of containerIssueEvidence because the Job
+// waiters of issue #352 need exactly this half and must not have the other: a Job pod whose
+// container TERMINATED has run, and its outcome belongs to the Job's own counters (a non-zero exit
+// from `burrow app run` is a result, not an error — ADR-0048 §3). Failing a Job wait on a terminated
+// container would turn that result into a failure.
+func waitingContainerIssueEvidence(pod *corev1.Pod, cs corev1.ContainerStatus) (controlplane.IssueEvidence, bool) {
+	w := cs.State.Waiting
+	if w == nil {
+		return controlplane.IssueEvidence{}, false
+	}
+	switch {
+	case controlplane.IsImagePullReason(w.Reason):
+		return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, Image: cs.Image, Detail: w.Message}, true
+	case w.Reason == controlplane.ReasonCreateContainerConfigError:
+		// The kubelet's message names the missing ConfigMap/Secret and the missing KEY, which is
+		// the actionable part and carries no value (ADR-0074 §9).
+		return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, Detail: w.Message}, true
+	case w.Reason == controlplane.ReasonCrashLoopBackOff:
+		if t := cs.LastTerminationState.Terminated; t != nil {
+			if t.Reason == controlplane.ReasonOOMKilled {
+				return oomEvidence(pod, cs.Name), true
+			}
+			return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, ExitCode: t.ExitCode}, true
+		}
+		return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name}, true
 	}
 	return controlplane.IssueEvidence{}, false
 }
@@ -448,6 +476,13 @@ func containerMemoryLimit(pod *corev1.Pod, container string) string {
 // with an autoscaler while a node is being provisioned. Reporting those would flip a healthy app to
 // not-available mid-deploy — the noise the criterion exists to prevent. A pod still unschedulable
 // after this has stopped resolving on its own.
+//
+// It is applied through schedulingIssueEvidence, which is the ONLY place it is read, so the Job
+// waiters of issue #352 inherit the same value rather than carrying one of their own. That is
+// ADR-0068 §6's requirement, not a convenience: how long a pod may sit unschedulable is a fact about
+// the cluster's scheduler, and two surfaces that answered it differently would hold two definitions
+// of "failure" for one pod at one moment. When ADR-0068 moves this to cluster configuration, the
+// waiters move with it because there is nothing else to move.
 const unschedulableGrace = 30 * time.Second
 
 // schedulingIssueEvidence reads the pod's PodScheduled condition for a scheduling failure, and

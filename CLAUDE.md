@@ -187,9 +187,12 @@ the v0.1 slice ([docs/PLAN.md](docs/PLAN.md)).
   is opened against `main`. Keep pull requests small and focused: one issue, one concern.
 - **Do the coding work in a sub-agent, not the main thread.** For any non-trivial change,
   delegate the whole loop to a sub-agent: it explores, implements, writes tests, runs
-  `task check`, opens the PR, then **watches the PR through the merge queue and re-kicks it when
-  the heavy k3d/Postgres suite flakes** (the transient "apiserver not ready"), and reports back a
-  **concise** result (what changed and why, test outcome, PR number, merge status). The main
+  `task check`, opens the PR, then **waits for the `PR checks` gate to go green and re-runs it
+  when the heavy k3d/Postgres suite flakes** (the transient "apiserver not ready") — since
+  [ADR-0075](docs/adr/0075-a-green-pr-is-a-tested-pr.md) there is no merge queue, so a flake is a
+  red check on the pull request itself rather than a silent eviction from a queue, and the fix is
+  to re-run the failed run. Then it reports back a **concise** result (what changed and why, test
+  outcome, PR number, merge status). The main
   thread **reviews that result** — pulling the diff only when needed — and does not hand-edit
   files or run its own background polling loops to watch PRs: those loops are unreliable (the main
   loop misses the merge) and burn context. Reserve direct main-thread edits for tiny, mechanical

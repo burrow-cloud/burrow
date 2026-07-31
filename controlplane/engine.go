@@ -459,21 +459,27 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	// check pod at all. runDependencyChecks returns no error, deliberately: a check that failed, or a
 	// check pod that could not be scheduled, must not turn a live deploy into a reported failure
 	// (ADR-0076 §6). It waits for the rollout to settle first, which is what ADR-0072 §4's
-	// `post-deploy` phase means by when it fires — the hook's own wait then returns immediately,
-	// having already been satisfied.
-	res.Dependencies = e.runDependencyChecks(ctx, k, req.App, envName(req.Env), ns, req.Image, env)
+	// `post-deploy` phase means by when it fires.
+	//
+	// BOTH TAKE THE SAME settle. It is one deferred observation of this rollout, made by whichever of
+	// them asks first and handed unchanged to the other, so the deploy waits out the settle bound at
+	// most once however many things want to know how it went (issue #407) — and the check and the
+	// hook cannot report differently on the same rollout. It stays deferred, so an app with neither
+	// feature waits for nothing at all.
+	settle := e.settleOnce(ctx, k, req.App, envName(req.Env))
+	res.Dependencies = e.runDependencyChecks(ctx, k, req.App, envName(req.Env), ns, req.Image, env, settle)
 	for _, d := range res.Dependencies {
 		if d.Failed() {
 			res.Hints = append(res.Hints, DependencyFailureHint)
 			break
 		}
 	}
-	// The post-deploy hook waits for the rollout to settle and tells the hook how it went — succeeded
-	// or failed, and on failure the reason from ADR-0074 §2's closed vocabulary. With no hook set it
+	// The post-deploy hook tells the hook how the rollout went — succeeded or failed, and on failure
+	// the reason from ADR-0074 §2's closed vocabulary — from the settle above. With no hook set it
 	// does nothing at all and waits for nothing, so a deploy nobody asked to be told about is
 	// unchanged. Whatever it and the rollout report comes back as hints (ADR-0072 §6 — Burrow
 	// reports, the hook decides).
-	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, k, req.App, req.Env, req.Image, rel.ID, DeployKindDeploy, env)...)
+	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, k, req.App, req.Env, req.Image, rel.ID, DeployKindDeploy, env, settle)...)
 	return res, nil
 }
 
@@ -2418,7 +2424,11 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	//
 	// It runs from the image now serving, target.Image: the post phase reports on what IS running,
 	// where `pre-rollback` ran from the image being left behind (§8).
-	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, e.k8s.WithNamespace(ns), app, env, target.Image, rel.ID, DeployKindRollback, cfg)...)
+	//
+	// A rollback runs no dependency check, so it has only one consumer for the settle and gets its own
+	// (issue #407); the hook is still the only thing that can cause a wait here.
+	rk := e.k8s.WithNamespace(ns)
+	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, rk, app, env, target.Image, rel.ID, DeployKindRollback, cfg, e.settleOnce(ctx, rk, app, envName(env)))...)
 	return res, nil
 }
 

@@ -443,3 +443,90 @@ func TestPostDeployOutcomeVocabularyIsTwoValues(t *testing.T) {
 		}
 	}
 }
+
+// TestDeploySettlesOnceHoweverManyThingsWantTheOutcome pins the number of rollout waits ONE deploy
+// makes at exactly one, and it is the guard the fix for issue #407 needs to keep.
+//
+// Two independent consumers of the rollout outcome arrived hours apart — the deploy-time dependency
+// check waits so its exposure check reaches the release just deployed (ADR-0076 §4), and the
+// `post-deploy` hook is told how it went (ADR-0072 §4) — and each waited for itself. An app with
+// both therefore ran the settle bound TWICE on a wedged rollout, which is the only case a bound is
+// for, and MaxDeployWait had to declare the doubled figure to every client budget derived from it.
+//
+// So the assertion is deliberately a COUNT rather than a behaviour: a third consumer wanting to know
+// how the rollout went is a reasonable change to make, and adding its own wait next to the others is
+// the natural way to make it. This is what says no.
+//
+// The rollout is wedged on purpose. On one that settles a second wait costs a single status read and
+// the doubling is invisible; the bound is only spent twice when nothing settles.
+func TestDeploySettlesOnceHoweverManyThingsWantTheOutcome(t *testing.T) {
+	e, k, d, prov := newPostgresEngine(t)
+	ctx := context.Background()
+	installPostgresAddon(t, d, cp.DefaultEnvironment)
+	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
+	setHook(ctx, t, e, "web", "", cp.HookPostDeploy, "./notify")
+	k.SetRolloutOutcome("web", cp.RolloutOutcome{
+		Reason: cp.ReasonProgressDeadlineExceeded,
+		Detail: "0 of 1 replicas updated, 0 ready",
+	})
+	k.SetRunResult(cp.RunResult{Stdout: probeStdout(cp.DependencyResult{
+		Kind: cp.DependencyPostgres, Outcome: cp.DependencyPassed, Detail: "connected and ran SELECT 1",
+	})})
+	// How many settle waits had happened when each Job was launched. It pins ORDER as well as count:
+	// the check must be preceded by the settle, and the hook after it must not have added one.
+	var waitsAtJob []int
+	k.SetRunJobHook(func() { waitsAtJob = append(waitsAtJob, len(k.Rollouts())) })
+
+	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "repo/web:1.0.0"})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if got := len(k.Rollouts()); got != 1 {
+		t.Fatalf("AwaitRollout calls = %d, want exactly 1: a deploy that settles once per consumer spends deploy.settle_timeout that many times over on a wedged rollout, and MaxDeployWait — which every client budget derives from — has to declare the multiple (issue #407)", got)
+	}
+	if len(waitsAtJob) != 2 {
+		t.Fatalf("Jobs launched = %d, want 2 (the dependency check, then the post-deploy hook)", len(waitsAtJob))
+	}
+	if waitsAtJob[0] != 1 {
+		t.Errorf("settle waits before the dependency check = %d, want 1: the check runs AFTER the settle so its exposure check reaches the release just deployed rather than the one it replaced (ADR-0076 §4)", waitsAtJob[0])
+	}
+	if waitsAtJob[1] != 1 {
+		t.Errorf("settle waits before the post-deploy hook = %d, want the same 1 the check already made", waitsAtJob[1])
+	}
+
+	// The one observation is still the hook's own answer. Sharing a wait is only correct while what
+	// the hook is told describes what happened to THIS rollout (ADR-0072 §4).
+	env := postHookEnv(t, k)
+	if env["BURROW_DEPLOY_OUTCOME"] != "failed" {
+		t.Errorf("BURROW_DEPLOY_OUTCOME = %q, want failed for a rollout that did not settle", env["BURROW_DEPLOY_OUTCOME"])
+	}
+	if env["BURROW_DEPLOY_REASON"] != cp.ReasonProgressDeadlineExceeded {
+		t.Errorf("BURROW_DEPLOY_REASON = %q, want %q", env["BURROW_DEPLOY_REASON"], cp.ReasonProgressDeadlineExceeded)
+	}
+	if !strings.Contains(env["BURROW_DEPLOY_DETAIL"], "replicas") {
+		t.Errorf("BURROW_DEPLOY_DETAIL = %q, want the detail the wait observed", env["BURROW_DEPLOY_DETAIL"])
+	}
+	// And the check still ran and reported, on the same shared observation.
+	if len(res.Dependencies) != 1 || res.Dependencies[0].Outcome != cp.DependencyPassed {
+		t.Errorf("dependencies = %+v, want the check to have run", res.Dependencies)
+	}
+}
+
+// TestMaxDeployWaitCountsTheSettleOnce is the same fact stated where it is consumed. apiwait.go is
+// the single declaration of how long a call may occupy the server and every client budget derives
+// from it, so a settle bound counted twice there sizes every client to a ceiling twice the one an
+// operator configured — and counting it zero times sizes them under it, which is how issue #404 came
+// back. The sum is spelled out rather than referenced so a change to the phases has to be made here
+// too, in front of a reader who can check it against the deploy path.
+func TestMaxDeployWaitCountsTheSettleOnce(t *testing.T) {
+	want := cp.RunJobTimeout + // pre-deploy hook Job
+		cp.MaxDeploySettleTimeout + // the rollout settle, made once and shared
+		cp.DependencyCheckDeadlineForTest() + // deploy-time dependency check
+		cp.RunJobTimeout // post-deploy hook Job
+	if cp.MaxDeployWait != want {
+		t.Errorf("MaxDeployWait = %s, want %s", cp.MaxDeployWait, want)
+	}
+	if cp.MaxBuildWait != cp.BuildJobTimeout+cp.MaxDeployWait {
+		t.Errorf("MaxBuildWait = %s, want the build Job plus the deploy it ends in (%s)", cp.MaxBuildWait, cp.BuildJobTimeout+cp.MaxDeployWait)
+	}
+}

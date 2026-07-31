@@ -297,7 +297,10 @@ bound, so a migration slower than that is reported as a failure. The audit log r
 the command, the image, and the exit code, and **never the command's output**. A `post-deploy` hook
 makes a deploy of that app **wait for its rollout to settle** before returning, bounded by
 `deploy.settle_timeout` (see [Operational limits](#operational-limits)). A deploy-time dependency
-check makes it wait for the same reason, so a hook is not the only way to get the wait.
+check makes it wait for the same reason, so a hook is not the only way to get the wait. An app with
+both waits **once**: the deploy makes one observation of the rollout and hands it to the check and
+the hook alike, so they can never report differently on the same rollout and the bound is spent at
+most once per deploy.
 
 ### Deploy does not wait for the rollout, unless it has something to wait for
 

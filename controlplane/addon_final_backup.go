@@ -206,11 +206,12 @@ func (e *Engine) finalBackupBeforeDataDeletion(ctx context.Context, info AddonIn
 		}
 		// The Backup row is what the abort is decided on, not the Job's exit status. ADR-0063 §7 only
 		// lets a row say `completed` for an object-store destination once the object was written and
-		// read back, so these two fields together ARE "the bytes are safe" — and checking the
-		// destination as well as the status is not belt-and-braces: a provider deregistered between
-		// the plan and the Job would leave a perfectly `completed` row for a dump that never left the
-		// cluster, which is not the fact this removal is standing on.
-		if backup.Status != BackupCompleted || backup.Destination != BackupDestinationObjectStore {
+		// read back, so Durable() IS "the bytes are safe" — and it checks the destination as well as
+		// the status because a provider deregistered between the plan and the Job would leave a
+		// perfectly `completed` row for a dump that never left the cluster, which is not the fact this
+		// removal is standing on. The same predicate decides what the backup-age signal counts
+		// (ADR-0066 §5), so the two cannot come to different answers about the same row.
+		if !backup.Durable() {
 			return nil, finalBackupRefusal(info, app, backup.FailureReason, backup.FailureDetail,
 				fmt.Errorf("the backup was recorded as %q at destination %q", backup.Status, backup.Destination))
 		}

@@ -185,7 +185,48 @@ func newAddonCmd() *cobra.Command {
 			return cmd.Help()
 		},
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonAttachCmd(), newAddonBackupCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonAttachCmd(), newAddonBackupCmd(), newAddonBackupHealthCmd())
+	return cmd
+}
+
+// newAddonBackupHealthCmd reports what Burrow observed about an add-on's backups (ADR-0063 §7,
+// ADR-0066 §5). It is a READ: it changes nothing, so it fails neither of ADR-0065 §1's tests —
+// scope, because it reads records Burrow already holds and probes a destination Burrow already has a
+// credential for, and reversibility, because there is nothing to reverse. It is therefore on the
+// surface unguarded, and it is named in the capability catalogue with that reasoning (ADR-0065 §6).
+//
+// It belongs here rather than being CLI-only because the agent is the reader most likely to need it
+// BEFORE it does something else: "how old is the last backup that left the cluster" is the question
+// worth asking ahead of a migration, a schema change, or relaying a human's request to remove an
+// add-on. Answering it from Burrow's own rows also means the agent never has to read a backup
+// engine's status fields, which can report stale values rather than absent ones.
+func newAddonBackupHealthCmd() *cobra.Command {
+	o := &connOpts{}
+	cmd := &cobra.Command{
+		Use:   "backup-health <addon> [<app>]",
+		Short: "Report backup coverage: last successful backup, last off-cluster backup, last failure, destination reachability",
+		Long: "Report what Burrow itself observed about an add-on's backups: how long ago the last backup\n" +
+			"completed, how long ago the last one actually LEFT THE CLUSTER, the most recent failure and its\n" +
+			"machine-readable reason, how many are still pending, and whether each registered object-storage\n" +
+			"destination answers right now.\n\n" +
+			"The two ages answer different questions. A dump on an in-cluster volume shares a failure domain\n" +
+			"with the database it came from, so only a backup that reached an object store survives losing\n" +
+			"the cluster — treat that age as the real one. Read-only and not guarded; it carries names,\n" +
+			"times and sizes, never a credential.\n\n" +
+			"With no app it spans every app; with no --env, every environment.",
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app := ""
+			if len(args) == 2 {
+				app = args[1]
+			}
+			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.BackupHealth(ctx, args[0], app, env)
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
 	return cmd
 }
 

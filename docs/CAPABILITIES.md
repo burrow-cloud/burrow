@@ -444,6 +444,7 @@ Logical `pg_dump` / `pg_restore` backups for the Postgres add-on
 | --- | --- | --- |
 | Back up an app's database | `burrow addon backup postgres <app> [--destination <provider>]` | Runs `pg_dump -Fc` in a one-shot Job (`postgres:17-alpine`), writing `/backups/<app>/<id>.dump` on the PVC. With an object-storage provider registered, the same Job then writes that dump to the store and **reads it back** before the backup is recorded as completed. Waits up to 10 minutes; records id, path, destination, object key, size, and status in the control-plane database. |
 | List backups | `burrow addon backups postgres [<app>]` | Reads the control-plane database, newest first, with a `WHERE` column saying which backups left the cluster. |
+| Backup health | `burrow addon backup-health postgres [<app>]` | Reports what Burrow itself observed: how long ago the last backup completed, how long ago the last one **left the cluster**, the last failure with its closed reason, how many rows are still pending, and whether each registered object-storage destination answers **right now**. Read-only, and computed from Burrow's own `Backup` rows rather than from any backup engine's status fields. |
 | Restore | `burrow addon restore postgres <app> --backup <id> --confirm` | Runs `pg_restore --clean --if-exists` into the app's database, overwriting live contents. Confirm-gated by the `addon.restore` guardrail. **Operator CLI only** — absent from `burrow-agent`. |
 
 The limits are as important as the capability:
@@ -474,10 +475,15 @@ The limits are as important as the capability:
   out of the backup — success or failure. The vendor's own error text goes to the Job's pod log,
   never into the `Backup` row: a vendor error body is the one place an access key id is known to
   be echoed back.
-- **Nothing yet ALERTS on backup age.** [ADR-0063](adr/0063-object-storage-provider.md) §7 also
-  calls for a status surface reporting destination reachability, the age of the last successful
-  backup, and the last failure. The rows those answers are computed from are now written; the
-  surface itself is not built.
+- **Backup age is REPORTED, and nothing alerts on it.** `burrow addon backup-health postgres`
+  answers [ADR-0063](adr/0063-object-storage-provider.md) §7's question on demand — destination
+  reachability, the age of the last successful backup, the age of the last one that left the
+  cluster, the last failure — from Burrow's own rows, which is what
+  [ADR-0066](adr/0066-postgres-on-cloudnativepg.md) §5 requires, since a backup engine's own status
+  fields can report stale values rather than absent ones. What does not exist is a **threshold**:
+  nothing schedules a backup yet, so any "no successful backup in N hours" would be a number Burrow
+  invented and then alerted on. The surface reports the ages; the alert waits for the scheduling
+  that gives a threshold a meaning.
 - **There is no scheduling.** No CronJob exists anywhere in the tree, and the control plane is
   not even granted `cronjobs` RBAC. Every backup is an explicit command.
 - **There is no retention or pruning.** No delete-backup command, no "keep last N", no
@@ -842,9 +848,9 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Registry onboarding via the developer's code-provider registry | [0046](adr/0046-registry-onboarding.md) | Proposed, held deliberately; only the in-cluster registry shipped, via ADR-0054. |
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
-| Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Partly built. The destination registration is built: the `s3` provider type and object-storage capability, the credential pair as two keys in `burrow-credentials`, the configuration-time probe write/delete, the recorded globally-unique bucket, lifecycle-versus-retention reconciliation, and `bucket.create` at `confirm` with bucket deletion absent from both CLIs. The backup WRITE path (§7 — retry, alerting on backup age, never recording an unwritten backup, and the status surface) is not built, so dumps still land on the in-cluster PVC. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
+| Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Partly built. The destination registration is built: the `s3` provider type and object-storage capability, the credential pair as two keys in `burrow-credentials`, the configuration-time probe write/delete, the recorded globally-unique bucket, lifecycle-versus-retention reconciliation, and `bucket.create` at `confirm` with bucket deletion absent from both CLIs. The backup WRITE path is built too: the dump is shipped to the store and read back before the row says `completed`, retries are for a store that will not answer and never for one that answered and refused, and `burrow addon backup-health postgres` reports destination reachability, the age of the last successful backup, the age of the last one that left the cluster, and the last failure. What is left of §7 is the ALERT: there is no threshold to alert against, because nothing schedules a backup yet. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
 | A final backup before `--delete-data` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5 | Not built — it waits on an object-storage provider ([ADR-0063](adr/0063-object-storage-provider.md)); until then the retained backup claim is the only copy. The rest of ADR-0064 is built: removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and carries §2's typed confirmation, the backup claim always survives, and `addon list` reports retained volumes (§6). [#334](https://github.com/burrow-cloud/burrow/issues/334) |
-| The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
+| The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | The MECHANISM is not built — still a single-replica `postgres:17-alpine` Deployment with Burrow-orchestrated `pg_dump` / `pg_restore` Jobs, no operator, no custom resources, no WAL archiving. §5 is built: `burrow addon backup-health postgres` reports the backup-age signal from what Burrow itself observed, which is the part of the record that is deliberately independent of the mechanism and stays correct across the swap. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
 
 The rows above are summaries. Per-ADR implementation tracking — the code as it stands, the sections
 each issue covers, and an acceptance checklist — lives in the issues labelled

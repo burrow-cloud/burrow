@@ -1141,3 +1141,40 @@ func TestRemoveAddonEndpointHonoursDeleteData(t *testing.T) {
 		t.Errorf("delete_data=true did not delete the data: %s", rr.Body.String())
 	}
 }
+
+// TestBackupHealthEndpoint asserts the ADR-0063 §7 status surface is served, requires auth like
+// every other v1 route, defaults the add-on to postgres, and refuses an add-on that has no backups
+// with a 4xx rather than a 500.
+func TestBackupHealthEndpoint(t *testing.T) {
+	h, _, _ := newAPI(t)
+
+	if rr := do(h, "GET", "/v1/addons/backup-health", "", ""); rr.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated backup-health = %d, want 401", rr.Code)
+	}
+
+	rr := do(h, "GET", "/v1/addons/backup-health", token, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("backup-health = %d %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Addon   string `json:"addon"`
+		State   string `json:"state"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding the report: %v (%s)", err, rr.Body.String())
+	}
+	if body.Addon != string(cp.AddonPostgres) {
+		t.Errorf("addon = %q, want the postgres default", body.Addon)
+	}
+	if body.State != string(cp.BackupHealthNever) {
+		t.Errorf("state = %q, want %q with nothing recorded", body.State, cp.BackupHealthNever)
+	}
+	if body.Summary == "" {
+		t.Error("the report carries no summary line")
+	}
+
+	if rr := do(h, "GET", "/v1/addons/backup-health?addon=cache", token, ""); rr.Code != http.StatusBadRequest {
+		t.Errorf("backup-health for an add-on without backups = %d, want 400 (%s)", rr.Code, rr.Body.String())
+	}
+}

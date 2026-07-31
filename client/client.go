@@ -870,6 +870,75 @@ func (c *Client) Backups(ctx context.Context, addonType, app, env string) ([]Bac
 	return out.Backups, err
 }
 
+// BackupObservation is one recorded backup as the health surface reports it, with its age already
+// computed against the moment the report was assembled.
+type BackupObservation struct {
+	ID          string `json:"id"`
+	App         string `json:"app"`
+	Environment string `json:"environment,omitempty"`
+	At          string `json:"at"`
+	// AgeSeconds is how long ago the backup was recorded. Seconds, not a rendered duration, so a
+	// caller compares a number rather than parsing prose.
+	AgeSeconds  int64  `json:"age_seconds"`
+	Status      string `json:"status"`
+	Destination string `json:"destination,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	SizeBytes   int64  `json:"size_bytes,omitempty"`
+	// Reason and Detail are set on a failure only. Neither carries a vendor response body.
+	Reason string `json:"reason,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// BackupDestinationHealth is one registered object-storage destination and whether it answered when
+// the report was assembled. It is probed on demand and never cached — a stored verdict goes stale
+// while continuing to read as current.
+type BackupDestinationHealth struct {
+	Provider  string `json:"provider"`
+	Endpoint  string `json:"endpoint,omitempty"`
+	Bucket    string `json:"bucket,omitempty"`
+	Reachable bool   `json:"reachable"`
+	// Detail is one Burrow-authored line describing what was observed. Never a vendor response body
+	// and never a credential.
+	Detail string `json:"detail,omitempty"`
+}
+
+// BackupHealth is what Burrow observed about an add-on's backups (ADR-0063 §7, ADR-0066 §5): the
+// last successful backup, the last one that left the cluster, the last failure, and whether each
+// registered destination answers.
+type BackupHealth struct {
+	Addon       string `json:"addon"`
+	App         string `json:"app,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	ObservedAt  string `json:"observed_at"`
+	// State is "never", "cluster-only" or "durable" — what kind of coverage exists, not a verdict
+	// against a threshold.
+	State string `json:"state"`
+	// LastSuccess is the newest completed backup wherever it went; LastDurableSuccess is the newest
+	// one that reached an object store, which is the age ADR-0063 §7 is about.
+	LastSuccess        *BackupObservation `json:"last_success,omitempty"`
+	LastDurableSuccess *BackupObservation `json:"last_durable_success,omitempty"`
+	LastFailure        *BackupObservation `json:"last_failure,omitempty"`
+	// Pending counts rows still recorded as pending. A pending row never reads as a success.
+	Pending      int                       `json:"pending,omitempty"`
+	Destinations []BackupDestinationHealth `json:"destinations,omitempty"`
+	Summary      string                    `json:"summary"`
+}
+
+// BackupHealth reports what Burrow observed about an add-on's backups (ADR-0063 §7, ADR-0066 §5).
+// An empty app spans every app and an empty env every environment. Read-only; it moves no secret.
+func (c *Client) BackupHealth(ctx context.Context, addonType, app, env string) (BackupHealth, error) {
+	var out BackupHealth
+	path := "/v1/addons/backup-health?addon=" + url.QueryEscape(addonType)
+	if app != "" {
+		path += "&app=" + url.QueryEscape(app)
+	}
+	if env != "" {
+		path += "&env=" + url.QueryEscape(env)
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	return out, err
+}
+
 // RestoreAddon restores an app's database from a recorded backup, overwriting its live contents
 // (ADR-0032). It is held for confirmation by a guardrail by default; pass confirm=true to proceed.
 func (c *Client) RestoreAddon(ctx context.Context, addonType, app, backupID, env string, confirm bool) error {

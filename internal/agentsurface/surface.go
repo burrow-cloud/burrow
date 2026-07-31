@@ -162,6 +162,7 @@ var catalogue = []Capability{
 	{Surface: Agent, Path: "addon install", What: "deploys a building block for one environment into the existing add-on namespace; creates no namespace and no RBAC"},
 	{Surface: Agent, Path: "addon attach", What: "gives one app a database on its environment's add-on instance; the URL is generated server-side"},
 	{Surface: Agent, Path: "addon backup", What: "takes a backup of an add-on's data"},
+	{Surface: Agent, Path: "addon backup-health", What: "reads how old the last backup is, how old the last one to leave the cluster is, the last failure, and whether the destination answers; changes nothing"},
 	{Surface: Agent, Path: "addons", What: "read-only: the installed add-ons and their capabilities"},
 	{Surface: Agent, Path: "backups", What: "read-only: the backups taken of an add-on"},
 

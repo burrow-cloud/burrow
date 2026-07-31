@@ -1011,6 +1011,11 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 						Command: spec.Command,
 						Env:     env,
 						EnvFrom: envFrom,
+						// Readiness only, and nil when the engine resolved no probe (ADR-0076 §1,
+						// §3). LivenessProbe and StartupProbe are deliberately left unset: a wrong
+						// liveness probe restarts a working container in a loop and presents as the
+						// crash loop it was installed to detect.
+						ReadinessProbe: readinessProbe(spec.Readiness),
 					}},
 				},
 			},
@@ -1027,6 +1032,41 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		a.podMutator(&dep.Spec.Template.Spec)
 	}
 	return dep
+}
+
+// readinessProbe translates the engine's resolved ReadinessCheck into the Kubernetes probe, or nil
+// when there is none (ADR-0076 §3: an app whose port Burrow does not know keeps exactly the
+// behaviour it had before probes existed).
+//
+// The two handlers here are the ONLY two Burrow ever authors, and both address the pod's own port:
+// TCPSocket and HTTPGet with no Host, so the request goes to the pod's IP. There is no Exec handler
+// and no way to name another host, which is ADR-0076 §2 enforced in the one place that turns intent
+// into a cluster object — a readiness probe that checked the shared database would fail every
+// replica of every app the moment that database blipped, converting a degraded dependency into a
+// total outage.
+//
+// The timings come from the constants in controlplane/health.go and are chosen to fail toward
+// DEPLOYED (§6): a generous timeout, and six consecutive failures — about a minute — before a
+// serving pod is pulled out of its Service.
+func readinessProbe(r controlplane.ReadinessCheck) *corev1.Probe {
+	if !r.Enabled() {
+		return nil
+	}
+	probe := &corev1.Probe{
+		InitialDelaySeconds: controlplane.ReadinessInitialDelaySeconds,
+		PeriodSeconds:       controlplane.ReadinessPeriodSeconds,
+		TimeoutSeconds:      controlplane.ReadinessTimeoutSeconds,
+		FailureThreshold:    controlplane.ReadinessFailureThreshold,
+		SuccessThreshold:    controlplane.ReadinessSuccessThreshold,
+	}
+	if r.HTTP() {
+		// Host is left empty on purpose: Kubernetes then addresses the pod's own IP. Setting it is
+		// how a probe would reach off the pod, so it is never set.
+		probe.HTTPGet = &corev1.HTTPGetAction{Path: r.Path, Port: intstr.FromInt32(r.Port)}
+		return probe
+	}
+	probe.TCPSocket = &corev1.TCPSocketAction{Port: intstr.FromInt32(r.Port)}
+	return probe
 }
 
 func boolPtr(b bool) *bool { return &b }

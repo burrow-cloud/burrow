@@ -152,6 +152,14 @@ var catalogue = []Capability{
 	{Surface: Agent, Path: "secret", What: "read-only: one app's secret KEY names, never values"},
 	{Surface: Agent, Path: "secret unset", What: "removes one app secret by key; carries no value"},
 
+	// Health. The agent is on this surface because it is the only party that CAN close the gap
+	// ADR-0076 describes: Burrow cannot write a health endpoint into the user's application, and the
+	// agent has the source. The verb's effect is one app's readiness probe, it is reversible with
+	// `health unset`, and it destroys nothing — ADR-0065 §1 straight down the middle.
+	{Surface: Agent, Path: "health", What: "read-only: the readiness probe Burrow sets on one app, and why"},
+	{Surface: Agent, Path: "health set", What: "declares the health endpoint one app serves, so Burrow probes it instead of just its port"},
+	{Surface: Agent, Path: "health unset", What: "returns one app to the default readiness probe"},
+
 	// Add-ons: in-cluster building blocks the control plane deploys into its OWN add-on
 	// namespace. burrowd holds only namespaced Roles and is forbidden from creating namespaces or
 	// RBAC, so an add-on install cannot widen anything — where an add-on needs a ServiceAccount

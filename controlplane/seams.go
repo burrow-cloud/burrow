@@ -548,6 +548,27 @@ type Database interface {
 	// Exposures returns every recorded exposure, ordered by app then environment. None yields an
 	// empty slice and no error.
 	Exposures(ctx context.Context) ([]Exposure, error)
+	// Exposure returns the recorded exposure for app in env, or ErrNotFound when the app is not
+	// published there. It is the read behind ADR-0076 §3's conservative default: the container port
+	// an exposure routes to is the ONLY port Burrow knows for an app, so it is what a readiness
+	// probe can honestly check. Not being published is the ordinary case, not a failure — the caller
+	// treats ErrNotFound as "no port known" and authors no probe.
+	Exposure(ctx context.Context, app, env string) (Exposure, error)
+
+	// HealthEndpoint returns the health endpoint declared for app in env (ADR-0076 §5), or the zero
+	// value when none was declared — which is where every app starts, since the endpoint is opt-in.
+	// A missing row is not an error.
+	HealthEndpoint(ctx context.Context, app, env string) (HealthEndpoint, error)
+	// SetHealthEndpoint upserts the declared health endpoint for app in env — the write behind
+	// `burrow app health set`. The path and port arrive already validated.
+	SetHealthEndpoint(ctx context.Context, ep HealthEndpoint) error
+	// UnsetHealthEndpoint removes the declared endpoint for app in env, returning the app to
+	// ADR-0076 §3's default. Unsetting one that was never declared is a no-op, not an error.
+	UnsetHealthEndpoint(ctx context.Context, app, env string) error
+	// DeleteHealthEndpoints removes every declared endpoint for app across all environments — the
+	// durable side of an app teardown, alongside DeleteReleases. Deleting for an app that declared
+	// none is a no-op.
+	DeleteHealthEndpoints(ctx context.Context, app string) error
 
 	// RecordFailure opens or extends the ledger row for one observed failure (ADR-0074 §4). The row
 	// is keyed by (object, reason) so concurrent reasons on one object coexist as separate rows with

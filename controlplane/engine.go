@@ -299,6 +299,12 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
 	}
+	// The replica ceiling is an operational limit, so it is checked here, ahead of the guardrails
+	// and of the audit row they write: exceeding it is a validation failure, not a decision anyone
+	// held or denied (ADR-0068 §2).
+	if err := e.checkReplicaCeiling(ctx, req.Env, "deploy", fmt.Sprintf("%d replicas", replicas), replicas); err != nil {
+		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
+	}
 	args := map[string]string{"image": req.Image, "replicas": strconv.Itoa(int(replicas)), "env": envName(req.Env), "trigger": string(prov.trigger)}
 	// An auto deploy records the level that applied and the tag the watcher took, so the audit trail
 	// distinguishes an unattended update from an explicit one (ADR-0052 §5).
@@ -1536,9 +1542,10 @@ func (e *Engine) Logs(ctx context.Context, app, env string, opts LogOptions) ([]
 	return lines, nil
 }
 
-// Scale changes an app's replica count, guarded against scale-to-zero and the policy
-// ceiling (ADR-0006). It does not create a new release: scaling adjusts the running
-// workload, while a release records a deploy.
+// Scale changes an app's replica count. It is bounded by the replica ceiling — an operational
+// limit whose breach is a validation failure (ADR-0068 §2) — and guarded against scale-to-zero
+// (ADR-0006). It does not create a new release: scaling adjusts the running workload, while a
+// release records a deploy.
 func (e *Engine) Scale(ctx context.Context, app, env string, replicas int32, confirm bool) (ScaleResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return ScaleResult{}, fmt.Errorf("scale: %w: %w", ErrInvalid, err)
@@ -1551,6 +1558,11 @@ func (e *Engine) Scale(ctx context.Context, app, env string, replicas int32, con
 		return ScaleResult{}, fmt.Errorf("scale %s: %w", app, err)
 	}
 	k := e.k8s.WithNamespace(ns)
+	// The ceiling is a bound, checked before the guardrails for the reason it is on the deploy path
+	// (ADR-0068 §2): no disposition opens it and no confirmation satisfies it.
+	if err := e.checkReplicaCeiling(ctx, env, "scale", fmt.Sprintf("%d replicas", replicas), replicas); err != nil {
+		return ScaleResult{}, fmt.Errorf("scale %s: %w", app, err)
+	}
 	pol, err := e.db.Policy(ctx)
 	if err != nil {
 		return ScaleResult{}, fmt.Errorf("scale %s: loading guardrail policy: %w", app, err)
@@ -1585,9 +1597,9 @@ const metricsAbsentWarning = "autoscaling needs metrics-server, which was not de
 
 // Autoscale configures autoscaling for an app: it applies an autoscaling/v2 HorizontalPodAutoscaler
 // on the app's Deployment with the requested replica band and utilization targets (ADR-0006). It is
-// guarded twice — the app.autoscale guardrail gates the operation (allow by default), and the
-// app.replica_ceiling guardrail bounds the requested max the same way it bounds a manual scale, so a
-// max above the ceiling is denied exactly like scaling above it. The HPA is applied even when
+// bounded twice — the replica ceiling bounds the requested max the same way it bounds a manual
+// scale, so a max above the ceiling is refused exactly like scaling above it (ADR-0068 §2), and the
+// app.autoscale guardrail gates the operation itself (allow by default). The HPA is applied even when
 // metrics-server is absent (creating it needs no metrics); the result then carries a Warning that it
 // will not scale until metrics-server is installed.
 func (e *Engine) Autoscale(ctx context.Context, app, env string, spec AutoscaleSpec, confirm bool) (AutoscaleResult, error) {
@@ -1602,6 +1614,11 @@ func (e *Engine) Autoscale(ctx context.Context, app, env string, spec AutoscaleS
 		return AutoscaleResult{}, fmt.Errorf("autoscale %s: %w", app, err)
 	}
 	k := e.k8s.WithNamespace(ns)
+	// The autoscaler's maximum is bounded by the same ceiling a manual scale is, and checked the
+	// same way: ahead of the guardrails, as a validation failure (ADR-0068 §2).
+	if err := e.checkReplicaCeiling(ctx, env, "autoscale", fmt.Sprintf("a maximum of %d replicas", spec.MaxReplicas), spec.MaxReplicas); err != nil {
+		return AutoscaleResult{}, fmt.Errorf("autoscale %s: %w", app, err)
+	}
 	pol, err := e.db.Policy(ctx)
 	if err != nil {
 		return AutoscaleResult{}, fmt.Errorf("autoscale %s: loading guardrail policy: %w", app, err)
@@ -1613,7 +1630,7 @@ func (e *Engine) Autoscale(ctx context.Context, app, env string, spec AutoscaleS
 		"memory": strconv.Itoa(int(spec.MemoryPercent)),
 		"env":    envName(env),
 	}
-	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale, pol.evaluateAutoscale(env, spec, confirm)); err != nil {
+	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale, pol.evaluateAutoscale(env, confirm)); err != nil {
 		return AutoscaleResult{}, err
 	}
 
@@ -1974,6 +1991,13 @@ func (e *Engine) Guardrails(ctx context.Context, env string) ([]GuardrailInfo, e
 // ErrInvalid.
 func (e *Engine) SetGuardrail(ctx context.Context, env string, code GuardrailCode, d Disposition) error {
 	if !KnownGuardrail(code) {
+		// A limit code arriving here is the ADR-0068 §2 correction landing on someone who learned
+		// the old shape — `guard set app.replica_ceiling allow` was how the ceiling was turned off.
+		// Naming the surface that now carries it is the whole point of removing the code rather
+		// than leaving it settable and inert.
+		if KnownLimit(LimitCode(code)) {
+			return fmt.Errorf("set guardrail: %q is an operational limit, not a guardrail: it is a bound a human sets, and exceeding it is refused rather than dispositioned. Set its value with `burrow cluster config set [--env <name>] %s <value>`: %w", code, code, ErrInvalid)
+		}
 		return fmt.Errorf("set guardrail: unknown guardrail %q: %w", code, ErrInvalid)
 	}
 	if !d.Valid() {
@@ -1993,6 +2017,97 @@ func (e *Engine) SetGuardrail(ctx context.Context, env string, code GuardrailCod
 		stored = GuardrailCode(env + "." + string(code))
 	}
 	return e.db.SetGuardrail(ctx, stored, d)
+}
+
+// Limits returns every operational limit with its effective value for env, each marking the tier
+// that value came from (ADR-0068 §3). With an empty env, or with `prod` — the environment install
+// created, whose configuration IS the cluster configuration (ADR-0067 §2) — it reports the cluster
+// tier and the built-in defaults; an environment added later reports its own values where it has
+// them. That environment must be registered; an unknown one is a clear ErrNotFound.
+//
+// This is a read of what the operator set, and reading a limit is harmless. SETTING one is the
+// operator's alone (ADR-0068 §4).
+func (e *Engine) Limits(ctx context.Context, env string) ([]LimitInfo, error) {
+	if env != "" && env != DefaultEnvironment {
+		if _, err := e.db.GetEnvironment(ctx, env); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil, fmt.Errorf("limits: unknown environment %q: %w", env, ErrNotFound)
+			}
+			return nil, fmt.Errorf("limits: resolving environment %q: %w", env, err)
+		}
+	}
+	cfg, err := e.db.OperationalConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("limits: loading operational configuration: %w", err)
+	}
+	return cfg.Limits(env), nil
+}
+
+// SetLimit sets one operational limit's value (ADR-0068). It rejects an unknown limit, or a value
+// that is not of the limit's kind or lies outside its permitted range, as ErrInvalid. This is the
+// operator's lever and it is on the operator CLI only — `burrow-agent` carries no `cluster config`,
+// because a bound the agent can raise is not a bound (ADR-0068 §4).
+//
+// With an empty env, or with `prod`, it sets the CLUSTER value, for the reason SetGuardrail does
+// the same: `prod` is the environment install created and the baseline every other environment
+// inherits (ADR-0067 §2). An environment added later stores the env-prefixed code (e.g.
+// staging.app.replica_ceiling) so its bound can diverge from that baseline; such an environment
+// must be registered, and only a limit that DECLARES itself environment-scoped may be set that way
+// (ADR-0068 §5).
+//
+// The value is normalized to the limit's canonical text form before it is stored, so `72h0m0s` and
+// `72h` do not read back as two different settings.
+func (e *Engine) SetLimit(ctx context.Context, env string, code LimitCode, value string) error {
+	d, ok := lookupLimit(code)
+	if !ok {
+		// A guardrail code arriving here is the ADR-0068 §2 correction landing on someone who
+		// learned the old shape, so name the surface that does carry it rather than only refusing.
+		if KnownGuardrail(GuardrailCode(code)) {
+			return fmt.Errorf("set limit: %q is a guardrail, not an operational limit; set its disposition with `burrow guard set %s <allow|confirm|deny>`: %w", code, code, ErrInvalid)
+		}
+		return fmt.Errorf("set limit: unknown limit %q (known limits: %s): %w", code, joinLimitCodes(), ErrInvalid)
+	}
+	n, err := d.parse(value)
+	if err != nil {
+		return fmt.Errorf("set limit %s: %w: %w", code, err, ErrInvalid)
+	}
+	stored := code
+	if env != "" && env != DefaultEnvironment {
+		if !d.envScoped {
+			return fmt.Errorf("set limit: %q is cluster-wide and cannot be set for one environment; set it without --env: %w", code, ErrInvalid)
+		}
+		if _, err := e.db.GetEnvironment(ctx, env); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("set limit: unknown environment %q: %w", env, ErrNotFound)
+			}
+			return fmt.Errorf("set limit: resolving environment %q: %w", env, err)
+		}
+		stored = LimitCode(env + "." + string(code))
+	}
+	return e.db.SetLimit(ctx, stored, d.format(n))
+}
+
+// joinLimitCodes lists the known limit codes for the "unknown limit" refusal, so an operator who
+// mistyped one sees the set rather than being told only that theirs is not in it.
+func joinLimitCodes() string {
+	codes := LimitCodes()
+	out := make([]string, len(codes))
+	for i, c := range codes {
+		out[i] = string(c)
+	}
+	return strings.Join(out, ", ")
+}
+
+// checkReplicaCeiling refuses op when requested exceeds the effective replica ceiling for env
+// (ADR-0068 §2). It runs BEFORE the guardrail decision on every path that names a replica count,
+// because exceeding a bound is a validation failure rather than a policy decision: there is nothing
+// to confirm, nothing to audit as held, and no disposition that opens it.
+func (e *Engine) checkReplicaCeiling(ctx context.Context, env, op, what string, requested int32) error {
+	cfg, err := e.db.OperationalConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("loading operational configuration: %w", err)
+	}
+	return cfg.checkReplicaCeiling(env, op, what, requested)
 }
 
 // AutoDeploy returns the auto-deploy level configured for app in env (ADR-0052 §2). A missing

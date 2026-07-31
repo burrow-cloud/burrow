@@ -187,16 +187,15 @@ func TestAuditDeployHeldDoesNotExecute(t *testing.T) {
 // TestAuditScaleHeldDoesNotExecute: a confirm-disposition scale with no confirm records a held
 // row and does NOT execute (no executed row, no scale on the cluster).
 func TestAuditScaleHeldDoesNotExecute(t *testing.T) {
-	pol := permissive().With(cp.GuardrailReplicaCeiling, cp.DispositionConfirm)
-	pol.MaxReplicas = 3
+	pol := permissive().With(cp.GuardrailScaleToZero, cp.DispositionConfirm)
 	e, k, d, _ := newEngine(t, pol)
 	ctx := context.Background()
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	// 5 exceeds the ceiling of 3, so app.replica_ceiling holds it for confirmation.
-	if _, err := e.Scale(ctx, "web", "", 5, false); err == nil {
+	// Scaling to zero takes the app offline, so app.scale_to_zero holds it for confirmation.
+	if _, err := e.Scale(ctx, "web", "", 0, false); err == nil {
 		t.Fatalf("Scale without confirm should be held")
 	}
 
@@ -207,8 +206,8 @@ func TestAuditScaleHeldDoesNotExecute(t *testing.T) {
 	if rows[0].Outcome != cp.AuditHeld {
 		t.Errorf("outcome = %q, want held", rows[0].Outcome)
 	}
-	if rows[0].GuardrailCode != string(cp.GuardrailReplicaCeiling) {
-		t.Errorf("guardrail = %q, want app.replica_ceiling", rows[0].GuardrailCode)
+	if rows[0].GuardrailCode != string(cp.GuardrailScaleToZero) {
+		t.Errorf("guardrail = %q, want app.scale_to_zero", rows[0].GuardrailCode)
 	}
 	if rows[0].Disposition != string(cp.DispositionConfirm) {
 		t.Errorf("disposition = %q, want confirm", rows[0].Disposition)
@@ -225,15 +224,14 @@ func TestAuditScaleHeldDoesNotExecute(t *testing.T) {
 
 // TestAuditScaleConfirmedExecutes: the same scale with confirm records executed and applies.
 func TestAuditScaleConfirmedExecutes(t *testing.T) {
-	pol := permissive().With(cp.GuardrailReplicaCeiling, cp.DispositionConfirm)
-	pol.MaxReplicas = 3
+	pol := permissive().With(cp.GuardrailScaleToZero, cp.DispositionConfirm)
 	e, k, d, _ := newEngine(t, pol)
 	ctx := context.Background()
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	if _, err := e.Scale(ctx, "web", "", 5, true); err != nil {
+	if _, err := e.Scale(ctx, "web", "", 0, true); err != nil {
 		t.Fatalf("Scale with confirm: %v", err)
 	}
 
@@ -247,8 +245,8 @@ func TestAuditScaleConfirmedExecutes(t *testing.T) {
 	if rows[1].Outcome != cp.AuditExecuted {
 		t.Errorf("execution outcome = %q, want executed", rows[1].Outcome)
 	}
-	if st, _ := k.WorkloadStatus(ctx, "web"); st.DesiredReplicas != 5 {
-		t.Errorf("replicas = %d, want 5", st.DesiredReplicas)
+	if st, _ := k.WorkloadStatus(ctx, "web"); st.DesiredReplicas != 0 {
+		t.Errorf("replicas = %d, want 0", st.DesiredReplicas)
 	}
 }
 

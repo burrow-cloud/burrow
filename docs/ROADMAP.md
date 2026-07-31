@@ -157,7 +157,7 @@ active environment, with prod gated while staging stays permissive.
 ## v0.8 — Autoscaling and deploy-safety hardening ✅ shipped
 
 Application autoscaling plus a batch of least-privilege and deploy-safety hardening. `burrow app
-autoscale` applies a HorizontalPodAutoscaler bounded by the replica-ceiling guardrail; install mints a
+autoscale` applies a HorizontalPodAutoscaler bounded by the replica ceiling an operator sets; install mints a
 scoped `burrow-agent` credential ([ADR-0038](adr/0038-scoped-agent-credential.md)) and the agent's
 binary fails closed without it; an `app.deploy` guardrail gates deploys and every deploy rolls the workload
 while preserving replicas; burrowd no longer contacts the registry

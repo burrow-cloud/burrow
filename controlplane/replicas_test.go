@@ -180,15 +180,15 @@ func TestReapplyEnvPreservesReplicas(t *testing.T) {
 	}
 }
 
-// TestDeployCeilingUsesResolvedReplicas: the replica-ceiling guardrail is evaluated against the
-// RESOLVED count. An active HPA that has scaled the app above the ceiling still trips the ceiling on
-// a redeploy, and scale-to-zero never trips on a deploy because the resolved count is always >= 1.
+// TestDeployCeilingUsesResolvedReplicas: the replica ceiling is checked against the RESOLVED count.
+// An active HPA that has scaled the app above the ceiling still trips it on a redeploy, and
+// scale-to-zero never trips on a deploy because the resolved count is always >= 1.
 func TestDeployCeilingUsesResolvedReplicas(t *testing.T) {
 	ctx := context.Background()
-	e, k, _, _ := newEngine(t, cp.Policy{MaxReplicas: 5}.
+	e, k, d, _ := newEngine(t, cp.Policy{}.
 		With(cp.GuardrailAppDeploy, cp.DispositionAllow).
-		With(cp.GuardrailReplicaCeiling, cp.DispositionDeny).
 		With(cp.GuardrailScaleToZero, cp.DispositionDeny))
+	d.SetLimits(ceiling(5))
 
 	// Seed a running app within the ceiling, then model the HPA scaling it above the ceiling
 	// directly in the cluster (the HPA changes the live count without going through burrow's scale).
@@ -199,8 +199,8 @@ func TestDeployCeilingUsesResolvedReplicas(t *testing.T) {
 		t.Fatalf("ScaleWorkload: %v", err)
 	}
 	k.SetAutoscalerActive("web", true)
-	// The resolved count (8, preserved from the HPA) exceeds the ceiling of 5, so the redeploy trips
-	// the replica-ceiling guardrail rather than silently applying an over-ceiling count.
+	// The resolved count (8, preserved from the HPA) exceeds the ceiling of 5, so the redeploy is
+	// refused rather than silently applying an over-ceiling count.
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 0})
-	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
+	mustLimit(t, err, cp.LimitReplicaCeiling)
 }

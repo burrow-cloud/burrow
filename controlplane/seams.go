@@ -414,6 +414,16 @@ type Database interface {
 	// `guard set`. It rejects an invalid disposition.
 	SetGuardrail(ctx context.Context, code GuardrailCode, d Disposition) error
 
+	// OperationalConfig returns the operator-set operational configuration: every stored limit
+	// value, keyed by the code it was set under (ADR-0068 §1). A limit with no stored value
+	// resolves to its built-in default, so a store with nothing set yields the defaults.
+	OperationalConfig(ctx context.Context) (OperationalConfig, error)
+	// SetLimit persists the value of one operational limit — the write behind `cluster config
+	// set`. code is the key the value is stored under, which is the bare limit code for a cluster
+	// value and `<env>.<code>` for an environment one; the engine composes it, exactly as it does
+	// for SetGuardrail. The value arrives already validated and in its canonical text form.
+	SetLimit(ctx context.Context, code LimitCode, value string) error
+
 	// AutoDeployLevel returns the auto-deploy level configured for app in the named environment
 	// (ADR-0052 §2). A missing configuration resolves to DefaultAutoDeployLevel (off): auto-deploy is
 	// opt-in, so an app with no stored row is off and is never polled (ADR-0058). env is the canonical

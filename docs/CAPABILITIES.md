@@ -601,7 +601,6 @@ These are all fourteen, in listing order, with their defaults:
 | Code | Gates | Default | Env-scopable |
 | --- | --- | --- | --- |
 | `app.deploy` | deploying a new release | `allow` | yes |
-| `app.replica_ceiling` | deploying or scaling above the replica ceiling | `deny` | yes |
 | `app.scale_to_zero` | scaling an app to zero | `confirm` | yes |
 | `app.expose_public` | exposing an app at a public hostname | `confirm` | yes |
 | `dns.write` | creating or updating a public DNS record | `confirm` | no |
@@ -641,15 +640,17 @@ Limits:
   and the refusal message says so, because relaxing one guardrail globally to unblock a sandbox
   relaxes production with it. `burrow app delete` is how a human deletes an app once the
   guardrail permits it.
-- **Only `app.*` guardrails can be scoped to an environment.** The six cluster-level codes
-  (`dns.*`, `addon.*`) are global; setting one with `--env` is rejected. `dns.delete`'s deny is
-  therefore all-or-nothing: an operator who wants the agent managing DNS in development but not
-  production must pick one answer for both. ADR-0065 §3 names this as a real limitation of the
-  decision; [ADR-0068](adr/0068-operational-limits-are-configuration.md) proposes widening the
-  prefix and is not built.
-- **The replica ceiling is 50 and is not configurable.** `app.replica_ceiling` controls the
-  *disposition* when the ceiling is exceeded, per environment; the number itself is compiled in
-  and has no CLI, API, or per-environment surface.
+- **Which guardrails can be scoped to an environment is a property each one declares**
+  ([ADR-0068](adr/0068-operational-limits-are-configuration.md) §5), not one read off the `app.`
+  prefix as it used to be. The app-level codes are scopable because the operations they gate always
+  name an environment. The cluster-level codes (`dns.*`, `addon.*`, `bucket.create`) are not,
+  because their dispositions are looked up with no environment at all; setting one with `--env` is
+  rejected. `dns.delete`'s deny is therefore still all-or-nothing: an operator who wants the agent
+  managing DNS in development but not production must pick one answer for both. Widening it is now
+  a change to that declaration plus the lookup at its call site rather than a rename.
+- **`app.replica_ceiling` is no longer a guardrail.** It is an operational limit — see
+  [Operational limits](#operational-limits) below. Exceeding it is a validation failure, not a
+  disposition, and any stored disposition for it was dropped by the schema migration.
 - **Several mutating operations are not guardrailed at all**: `app config set/unset`,
   `app secret set/unset`, `app unpublish`, `addon attach`, `addon backup`, `addon connect`,
   `config provider add`, `app auto-deploy`, `env add/remove`, and `guard set` itself. Some are
@@ -657,6 +658,50 @@ Limits:
   `unpublish` taking an app offline without a gate is worth knowing.
 - Removing an environment does not cascade to its guardrail overrides; they are orphaned and
   would apply again if the name were reused.
+
+---
+
+## Operational limits
+
+A limit is a **bound a human sets**, and it is deliberately not a guardrail
+([ADR-0068](adr/0068-operational-limits-are-configuration.md)). A guardrail answers *what happens
+when this is attempted*; a limit answers *where the line is*. Exceeding one is a **validation
+failure**: there is no disposition on it, nothing to relax, and no `--confirm` that opens it. The
+refusal names the limit, the tier the effective bound came from, and the command that raises it.
+
+| Limit | Bounds | Default | Tier |
+| --- | --- | --- | --- |
+| `app.replica_ceiling` | the largest replica count a deploy, a scale, or an autoscaler's maximum may ask for | `50` | environment or cluster |
+
+Two operator-owned tiers, resolved in the order guardrail dispositions already use — the
+environment's value, then the cluster's, then the built-in default:
+
+- `burrow cluster config list [--env <name>]` shows every limit with its effective value, the tier
+  that value came from, and the built-in default it reverts to.
+- `burrow cluster config set <limit> <value>` sets the **cluster** value, which applies everywhere.
+- `burrow cluster config set --env <name> <limit> <value>` sets that **environment's** value, which
+  wins there. `--env prod` writes the cluster value: `prod` is the environment install created and
+  the baseline the others diverge from ([ADR-0067](adr/0067-one-database-instance-per-environment.md)
+  §2), exactly as for `guard set`.
+
+**The whole surface is absent from `burrow-agent`** (ADR-0068 §4, ADR-0065 tier 1), asserted by the
+surface-guard test, for the reason `guard set` is: a bound the agent can raise is not a bound. The
+agent gets the refusal and the operator command to relay, not the lever. Reading a limit is harmless
+and useful, but ADR-0068 leaves the shape of an agent-side read undecided, so there is none yet.
+
+Limits:
+
+- **One limit exists.** ADR-0068 §6 names three more occupants — the build Job's retention, the
+  metrics add-on's retention, and the unschedulable grace period — and they are still constants in
+  the files that needed them
+  ([#384](https://github.com/burrow-cloud/burrow/issues/384)).
+- **There is no `unset`.** A value returns to the default by being set back to it explicitly, the
+  same as for a guardrail disposition.
+- **Values are validated on the way in**, against the limit's kind and permitted range, and stored
+  in canonical form. A value that later stops parsing (a hand-edited row) is skipped on read and the
+  next tier applies, so a bad row cannot wedge a deploy.
+- Removing an environment does not cascade to its limit values, exactly as it does not cascade to
+  its guardrail overrides.
 
 ---
 
@@ -703,8 +748,9 @@ pinned by tests that fail if a verb is added or removed.
 
 **Absent from the agent binary entirely** — these are operator actions on the `burrow` CLI:
 `cluster install`, `cluster upgrade`, `cluster bootstrap`, `cluster ingress install`,
-`cluster registry install`, `cluster postgres install`, `join`, `env add`, `guard set`, `app secret set`,
-`app auto-deploy`, `addon remove`, `addon remove --delete-data`, `addon connect`, `addon detach`,
+`cluster registry install`, `cluster postgres install`, `cluster config set`, `join`, `env add`,
+`guard set`, `app secret set`, `app auto-deploy`, `addon remove`, `addon remove --delete-data`,
+`addon connect`, `addon detach`,
 `addon restore`, `config provider add`, `config registry login`, `agent <tool> install`,
 `app publish`/`unpublish` under those names, and the client-side `--build` deploy path.
 **Bucket deletion** is in that list too and is the one entry Burrow does not carry on *either*

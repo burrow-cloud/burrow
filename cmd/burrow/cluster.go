@@ -58,7 +58,10 @@ func newClusterCmd() *cobra.Command {
 			"infrastructure (ingress-nginx, cert-manager, a Let's Encrypt issuer),\n" +
 			"`burrow cluster registry install` provisions the optional in-cluster image registry, and\n" +
 			"`burrow cluster postgres install` provisions the CloudNativePG operator the Postgres add-on\n" +
-			"runs on; each is a one-time operator setup.",
+			"runs on; each is a one-time operator setup.\n\n" +
+			"`burrow cluster config` is the operational limits Burrow enforces (the replica ceiling and\n" +
+			"its siblings), set for the whole cluster or for one environment. Those are bounds a human\n" +
+			"sets; the agent CLI carries no command that changes them.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -86,6 +89,7 @@ func newClusterCmd() *cobra.Command {
 	cmd.AddCommand(newClusterPostgresCmd())
 	cmd.AddCommand(newBootstrapCmd())
 	cmd.AddCommand(newCapacityCmd())
+	cmd.AddCommand(newClusterConfigCmd())
 	return cmd
 }
 

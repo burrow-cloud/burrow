@@ -6,7 +6,6 @@ package controlplane
 import (
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // Disposition is how the control plane enforces a guardrail when an operation trips it:
@@ -41,8 +40,6 @@ const (
 	// deploys entirely, per environment. Realizes ADR-0007: the explicit deploy call is where
 	// the guardrails live.
 	GuardrailAppDeploy GuardrailCode = "app.deploy"
-	// GuardrailReplicaCeiling: the requested replica count exceeds Policy.MaxReplicas.
-	GuardrailReplicaCeiling GuardrailCode = "app.replica_ceiling"
 	// GuardrailScaleToZero: the operation would scale to zero replicas.
 	GuardrailScaleToZero GuardrailCode = "app.scale_to_zero"
 	// GuardrailExposePublic: the operation would make an app reachable from outside the
@@ -56,9 +53,11 @@ const (
 	// (ADR-0065 §3): removing the record takes an application off the internet, and the record may
 	// not be one Burrow created, so a confirmation the caller can satisfy itself is too weak a
 	// control. An operator who wants the agent tidying up DNS sets it to confirm or allow with
-	// `guard set dns.delete ...` — cluster-wide, because EnvScopable keys on the `app.` prefix, so
-	// unlike app.delete this one cannot be relaxed for a single environment (ADR-0068 proposes
-	// widening that prefix).
+	// `guard set dns.delete ...` — cluster-wide, because a DNS operation carries no environment to
+	// scope the disposition to: AddDomain and RemoveDomain act on a hostname at a vendor, and
+	// nothing in the request says which environment it belongs to. Its declaration below says so
+	// (ADR-0068 §5): scoping it is a matter of the operation carrying an environment, not of the
+	// code's name.
 	GuardrailDNSDelete GuardrailCode = "dns.delete"
 	// GuardrailAddonInstall: the operation would install a building-block backing service
 	// (a vetted add-on like logs or metrics) onto the cluster (ADR-0025).
@@ -90,8 +89,9 @@ const (
 	// GuardrailAutoscale: the operation would configure (or turn off) autoscaling for an app — apply
 	// a HorizontalPodAutoscaler on its Deployment. Allowed by default: autoscaling is helpful and
 	// non-destructive, and the autoscaler's max is independently bounded by the replica ceiling
-	// (GuardrailReplicaCeiling). An operator can raise it to confirm or deny per environment, e.g.
-	// deny in prod so only a human sets the scaling shape there.
+	// (LimitReplicaCeiling), which is an operational limit rather than a guardrail (ADR-0068 §2).
+	// An operator can raise it to confirm or deny per environment, e.g. deny in prod so only a
+	// human sets the scaling shape there.
 	GuardrailAutoscale GuardrailCode = "app.autoscale"
 	// GuardrailAppRun: the operation would run a caller-provided one-off command inside the app's own
 	// current image and environment (ADR-0048) — a migration, seed, backfill, or maintenance script.
@@ -124,44 +124,68 @@ type GuardrailInfo struct {
 	Source string `json:"source,omitempty"`
 }
 
+// guardrailDef declares one guardrail: its code, what it gates, and whether it can be scoped to a
+// named environment.
+//
+// envScoped is a DECLARATION rather than an inference from the code's name (ADR-0068 §5).
+// EnvScopable used to key on the `app.` prefix, which was a reasonable shorthand when app-lifecycle
+// codes were the only ones anyone wanted to scope and became a trap once they were not: a
+// correctly-named code silently was not scopable, and inferring capability from a string prefix is
+// the kind of shortcut that is invisible until it is wrong.
+//
+// What the flag asserts is that the guarded operation CARRIES an environment to scope the lookup
+// to. The app-level guardrails gate per-app operations that always name one, so they can be locked
+// down per environment — strict prod, permissive staging. dns.* and addon.* are evaluated with an
+// empty environment today (the DNS request has no environment at all; an add-on operation names one
+// but looks its disposition up globally), so declaring them scopable would promise an override that
+// is never read. Widening one is now a change to this line plus the lookup at its call site, rather
+// than a rename.
+type guardrailDef struct {
+	code        GuardrailCode
+	description string
+	envScoped   bool
+}
+
 // knownGuardrails enumerates every configurable guardrail in a stable order with a human
 // description, so inspection shows the full set — including unset ones, which read as their
 // default disposition.
-var knownGuardrails = []GuardrailInfo{
-	{Code: GuardrailAppDeploy, Description: "deploy a new release of an application"},
-	{Code: GuardrailReplicaCeiling, Description: "deploy or scale above the replica ceiling"},
-	{Code: GuardrailScaleToZero, Description: "scale an application to zero replicas"},
-	{Code: GuardrailExposePublic, Description: "expose an application to the public internet at a hostname"},
-	{Code: GuardrailDNSWrite, Description: "create or update a public DNS record at a configured provider"},
-	{Code: GuardrailDNSDelete, Description: "delete a public DNS record at a configured provider"},
-	{Code: GuardrailAddonInstall, Description: "install a building-block add-on (backing service) onto the cluster"},
-	{Code: GuardrailAddonRemove, Description: "remove an installed add-on from the cluster"},
-	{Code: GuardrailAddonDetach, Description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)"},
-	{Code: GuardrailAddonRestore, Description: "restore an app's database from a backup, overwriting its live contents"},
-	{Code: GuardrailAppDelete, Description: "delete an app entirely (its workload, routing, and release history)"},
-	{Code: GuardrailRollback, Description: "roll an application back to its previous release"},
-	{Code: GuardrailAutoscale, Description: "configure autoscaling for an application"},
-	{Code: GuardrailAppRun, Description: "run a one-off command inside an application's own image and environment"},
-	{Code: GuardrailBucketCreate, Description: "create a bucket at an object-storage provider (deleting one is not a Burrow operation at all)"},
+var knownGuardrails = []guardrailDef{
+	{code: GuardrailAppDeploy, description: "deploy a new release of an application", envScoped: true},
+	{code: GuardrailScaleToZero, description: "scale an application to zero replicas", envScoped: true},
+	{code: GuardrailExposePublic, description: "expose an application to the public internet at a hostname", envScoped: true},
+	{code: GuardrailDNSWrite, description: "create or update a public DNS record at a configured provider"},
+	{code: GuardrailDNSDelete, description: "delete a public DNS record at a configured provider"},
+	{code: GuardrailAddonInstall, description: "install a building-block add-on (backing service) onto the cluster"},
+	{code: GuardrailAddonRemove, description: "remove an installed add-on from the cluster"},
+	{code: GuardrailAddonDetach, description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)"},
+	{code: GuardrailAddonRestore, description: "restore an app's database from a backup, overwriting its live contents"},
+	{code: GuardrailAppDelete, description: "delete an app entirely (its workload, routing, and release history)", envScoped: true},
+	{code: GuardrailRollback, description: "roll an application back to its previous release", envScoped: true},
+	{code: GuardrailAutoscale, description: "configure autoscaling for an application", envScoped: true},
+	{code: GuardrailAppRun, description: "run a one-off command inside an application's own image and environment", envScoped: true},
+	{code: GuardrailBucketCreate, description: "create a bucket at an object-storage provider (deleting one is not a Burrow operation at all)"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.
 func KnownGuardrail(code GuardrailCode) bool {
-	for _, g := range knownGuardrails {
-		if g.Code == code {
-			return true
-		}
-	}
-	return false
+	_, ok := lookupGuardrail(code)
+	return ok
 }
 
 // EnvScopable reports whether a guardrail can be scoped to a named environment (ADR-0035 phase
-// 2c). The app-level guardrails (app.*) gate per-app operations that always carry an environment,
-// so they can be locked down per environment — strict prod, permissive staging. The cluster-level
-// guardrails (addon.*, dns.*) gate cluster-wide operations that are not env-scoped (installing an
-// add-on or writing DNS affects the whole cluster), so they are only ever set globally.
+// 2c), which is a property the guardrail declares (ADR-0068 §5). An unknown code is not scopable.
 func EnvScopable(code GuardrailCode) bool {
-	return strings.HasPrefix(string(code), "app.")
+	g, ok := lookupGuardrail(code)
+	return ok && g.envScoped
+}
+
+func lookupGuardrail(code GuardrailCode) (guardrailDef, bool) {
+	for _, g := range knownGuardrails {
+		if g.code == code {
+			return g, true
+		}
+	}
+	return guardrailDef{}, false
 }
 
 // Guardrails returns each known guardrail with its effective disposition under the global policy
@@ -187,8 +211,8 @@ func (p Policy) guardrails(env string) []GuardrailInfo {
 	named := env != "" && env != DefaultEnvironment
 	out := make([]GuardrailInfo, len(knownGuardrails))
 	for i, g := range knownGuardrails {
-		disp, source := p.dispositionSource(env, g.Code)
-		info := GuardrailInfo{Code: g.Code, Disposition: disp, Description: g.Description}
+		disp, source := p.dispositionSource(env, g.code)
+		info := GuardrailInfo{Code: g.code, Disposition: disp, Description: g.description}
 		if named {
 			info.Source = source
 		}
@@ -232,11 +256,12 @@ func AsGuardrail(err error) (*GuardrailError, bool) {
 	return nil, false
 }
 
-// evaluateDeploy applies the guardrails that gate a deploy: first the categorical app.deploy
-// gate (allow/confirm/deny — default allow), then the replica ceiling bound. The categorical
-// gate is checked first so a deny/confirm on deploying at all takes precedence; a within-policy
-// deploy still cannot exceed the replica ceiling. Realizes ADR-0007 (explicit deploy is where
-// guardrails live) and ADR-0020 (safe defaults).
+// evaluateDeploy applies the guardrails that gate a deploy: the categorical app.deploy gate
+// (allow/confirm/deny — default allow), then the scale-to-zero gate on the resolved replica count.
+// Realizes ADR-0007 (explicit deploy is where guardrails live) and ADR-0020 (safe defaults).
+//
+// The replica CEILING is not evaluated here and is not a guardrail: it is an operational limit
+// whose breach is a validation failure, checked before any guardrail runs (ADR-0068 §2).
 func (p Policy) evaluateDeploy(env string, replicas int32, confirmed bool) error {
 	if err := p.evaluateGuardrail(env, "deploy", GuardrailAppDeploy, confirmed,
 		fmt.Sprintf("deploying a new release to %s", envName(env))); err != nil {
@@ -249,36 +274,28 @@ func (p Policy) evaluateDeploy(env string, replicas int32, confirmed bool) error
 // whether the caller has confirmed. It returns nil to proceed, or a *GuardrailError that
 // either denies the operation or marks it as needing confirmation. It assumes replicas is
 // already known non-negative (a negative count is a malformed request, validated
-// separately, not a guardrail concern).
+// separately, not a guardrail concern) and already within the replica ceiling, which is an
+// operational limit checked ahead of the guardrails (ADR-0068 §2).
+//
+// Zero is the only count a guardrail has an opinion about: scaling to zero takes an app offline,
+// which is a question of what may happen rather than of where a line is drawn.
 func (p Policy) evaluateReplicas(env, op string, replicas int32, confirmed bool) error {
 	if replicas == 0 {
 		return p.enforce(env, op, GuardrailScaleToZero, confirmed, "scaling to zero replicas", 0, 0)
-	}
-	if replicas > p.MaxReplicas {
-		return p.enforce(env, op, GuardrailReplicaCeiling, confirmed,
-			fmt.Sprintf("requested %d replicas exceeds the policy ceiling of %d", replicas, p.MaxReplicas),
-			replicas, p.MaxReplicas)
 	}
 	return nil
 }
 
 // evaluateAutoscale evaluates an autoscale request against the policy, given whether the caller has
-// confirmed. It applies two guardrails in order: the app.autoscale guardrail gates the operation
-// itself (allow by default), and the app.replica_ceiling guardrail bounds the autoscaler's max the
-// same way it bounds a manual scale — a max above the ceiling is denied exactly like scaling above
-// it (ADR-0006). It returns nil to proceed, or the first *GuardrailError that denies the operation
-// or marks it as needing confirmation. The spec is assumed already validated (min >= 1, max >= min),
-// so the ceiling is the only replica bound a guardrail concerns itself with here.
-func (p Policy) evaluateAutoscale(env string, spec AutoscaleSpec, confirmed bool) error {
-	if err := p.evaluateGuardrail(env, "autoscale", GuardrailAutoscale, confirmed, "configuring autoscaling"); err != nil {
-		return err
-	}
-	if spec.MaxReplicas > p.MaxReplicas {
-		return p.enforce(env, "autoscale", GuardrailReplicaCeiling, confirmed,
-			fmt.Sprintf("requested max of %d replicas exceeds the policy ceiling of %d", spec.MaxReplicas, p.MaxReplicas),
-			spec.MaxReplicas, p.MaxReplicas)
-	}
-	return nil
+// confirmed: the app.autoscale guardrail gates the operation itself (allow by default). It returns
+// nil to proceed, or a *GuardrailError that denies the operation or marks it as needing
+// confirmation.
+//
+// The autoscaler's MAXIMUM is bounded by the replica ceiling exactly as a manual scale is, and for
+// the same reason it is checked before this runs rather than here: the ceiling is an operational
+// limit, not a guardrail (ADR-0068 §2).
+func (p Policy) evaluateAutoscale(env string, confirmed bool) error {
+	return p.evaluateGuardrail(env, "autoscale", GuardrailAutoscale, confirmed, "configuring autoscaling")
 }
 
 // enforce applies the configured disposition for a tripped guardrail, producing the right
@@ -321,10 +338,10 @@ func (p Policy) enforce(env, op string, code GuardrailCode, confirmed bool, what
 // exists to prevent is an operator meeting one refusal and reaching for a global `guard set
 // app.delete allow`, relaxing production to unblock a sandbox.
 //
-// A cluster-level code gets the global form instead, and says so, because EnvScopable keys on the
-// `app.` prefix: dns.*, addon.* and the rest are all-or-nothing today. ADR-0065 §3 records that as
-// a real limitation of the decision and ADR-0068 proposes widening the prefix; until then, naming
-// the reach honestly beats printing a `--env` flag the caller cannot use.
+// A cluster-level code gets the global form instead, and says so, because dns.*, addon.* and the
+// rest declare themselves un-scopable: the operations they gate are evaluated with no environment,
+// so an override for one would never be read. ADR-0065 §3 records that as a real limitation of the
+// decision; naming the reach honestly beats printing a `--env` flag the caller cannot use.
 func relaxHint(env string, code GuardrailCode) string {
 	if !EnvScopable(code) {
 		return fmt.Sprintf(" — an operator can relax it with `burrow guard set %s confirm`, which applies to the whole cluster: %s cannot be scoped to one environment", code, code)

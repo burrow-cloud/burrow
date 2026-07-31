@@ -21,9 +21,7 @@ func newRoutingEngine(t *testing.T, appNamespace string) (*cp.Engine, *fake.Kube
 	t.Helper()
 	k := fake.NewKubernetes()
 	d := fake.NewDatabase()
-	p := cp.DefaultPolicy()
-	p.MaxReplicas = 1000
-	d.SetPolicy(p.With(cp.GuardrailScaleToZero, cp.DispositionAllow))
+	d.SetPolicy(cp.DefaultPolicy().With(cp.GuardrailScaleToZero, cp.DispositionAllow))
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Database: d,
 		Clock: fake.NewClock(time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)),

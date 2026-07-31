@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -188,7 +189,42 @@ func TestHeldThenConfirm(t *testing.T) {
 func TestDeniedOutcome(t *testing.T) {
 	f := newFakeCP(t)
 	f.handler = func(w http.ResponseWriter, _ *http.Request) {
-		denied(w, "scale", "app.replica_ceiling", "requested 99 replicas exceeds the policy ceiling of 5")
+		denied(w, "delete", "app.delete", "deleting the app is denied by the current guardrail policy")
+	}
+	out, code := runMutate(t, f, "delete", "web", "--confirm")
+	oc := decodeOutcome(t, out)
+	if oc.Outcome != outcomeDenied {
+		t.Fatalf("outcome = %q, want denied", oc.Outcome)
+	}
+	if oc.Code != "app.delete" {
+		t.Errorf("code = %q, want app.delete", oc.Code)
+	}
+	if oc.ConfirmRequired {
+		t.Error("denied outcome must not set confirm_required")
+	}
+	if code != exitCodeDenied {
+		t.Errorf("exit code = %d, want %d", code, exitCodeDenied)
+	}
+}
+
+// TestOperationalLimitOutcome: crossing an operational limit is a refusal no --confirm opens, so it
+// classifies as "denied" and exits 3 rather than falling through to a plain "error"
+// ([ADR-0068](../../docs/adr/0068-operational-limits-are-configuration.md) §2). The distinction the
+// agent needs is between "retrying will not help" and "something went wrong"; a limit is the first,
+// and the message the control plane wrote names the operator command that raises it.
+func TestOperationalLimitOutcome(t *testing.T) {
+	f := newFakeCP(t)
+	f.handler = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "scale refused: 99 replicas exceeds the replica ceiling of 5, set for the cluster. " +
+				"A limit is a bound a human sets, not a guardrail that can be dispositioned away: raise it " +
+				"for one environment with `burrow cluster config set --env <env> app.replica_ceiling <value>`.",
+			"code":      "app.replica_ceiling",
+			"requested": 99,
+			"limit":     5,
+		})
 	}
 	out, code := runMutate(t, f, "scale", "web", "99")
 	oc := decodeOutcome(t, out)
@@ -199,7 +235,10 @@ func TestDeniedOutcome(t *testing.T) {
 		t.Errorf("code = %q, want app.replica_ceiling", oc.Code)
 	}
 	if oc.ConfirmRequired {
-		t.Error("denied outcome must not set confirm_required")
+		t.Error("a limit refusal must not offer a confirmation: nothing about it is confirmable")
+	}
+	if !strings.Contains(oc.Message, "burrow cluster config set") {
+		t.Errorf("message = %q, want the operator command that raises the limit", oc.Message)
 	}
 	if code != exitCodeDenied {
 		t.Errorf("exit code = %d, want %d", code, exitCodeDenied)

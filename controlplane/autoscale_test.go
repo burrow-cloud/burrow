@@ -74,17 +74,17 @@ func TestAutoscaleValidation(t *testing.T) {
 }
 
 // TestAutoscaleMaxBoundedByCeiling proves the autoscaler's max is bounded by the same replica
-// ceiling a manual scale is: a max above the ceiling is denied via app.replica_ceiling even though
-// the autoscale guardrail itself allows the operation.
+// ceiling a manual scale is: a max above the ceiling is refused as an operational limit even though
+// the autoscale guardrail itself allows the operation (ADR-0068 §2).
 func TestAutoscaleMaxBoundedByCeiling(t *testing.T) {
 	ctx := context.Background()
-	// Ceiling of 10; autoscale allowed by default.
+	// The built-in ceiling of 50; autoscale allowed by default.
 	e, k, _, _ := newEngine(t, cp.DefaultPolicy())
 
 	_, err := e.Autoscale(ctx, "web", "", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 99, CPUPercent: 80}, false)
-	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
+	mustLimit(t, err, cp.LimitReplicaCeiling)
 	if _, ok := k.Autoscaler("web"); ok {
-		t.Errorf("HPA should not be applied when the max is denied")
+		t.Errorf("HPA should not be applied when the max exceeds the ceiling")
 	}
 
 	// A max at the ceiling is allowed.

@@ -92,6 +92,11 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/{key}", s.unsetSecret)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
+	// The operational limits (ADR-0068). The write is reachable only from the operator CLI: the
+	// agent binary carries no `cluster config` verb at all, which is what the surface guard asserts
+	// — a bound the agent can raise is not a bound (ADR-0068 §4).
+	v1.HandleFunc("GET /v1/config", s.limitsList)
+	v1.HandleFunc("PUT /v1/config/{code}", s.limitSet)
 	v1.HandleFunc("POST /v1/providers", s.addProvider)
 	v1.HandleFunc("GET /v1/providers", s.listProviders)
 	v1.HandleFunc("POST /v1/domains", s.addDomain)
@@ -484,6 +489,39 @@ func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, guardResponse{Guardrails: gs})
+}
+
+// limitsList returns every operational limit with its effective value (ADR-0068 §3). The optional
+// env query selects a named environment's effective configuration; empty is the cluster tier.
+func (s *server) limitsList(w http.ResponseWriter, r *http.Request) {
+	ls, err := s.engine.Limits(r.Context(), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, limitsResponse{Limits: ls})
+}
+
+// limitSet sets one operational limit's value and returns the updated configuration. The optional
+// env query scopes the set to a named environment (storing the env-prefixed code); empty sets the
+// cluster value (ADR-0068 §3).
+func (s *server) limitSet(w http.ResponseWriter, r *http.Request) {
+	var req limitSetRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	env := r.URL.Query().Get("env")
+	code := controlplane.LimitCode(r.PathValue("code"))
+	if err := s.engine.SetLimit(r.Context(), env, code, req.Value); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	ls, err := s.engine.Limits(r.Context(), env)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, limitsResponse{Limits: ls})
 }
 
 // getAutoDeploy returns the enriched, read-only auto-deploy view for an app in the selected
@@ -1086,6 +1124,19 @@ type guardSetRequest struct {
 	Disposition string `json:"disposition"`
 }
 
+// limitsResponse is the body of a config list/set call: every operational limit with its effective
+// value and the tier that value came from (ADR-0068).
+type limitsResponse struct {
+	Limits []controlplane.LimitInfo `json:"limits"`
+}
+
+// limitSetRequest is the body of a config set call (the limit code comes from the path). Value is
+// the limit's canonical text form — "50" for a count, "72h" for a duration — validated server-side
+// against the limit's kind and permitted range.
+type limitSetRequest struct {
+	Value string `json:"value"`
+}
+
 func health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -1190,6 +1241,17 @@ func writeError(w http.ResponseWriter, status int, msg, code string) {
 
 // writeEngineError maps a deploy-engine error to its HTTP status and structured body.
 func writeEngineError(w http.ResponseWriter, err error) {
+	// An operational limit exceeded is a structured refusal, not a system failure and not a policy
+	// decision (ADR-0068 §2): the request was understood, it crosses a bound a human set, and no
+	// confirmation opens it. It carries the same requested/limit pair a guardrail refusal does, and
+	// NeedsConfirmation is deliberately absent — there is nothing to confirm.
+	if l, ok := controlplane.AsLimit(err); ok {
+		req, lim := l.Requested, l.Limit
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+			Error: err.Error(), Code: string(l.Code), Requested: &req, Limit: &lim,
+		})
+		return
+	}
 	if g, ok := controlplane.AsGuardrail(err); ok {
 		req, lim := g.Requested, g.Limit
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{

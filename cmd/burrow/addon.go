@@ -692,9 +692,15 @@ func printRetainedVolumes(out io.Writer, vols []client.RetainedVolume) error {
 // it refuses unless --acknowledge-data-loss is passed. --confirm satisfies a guardrail; it is not that
 // acknowledgement, because a flag people already reach for reflexively is exactly the habit the gate
 // exists to interrupt.
+//
+// With an object-storage provider registered, burrowd takes a final backup of every attached database
+// before it destroys anything and abandons the removal if it does not reach the store (ADR-0064 §5).
+// --skip-final-backup is the way past that, and it exists because an add-on is often removed BECAUSE
+// it is wedged: without an override a broken add-on would be undeletable.
 func newAddonRemoveCmd() *cobra.Command {
 	o := &commonOpts{}
-	var confirm, deleteData, ackDataLoss bool
+	var confirm, deleteData, ackDataLoss, skipFinalBackup bool
+	var backupDestination string
 	cmd := &cobra.Command{
 		Use:   "remove <name>",
 		Short: "Remove an installed add-on (keeps its data volume)",
@@ -704,11 +710,21 @@ func newAddonRemoveCmd() *cobra.Command {
 			"database. Recorded backups are on a separate volume and survive either way.\n\n" +
 			"--delete-data prints what it would destroy and asks for the add-on's name to be typed back.\n" +
 			"With no terminal to type into it refuses rather than proceeding; --acknowledge-data-loss is\n" +
-			"how a script says it means it.",
+			"how a script says it means it.\n\n" +
+			"With an object-storage provider registered, --delete-data takes a final backup of every\n" +
+			"attached database to that store first and removes NOTHING if it fails. --skip-final-backup\n" +
+			"destroys the data without one — which is how a wedged instance that cannot be dumped is\n" +
+			"still removable.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			name := args[0]
+			// A flag that skips a step this invocation was never going to take is a misunderstanding
+			// worth surfacing rather than accepting quietly — the likely reading of a lone
+			// --skip-final-backup is "and destroy the data", which is not what it says.
+			if skipFinalBackup && !deleteData {
+				return fmt.Errorf("--skip-final-backup only applies to --delete-data: without it the data volume is kept and no backup is taken or needed")
+			}
 			// The off-terminal refusal runs BEFORE anything is contacted, so a script that never
 			// said it destroys databases cannot reach the removal call at all (ADR-0064 §2).
 			if deleteData && !ackDataLoss && !stdinIsTerminal(cmd.InOrStdin()) {
@@ -720,11 +736,16 @@ func newAddonRemoveCmd() *cobra.Command {
 			}
 			// The typed-name gate goes to stderr so a --json run keeps a clean stdout.
 			if deleteData && !ackDataLoss {
-				if err := confirmDeleteData(ctx, c, name, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
+				if err := confirmDeleteData(ctx, c, name, skipFinalBackup, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
 					return err
 				}
 			}
-			res, err := c.RemoveAddon(ctx, name, deleteData, confirm)
+			res, err := c.RemoveAddon(ctx, name, client.RemoveAddonOptions{
+				DeleteData:        deleteData,
+				SkipFinalBackup:   skipFinalBackup,
+				BackupDestination: backupDestination,
+				Confirm:           confirm,
+			})
 			if err != nil {
 				return err
 			}
@@ -735,6 +756,9 @@ func newAddonRemoveCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	cmd.Flags().BoolVar(&deleteData, "delete-data", false, "also DESTROY the add-on's data volume (for postgres: every attached app's database)")
 	cmd.Flags().BoolVar(&ackDataLoss, dataLossAckFlag, false, "acknowledge that --delete-data destroys the add-on's data, so it proceeds without the typed-name prompt (this is how a script asks for it). No shorthand: destroying every attached app's database should not be a single keystroke.")
+	cmd.Flags().BoolVar(&skipFinalBackup, "skip-final-backup", false, "destroy the data WITHOUT the final backup --delete-data otherwise takes first. For an instance too broken to dump — the removal output says plainly that no backup was taken.")
+	cmd.Flags().StringVar(&backupDestination, "backup-destination", "",
+		"the object-storage `provider` the final backup goes to (only needed when more than one is registered)")
 	return cmd
 }
 
@@ -767,8 +791,8 @@ func errDeleteDataNeedsTerminal(name string) error {
 // is not compiled into burrow-agent at all (ADR-0064 §2, ADR-0049 layer (a), ADR-0065 §2 tier 1).
 // That structural absence must never be relaxed on the grounds that "there's a confirmation anyway"
 // — the confirmation is a legibility device, not the boundary.
-func confirmDeleteData(ctx context.Context, c *client.Client, name string, in io.Reader, out io.Writer) error {
-	fmt.Fprintln(out, warning(out)+deleteDataConsequence(ctx, c, name))
+func confirmDeleteData(ctx context.Context, c *client.Client, name string, skipFinalBackup bool, in io.Reader, out io.Writer) error {
+	fmt.Fprintln(out, warning(out)+deleteDataConsequence(ctx, c, name, skipFinalBackup))
 	fmt.Fprintln(out)
 	typed, err := readLine(in, out, fmt.Sprintf("Type the add-on's name (%s) to proceed, or anything else to abort: ", name))
 	if err != nil {
@@ -790,7 +814,7 @@ func confirmDeleteData(ctx context.Context, c *client.Client, name string, in io
 // precisely because it is wedged, and a control plane that will not answer must degrade to the
 // volume-concrete message rather than make a broken add-on unremovable. The volume name is known
 // without asking anyone — a stateful add-on's claim carries the add-on's own name.
-func deleteDataConsequence(ctx context.Context, c *client.Client, name string) string {
+func deleteDataConsequence(ctx context.Context, c *client.Client, name string, skipFinalBackup bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "--delete-data DESTROYS the data volume %q in namespace %s. This cannot be undone.",
 		name, connect.DefaultAddonNamespace)
@@ -803,7 +827,44 @@ func deleteDataConsequence(ctx context.Context, c *client.Client, name string) s
 	}
 	fmt.Fprintf(&b, ".\n  The backup volume %q is kept — recorded backups outlive the database they came from.",
 		controlplane.PostgresBackupVolume)
+	b.WriteString("\n  " + finalBackupNotice(ctx, c, skipFinalBackup))
 	return b.String()
+}
+
+// finalBackupNotice is the line about the final backup in the typed-name notice (ADR-0064 §5). It is
+// stated BEFORE the name is typed rather than only in the output afterwards, because it changes what
+// the operator is agreeing to: "a copy is written off-cluster first and this is abandoned if that
+// fails" and "this is the last moment the data exists" are different decisions.
+//
+// Best-effort, like everything else behind this notice: a provider listing that will not answer
+// degrades to naming the uncertainty rather than asserting either answer. It is deliberately not the
+// authority — burrowd decides and enforces §5 — so being unable to read the providers costs the
+// notice a sentence, never the removal.
+func finalBackupNotice(ctx context.Context, c *client.Client, skipFinalBackup bool) string {
+	if skipFinalBackup {
+		return "--skip-final-backup: NO final backup will be taken. The data is destroyed with no off-cluster copy."
+	}
+	stores, err := c.Providers(ctx)
+	if err != nil {
+		return "Whether a final backup is taken first depends on an object-storage provider being registered;\n" +
+			"  the provider listing could not be read, so burrowd decides. It removes nothing if the backup fails."
+	}
+	var names []string
+	for _, p := range stores {
+		for _, cap := range p.Capabilities {
+			if cap == string(controlplane.CapabilityObjectStorage) {
+				names = append(names, p.Name)
+				break
+			}
+		}
+	}
+	if len(names) == 0 {
+		return "No object-storage provider is registered, so NO off-cluster backup is taken first —\n" +
+			"  register one (`burrow config provider add --type s3`) if you want a copy to survive this."
+	}
+	sort.Strings(names)
+	return fmt.Sprintf("A final backup of each attached database is written to the %s object store FIRST;\n"+
+		"  if it does not get there, nothing is removed.", strings.Join(names, " or "))
 }
 
 // addonTypeOf looks up the registered type of an installed add-on by name, returning "" when the
@@ -874,6 +935,16 @@ func removeAddonSummary(res client.RemoveAddonResult) string {
 	switch {
 	case res.DataDeleted:
 		b.WriteString("its data volume was DESTROYED\n")
+		// What happened to the copy comes immediately after what happened to the original, because
+		// they are one fact read together (ADR-0064 §5). A skipped backup is stated as plainly as a
+		// taken one: an operator who destroyed a database believing a copy exists is worse off than
+		// one who knows none does.
+		for _, bk := range res.FinalBackups {
+			fmt.Fprintf(&b, "final backup of %q taken first: %s (%s)\n", bk.App, bk.ID, backupWhere(bk))
+		}
+		if res.FinalBackupSkipped {
+			fmt.Fprintf(&b, "NO final backup was taken — %s\n", res.FinalBackupNote)
+		}
 	case res.RetainedDataVolume != "":
 		// `burrow addon list` is named here because it is where this volume shows up from now on:
 		// the removal output must not be the only record of it (ADR-0064 §1/§6).

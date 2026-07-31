@@ -341,6 +341,22 @@ The prompt is a legibility device for humans, **not a security control** — wha
 away from this is that the whole verb is absent from `burrow-agent`
 ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §2).
 
+**`--delete-data` takes a final backup first, and removes nothing if it fails.** Where an
+object-storage provider is registered, burrowd dumps every attached database to that store
+*before* it destroys anything, and a backup that does not arrive aborts the whole removal with
+the volume, the workload and the registry row all intact — the error naming the app and the
+closed reason (`Unschedulable`, `StoreRejected`, …) rather than a timeout. "Arrived" means the
+`Backup` row says `completed` at an object-store destination, which [ADR-0063](adr/0063-object-storage-provider.md)
+§7 only allows once the object was written *and* read back; an in-cluster dump is never accepted
+as the final backup, because it shares a failure domain with the volume about to be destroyed.
+With several stores registered burrowd refuses to guess and `--backup-destination` names one.
+`--skip-final-backup` destroys the data without one and says so in the output — it exists because
+an add-on is often removed *because* it is wedged, and a wedged instance cannot be dumped
+([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §5). With **no** object-storage provider
+registered the behaviour is what it always was, and the output says no off-cluster copy was
+taken. An instance that will not say which databases it holds is refused rather than destroyed
+blind: `--skip-final-backup` is the way past that too.
+
 **Removal is operator CLI only** — the whole verb, not just `--delete-data`, is absent from
 `burrow-agent` like `detach` and `restore`. Because there is one add-on instance per type per
 cluster and every app's database lives on the one shared `postgres`, removing it is removing
@@ -383,7 +399,7 @@ to the existing app namespace (§2–§3).
 | List | `burrow addon list` / `burrow-agent addons` | Type, mode (`installed`/`connected`), backend, endpoint, capabilities. This is how an app is pointed at `cache` — read the endpoint and set it as config. `burrow addon list` additionally reports the volumes an earlier removal kept, in their own section (`retained_volumes` in `--json`). |
 | Attach an app | `burrow addon attach postgres <app> [--env]` | **Postgres only.** On the named environment's instance, creates role `app_<app>` and database `<app>` owned by it, revokes `CONNECT` from `PUBLIC`, grants it to the role, and writes the generated `DATABASE_URL` into the app's Secret in that environment's namespace, then restarts the workload there. Re-attaching rotates the password. The URL is never returned, logged, or audited. |
 | Detach | `burrow addon detach postgres <app> [--env]` | Removes `DATABASE_URL`, then `DROP DATABASE … WITH (FORCE)` and `DROP ROLE` **on that environment's instance**. Destructive; confirm-gated. |
-| Remove | `burrow addon remove <name> [--delete-data]` | Tears the add-on's workload down and **keeps its data volume** unless `--delete-data` is passed. Confirm-gated by `addon.remove`; the held message names the volume and, for `postgres`, the attached apps by name. `--delete-data` additionally requires the add-on's name typed back on a terminal, and refuses off one without `--acknowledge-data-loss`. **Operator CLI only** — absent from `burrow-agent` entirely (ADR-0065 §2). |
+| Remove | `burrow addon remove <name> [--delete-data] [--skip-final-backup] [--backup-destination <provider>]` | Tears the add-on's workload down and **keeps its data volume** unless `--delete-data` is passed. Confirm-gated by `addon.remove`; the held message names the volume, the attached apps for `postgres`, and whether a final backup is taken first. `--delete-data` additionally requires the add-on's name typed back on a terminal, and refuses off one without `--acknowledge-data-loss`. With an object-storage provider registered it takes a final backup of every attached database first and removes **nothing** if it fails; `--skip-final-backup` destroys the data without one and announces it (ADR-0064 §5). **Operator CLI only** — absent from `burrow-agent` entirely (ADR-0065 §2). |
 | Connect an existing backend | `burrow addon connect <loki\|prometheus> --endpoint <url> [--auth]` | Registers a backend you already run — **deploys nothing**. Only `loki` (logs) and `prometheus` (metrics) are connectable. Operator CLI only. |
 | Query logs | `burrow addon logs [query] [--limit]` / `burrow-agent logs-query` | LogsQL against VictoriaLogs, or LogQL against Loki. Limit clamps to 200 when out of range or unset, capped at 1000. |
 | Query metrics | `burrow addon metrics <query>` / `burrow-agent metrics-query` | PromQL **instant** query against VictoriaMetrics or Prometheus. |
@@ -473,12 +489,14 @@ The limits are as important as the capability:
   came from is the point of taking them, and it is what makes destroying the data survivable.
   Their records stay listed, and the removal output names the volume so the storage is not a
   surprise. Reclaiming it is a manual `kubectl delete pvc`.
-- **`--delete-data` takes no backup first.** It destroys the data volume immediately once the
-  `addon.remove` guardrail and §2's typed confirmation are both satisfied; the only copy that
-  survives is whatever the retained backup PVC already held.
-  [ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §5 decides that, where an object-storage
-  provider is configured, a final backup is taken **before** anything is deleted and a failed one
-  aborts the removal — **not built**, and neither is the destination it needs (ADR-0063, above).
+- **`--delete-data` takes a final backup first where one can be taken.** With an object-storage
+  provider registered, every attached database is dumped to that store before anything is
+  destroyed, and a backup that does not reach it aborts the removal with nothing deleted
+  ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §5). With none registered the behaviour is
+  unchanged and the only copy that survives is whatever the retained backup PVC already held —
+  which the output says. `--skip-final-backup` is the override for an instance too broken to dump,
+  and it announces itself. This is **not a backup regime**: a dump taken at teardown is the
+  least-exercised path in the product, running against an instance that may already be unhealthy.
 - A failed backup or restore Job is left in place for diagnosis rather than reaped.
 
 Scheduled backups with retention are decided as a follow-on in ADR-0032 and are **not built**.

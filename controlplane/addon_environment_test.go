@@ -321,7 +321,7 @@ func TestRemoveAddonNamesOnlyItsOwnEnvironmentsApps(t *testing.T) {
 	prov.SetAttachedApps(cp.DefaultEnvironment, "billing", "web")
 	prov.SetAttachedApps("staging", "web")
 
-	res, err := e.RemoveAddon(ctx, "burrow-postgres-staging", true, true)
+	res, err := e.RemoveAddon(ctx, "burrow-postgres-staging", cp.RemoveAddonOptions{DeleteData: true, Confirm: true})
 	if err != nil {
 		t.Fatalf("RemoveAddon(staging): %v", err)
 	}

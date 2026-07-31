@@ -272,6 +272,19 @@ type RemoveAddonResult struct {
 	// sorted. Empty for an add-on type that has no per-app attachments, and empty (not an error) when
 	// the instance could not be reached to enumerate them — a wedged add-on must stay removable.
 	AttachedApps []string `json:"attached_apps,omitempty"`
+	// FinalBackups are the backups taken before the data volume was destroyed, one per attached
+	// database (ADR-0064 §5). Each is a completed row at an object-store destination — the removal
+	// does not get past them otherwise — so this is the list of copies that outlived the instance,
+	// and it is what a restore is addressed with. Empty on a removal that kept its data.
+	FinalBackups []Backup `json:"final_backups,omitempty"`
+	// FinalBackupSkipped reports that the data volume was destroyed with NO off-cluster copy taken:
+	// the override flag was passed, no object-storage provider was registered, or the add-on is not
+	// one Burrow can dump. It is reported rather than inferred from an empty FinalBackups, because
+	// "nothing was backed up" and "nothing needed backing up" are the two answers an operator must
+	// not have to guess between.
+	FinalBackupSkipped bool `json:"final_backup_skipped,omitempty"`
+	// FinalBackupNote is the one-line reason behind FinalBackupSkipped, safe to print.
+	FinalBackupNote string `json:"final_backup_note,omitempty"`
 }
 
 // AddonInfo is one installed add-on instance, as seen by `addon list` and the agent. It carries

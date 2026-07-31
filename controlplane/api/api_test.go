@@ -1330,3 +1330,67 @@ func TestBackupHealthEndpoint(t *testing.T) {
 		t.Errorf("backup-health for an add-on without backups = %d, want 400 (%s)", rr.Code, rr.Body.String())
 	}
 }
+
+// TestHealthEndpoints covers the health get/set/unset API (ADR-0076 §3, §5): the conservative
+// default reads back for an app that declared nothing, a declaration is reflected, a path that is
+// not a pod-local path is a clean 400 at the boundary, and unsetting returns the app to the default.
+func TestHealthEndpoints(t *testing.T) {
+	h, _, d := newAPI(t)
+
+	// An app that declared nothing and is not published: no probe, and the §5 guidance so an agent
+	// reading this learns what to do about it and what the endpoint must not check.
+	rr := do(h, "GET", "/v1/apps/web/health", token, "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"probe":"none"`) {
+		t.Fatalf("health get = %d %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "never its database") {
+		t.Errorf("health get carries no dependency warning: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"liveness":false`) {
+		t.Errorf("health get does not report that no liveness probe is set: %s", rr.Body.String())
+	}
+
+	// Publishing the app turns on the conservative TCP default with no configuration at all.
+	if err := d.RecordExposure(context.Background(), cp.Exposure{App: "web", Environment: cp.DefaultEnvironment, Host: "web.example.com", Port: 8080}); err != nil {
+		t.Fatalf("RecordExposure: %v", err)
+	}
+	rr = do(h, "GET", "/v1/apps/web/health", token, "")
+	if !strings.Contains(rr.Body.String(), `"probe":"tcp"`) || !strings.Contains(rr.Body.String(), `"probe_port":8080`) {
+		t.Errorf("health get after publishing = %s, want a tcp probe on 8080", rr.Body.String())
+	}
+
+	// Declaring an endpoint switches it to an HTTP check.
+	rr = do(h, "PUT", "/v1/apps/web/health", token, `{"path":"/healthz"}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"probe":"http"`) || !strings.Contains(rr.Body.String(), `"probe_path":"/healthz"`) {
+		t.Fatalf("health set = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// A path that names another host is refused before it is stored (ADR-0076 §2).
+	if rr := do(h, "PUT", "/v1/apps/web/health", token, `{"path":"http://postgres:5432/"}`); rr.Code != 400 {
+		t.Errorf("off-pod path code = %d, want 400", rr.Code)
+	}
+	if rr := do(h, "PUT", "/v1/apps/web/health", token, `{"path":"/healthz","port":70000}`); rr.Code != 400 {
+		t.Errorf("out-of-range port code = %d, want 400", rr.Code)
+	}
+	// The refused declaration did not overwrite the good one.
+	if rr := do(h, "GET", "/v1/apps/web/health", token, ""); !strings.Contains(rr.Body.String(), `"probe_path":"/healthz"`) {
+		t.Errorf("health get after a refused set = %s", rr.Body.String())
+	}
+
+	// Unsetting returns the app to the default rather than to nothing: it is still published.
+	rr = do(h, "DELETE", "/v1/apps/web/health", token, "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"probe":"tcp"`) {
+		t.Fatalf("health unset = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// An unknown environment is a 404 on every verb.
+	for _, m := range []string{"GET", "PUT", "DELETE"} {
+		body := ""
+		if m == "PUT" {
+			body = `{"path":"/healthz"}`
+		}
+		if rr := do(h, m, "/v1/apps/web/health?env=ghost", token, body); rr.Code != 404 {
+			t.Errorf("%s unknown env code = %d, want 404", m, rr.Code)
+		}
+	}
+}

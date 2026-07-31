@@ -67,6 +67,11 @@ func New(cfg Config) (http.Handler, error) {
 	// verb — burrow-agent may read the level but not change it.
 	v1.HandleFunc("GET /v1/apps/{app}/auto-deploy", s.getAutoDeploy)
 	v1.HandleFunc("PUT /v1/apps/{app}/auto-deploy", s.setAutoDeploy)
+	// health: GET reads the declared health endpoint and the readiness probe Burrow authors from it,
+	// PUT declares one, DELETE returns the app to the conservative default (ADR-0076 §3, §5).
+	v1.HandleFunc("GET /v1/apps/{app}/health", s.getHealth)
+	v1.HandleFunc("PUT /v1/apps/{app}/health", s.setHealth)
+	v1.HandleFunc("DELETE /v1/apps/{app}/health", s.unsetHealth)
 	// next-tag suggests the app's next semver release tags from its current running tag (ADR-0052 §8).
 	// It is read-only guidance the agent applies to its own build; there is no mutating counterpart.
 	v1.HandleFunc("GET /v1/apps/{app}/next-tag", s.nextTag)
@@ -646,6 +651,55 @@ func (s *server) setAutoDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, autoDeployResponse{App: app, Env: envName(env), Level: string(effective)})
+}
+
+// getHealth returns the health endpoint declared for an app and the readiness probe Burrow authors
+// as a result (ADR-0076 §3, §5). It is a read: nothing is changed and no workload is rolled. The
+// answer carries the §5 guidance whenever no endpoint has been declared, so an agent that asks what
+// the probe is also learns why declaring one is worth doing and what a good one must not check.
+func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
+	rep, err := s.engine.AppHealth(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// setHealth declares the health endpoint an app serves and re-applies the running workload so the
+// probe reaches its pods. A path that is not a path — a URL, a host — is rejected by the engine as
+// invalid, which is ADR-0076 §2 enforced at the boundary rather than trusted.
+func (s *server) setHealth(w http.ResponseWriter, r *http.Request) {
+	var req healthSetRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	rep, err := s.engine.SetAppHealth(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), req.Path, req.Port)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// unsetHealth removes an app's declared endpoint, returning it to ADR-0076 §3's default, and
+// re-applies the running workload. Unsetting one that was never declared succeeds: it is the state
+// the app is already in.
+func (s *server) unsetHealth(w http.ResponseWriter, r *http.Request) {
+	rep, err := s.engine.UnsetAppHealth(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// healthSetRequest is the body of a health declare call: the path the app serves its readiness
+// answer on, and optionally the port. The app and the environment come from the path and the query.
+// Port is omitted or zero to mean "the port the app is published on", resolved on every apply.
+type healthSetRequest struct {
+	Path string `json:"path"`
+	Port int32  `json:"port,omitempty"`
 }
 
 // nextTag returns the app's suggested next semver release tags from its current running tag

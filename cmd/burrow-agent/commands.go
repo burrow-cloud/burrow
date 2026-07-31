@@ -79,6 +79,7 @@ func newRootCmd() *cobra.Command {
 		newNextTagCmd(),
 		newLogsCmd(),
 		newConfigCmd(),
+		newHealthCmd(),
 		newSecretCmd(),
 		newReachabilityCmd(),
 		newClusterCmd(),

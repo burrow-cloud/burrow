@@ -1349,6 +1349,58 @@ func (c *Client) SetAutoDeploy(ctx context.Context, app, env, level string) (Aut
 	return out, err
 }
 
+// HealthResult is an app's health configuration (ADR-0076): the endpoint the user or their agent
+// declared, and — the part that actually matters — the readiness probe Burrow authors on the
+// container as a result, which is not the same fact. An endpoint declared before the app was
+// published resolves to no probe at all, and a surface that reported only the declaration would let
+// that gap sit unnoticed.
+type HealthResult struct {
+	App         string `json:"app"`
+	Environment string `json:"environment,omitempty"`
+	// Path and Port are the DECLARED endpoint; empty and zero when none was declared.
+	Path string `json:"path,omitempty"`
+	Port int32  `json:"port,omitempty"`
+	// Probe is what Burrow authors: "http", "tcp", or "none".
+	Probe     string `json:"probe"`
+	ProbePort int32  `json:"probe_port,omitempty"`
+	ProbePath string `json:"probe_path,omitempty"`
+	// Source is where the probe came from: "endpoint", "exposure" (the conservative TCP default on
+	// the published port), or "none".
+	Source string `json:"source"`
+	// Liveness is always false: Burrow never sets a liveness probe by default (ADR-0076 §1). It is
+	// reported anyway because "does this restart my container?" is the first question a reader has.
+	Liveness bool `json:"liveness"`
+	// Hint is the ADR-0076 §5 guidance, present when no endpoint has been declared.
+	Hint string `json:"hint,omitempty"`
+	// AppliesOn says when the reported probe reaches the running pods, when it is not there yet.
+	AppliesOn string `json:"applies_on,omitempty"`
+}
+
+// Health returns an app's declared health endpoint and the readiness probe Burrow authors from it
+// (ADR-0076). An empty env reads the default environment.
+func (c *Client) Health(ctx context.Context, app, env string) (HealthResult, error) {
+	var out HealthResult
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "health"), env), nil, &out)
+	return out, err
+}
+
+// SetHealth declares the health endpoint app serves in env and re-applies the running workload so
+// the probe reaches its pods (ADR-0076 §5). A zero port means "the port the app is published on".
+func (c *Client) SetHealth(ctx context.Context, app, env, path string, port int32) (HealthResult, error) {
+	var out HealthResult
+	body := map[string]any{"path": path, "port": port}
+	err := c.do(ctx, http.MethodPut, withEnv(c.appPath(app, "health"), env), body, &out)
+	return out, err
+}
+
+// UnsetHealth removes app's declared endpoint, returning it to the conservative default — a TCP
+// check on the published port, or no probe when the app is not published (ADR-0076 §3).
+func (c *Client) UnsetHealth(ctx context.Context, app, env string) (HealthResult, error) {
+	var out HealthResult
+	err := c.do(ctx, http.MethodDelete, withEnv(c.appPath(app, "health"), env), nil, &out)
+	return out, err
+}
+
 // NextTags are the suggested next release tags after a current semver tag (ADR-0052 §8).
 type NextTags struct {
 	Patch string `json:"patch"`

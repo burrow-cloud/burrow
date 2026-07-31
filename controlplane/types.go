@@ -37,7 +37,16 @@ type WorkloadSpec struct {
 	// buildDeployment annotates the pod template (prometheus.io/scrape, /port, /path) so the
 	// metrics add-on's scraper discovers and scrapes /metrics on it. Zero adds no annotations.
 	MetricsPort int32
-	Replicas    int32
+	// Readiness is the readiness probe to author on the container (ADR-0076 §1-§3). The zero value
+	// means NO PROBE, which is what an app whose port Burrow does not know gets — behaviour
+	// identical to before probes existed. The engine resolves it with ResolveReadiness on every
+	// apply, so a deploy, a rollback, and a config reapply all author the same probe.
+	//
+	// There is no liveness field here and there is not going to be one by default (§1): readiness
+	// takes a pod out of service reversibly, liveness restarts the container and manufactures the
+	// crash loop it was meant to detect.
+	Readiness ReadinessCheck
+	Replicas  int32
 	// ReleaseID is the release this workload is applying. It is stamped on the pod template (under
 	// ReleaseAnnotation) so a new release always rolls the workload, even when the image reference
 	// is unchanged; re-applying the same release reuses the same ID, so the apply stays idempotent.

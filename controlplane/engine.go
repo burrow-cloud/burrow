@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -337,6 +338,17 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 		return DeployResult{}, fmt.Errorf("deploy %s: reading env: %w", req.App, err)
 	}
 
+	// The readiness probe is resolved from what the user declared and what Burrow knows about the
+	// app's published port (ADR-0076 §3). An app that declared nothing and is not published resolves
+	// to no probe, which is exactly the behaviour it had before probes existed. It is read here,
+	// before the release record is written, so a store failure fails the deploy cleanly rather than
+	// leaving a Pending release behind.
+	readiness, ep, _, err := e.resolveHealth(ctx, req.App, envName(req.Env))
+	if err != nil {
+		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
+	}
+	declared := ep.Declared()
+
 	rel := Release{
 		ID:          e.ids.NewID(),
 		App:         req.App,
@@ -384,7 +396,7 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
 	}
 
-	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: replicas, ReleaseID: rel.ID}
+	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Readiness: readiness, Replicas: replicas, ReleaseID: rel.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
@@ -427,6 +439,14 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	// ever trips it.
 	if stableSemver(imageTag(req.Image)) == "" {
 		res.Hints = append(res.Hints, nonSemverDeployHint)
+	}
+	// ADR-0076 §5, stated where the agent meets it. An app with no declared health endpoint is one
+	// whose broken deploys look successful, and the agent — which has the user's source — is the
+	// only party that can fix that. The hint says so, says adding one is a few lines, and says the
+	// endpoint must check the app's OWN readiness and never its dependencies, because that last part
+	// is what an agent copying the internet's most common example gets wrong (§2).
+	if !declared {
+		res.Hints = append(res.Hints, NoHealthEndpointHint)
 	}
 	return res, nil
 }
@@ -499,33 +519,49 @@ func (e *Engine) ListConfig(ctx context.Context, app, env string) (map[string]st
 }
 
 // reapplyEnv re-renders the running workload with the current store env so a mutation rolls the
-// Deployment (ADR-0028). It reconstructs the WorkloadSpec from the app's currently running release
-// and the store. With no running release there is nothing to roll: the change is persisted and
-// will land on the next deploy, so this is a no-op, not an error.
+// Deployment (ADR-0028).
 func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app, env string) error {
+	_, err := e.reapplyWorkload(ctx, k, "set env", app, env)
+	return err
+}
+
+// reapplyWorkload re-renders the running workload from the app's currently running release and the
+// current store state, so an out-of-band change (a config var, a declared health endpoint, a new
+// exposure) rolls the Deployment and reaches the running pods. op names the calling operation for
+// the error messages. It reports whether a workload was actually re-applied: with no running release
+// there is nothing to roll, so the change is persisted and lands on the next deploy — a no-op, not
+// an error, and the false return is what lets a caller say so on its surface.
+func (e *Engine) reapplyWorkload(ctx context.Context, k Kubernetes, op, app, env string) (bool, error) {
 	releases, err := e.db.Releases(ctx, app, env)
 	if err != nil {
-		return fmt.Errorf("set env %s: reading release history: %w", app, err)
+		return false, fmt.Errorf("%s %s: reading release history: %w", op, app, err)
 	}
 	cur, ok := lastDeployed(releases)
 	if !ok {
-		return nil // no running workload yet; the change lands on the next deploy
+		return false, nil // no running workload yet; the change lands on the next deploy
 	}
 	cfg, err := e.db.AppEnv(ctx, app)
 	if err != nil {
-		return fmt.Errorf("set env %s: reading env: %w", app, err)
+		return false, fmt.Errorf("%s %s: reading env: %w", op, app, err)
 	}
-	// A config/secret reapply re-renders the running workload; it must not rescale it. Resolve with
-	// no explicit request so the current count is preserved (or the HPA left to own it).
+	// A reapply re-renders the running workload; it must not rescale it. Resolve with no explicit
+	// request so the current count is preserved (or the HPA left to own it).
 	replicas, err := e.resolveReplicas(ctx, k, app, 0)
 	if err != nil {
-		return fmt.Errorf("set env %s: %w", app, err)
+		return false, fmt.Errorf("%s %s: %w", op, app, err)
 	}
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: cfg, Command: cur.Command, MetricsPort: cur.MetricsPort, Replicas: replicas, ReleaseID: cur.ID}
+	// The readiness probe is resolved on EVERY apply, not snapshotted onto the release, so a
+	// declared endpoint or a new exposure reaches the workload through this path as well as through
+	// a deploy (ADR-0076 §3).
+	readiness, err := e.readinessFor(ctx, app, env)
+	if err != nil {
+		return false, fmt.Errorf("%s %s: %w", op, app, err)
+	}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: cfg, Command: cur.Command, MetricsPort: cur.MetricsPort, Readiness: readiness, Replicas: replicas, ReleaseID: cur.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
-		return fmt.Errorf("set env %s: applying to cluster: %w", app, err)
+		return false, fmt.Errorf("%s %s: applying to cluster: %w", op, app, err)
 	}
-	return nil
+	return true, nil
 }
 
 // ListSecrets returns the env-var KEYS in an app's per-app Secret, sorted, never the values
@@ -1339,6 +1375,13 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	// The app is gone, so its recorded exposure is intent about nothing. Leaving it would have the
 	// observer report a missing Ingress for an app that was deliberately deleted (ADR-0074 §6).
 	e.forgetExposure(ctx, app, env)
+	// Same reasoning for the declared health endpoint: it is intent about an app that no longer
+	// exists, and a redeploy under the same name should start from the conservative default rather
+	// than inherit a path the previous occupant served (ADR-0076 §5). Best-effort — the app is
+	// already gone, and failing the delete afterwards would report a completed teardown as broken.
+	if err := e.db.DeleteHealthEndpoints(ctx, app); err != nil {
+		slog.WarnContext(ctx, "removing the app's declared health endpoints failed", "app", app, "error", err)
+	}
 	e.recordExecution(ctx, auditOpAppDelete, app, args, nil)
 	return nil
 }
@@ -1787,9 +1830,16 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
 	}
 	e.recordExecution(ctx, auditOpExpose, req.App, args, nil)
+	// What the readiness probe resolved to BEFORE this exposure was recorded — publishing an app is
+	// one of the two things that can change it (ADR-0076 §3), so it is read here, on the near side
+	// of the write.
+	before, _, _, herr := e.resolveHealth(ctx, req.App, envName(req.Env))
 	// Record what was asked for, so an Ingress that later disappears is a failure Burrow can see
 	// rather than an app that looks like it was never exposed (ADR-0074 §6).
 	e.recordExposure(ctx, Exposure{App: req.App, Environment: envName(req.Env), Host: req.Host, Port: req.Port, TLS: req.TLS})
+	if herr == nil {
+		e.rollForReadiness(ctx, k, "expose", req.App, envName(req.Env), before)
+	}
 	scheme := "http"
 	if req.TLS {
 		scheme = "https"
@@ -1978,7 +2028,8 @@ func (e *Engine) Unexpose(ctx context.Context, app, env string) error {
 	if err != nil {
 		return fmt.Errorf("unexpose %s: %w", app, err)
 	}
-	if err := e.k8s.WithNamespace(ns).Unexpose(ctx, app); err != nil {
+	k := e.k8s.WithNamespace(ns)
+	if err := k.Unexpose(ctx, app); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			// The routing is already gone, but a stale intent row would have the observer report a
 			// missing Ingress forever, so it is dropped on this path too.
@@ -1987,7 +2038,14 @@ func (e *Engine) Unexpose(ctx context.Context, app, env string) error {
 		}
 		return fmt.Errorf("unexpose %s: %w", app, err)
 	}
+	before, _, _, herr := e.resolveHealth(ctx, app, envName(env))
 	e.forgetExposure(ctx, app, env)
+	// Unpublishing withdraws the port §3's default probe was checking, so the probe goes away with
+	// it. Rolling that out is a RELAXATION — the pods stop being gated on a check that no longer has
+	// a port behind it — which is the safe direction to move (§6).
+	if herr == nil {
+		e.rollForReadiness(ctx, k, "unexpose", app, envName(env), before)
+	}
 	return nil
 }
 
@@ -2268,6 +2326,14 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 
 	args["env_keys"] = auditKeys(cfg) // KEY NAMES only — never values (ADR-0027)
 
+	// Like the env, the readiness probe is current state rather than a per-release snapshot: a
+	// rollback restores the prior image and command but keeps the probe the app has declared now
+	// (ADR-0076 §3), so rolling back never reinstates a probe the operator has since changed.
+	readiness, err := e.readinessFor(ctx, app, envName(env))
+	if err != nil {
+		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
+	}
+
 	// A rollback fires `pre-rollback` and NEVER `pre-deploy` (ADR-0072 §8). A rollback is mechanically
 	// a deploy of an older image, so §2's "every deploy path" would otherwise reach it — and running
 	// the pre-deploy hook here would run A's migration tool while returning to A, which does not know
@@ -2288,7 +2354,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
 	}
 
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: replicas, ReleaseID: rel.ID}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Readiness: readiness, Replicas: replicas, ReleaseID: rel.ID}
 	if err := e.k8s.WithNamespace(ns).ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)

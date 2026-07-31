@@ -6,6 +6,7 @@ package controlplane_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	cp "github.com/burrow-cloud/burrow/controlplane"
@@ -86,8 +87,13 @@ func TestDeploySemverNoHint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
-	if len(res.Hints) != 0 {
-		t.Errorf("Hints = %v, want none for a semver tag", res.Hints)
+	// Assert the absence of THIS hint rather than of all hints: a deploy carries other advisory
+	// notes (ADR-0076 §5's health-endpoint nudge, for one), and an assertion on the whole slice
+	// would make every future hint look like a regression in the semver nudge.
+	for _, h := range res.Hints {
+		if strings.Contains(h, "not semver") {
+			t.Errorf("Hints = %v, want no semver nudge for a semver tag", res.Hints)
+		}
 	}
 }
 

@@ -40,6 +40,9 @@ type Database struct {
 	failures  []controlplane.Failure
 	windows   []controlplane.ObservationWindow
 	exposures map[string]controlplane.Exposure // "app\x00env" -> recorded exposure intent
+	// The declared health endpoints (ADR-0076 §5), keyed the same way exposures are, because the
+	// readiness default reads one against the other.
+	health map[string]controlplane.HealthEndpoint // "app\x00env" -> declared health endpoint
 
 	// The operator-set operational limits (ADR-0068 §1), kept apart from policy above because a
 	// limit carries a value rather than a disposition.
@@ -62,6 +65,7 @@ func NewDatabase() *Database {
 		errs:       make(map[Op]error),
 		policy:     controlplane.DefaultPolicy(),
 		exposures:  make(map[string]controlplane.Exposure),
+		health:     make(map[string]controlplane.HealthEndpoint),
 		limits:     controlplane.OperationalConfig{Values: map[controlplane.LimitCode]string{}},
 	}
 }

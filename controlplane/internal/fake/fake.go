@@ -102,6 +102,10 @@ const (
 	OpRecordExposure          Op = "RecordExposure"
 	OpDeleteExposure          Op = "DeleteExposure"
 	OpExposures               Op = "Exposures"
+	OpExposure                Op = "Exposure"
+	OpHealthEndpoint          Op = "HealthEndpoint"
+	OpSetHealthEndpoint       Op = "SetHealthEndpoint"
+	OpUnsetHealthEndpoint     Op = "UnsetHealthEndpoint"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

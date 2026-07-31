@@ -53,27 +53,63 @@ This file is the place both questions get answered together.
 | Run a one-off command | `burrow app run <app> -- ./migrate` | Runs the command as a `batch/v1` Job from the app's **currently deployed image**, in the app's namespace, with the app's config and per-app Secret injected. Waits synchronously, captures the exit code and combined output. | [0048](adr/0048-one-off-command-runner.md) |
 | Run a command around a deploy | `burrow app hook set <app> --on pre-deploy -- ./migrate`, plus `hook list` / `hook unset` | Stores a command per (app, environment, phase). `pre-deploy` runs on **every** deploy path, automated ones included, from the image **being deployed**, before anything reaches the cluster; its failure aborts the deploy. `pre-rollback` is unset by default and runs from the image being rolled back **away from**. See [Lifecycle hooks](#lifecycle-hooks). | [0072](adr/0072-deploy-and-run-lifecycle-hooks.md) |
 | Auto-deploy on a new tag | `burrow app auto-deploy <app> <patch\|minor\|major\|off>` | burrowd polls the registry (~5 min, jittered) and fires the same guarded deploy for an in-level upgrade. Outbound-only, so it works on a NAT'd cluster. | [0052](adr/0052-pull-based-passive-deploy.md), [0058](adr/0058-auto-deploy-is-opt-in.md) |
+| Declare a health endpoint | `burrow app health set <app> --path /healthz [--port N]` | Turns the default TCP readiness check into an HTTP GET of that path; `burrow app health unset` returns to the default and `burrow app health show` reports what is in force. See [Health checks](#health-checks). | [0076](adr/0076-health-checks-readiness-only-and-dependencies-at-deploy-time.md) |
 | Delete an app | `burrow app delete <app>` | Removes the workload, its Service and Ingress, and its release history. Guarded by `app.delete`, **denied by default** — relax the guardrail (ideally per environment) before the verb will run on either CLI. | [0024](adr/0024-cli-command-taxonomy.md), [0065](adr/0065-what-belongs-on-the-agent-surface.md) |
 
 Every verb above except `auto-deploy` and `hook` also exists on `burrow-agent` (`deploy`, `scale`,
-`autoscale`, `rollback`, `run`, `delete`, `apps`, `status`, `history`). Setting the auto-deploy
-level and setting a lifecycle hook are deliberately operator actions: both are standing authority
-for something that happens with nobody watching.
+`autoscale`, `rollback`, `run`, `delete`, `apps`, `status`, `history`, `health`/`health set`/
+`health unset`). Setting the auto-deploy level and setting a lifecycle hook are deliberately
+operator actions: both are standing authority for something that happens with nobody watching.
+Declaring a health endpoint deliberately is not, because the agent is the only party that can
+write one into the application's code.
 
 ### What the app Pod actually looks like
 
 The Pod template is a fixed literal in Go. It sets exactly this: one container (named after
 the app) with `image`, `command`, `env`, and `envFrom`; the labels
 `app.kubernetes.io/name` and `app.kubernetes.io/managed-by`; a `burrow.cloud/release`
-annotation so every release rolls the workload; and `prometheus.io/*` scrape annotations when
-`--metrics-port` is given.
+annotation so every release rolls the workload; `prometheus.io/*` scrape annotations when
+`--metrics-port` is given; and a **readiness probe when, and only when, Burrow knows a port to
+check** (see [Health checks](#health-checks) below).
 
 Nothing else. **The app Pod has no `Volumes` and no `VolumeMounts`**, and no resource
-requests or limits, no liveness/readiness/startup probes, no `securityContext`, no
+requests or limits, **no liveness or startup probe**, no `securityContext`, no
 `serviceAccountName`, no `imagePullSecrets`, no `nodeSelector` and no tolerations. There is no
 CLI or API surface for any of them. Pods therefore run under the namespace's `default`
 ServiceAccount — which is how the private-registry pull secret reaches them (see
 [Registries](#registries-and-credentials)).
+
+### Health checks
+
+Readiness only ([ADR-0076](adr/0076-health-checks-readiness-only-and-dependencies-at-deploy-time.md)),
+and the defaults err toward *not* failing a deploy:
+
+| Situation | What Burrow sets |
+| --- | --- |
+| The app is published (`burrow app publish`), so an exposure records a container port | A **TCP connect** on that port |
+| The app is not published and declares nothing | **No probe at all** — identical to the behaviour before probes existed |
+| `burrow app health set <app> --path /healthz [--port N]` | An **HTTP GET** of that path |
+
+Burrow does **not** scan for a listening port, assume 8080, or guess `/healthz`: a probe it
+invented would fail a working deploy for a reason the user could not see. It **never sets a
+liveness probe**, because a liveness probe restarts the container and a wrong one manufactures
+the crash loop it was meant to detect.
+
+The probe's timings are fixed, not configurable: period 10s, timeout 5s, failure threshold 6
+(so roughly a minute of continuous failure before a serving pod leaves its Service), no initial
+delay. A pod that never passes stalls the rollout and leaves the previous pods serving, which is
+the direction the whole design fails in.
+
+**A readiness probe never checks a dependency.** The probe can address only the pod's own port —
+the type carrying it has no field for a host and no exec handler — and a declared path that
+looks like a URL or names a host is refused before it is stored. One shared Postgres backs every
+app in an environment, so a readiness check that touched it would remove every replica of every
+app from service the moment that database blipped. Dependency checks belong at deploy time
+(ADR-0076 §4), which is not built yet.
+
+A failing probe surfaces through the existing vocabulary rather than a new one: pods never become
+ready, the rollout does not progress, and `burrow app status` reports
+`ProgressDeadlineExceeded` ([ADR-0074](adr/0074-burrow-observes-what-it-manages.md) §2).
 
 The one escape hatch is `Adapter.WithPodMutator` ([ADR-0061](adr/0061-deploy-pod-mutator-seam.md)),
 a `func(*corev1.PodSpec)` applied on both create and update. It is a **compile-time seam for an
@@ -698,7 +734,7 @@ Limits:
   [Operational limits](#operational-limits) below. Exceeding it is a validation failure, not a
   disposition, and any stored disposition for it was dropped by the schema migration.
 - **Several mutating operations are not guardrailed at all**: `app config set/unset`,
-  `app secret set/unset`, `app unpublish`, `addon attach`, `addon backup`, `addon connect`,
+  `app health set/unset`, `app secret set/unset`, `app unpublish`, `addon attach`, `addon backup`, `addon connect`,
   `config provider add`, `app auto-deploy`, `env add/remove`, and `guard set` itself. Some are
   deliberate (config and secrets destroy nothing; attach provisions rather than destroys);
   `unpublish` taking an app offline without a gate is worth knowing.
@@ -843,12 +879,12 @@ pinned by tests that fail if a verb is added or removed.
 
 **Read-only:** `apps`, `status`, `history`, `next-tag`, `logs`, `config`, `secret` (keys),
 `reachability`, `cluster`, `cluster capacity`, `addons`, `backups`, `logs-query`,
-`metrics-query`, `guard`, `audit`, `failures`, `providers`, `environments`.
+`metrics-query`, `guard`, `audit`, `failures`, `health`, `providers`, `environments`.
 
 **Mutating** (each returns an outcome envelope — `executed` / `held_for_confirmation` /
 `denied` / `error`, exit codes 0/2/3/1): `deploy`, `build`, `rollback`, `scale`, `autoscale`,
 `run`, `expose`, `unexpose`, `domain add`, `domain remove`, `addon install`, `addon attach`,
-`addon backup`, `config set`, `config unset`, `secret unset`, `delete`.
+`addon backup`, `config set`, `config unset`, `health set`, `health unset`, `secret unset`, `delete`.
 
 **Absent from the agent binary entirely** — these are operator actions on the `burrow` CLI:
 `cluster install`, `cluster upgrade`, `cluster bootstrap`, `cluster ingress install`,

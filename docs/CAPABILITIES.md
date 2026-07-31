@@ -133,8 +133,9 @@ The in-cluster build ([ADR-0053](adr/0053-in-cluster-build-from-source.md)), con
 `alpine/git:2.45.2` init container does a depth-1 fetch and checkout; the build container is
 `ghcr.io/burrow-cloud/burrow-builder` and picks **buildah when a Dockerfile is present** and
 the **Cloud Native Buildpacks lifecycle when it is not**. One attempt (`backoffLimit: 0`),
-250m CPU / 512Mi requested and 2 CPU / 2Gi limited, a 30-minute wait, and a 3-day
-`ttlSecondsAfterFinished` on the finished Job (a success is deleted immediately; a failure is
+250m CPU / 512Mi requested and 2 CPU / 2Gi limited, a 30-minute wait, and a
+`ttlSecondsAfterFinished` on the finished Job set from `build.job_retention` (three days by default
+— see [Operational limits](#operational-limits); a success is deleted immediately, a failure is
 left in place for diagnosis). Job names are content-derived, so re-running the same
 repo/ref/target reuses a succeeded or active build. A capacity pre-flight refuses the build
 when no node has room.
@@ -325,14 +326,16 @@ ReadWriteOnce PVC when they need storage. **There are exactly four.**
 | Add-on | Image | Port | Storage | Extra workload |
 | --- | --- | --- | --- | --- |
 | `logs` | `victoriametrics/victoria-logs:v1.51.0` | 9428 | 10Gi PVC | a Fluent Bit DaemonSet (`fluent/fluent-bit:3.2.10`) reading `/var/log`, tolerating all taints |
-| `metrics` | `victoriametrics/victoria-metrics:v1.115.0` | 8428 | 10Gi PVC, one-month retention | a vmagent Deployment (`victoriametrics/vmagent:v1.115.0`) scraping the app **and** add-on namespaces |
+| `metrics` | `victoriametrics/victoria-metrics:v1.115.0` | 8428 | 10Gi PVC, retention per `addon.metric_retention` (default 744h — the month it was) | a vmagent Deployment (`victoriametrics/vmagent:v1.115.0`) scraping the app **and** add-on namespaces |
 | `cache` | `valkey/valkey:8.0` | 6379 | **none — ephemeral** | — |
 | `postgres` | `postgres:17-alpine` | 5432 | 10Gi PVC | an always-on `quay.io/prometheuscommunity/postgres-exporter:v0.20.1` sidecar on port 9187 |
 
 `burrow addon install <type>` takes **no tuning flags** — no `--size`, no `--storage-class`,
 no `--retention`, no version override. (`--env` selects which environment the instance serves, not
-how it is built.) Sizes, images, and retention are compile-time
-constants, and no PVC sets a `storageClassName`, so every volume lands on the cluster default
+how it is built.) Sizes and images are compile-time constants; the metrics add-on's retention is the
+one tunable, set cluster-wide with `burrow cluster config set addon.metric_retention <duration>`
+before the instance is installed ([Operational limits](#operational-limits)). No PVC sets a
+`storageClassName`, so every volume lands on the cluster default
 StorageClass. `burrow addon remove <type>` deletes the Deployment, Service, and collectors and
 **keeps the data PVC**: reinstalling the add-on lands on the same claim and picks the data back
 up, so for `postgres` the databases, roles, and role passwords survive and attached apps
@@ -671,7 +674,10 @@ refusal names the limit, the tier the effective bound came from, and the command
 
 | Limit | Bounds | Default | Tier |
 | --- | --- | --- | --- |
-| `app.replica_ceiling` | the largest replica count a deploy, a scale, or an autoscaler's maximum may ask for | `50` | environment or cluster |
+| `app.replica_ceiling` | the largest replica count a deploy, a scale, or an autoscaler's maximum may ask for | `50` (1 – 2147483647) | environment or cluster |
+| `build.job_retention` | how long a finished in-cluster build Job and its pods are kept before Kubernetes reaps them | `72h0m0s` (1m – 8760h) | cluster |
+| `addon.metric_retention` | how long the metrics add-on keeps samples, applied when its instance is created | `744h0m0s` (24h – 87600h) | cluster |
+| `status.unschedulable_grace` | how long a pod must have been unschedulable before Burrow reports it as an Issue | `30s` (0s – 1h) | cluster |
 
 Two operator-owned tiers, resolved in the order guardrail dispositions already use — the
 environment's value, then the cluster's, then the built-in default:
@@ -691,10 +697,24 @@ and useful, but ADR-0068 leaves the shape of an agent-side read undecided, so th
 
 Limits:
 
-- **One limit exists.** ADR-0068 §6 names three more occupants — the build Job's retention, the
-  metrics add-on's retention, and the unschedulable grace period — and they are still constants in
-  the files that needed them
-  ([#384](https://github.com/burrow-cloud/burrow/issues/384)).
+- **Three of the four are cluster-only**, and deliberately: how long a build's logs are worth
+  keeping, how long metric samples are kept, and how long a pod may sit unschedulable are all facts
+  about the cluster. An operator who tuned the last of them per environment would be encoding the
+  same scheduler fact twice and would eventually disagree with themselves.
+- **`status.unschedulable_grace` is ONE value, everywhere.** The live status surface, the Job
+  waiters behind `app run` / build / backup / restore, and the failure ledger
+  ([ADR-0074](adr/0074-burrow-observes-what-it-manages.md)) all judge the same pod through the same
+  inspection, so a change to it moves all of them together. Two surfaces disagreeing here would not
+  be a tuning difference — they would hold different definitions of "failure".
+- **Two of them apply at creation, not retroactively.** `build.job_retention` is written onto each
+  build Job as `ttlSecondsAfterFinished`, and `addon.metric_retention` onto the metrics add-on's
+  container args, so a change reaches the next build and the next install of the add-on. A running
+  metrics instance keeps the retention it was created with until it is removed and reinstalled.
+  `status.unschedulable_grace` has no such lag: it is read on every inspection.
+- **A limit reads live.** burrowd reads the values on each operation rather than at startup, so a
+  `cluster config set` takes effect on the next deploy, build, or status call with no restart. If
+  the database cannot be read, every limit falls back to its built-in default and burrowd logs that
+  it did — an unavailable database must not become a failed deploy.
 - **There is no `unset`.** A value returns to the default by being set back to it explicitly, the
   same as for a guardrail disposition.
 - **Values are validated on the way in**, against the limit's kind and permitted range, and stored

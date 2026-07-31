@@ -339,7 +339,7 @@ func (a *Adapter) runJobAwaitSize(ctx context.Context, job *batchv1.Job, name st
 		return 0, fmt.Errorf("kube: creating job %q: %w", name, err)
 	}
 
-	j, err := awaitJob(ctx, a.client, a.addonNamespace, name, backupJobTimeout, backupJobPoll)
+	j, err := awaitJob(ctx, a.client, a.addonNamespace, name, backupJobTimeout, backupJobPoll, unschedulableGrace(ctx, a.limits))
 	if err != nil {
 		return 0, err
 	}
@@ -510,7 +510,7 @@ func (a *Adapter) runBackupJobAwait(ctx context.Context, job *batchv1.Job, name 
 		a.adoptBackupCredentials(ctx, secretName, created)
 	}
 
-	j, err := awaitJob(ctx, a.client, a.addonNamespace, name, backupJobTimeout, backupJobPoll)
+	j, err := awaitJob(ctx, a.client, a.addonNamespace, name, backupJobTimeout, backupJobPoll, unschedulableGrace(ctx, a.limits))
 	if err != nil {
 		// A pod that could not start reports a reason from ADR-0074 §2's closed set; carry it through
 		// so the Backup row records a blocked Job as precisely as it records a refused write. The

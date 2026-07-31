@@ -46,7 +46,11 @@ import (
 //
 // It does not delete anything. A Job left behind by any of these paths keeps its pod and its logs
 // for diagnosis, which is what every caller already did with a failed Job.
-func awaitJob(ctx context.Context, client kubernetes.Interface, namespace, name string, timeout, poll time.Duration) (*batchv1.Job, error) {
+//
+// grace is the configured unschedulable grace (ADR-0068 §6). The caller resolves it from the
+// operational configuration and passes it in, so a waiter believes an Unschedulable pod at exactly
+// the moment the status surface does.
+func awaitJob(ctx context.Context, client kubernetes.Interface, namespace, name string, timeout, poll, grace time.Duration) (*batchv1.Job, error) {
 	jobs := client.BatchV1().Jobs(namespace)
 	deadline := time.Now().Add(timeout)
 	for {
@@ -59,7 +63,7 @@ func awaitJob(ctx context.Context, client kubernetes.Interface, namespace, name 
 		}
 		// Neither counter has moved. Before concluding "still working", ask the pod — this is the
 		// whole point of the file.
-		if ev, ok := jobStartupIssue(ctx, client, namespace, name); ok {
+		if ev, ok := jobStartupIssue(ctx, client, namespace, name, grace); ok {
 			// Wrapped, not replaced: the package's errors carry a "kube:" prefix, and errors.As still
 			// reaches the reason a caller branches on.
 			return nil, fmt.Errorf("kube: %w", &controlplane.JobBlockedError{Job: name, Reason: ev.Reason, Issue: ev.Message()})
@@ -81,8 +85,10 @@ func awaitJob(ctx context.Context, client kubernetes.Interface, namespace, name 
 //
 // Best-effort, exactly as the status path is: an unreadable pod list yields ok=false and the waiter
 // keeps waiting. Enrichment must never be the thing that fails a Job.
-func jobStartupIssue(ctx context.Context, client kubernetes.Interface, namespace, job string) (controlplane.IssueEvidence, bool) {
-	ev, _, ok := selectPodIssue(ctx, client, namespace, nameLabel+"="+job, jobPodStartupEvidence)
+func jobStartupIssue(ctx context.Context, client kubernetes.Interface, namespace, job string, grace time.Duration) (controlplane.IssueEvidence, bool) {
+	ev, _, ok := selectPodIssue(ctx, client, namespace, nameLabel+"="+job, func(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
+		return jobPodStartupEvidence(pod, grace)
+	})
 	return ev, ok
 }
 
@@ -104,7 +110,7 @@ func jobStartupIssue(ctx context.Context, client kubernetes.Interface, namespace
 // self-resolving (ADR-0074 §2). ContainerCreating and PodInitializing are a Job getting on with it,
 // so they are not in the closed set, so they are not reported — which is what keeps a slow image
 // pull from being turned into a failed backup.
-func jobPodStartupEvidence(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
+func jobPodStartupEvidence(pod *corev1.Pod, grace time.Duration) (controlplane.IssueEvidence, bool) {
 	var best controlplane.IssueEvidence
 	bestRank := 0
 	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
@@ -122,10 +128,10 @@ func jobPodStartupEvidence(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
 		return best, true
 	}
 	// No container reports anything, which is what a pod that was never scheduled looks like. The
-	// scheduling read carries unschedulableGrace with it — the SAME thirty seconds the Deployment
-	// path waits before believing an Unschedulable pod, deliberately not a second constant of this
-	// waiter's own (ADR-0068 §6; see the constant's comment in adapter.go).
-	return schedulingIssueEvidence(pod)
+	// scheduling read carries the configured unschedulable grace with it — the SAME value the
+	// Deployment path waits out before believing an Unschedulable pod, deliberately not a second
+	// setting of this waiter's own (ADR-0068 §6; see unschedulableGrace in adapter.go).
+	return schedulingIssueEvidence(pod, grace)
 }
 
 // jobDeadlineError builds the error for a Job that outlasted its client-side deadline without any

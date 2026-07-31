@@ -185,6 +185,14 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	}
 	// Add-ons live in their own namespace, set by the install manifest (ADR-0025).
 	k8s.WithAddonNamespace(os.Getenv("BURROW_ADDON_NAMESPACE"))
+	// The operational limits the ADAPTERS apply — the unschedulable grace, the build Job's retention,
+	// the metrics add-on's sample retention (ADR-0068 §6). They read the store directly rather than
+	// being handed a value, so `burrow cluster config set` takes effect on the next operation instead
+	// of on the next burrowd restart. A read that fails resolves to the built-in defaults and says so
+	// in the log: an unavailable database must not turn into a failed deploy or a status call that
+	// errors instead of answering.
+	limits := controlplane.ClusterConfigFrom(store.OperationalConfig)
+	k8s.WithOperationalLimits(limits)
 	// Pin the backup Job's shipping container to burrowd's own stamped version, for the same reason
 	// the builder image is pinned: a released control plane ships backups with the binary published
 	// under the SAME release tag, not a floating :latest a later republish could change under it. An
@@ -240,7 +248,7 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	if buildImage == "" {
 		buildImage = kube.BuilderImageForVersion(version)
 	}
-	builder.WithBuildImage(buildImage).WithGitImage(os.Getenv("BURROW_GIT_IMAGE")).WithCapacityProber(prober)
+	builder.WithBuildImage(buildImage).WithGitImage(os.Getenv("BURROW_GIT_IMAGE")).WithCapacityProber(prober).WithOperationalLimits(limits)
 
 	// One HTTP client shared across the observability adapters — burrowd reaches each backend
 	// in-cluster.

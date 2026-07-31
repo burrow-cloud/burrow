@@ -98,15 +98,25 @@ const (
 	// Any imagePullSecret / registry-auth Secret a build needs is created HERE, never in the app
 	// namespace.
 	buildNamespace = "burrow-builds"
-
-	// buildJobTTLSeconds is how long a finished build Job (succeeded OR failed) lingers before
-	// Kubernetes' TTL-after-finished controller reaps it and its pods. The maintainer's chosen
-	// retention is a few days; three days keeps a recent failure inspectable without leaking Jobs
-	// forever. It is the UNIFORM backstop that fixes failed-Job accumulation (issue #280) — a success
-	// is still reaped immediately for a clean cluster, and the TTL covers the failures the wait loop
-	// deliberately leaves behind for diagnosis.
-	buildJobTTLSeconds int32 = 3 * 24 * 60 * 60 // 259200s = 3 days
 )
+
+// buildJobTTLSeconds is how long a finished build Job (succeeded OR failed) lingers before
+// Kubernetes' TTL-after-finished controller reaps it and its pods. Three days keeps a recent failure
+// inspectable without leaking Jobs forever. It is the UNIFORM backstop that fixes failed-Job
+// accumulation (issue #280) — a success is still reaped immediately for a clean cluster, and the TTL
+// covers the failures the wait loop deliberately leaves behind for diagnosis.
+//
+// It is cluster CONFIGURATION rather than a constant (ADR-0068 §6): how long a build's logs are
+// worth keeping is an operator's decision about their own disk, and it was previously one they could
+// not see, let alone change, without reading this file. `build.job_retention` is where they set it,
+// and its built-in default is the three days this was.
+//
+// The value is applied to the Job at CREATION. A Job already finished and waiting to be reaped keeps
+// the TTL it was created with, because ttlSecondsAfterFinished is a field on the object rather than
+// a policy the controller re-reads — so a change takes effect for the next build, not retroactively.
+func buildJobTTLSeconds(ctx context.Context, limits controlplane.ClusterConfigFunc) int32 {
+	return int32(limits.ClusterDuration(ctx, controlplane.LimitBuildJobRetention).Seconds())
+}
 
 // BuilderImageForVersion returns the pinned builder image reference for a stamped release
 // version, so a released burrowd pulls the builder image published under the SAME release tag
@@ -204,6 +214,12 @@ type BuildAdapter struct {
 	// API for the managed product (cloud ADR-0003), never consumed by OSS — nil (the default) leaves
 	// the OSS behavior exactly as-is. Wired via WithBuildPodMutator.
 	podMutator func(*corev1.PodSpec)
+	// limits reads the operator-set operational configuration for the cluster-tier limits this
+	// adapter applies (ADR-0068 §6): how long a finished build Job is kept, and the unschedulable
+	// grace the wait loop shares with the status surface. nil (the default) resolves every limit to
+	// its built-in default, which is exactly the behaviour these had as constants. Wired via
+	// WithOperationalLimits.
+	limits controlplane.ClusterConfigFunc
 }
 
 // NewBuilder returns a BuildAdapter over the given clientset. The build always runs in the dedicated
@@ -222,6 +238,16 @@ func NewBuilderFromConfig(cfg *rest.Config) (*BuildAdapter, error) {
 		return nil, fmt.Errorf("kube: building clientset: %w", err)
 	}
 	return NewBuilder(client), nil
+}
+
+// WithOperationalLimits registers the source of the operator-set operational limits this adapter
+// reads (ADR-0068 §6) — the build Job's retention and the unschedulable grace. It is read at the
+// moment a build runs rather than captured here, so `burrow cluster config set` takes effect without
+// restarting burrowd. A nil supplier (the default) resolves every limit to its built-in default.
+// Returns the adapter for chaining.
+func (b *BuildAdapter) WithOperationalLimits(f controlplane.ClusterConfigFunc) *BuildAdapter {
+	b.limits = f
+	return b
 }
 
 // WithCapacityProber enables the pre-build scheduling-headroom check (issue #274): before creating a
@@ -310,7 +336,7 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 	// and cannot create namespaces or cluster RBAC itself (least privilege) — the same reason
 	// `burrow env add` creates per-environment namespaces kubeconfig-side rather than at runtime.
 	name := buildJobName(source, targetImage)
-	job := b.buildJob(name, source, targetImage, insecure, cred)
+	job := b.buildJob(ctx, name, source, targetImage, insecure, cred)
 	jobs := b.client.BatchV1().Jobs(b.namespace)
 	created, err := jobs.Create(ctx, job, metav1.CreateOptions{})
 	switch {
@@ -358,7 +384,7 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 	// any Job exists, but it cannot catch the rest: a clone init container whose credential Secret is
 	// missing, an unreachable builder image, a taint the build pod does not tolerate. Those all leave
 	// both Job counters at zero, and thirty minutes is a long time to learn nothing.
-	j, err := awaitJob(ctx, b.client, b.namespace, name, buildJobTimeout, buildJobPoll)
+	j, err := awaitJob(ctx, b.client, b.namespace, name, buildJobTimeout, buildJobPoll, unschedulableGrace(ctx, b.limits))
 	if err != nil {
 		return "", err
 	}
@@ -417,10 +443,13 @@ func buildJobName(source controlplane.SourceRef, targetImage string) string {
 // (the workspace, $HOME for container storage, /tmp) is a writable emptyDir so the container root
 // filesystem can stay read-only (ADR-0053 §7). BackoffLimit 0 with RestartPolicy Never makes a
 // single attempt whose outcome is the result — no retry masking a failure.
-func (b *BuildAdapter) buildJob(name string, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) *batchv1.Job {
+//
+// ctx is taken for the operational configuration read behind buildJobTTLSeconds, not for a cluster
+// call: this function constructs an object and sends nothing.
+func (b *BuildAdapter) buildJob(ctx context.Context, name string, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
 	var backoff int32
-	ttl := buildJobTTLSeconds
+	ttl := buildJobTTLSeconds(ctx, b.limits)
 
 	// The repo URL and ref are passed as env, never interpolated into a script, so they are data
 	// and cannot inject shell (ADR-0053 §3, §7). Only these two values and the target reference

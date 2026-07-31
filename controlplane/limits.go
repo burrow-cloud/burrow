@@ -4,8 +4,10 @@
 package controlplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strconv"
 	"strings"
@@ -35,6 +37,35 @@ const (
 	// maximum may ask for. Environment-scoped: a production ceiling and a development ceiling are
 	// exactly the case that motivates limits at all (ADR-0068 §6).
 	LimitReplicaCeiling LimitCode = "app.replica_ceiling"
+
+	// LimitBuildJobRetention is how long a finished in-cluster build Job lingers before Kubernetes'
+	// TTL-after-finished controller reaps it and its pods. Cluster-scoped: how long a build's logs
+	// are worth keeping is a property of the cluster, not of the environment an image was built for
+	// — and a build Job runs in one namespace of its own regardless of which environment the
+	// resulting image is deployed to, so there is no environment to scope it by (ADR-0068 §6).
+	LimitBuildJobRetention LimitCode = "build.job_retention"
+
+	// LimitAddonMetricRetention is how long the metrics add-on keeps samples. Cluster-scoped: the
+	// add-on is one instance per environment, but the retention is a storage-cost decision about
+	// the cluster's disk, and ADR-0068 §1's test — whether a sensible answer can differ per
+	// environment — does not obviously pull the other way for it (ADR-0068 §6).
+	LimitAddonMetricRetention LimitCode = "addon.metric_retention"
+
+	// LimitUnschedulableGrace is how long a pod must have been unschedulable before Burrow calls it
+	// an Issue. Cluster-scoped, and it is the clearest case for that tier: how long a pod may sit
+	// unschedulable before something is actually wrong is a property of the cluster's scheduler and
+	// whether it has an autoscaler — a cluster that provisions a node in ninety seconds needs a
+	// longer grace than one with fixed capacity — not of whether the workload is staging or
+	// production. An operator who tuned it per environment would be encoding the same cluster fact
+	// twice and would eventually disagree with themselves (ADR-0068 §6).
+	//
+	// It carries an obligation the other occupants do not: WHATEVER VALUE APPLIES HAS TO APPLY
+	// EVERYWHERE THE SAME FACT IS JUDGED. The live status surface, the Job waiters, and ADR-0074's
+	// failure ledger are all consumers of exactly this threshold, and a status surface that stayed
+	// silent for thirty seconds while the ledger recorded a row at twenty would not merely disagree
+	// on tuning — the two would hold different definitions of "failure", and an agent reading both
+	// would get contradictory answers about one pod at one moment.
+	LimitUnschedulableGrace LimitCode = "status.unschedulable_grace"
 )
 
 // LimitKind is the shape of a limit's value, which decides how it is parsed, formatted, and
@@ -78,8 +109,10 @@ type limitDef struct {
 
 // knownLimits enumerates every operational limit in a stable order, the way knownGuardrails
 // enumerates every guardrail, so a listing shows the full set including the ones nobody has set —
-// which read as their built-in default. ADR-0068 §6 names the occupants that join the replica
-// ceiling here as their constants are moved onto this mechanism.
+// which read as their built-in default. It holds ADR-0068 §6's occupants: the replica ceiling, the
+// build Job's retention, the metrics add-on's retention, and the first of the status thresholds.
+// Each was a constant in whatever file first needed it, and each default below is exactly the number
+// that constant held, so an install that sets nothing behaves as it did.
 var knownLimits = []limitDef{
 	{
 		code:        LimitReplicaCeiling,
@@ -92,6 +125,63 @@ var knownLimits = []limitDef{
 		min: 1,
 		// A replica count is an int32 everywhere below this, so the ceiling cannot exceed one.
 		max: math.MaxInt32,
+	},
+	{
+		code:        LimitBuildJobRetention,
+		kind:        LimitKindDuration,
+		description: "how long a finished in-cluster build Job and its pods are kept before Kubernetes reaps them",
+		envScoped:   false,
+		// Three days is the retention that was compiled into build.go before this became
+		// configuration, so an install that never sets one behaves exactly as it did. It keeps a
+		// recent failure inspectable without leaking Jobs forever: it is the UNIFORM backstop that
+		// fixes failed-Job accumulation (issue #280) — a success is still reaped immediately for a
+		// clean cluster, and the retention covers the failures the wait loop deliberately leaves
+		// behind for diagnosis.
+		def: int64(3 * 24 * time.Hour),
+		// A minute is the floor because a retention shorter than the time it takes to notice a
+		// failed build reaps the evidence before anyone reads it. Setting it to the floor is still
+		// "reap almost immediately" for an operator who wants no build Jobs lying around.
+		min: int64(time.Minute),
+		// A year is the ceiling. Kubernetes holds this as an int32 of SECONDS, which permits far
+		// more, but a build Job kept for longer than that is a leak with a setting in front of it.
+		max: int64(365 * 24 * time.Hour),
+	},
+	{
+		code:        LimitAddonMetricRetention,
+		kind:        LimitKindDuration,
+		description: "how long the metrics add-on keeps samples, applied when its instance is created",
+		envScoped:   false,
+		// 744h is 31 days, which is EXACTLY what the compiled-in `-retentionPeriod=1` meant:
+		// VictoriaMetrics' bare-number unit is months and its month is 31 days. Stating it in hours
+		// rather than months is what lets it share the duration kind with the other occupants, and
+		// the arithmetic is pinned here so the move preserves today's behaviour to the second.
+		def: int64(744 * time.Hour),
+		// VictoriaMetrics refuses a retention below 24h, so the limit refuses it first — at the
+		// operator CLI, where someone is present to be told, rather than at a CrashLoopBackOff.
+		min: int64(24 * time.Hour),
+		// Ten years. VictoriaMetrics accepts more; a single-node metrics add-on on one PVC will run
+		// out of disk long before it runs out of retention, and the bound is a reminder of that.
+		max: int64(10 * 365 * 24 * time.Hour),
+	},
+	{
+		code:        LimitUnschedulableGrace,
+		kind:        LimitKindDuration,
+		description: "how long a pod must have been unschedulable before Burrow reports it as an Issue",
+		envScoped:   false,
+		// Thirty seconds is the grace that was compiled into adapter.go before this became
+		// configuration, so an install that never sets one behaves exactly as it did. The scheduler
+		// marks a pod Unschedulable after ONE failed attempt, which a rolling update can hit for a
+		// few seconds while the old pods still hold the capacity the new one wants, and which a
+		// cluster with an autoscaler hits while a node is being provisioned. Reporting those would
+		// flip a healthy app to not-available mid-deploy — the noise the grace exists to prevent.
+		def: int64(30 * time.Second),
+		// Zero is permitted and means "report the scheduler's first refusal immediately". It is
+		// noisy on a cluster that autoscales and exactly right on one with fixed capacity, which is
+		// the whole reason this is the operator's to choose.
+		min: 0,
+		// An hour. A pod the scheduler has refused for an hour is not waiting for a node, and a
+		// grace long enough to hide that is a surface that has stopped reporting.
+		max: int64(time.Hour),
 	},
 }
 
@@ -251,6 +341,56 @@ func (c OperationalConfig) Duration(env string, code LimitCode) (time.Duration, 
 func (c OperationalConfig) ReplicaCeiling(env string) (int32, string) {
 	n, scope := c.Count(env, LimitReplicaCeiling)
 	return int32(n), scope
+}
+
+// ClusterConfigFunc supplies the operator-set operational configuration to an ADAPTER — a piece of
+// the system that reads a cluster-tier limit at the moment it acts, rather than being handed the
+// value by the engine (ADR-0068 §6).
+//
+// It exists because §6's remaining occupants are read where no engine call can reach: the
+// unschedulable grace is applied inside the pod inspection that produces a WorkloadStatus, the build
+// Job's retention inside the Job the build adapter constructs, and the metrics add-on's retention
+// inside its container args. Threading each through the narrow seams those sit behind would widen
+// three interfaces to carry three numbers; a supplier the adapter calls keeps the seams as they are
+// and keeps the READ where the value is used, which is what makes `cluster config set` take effect
+// without restarting burrowd.
+//
+// A NIL ClusterConfigFunc IS VALID and yields the built-in defaults. That is the point: an adapter
+// nobody wired — every test, and any embedder that has not opted in — behaves exactly as it did when
+// these were constants.
+type ClusterConfigFunc func(ctx context.Context) OperationalConfig
+
+// ClusterConfigFrom adapts a Database read into a ClusterConfigFunc. A read that FAILS yields the
+// empty configuration, which resolves every limit to its built-in default, and says so once in the
+// log rather than propagating: these values are read on the deploy and status paths, where the
+// database being briefly unavailable must not become a failed deploy or a status call that errors
+// instead of answering. Values are validated on the way IN, where an operator is present to be told
+// (see resolve) — this is the same principle applied one level up.
+func ClusterConfigFrom(read func(context.Context) (OperationalConfig, error)) ClusterConfigFunc {
+	return func(ctx context.Context) OperationalConfig {
+		cfg, err := read(ctx)
+		if err != nil {
+			slog.WarnContext(ctx, "reading operational configuration failed; operational limits fall back to their built-in defaults", "error", err)
+			return OperationalConfig{}
+		}
+		return cfg
+	}
+}
+
+// ClusterDuration returns the effective CLUSTER-tier value of a duration limit. It is the only
+// accessor an adapter needs, because every limit an adapter reads is cluster-scoped: an adapter acts
+// on a cluster, and the environment-scoped tier belongs to the engine, which knows which environment
+// an operation named.
+//
+// A nil receiver, an unreadable configuration, and an unset limit all give the built-in default,
+// which are three different reasons for the same correct answer.
+func (f ClusterConfigFunc) ClusterDuration(ctx context.Context, code LimitCode) time.Duration {
+	var cfg OperationalConfig
+	if f != nil {
+		cfg = f(ctx)
+	}
+	d, _ := cfg.Duration("", code)
+	return d
 }
 
 // resolve applies ADR-0068 §3's order: the environment's value wins; absent one, the cluster

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strconv"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -164,9 +165,14 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
 					Containers: append([]corev1.Container{{
-						Name:           string(spec.Type),
-						Image:          spec.Image,
-						Args:           addonArgs(spec),
+						Name:  string(spec.Type),
+						Image: spec.Image,
+						// The metrics add-on's sample retention is cluster configuration read HERE,
+						// at creation (ADR-0068 §6). An instance that already exists keeps the
+						// retention it was created with — the args are a field on its pod template,
+						// not a policy the add-on re-reads — so a change applies to the next install
+						// of it rather than to the running one.
+						Args:           addonArgs(spec, a.limits.ClusterDuration(ctx, controlplane.LimitAddonMetricRetention)),
 						Env:            podEnv,
 						Ports:          []corev1.ContainerPort{{ContainerPort: spec.Port}},
 						VolumeMounts:   mounts,
@@ -775,13 +781,27 @@ func addonDataPath(t controlplane.AddonType) string {
 
 // addonArgs are the container args for an add-on: listen on its port and persist under the
 // mounted data path.
-func addonArgs(spec controlplane.AddonSpec) []string {
+//
+// metricRetention is the configured sample retention for the metrics add-on (ADR-0068 §6), resolved
+// by the caller. It is ignored by every other add-on.
+func addonArgs(spec controlplane.AddonSpec, metricRetention time.Duration) []string {
 	switch spec.Type {
 	case controlplane.AddonLogs:
 		return []string{fmt.Sprintf("-httpListenAddr=:%d", spec.Port), "-storageDataPath=" + addonDataPath(spec.Type)}
 	case controlplane.AddonMetrics:
-		// -retentionPeriod=1 keeps one month of samples (VictoriaMetrics' default unit is months).
-		return []string{fmt.Sprintf("-httpListenAddr=:%d", spec.Port), "-storageDataPath=" + addonDataPath(spec.Type), "-retentionPeriod=1"}
+		// -retentionPeriod is how long VictoriaMetrics keeps samples. It was the literal `1` — one
+		// month, VictoriaMetrics' unit for a bare number — and is now cluster configuration
+		// (`addon.metric_retention`), whose built-in default is that same month expressed as the 744
+		// hours VictoriaMetrics means by it.
+		//
+		// It is rendered in SECONDS rather than passed through as a Go duration string: the seconds
+		// suffix is one VictoriaMetrics documents, and a compound form like "744h0m0s" would be
+		// relying on its parser being lenient about a shape nothing else produces.
+		return []string{
+			fmt.Sprintf("-httpListenAddr=:%d", spec.Port),
+			"-storageDataPath=" + addonDataPath(spec.Type),
+			fmt.Sprintf("-retentionPeriod=%ds", int64(metricRetention.Seconds())),
+		}
 	case controlplane.AddonPostgres:
 		// Run the shared Postgres instance with lean server settings suited to a low-traffic
 		// metadata store (see LeanPostgresSettings), plus pg_stat_statements preloaded so the

@@ -158,7 +158,7 @@ func TestRunBackupJobFailsFastOnMissingSecret(t *testing.T) {
 // the inspection. Restore is the path where this matters most: it is run during an incident, and ten
 // minutes of silence followed by "timed out" is ten minutes lost to learning nothing.
 //
-// The condition's LastTransitionTime is set well past unschedulableGrace, because a pod that has
+// The condition's LastTransitionTime is set well past the unschedulable grace, because a pod that has
 // only just been marked unschedulable is still within the window the Deployment path (and therefore
 // this one) waits before believing it.
 func TestRunRestoreJobFailsFastOnUnschedulablePod(t *testing.T) {
@@ -172,7 +172,7 @@ func TestRunRestoreJobFailsFastOnUnschedulablePod(t *testing.T) {
 			Status:             corev1.ConditionFalse,
 			Reason:             corev1.PodReasonUnschedulable,
 			Message:            "0/1 nodes are available: 1 Insufficient cpu.",
-			LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * unschedulableGrace)),
+			LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * defaultGrace)),
 		}},
 	})
 
@@ -242,7 +242,7 @@ func TestJobWaitKeepsWaitingThroughTransientStates(t *testing.T) {
 			Name:  "pg",
 			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
 		}},
-		// A pod scheduled only moments ago is inside unschedulableGrace even when the scheduler has
+		// A pod scheduled only moments ago is inside the unschedulable grace even when the scheduler has
 		// already rejected it once, which a rolling cluster does routinely.
 		Conditions: []corev1.PodCondition{{
 			Type:               corev1.PodScheduled,
@@ -279,7 +279,7 @@ func TestJobDeadlineReportsWhatWasObserved(t *testing.T) {
 		}},
 	})
 
-	_, err := awaitJob(ctx, client, addonNS, "burrow-pg-backup-bk1", time.Millisecond, time.Millisecond)
+	_, err := awaitJob(ctx, client, addonNS, "burrow-pg-backup-bk1", time.Millisecond, time.Millisecond, defaultGrace)
 	requireBlocked(t, err, controlplane.ReasonDeadlineExceeded,
 		"burrow-pg-backup-bk1-abcde", // the pod, so a reader can go straight to it
 		"Pending",                    // its phase
@@ -297,9 +297,15 @@ func TestJobDeadlineReportsNoPod(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	pendingJobs(client, addonNS)
 
-	_, err := awaitJob(context.Background(), client, addonNS, "burrow-pg-backup-bk1", time.Millisecond, time.Millisecond)
+	_, err := awaitJob(context.Background(), client, addonNS, "burrow-pg-backup-bk1", time.Millisecond, time.Millisecond, defaultGrace)
 	requireBlocked(t, err, controlplane.ReasonDeadlineExceeded, "no pod was created for it")
 }
+
+// defaultGrace is the unschedulable grace a NIL operational-limits supplier resolves to — the
+// built-in default of `status.unschedulable_grace`, and therefore what every adapter in these tests
+// applies, since none of them is wired to a configuration source (ADR-0068 §6). Reading it through
+// the same accessor production reads it through keeps the tests from restating the number.
+var defaultGrace = unschedulableGrace(context.Background(), nil)
 
 // TestJobPodStartupEvidenceIgnoresTerminatedContainers pins the one place the Job criterion is
 // deliberately NARROWER than the Deployment one. A Job pod whose container terminated has run: its
@@ -326,19 +332,19 @@ func TestJobPodStartupEvidenceIgnoresTerminatedContainers(t *testing.T) {
 			}},
 		},
 	}
-	if ev, ok := jobPodStartupEvidence(pod); ok {
+	if ev, ok := jobPodStartupEvidence(pod, defaultGrace); ok {
 		t.Errorf("jobPodStartupEvidence reported %q for a container that already RAN; its outcome belongs to the Job's counters and to the caller", ev.Reason)
 	}
 	// The Deployment path, by contrast, does report it — the two are deliberately different, and this
 	// asserts the difference is the intended one rather than a shared function having been narrowed.
-	if _, ok := podIssueEvidence(pod); !ok {
+	if _, ok := podIssueEvidence(pod, defaultGrace); !ok {
 		t.Error("podIssueEvidence must still report an OOM-killed container for a Deployment")
 	}
 }
 
-// TestJobPodStartupEvidenceHonoursUnschedulableGrace asserts the waiter inherits the Deployment
-// path's thirty seconds rather than carrying a second, scattered value of its own (ADR-0068 §6):
-// the same pod is invisible inside the grace and reported outside it.
+// TestJobPodStartupEvidenceHonoursUnschedulableGrace asserts the waiter inherits the CONFIGURED
+// grace the Deployment path applies rather than carrying a second, scattered value of its own
+// (ADR-0068 §6): the same pod is invisible inside the grace and reported outside it.
 func TestJobPodStartupEvidenceHonoursUnschedulableGrace(t *testing.T) {
 	podAt := func(age time.Duration) *corev1.Pod {
 		return &corev1.Pod{Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
@@ -349,10 +355,10 @@ func TestJobPodStartupEvidenceHonoursUnschedulableGrace(t *testing.T) {
 			LastTransitionTime: metav1.NewTime(time.Now().Add(-age)),
 		}}}}
 	}
-	if _, ok := jobPodStartupEvidence(podAt(unschedulableGrace / 2)); ok {
+	if _, ok := jobPodStartupEvidence(podAt(defaultGrace/2), defaultGrace); ok {
 		t.Error("a pod rejected moments ago must not fail a Job wait: the scheduler marks a pod Unschedulable after ONE attempt, which normal scheduling churn produces")
 	}
-	ev, ok := jobPodStartupEvidence(podAt(2 * unschedulableGrace))
+	ev, ok := jobPodStartupEvidence(podAt(2*defaultGrace), defaultGrace)
 	if !ok || ev.Reason != controlplane.ReasonUnschedulable {
 		t.Errorf("jobPodStartupEvidence(past grace) = %q, %v, want %q, true", ev.Reason, ok, controlplane.ReasonUnschedulable)
 	}

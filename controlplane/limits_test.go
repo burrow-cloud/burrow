@@ -4,6 +4,8 @@
 package controlplane
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -215,5 +217,97 @@ func TestStoredValueThatNoLongerParsesFallsThrough(t *testing.T) {
 	broken := OperationalConfig{Values: map[LimitCode]string{LimitReplicaCeiling: ""}}
 	if v, scope := broken.ReplicaCeiling(""); v != 50 || scope != LimitScopeDefault {
 		t.Errorf("unparseable cluster value = (%d, %q), want the built-in default", v, scope)
+	}
+}
+
+// TestSection6OccupantsAreConfiguration covers the constants ADR-0068 §6 named, now that each is a
+// row in the catalogue rather than a number in whatever file first needed it. The DEFAULTS are the
+// load-bearing part: each is exactly the value its constant held, so an install that sets nothing
+// behaves precisely as it did before the move.
+func TestSection6OccupantsAreConfiguration(t *testing.T) {
+	cases := []struct {
+		code LimitCode
+		def  time.Duration
+		was  string
+	}{
+		{LimitBuildJobRetention, 3 * 24 * time.Hour, "the three days build.go compiled in"},
+		{LimitAddonMetricRetention, 744 * time.Hour, "the month `-retentionPeriod=1` meant (VictoriaMetrics counts 31 days to a month)"},
+		{LimitUnschedulableGrace, 30 * time.Second, "the thirty seconds adapter.go compiled in"},
+	}
+	for _, c := range cases {
+		t.Run(string(c.code), func(t *testing.T) {
+			if !KnownLimit(c.code) {
+				t.Fatalf("%s is not a known limit", c.code)
+			}
+			d, _ := lookupLimit(c.code)
+			if d.kind != LimitKindDuration {
+				t.Errorf("%s is a %q, want a duration", c.code, d.kind)
+			}
+			if got, scope := (OperationalConfig{}).Duration("", c.code); got != c.def || scope != LimitScopeDefault {
+				t.Errorf("unset %s = (%s, %q), want (%s, default) — %s", c.code, got, scope, c.def, c.was)
+			}
+			// Every §6 occupant except the ceiling is CLUSTER-scoped, so an environment key written
+			// for one is not honoured — it would encode a cluster fact twice.
+			if EnvScopableLimit(c.code) {
+				t.Errorf("%s should be cluster-scoped (ADR-0068 §6)", c.code)
+			}
+			env := OperationalConfig{}.With(LimitCode("staging."+string(c.code)), d.format(d.min))
+			if got, scope := env.Duration("staging", c.code); got != c.def || scope != LimitScopeDefault {
+				t.Errorf("%s resolved an environment value: got (%s, %q), want the built-in default", c.code, got, scope)
+			}
+			// A cluster value IS honoured, which is the whole point of the move.
+			cluster := OperationalConfig{}.With(c.code, d.format(d.min))
+			if got, scope := cluster.Duration("staging", c.code); got != time.Duration(d.min) || scope != LimitScopeCluster {
+				t.Errorf("%s cluster value = (%s, %q), want (%s, cluster)", c.code, got, scope, time.Duration(d.min))
+			}
+		})
+	}
+}
+
+// TestUnschedulableGraceMayBeZeroButNotNegative pins the one occupant whose floor is deliberately
+// zero: reporting the scheduler's first refusal immediately is noisy on a cluster that autoscales
+// and exactly right on one with fixed capacity, which is why it is the operator's to choose.
+func TestUnschedulableGraceMayBeZeroButNotNegative(t *testing.T) {
+	d, _ := lookupLimit(LimitUnschedulableGrace)
+	if _, err := d.parse("0s"); err != nil {
+		t.Errorf("a zero grace should be settable: %v", err)
+	}
+	for _, bad := range []string{"-1s", "2h", "30"} {
+		if _, err := d.parse(bad); err == nil {
+			t.Errorf("parse(%q) should be refused", bad)
+		}
+	}
+}
+
+// TestClusterConfigFuncResolvesForAdapters covers the supplier the adapters read cluster-tier limits
+// through (ADR-0068 §6). A NIL supplier is valid and yields the built-in defaults, which is what lets
+// an adapter nobody wired behave exactly as it did when these were constants.
+func TestClusterConfigFuncResolvesForAdapters(t *testing.T) {
+	var unwired ClusterConfigFunc
+	if got := unwired.ClusterDuration(context.Background(), LimitUnschedulableGrace); got != 30*time.Second {
+		t.Errorf("nil supplier = %s, want the built-in 30s", got)
+	}
+
+	set := ClusterConfigFunc(func(context.Context) OperationalConfig {
+		return OperationalConfig{}.With(LimitUnschedulableGrace, "90s")
+	})
+	if got := set.ClusterDuration(context.Background(), LimitUnschedulableGrace); got != 90*time.Second {
+		t.Errorf("configured supplier = %s, want 90s", got)
+	}
+
+	// A read that fails resolves to the defaults rather than propagating: these values are read on
+	// the deploy and status paths, where a briefly unavailable database must not become a failed
+	// deploy or a status call that errors instead of answering.
+	broken := ClusterConfigFrom(func(context.Context) (OperationalConfig, error) {
+		return OperationalConfig{}, errors.New("database unavailable")
+	})
+	if got := broken.ClusterDuration(context.Background(), LimitUnschedulableGrace); got != 30*time.Second {
+		t.Errorf("unreadable configuration = %s, want the built-in 30s", got)
+	}
+
+	// A limit of the wrong KIND, or one that does not exist, is a programming error rather than an
+	// operator's, and reads as zero rather than as a plausible-looking duration.
+	if got := set.ClusterDuration(context.Background(), LimitReplicaCeiling); got != 0 {
+		t.Errorf("a count read as a duration = %s, want 0", got)
 	}
 }

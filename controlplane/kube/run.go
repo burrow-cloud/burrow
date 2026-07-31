@@ -50,7 +50,7 @@ func (a *Adapter) RunJob(ctx context.Context, spec controlplane.RunSpec) (contro
 	// synchronous with a TEN-MINUTE bound (ADR-0048 §3), so before this a misconfigured app meant a
 	// user or an agent waited ten minutes to be told "timed out", with nothing anywhere naming the
 	// Secret that was missing.
-	if _, err := awaitJob(ctx, a.client, a.namespace, name, runJobTimeout, runJobPoll); err != nil {
+	if _, err := awaitJob(ctx, a.client, a.namespace, name, runJobTimeout, runJobPoll, unschedulableGrace(ctx, a.limits)); err != nil {
 		// The deadline backstop keeps its TimedOut result: a caller distinguishes "we stopped
 		// waiting" from "the pod could not start", and only the former is a candidate for a retry.
 		var blocked *controlplane.JobBlockedError

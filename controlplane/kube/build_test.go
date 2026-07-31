@@ -467,8 +467,10 @@ func TestBuildJobTTL(t *testing.T) {
 	if ttl == nil {
 		t.Fatal("build Job has no ttlSecondsAfterFinished; failed Jobs would accumulate (issue #280)")
 	}
-	if *ttl != buildJobTTLSeconds {
-		t.Errorf("ttlSecondsAfterFinished = %d, want %d (3 days)", *ttl, buildJobTTLSeconds)
+	// nil operational limits resolve to the built-in default, which is the three days this was when
+	// it was a constant (ADR-0068 §6).
+	if want := buildJobTTLSeconds(ctx, nil); *ttl != want {
+		t.Errorf("ttlSecondsAfterFinished = %d, want %d (3 days)", *ttl, want)
 	}
 }
 

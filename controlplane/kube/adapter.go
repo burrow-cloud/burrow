@@ -83,6 +83,12 @@ type Adapter struct {
 	// overrides both for a dev or e2e cluster where no published image applies. Wired via
 	// WithShipperImage.
 	shipperImage string
+	// limits reads the operator-set operational configuration for the cluster-tier limits this
+	// adapter applies (ADR-0068 §6): the unschedulable grace the pod inspection waits out, and the
+	// metrics add-on's sample retention. nil (the default) resolves every limit to its built-in
+	// default, which is exactly the behaviour these had as constants. Wired via
+	// WithOperationalLimits.
+	limits controlplane.ClusterConfigFunc
 }
 
 // New returns an Adapter over the given clientset and namespace (defaulting to
@@ -102,6 +108,15 @@ func (a *Adapter) WithShipperImage(image string) *Adapter {
 	if image != "" {
 		a.shipperImage = image
 	}
+	return a
+}
+
+// WithOperationalLimits registers the source of the operator-set operational limits this adapter
+// reads (ADR-0068 §6). It is read at the moment the adapter acts rather than captured here, so
+// `burrow cluster config set` takes effect without restarting burrowd. A nil supplier (the default)
+// resolves every limit to its built-in default. Returns the Adapter for chaining.
+func (a *Adapter) WithOperationalLimits(f controlplane.ClusterConfigFunc) *Adapter {
+	a.limits = f
 	return a
 }
 
@@ -269,7 +284,7 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 	if err != nil {
 		return controlplane.WorkloadStatus{}, fmt.Errorf("kube: reading deployment %q: %w", app, err)
 	}
-	return a.workloadStatus(ctx, dep), nil
+	return a.workloadStatus(ctx, dep, unschedulableGrace(ctx, a.limits)), nil
 }
 
 // workloadStatus maps a Deployment to a WorkloadStatus and enriches it with the health of the
@@ -283,7 +298,7 @@ func (a *Adapter) WorkloadStatus(ctx context.Context, app string) (controlplane.
 // no blocking reason, so availability is left as reported and a normal deploy is not flagged as
 // broken. Enrichment is best-effort: a pod-list error leaves the base status untouched. It is
 // shared by WorkloadStatus and ListWorkloads so both surfaces agree.
-func (a *Adapter) workloadStatus(ctx context.Context, dep *appsv1.Deployment) controlplane.WorkloadStatus {
+func (a *Adapter) workloadStatus(ctx context.Context, dep *appsv1.Deployment, grace time.Duration) controlplane.WorkloadStatus {
 	var desired int32
 	if dep.Spec.Replicas != nil {
 		desired = *dep.Spec.Replicas
@@ -309,7 +324,7 @@ func (a *Adapter) workloadStatus(ctx context.Context, dep *appsv1.Deployment) co
 	// Either downgrades availability so a broken deploy does not read as healthy on the strength of
 	// the superseded release still serving. The pod condition is checked first because it names the
 	// fix, where the deadline only reports that time ran out.
-	if issue, reason := a.podIssue(ctx, dep.Name); reason != "" {
+	if issue, reason := a.podIssue(ctx, dep.Name, grace); reason != "" {
 		st.Issue, st.IssueReason = issue, reason
 		st.Available = false
 	} else if deploymentProgressStalled(dep) {
@@ -334,8 +349,10 @@ func (a *Adapter) workloadStatus(ctx context.Context, dep *appsv1.Deployment) co
 // status call never fails on its enrichment. Only the CRITERION decides what is reported — blocking
 // and human-fixable, never self-resolving — so a transient ContainerCreating stays invisible here
 // no matter how long it lasts.
-func (a *Adapter) podIssue(ctx context.Context, app string) (issue, reason string) {
-	best, bestPod, ok := selectPodIssue(ctx, a.client, a.namespace, nameLabel+"="+app, podIssueEvidence)
+func (a *Adapter) podIssue(ctx context.Context, app string, grace time.Duration) (issue, reason string) {
+	best, bestPod, ok := selectPodIssue(ctx, a.client, a.namespace, nameLabel+"="+app, func(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
+		return podIssueEvidence(pod, grace)
+	})
 	if !ok {
 		return "", "" // best-effort: never fail Status on enrichment
 	}
@@ -404,7 +421,7 @@ func issueRank(reason string) int {
 // state is preferred over the pod's scheduling condition because a pod with running containers has
 // obviously been scheduled; the scheduling condition is what explains a pod with no container state
 // at all.
-func podIssueEvidence(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
+func podIssueEvidence(pod *corev1.Pod, grace time.Duration) (controlplane.IssueEvidence, bool) {
 	var best controlplane.IssueEvidence
 	bestRank := 0
 	for _, cs := range pod.Status.ContainerStatuses {
@@ -419,7 +436,7 @@ func podIssueEvidence(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
 	if bestRank > 0 {
 		return best, true
 	}
-	return schedulingIssueEvidence(pod)
+	return schedulingIssueEvidence(pod, grace)
 }
 
 // containerIssueEvidence reads one container's status for a blocking condition.
@@ -499,24 +516,34 @@ func containerMemoryLimit(pod *corev1.Pod, container string) string {
 // not-available mid-deploy — the noise the criterion exists to prevent. A pod still unschedulable
 // after this has stopped resolving on its own.
 //
-// It is applied through schedulingIssueEvidence, which is the ONLY place it is read, so the Job
-// waiters of issue #352 inherit the same value rather than carrying one of their own. That is
-// ADR-0068 §6's requirement, not a convenience: how long a pod may sit unschedulable is a fact about
-// the cluster's scheduler, and two surfaces that answered it differently would hold two definitions
-// of "failure" for one pod at one moment. When ADR-0068 moves this to cluster configuration, the
-// waiters move with it because there is nothing else to move.
-const unschedulableGrace = 30 * time.Second
+// It is cluster CONFIGURATION rather than a constant (ADR-0068 §6): how long a pod may sit
+// unschedulable before something is wrong is a property of the cluster's scheduler and whether it
+// has an autoscaler, which is a fact only the operator has. `status.unschedulable_grace` is where
+// they set it, and its built-in default is the thirty seconds this was.
+//
+// It is resolved HERE, once per inspection, and threaded into schedulingIssueEvidence, which is the
+// ONLY place it is applied — so the Job waiters of issue #352 inherit the same value rather than
+// carrying one of their own, and ADR-0074's failure ledger inherits it too because the ledger
+// records the reason this inspection produced rather than judging schedulability a second time. That
+// is ADR-0068 §6's requirement, not a convenience: two surfaces that answered it differently would
+// hold two definitions of "failure" for one pod at one moment.
+func unschedulableGrace(ctx context.Context, limits controlplane.ClusterConfigFunc) time.Duration {
+	return limits.ClusterDuration(ctx, controlplane.LimitUnschedulableGrace)
+}
 
 // schedulingIssueEvidence reads the pod's PodScheduled condition for a scheduling failure, and
 // separates the volume case out of it: Kubernetes reports "no node can run this pod" for both a
 // cluster with no room and a claim that will not bind, but the fixes have nothing in common, and an
 // agent branching on the reason should not have to grep the scheduler's prose to tell them apart.
-func schedulingIssueEvidence(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
+//
+// grace is the configured unschedulable grace, passed in rather than read here so every caller
+// applies the one value (see unschedulableGrace).
+func schedulingIssueEvidence(pod *corev1.Pod, grace time.Duration) (controlplane.IssueEvidence, bool) {
 	for _, c := range pod.Status.Conditions {
 		if c.Type != corev1.PodScheduled || c.Status != corev1.ConditionFalse || c.Reason != corev1.PodReasonUnschedulable {
 			continue
 		}
-		if !c.LastTransitionTime.IsZero() && time.Since(c.LastTransitionTime.Time) < unschedulableGrace {
+		if !c.LastTransitionTime.IsZero() && time.Since(c.LastTransitionTime.Time) < grace {
 			return controlplane.IssueEvidence{}, false
 		}
 		reason := controlplane.ReasonUnschedulable
@@ -579,12 +606,16 @@ func (a *Adapter) ListWorkloads(ctx context.Context) ([]controlplane.WorkloadSta
 	if err != nil {
 		return nil, fmt.Errorf("kube: listing deployments: %w", err)
 	}
+	// The unschedulable grace is resolved ONCE for the whole listing rather than per app: it is
+	// cluster configuration, so every app in the namespace is judged against the same value, and a
+	// read per app would put a database call behind every row of `burrow app list`.
+	grace := unschedulableGrace(ctx, a.limits)
 	out := make([]controlplane.WorkloadStatus, 0, len(deps.Items))
 	for i := range deps.Items {
 		// Enrich each app the same way single-app Status does, so a wedged rollout (a new
 		// release stuck in ImagePullBackOff while the old pods still serve) surfaces its Issue
 		// and reads not-available in `burrow app list`, not only in `burrow app logs` (#307).
-		out = append(out, a.workloadStatus(ctx, &deps.Items[i]))
+		out = append(out, a.workloadStatus(ctx, &deps.Items[i], grace))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].App < out[j].App })
 	return out, nil

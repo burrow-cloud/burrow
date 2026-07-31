@@ -125,6 +125,14 @@ type StatusResult struct {
 	// holds its observed state when true.
 	Running  bool           `json:"running"`
 	Workload WorkloadStatus `json:"workload,omitempty"`
+	// Failures is this app's recent failure history from the ledger (ADR-0074 §8): the failures
+	// observed for it over the last StatusFailureLookback, oldest first, resolved ones included.
+	// Workload above is the live present tense; this is the part nothing else can reconstruct —
+	// whether the app crash-looped at 02:00 and recovered, and when it started.
+	Failures []Failure `json:"failures,omitempty"`
+	// Coverage is what the observer was doing over that same window. It is never omitted, because
+	// an empty Failures list means "nothing broke" only if something was watching.
+	Coverage Coverage `json:"coverage"`
 }
 
 // ScaleResult reports the outcome of a scale.

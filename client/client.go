@@ -224,6 +224,13 @@ type StatusResult struct {
 	Release    Release        `json:"release,omitempty"`
 	Running    bool           `json:"running"`
 	Workload   WorkloadStatus `json:"workload,omitempty"`
+	// Failures is the app's recent failure history from the ledger (ADR-0074 §8), oldest first,
+	// resolved episodes included. Workload above is the live present tense; this is the part
+	// nothing can reconstruct afterwards — whether it crash-looped at 02:00 and recovered.
+	Failures []Failure `json:"failures,omitempty"`
+	// Coverage is what the observer was doing over that window. An empty Failures list means
+	// "nothing broke" only if Coverage says something was watching.
+	Coverage Coverage `json:"coverage"`
 }
 
 type ScaleResult struct {

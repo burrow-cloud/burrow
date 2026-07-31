@@ -359,6 +359,72 @@ func TestAuditEndpoint(t *testing.T) {
 	}
 }
 
+// TestFailuresEndpoint exercises GET /v1/failures (ADR-0074 §8): the ledger rows come back oldest
+// first and UNGROUPED — the grouping is the human listing's presentation, and §5 keeps it off the
+// wire so an agent correlates on its own terms — with the observation coverage attached to every
+// answer so a gap cannot be read as health.
+func TestFailuresEndpoint(t *testing.T) {
+	h, _, d := newAPI(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	for i, name := range []string{"api", "web"} {
+		if err := d.RecordFailure(ctx, cp.FailureObservation{
+			Object: cp.ObjectRef{Kind: cp.FailureApp, Name: name, Environment: "prod"},
+			Reason: cp.ReasonUnschedulable, Detail: "no node could run it",
+			At: now.Add(-time.Duration(30-i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("RecordFailure(%s): %v", name, err)
+		}
+	}
+
+	rec := do(h, "GET", "/v1/failures", token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("failures = %d %s", rec.Code, rec.Body.String())
+	}
+	var out client.FailureReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Failures) != 2 {
+		t.Fatalf("failures = %d, want both rows — one cause, two addressable rows", len(out.Failures))
+	}
+	if out.Failures[0].Object.Name != "api" || out.Failures[0].FirstSeen.After(out.Failures[1].FirstSeen) {
+		t.Errorf("rows = %+v, want oldest first", out.Failures)
+	}
+	// Nothing has observed, so the coverage says so rather than leaving the list looking whole.
+	if len(out.Coverage.Gaps) == 0 || out.Coverage.Observed() {
+		t.Errorf("coverage = %+v, want it to report that nothing was watching", out.Coverage)
+	}
+
+	// The kind filter narrows; an unknown kind or reason is a 400, not an empty list.
+	rec = do(h, "GET", "/v1/failures?kind=addon", token, "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Failures) != 0 {
+		t.Errorf("kind=addon returned %d rows, want none", len(out.Failures))
+	}
+	for _, path := range []string{"/v1/failures?kind=deployment", "/v1/failures?reason=ContainerCreating", "/v1/failures?since=yesterday", "/v1/failures?limit=nope"} {
+		if rr := do(h, "GET", path, token, ""); rr.Code != http.StatusBadRequest {
+			t.Errorf("GET %s = %d, want 400", path, rr.Code)
+		}
+	}
+
+	// `since` is a duration resolved against the control plane's own clock, and it widens the
+	// answer to failures that have since recovered.
+	if err := d.ResolveFailures(ctx, now.Add(-10*time.Minute), nil, nil); err != nil {
+		t.Fatalf("ResolveFailures: %v", err)
+	}
+	rec = do(h, "GET", "/v1/failures", token, "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Failures) != 0 {
+		t.Fatalf("default listing returned %d resolved rows, want only what is still broken", len(out.Failures))
+	}
+	rec = do(h, "GET", "/v1/failures?since=2h", token, "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Failures) != 2 {
+		t.Fatalf("since=2h returned %d rows, want the two resolved episodes", len(out.Failures))
+	}
+}
+
 // TestHistoryEndpoint exercises GET /v1/apps/{app}/history: two deploys produce a two-entry timeline,
 // newest first, and an app with no releases returns an empty list rather than an error. An unknown
 // environment is a 404.

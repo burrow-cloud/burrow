@@ -48,7 +48,8 @@ This file is the place both questions get answered together.
 | Autoscale | `burrow app autoscale <app> --min --max --cpu [--memory]` | Creates an `autoscaling/v2` HorizontalPodAutoscaler targeting the Deployment. Defaults: min 1, max 10, CPU 80%, memory off. `burrow app autoscale <app> off` deletes it. | [0020](adr/0020-guardrails-as-configurable-policy.md) |
 | Roll back | `burrow app rollback <app>` | Re-applies the release the current one supersedes — **exactly one step back**; there is no "roll back to release X". | [0007](adr/0007-explicit-deploy-by-image-reference.md) |
 | Release history | `burrow app history <app>` | Lists releases newest-first from the control-plane database. | [0012](adr/0012-in-cluster-postgres.md) |
-| Status | `burrow app status <app>`, `burrow app list` | Live workload state: desired/ready/updated replicas, availability, and — when the app is blocked — an actionable issue naming the fix, plus a machine-usable reason from a closed set: `ImagePullBackOff`, `ErrImagePull`, `Unschedulable`, `VolumeUnavailable`, `CrashLoopBackOff`, `CreateContainerConfigError`, `OOMKilled`, `ProgressDeadlineExceeded`, `DeadlineExceeded`. Conditions that resolve on their own (`ContainerCreating`, `PodInitializing`) are deliberately not reported. A crash loop carries a bounded tail of the container's own output; a missing config or secret **key** is named, a value never is. | [0011](adr/0011-kubernetes-integration.md), [0074](adr/0074-burrow-observes-what-it-manages.md) |
+| Status | `burrow app status <app>`, `burrow app list` | Live workload state: desired/ready/updated replicas, availability, and — when the app is blocked — an actionable issue naming the fix, plus a machine-usable reason from a closed set: `ImagePullBackOff`, `ErrImagePull`, `Unschedulable`, `VolumeUnavailable`, `CrashLoopBackOff`, `CreateContainerConfigError`, `OOMKilled`, `ProgressDeadlineExceeded`, `DeadlineExceeded`. Conditions that resolve on their own (`ContainerCreating`, `PodInitializing`) are deliberately not reported. A crash loop carries a bounded tail of the container's own output; a missing config or secret **key** is named, a value never is. `status` also carries the app's recent failure history from the ledger (last 24h, up to 10 rows, resolved episodes included) and the observation coverage over that window. | [0011](adr/0011-kubernetes-integration.md), [0074](adr/0074-burrow-observes-what-it-manages.md) |
+| What is broken, cluster-wide | `burrow failures`, `burrow-agent failures` | Lists the ledger's failures across every managed object. See [Failure ledger](#failure-ledger). | [0074](adr/0074-burrow-observes-what-it-manages.md) |
 | Run a one-off command | `burrow app run <app> -- ./migrate` | Runs the command as a `batch/v1` Job from the app's **currently deployed image**, in the app's namespace, with the app's config and per-app Secret injected. Waits synchronously, captures the exit code and combined output. | [0048](adr/0048-one-off-command-runner.md) |
 | Auto-deploy on a new tag | `burrow app auto-deploy <app> <patch\|minor\|major\|off>` | burrowd polls the registry (~5 min, jittered) and fires the same guarded deploy for an in-level upgrade. Outbound-only, so it works on a NAT'd cluster. | [0052](adr/0052-pull-based-passive-deploy.md), [0058](adr/0058-auto-deploy-is-opt-in.md) |
 | Delete an app | `burrow app delete <app>` | Removes the workload, its Service and Ingress, and its release history. Guarded by `app.delete`, **denied by default** — relax the guardrail (ideally per environment) before the verb will run on either CLI. | [0024](adr/0024-cli-command-taxonomy.md), [0065](adr/0065-what-belongs-on-the-agent-surface.md) |
@@ -750,6 +751,47 @@ operation it describes. `guard set`, `addon connect`, `unexpose`, and provider r
 
 ---
 
+## Failure ledger
+
+A record in the control-plane Postgres of what the cluster **did** after Burrow acted on it
+([ADR-0074](adr/0074-burrow-observes-what-it-manages.md)). It is **not** the audit log and does
+not share its table: the audit log records what Burrow was *asked* to do and what it *decided*,
+is append-only, and is never pruned; this records the outcome, mostly unrequested by anyone, and
+it *is* pruned.
+
+burrowd sweeps the objects the registry says it owns and writes one row per **(object, reason)**
+— an app, add-on, backup, or exposure, and a reason from a closed vocabulary. Each row carries a
+`first_seen` ("when did it start"), a `last_seen` ("is it still happening"), a `resolved_at`
+(null while active), an occurrence count, and one bounded, Burrow-authored detail line. Two
+reasons on one object are two rows with independent lifetimes.
+
+Read it with `burrow failures` or `burrow-agent failures`, filtered by `--kind`, `--name`,
+`--env`, `--reason`, `--since <duration>`, `--all`, and `--limit` (default 500, oldest first).
+By default it lists what is still broken; `--since` widens to a window of history and `--all` to
+the whole retained history.
+
+**Grouped, on the human CLI only.** `burrow failures` groups rows by shared reason and orders
+them oldest first, because one cause routinely produces many rows and the earliest one in a
+cascade is usually the thing worth fixing. That grouping is presentation: the JSON form and the
+API return **rows, not groups**, so an agent correlates on its own terms.
+
+**It never claims a cause.** Rows sharing a reason and a window are placed beside each other as
+a hint about where to look. Burrow does not assert that one caused another, and two unrelated
+failures in the same minute will sometimes be shown together.
+
+**Coverage travels with every answer.** `coverage` reports the observation windows behind the
+result and the literal `gaps` between them — stretches in which nothing was observing. An empty
+list over a gap is not evidence that nothing broke, and both CLIs say so rather than printing a
+clean list. Sweeps that ran but could not read every object are reported as degraded coverage.
+
+Limits: retention prunes **resolved** rows and elapsed windows after 30 days (an active failure
+is never pruned). The observer **samples** on an interval (one minute by default) rather than
+holding a watch, so a failure shorter than the interval can pass unseen. burrowd **observes and
+never remediates**. **No row carries a secret value** — the detail is one Burrow-authored line,
+and a crash loop's application output stays with the live status surface and `app logs`.
+
+---
+
 ## The agent surface
 
 `burrow-agent` is a separate binary from `burrow`: capability-reduced, credential-free,
@@ -759,7 +801,7 @@ pinned by tests that fail if a verb is added or removed.
 
 **Read-only:** `apps`, `status`, `history`, `next-tag`, `logs`, `config`, `secret` (keys),
 `reachability`, `cluster`, `cluster capacity`, `addons`, `backups`, `logs-query`,
-`metrics-query`, `guard`, `audit`, `providers`, `environments`.
+`metrics-query`, `guard`, `audit`, `failures`, `providers`, `environments`.
 
 **Mutating** (each returns an outcome envelope — `executed` / `held_for_confirmation` /
 `denied` / `error`, exit codes 0/2/3/1): `deploy`, `build`, `rollback`, `scale`, `autoscale`,

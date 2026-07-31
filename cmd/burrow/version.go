@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"runtime/debug"
 	"strings"
 	"text/tabwriter"
@@ -60,9 +61,89 @@ var fetchLatestRelease = func(ctx context.Context) (string, error) {
 	return body.TagName, nil
 }
 
-// newVersionCmd reports this CLI's version and, best effort, the version of the control plane
-// installed in the cluster — read from the burrowd Deployment's image, so it works even if
-// burrowd is unhealthy and needs no API token.
+// agentBinary is the agent's control-channel executable (ADR-0049 §1), looked up on PATH so
+// `burrow version` can report the version the AGENT would send to the control plane, not just the
+// CLI's. The two binaries ship together but are installed and updated independently, so they drift;
+// before this line existed the drift was invisible until every agent call started being refused.
+const agentBinary = "burrow-agent"
+
+// agentProbeTimeout bounds the `burrow-agent --version` probe. It is a local exec, so this is a
+// guard against a wedged binary rather than a latency budget.
+const agentProbeTimeout = 3 * time.Second
+
+// probeAgentVersion returns the path of the burrow-agent on PATH and the version it reports, or an
+// error when it is absent or unreadable. It is a package var so tests exercise the rendering and the
+// skew comparison without a burrow-agent on the test machine's PATH. Best effort by contract: every
+// failure is returned for the caller to render, never to fail `burrow version`.
+var probeAgentVersion = func(ctx context.Context) (path, version string, err error) {
+	path, err = exec.LookPath(agentBinary)
+	if err != nil {
+		return "", "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, agentProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").Output()
+	if err != nil {
+		return path, "", err
+	}
+	var body struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(out, &body); err != nil || body.Version == "" {
+		// A burrow-agent old enough to predate the --version flag prints usage to stderr and exits
+		// non-zero (handled above) or prints something unparseable here. Either way its version is
+		// unknown, which is itself the useful signal: it is older than this CLI.
+		return path, "", fmt.Errorf("%s does not report a version (it predates `--version`)", agentBinary)
+	}
+	return path, body.Version, nil
+}
+
+// agentValue renders the value cell of the "burrow-agent" line: its version and where it is
+// installed, or why it could not be read. The PATH is included because the two binaries can be
+// installed by different means into different prefixes, and which copy is first on PATH is exactly
+// the thing a stranded user cannot see. It is pure so all three renderings are unit-tested.
+func agentValue(path, agentVer string, err error) string {
+	switch {
+	case err == nil:
+		return fmt.Sprintf("%s (%s)", agentVer, path)
+	case path != "":
+		return fmt.Sprintf("unknown version (%s)", path)
+	default:
+		return fmt.Sprintf("not found on PATH (install it: %s)", agentInstallHint)
+	}
+}
+
+// agentInstallHint is the one-liner for a machine with no burrow-agent at all.
+const agentInstallHint = "`brew install burrow-cloud/tap/burrow` installs burrow and burrow-agent together"
+
+// agentSkewHint returns the nudge to update burrow-agent when it is behind the CLI, or "" when it is
+// not or when either version is a local build with nothing to upgrade to. This is the ACTIVE half of
+// keeping the two binaries in step: neither binary updates the other (distribution is Homebrew and
+// release archives with the CLI as the unit a user installs, ADR-0016; burrow-agent is
+// capability-reduced and does not rewrite binaries, ADR-0049 §2a), so the CLI's job is to make the
+// drift visible here, before the control plane has to refuse a call to reveal it. It names both the
+// Homebrew and source remedies because the CLI cannot know how the agent binary was installed;
+// burrow-agent itself narrows that further when it is refused, where the installed path is knowable.
+func agentSkewHint(cliVer, agentVer string) string {
+	if !semver.IsValid(cliVer) || !semver.IsValid(agentVer) {
+		return ""
+	}
+	if module.IsPseudoVersion(cliVer) || module.IsPseudoVersion(agentVer) {
+		return ""
+	}
+	if semver.Compare(semver.MajorMinor(agentVer), semver.MajorMinor(cliVer)) >= 0 {
+		return ""
+	}
+	return fmt.Sprintf("Your %s (%s) is behind your burrow CLI (%s). They are separate binaries: "+
+		"`brew upgrade burrow` updates both, or from source "+
+		"`go install github.com/burrow-cloud/burrow/cmd/burrow-agent@%s`. "+
+		"Restart your agent session afterwards so it runs the new binary.",
+		agentBinary, agentVer, cliVer, cliVer)
+}
+
+// newVersionCmd reports this CLI's version, the burrow-agent on PATH, and, best effort, the version
+// of the control plane installed in the cluster — read from the burrowd Deployment's image, so it
+// works even if burrowd is unhealthy and needs no API token.
 func newVersionCmd() *cobra.Command {
 	var kubeconfig, kubeContext, namespace string
 	cmd := &cobra.Command{
@@ -76,6 +157,11 @@ func newVersionCmd() *cobra.Command {
 			// CLI line prints first and always; control-plane connectivity never blocks it.
 			tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 			fmt.Fprintf(tw, "burrow (CLI):\t%s\n", cliVersion())
+
+			// The agent's binary is the one that goes stale unnoticed after a CLI upgrade, so it gets
+			// its own line rather than being inferred from a failing agent session (issue #308).
+			agentPath, agentVer, agentErr := probeAgentVersion(cmd.Context())
+			fmt.Fprintf(tw, "burrow-agent:\t%s\n", agentValue(agentPath, agentVer, agentErr))
 
 			// Name the targeted context so the control-plane line is legible in both the success and
 			// failure cases. Best effort: a missing or unreadable kubeconfig leaves it empty, which
@@ -106,6 +192,12 @@ func newVersionCmd() *cobra.Command {
 			if latest, lerr := fetchLatestRelease(cmd.Context()); lerr == nil && latest != "" {
 				fmt.Fprintf(tw, "latest release:\t%s\n", latest)
 				hints = upgradeHints(cliVersion(), cpVer, latest)
+			}
+			// The agent-skew nudge needs no network, so it prints whether or not the release check
+			// succeeded, and it leads: a stale burrow-agent is a hard refusal on every agent call,
+			// while a lagging CLI or control plane is only an advisory.
+			if hint := agentSkewHint(cliVersion(), agentVer); hint != "" {
+				hints = append([]string{hint}, hints...)
 			}
 			// Flush the aligned block before the hints, which print at the left margin unaligned.
 			_ = tw.Flush()

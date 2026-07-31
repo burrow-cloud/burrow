@@ -68,12 +68,18 @@ tasks:
   # --- dev-cluster builds (stamp a version the upgrade + skew gates accept) ---
 
   dev-build:
-    desc: "DEV: install the burrow CLI stamped with DEV_VERSION so the skew gate accepts it (override DEV_VERSION=...)"
+    desc: "DEV: install the burrow CLI and burrow-agent stamped with DEV_VERSION so the skew gate accepts them (override DEV_VERSION=...)"
     cmds:
       # The CLI is stamped via ldflags (same var the release goreleaser build sets), so a
       # from-source `burrow` reports DEV_VERSION instead of the "dev" fallback the skew gate
       # (ADR-0039) would reject.
       - go install -ldflags "-X main.version={{.DEV_VERSION}}" ./cmd/burrow
+      # burrow-agent is a SEPARATE binary (ADR-0049 §1) with its own version var, and it is the one
+      # the agent actually runs. Installing only the CLI here left a from-source machine with a
+      # stale burrow-agent that every control-plane call refused, while `burrow version` looked
+      # fine — issue #308. Both binaries are stamped from one target so they cannot drift apart on
+      # a dev machine. The release path already stamps both (.goreleaser.yaml).
+      - go install -ldflags "-X main.version={{.DEV_VERSION}}" ./cmd/burrow-agent
 
   dev-image:
     desc: "DEV (Docker): build+push the burrowd image stamped with DEV_VERSION (needs KO_DOCKER_REPO; pairs with dev-build)"

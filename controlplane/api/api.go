@@ -1156,6 +1156,10 @@ type errorResponse struct {
 	// NeedsConfirmation is set on a guardrail that holds the operation for confirmation
 	// rather than refusing it: the caller may retry with confirm set (ADR-0020).
 	NeedsConfirmation bool `json:"needs_confirmation,omitempty"`
+	// ServerVersion is this control plane's release version, set on the client_too_old refusal so
+	// the client can name the version it must reach in its own, install-aware remedy (ADR-0039).
+	// The control plane cannot know how the caller was installed; the caller can.
+	ServerVersion string `json:"server_version,omitempty"`
 }
 
 func writeError(w http.ResponseWriter, status int, msg, code string) {

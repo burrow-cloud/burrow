@@ -73,6 +73,9 @@ func (e *exitError) Error() string { return "burrow-agent: exit " + strconv.Itoa
 // not-found app, an ambiguous environment, a transport failure — is a plain error the agent surfaces
 // and stops on.
 func classify(operation string, err error) outcome {
+	// A version-skew refusal arrives with the control plane's necessarily generic remedy; swap in one
+	// that names this binary and how to update it before the envelope is built (issue #308).
+	err = retargetTooOld(err)
 	var api *client.APIError
 	if errors.As(err, &api) {
 		switch {

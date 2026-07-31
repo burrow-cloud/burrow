@@ -17,12 +17,14 @@ import (
 
 // The client-version handshake (ADR-0039). burrowd is the compatibility anchor: it serves any
 // client within one minor of its own version and never hard-blocks on version difference alone. The
-// client sends its release version in X-Burrow-Client-Version (its transport sets the header); the
-// checks here turn genuine skew into an actionable error instead of an opaque failure:
+// client sends its release version in X-Burrow-Client-Version and its binary name in
+// X-Burrow-Client (its transport sets both headers); the checks here turn genuine skew into an
+// actionable error instead of an opaque failure:
 //
-//   - a client more than one minor behind burrowd is refused with a "too old, upgrade the CLI"
-//     error. A client that predates the handshake sends no header and is served, and a locally built
-//     (untagged) client is exempt — there is nothing for it to upgrade to.
+//   - a client more than one minor behind burrowd is refused with a "too old" error that names the
+//     remedy for THAT binary — see tooOldMessage. A client that predates the handshake sends no
+//     header and is served, and a locally built (untagged) client is exempt — there is nothing for it
+//     to upgrade to.
 //   - a request for a route this burrowd does not have — a newer client calling a feature the server
 //     lacks — becomes a structured "unknown operation, upgrade the control plane" error rather than a
 //     bare 404.
@@ -33,6 +35,46 @@ import (
 // clientVersionHeader carries the calling client's release version (ADR-0039). It rides alongside
 // X-Burrow-Token and, like it, survives the Kubernetes API-server proxy untouched.
 const clientVersionHeader = "X-Burrow-Client-Version"
+
+// clientNameHeader carries the calling binary's name — "burrow" (the human CLI) or "burrow-agent"
+// (the agent's scoped control channel, ADR-0049 §1) — alongside the version header. Burrow ships two
+// clients that install together but drift apart on disk, and the remedy for a stale one is NOT the
+// remedy for the other: telling someone whose burrow-agent is stale to upgrade the burrow CLI sends
+// them to a command they have very likely already run. A client that predates this header sends
+// nothing and gets the both-binaries wording below.
+const clientNameHeader = "X-Burrow-Client"
+
+// burrowAgentBinary and burrowCLIBinary are the two client names the messages below recognize; they
+// are the executable names, so what a refusal prints is what the user types.
+const (
+	burrowCLIBinary   = "burrow"
+	burrowAgentBinary = "burrow-agent"
+)
+
+// tooOldMessage renders the refusal for a client outside the compatibility window. Its whole job is
+// to name a remedy that fixes THE BINARY THAT WAS REFUSED, so it branches on the client name:
+//
+//   - burrow-agent: say so explicitly, and say "not just the CLI" — the failure this replaces is a
+//     user who had already run `brew upgrade burrow`, was told to run `brew upgrade burrow`, and
+//     concluded Burrow was broken. It also names the session restart, because a running agent keeps
+//     executing the binary it launched with.
+//   - burrow: the CLI remedy, unqualified.
+//   - unknown (a client older than the name header, which is exactly the stranded case being
+//     reported): name both binaries rather than guess at one.
+//
+// Both Homebrew and source remedies are given, because the control plane cannot know how the caller
+// was installed. A client that carries its own too-old handling narrows this further on the client
+// side, where the installed path is knowable.
+func tooOldMessage(clientName, clientVersion, serverVersion string) string {
+	switch clientName {
+	case burrowAgentBinary:
+		return fmt.Sprintf("your burrow-agent (%s) is too old for this control plane (%s); update the burrow-agent binary, not just the burrow CLI: they are separate binaries. `brew upgrade burrow` updates both, or from source `go install github.com/burrow-cloud/burrow/cmd/burrow-agent@%s`. Then restart your agent session so it runs the new binary.", clientVersion, serverVersion, serverVersion)
+	case burrowCLIBinary:
+		return fmt.Sprintf("your burrow CLI (%s) is too old for this control plane (%s); run `brew upgrade burrow` (or reinstall the CLI from the release archive) to update it.", clientVersion, serverVersion)
+	default:
+		return fmt.Sprintf("your burrow client (%s) is too old for this control plane (%s); burrow and burrow-agent are separate binaries and both must be current, so update the one that made this call. `brew upgrade burrow` updates both, or from source `go install github.com/burrow-cloud/burrow/cmd/burrow-agent@%s`. Then restart your agent session so it runs the new burrow-agent.", clientVersion, serverVersion, serverVersion)
+	}
+}
 
 // clientSupported reports whether a client of clientVersion is within the compatibility window of a
 // burrowd of serverVersion: the same minor or exactly one minor back. A newer client is also
@@ -78,8 +120,9 @@ func versionGate(serverVersion string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if cv := r.Header.Get(clientVersionHeader); cv != "" && !clientSupported(serverVersion, cv) {
 			writeJSON(w, http.StatusUpgradeRequired, errorResponse{
-				Error: fmt.Sprintf("your burrow client (%s) is too old for this control plane (%s); run `brew upgrade burrow` (or reinstall the CLI) to update it", cv, serverVersion),
-				Code:  "client_too_old",
+				Error:         tooOldMessage(r.Header.Get(clientNameHeader), cv, serverVersion),
+				Code:          "client_too_old",
+				ServerVersion: serverVersion,
 			})
 			return
 		}
@@ -126,7 +169,11 @@ func v1NotFound(serverVersion string, mux *http.ServeMux) http.Handler {
 			msg = fmt.Sprintf("this control plane (%s) does not recognize %s %s", serverVersion, r.Method, r.URL.Path)
 		}
 		if cv := r.Header.Get(clientVersionHeader); cv != "" {
-			msg += fmt.Sprintf("; if your burrow client (%s) is newer, ask an operator to run `burrow upgrade` to update the control plane", cv)
+			name := r.Header.Get(clientNameHeader)
+			if name != burrowCLIBinary && name != burrowAgentBinary {
+				name = "burrow client"
+			}
+			msg += fmt.Sprintf("; if your %s (%s) is newer, ask an operator to run `burrow upgrade` to update the control plane", name, cv)
 		}
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: msg, Code: "unknown_operation"})
 	})

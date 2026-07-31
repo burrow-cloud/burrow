@@ -41,13 +41,20 @@ func NewClient(baseURL, token string) *Client {
 
 // NewClientVersion is NewClient plus the ADR-0039 client-version handshake: it sends clientVersion
 // in X-Burrow-Client-Version on every request so burrowd can turn version skew into an actionable
-// error rather than an opaque one. An empty clientVersion behaves exactly like NewClient. It is the
-// constructor the direct-URL transport and the MCP server's direct path use, passing the binary's
-// own release version.
+// error rather than an opaque one. An empty clientVersion behaves exactly like NewClient. It sends
+// no client NAME; a binary that knows which of Burrow's two clients it is should use NewNamedClient
+// so a too-old refusal can name the binary the user must actually update.
 func NewClientVersion(baseURL, token, clientVersion string) *Client {
+	return NewNamedClient(baseURL, token, "", clientVersion)
+}
+
+// NewNamedClient is NewClientVersion plus the client-NAME half of the ADR-0039 handshake: it sends
+// clientName (ClientNameCLI or ClientNameAgent) in X-Burrow-Client alongside the version. It is the
+// constructor the direct-URL transport uses, passing the binary's own name and release version.
+func NewNamedClient(baseURL, token, clientName, clientVersion string) *Client {
 	hc := &http.Client{
 		Timeout:   60 * time.Second,
-		Transport: NewTokenRoundTripper(token, clientVersion, nil),
+		Transport: NewNamedTokenRoundTripper(token, clientName, clientVersion, nil),
 	}
 	return NewClientWithHTTP(baseURL, hc)
 }
@@ -75,7 +82,15 @@ type APIError struct {
 	// NeedsConfirmation is true when a guardrail held the operation for confirmation
 	// rather than refusing it: retrying with confirm set lets it proceed (ADR-0020).
 	NeedsConfirmation bool
+	// ServerVersion is the control plane's release version, set on a CodeClientTooOld refusal so a
+	// client can name the version it must reach in an install-aware remedy of its own (ADR-0039).
+	ServerVersion string
 }
+
+// CodeClientTooOld is the machine-readable code burrowd returns when it refuses a client outside
+// the compatibility window (ADR-0039). A client matches on it to replace the server's necessarily
+// generic remedy with one it can establish locally — which binary it is, and where it is installed.
+const CodeClientTooOld = "client_too_old"
 
 func (e *APIError) Error() string {
 	hint := ""
@@ -1294,6 +1309,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			Error             string `json:"error"`
 			Code              string `json:"code"`
 			NeedsConfirmation bool   `json:"needs_confirmation"`
+			ServerVersion     string `json:"server_version"`
 		}
 		_ = json.Unmarshal(data, &e)
 		msg := e.Error
@@ -1302,7 +1318,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 				msg = resp.Status
 			}
 		}
-		return &APIError{StatusCode: resp.StatusCode, Code: e.Code, Message: msg, NeedsConfirmation: e.NeedsConfirmation}
+		return &APIError{StatusCode: resp.StatusCode, Code: e.Code, Message: msg, NeedsConfirmation: e.NeedsConfirmation, ServerVersion: e.ServerVersion}
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {

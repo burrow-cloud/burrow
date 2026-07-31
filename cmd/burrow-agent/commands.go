@@ -56,7 +56,14 @@ func newRootCmd() *cobra.Command {
 		Long:          rootLong,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// `burrow-agent --version` reports the version this binary sends in the ADR-0039 handshake, so
+		// a stranded agent (and `burrow version`, which reads it) can see the skew rather than infer it
+		// from a refusal. It is deliberately a FLAG, not a subcommand: the agent surface is a closed
+		// allow-list (agent_surface_guard_test.go) and reporting your own version is not a capability.
+		// The template emits JSON like every other output this binary produces (ADR-0049 §1).
+		Version: agentVersion(),
 	}
+	root.SetVersionTemplate("{\"version\": \"{{.Version}}\"}\n")
 	root.AddCommand(
 		newAppsCmd(),
 		newStatusCmd(),

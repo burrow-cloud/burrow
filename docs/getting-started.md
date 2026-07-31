@@ -121,17 +121,32 @@ missing registry and this exact fix.
 
 ## Upgrade
 
-To update the CLI:
+Burrow installs two binaries: `burrow`, the CLI you run, and `burrow-agent`, the one your coding
+agent runs. Homebrew updates both together:
 
 ```sh
 brew update && brew upgrade burrow
 ```
+
+Then **restart your agent session** (for example `claude --resume`). A running session keeps
+executing the `burrow-agent` it started with, so it does not pick up the new one until it restarts.
 
 To roll the in-cluster Burrow forward after a new release:
 
 ```sh
 burrow cluster upgrade
 ```
+
+`burrow version` shows all three at once, so you can see if any of them has fallen behind:
+
+```
+burrow (CLI):     v0.13.0
+burrow-agent:     v0.13.0 (/opt/homebrew/bin/burrow-agent)
+control plane:    v0.13.0 (context "prod", namespace "burrow")
+```
+
+If you installed `burrow-agent` from source rather than with Homebrew, `brew upgrade burrow` will
+not replace it; update it with `go install github.com/burrow-cloud/burrow/cmd/burrow-agent@<version>`.
 
 `burrow cluster upgrade` updates the installed control plane in place and preserves your state.
 

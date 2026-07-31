@@ -31,6 +31,16 @@ func stubLatestRelease(t *testing.T, tag string, err error) {
 	t.Cleanup(func() { fetchLatestRelease = orig })
 }
 
+// stubAgentVersion replaces the probeAgentVersion seam for one test, so `burrow version` neither
+// looks for nor executes a real burrow-agent: what happens to be installed on the machine running
+// the tests must not decide what they assert.
+func stubAgentVersion(t *testing.T, path, version string, err error) {
+	t.Helper()
+	orig := probeAgentVersion
+	probeAgentVersion = func(context.Context) (string, string, error) { return path, version, err }
+	t.Cleanup(func() { probeAgentVersion = orig })
+}
+
 func TestCliVersionDevDefault(t *testing.T) {
 	// A test binary has no module release version, so the CLI reports the dev default.
 	if got := cliVersion(); got != "dev" {
@@ -81,6 +91,7 @@ func TestImageTag(t *testing.T) {
 
 func TestVersionCommandPrintsCLILine(t *testing.T) {
 	stubLatestRelease(t, "", errors.New("offline"))
+	stubAgentVersion(t, "", "", errors.New("not on PATH"))
 	var out, errb bytes.Buffer
 	// No reachable cluster in the test env, so the control-plane line is best-effort; the CLI
 	// line must always print and the command must succeed.
@@ -204,6 +215,7 @@ func TestUpgradeHints(t *testing.T) {
 // latest release of v0.7.2, and confirms the `burrow upgrade` hint names the right target.
 func TestVersionControlPlaneBehind(t *testing.T) {
 	stubLatestRelease(t, "v0.7.2", nil)
+	stubAgentVersion(t, "", "", errors.New("not on PATH"))
 	var hit bool
 	cluster := fakeBurrowdDeployment(&hit, "ghcr.io/burrow-cloud/burrowd:v0.7.0")
 	defer cluster.Close()
@@ -231,6 +243,7 @@ func TestVersionControlPlaneBehind(t *testing.T) {
 // prints the latest line and the reassurance, with no upgrade hint.
 func TestVersionAllCurrent(t *testing.T) {
 	stubLatestRelease(t, "v0.7.2", nil)
+	stubAgentVersion(t, "", "", errors.New("not on PATH"))
 	var hit bool
 	cluster := fakeBurrowdDeployment(&hit, "ghcr.io/burrow-cloud/burrowd:v0.7.2")
 	defer cluster.Close()
@@ -256,6 +269,7 @@ func TestVersionAllCurrent(t *testing.T) {
 // no latest line and no hint, so `burrow version` still works offline.
 func TestVersionFetchErrorSkipsReleaseLines(t *testing.T) {
 	stubLatestRelease(t, "", errors.New("offline"))
+	stubAgentVersion(t, "", "", errors.New("not on PATH"))
 	var hit bool
 	cluster := fakeBurrowdDeployment(&hit, "ghcr.io/burrow-cloud/burrowd:v0.7.0")
 	defer cluster.Close()
@@ -297,6 +311,7 @@ func fakeBurrowdDeployment(hit *bool, image string) *httptest.Server {
 // probe reports prod's burrowd image and names prod, not the current context (staging).
 func TestVersionContextFlagSelectsCluster(t *testing.T) {
 	stubLatestRelease(t, "", errors.New("offline"))
+	stubAgentVersion(t, "", "", errors.New("not on PATH"))
 	var stagingHit, prodHit bool
 	staging := fakeBurrowdDeployment(&stagingHit, "ghcr.io/burrow-cloud/burrowd:v0.5.0")
 	prod := fakeBurrowdDeployment(&prodHit, "ghcr.io/burrow-cloud/burrowd:v0.6.0")
@@ -325,6 +340,7 @@ func TestVersionContextFlagSelectsCluster(t *testing.T) {
 // line that names the current context and carries no full URL, with the command still succeeding.
 func TestVersionUnreachableCluster(t *testing.T) {
 	stubLatestRelease(t, "", errors.New("offline"))
+	stubAgentVersion(t, "", "", errors.New("not on PATH"))
 	// A current context "do-nyc1-prod" pointing at a non-resolvable host: the probe fails fast on
 	// DNS without needing a real cluster.
 	cfg := twoContextConfig("https://burrow-version-unreachable.invalid:6443", "https://unused.invalid:6443")
@@ -343,5 +359,130 @@ func TestVersionUnreachableCluster(t *testing.T) {
 	}
 	if strings.Contains(s, "https://") || strings.Contains(s, `Get "`) {
 		t.Errorf("version output = %q, leaked the dialed URL", s)
+	}
+}
+
+// TestAgentValue covers the three renderings of the burrow-agent line. The installed PATH is part of
+// the value on purpose: `burrow` and `burrow-agent` can come from different prefixes (a go-installed
+// copy in ~/go/bin shadowing a brewed one), and which copy is first on PATH is exactly the thing a
+// stranded user cannot see (issue #308).
+func TestAgentValue(t *testing.T) {
+	cases := []struct {
+		name             string
+		path, agentVer   string
+		err              error
+		want, wantAbsent string
+	}{
+		{
+			name:     "found reports version and path",
+			path:     "/opt/homebrew/bin/burrow-agent",
+			agentVer: "v0.13.0",
+			want:     "v0.13.0 (/opt/homebrew/bin/burrow-agent)",
+		},
+		{
+			name: "present but unreadable still names where it is",
+			path: "/Users/dev/go/bin/burrow-agent",
+			err:  errors.New("predates --version"),
+			want: "unknown version (/Users/dev/go/bin/burrow-agent)",
+		},
+		{
+			name: "absent says how to get it",
+			err:  errors.New("not found"),
+			want: "not found on PATH",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := agentValue(tc.path, tc.agentVer, tc.err)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("agentValue = %q, want substring %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAgentSkewHint pins the ACTIVE half of keeping the two binaries in step: `burrow version` names
+// the drift before the control plane has to refuse an agent call to reveal it, and it names both
+// remedies because the CLI cannot know how burrow-agent was installed. A local build on either side
+// is exempt — there is nothing to upgrade to, matching the ADR-0039 gate and the existing CLI hint.
+func TestAgentSkewHint(t *testing.T) {
+	const pseudo = "v0.0.0-20260101120000-abcdefabcdef"
+	cases := []struct {
+		name             string
+		cliVer, agentVer string
+		wantHint         bool
+	}{
+		{name: "agent a minor behind", cliVer: "v0.13.0", agentVer: "v0.12.4", wantHint: true},
+		{name: "agent far behind", cliVer: "v0.13.0", agentVer: "v0.1.0", wantHint: true},
+		{name: "same minor is fine", cliVer: "v0.13.1", agentVer: "v0.13.0"},
+		{name: "agent ahead is not this hint's business", cliVer: "v0.12.0", agentVer: "v0.13.0"},
+		{name: "a dev CLI has nothing to compare", cliVer: "dev", agentVer: "v0.1.0"},
+		{name: "a dev agent has nothing to upgrade to", cliVer: "v0.13.0", agentVer: "dev"},
+		{name: "a pseudo-version agent is a source build", cliVer: "v0.13.0", agentVer: pseudo},
+		{name: "a pseudo-version CLI is a source build", cliVer: pseudo, agentVer: "v0.1.0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := agentSkewHint(tc.cliVer, tc.agentVer)
+			if !tc.wantHint {
+				if got != "" {
+					t.Errorf("agentSkewHint(%q, %q) = %q, want no hint", tc.cliVer, tc.agentVer, got)
+				}
+				return
+			}
+			for _, want := range []string{
+				"burrow-agent", tc.agentVer, tc.cliVer,
+				"separate binaries",
+				"brew upgrade burrow",
+				"go install github.com/burrow-cloud/burrow/cmd/burrow-agent@" + tc.cliVer,
+				"Restart your agent session",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("agentSkewHint(%q, %q) = %q\n  want substring %q", tc.cliVer, tc.agentVer, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestVersionReportsTheAgentBinary confirms `burrow version` prints the agent's own line. Before it
+// did, a CLI upgrade could leave burrow-agent stale with nothing in the CLI's output to show it, and
+// the first symptom was every agent call being refused (issue #308).
+func TestVersionReportsTheAgentBinary(t *testing.T) {
+	stubLatestRelease(t, "", errors.New("offline"))
+	stubAgentVersion(t, "/opt/homebrew/bin/burrow-agent", "v0.7.0", nil)
+	var hit bool
+	cluster := fakeBurrowdDeployment(&hit, "ghcr.io/burrow-cloud/burrowd:v0.7.0")
+	defer cluster.Close()
+	path := writeKubeconfig(t, twoContextConfig(cluster.URL, "https://unused.invalid:6443"))
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"version", "--kubeconfig", path}, &out, &errb); err != nil {
+		t.Fatalf("version: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	for _, want := range []string{"burrow-agent:", "v0.7.0", "/opt/homebrew/bin/burrow-agent"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("version output = %q, want substring %q", s, want)
+		}
+	}
+}
+
+// TestVersionReportsAMissingAgentBinary confirms a machine with no burrow-agent gets a line saying
+// so, rather than silence that reads as "everything is installed".
+func TestVersionReportsAMissingAgentBinary(t *testing.T) {
+	stubLatestRelease(t, "", errors.New("offline"))
+	stubAgentVersion(t, "", "", errors.New("exec: burrow-agent: not found"))
+	var hit bool
+	cluster := fakeBurrowdDeployment(&hit, "ghcr.io/burrow-cloud/burrowd:v0.7.0")
+	defer cluster.Close()
+	path := writeKubeconfig(t, twoContextConfig(cluster.URL, "https://unused.invalid:6443"))
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"version", "--kubeconfig", path}, &out, &errb); err != nil {
+		t.Fatalf("version: %v\n%s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "burrow-agent:") || !strings.Contains(out.String(), "not found on PATH") {
+		t.Errorf("version output = %q, want the missing-agent line", out.String())
 	}
 }

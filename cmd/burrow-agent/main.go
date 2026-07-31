@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/spf13/pflag"
@@ -32,9 +33,30 @@ import (
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
-// version is the Burrow version this binary reports to the control plane (ADR-0039), sent as
-// X-Burrow-Client-Version through agentconn.
-var version = "v0.1.0"
+// version is the Burrow release version this binary reports to the control plane (ADR-0039), sent as
+// X-Burrow-Client-Version through agentconn. It is stamped at build time with
+// `-ldflags "-X main.version=<tag>"` (goreleaser injects the release tag on a tagged build) and is
+// EMPTY for a local `go build`, a `go install …@version`, or a test binary — exactly like the `burrow`
+// CLI's own `version` var. It must not carry a hard-coded release default: an unstamped build that
+// claims a real old tag is refused by the skew gate as an ancient release, when the truth is that it
+// is a source build with nothing to upgrade to.
+var version string
+
+// agentVersion returns this binary's release version: the ldflags-stamped tag for a release build,
+// otherwise the main-module version from the build info — set when it is installed with
+// `go install …@version` or a Go pseudo-version for a local source build — or "dev" for an
+// unversioned build. It mirrors the `burrow` CLI's cliVersion() so both binaries report a source
+// build the same way, and so the ADR-0039 skew gate exempts both alike: a pseudo-version or "dev" is
+// served rather than refused, because there is nothing for the user to upgrade to.
+func agentVersion() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return "dev"
+}
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -46,7 +68,9 @@ func main() {
 		if errors.As(err, &ee) {
 			os.Exit(ee.code)
 		}
-		fmt.Fprintln(os.Stderr, "burrow-agent:", err)
+		// A read-only verb surfaces its error here rather than through an outcome envelope, so the
+		// version-skew retarget has to run on this path too (issue #308).
+		fmt.Fprintln(os.Stderr, "burrow-agent:", retargetTooOld(err))
 		os.Exit(1)
 	}
 }
@@ -98,7 +122,8 @@ func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Clien
 		factory, err := agentconn.NewFactory(ctx, agentconn.Config{
 			ControlPlaneURL: o.controlPlane,
 			Token:           o.token,
-			Version:         version,
+			Name:            client.ClientNameAgent,
+			Version:         agentVersion(),
 		}, stderr)
 		if err != nil {
 			return nil, "", err
@@ -136,7 +161,8 @@ func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Clien
 		Kubeconfig:      o.kubeconfig,
 		Namespace:       cpNamespace,
 		Strict:          strict,
-		Version:         version,
+		Name:            client.ClientNameAgent,
+		Version:         agentVersion(),
 	}, stderr)
 	if err != nil {
 		return nil, "", err

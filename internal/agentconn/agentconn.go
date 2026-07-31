@@ -32,14 +32,15 @@ import (
 // Config configures the agent-layer client factory. ControlPlaneURL (with Token) names a single
 // control plane directly and outranks everything; Kubeconfig is an explicit kubeconfig used for every
 // context; Namespace is the control-plane namespace burrowd runs in; Strict refuses the ambient
-// fallback for a context with no scoped credential; Version is forwarded as X-Burrow-Client-Version
-// (ADR-0039).
+// fallback for a context with no scoped credential; Name and Version are forwarded as
+// X-Burrow-Client and X-Burrow-Client-Version (ADR-0039).
 type Config struct {
 	ControlPlaneURL string
 	Token           string
 	Kubeconfig      string
 	Namespace       string
 	Strict          bool
+	Name            string
 	Version         string
 }
 
@@ -68,7 +69,7 @@ func NewFactory(ctx context.Context, cfg Config, stderr io.Writer) (ClientForCon
 		if cfg.Token == "" {
 			return nil, errors.New("a control-plane token is required with a control-plane URL")
 		}
-		c := client.NewClientVersion(cfg.ControlPlaneURL, cfg.Token, cfg.Version)
+		c := client.NewNamedClient(cfg.ControlPlaneURL, cfg.Token, cfg.Name, cfg.Version)
 		return func(string) (*client.Client, error) { return c, nil }, nil
 	}
 
@@ -84,7 +85,9 @@ func NewFactory(ctx context.Context, cfg Config, stderr io.Writer) (ClientForCon
 		if err != nil {
 			return nil, err
 		}
-		opts.ClientVersion = cfg.Version // ADR-0039: forward this binary's version as X-Burrow-Client-Version
+		// ADR-0039: forward this binary's name and version as X-Burrow-Client / X-Burrow-Client-Version.
+		opts.ClientName = cfg.Name
+		opts.ClientVersion = cfg.Version
 		// Route through the same kubeconfig transport the `burrow` CLI uses, so both binaries share
 		// one seam (ADR-0045). The transport stays credential-free here: it reads the burrowd API token
 		// from the install Secret over the human's proxy, holding no cluster-operating credential of

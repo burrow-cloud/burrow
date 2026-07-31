@@ -137,3 +137,131 @@ func TestVersionHandshakePermissiveWithoutServerVersion(t *testing.T) {
 		t.Errorf("status = %d, want 200 (no server version → permissive handshake); body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+// doClient is doVersion plus the client-NAME header, so a test can drive a request as a specific
+// Burrow binary (ADR-0039). A client that predates the name header is expressed as an empty name.
+func doClient(h http.Handler, method, path, tok, clientName, clientVersion, body string) *httptest.ResponseRecorder {
+	var br io.Reader
+	if body != "" {
+		br = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, br)
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	if clientName != "" {
+		req.Header.Set("X-Burrow-Client", clientName)
+	}
+	if clientVersion != "" {
+		req.Header.Set("X-Burrow-Client-Version", clientVersion)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestTooOldNamesTheRemedyForTheRefusedBinary is the regression pin for issue #308.
+//
+// The reported failure was not the refusal: skew is expected and ADR-0039 governs it. The failure
+// was that the refusal sent the user somewhere that could not fix it. `burrow` and `burrow-agent`
+// are two binaries (ADR-0049 §1); when the stale one was burrow-agent, the message still read "your
+// burrow client ... run `brew upgrade burrow` (or reinstall the CLI)", so a user who had just
+// upgraded the CLI was told to upgrade the CLI and concluded Burrow was broken.
+//
+// This asserts the message names the remedy for the binary that was ACTUALLY refused, in all three
+// cases the control plane can be in: it knows the caller is burrow-agent, it knows the caller is the
+// CLI, or (a client older than the name header — the reported case) it knows neither and must name
+// both.
+func TestTooOldNamesTheRemedyForTheRefusedBinary(t *testing.T) {
+	h, _, _ := newAPIVersion(t, "v0.9.1")
+
+	cases := []struct {
+		name       string
+		clientName string
+		want       []string
+		notWant    []string
+	}{
+		{
+			name:       "burrow-agent is named, along with the command that updates IT",
+			clientName: "burrow-agent",
+			want: []string{
+				"burrow-agent",
+				// The line that stops the user repeating what they already did.
+				"not just the burrow CLI",
+				// A source install is not reachable by brew, so the message must carry both remedies.
+				"go install github.com/burrow-cloud/burrow/cmd/burrow-agent@v0.9.1",
+				// Updating the file is half the fix: a running session keeps the old binary.
+				"restart your agent session",
+			},
+		},
+		{
+			name:       "the CLI gets the CLI remedy and is not told about the agent binary",
+			clientName: "burrow",
+			want:       []string{"your burrow CLI", "brew upgrade burrow"},
+			notWant:    []string{"burrow-agent", "restart your agent session"},
+		},
+		{
+			name:       "a client too old to name itself is told both binaries must be current",
+			clientName: "",
+			want: []string{
+				"burrow and burrow-agent are separate binaries",
+				"brew upgrade burrow",
+				"go install github.com/burrow-cloud/burrow/cmd/burrow-agent@v0.9.1",
+				"restart your agent session",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doClient(h, "GET", "/v1/apps", token, tc.clientName, "v0.7.0", "")
+			if rec.Code != http.StatusUpgradeRequired {
+				t.Fatalf("status = %d, want 426; body = %s", rec.Code, rec.Body.String())
+			}
+			var e struct {
+				Error         string `json:"error"`
+				Code          string `json:"code"`
+				ServerVersion string `json:"server_version"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if e.Code != "client_too_old" {
+				t.Errorf("code = %q, want client_too_old", e.Code)
+			}
+			// The client renders its own install-aware remedy from this, so it has to be on the wire.
+			if e.ServerVersion != "v0.9.1" {
+				t.Errorf("server_version = %q, want v0.9.1 (the client needs the target version)", e.ServerVersion)
+			}
+			for _, want := range append([]string{"v0.7.0", "v0.9.1"}, tc.want...) {
+				if !strings.Contains(e.Error, want) {
+					t.Errorf("error %q\n  want substring %q", e.Error, want)
+				}
+			}
+			for _, no := range tc.notWant {
+				if strings.Contains(e.Error, no) {
+					t.Errorf("error %q\n  should not contain %q", e.Error, no)
+				}
+			}
+		})
+	}
+}
+
+// TestUnknownOperationNamesTheClientBinary confirms the newer-client-against-older-server message
+// also names which binary is ahead, so an operator reading a relayed error knows what is installed
+// where (ADR-0039).
+func TestUnknownOperationNamesTheClientBinary(t *testing.T) {
+	h, _, _ := newAPIVersion(t, "v0.9.1")
+
+	rec := doClient(h, "POST", "/v1/frobnicate", token, "burrow-agent", "v0.10.0", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+	}
+	var e errBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(e.Error, "your burrow-agent (v0.10.0)") {
+		t.Errorf("error %q, want it to name the burrow-agent client", e.Error)
+	}
+}

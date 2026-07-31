@@ -340,7 +340,7 @@ func (o *commonOpts) transport(tgt target) (client.Transport, error) {
 		if o.token == "" {
 			return nil, errors.New("--token (or BURROW_API_TOKEN) is required with --control-plane")
 		}
-		return client.DirectTransport{BaseURL: o.controlPlane, Token: o.token, Version: cliVersion()}, nil
+		return client.DirectTransport{BaseURL: o.controlPlane, Token: o.token, Name: client.ClientNameCLI, Version: cliVersion()}, nil
 	}
 	return connect.KubeconfigTransport{Options: o.connectOptions(tgt)}, nil
 }
@@ -358,7 +358,7 @@ func (o *commonOpts) connectOptions(tgt target) connect.Options {
 		kubeconfig = tgt.agentKubeconfig
 		kubeContext = tgt.agentContext
 	}
-	return connect.Options{Kubeconfig: kubeconfig, Context: kubeContext, Namespace: tgt.controlPlaneNamespace, ClientVersion: cliVersion()}
+	return connect.Options{Kubeconfig: kubeconfig, Context: kubeContext, Namespace: tgt.controlPlaneNamespace, ClientName: client.ClientNameCLI, ClientVersion: cliVersion()}
 }
 
 // emit prints v as indented JSON when asJSON, otherwise the human-readable line.

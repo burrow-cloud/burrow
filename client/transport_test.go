@@ -5,6 +5,7 @@ package client_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -122,5 +123,75 @@ func TestDirectTransportConnect(t *testing.T) {
 	}
 	if gotVersion != "v9.9.9" {
 		t.Errorf("X-Burrow-Client-Version = %q, want v9.9.9 (the DirectTransport Version, ADR-0039)", gotVersion)
+	}
+}
+
+// TestNamedTokenRoundTripperSendsClientName confirms the client-NAME half of the ADR-0039 handshake
+// rides X-Burrow-Client, and that an unnamed client omits the header rather than sending an empty
+// one. burrowd needs the name because Burrow ships two client binaries whose remedies differ: the
+// refusal for a stale burrow-agent must not send the user to `brew upgrade burrow` as if the CLI
+// were at fault (issue #308).
+func TestNamedTokenRoundTripperSendsClientName(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		clientName string
+		present    bool
+	}{
+		{name: "the agent binary names itself", clientName: client.ClientNameAgent, present: true},
+		{name: "the CLI names itself", clientName: client.ClientNameCLI, present: true},
+		{name: "an unnamed client omits the header", clientName: "", present: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			var present bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("X-Burrow-Client")
+				_, present = r.Header["X-Burrow-Client"]
+				_, _ = w.Write([]byte("{}"))
+			}))
+			defer srv.Close()
+
+			hc := &http.Client{Transport: client.NewNamedTokenRoundTripper("tok", tc.clientName, "v1.2.3", nil)}
+			c := client.NewClientWithHTTP(srv.URL, hc)
+			if _, err := c.ListEnvironments(context.Background()); err != nil {
+				t.Fatalf("ListEnvironments: %v", err)
+			}
+			if got != tc.clientName {
+				t.Errorf("X-Burrow-Client = %q, want %q", got, tc.clientName)
+			}
+			if present != tc.present {
+				t.Errorf("X-Burrow-Client present = %v, want %v", present, tc.present)
+			}
+		})
+	}
+	// The names are the executable names, so a message that prints one prints what the user types.
+	if client.ClientNameCLI != "burrow" || client.ClientNameAgent != "burrow-agent" {
+		t.Errorf("client names = %q/%q, want the executable names burrow/burrow-agent",
+			client.ClientNameCLI, client.ClientNameAgent)
+	}
+}
+
+// TestAPIErrorCarriesServerVersion confirms the control plane's release version on a client_too_old
+// refusal reaches the caller as a field, not only inside prose. A client rewrites the remedy locally
+// (it alone knows how it was installed) and needs the target version to name in that remedy.
+func TestAPIErrorCarriesServerVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_, _ = w.Write([]byte(`{"error":"too old","code":"client_too_old","server_version":"v0.13.0"}`))
+	}))
+	defer srv.Close()
+
+	c := client.NewNamedClient(srv.URL, "tok", client.ClientNameAgent, "v0.1.0")
+	_, err := c.ListEnvironments(context.Background())
+	var api *client.APIError
+	if !errors.As(err, &api) {
+		t.Fatalf("err = %v, want an *APIError", err)
+	}
+	if api.Code != client.CodeClientTooOld {
+		t.Errorf("code = %q, want %q", api.Code, client.CodeClientTooOld)
+	}
+	if api.ServerVersion != "v0.13.0" {
+		t.Errorf("ServerVersion = %q, want v0.13.0", api.ServerVersion)
 	}
 }

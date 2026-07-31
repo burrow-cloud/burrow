@@ -197,6 +197,15 @@ read live and discarded that is an accepted trade, and it is not one for a value
 environment where it would sit in a Kubernetes object. The hook gets the reason and Burrow's own
 replica summary; the app's output stays in `burrow app logs`.
 
+**The deploy waits, so a slow verdict is a slow deploy call.** The wait is bounded by
+`deploy.settle_timeout` (5m by default) and ends early on any blocking condition, but a rollout
+wedged for a reason no pod reports takes the whole bound. `burrow` connects through the API-server
+proxy with no client-side timeout and simply waits; `burrow-agent` against a direct control-plane URL
+has a 60-second HTTP timeout, so on that path a long wait is reported to the caller as a timeout
+while burrowd carries on. Nothing is lost either way — the release is recorded and the image is live
+before the wait starts, and the hook still runs — but the caller may not see the result. Lower
+`deploy.settle_timeout` for that environment if it matters.
+
 **A failed `post-deploy` hook undoes nothing.** By the time it runs the image is live and the release
 is recorded, so there is nothing left to abort — the failure is audited and comes back as a hint on
 an otherwise successful deploy. **Burrow never rolls back by itself**

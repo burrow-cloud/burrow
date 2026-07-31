@@ -85,9 +85,6 @@ func TestDefaultPolicyIsValid(t *testing.T) {
 	if err := p.Validate(); err != nil {
 		t.Fatalf("DefaultPolicy() is invalid: %v", err)
 	}
-	if p.MaxReplicas <= 0 {
-		t.Errorf("DefaultPolicy().MaxReplicas = %d, want positive", p.MaxReplicas)
-	}
 	if p.disposition("", GuardrailScaleToZero) != DispositionConfirm {
 		t.Errorf("DefaultPolicy() should hold scale-to-zero for confirmation by default")
 	}
@@ -121,18 +118,21 @@ func TestDefaultPolicyDeniesIrreversibleDeletes(t *testing.T) {
 		t.Errorf("app.delete should be env-scopable, so its deny can be relaxed per environment")
 	}
 	if EnvScopable(GuardrailDNSDelete) {
-		t.Errorf("dns.delete is expected to be cluster-wide; widening the prefix is ADR-0068's change, not this one's")
+		t.Errorf("dns.delete is expected to be cluster-wide: its operation carries no environment for an override to be read against")
 	}
 }
 
+// TestPolicyValidate covers what a Policy can now be wrong about. Since ADR-0068 §2 it carries
+// dispositions and nothing else — the numbers moved to OperationalConfig — so an invalid
+// disposition is the only incoherence left, and an empty policy is valid rather than under-filled.
 func TestPolicyValidate(t *testing.T) {
-	if err := (Policy{MaxReplicas: 0}).Validate(); err == nil {
-		t.Errorf("MaxReplicas 0 should be invalid")
+	if err := (Policy{}).Validate(); err != nil {
+		t.Errorf("an empty policy should be valid (every guardrail reads as its default), got %v", err)
 	}
-	if err := (Policy{MaxReplicas: -3}).Validate(); err == nil {
-		t.Errorf("negative MaxReplicas should be invalid")
+	if err := (Policy{}.With(GuardrailAppDelete, Disposition("maybe"))).Validate(); err == nil {
+		t.Errorf("an invalid disposition should be rejected")
 	}
-	if err := (Policy{MaxReplicas: 10}).Validate(); err != nil {
-		t.Errorf("MaxReplicas 10 should be valid, got %v", err)
+	if err := (Policy{}.With(GuardrailAppDelete, DispositionDeny)).Validate(); err != nil {
+		t.Errorf("a valid disposition should pass, got %v", err)
 	}
 }

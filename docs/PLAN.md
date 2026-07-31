@@ -151,7 +151,7 @@ Released as **v0.8.0**. Application autoscaling, plus a batch of least-privilege
 hardening.
 
 - **Autoscaling** — `burrow app autoscale <app>` applies an autoscaling/v2 HorizontalPodAutoscaler
-  (1..10 replicas at 80% CPU by default), its max bounded by the replica-ceiling guardrail;
+  (1..10 replicas at 80% CPU by default), its max bounded by the replica ceiling an operator sets;
   `app autoscale <app> off` removes it, and an `app.autoscale` guardrail gates it. Warns when
   metrics-server is absent.
 - **Scoped agent credential** ([ADR-0038](adr/0038-scoped-agent-credential.md)) — install mints a

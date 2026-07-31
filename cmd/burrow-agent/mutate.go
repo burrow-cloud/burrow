@@ -68,10 +68,15 @@ func (e *exitError) Error() string { return "burrow-agent: exit " + strconv.Itoa
 
 // classify turns an operation error into the right non-executed outcome. It reuses the control plane's
 // own classification rather than reinventing it: the API surfaces a held operation as an *APIError with
-// NeedsConfirmation set (the disposition-confirm hold, ADR-0020), and a guardrail denial as an
-// *APIError whose Code is a known guardrail (controlplane.KnownGuardrail). Everything else — a
-// not-found app, an ambiguous environment, a transport failure — is a plain error the agent surfaces
-// and stops on.
+// NeedsConfirmation set (the disposition-confirm hold, ADR-0020), and a refusal as an *APIError whose
+// Code names either a known guardrail (controlplane.KnownGuardrail) or a known operational limit
+// (controlplane.KnownLimit). Everything else — a not-found app, an ambiguous environment, a transport
+// failure — is a plain error the agent surfaces and stops on.
+//
+// A limit and a guardrail deny are the same OUTCOME here and different things underneath (ADR-0068
+// §2): both are refusals no --confirm opens, so both exit 3, but a deny is a disposition an operator
+// can relax while a limit is a bound they can only raise. The message the control plane wrote names
+// which, and names the command that changes it, so the agent has something concrete to relay.
 func classify(operation string, err error) outcome {
 	// A version-skew refusal arrives with the control plane's necessarily generic remedy; swap in one
 	// that names this binary and how to update it before the envelope is built (issue #308).
@@ -88,7 +93,8 @@ func classify(operation string, err error) outcome {
 				ConfirmRequired: true,
 				Hint:            "relay this to the human; re-run with --confirm ONLY after they approve. Never self-confirm.",
 			}
-		case controlplane.KnownGuardrail(controlplane.GuardrailCode(api.Code)):
+		case controlplane.KnownGuardrail(controlplane.GuardrailCode(api.Code)),
+			controlplane.KnownLimit(controlplane.LimitCode(api.Code)):
 			return outcome{
 				Outcome:   outcomeDenied,
 				Operation: operation,
@@ -326,7 +332,7 @@ func newAutoscaleCmd() *cobra.Command {
 		Short: "Configure autoscaling for an app, or turn it off",
 		Long: "Configure a HorizontalPodAutoscaler on the app's Deployment so it scales between --min and\n" +
 			"--max replicas to hold a target CPU (and optional memory) utilization. The max is bounded by\n" +
-			"the replica-ceiling guardrail. Autoscaling needs metrics-server; without it the autoscaler is\n" +
+			"the replica ceiling, which an operator sets. Autoscaling needs metrics-server; without it the autoscaler is\n" +
 			"set but will not scale until it is installed (the result carries a warning).\n\n" +
 			"Run \"burrow-agent autoscale <app> off\" to remove autoscaling (idempotent).\n\n" +
 			"A guardrail may hold this for confirmation or deny it. When held, the outcome says so — relay\n" +
@@ -352,7 +358,7 @@ func newAutoscaleCmd() *cobra.Command {
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().Int32Var(&min, "min", 1, "minimum replicas")
-	cmd.Flags().Int32Var(&max, "max", 10, "maximum replicas (bounded by the replica-ceiling guardrail)")
+	cmd.Flags().Int32Var(&max, "max", 10, "maximum replicas (bounded by the replica ceiling an operator sets)")
 	cmd.Flags().Int32Var(&cpu, "cpu", 80, "target average CPU utilization percent")
 	cmd.Flags().Int32Var(&memory, "memory", 0, "target average memory utilization percent (0 leaves it unset)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an autoscale a guardrail holds for confirmation (supply only after the human approves)")

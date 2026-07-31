@@ -375,7 +375,7 @@ func newAutoscaleCmd() *cobra.Command {
 		Short: "Autoscale an app, or turn autoscaling off",
 		Long: "autoscale sets up a HorizontalPodAutoscaler on the app's Deployment so it scales\n" +
 			"between --min and --max replicas to hold a target CPU (and optional memory)\n" +
-			"utilization. The max is bounded by the replica-ceiling guardrail. Autoscaling needs\n" +
+			"utilization. The max is bounded by the replica ceiling an operator sets. Autoscaling needs\n" +
 			"metrics-server; without it the autoscaler is set but will not scale until it is\n" +
 			"installed.\n\n" +
 			"Run \"burrow app autoscale <app> off\" to remove autoscaling.",
@@ -408,7 +408,7 @@ func newAutoscaleCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().Int32Var(&min, "min", 1, "minimum replicas")
-	cmd.Flags().Int32Var(&max, "max", 10, "maximum replicas (bounded by the replica-ceiling guardrail)")
+	cmd.Flags().Int32Var(&max, "max", 10, "maximum replicas (bounded by the replica ceiling an operator sets)")
 	cmd.Flags().Int32Var(&cpu, "cpu", 80, "target average CPU utilization percent")
 	cmd.Flags().Int32Var(&memory, "memory", 0, "target average memory utilization percent (0 leaves it unset)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")

@@ -263,6 +263,23 @@ var catalogue = []Capability{
 			"dispositions this command reports are exactly the limits the agent cannot move",
 		Command: "burrow guard set [--env <name>] <code> <allow|confirm|deny>",
 	},
+	// Operational limits. ADR-0068 §4 puts SETTING a limit beside `guard set` in ADR-0065's tier 1,
+	// and for the identical reason: a bound the agent can raise is not a bound. The replica ceiling
+	// used to be a guardrail whose disposition the operator set, which meant it could be turned off
+	// but not turned up; it is now a number a human sets, and the number lives behind this command.
+	//
+	// Only the WRITE is held back. Reading a limit is harmless and useful — an agent that could see
+	// the ceiling could say it was about to exceed one — but ADR-0068 leaves the shape of that read
+	// undecided, so nothing here is on the agent surface yet.
+	{
+		Surface: Operator,
+		Path:    "cluster config set",
+		What:    "sets an operational limit (e.g. the replica ceiling), for the cluster or for one environment",
+		Why: "a bound the agent can raise is not a bound (ADR-0068 §4); a limit is a number a human " +
+			"chooses, and exceeding it is refused rather than held for a confirmation the agent could " +
+			"satisfy itself",
+		Command: "burrow cluster config set [--env <name>] <limit> <value>",
+	},
 	{
 		Surface: Operator,
 		Path:    "secret set",

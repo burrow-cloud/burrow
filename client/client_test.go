@@ -154,6 +154,47 @@ func TestClientErrorMapping(t *testing.T) {
 	}
 }
 
+// TestClientLimits covers the operational-configuration calls (ADR-0068): the list reads
+// /v1/config, and a set PUTs the value under the limit's code with the environment as a query
+// parameter — the same shape the guardrail calls use, because the two resolve the same way.
+func TestClientLimits(t *testing.T) {
+	var gotMethod, gotPath, gotQuery, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_ = json.NewEncoder(w).Encode(map[string]any{"limits": []map[string]any{
+			{"code": "app.replica_ceiling", "value": "200", "kind": "count", "scope": "environment", "env_scoped": true, "default": "50"},
+		}})
+	}))
+	defer srv.Close()
+	c := client.NewClient(srv.URL, "tok")
+
+	limits, err := c.Limits(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Limits: %v", err)
+	}
+	if gotMethod != "GET" || gotPath != "/v1/config" || gotQuery != "" {
+		t.Errorf("list request = %s %s?%s, want GET /v1/config", gotMethod, gotPath, gotQuery)
+	}
+	if len(limits) != 1 || limits[0].Code != "app.replica_ceiling" || limits[0].Value != "200" {
+		t.Errorf("limits = %+v", limits)
+	}
+	if limits[0].Scope != "environment" || !limits[0].EnvScoped || limits[0].Default != "50" {
+		t.Errorf("limit tier fields = %+v, want scope environment, env-scoped, default 50", limits[0])
+	}
+
+	if _, err := c.SetLimit(context.Background(), "staging", "app.replica_ceiling", "200"); err != nil {
+		t.Fatalf("SetLimit: %v", err)
+	}
+	if gotMethod != "PUT" || gotPath != "/v1/config/app.replica_ceiling" || gotQuery != "env=staging" {
+		t.Errorf("set request = %s %s?%s", gotMethod, gotPath, gotQuery)
+	}
+	if !strings.Contains(gotBody, `"value":"200"`) {
+		t.Errorf("set body = %s, want it to carry the value", gotBody)
+	}
+}
+
 func TestClientLogsTail(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

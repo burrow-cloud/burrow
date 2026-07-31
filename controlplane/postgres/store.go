@@ -278,6 +278,47 @@ ON CONFLICT (code) DO UPDATE SET disposition = EXCLUDED.disposition`
 	return nil
 }
 
+// OperationalConfig returns every stored operational limit value, keyed by the code it was set
+// under — a bare code for a cluster value, `<env>.<code>` for an environment one (ADR-0068 §1). An
+// empty table yields an empty configuration, in which every limit resolves to its built-in default.
+func (s *Store) OperationalConfig(ctx context.Context) (controlplane.OperationalConfig, error) {
+	const q = `SELECT code, value FROM operational_config`
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return controlplane.OperationalConfig{}, fmt.Errorf("postgres: operational config: %w", err)
+	}
+	defer rows.Close()
+
+	values := map[controlplane.LimitCode]string{}
+	for rows.Next() {
+		var code, value string
+		if err := rows.Scan(&code, &value); err != nil {
+			return controlplane.OperationalConfig{}, fmt.Errorf("postgres: operational config: %w", err)
+		}
+		values[controlplane.LimitCode(code)] = value
+	}
+	if err := rows.Err(); err != nil {
+		return controlplane.OperationalConfig{}, fmt.Errorf("postgres: operational config: %w", err)
+	}
+	return controlplane.OperationalConfig{Values: values}, nil
+}
+
+// SetLimit upserts one operational limit's value. The value arrives validated and canonicalized by
+// the engine, which is the only place that knows a limit's kind and bounds; the store records what
+// it is given.
+func (s *Store) SetLimit(ctx context.Context, code controlplane.LimitCode, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("postgres: set limit %q: empty value", code)
+	}
+	const q = `
+INSERT INTO operational_config (code, value) VALUES ($1, $2)
+ON CONFLICT (code) DO UPDATE SET value = EXCLUDED.value`
+	if _, err := s.db.ExecContext(ctx, q, string(code), value); err != nil {
+		return fmt.Errorf("postgres: set limit %q: %w", code, err)
+	}
+	return nil
+}
+
 // AutoDeployLevel returns app's auto-deploy level in env (ADR-0052 §2). A missing row resolves to
 // DefaultAutoDeployLevel (off): the table holds only opt-ins, so an app runs at the default level
 // with no row (auto-deploy is opt-in — ADR-0058).

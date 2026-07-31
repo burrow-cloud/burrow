@@ -191,7 +191,7 @@ type AutoscaleSpec struct {
 	// MinReplicas is the floor the autoscaler will not scale below. Must be at least 1.
 	MinReplicas int32 `json:"min_replicas"`
 	// MaxReplicas is the ceiling the autoscaler will not scale above. Must be >= MinReplicas and is
-	// itself bounded by the replica-ceiling guardrail (Policy.MaxReplicas).
+	// itself bounded by the replica ceiling, an operational limit an operator sets (ADR-0068 §6).
 	MaxReplicas int32 `json:"max_replicas"`
 	// CPUPercent is the target average CPU utilization (1..100) the autoscaler holds the app at.
 	CPUPercent int32 `json:"cpu_percent"`

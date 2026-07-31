@@ -256,6 +256,10 @@ func TestAdminVerbFragmentsCatchTheObviousCases(t *testing.T) {
 		"rolebinding create", "clusterrolebinding create", "serviceaccount create",
 		"service account token", "grant", "permission add", "kubeconfig", "kubectl",
 		"apply", "manifest apply", "helm install", "guard set", "env add", "environment create",
+		// Setting an operational limit is tier 1 beside `guard set` (ADR-0068 §4): a bound the
+		// agent can raise is not a bound. `cluster_` already catches it, which is the point of
+		// pinning it here — thinning that fragment must fail loudly.
+		"cluster config", "cluster config set",
 		"credential add", "config registry login", "config provider add", "secret set",
 		"addon remove", // tier 1 (ADR-0065 §2): removes THE add-on, taking every attached app with it
 		// tier 1 (ADR-0063 §5): a bucket holds every backup, and its name is in a global namespace.

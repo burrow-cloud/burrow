@@ -39,6 +39,10 @@ type Database struct {
 	failures  []controlplane.Failure
 	windows   []controlplane.ObservationWindow
 	exposures map[string]controlplane.Exposure // "app\x00env" -> recorded exposure intent
+
+	// The operator-set operational limits (ADR-0068 §1), kept apart from policy above because a
+	// limit carries a value rather than a disposition.
+	limits controlplane.OperationalConfig
 }
 
 // NewDatabase returns an empty fake database with the default guardrail policy.
@@ -56,6 +60,7 @@ func NewDatabase() *Database {
 		errs:       make(map[Op]error),
 		policy:     controlplane.DefaultPolicy(),
 		exposures:  make(map[string]controlplane.Exposure),
+		limits:     controlplane.OperationalConfig{Values: map[controlplane.LimitCode]string{}},
 	}
 }
 
@@ -88,6 +93,38 @@ func (d *Database) SetGuardrail(ctx context.Context, code controlplane.Guardrail
 		return fmt.Errorf("database: set guardrail: invalid disposition %q", disp)
 	}
 	d.policy = d.policy.With(code, disp)
+	return nil
+}
+
+// SetLimits replaces the whole operational configuration. It is a test helper for arranging a
+// specific set of limits before exercising the engine, the way SetPolicy is for guardrails.
+func (d *Database) SetLimits(c controlplane.OperationalConfig) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.limits = c
+}
+
+// OperationalConfig returns the stored operational limit values (ADR-0068 §1).
+func (d *Database) OperationalConfig(ctx context.Context) (controlplane.OperationalConfig, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpOperationalConfig]; err != nil {
+		return controlplane.OperationalConfig{}, err
+	}
+	return d.limits, nil
+}
+
+// SetLimit persists one operational limit's value, overlaying it on the current configuration.
+func (d *Database) SetLimit(ctx context.Context, code controlplane.LimitCode, value string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpSetLimit]; err != nil {
+		return err
+	}
+	if value == "" {
+		return fmt.Errorf("database: set limit %q: empty value", code)
+	}
+	d.limits = d.limits.With(code, value)
 	return nil
 }
 

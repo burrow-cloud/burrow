@@ -10,10 +10,13 @@ import (
 	"testing"
 )
 
+// TestEvaluateReplicas covers the one thing a guardrail has an opinion about in a replica count:
+// zero. The CEILING is no longer evaluated here at all — it is an operational limit whose breach is
+// a validation failure, checked ahead of the guardrails (ADR-0068 §2) and covered by TestLimits*.
 func TestEvaluateReplicas(t *testing.T) {
-	deny := Policy{MaxReplicas: 10} // ceiling + scale-to-zero default to deny
-	allowZero := Policy{MaxReplicas: 10}.With(GuardrailScaleToZero, DispositionAllow)
-	confirmZero := Policy{MaxReplicas: 10}.With(GuardrailScaleToZero, DispositionConfirm)
+	deny := Policy{} // scale-to-zero defaults to deny
+	allowZero := Policy{}.With(GuardrailScaleToZero, DispositionAllow)
+	confirmZero := Policy{}.With(GuardrailScaleToZero, DispositionConfirm)
 
 	cases := []struct {
 		name        string
@@ -23,12 +26,10 @@ func TestEvaluateReplicas(t *testing.T) {
 		wantCode    GuardrailCode // "" means allowed
 		wantConfirm bool
 	}{
-		{"within limits", deny, 3, false, "", false},
-		{"at ceiling", deny, 10, false, "", false},
-		{"above ceiling denied", deny, 11, false, GuardrailReplicaCeiling, false},
+		{"a positive count is not a guardrail concern", deny, 3, false, "", false},
+		{"a large positive count is still not one", deny, 5000, false, "", false},
 		{"zero denied", deny, 0, false, GuardrailScaleToZero, false},
 		{"zero allowed", allowZero, 0, false, "", false},
-		{"zero allowed still ceiling", allowZero, 11, false, GuardrailReplicaCeiling, false},
 		{"zero needs confirmation", confirmZero, 0, false, GuardrailScaleToZero, true},
 		{"zero confirmed proceeds", confirmZero, 0, true, "", false},
 	}
@@ -59,10 +60,10 @@ func TestEvaluateReplicas(t *testing.T) {
 }
 
 // TestEvaluateDeploy exercises the composed deploy gate: the categorical app.deploy guardrail
-// (default allow) checked first, then the replica ceiling bound. It proves the composition order —
-// the categorical gate takes precedence over a within-policy deploy, but an allowed deploy still
-// cannot exceed the ceiling — and that env-scoping locks down a single environment while others stay
-// permissive (ADR-0007, ADR-0020, ADR-0035 phase 2c).
+// (default allow), then the scale-to-zero gate on the resolved count. It proves the composition
+// order and that env-scoping locks down a single environment while others stay permissive
+// (ADR-0007, ADR-0020, ADR-0035 phase 2c). The replica ceiling is not part of it: a bound is checked
+// before any of this runs (ADR-0068 §2).
 func TestEvaluateDeploy(t *testing.T) {
 	deny := DefaultPolicy().With(GuardrailAppDeploy, DispositionDeny)
 	confirm := DefaultPolicy().With(GuardrailAppDeploy, DispositionConfirm)
@@ -83,7 +84,7 @@ func TestEvaluateDeploy(t *testing.T) {
 		{"deny refuses", deny, "", 3, false, GuardrailAppDeploy, false},
 		{"confirm needs confirmation", confirm, "", 3, false, GuardrailAppDeploy, true},
 		{"confirm confirmed proceeds", confirm, "", 3, true, "", false},
-		{"allowed deploy still bounded by ceiling", DefaultPolicy(), "", 51, false, GuardrailReplicaCeiling, false},
+		{"a count above the old ceiling is no longer a guardrail matter", DefaultPolicy(), "", 51, false, "", false},
 		{"env-scoped staging holds for confirmation", envScoped, "staging", 3, false, GuardrailAppDeploy, true},
 		{"env-scoped default env stays allow", envScoped, "", 3, false, "", false},
 		{"the default environment prod is the global policy", envScoped, DefaultEnvironment, 3, false, "", false},
@@ -120,7 +121,7 @@ func TestEvaluateDeploy(t *testing.T) {
 // empty env and the default environment `prod` reproduce the global lookup exactly (ADR-0067 §2).
 func TestDispositionEnvFallback(t *testing.T) {
 	// Global app.delete = allow; staging overrides it to deny. Dev has no override.
-	p := Policy{MaxReplicas: 10}.
+	p := Policy{}.
 		With(GuardrailAppDelete, DispositionAllow).
 		With(GuardrailCode("staging."+string(GuardrailAppDelete)), DispositionDeny)
 
@@ -151,7 +152,7 @@ func TestDispositionEnvFallback(t *testing.T) {
 // TestDispositionSource confirms the source label tracks where the effective disposition came from,
 // which drives the env-aware `guard list` (ADR-0035 phase 2c).
 func TestDispositionSource(t *testing.T) {
-	p := Policy{MaxReplicas: 10}.
+	p := Policy{}.
 		With(GuardrailAppDelete, DispositionAllow).
 		With(GuardrailCode("staging."+string(GuardrailAppDelete)), DispositionDeny)
 
@@ -186,11 +187,12 @@ func TestGuardrailsForMarksSource(t *testing.T) {
 	}
 }
 
-// TestEnvScopable confirms only the app-level guardrails can be scoped to an environment; the
-// cluster-level ones (addon.*, dns.*) are global (ADR-0035 phase 2c).
+// TestEnvScopable confirms which guardrails can be scoped to an environment: the app-level ones,
+// whose operations always carry an environment, and not the cluster-level ones (addon.*, dns.*),
+// whose dispositions are looked up with no environment at all (ADR-0035 phase 2c).
 func TestEnvScopable(t *testing.T) {
-	scopable := []GuardrailCode{GuardrailAppDeploy, GuardrailAppDelete, GuardrailRollback, GuardrailExposePublic, GuardrailScaleToZero, GuardrailReplicaCeiling}
-	global := []GuardrailCode{GuardrailDNSWrite, GuardrailDNSDelete, GuardrailAddonInstall, GuardrailAddonRemove, GuardrailAddonDetach, GuardrailAddonRestore}
+	scopable := []GuardrailCode{GuardrailAppDeploy, GuardrailAppDelete, GuardrailRollback, GuardrailExposePublic, GuardrailScaleToZero, GuardrailAppRun, GuardrailAutoscale}
+	global := []GuardrailCode{GuardrailDNSWrite, GuardrailDNSDelete, GuardrailAddonInstall, GuardrailAddonRemove, GuardrailAddonDetach, GuardrailAddonRestore, GuardrailBucketCreate}
 	for _, c := range scopable {
 		if !EnvScopable(c) {
 			t.Errorf("EnvScopable(%q) = false, want true", c)
@@ -203,8 +205,42 @@ func TestEnvScopable(t *testing.T) {
 	}
 }
 
+// TestEnvScopableIsDeclaredNotInferred pins ADR-0068 §5: scopability is a property a code declares,
+// not one read off its name. The check that used to stand here was strings.HasPrefix(code, "app."),
+// so a code named outside that prefix could not be scoped however much it deserved to be, and one
+// named inside it was scopable whether or not its operation carried an environment. Both halves are
+// asserted: a made-up `app.` code is NOT scopable because it declares nothing, and every scopable
+// code is one the catalogue lists.
+func TestEnvScopableIsDeclaredNotInferred(t *testing.T) {
+	if EnvScopable(GuardrailCode("app.not_a_real_code")) {
+		t.Error("an unknown code beginning with `app.` is scopable, so scopability is still inferred from the name")
+	}
+	if EnvScopable(GuardrailCode("")) {
+		t.Error("the empty code is scopable")
+	}
+	for _, g := range knownGuardrails {
+		if g.envScoped && !KnownGuardrail(g.code) {
+			t.Errorf("%q declares itself scopable but is not a known guardrail", g.code)
+		}
+	}
+}
+
+// TestReplicaCeilingIsNotAGuardrail pins ADR-0068 §2: the ceiling is a bound, not a code whose
+// disposition an operator can set. A guardrail set that still carried it would let `guard set
+// app.replica_ceiling allow` turn the limit off, which is the whole failure the record corrects.
+func TestReplicaCeilingIsNotAGuardrail(t *testing.T) {
+	if KnownGuardrail(GuardrailCode(LimitReplicaCeiling)) {
+		t.Errorf("%q is still a guardrail code; a limit you can disposition away is not a limit (ADR-0068 §2)", LimitReplicaCeiling)
+	}
+	for _, g := range DefaultPolicy().Guardrails() {
+		if string(g.Code) == string(LimitReplicaCeiling) {
+			t.Errorf("the default policy still lists %q", g.Code)
+		}
+	}
+}
+
 func TestAsGuardrailWrapped(t *testing.T) {
-	base := &GuardrailError{Operation: "deploy", Code: GuardrailReplicaCeiling, Requested: 99, Limit: 50, Message: "too many"}
+	base := &GuardrailError{Operation: "deploy", Code: GuardrailScaleToZero, Requested: 99, Limit: 50, Message: "too many"}
 	wrapped := fmt.Errorf("deploy web: %w", base)
 
 	g, ok := AsGuardrail(wrapped)
@@ -228,8 +264,8 @@ func TestAsGuardrailWrapped(t *testing.T) {
 // operator meeting one refusal and reaching for a global `guard set app.delete allow` — relaxing
 // production to unblock a sandbox. So an env-scopable code's refusal leads with the --env form and
 // names the environment it was refused in, while a cluster-level code's refusal offers the global
-// form and says plainly how far it reaches, because EnvScopable keys on the `app.` prefix and
-// dns.delete cannot be scoped today (ADR-0068 proposes widening it).
+// form and says plainly how far it reaches, because dns.delete declares itself un-scopable: its
+// operation carries no environment for an override to be read against.
 func TestDenyRefusalSteersTowardScoping(t *testing.T) {
 	p := DefaultPolicy()
 

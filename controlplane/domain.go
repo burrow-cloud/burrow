@@ -236,22 +236,20 @@ func (r Release) Validate() error {
 }
 
 // Policy is the guardrail configuration the control plane evaluates dangerous
-// operations against (ADR-0006). This type carries the limits; the evaluation that
-// gates, constrains, or refuses an operation against them is the deploy engine's job.
+// operations against (ADR-0006). It carries dispositions and nothing else: a guardrail answers
+// "may this operation happen", so a Policy holds no numbers. The bounds an operator sets are
+// OperationalConfig's (ADR-0068 §2), and the evaluation that gates, constrains, or refuses an
+// operation is the deploy engine's job.
 type Policy struct {
 	// Dispositions configures how each guardrail is enforced — allow, confirm, or deny
 	// (ADR-0020), keyed by GuardrailCode. A guardrail with no entry here defaults to deny:
 	// the safe default.
 	Dispositions map[GuardrailCode]Disposition
-	// MaxReplicas is the largest replica count permitted before the app.replica_ceiling
-	// guardrail's disposition applies. Must be positive.
-	MaxReplicas int32
 }
 
-// DefaultPolicy returns the conservative starting guardrail policy (ADR-0020): a modest
-// replica ceiling that denies oversized scale-ups, and scale-to-zero held for confirmation
-// — recoverable with an explicit confirm rather than silently allowed or hard-denied. The
-// operator can relax or tighten any of these with `guard set`.
+// DefaultPolicy returns the conservative starting guardrail policy (ADR-0020): scale-to-zero held
+// for confirmation — recoverable with an explicit confirm rather than silently allowed or
+// hard-denied. The operator can relax or tighten any of these with `guard set`.
 //
 // The irreversible operations — deleting an app, deleting a public DNS record — are denied
 // rather than confirmed (ADR-0065 §3): a confirmation is a real control only for someone who
@@ -265,15 +263,14 @@ func DefaultPolicy() Policy {
 			// Deploy is the core action, so it is allowed by default — an agent should be able to
 			// ship a release without friction. An operator who wants sign-off (or a freeze) can raise
 			// it to confirm or deny per environment with `guard set --env prod app.deploy ...`.
-			GuardrailAppDeploy:      DispositionAllow,
-			GuardrailReplicaCeiling: DispositionDeny,
-			GuardrailScaleToZero:    DispositionConfirm,
-			GuardrailExposePublic:   DispositionConfirm,
-			GuardrailDNSWrite:       DispositionConfirm,
-			GuardrailAddonInstall:   DispositionConfirm,
-			GuardrailAddonRemove:    DispositionConfirm,
-			GuardrailAddonDetach:    DispositionConfirm,
-			GuardrailAddonRestore:   DispositionConfirm,
+			GuardrailAppDeploy:    DispositionAllow,
+			GuardrailScaleToZero:  DispositionConfirm,
+			GuardrailExposePublic: DispositionConfirm,
+			GuardrailDNSWrite:     DispositionConfirm,
+			GuardrailAddonInstall: DispositionConfirm,
+			GuardrailAddonRemove:  DispositionConfirm,
+			GuardrailAddonDetach:  DispositionConfirm,
+			GuardrailAddonRestore: DispositionConfirm,
 			// Deleting a public DNS record is denied by default (ADR-0065 §3, tier 2): it takes an
 			// application off the internet, and the record may not be one Burrow created, so a confirm
 			// prompt protects only an attentive reader. It fails reversibility, not scope, so the
@@ -316,7 +313,6 @@ func DefaultPolicy() Policy {
 			// app.autoscale ...`, per environment.
 			GuardrailAutoscale: DispositionAllow,
 		},
-		MaxReplicas: 50,
 	}
 }
 
@@ -328,14 +324,11 @@ func (p Policy) With(code GuardrailCode, d Disposition) Policy {
 		next[k] = v
 	}
 	next[code] = d
-	return Policy{Dispositions: next, MaxReplicas: p.MaxReplicas}
+	return Policy{Dispositions: next}
 }
 
 // Validate reports whether the policy is internally coherent.
 func (p Policy) Validate() error {
-	if p.MaxReplicas <= 0 {
-		return fmt.Errorf("policy MaxReplicas %d must be positive", p.MaxReplicas)
-	}
 	for code, d := range p.Dispositions {
 		if !d.Valid() {
 			return fmt.Errorf("policy disposition %q for guardrail %q is not valid", d, code)

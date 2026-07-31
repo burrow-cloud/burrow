@@ -34,9 +34,12 @@ func newAPIVersion(t *testing.T, version string) (http.Handler, *fake.Kubernetes
 	// A restrictive baseline (empty dispositions → deny) so guardrail tests opt in explicitly,
 	// but rollback and deploy have a product default of allow, so seed those to match production
 	// (deploy is the core action and is what the setup `do(... /deploy ...)` calls exercise).
-	d.SetPolicy(cp.Policy{MaxReplicas: 5}.
+	d.SetPolicy(cp.Policy{}.
 		With(cp.GuardrailRollback, cp.DispositionAllow).
 		With(cp.GuardrailAppDeploy, cp.DispositionAllow))
+	// A low replica ceiling so the limit tests can cross it without asking for 51 replicas
+	// (ADR-0068): it is operational configuration now, not a field on the policy.
+	d.SetLimits(cp.OperationalConfig{}.With(cp.LimitReplicaCeiling, "5"))
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Database: d,
 		Clock:       fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
@@ -498,9 +501,11 @@ func do(h http.Handler, method, path, tok, body string) *httptest.ResponseRecord
 }
 
 type errBody struct {
-	Error string `json:"error"`
-	Code  string `json:"code"`
-	Limit *int32 `json:"limit"`
+	Error             string `json:"error"`
+	Code              string `json:"code"`
+	Requested         *int32 `json:"requested"`
+	Limit             *int32 `json:"limit"`
+	NeedsConfirmation bool   `json:"needs_confirmation"`
 }
 
 func TestHealthNoAuth(t *testing.T) {
@@ -572,7 +577,10 @@ func TestDeployBadRequest(t *testing.T) {
 	}
 }
 
-func TestDeployGuardrailCeiling(t *testing.T) {
+// TestDeployOverReplicaCeiling covers the wire shape of an operational-limit refusal (ADR-0068 §2):
+// 422 with the limit's code and the requested/limit pair, and — unlike a guardrail hold —
+// needs_confirmation absent, because there is nothing a caller can confirm.
+func TestDeployOverReplicaCeiling(t *testing.T) {
 	h, _, _ := newAPI(t)
 	rec := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":9}`)
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -580,11 +588,89 @@ func TestDeployGuardrailCeiling(t *testing.T) {
 	}
 	var e errBody
 	_ = json.Unmarshal(rec.Body.Bytes(), &e)
-	if e.Code != string(cp.GuardrailReplicaCeiling) {
-		t.Errorf("code = %q, want %q", e.Code, cp.GuardrailReplicaCeiling)
+	if e.Code != string(cp.LimitReplicaCeiling) {
+		t.Errorf("code = %q, want %q", e.Code, cp.LimitReplicaCeiling)
 	}
 	if e.Limit == nil || *e.Limit != 5 {
 		t.Errorf("limit = %v, want 5", e.Limit)
+	}
+	if e.Requested == nil || *e.Requested != 9 {
+		t.Errorf("requested = %v, want 9", e.Requested)
+	}
+	if e.NeedsConfirmation {
+		t.Errorf("a limit refusal must not offer a confirmation: %s", rec.Body.String())
+	}
+	// The refusal names the command that raises the bound, so the agent can relay it.
+	if !strings.Contains(rec.Body.String(), "burrow cluster config set") {
+		t.Errorf("body = %s, want the operator command that raises the limit", rec.Body.String())
+	}
+}
+
+// TestLimitEndpoints covers the operational-configuration surface: listing reports every limit with
+// its effective value and the tier it came from, a set raises the bound and is visible to the very
+// next operation, and a bad value or an unknown code is refused rather than stored (ADR-0068).
+func TestLimitEndpoints(t *testing.T) {
+	h, _, _ := newAPI(t)
+
+	rec := do(h, "GET", "/v1/config", token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("config list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Limits []cp.LimitInfo `json:"limits"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(list.Limits) == 0 {
+		t.Fatalf("config list returned no limits")
+	}
+	found := false
+	for _, l := range list.Limits {
+		if l.Code != cp.LimitReplicaCeiling {
+			continue
+		}
+		found = true
+		if l.Value != "5" || l.Scope != cp.LimitScopeCluster {
+			t.Errorf("replica ceiling = (%q, %q), want (5, cluster)", l.Value, l.Scope)
+		}
+		if l.Default != "50" {
+			t.Errorf("replica ceiling default = %q, want 50", l.Default)
+		}
+	}
+	if !found {
+		t.Errorf("config list omitted %s", cp.LimitReplicaCeiling)
+	}
+
+	// Raising the bound is the whole point: the guardrail this replaced could be turned off but
+	// never turned up (ADR-0068 §2).
+	if rec := do(h, "PUT", "/v1/config/app.replica_ceiling", token, `{"value":"80"}`); rec.Code != http.StatusOK {
+		t.Fatalf("config set status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":9}`); rec.Code != http.StatusOK {
+		t.Fatalf("deploy after raising the ceiling = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A value that is not a whole number, and an unknown code, are both refused as invalid.
+	if rec := do(h, "PUT", "/v1/config/app.replica_ceiling", token, `{"value":"lots"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("non-numeric value status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, "PUT", "/v1/config/app.made_up", token, `{"value":"3"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown limit status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGuardSetRejectsALimitCode pins the upgrade path a human hits: `guard set app.replica_ceiling`
+// used to work, and now names the surface that carries the bound instead of failing opaquely
+// (ADR-0068 §2).
+func TestGuardSetRejectsALimitCode(t *testing.T) {
+	h, _, _ := newAPI(t)
+	rec := do(h, "PUT", "/v1/guard/app.replica_ceiling", token, `{"disposition":"allow"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "burrow cluster config set") {
+		t.Errorf("body = %s, want it to name the command that sets the limit", rec.Body.String())
 	}
 }
 
@@ -594,7 +680,7 @@ func TestDeployGuardrailCeiling(t *testing.T) {
 // only the git ref and target image — never source bytes.
 func TestBuildEndpoint(t *testing.T) {
 	k, d := fake.NewKubernetes(), fake.NewDatabase()
-	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
+	d.SetPolicy(cp.Policy{}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
 	b := fake.NewBuilder()
 	b.SetDigest("sha256:abc123")
 	e, err := cp.New(cp.Deps{
@@ -1008,7 +1094,7 @@ func TestMethodNotAllowed(t *testing.T) {
 
 func TestAutoscaleEndpoint(t *testing.T) {
 	h, k, d := newAPI(t)
-	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAutoscale, cp.DispositionAllow))
+	d.SetPolicy(cp.Policy{}.With(cp.GuardrailAutoscale, cp.DispositionAllow))
 
 	rec := do(h, "POST", "/v1/apps/web/autoscale", token, `{"min":1,"max":4,"cpu":90}`)
 	if rec.Code != http.StatusOK {
@@ -1036,9 +1122,9 @@ func TestAutoscaleEndpoint(t *testing.T) {
 
 func TestAutoscaleMaxOverCeilingDenied(t *testing.T) {
 	h, _, d := newAPI(t)
-	d.SetPolicy(cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAutoscale, cp.DispositionAllow))
-	// A max above the ceiling is denied via the replica-ceiling guardrail (422, a structured
-	// guardrail refusal).
+	d.SetPolicy(cp.Policy{}.With(cp.GuardrailAutoscale, cp.DispositionAllow))
+	// A max above the ceiling is refused as an operational limit (422, a structured refusal that
+	// no confirmation opens).
 	rec := do(h, "POST", "/v1/apps/web/autoscale", token, `{"min":1,"max":50,"cpu":80}`)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())

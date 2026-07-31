@@ -1224,6 +1224,45 @@ func (c *Client) SetGuardrail(ctx context.Context, env, code, disposition string
 	return out.Guardrails, err
 }
 
+// Limit is one operational limit and its effective value (ADR-0068): a bound a human sets, which is
+// not a guardrail — there is no disposition on it, and exceeding it is refused rather than held.
+// Scope reports which tier the effective value came from ("environment", "cluster", or "default"),
+// EnvScoped whether it may be set for one environment at all, and Default the built-in value it
+// reverts to.
+type Limit struct {
+	Code        string `json:"code"`
+	Value       string `json:"value"`
+	Description string `json:"description"`
+	Kind        string `json:"kind"`
+	Scope       string `json:"scope"`
+	EnvScoped   bool   `json:"env_scoped"`
+	Default     string `json:"default"`
+}
+
+// Limits lists the operational limits and their effective values. An empty env reads the cluster
+// tier; a named environment reads its effective configuration under the environment to cluster to
+// default fallback, each entry marking which tier its value came from (ADR-0068 §3).
+func (c *Client) Limits(ctx context.Context, env string) ([]Limit, error) {
+	var out struct {
+		Limits []Limit `json:"limits"`
+	}
+	err := c.do(ctx, http.MethodGet, withEnv("/v1/config", env), nil, &out)
+	return out.Limits, err
+}
+
+// SetLimit sets an operational limit's value and returns the updated configuration. An empty env
+// sets the cluster value; a named environment scopes it to that environment, storing the
+// env-prefixed code (ADR-0068 §3). It is on this client because it is on the operator CLI:
+// `burrow-agent` carries no command that reaches it (ADR-0068 §4).
+func (c *Client) SetLimit(ctx context.Context, env, code, value string) ([]Limit, error) {
+	var out struct {
+		Limits []Limit `json:"limits"`
+	}
+	body := map[string]string{"value": value}
+	err := c.do(ctx, http.MethodPut, withEnv("/v1/config/"+url.PathEscape(code), env), body, &out)
+	return out.Limits, err
+}
+
 // AutoDeployResult is the auto-deploy configuration for an app in one environment (ADR-0052 §2):
 // the app, the canonical environment name, and the effective auto-deploy level, plus the enriched
 // read-only upgrade view a show returns (ADR-0052 §3) — the current running version, the tag

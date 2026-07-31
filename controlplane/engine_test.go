@@ -6,6 +6,7 @@ package controlplane_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,9 +33,14 @@ func newEngine(t *testing.T, policy cp.Policy) (*cp.Engine, *fake.Kubernetes, *f
 
 // permissive avoids guardrail interference for tests not about guardrails.
 func permissive() cp.Policy {
-	p := cp.DefaultPolicy()
-	p.MaxReplicas = 1000
-	return p.With(cp.GuardrailScaleToZero, cp.DispositionAllow)
+	return cp.DefaultPolicy().With(cp.GuardrailScaleToZero, cp.DispositionAllow)
+}
+
+// ceiling builds an operational configuration whose CLUSTER replica ceiling is n, for tests that
+// need a bound other than the built-in 50 (ADR-0068). Limits are read from the database on every
+// operation, so a test can apply it before or after the engine is constructed.
+func ceiling(n int) cp.OperationalConfig {
+	return cp.OperationalConfig{}.With(cp.LimitReplicaCeiling, strconv.Itoa(n))
 }
 
 // mustGuardrail asserts err is a guardrail refusal with the given code.
@@ -47,6 +53,24 @@ func mustGuardrail(t *testing.T, err error, code cp.GuardrailCode) {
 	if g.Code != code {
 		t.Fatalf("guardrail code = %q, want %q", g.Code, code)
 	}
+}
+
+// mustLimit asserts err is an operational-limit refusal with the given code, and returns it so a
+// caller can check what it says. A limit refusal is deliberately NOT a GuardrailError: it carries no
+// disposition and no confirmation path (ADR-0068 §2), so the two assertions cannot be confused.
+func mustLimit(t *testing.T, err error, code cp.LimitCode) *cp.LimitError {
+	t.Helper()
+	l, ok := cp.AsLimit(err)
+	if !ok {
+		t.Fatalf("err = %v, want a LimitError", err)
+	}
+	if l.Code != code {
+		t.Fatalf("limit code = %q, want %q", l.Code, code)
+	}
+	if _, isGuardrail := cp.AsGuardrail(err); isGuardrail {
+		t.Fatalf("a limit refusal must not also be a guardrail refusal: %v", err)
+	}
+	return l
 }
 
 func TestNewValidatesDeps(t *testing.T) {
@@ -186,12 +210,13 @@ func TestReapplyEnvKeepsCurrentReleaseID(t *testing.T) {
 
 func TestDeployGuardrails(t *testing.T) {
 	ctx := context.Background()
-	e, k, _, _ := newEngine(t, cp.Policy{MaxReplicas: 5}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
+	e, k, d, _ := newEngine(t, cp.Policy{}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
+	d.SetLimits(ceiling(5))
 
-	// An explicit count above the ceiling still trips the replica-ceiling guardrail: the resolved
-	// count (6, a new app with an explicit request and no HPA) is what the guardrail sees.
+	// An explicit count above the ceiling is refused as an operational limit: the resolved count
+	// (6, a new app with an explicit request and no HPA) is what the bound is checked against.
 	_, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 6})
-	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
+	mustLimit(t, err, cp.LimitReplicaCeiling)
 	// A refused deploy touches nothing.
 	if _, ok := k.Spec("web"); ok {
 		t.Errorf("refused deploy should not apply to the cluster")
@@ -441,7 +466,8 @@ func TestLogs(t *testing.T) {
 
 func TestScale(t *testing.T) {
 	ctx := context.Background()
-	e, k, _, _ := newEngine(t, cp.Policy{MaxReplicas: 10}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
+	e, k, d, _ := newEngine(t, cp.Policy{}.With(cp.GuardrailAppDeploy, cp.DispositionAllow))
+	d.SetLimits(ceiling(10))
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -457,11 +483,11 @@ func TestScale(t *testing.T) {
 		t.Errorf("cluster desired = %d, want 5", st.DesiredReplicas)
 	}
 
-	// Guardrails apply to scale too.
+	// Guardrails apply to scale too, and so does the ceiling — which is a limit, not a guardrail.
 	_, err = e.Scale(ctx, "web", "", 0, false)
 	mustGuardrail(t, err, cp.GuardrailScaleToZero)
 	_, err = e.Scale(ctx, "web", "", 99, false)
-	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
+	mustLimit(t, err, cp.LimitReplicaCeiling)
 	// Unknown app.
 	if _, err := e.Scale(ctx, "ghost", "", 3, false); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("scale ghost err = %v, want ErrNotFound", err)
@@ -477,9 +503,35 @@ func TestPolicyReadLive(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 	// Tighten the policy at runtime; the next operation must observe it.
-	d.SetPolicy(cp.Policy{MaxReplicas: 1})
+	d.SetPolicy(cp.Policy{}.With(cp.GuardrailScaleToZero, cp.DispositionDeny))
+	_, err := e.Scale(ctx, "web", "", 0, false)
+	mustGuardrail(t, err, cp.GuardrailScaleToZero)
+}
+
+// TestLimitsReadLive is TestPolicyReadLive's sibling for operational limits: the engine reads the
+// configuration from the database on every operation, so a `cluster config set` takes effect
+// without a restart (ADR-0068).
+func TestLimitsReadLive(t *testing.T) {
+	ctx := context.Background()
+	e, _, d, _ := newEngine(t, permissive())
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 2}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	// Within the built-in ceiling of 50, so this scale goes through.
+	if _, err := e.Scale(ctx, "web", "", 5, false); err != nil {
+		t.Fatalf("scale within the default ceiling: %v", err)
+	}
+	// Lower the bound at runtime; the next operation must observe it.
+	d.SetLimits(ceiling(1))
 	_, err := e.Scale(ctx, "web", "", 5, false)
-	mustGuardrail(t, err, cp.GuardrailReplicaCeiling)
+	mustLimit(t, err, cp.LimitReplicaCeiling)
+
+	// And it is RAISABLE, which the guardrail it replaced never was: an operator who needs 80 has
+	// a way to say so (ADR-0068 §2).
+	d.SetLimits(ceiling(80))
+	if _, err := e.Scale(ctx, "web", "", 80, false); err != nil {
+		t.Fatalf("scale to a raised ceiling: %v", err)
+	}
 }
 
 func TestGuardrailsListAndSet(t *testing.T) {
@@ -494,8 +546,8 @@ func TestGuardrailsListAndSet(t *testing.T) {
 	for _, g := range gs {
 		got[g.Code] = g.Disposition
 	}
-	if got[cp.GuardrailReplicaCeiling] != cp.DispositionDeny || got[cp.GuardrailScaleToZero] != cp.DispositionConfirm {
-		t.Errorf("default dispositions = %v, want ceiling=deny app.scale_to_zero=confirm", got)
+	if got[cp.GuardrailAppDelete] != cp.DispositionDeny || got[cp.GuardrailScaleToZero] != cp.DispositionConfirm {
+		t.Errorf("default dispositions = %v, want app.delete=deny app.scale_to_zero=confirm", got)
 	}
 
 	// A valid set is reflected on the next list.

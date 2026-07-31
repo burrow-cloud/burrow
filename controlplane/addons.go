@@ -51,10 +51,10 @@ const (
 	// ADR-0066 §1's end state is that `addon install postgres` simply uses the operator; getting
 	// there is several slices, and until they land a CloudNativePG-backed instance is genuinely less
 	// capable than the Deployment it would replace — its backups are still ADR-0032 logical dumps
-	// rather than the operator's, and its removal is not built. Making it the automatic answer on
-	// every cluster that happens to have the operator installed would hand that gap to users who did
-	// not ask for it, and would assert a mechanism as done while it is being built, which is the one
-	// thing ADR-0009 forbids. The flag's default flips when the mechanism is complete.
+	// rather than the operator's. Making it the automatic answer on every cluster that happens to
+	// have the operator installed would hand that gap to users who did not ask for it, and would
+	// assert a mechanism as done while it is being built, which is the one thing ADR-0009 forbids.
+	// The flag's default flips when the mechanism is complete.
 	AddonMechanismCloudNativePG AddonMechanism = "cloudnative-pg"
 )
 
@@ -170,6 +170,27 @@ func AddonInstanceName(t AddonType, env string) (string, error) {
 		return "", fmt.Errorf("add-on instance for %s: environment %q is not a valid DNS-1123 label: %w", t, env, ErrInvalid)
 	}
 	return "burrow-" + string(t) + "-" + env, nil
+}
+
+// AddonDataVolumeName is the PersistentVolumeClaim holding the data of the add-on instance named
+// instance, under mechanism mech. It exists so a message about a removal names the volume that
+// removal actually acts on (ADR-0064 §3) — "this destroys the data volume X" is only informed
+// consent while X is the volume being destroyed.
+//
+// The two mechanisms name it differently, and neither name is a convention Burrow is free to pick.
+// The claim Burrow creates is named after the instance; CloudNativePG composes one claim per
+// instance from the `Cluster` and calls it `<instance>-<serial>`, and the single-instance `Cluster`
+// Burrow authors (ADR-0066 §1) therefore has exactly one, `<instance>-1`.
+//
+// IT IS FOR SAYING, NOT FOR ACTING. Every path that DELETES or RETAINS a CloudNativePG claim finds
+// it by the label the operator puts on it rather than by this derivation, because a constructed name
+// that stopped matching would retain one claim out of a volume group and silently strand the rest.
+// A prose name that is wrong costs a confusing sentence; an act aimed at the wrong name costs data.
+func AddonDataVolumeName(instance string, mech AddonMechanism) string {
+	if mech == AddonMechanismCloudNativePG {
+		return instance + "-1"
+	}
+	return instance
 }
 
 // InstallAddonOptions is everything `addon install` needs beyond the add-on's type and its
@@ -431,4 +452,20 @@ type AddonInfo struct {
 	// Ready is a live property — whether the backing Deployment is available. It is probed
 	// from the cluster at list time and never persisted in the registry.
 	Ready bool `json:"ready"`
+}
+
+// Mechanism reports HOW this instance's workload is provided, recovered from the Backend the
+// registry recorded at install (ADR-0066 §1). It is the one place the string is turned back into the
+// choice, so an operation that has to act differently per mechanism — removing the instance is the
+// first — asks a question with two answers rather than comparing a backend name at each call site.
+//
+// Anything that is not the CloudNativePG backend is the catalog's own mechanism, including a
+// connected backend and a registry row written before there was a choice. That direction is the safe
+// one: a Deployment-shaped teardown of an instance that has no Deployment reports ErrNotFound and
+// changes nothing, while the reverse would look for a `Cluster` that was never created.
+func (a AddonInfo) Mechanism() AddonMechanism {
+	if a.Backend == AddonBackendCloudNativePG {
+		return AddonMechanismCloudNativePG
+	}
+	return AddonMechanismDefault
 }

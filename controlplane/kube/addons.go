@@ -679,7 +679,17 @@ func (a *Adapter) AddonReady(ctx context.Context, name string) (bool, error) {
 // superuser password would not take — burrowd, the metrics exporter, and the backup Jobs would all
 // be locked out of a database that is still there. Keeping the volume therefore means keeping the
 // credential that opens it; the two are deleted together or kept together, never split.
-func (a *Adapter) DeleteAddon(ctx context.Context, name string, deleteData bool) (controlplane.AddonRemoval, error) {
+//
+// mech says which mechanism stood the instance up, and it is TOLD rather than discovered. The
+// registry recorded it at install (AddonInfo.Backend, ADR-0066 §1), and a removal is the one
+// operation that must not infer it: inferring means reading the cluster, and every way of failing to
+// read the cluster looks like "the object is not there" — which on this path would mean walking past
+// a running database and deleting the row that named it. The mechanism decides which teardown runs;
+// the teardown itself still refuses anything it cannot read (cnpg_remove.go).
+func (a *Adapter) DeleteAddon(ctx context.Context, name string, mech controlplane.AddonMechanism, deleteData bool) (controlplane.AddonRemoval, error) {
+	if mech == controlplane.AddonMechanismCloudNativePG {
+		return a.deletePostgresCluster(ctx, name, deleteData)
+	}
 	removal := controlplane.AddonRemoval{Namespace: a.addonNamespace}
 	deps := a.client.AppsV1().Deployments(a.addonNamespace)
 	// The instance's own label says what it is. Reading it beats comparing the name against a

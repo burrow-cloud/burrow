@@ -29,7 +29,7 @@ func TestAddonVolumesFindsClaimsAfterRemoval(t *testing.T) {
 	if _, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
-	if _, err := a.DeleteAddon(ctx, "burrow-logs", false); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-logs", cp.AddonMechanismDefault, false); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 

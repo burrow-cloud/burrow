@@ -127,17 +127,19 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list"]
   # The Postgres add-on can run on CloudNativePG instead of a Deployment Burrow authors: burrowd
-  # creates one `postgresql.cnpg.io/v1 Cluster` per environment in this namespace and reads its
-  # status to answer "is this instance serving" (ADR-0066 §1). GET and CREATE only, scoped to the
-  # add-on namespace: creating an instance and reading it back is the whole of what this slice does.
-  # There is deliberately no update, patch, delete or list — a Cluster Burrow wrote is not edited in
-  # place, and removing one is not built (`addon remove` refuses on such an instance rather than
-  # half-removing the object every attached app's database lives in). Installing the OPERATOR is not
-  # this grant and never will be: CRDs and cluster RBAC need cluster-admin, which is why
-  # `burrow cluster postgres install` is an operator step run with a kubeconfig.
+  # creates one `postgresql.cnpg.io/v1 Cluster` per environment in this namespace, reads its status
+  # to answer "is this instance serving", and deletes it when the add-on is removed (ADR-0066 §1).
+  # GET, CREATE and DELETE, scoped to the add-on namespace. There is deliberately no update or patch
+  # — a Cluster Burrow wrote is not edited in place — and no list: an instance is always addressed by
+  # the name the registry holds, never discovered by sweeping the namespace. DELETE is the whole of
+  # what removal needs from this API: keeping the data (ADR-0064 §1) is done by detaching the
+  # operator's claims first, which is a patch on persistentvolumeclaims and already granted above.
+  # Installing the OPERATOR is not this grant and never will be: CRDs and cluster RBAC need
+  # cluster-admin, which is why `burrow cluster postgres install` is an operator step run with a
+  # kubeconfig.
   - apiGroups: ["postgresql.cnpg.io"]
     resources: ["clusters"]
-    verbs: ["get", "create"]
+    verbs: ["get", "create", "delete"]
   # Read-only check that an add-on's pre-provisioned ServiceAccount exists before burrowd deploys
   # that add-on's workload (e.g. the metrics scraper's ServiceAccount, which the CLI applies
   # kubeconfig-side at install time). Get ONLY — no create/update/delete on serviceaccounts, so this

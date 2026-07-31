@@ -265,7 +265,7 @@ func TestAddonDeployListDelete(t *testing.T) {
 	}
 
 	// Delete removes it; deleting a missing add-on is ErrNotFound.
-	if _, err := a.DeleteAddon(ctx, "burrow-logs", true); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-logs", cp.AddonMechanismDefault, true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-logs", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -274,7 +274,7 @@ func TestAddonDeployListDelete(t *testing.T) {
 	if _, err := client.AppsV1().DaemonSets(addonNS).Get(ctx, "burrow-logs-collector", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("collector should be gone, got %v", err)
 	}
-	if _, err := a.DeleteAddon(ctx, "nope", true); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := a.DeleteAddon(ctx, "nope", cp.AddonMechanismDefault, true); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("delete missing = %v, want ErrNotFound", err)
 	}
 }
@@ -324,7 +324,7 @@ func TestAddonMetricsDeployDelete(t *testing.T) {
 	}
 
 	// Delete removes the store and the vmagent collector Deployment + ConfigMap.
-	if _, err := a.DeleteAddon(ctx, "burrow-metrics", true); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-metrics", cp.AddonMechanismDefault, true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -405,7 +405,7 @@ func TestAddonCacheDeployDelete(t *testing.T) {
 		t.Errorf("cache should have no collector, got %v", err)
 	}
 
-	if _, err := a.DeleteAddon(ctx, "burrow-cache", true); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-cache", cp.AddonMechanismDefault, true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-cache", metav1.GetOptions{}); !apierrors.IsNotFound(err) {

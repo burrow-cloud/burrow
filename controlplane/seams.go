@@ -286,7 +286,15 @@ type Kubernetes interface {
 	// back" must not destroy it. A retained volume is left with whatever the add-on needs to be
 	// usable again after a reinstall. It returns what was torn down and what was deliberately kept,
 	// so the caller can report it. Removing an add-on that is not installed returns ErrNotFound.
-	DeleteAddon(ctx context.Context, name string, deleteData bool) (AddonRemoval, error)
+	//
+	// mech says which mechanism stood this instance up, so the teardown matches the install
+	// (ADR-0066 §1). It comes from the registry rather than from the cluster, because a removal is
+	// the operation that must never guess: a CloudNativePG-backed instance has no Deployment, and
+	// probing for one and finding nothing is indistinguishable from a probe that was refused. Under
+	// that mechanism the claims belong to the OPERATOR and carry the `Cluster` as their owner, so
+	// keeping the data means disowning them before the `Cluster` is deleted rather than simply not
+	// deleting them — the same promise, a different act.
+	DeleteAddon(ctx context.Context, name string, mech AddonMechanism, deleteData bool) (AddonRemoval, error)
 	// AddonVolumes returns every PersistentVolumeClaim in the add-on namespace that Burrow created
 	// for an add-on, whether or not the add-on that owns it still exists. It reads the CLUSTER, not
 	// the registry, because that is the only place a volume outliving its add-on can be seen at all

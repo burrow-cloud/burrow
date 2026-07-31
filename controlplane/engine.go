@@ -76,6 +76,11 @@ type Engine struct {
 	// anything moving). It mirrors the kube Adapter's namespace, and it is what
 	// EnsureDefaultEnvironment registers `prod` against.
 	appNamespace string
+	// hookLock serializes the lifecycle hooks of one (app, environment) pair (ADR-0072 §9), so two
+	// pushes in quick succession never run two migration Jobs against one database. It is state, but
+	// not GLOBAL state: it belongs to this engine and is created in New, so two engines in one test
+	// binary do not contend.
+	hookLock *hookLock
 }
 
 // Deps are the dependencies an Engine needs. All seams are required. The guardrail policy
@@ -188,6 +193,7 @@ func New(d Deps) (*Engine, error) {
 		buildRegistry:       d.BuildRegistry,
 		buildPublicRegistry: d.BuildPublicRegistry,
 		appNamespace:        appNamespace,
+		hookLock:            newHookLock(),
 	}, nil
 }
 
@@ -360,6 +366,23 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 
 	// The execution-row args carry the env KEY NAMES only — never values (ADR-0027).
 	args["env_keys"] = auditKeys(env)
+
+	// The pre-deploy hook runs here, from the image BEING DEPLOYED, before anything reaches the
+	// cluster (ADR-0072 §2). This is the shared rollout path, so it fires on EVERY deploy path — an
+	// explicit deploy, a build that ends in one, and an unattended auto-deploy alike: a hook that
+	// fires only sometimes is worse than one that always fires, because the point is that schema and
+	// code move together. A rollback does not come through here and fires `pre-rollback` instead (§8).
+	//
+	// Its failure ABORTS the deploy (§3): the new image does not roll out, the running version keeps
+	// serving on the old schema, and the failure is reported as the deploy's failure with the
+	// command's output. The release is recorded failed so the history shows the attempt; a failed
+	// release is not a rollback target, so the rollback handle is unchanged.
+	if err := e.runHook(ctx, k, HookPreDeploy, req.App, req.Env, req.Image, env); err != nil {
+		rel.Status = ReleaseFailed
+		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
+		e.recordExecution(ctx, auditOpDeploy, req.App, args, auditableHookError(err))
+		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
+	}
 
 	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Replicas: replicas, ReleaseID: rel.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
@@ -1306,6 +1329,13 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 		e.recordExecution(ctx, auditOpAppDelete, app, args, err)
 		return fmt.Errorf("delete app %s: removing release history: %w", app, err)
 	}
+	// The app is gone, so its lifecycle hooks are commands for an image nobody will deploy. Leaving
+	// them would have an app of the same name created later inherit a stranger's pre-deploy command
+	// (ADR-0072 §1: unset means today's behaviour exactly, and a new app is unset).
+	if err := e.db.DeleteAppHooks(ctx, app); err != nil {
+		e.recordExecution(ctx, auditOpAppDelete, app, args, err)
+		return fmt.Errorf("delete app %s: removing lifecycle hooks: %w", app, err)
+	}
 	// The app is gone, so its recorded exposure is intent about nothing. Leaving it would have the
 	// observer report a missing Ingress for an app that was deliberately deleted (ADR-0074 §6).
 	e.forgetExposure(ctx, app, env)
@@ -2237,6 +2267,26 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	}
 
 	args["env_keys"] = auditKeys(cfg) // KEY NAMES only — never values (ADR-0027)
+
+	// A rollback fires `pre-rollback` and NEVER `pre-deploy` (ADR-0072 §8). A rollback is mechanically
+	// a deploy of an older image, so §2's "every deploy path" would otherwise reach it — and running
+	// the pre-deploy hook here would run A's migration tool while returning to A, which does not know
+	// B's migration exists and would step back one of A's OWN migrations instead. The exclusion is
+	// structural: a rollback does not go through the shared deploy path, and this is the only hook it
+	// runs.
+	//
+	// It runs from `cur.Image` — the image being rolled back FROM, not the one being rolled back to —
+	// because the code that knows how to undo B's migration is in B. It runs BEFORE traffic moves
+	// back, so the schema is stepped back before the older code serves; a failure therefore aborts the
+	// rollback, the same rule §3 gives the other pre phase, because letting the older code serve
+	// against a half-stepped-back schema is the outcome the ordering exists to prevent. With no
+	// pre-rollback hook set nothing runs at all, which is the safe forward-only default.
+	if err := e.runHook(ctx, e.k8s.WithNamespace(ns), HookPreRollback, app, env, cur.Image, cfg); err != nil {
+		rel.Status = ReleaseFailed
+		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
+		e.recordExecution(ctx, auditOpRollback, app, args, auditableHookError(err))
+		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
+	}
 
 	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Replicas: replicas, ReleaseID: rel.ID}
 	if err := e.k8s.WithNamespace(ns).ApplyWorkload(ctx, spec); err != nil {

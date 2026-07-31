@@ -240,6 +240,99 @@ func (s *Store) UnsetAppEnv(ctx context.Context, app, key string) error {
 	return nil
 }
 
+// AppHook returns the command app runs at phase in env (ADR-0072 §1). A phase with no row yields a
+// nil command and no error: unset means no hook and today's behaviour exactly, so absence is the
+// ordinary answer rather than ErrNotFound.
+func (s *Store) AppHook(ctx context.Context, app, env string, phase controlplane.HookPhase) ([]string, error) {
+	const q = `SELECT command FROM app_hooks WHERE app = $1 AND environment = $2 AND phase = $3`
+	var raw []byte
+	err := s.db.QueryRowContext(ctx, q, app, env, string(phase)).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("postgres: %s hook for %q in %q: %w", phase, app, env, err)
+	}
+	var command []string
+	if err := json.Unmarshal(raw, &command); err != nil {
+		return nil, fmt.Errorf("postgres: %s hook for %q in %q: decoding command: %w", phase, app, env, err)
+	}
+	return command, nil
+}
+
+// AppHooks returns every hook configured for app in env. None yields an empty slice and no error.
+// Rows come back in phase order so a listing is deterministic; the engine re-orders them into the
+// order the phases fire in, which is its business and not the store's.
+func (s *Store) AppHooks(ctx context.Context, app, env string) ([]controlplane.Hook, error) {
+	const q = `SELECT phase, command FROM app_hooks WHERE app = $1 AND environment = $2 ORDER BY phase`
+	rows, err := s.db.QueryContext(ctx, q, app, env)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: hooks for %q in %q: %w", app, env, err)
+	}
+	defer rows.Close()
+
+	out := []controlplane.Hook{}
+	for rows.Next() {
+		var phase string
+		var raw []byte
+		if err := rows.Scan(&phase, &raw); err != nil {
+			return nil, fmt.Errorf("postgres: hooks for %q in %q: %w", app, env, err)
+		}
+		var command []string
+		if err := json.Unmarshal(raw, &command); err != nil {
+			return nil, fmt.Errorf("postgres: hooks for %q in %q: decoding %s command: %w", app, env, phase, err)
+		}
+		out = append(out, controlplane.Hook{
+			App: app, Environment: env, Phase: controlplane.HookPhase(phase), Command: command,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: hooks for %q in %q: %w", app, env, err)
+	}
+	return out, nil
+}
+
+// SetAppHook upserts the command app runs at phase in env, replacing any command already set there.
+// The command arrives validated by the engine, which is the only place that knows what a runnable
+// argv is; the store records what it is given.
+func (s *Store) SetAppHook(ctx context.Context, app, env string, phase controlplane.HookPhase, command []string) error {
+	if len(command) == 0 {
+		return fmt.Errorf("postgres: set %s hook for %q in %q: empty command", phase, app, env)
+	}
+	raw, err := json.Marshal(command)
+	if err != nil {
+		return fmt.Errorf("postgres: set %s hook for %q in %q: encoding command: %w", phase, app, env, err)
+	}
+	// command is cast to jsonb explicitly so the JSON is passed as text and stored as jsonb
+	// regardless of how the driver encodes the parameter, exactly as SaveRelease does.
+	const q = `
+INSERT INTO app_hooks (app, environment, phase, command) VALUES ($1, $2, $3, $4::jsonb)
+ON CONFLICT (app, environment, phase) DO UPDATE SET command = EXCLUDED.command`
+	if _, err := s.db.ExecContext(ctx, q, app, env, string(phase), string(raw)); err != nil {
+		return fmt.Errorf("postgres: set %s hook for %q in %q: %w", phase, app, env, err)
+	}
+	return nil
+}
+
+// UnsetAppHook removes app's hook at phase in env. Removing one that is not set is a no-op.
+func (s *Store) UnsetAppHook(ctx context.Context, app, env string, phase controlplane.HookPhase) error {
+	const q = `DELETE FROM app_hooks WHERE app = $1 AND environment = $2 AND phase = $3`
+	if _, err := s.db.ExecContext(ctx, q, app, env, string(phase)); err != nil {
+		return fmt.Errorf("postgres: unset %s hook for %q in %q: %w", phase, app, env, err)
+	}
+	return nil
+}
+
+// DeleteAppHooks removes every hook for app across every environment — the durable side of an app
+// teardown, beside DeleteReleases. Deleting the hooks of an app that has none is a no-op.
+func (s *Store) DeleteAppHooks(ctx context.Context, app string) error {
+	const q = `DELETE FROM app_hooks WHERE app = $1`
+	if _, err := s.db.ExecContext(ctx, q, app); err != nil {
+		return fmt.Errorf("postgres: delete hooks for %q: %w", app, err)
+	}
+	return nil
+}
+
 // Policy returns the current guardrail policy: the built-in defaults with any stored
 // guardrail dispositions overlaid (ADR-0020). An empty table yields DefaultPolicy.
 func (s *Store) Policy(ctx context.Context) (controlplane.Policy, error) {

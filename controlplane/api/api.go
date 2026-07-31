@@ -73,6 +73,14 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/apps/{app}/scale", s.scale)
 	// run executes a one-off command in the app's own current image and environment (ADR-0048).
 	v1.HandleFunc("POST /v1/apps/{app}/run", s.run)
+	// Lifecycle hooks: the command an app runs at a named phase (ADR-0072 §1). One mechanism with the
+	// phase in the path, so a further phase is a new value rather than a new route. Setting one is an
+	// operator action — a pre-deploy hook runs a command on every deploy of the app, which is the
+	// blast radius of configuration set once and forgotten — so, like the auto-deploy level, the write
+	// lives on this admin API and carries no `burrow-agent` verb.
+	v1.HandleFunc("GET /v1/apps/{app}/hooks", s.listHooks)
+	v1.HandleFunc("PUT /v1/apps/{app}/hooks/{phase}", s.setHook)
+	v1.HandleFunc("DELETE /v1/apps/{app}/hooks/{phase}", s.unsetHook)
 	// autoscale applies (POST) or removes (DELETE) an app's HorizontalPodAutoscaler (ADR-0006).
 	v1.HandleFunc("POST /v1/apps/{app}/autoscale", s.autoscale)
 	v1.HandleFunc("DELETE /v1/apps/{app}/autoscale", s.disableAutoscale)
@@ -223,6 +231,57 @@ func (s *server) run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// listHooks returns the lifecycle hooks configured for an app in the target environment (ADR-0072
+// §1). A phase with no hook is absent rather than present and empty: unset means no hook. It moves
+// no secret value — a hook is a command, and the app's config and Secret reach it at run time.
+func (s *server) listHooks(w http.ResponseWriter, r *http.Request) {
+	hooks, err := s.engine.Hooks(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, hooksResponse{Hooks: hooks})
+}
+
+// hooksResponse wraps the hook listing so the shape can grow without breaking object decoders.
+type hooksResponse struct {
+	Hooks []controlplane.Hook `json:"hooks"`
+}
+
+// hookRequest is the body of a hook write: the command to run, as an argv. The phase is in the path
+// and the app is in the path; neither is read from the body.
+type hookRequest struct {
+	Command []string `json:"command"`
+}
+
+// setHook configures the command an app runs at a phase, replacing any command already set there
+// (ADR-0072 §1). An unknown phase — including `post-deploy`, which this control plane does not fire
+// yet — is a 400 rather than a silently-stored setting that never runs (ADR-0009).
+func (s *server) setHook(w http.ResponseWriter, r *http.Request) {
+	var req hookRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	hook, err := s.engine.SetHook(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"),
+		controlplane.HookPhase(r.PathValue("phase")), req.Command)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, hook)
+}
+
+// unsetHook removes an app's hook at a phase. Unsetting a phase with no hook succeeds: afterwards
+// that phase runs nothing, which is what the caller asked for.
+func (s *server) unsetHook(w http.ResponseWriter, r *http.Request) {
+	app, phase := r.PathValue("app"), controlplane.HookPhase(r.PathValue("phase"))
+	if err := s.engine.UnsetHook(r.Context(), app, r.URL.Query().Get("env"), phase); err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"app": app, "phase": string(phase)})
 }
 
 func (s *server) listApps(w http.ResponseWriter, r *http.Request) {
@@ -1316,6 +1375,16 @@ func writeEngineError(w http.ResponseWriter, err error) {
 	// target, without a separate probe. It is an unprocessable request, not a system failure.
 	if a, ok := controlplane.AsAmbiguousEnvironment(err); ok {
 		writeError(w, http.StatusUnprocessableEntity, a.Error(), "ambiguous_environment")
+		return
+	}
+	// A failed lifecycle hook is a structured, actionable refusal (ADR-0072 §3): the request was
+	// understood, the guardrail allowed it, and the user's own command exited non-zero, so the deploy
+	// (or rollback) did not happen and the running version is untouched. The phase, the command, the
+	// exit code and the command's own output ride in the error text, which is what makes the failure
+	// diagnosable from the response instead of from a hunt through the cluster. NeedsConfirmation is
+	// deliberately absent — there is nothing to confirm; the command has to be fixed.
+	if _, ok := controlplane.AsHook(err); ok {
+		writeError(w, http.StatusUnprocessableEntity, err.Error(), "hook_failed")
 		return
 	}
 	// Missing cluster prerequisites is a structured, actionable outcome (ADR-0006): the request was

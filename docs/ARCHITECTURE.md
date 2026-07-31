@@ -120,8 +120,12 @@ These are the decisions everything else rests on. Each has an ADR.
 3. `burrow-agent` forwards the call to the control plane over the authenticated
    control-plane API. It holds no cluster credentials and makes no cluster calls itself.
 4. The control plane runs the guardrails
-   ([ADR-0006](adr/0006-guardrails-in-the-control-plane.md)), then — using the cluster
-   credentials it alone holds — instructs Kubernetes to roll out the referenced image.
+   ([ADR-0006](adr/0006-guardrails-in-the-control-plane.md)). If the app has a `pre-deploy`
+   hook configured for that environment, it runs that command first, as a Job from the image
+   **being deployed**, with the app's config and Secret — the supported place for a schema
+   migration ([ADR-0072](adr/0072-deploy-and-run-lifecycle-hooks.md) §2). A failure aborts here:
+   nothing reaches the cluster and the running version keeps serving (§3). Then — using the
+   cluster credentials it alone holds — it instructs Kubernetes to roll out the referenced image.
 5. The control plane records the deploy (image digest, when, by whom, what it replaced) —
    the rollback handle ([ADR-0007](adr/0007-explicit-deploy-by-image-reference.md)) — and
    returns a structured result describing what changed and how to undo it.
@@ -137,7 +141,11 @@ operations (e.g. scale), and returns a structured result.
 
 The agent calls `rollback`; the control plane looks up the recorded prior deploy for the
 target and redeploys that reference through the same guarded path — recovery is a
-first-class, supported operation, not guesswork.
+first-class, supported operation, not guesswork. A rollback fires the `pre-rollback` hook and
+**never** `pre-deploy` ([ADR-0072](adr/0072-deploy-and-run-lifecycle-hooks.md) §8), and it runs
+from the image being rolled back *away from*: that is where the code that knows how to undo its
+own migration lives. `pre-rollback` is unset by default, so a rollback runs nothing unless
+someone deliberately configured it.
 
 ## Components and code layout
 

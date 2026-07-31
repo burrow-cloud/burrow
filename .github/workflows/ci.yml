@@ -4,18 +4,27 @@ on:
   push:
     branches: [main]
   pull_request:
-  # merge_group runs the required checks against the queued PR merged onto main. ADR-0075
-  # retires the merge queue, but the trigger stays until the `merge_queue` rule is actually
-  # off the `protect-main` ruleset: while a queue is enabled, a workflow without this trigger
-  # never produces the required check, so every queued PR stalls to the 60-minute timeout —
-  # including the PR that removes the trigger. It is dead weight afterwards and can be dropped
-  # once the ruleset change has landed.
-  merge_group:
+
+# Since ADR-0075 the ~10 min k3d job runs on every push to a pull request rather than once per
+# merge, so a branch pushed three times in a row pays three times over — usually for commits
+# nobody is waiting on any more. This block drops that to one live run per branch. It could not
+# be added while the merge queue existed: cancelling a run under a queue IS an eviction, so the
+# very mechanism that saves the minutes here would have dropped PRs out of the queue there.
+concurrency:
+  # On a pull request the group is the branch, so a new push supersedes the run still going for
+  # the commit it replaced. On a push to main the group is the commit instead, which means main
+  # builds neither cancel nor queue behind one another — every merged commit gets its own result.
+  # That asymmetry is deliberate. Branches are not required to be current with main (ADR-0075 §3)
+  # and main is fixed forward, so the per-commit build is the signal that says a merge broke it;
+  # cancelling it would discard the only evidence, and merely queueing it would delay the
+  # discovery by a full run. A superseded PR run has no such value — its commit is already gone.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
 
 jobs:
   # changes detects whether anything other than documentation changed, so the heavy build
   # and integration jobs can be skipped on docs-only PRs. A skipped required check still
-  # counts as passing for branch protection and the merge queue, so auto-merge keeps working.
+  # counts as passing for branch protection, so a docs-only PR still goes green.
   changes:
     name: detect changes
     runs-on: ubuntu-latest
@@ -32,10 +41,10 @@ jobs:
           # under which a file matches the filter if it matches ANY line. Because '**' matches
           # every path, the '!' lines were dead: `code` evaluated true for every change on every
           # event, so the docs-only skip below never once fired. It looked like it worked only
-          # because kube-integration is separately gated on merge_group, which hid the always-true
-          # `code` on PRs; in the queue nothing hid it and a two-file docs-only change (PR #356)
-          # ran the ~10 min k3d job. `every` makes all lines conjunctive, which is what turns the
-          # '!' lines back into real exclusions.
+          # because kube-integration was then separately gated on merge_group, which hid the
+          # always-true `code` on PRs; in the queue nothing hid it and a two-file docs-only
+          # change (PR #356) ran the ~10 min k3d job. `every` makes all lines conjunctive, which
+          # is what turns the '!' lines back into real exclusions.
           predicate-quantifier: every
           # Docs-only is deliberately NARROW: only the root README.md and anything under docs/.
           # A markdown file anywhere else — CLAUDE.md, LICENSING.md, a nested README.md — counts as

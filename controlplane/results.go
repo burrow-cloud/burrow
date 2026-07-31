@@ -482,9 +482,20 @@ type Backup struct {
 	Environment string `json:"environment,omitempty"`
 	// CreatedAt is when the backup was recorded, read from the injected clock.
 	CreatedAt time.Time `json:"created_at"`
-	// Path is the on-PVC location of the dump (e.g. /backups/<app>/<id>.dump). It is a path on a
-	// volume burrowd does not mount — never a credential.
+	// Path is the location of the dump WITHIN its claim (e.g. /backups/<app>/<id>.dump). It is a
+	// path on a volume burrowd does not mount — never a credential. It does not identify a dump on
+	// its own: the same path exists on every environment's claim, and Volume says which one.
 	Path string `json:"path,omitempty"`
+	// Volume is the PersistentVolumeClaim the dump was written to — this environment's backup claim
+	// (BackupVolumeName). It is recorded rather than derived on read because the derivation changed:
+	// backups written before backups were per-environment are all on the one claim that existed then
+	// (PostgresBackupVolume), and a row that only said which environment it came from could not tell
+	// the two eras apart. Recording it is what lets a restore refuse a dump that is not on the claim
+	// this environment mounts, instead of running a Job that finds no such file.
+	//
+	// Empty only on a row written by an older burrowd against a newer schema; readers treat that as
+	// the pre-migration claim, which is what it can only be.
+	Volume string `json:"volume,omitempty"`
 	// SizeBytes is the dump's size in bytes, or 0 when unknown.
 	SizeBytes int64 `json:"size_bytes,omitempty"`
 	// Status is the lifecycle state of this backup.

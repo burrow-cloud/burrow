@@ -111,8 +111,18 @@ func (k *Kubernetes) WithNamespace(ns string) controlplane.Kubernetes {
 // on the same shape production produces (ADR-0064 §6).
 type fakeVolume struct {
 	Addon controlplane.AddonType
+	Env   string
 	Role  string
 	Size  string
+}
+
+// fakeEnvName resolves an unnamed environment to the default one, mirroring the engine's envName so
+// a fake driven by a test that omits the environment lands where the real adapter would.
+func fakeEnvName(env string) string {
+	if env == "" {
+		return controlplane.DefaultEnvironment
+	}
+	return env
 }
 
 // backupCall records one RunBackupJob/RunRestoreJob invocation so a test can assert the engine
@@ -309,6 +319,7 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 	if spec.StorageGi > 0 {
 		k.volumes[name] = fakeVolume{
 			Addon: spec.Type,
+			Env:   fakeEnvName(env),
 			Role:  controlplane.AddonVolumeData,
 			Size:  fmt.Sprintf("%dGi", spec.StorageGi),
 		}
@@ -355,6 +366,7 @@ func (k *Kubernetes) AddonVolumes(ctx context.Context) ([]controlplane.AddonVolu
 			Name:            name,
 			Namespace:       fakeAddonNamespace,
 			Addon:           v.Addon,
+			Environment:     v.Env,
 			Role:            v.Role,
 			Size:            v.Size,
 			ReinstallAdopts: v.Role == controlplane.AddonVolumeData,
@@ -384,10 +396,15 @@ func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, deleteData bo
 			removal.RetainedDataVolume = name
 		}
 	}
-	// The backup volume outlives the database either way (ADR-0032). It exists in this fake only
-	// once a backup has been taken, exactly as the adapter creates it on first backup.
-	if info.Type == controlplane.AddonPostgres && len(*k.backups) > 0 {
-		removal.RetainedBackupVolume = controlplane.PostgresBackupVolume
+	// The backup volume outlives the database either way (ADR-0032), and it is THIS environment's
+	// claim (ADR-0067 §1). It exists in this fake only once a backup has been taken in that
+	// environment, exactly as the adapter creates it on first backup.
+	if info.Type == controlplane.AddonPostgres {
+		if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, fakeEnvName(info.Environment)); err == nil {
+			if _, ok := k.volumes[claim]; ok {
+				removal.RetainedBackupVolume = claim
+			}
+		}
 	}
 	return removal, nil
 }
@@ -933,11 +950,17 @@ func (k *Kubernetes) RunBackupJob(ctx context.Context, app, env, backupID string
 		// for even on the path where the Job fails — which is the path this issue is about.
 		return *k.backupReason, err
 	}
-	// The backup claim is created on first backup, exactly as the adapter creates it (ADR-0032), and
-	// from then on it is a claim in the add-on namespace like any other — including after the add-on
-	// that filled it is gone.
-	k.volumes[controlplane.PostgresBackupVolume] = fakeVolume{
+	// The backup claim is created on first backup, exactly as the adapter creates it (ADR-0032) —
+	// one per ENVIRONMENT (ADR-0067 §1), so a backup taken in staging creates staging's claim and
+	// leaves production's alone. From then on it is a claim in the add-on namespace like any other,
+	// including after the add-on that filled it is gone.
+	claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, fakeEnvName(env))
+	if err != nil {
+		return controlplane.BackupJobOutcome{}, err
+	}
+	k.volumes[claim] = fakeVolume{
 		Addon: controlplane.AddonPostgres,
+		Env:   fakeEnvName(env),
 		Role:  controlplane.AddonVolumeBackup,
 		Size:  "10Gi",
 	}

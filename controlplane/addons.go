@@ -193,11 +193,67 @@ func LookupConnectBackend(name string) (ConnectBackend, bool) {
 	return b, ok
 }
 
-// PostgresBackupVolume is the PersistentVolumeClaim in the add-on namespace that holds the Postgres
-// add-on's dumps (ADR-0032). It is named here, next to BackupPath, so the engine can report that
-// removing the add-on deliberately LEFT IT IN PLACE without importing the kube package — the same
-// reason BackupPath lives in this package rather than in the Job builder.
+// PostgresBackupVolume is the DEFAULT environment's Postgres backup claim, and the only backup claim
+// that existed before backups were per-environment: every dump taken before that change is on it.
+// It is named here, next to BackupPath, so the engine can report that removing the add-on
+// deliberately LEFT IT IN PLACE without importing the kube package — the same reason BackupPath
+// lives in this package rather than in the Job builder.
+//
+// It is a constant rather than a call to BackupVolumeName because it is also the value migration
+// 00027 backfilled every pre-existing backup row's volume to, and a backfill is a historical fact
+// about bytes on a disk: it must not move if the derivation is ever revised. BackupVolumeName agrees
+// with it for the default environment, asserted by a test.
 const PostgresBackupVolume = "burrow-postgres-backups"
+
+// BackupVolumeName is the PersistentVolumeClaim holding add-on type t's dumps for environment env —
+// ONE CLAIM PER ENVIRONMENT, the same shape ADR-0067 §1 gives the instance those dumps come from.
+//
+// A dump is only ever taken from, and only ever restored into, one environment's instance. Sharing
+// one claim across environments would have put staging's and production's dumps for an app of the
+// same name on one disk, which the backup and restore Jobs of EITHER environment mount whole: the
+// registry rows would say which environment each dump came from while nothing on the volume did.
+// Isolation comes from the claim, not from a naming convention inside a shared one — the sentence
+// ADR-0067 §1 uses about the instance, one level down.
+//
+// THE NAMES CANNOT COLLIDE, and that is by construction rather than by convention:
+//
+//   - Across environments, because AddonInstanceName is already injective over (type, environment)
+//     and appending a fixed token preserves that. Two environments have no name they both resolve to.
+//   - Against the INSTANCE names sharing the add-on namespace, because a named environment's claim
+//     is separated by a DOT, and an instance name can never contain one: an add-on type has no dot
+//     and an environment name is a DNS-1123 *label*. Without that, an environment called
+//     `staging-backups` would name its instance, its Deployment, its Service and its data claim
+//     exactly what `staging`'s backup claim is called — the same class of collision this fixes.
+//
+// The DEFAULT environment keeps the unqualified name its claim already carries
+// (PostgresBackupVolume), so no dump moves and no existing claim is renamed — the same exemption
+// ADR-0067 §3 gives the default environment's instance, for the same reason. That is the one name in
+// the family sitting inside the instance family's shape, which is why an environment called
+// `backups` is reserved (ReservedEnvironmentNames).
+//
+// env is REQUIRED, for AddonInstanceName's reason: a signature that can omit it is a signature that
+// will omit it, and the value it would default to is another environment's dumps.
+func BackupVolumeName(t AddonType, env string) (string, error) {
+	instance, err := AddonInstanceName(t, env)
+	if err != nil {
+		return "", fmt.Errorf("backup volume: %w", err)
+	}
+	if env == DefaultEnvironment {
+		return instance + defaultBackupVolumeSuffix, nil
+	}
+	return instance + backupVolumeSuffix, nil
+}
+
+const (
+	// defaultBackupVolumeSuffix makes the default environment's claim the name it already has
+	// (`burrow-postgres` + `-backups` = PostgresBackupVolume).
+	defaultBackupVolumeSuffix = "-backups"
+	// backupVolumeSuffix separates a named environment's claim from its instance with a character no
+	// instance name can contain, so the two families cannot meet. A PersistentVolumeClaim name is a
+	// DNS-1123 subdomain, which admits the dot; an environment name is a DNS-1123 label, which does
+	// not.
+	backupVolumeSuffix = ".backups"
+)
 
 // Add-on volume roles: what a claim in the add-on namespace holds. The role decides what a retained
 // claim is worth keeping for — a data claim comes back to life on reinstall, a backup claim is a
@@ -222,6 +278,13 @@ type AddonVolume struct {
 	// Addon is the add-on type the claim was created for, read from the claim's own Burrow labels —
 	// not inferred from its name.
 	Addon AddonType `json:"addon"`
+	// Environment is the environment the claim serves, read from the claim's own Burrow labels.
+	// Empty for a claim created before add-ons were per-environment, which is the default
+	// environment's by construction — it is left empty rather than filled in, because the label is
+	// what the cluster actually says. With one instance and one backup claim per environment
+	// (ADR-0067 §1) it is the difference between a listing that says which claim is which and one
+	// that leaves the operator to read it off a name suffix.
+	Environment string `json:"environment,omitempty"`
 	// Role is what the claim holds: AddonVolumeData or AddonVolumeBackup.
 	Role string `json:"role"`
 	// Size is the claim's provisioned capacity where the cluster reports it, falling back to the

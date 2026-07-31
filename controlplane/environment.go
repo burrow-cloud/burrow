@@ -54,12 +54,28 @@ var reservedEnvironments = []struct {
 }{
 	{DefaultEnvironment, fmt.Sprintf("environment %q already exists: install creates it, mapped to the app namespace (ADR-0067 §2)", DefaultEnvironment)},
 	{retiredDefaultEnvironment, fmt.Sprintf("environment name %q is retired: the environment it named is now called %q (ADR-0067 §2)", retiredDefaultEnvironment, DefaultEnvironment)},
+	{backupsEnvironment, fmt.Sprintf("environment name %q is reserved: %q is the default environment's backup claim, and an environment of that name would give its Postgres instance — its Deployment, its Service, its superuser Secret and its data volume — the same name, so the instance would come up on the volume holding every dump", backupsEnvironment, PostgresBackupVolume)},
 }
 
+// backupsEnvironment is the one environment name that would name a resource the backup claims
+// already own. Every OTHER environment's backup claim is separated from its instance by a dot, which
+// an environment name cannot contain (BackupVolumeName), so this is the whole of the overlap between
+// the two families rather than the first case of a pattern: the default environment's claim is the
+// single one that keeps an unqualified, dot-free name, and `burrow-postgres-backups` is what
+// AddonInstanceName would hand an environment called `backups`.
+//
+// It is reserved rather than merely improbable because the failure is silent. Installing Postgres
+// into such an environment creates its data claim under a name that already exists, which is not an
+// error — the create returns AlreadyExists and the instance starts on the backup volume, with
+// initdb running over a directory of dumps.
+const backupsEnvironment = "backups"
+
 // ReservedEnvironmentNames returns every environment name this package refuses outright — `prod`,
-// which install already created, and the retired `default` it replaced (ADR-0067 §2) — as a fresh
-// slice a caller cannot mutate. It is the same table validateEnvironmentName refuses from, so the
-// answer is the refusal itself and not a description of it that can fall behind.
+// which install already created, the retired `default` it replaced (ADR-0067 §2), and `backups`,
+// which would name its Postgres instance what the default environment's backup claim is already
+// called (backupsEnvironment) — as a fresh slice a caller cannot mutate. It is the same table
+// validateEnvironmentName refuses from, so the answer is the refusal itself and not a description of
+// it that can fall behind.
 //
 // IT IS EXPORTED FOR THE CALLER THAT REFUSES BEFORE IT FORWARDS. A front end that provisions with
 // its own credentials and only then hands the request to the control plane has to make this refusal

@@ -14,29 +14,36 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-const backupColumns = `id, app, environment, created_at, path, size_bytes, status, ` +
+const backupColumns = `id, app, environment, created_at, path, volume, size_bytes, status, ` +
 	`destination, provider, object_key, failure_reason, failure_detail`
 
 // RecordBackup persists a new backup row (ADR-0032). burrowd records it pending before starting the
 // backup Job, then SetBackupStatus moves it to completed or FailBackup to failed when the Job
-// finishes. An existing row with the same id is overwritten. The row names the app, the on-PVC path,
-// the destination it is being written to, and the status — never a credential.
+// finishes. An existing row with the same id is overwritten. The row names the app, the claim and
+// the path within it, the destination it is being written to, and the status — never a credential.
 func (s *Store) RecordBackup(ctx context.Context, b controlplane.Backup) error {
 	if b.ID == "" {
 		return fmt.Errorf("postgres: record backup: empty ID")
 	}
 	const q = `
-INSERT INTO postgres_backups (id, app, environment, created_at, path, size_bytes, status,
+INSERT INTO postgres_backups (id, app, environment, created_at, path, volume, size_bytes, status,
                               destination, provider, object_key, failure_reason, failure_detail)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (id) DO UPDATE SET
     app = EXCLUDED.app, environment = EXCLUDED.environment, created_at = EXCLUDED.created_at,
-    path = EXCLUDED.path, size_bytes = EXCLUDED.size_bytes, status = EXCLUDED.status,
+    path = EXCLUDED.path, volume = EXCLUDED.volume, size_bytes = EXCLUDED.size_bytes, status = EXCLUDED.status,
     destination = EXCLUDED.destination, provider = EXCLUDED.provider, object_key = EXCLUDED.object_key,
     failure_reason = EXCLUDED.failure_reason, failure_detail = EXCLUDED.failure_detail`
 	env := b.Environment
 	if env == "" {
 		env = controlplane.DefaultEnvironment
+	}
+	vol := b.Volume
+	if vol == "" {
+		// A row arriving with no claim named can only mean the shared claim that predates
+		// per-environment backups; writing it blank would leave the restore unable to say which
+		// volume the dump is on (ADR-0067 §1).
+		vol = controlplane.PostgresBackupVolume
 	}
 	dest := b.Destination
 	if dest == "" {
@@ -44,7 +51,7 @@ ON CONFLICT (id) DO UPDATE SET
 		// would leave the listing unable to say which backups survive losing the cluster.
 		dest = controlplane.BackupDestinationCluster
 	}
-	if _, err := s.db.ExecContext(ctx, q, b.ID, b.App, env, b.CreatedAt, b.Path, b.SizeBytes, string(b.Status),
+	if _, err := s.db.ExecContext(ctx, q, b.ID, b.App, env, b.CreatedAt, b.Path, vol, b.SizeBytes, string(b.Status),
 		string(dest), b.Provider, b.ObjectKey, b.FailureReason, b.FailureDetail); err != nil {
 		return fmt.Errorf("postgres: record backup %s: %w", b.ID, err)
 	}
@@ -152,7 +159,7 @@ func scanBackup(sc scanner) (controlplane.Backup, error) {
 		status  string
 		dest    string
 	)
-	if err := sc.Scan(&b.ID, &b.App, &b.Environment, &created, &b.Path, &b.SizeBytes, &status,
+	if err := sc.Scan(&b.ID, &b.App, &b.Environment, &created, &b.Path, &b.Volume, &b.SizeBytes, &status,
 		&dest, &b.Provider, &b.ObjectKey, &b.FailureReason, &b.FailureDetail); err != nil {
 		return controlplane.Backup{}, err
 	}

@@ -37,6 +37,14 @@ const addonLabel = "burrow.cloud/addon"
 // because the label is a note to a human rather than an index.
 const addonEnvLabel = "burrow.cloud/environment"
 
+// addonVolumeRole records what an add-on claim HOLDS: the add-on's own data (AddonVolumeData) or its
+// dumps (AddonVolumeBackup). The two are different things to keep — a data claim comes back to life
+// on reinstall, a backup claim is a pile of dumps that outlives the database it came from — and
+// until backups were per-environment the role could be read off the one compiled-in claim name.
+// It cannot any more: `burrow-postgres-staging.backups` is a backup claim whose name is not that
+// constant, and attributing it by shape would be the name-guessing AddonVolumes exists to avoid.
+const addonVolumeRole = "burrow.cloud/addon-volume"
+
 // addonName is the deterministic resource name for the instance of add-on type t serving
 // environment env — one instance PER TYPE PER ENVIRONMENT (ADR-0067 §1). The derivation lives in the
 // controlplane package (AddonInstanceName) so the engine, the registry, and this adapter cannot
@@ -64,6 +72,9 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 	// environment label records which environment the instance serves, so the cluster view agrees
 	// with the registry row.
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(spec.Type), addonEnvLabel: env}
+	// The data claim carries the role as well, so every claim Burrow creates says what it holds
+	// rather than only the ones whose name gives it away.
+	volumeLabels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(spec.Type), addonEnvLabel: env, addonVolumeRole: controlplane.AddonVolumeData}
 
 	// The metrics add-on's vmagent scraper references a pre-provisioned ServiceAccount whose RBAC
 	// only a kubeconfig-holder can apply (burrowd cannot create RBAC). The CLI self-heals this
@@ -81,7 +92,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 	var mounts []corev1.VolumeMount
 	if spec.StorageGi > 0 {
 		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: labels},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: volumeLabels},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				Resources: corev1.VolumeResourceRequirements{
@@ -687,9 +698,16 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string, deleteData bool)
 	// makes destroying the data survivable: the recorded backup rows in the control-plane database
 	// still resolve to dumps that are still there. It is reported rather than silently left so the
 	// operator knows the storage is still allocated and can reclaim it deliberately.
+	// It is THIS environment's backup claim that is reported, resolved from the instance's own
+	// environment label — one claim per environment (ADR-0067 §1), so naming the compiled-in constant
+	// here would tell an operator removing staging's instance that production's dumps were what
+	// survived. An instance installed before that label existed carries none, and is the default
+	// environment's by construction, which is exactly what envName resolves an empty value to.
 	if isPostgres {
-		if _, err := pvcs.Get(ctx, controlplane.PostgresBackupVolume, metav1.GetOptions{}); err == nil {
-			removal.RetainedBackupVolume = controlplane.PostgresBackupVolume
+		if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, addonEnvironment(dep.Labels)); err == nil {
+			if _, err := pvcs.Get(ctx, claim, metav1.GetOptions{}); err == nil {
+				removal.RetainedBackupVolume = claim
+			}
 		}
 	}
 	return removal, nil
@@ -719,11 +737,12 @@ func (a *Adapter) AddonVolumes(ctx context.Context) ([]controlplane.AddonVolume,
 			continue
 		}
 		out = append(out, controlplane.AddonVolume{
-			Name:      pvc.Name,
-			Namespace: a.addonNamespace,
-			Addon:     addon,
-			Role:      role,
-			Size:      addonVolumeSize(pvc),
+			Name:        pvc.Name,
+			Namespace:   a.addonNamespace,
+			Addon:       addon,
+			Environment: pvc.Labels[addonEnvLabel],
+			Role:        role,
+			Size:        addonVolumeSize(pvc),
 			// A data claim keeps the add-on's resource name, so a reinstall creates over it and the
 			// instance comes back with its data (ADR-0064 §1). The backup claim is mounted by the
 			// backup/restore Jobs instead, so a reinstall does not adopt it.
@@ -734,13 +753,22 @@ func (a *Adapter) AddonVolumes(ctx context.Context) ([]controlplane.AddonVolume,
 	return out, nil
 }
 
-// addonVolumeOwner attributes a claim to the add-on it serves and says what it holds. The add-on
-// label is authoritative. The backup claim is the one exception: it is created on the backup path
-// (ensureBackupPVC) and claims created before that path carried the add-on label have only their
-// name — which is safe to match on because it is a compiled-in constant
-// (controlplane.PostgresBackupVolume), not a prefix guess about what a user might have named
-// something.
+// addonVolumeOwner attributes a claim to the add-on it serves and says what it holds. The LABELS are
+// authoritative: the add-on label names the type and the role label says whether the claim holds the
+// add-on's data or its dumps.
+//
+// Two fallbacks cover claims written before those labels, and neither guesses from a name shape. A
+// claim named exactly controlplane.PostgresBackupVolume is a backup claim — safe to match because it
+// is a compiled-in constant, not a prefix guess about what a user might have named something. Any
+// other labelled claim predates the role label and can only be a data claim, since the backup path
+// never created one under another name until backups became per-environment and started labelling
+// them.
 func addonVolumeOwner(pvc *corev1.PersistentVolumeClaim) (controlplane.AddonType, string, bool) {
+	if role := pvc.Labels[addonVolumeRole]; role != "" {
+		if t := pvc.Labels[addonLabel]; t != "" {
+			return controlplane.AddonType(t), role, true
+		}
+	}
 	if pvc.Name == controlplane.PostgresBackupVolume {
 		return controlplane.AddonPostgres, controlplane.AddonVolumeBackup, true
 	}
@@ -748,6 +776,17 @@ func addonVolumeOwner(pvc *corev1.PersistentVolumeClaim) (controlplane.AddonType
 		return controlplane.AddonType(t), controlplane.AddonVolumeData, true
 	}
 	return "", "", false
+}
+
+// addonEnvironment reads the environment an add-on resource serves from its labels, resolving an
+// absent label to the default environment. A resource created before add-ons were per-environment
+// carries no label and can only be the default environment's, because that is the only one that
+// existed when it was created (ADR-0067 §3).
+func addonEnvironment(labels map[string]string) string {
+	if env := labels[addonEnvLabel]; env != "" {
+		return env
+	}
+	return controlplane.DefaultEnvironment
 }
 
 // addonVolumeSize reports the claim's capacity: what the cluster actually provisioned once the claim

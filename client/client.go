@@ -717,6 +717,9 @@ type RetainedVolume struct {
 	Namespace string `json:"namespace,omitempty"`
 	// Addon is the add-on type the volume belonged to.
 	Addon string `json:"addon"`
+	// Environment is the environment the claim served (ADR-0067 §1). Empty for a claim created
+	// before add-ons were per-environment, which is the default environment's.
+	Environment string `json:"environment,omitempty"`
 	// Role is what the claim holds: "data" (the add-on's own volume) or "backup" (its dumps).
 	Role string `json:"role"`
 	// Size is the claim's capacity, e.g. "10Gi". Size, not cost: cost needs the provider's pricing.
@@ -861,8 +864,11 @@ type Backup struct {
 	Environment string `json:"environment,omitempty"`
 	CreatedAt   string `json:"created_at"`
 	Path        string `json:"path,omitempty"`
-	SizeBytes   int64  `json:"size_bytes,omitempty"`
-	Status      string `json:"status"`
+	// Volume is the claim the dump was written to — this environment's backup claim. Each
+	// environment holds its dumps on its own volume, so the path alone does not address a dump.
+	Volume    string `json:"volume,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	Status    string `json:"status"`
 	// Destination is where this backup's bytes ended up: "object-store" for one that left the
 	// cluster, "cluster" for one that did not (ADR-0063). It is recorded per backup rather than
 	// derived from the current configuration, so registering a destination today does not make

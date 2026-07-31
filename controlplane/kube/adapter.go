@@ -71,6 +71,12 @@ type Adapter struct {
 	// code is not. nil (the default) leaves the constructed object exactly as it is. Wired via
 	// WithPlatformPodMutator.
 	platformPodMutator func(*corev1.PodSpec)
+	// controllerPlacement is the ADR-0077 §2 third seam: placement policy for pods this adapter
+	// causes to exist but does not author, where a third-party controller composes the pod from a
+	// custom resource Burrow creates. It is a VALUE rather than a hook because there is no
+	// constructed pod spec to hand a hook — see PodPlacement. The zero value carries no policy.
+	// Wired via WithControllerPodPlacement, which refuses policy the target cannot carry.
+	controllerPlacement PodPlacement
 	// shipperImage is the image the backup Job's shipping container runs — burrowd's own, under the
 	// ship-backup subcommand (ADR-0063 §7). Empty (the default) leaves the floating
 	// defaultShipperImage; a released burrowd pins its own version, and BURROW_SHIPPER_IMAGE
@@ -210,12 +216,12 @@ func (a *Adapter) applyPlatformPodMutator(pod *corev1.PodSpec) {
 // namespace (ADR-0035 phase 2). The add-on namespace is unchanged, so add-ons still land in their
 // own namespace. An empty ns, or ns equal to the current app namespace, returns the receiver
 // unchanged, so default-environment behavior is identical to before environments existed. The copy
-// is shallow: it shares the same client and BOTH pod mutators — the app hook of ADR-0061 and the
-// platform hook of ADR-0073 — so an environment-scoped view applies the same hooks, and a hook
-// wired once at construction reaches every per-tenant view of the adapter. That is load-bearing: a
-// hook that survived only on the receiver would work in a single-namespace install and silently
-// stop applying the moment an operation was routed to a named environment. No new connection is
-// made per operation.
+// is shallow: it shares the same client and ALL THREE placement seams — the app hook of ADR-0061,
+// the platform hook of ADR-0073, and the controller placement of ADR-0077 — so an environment-scoped
+// view applies the same policy, and a seam wired once at construction reaches every per-tenant view
+// of the adapter. That is load-bearing: policy that survived only on the receiver would work in a
+// single-namespace install and silently stop applying the moment an operation was routed to a named
+// environment. No new connection is made per operation.
 func (a *Adapter) WithNamespace(ns string) controlplane.Kubernetes {
 	if ns == "" || ns == a.namespace {
 		return a

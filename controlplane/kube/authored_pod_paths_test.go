@@ -80,6 +80,16 @@ import (
 //
 // The catalogue lives here rather than in package code because this is its only reader — unlike
 // internal/agentsurface, whose catalogue `guard` also reports at runtime.
+//
+// # What this file does NOT cover
+//
+// It scans for corev1.PodSpec literals, so its subject is pods Burrow ASSEMBLES.
+// [ADR-0077](../../docs/adr/0077-placement-policy-for-pods-burrow-does-not-author.md) §1 restates
+// ADR-0073 §1 to every pod Burrow CAUSES TO EXIST, which includes pods a third-party controller
+// composes from a custom resource Burrow creates. Those have no pod spec to scan for and no hook to
+// apply; they carry placement through WithControllerPodPlacement and are guarded by
+// placement_test.go and placement_cnpg_test.go. Reading §1 through this file alone would read
+// "authored" narrowly, which is the gap ADR-0077 exists to close.
 
 // placementHook names one of ADR-0073's three operator hooks, by the method that wires it.
 type placementHook string

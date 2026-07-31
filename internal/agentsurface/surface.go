@@ -181,6 +181,15 @@ var catalogue = []Capability{
 	{Surface: Agent, Path: "cluster", What: "read-only: the cluster's capabilities"},
 	{Surface: Agent, Path: "cluster capacity", What: "read-only: scheduling headroom, from the Kubernetes API"},
 	{Surface: Agent, Path: "audit", What: "read-only: the audit record of guarded operations"},
+	// The failure ledger's read surface (ADR-0074 §8). It qualifies on ADR-0065 §1: a read that
+	// changes nothing passes the reversibility test outright, and the scope test asks about the
+	// blast radius of an EFFECT, which a read does not have — the same ground `cluster` and `audit`
+	// are already here on. ADR-0074 §5 goes further and names the agent as the surface's most
+	// important consumer: Burrow reports correlation and refuses to claim a cause, and turning
+	// twenty rows into "the node pool was tainted at 02:14; remove the taint" is the agent's half
+	// of that division of labour. Withholding it would leave the agent with a control plane that
+	// knows what broke and no way to ask — the dead end ADR-0021 says pushes it to kubectl.
+	{Surface: Agent, Path: "failures", What: "read-only: what is broken across everything Burrow manages, with the observation coverage behind the answer"},
 	{Surface: Agent, Path: "guard", What: "read-only: the guardrail dispositions and the capabilities absent from this binary; `guard set` is operator-only (ADR-0020)"},
 
 	// Targeting: selects among environments the OPERATOR registered.

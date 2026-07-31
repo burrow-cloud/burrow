@@ -179,6 +179,18 @@ that holds both the credentials and the decision. Its arguments are redacted to 
 read-only through the API: the operator and the agent can review it with `burrow audit`, but
 nothing can write to or alter it.
 
+Beside it, in separate tables, sits the **failure ledger** (ADR-0074): what the cluster *did*
+afterwards. burrowd runs a background observer over the objects the registry says it owns and
+records one row per (object, reason) with a first-seen, a last-seen, a resolution and a count —
+so "when did this start" and "has this happened before" are answerable, which they are not from
+the cluster, whose Events expire in an hour. It is deliberately not merged with the audit log:
+that record is append-only and complete, and this one is pruned. Alongside the rows the ledger
+records **its own observation coverage**, so a stretch in which nothing was watching reads as a
+gap rather than as an hour in which nothing broke. Both are read with `burrow failures` (and
+`burrow-agent failures`), which groups a cascade by shared reason for a human reader while the
+API returns the rows ungrouped for an agent. Current state is never served from here: `burrow app
+status` stays a live read, because a cache is most stale during the incident it exists to help.
+
 ## Where to look for what is built
 
 This document describes the shape. What is actually built — every capability, the command that

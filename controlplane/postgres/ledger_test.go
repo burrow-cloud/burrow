@@ -374,3 +374,114 @@ func exposureFor(t *testing.T, s *postgres.Store, app string) cp.Exposure {
 	}
 	return found[0]
 }
+
+// TestStoreLedgerReadFilters: the filters the cluster-wide listing is built on (ADR-0074 §8) applied
+// against a real Postgres. Ordering, the kind/reason/environment narrowing, the last-seen window and
+// the row cap all live in one SQL builder, and a wrong clause there produces the one answer this
+// surface must never give by accident — a short list that looks complete.
+func TestStoreLedgerReadFilters(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	prefix := strings.ToLower(t.Name())
+	base := time.Date(2031, 5, 6, 1, 0, 0, 0, time.UTC)
+
+	// One taint's worth of cascade across two kinds, plus an unrelated crash loop that started
+	// earlier and a stale row outside the window.
+	seed := []struct {
+		kind   cp.FailureKind
+		name   string
+		env    string
+		reason string
+		at     time.Time
+	}{
+		{cp.FailureApp, "api", "prod", cp.ReasonUnschedulable, base.Add(30 * time.Minute)},
+		{cp.FailureAddon, "postgres", "prod", cp.ReasonUnschedulable, base.Add(31 * time.Minute)},
+		{cp.FailureApp, "web", "staging", cp.ReasonUnschedulable, base.Add(32 * time.Minute)},
+		{cp.FailureApp, "worker", "prod", cp.ReasonCrashLoopBackOff, base},
+		{cp.FailureApp, "ancient", "prod", cp.ReasonOOMKilled, base.Add(-48 * time.Hour)},
+	}
+	for _, sd := range seed {
+		if err := s.RecordFailure(ctx, cp.FailureObservation{
+			Object: cp.ObjectRef{Kind: sd.kind, Name: prefix + "-" + sd.name, Environment: sd.env},
+			Reason: sd.reason, At: sd.at,
+		}); err != nil {
+			t.Fatalf("RecordFailure(%s): %v", sd.name, err)
+		}
+	}
+
+	// Oldest first, because the earliest first_seen in a cascade is the likeliest thing to fix.
+	rows := readFailures(t, s, cp.FailureFilter{Since: base.Add(-time.Hour)})
+	rows = onlyPrefixed(rows, prefix)
+	if len(rows) != 4 {
+		t.Fatalf("got %d rows, want the four inside the window: %+v", len(rows), rows)
+	}
+	if rows[0].Object.Name != prefix+"-worker" {
+		t.Errorf("first row is %q, want the crash loop that started first", rows[0].Object.Name)
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].FirstSeen.Before(rows[i-1].FirstSeen) {
+			t.Fatalf("rows are not oldest-first: %+v", rows)
+		}
+	}
+
+	// The narrowing filters.
+	for _, tc := range []struct {
+		what   string
+		filter cp.FailureFilter
+		want   int
+	}{
+		{"kind", cp.FailureFilter{Kind: cp.FailureAddon, Since: base.Add(-time.Hour)}, 1},
+		{"reason", cp.FailureFilter{Reason: cp.ReasonUnschedulable, Since: base.Add(-time.Hour)}, 3},
+		{"environment", cp.FailureFilter{Environment: "staging", Since: base.Add(-time.Hour)}, 1},
+		{"name", cp.FailureFilter{Name: prefix + "-api"}, 1},
+		{"window excludes the stale row", cp.FailureFilter{Reason: cp.ReasonOOMKilled, Since: base.Add(-time.Hour)}, 0},
+		{"window includes it when widened", cp.FailureFilter{Reason: cp.ReasonOOMKilled, Since: base.Add(-72 * time.Hour)}, 1},
+	} {
+		got := onlyPrefixed(readFailures(t, s, tc.filter), prefix)
+		if len(got) != tc.want {
+			t.Errorf("%s filter returned %d rows, want %d: %+v", tc.what, len(got), tc.want, got)
+		}
+	}
+
+	// The cap is asserted unfiltered: it bounds the RESPONSE, so it is the one property a
+	// prefix-scoped count could not see.
+	if capped := readFailures(t, s, cp.FailureFilter{Since: base.Add(-72 * time.Hour), Limit: 2}); len(capped) != 2 {
+		t.Errorf("limit 2 returned %d rows, want the response capped at 2", len(capped))
+	}
+
+	// A resolved episode leaves the default listing and stays in the history.
+	if err := s.ResolveFailures(ctx, base.Add(time.Hour), []cp.FailureKey{
+		{Object: cp.ObjectRef{Kind: cp.FailureApp, Name: prefix + "-api", Environment: "prod"}, Reason: cp.ReasonUnschedulable},
+	}, nil); err != nil {
+		t.Fatalf("ResolveFailures: %v", err)
+	}
+	active := onlyPrefixed(readFailures(t, s, cp.FailureFilter{Name: prefix + "-worker"}), prefix)
+	if len(active) != 0 {
+		t.Errorf("the resolved crash loop is still in the default listing: %+v", active)
+	}
+	history := onlyPrefixed(readFailures(t, s, cp.FailureFilter{Name: prefix + "-worker", IncludeResolved: true}), prefix)
+	if len(history) != 1 || history[0].Active() {
+		t.Errorf("history = %+v, want the one resolved episode", history)
+	}
+}
+
+// readFailures runs one ledger query or fails the test.
+func readFailures(t *testing.T, s *postgres.Store, filter cp.FailureFilter) []cp.Failure {
+	t.Helper()
+	rows, err := s.Failures(context.Background(), filter)
+	if err != nil {
+		t.Fatalf("Failures(%+v): %v", filter, err)
+	}
+	return rows
+}
+
+// onlyPrefixed keeps the rows this test seeded, so it is safe against a shared database.
+func onlyPrefixed(rows []cp.Failure, prefix string) []cp.Failure {
+	out := make([]cp.Failure, 0, len(rows))
+	for _, f := range rows {
+		if strings.HasPrefix(f.Object.Name, prefix) {
+			out = append(out, f)
+		}
+	}
+	return out
+}

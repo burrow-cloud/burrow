@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -24,6 +25,13 @@ writes (config set/unset), secret unset, and the guarded destructive delete.
 
 Every command prints its result as indented JSON, so you can pipe, grep, and jq it
 (e.g. burrow-agent logs web | jq '.lines[] | select(.message | test("error"))').
+
+When something is wrong and you do not yet know what, burrow-agent failures is the place to start:
+it reports what broke across every object Burrow manages, with a first_seen, a last_seen and a
+count per (object, reason). Burrow reports what it observed and never claims a cause — reading
+twenty rows and concluding "the node pool was tainted at 02:14" is your half of the work. Read the
+"coverage" field before concluding a cluster is healthy: its "gaps" are stretches in which nothing
+was observing, so an empty list over a gap is not evidence that nothing broke.
 
 A mutating verb prints a structured outcome envelope with a top-level "outcome" field:
   executed              — the operation ran; "result" carries its result.
@@ -80,6 +88,7 @@ func newRootCmd() *cobra.Command {
 		newMetricsQueryCmd(),
 		newGuardCmd(),
 		newAuditCmd(),
+		newFailuresCmd(),
 		newProvidersCmd(),
 		newEnvironmentsCmd(),
 		// The mutating compute operate-verbs (ADR-0049 Phase 2a). Each funnels through the confirm
@@ -470,6 +479,60 @@ func newAuditCmd() *cobra.Command {
 	cmd.Flags().StringVar(&app, "app", "", "filter to one app/host/add-on target")
 	cmd.Flags().StringVar(&operation, "operation", "", "filter to one operation (e.g. deploy, rollback, app_delete)")
 	cmd.Flags().StringVar(&outcome, "outcome", "", "filter to one outcome (e.g. executed, held, denied, failed)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum number of rows to return (0 = server default)")
+	return cmd
+}
+
+// newFailuresCmd is the failure ledger's read surface on the agent channel (ADR-0074 §8). It is here
+// and not only on the human CLI because ADR-0074 §5 makes the agent the surface's most important
+// consumer: Burrow's half is to report every failure it observed, completely and in a shape
+// something else can reason over; the agent's half is to read twenty rows and conclude "the node
+// pool was tainted at 02:14; remove the taint or add the toleration". Synthesising a cause from
+// partial evidence is what a language model is good at and a control plane is not, and Burrow
+// deliberately does not run one.
+//
+// So this prints ROWS, NEVER GROUPS. The `burrow failures` listing groups by shared reason because a
+// person reading thirty red lines during an incident needs the cascade to read as one event; that is
+// a human-facing heuristic, and an agent inheriting it would be correlating on someone else's terms
+// instead of its own. Every answer carries the observation coverage behind it, so a gap in the
+// ledger cannot be mistaken for an hour in which nothing broke.
+func newFailuresCmd() *cobra.Command {
+	o := &connOpts{}
+	var kind, name, env, reason string
+	var since time.Duration
+	var all bool
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "failures",
+		Short: "Report what is broken across everything Burrow manages, with the observation coverage behind the answer",
+		Long: "failures reports the control plane's record of what broke across every object it manages —\n" +
+			"apps, add-ons, backups, and exposures — as rows, oldest first. One row per (object, reason),\n" +
+			"each with a first_seen, a last_seen, a resolved_at, and how many observations found it\n" +
+			"present.\n\n" +
+			"Burrow reports what it observed and never claims a cause. Rows sharing a reason and a window\n" +
+			"are a correlation you can reason over — a taint, a database outage — not a diagnosis Burrow\n" +
+			"asserts. Forming the cause and the fix from them is your half of the work.\n\n" +
+			"The `coverage` field says whether the answer can be read at face value: its `gaps` are\n" +
+			"stretches in which nothing was observing, so an empty `failures` list over a gap is not\n" +
+			"evidence that nothing broke. Check it before concluding a cluster is healthy.\n\n" +
+			"By default it reports failures that are still active. --since looks back over a window and\n" +
+			"includes ones that have since recovered; --all is the whole retained history.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return o.withClient(cmd, func(ctx context.Context, c *client.Client, _ string) (any, error) {
+				return c.Failures(ctx, client.FailureQuery{
+					Kind: kind, Name: name, Env: env, Reason: reason, Since: since, All: all, Limit: limit,
+				})
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
+	cmd.Flags().StringVar(&kind, "kind", "", "filter to one kind of object ("+strings.Join(client.FailureKinds(), ", ")+")")
+	cmd.Flags().StringVar(&name, "name", "", "filter to one object by name")
+	cmd.Flags().StringVar(&env, "env", "", "filter to one environment")
+	cmd.Flags().StringVar(&reason, "reason", "", "filter to one reason (e.g. Unschedulable, CrashLoopBackOff)")
+	cmd.Flags().DurationVar(&since, "since", 0, "look back over this window, including failures that have since recovered (e.g. 24h)")
+	cmd.Flags().BoolVar(&all, "all", false, "include failures that have since recovered, over the whole retained history")
 	cmd.Flags().IntVar(&limit, "limit", 0, "maximum number of rows to return (0 = server default)")
 	return cmd
 }

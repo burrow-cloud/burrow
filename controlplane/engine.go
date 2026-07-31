@@ -1523,6 +1523,15 @@ func (e *Engine) Status(ctx context.Context, app, env string) (StatusResult, err
 	if !res.HasRelease && !res.Running {
 		return StatusResult{}, fmt.Errorf("status %s: unknown app: %w", app, ErrNotFound)
 	}
+
+	// The recent-failure history and the coverage behind it (ADR-0074 §8). The live read above says
+	// what is wrong now; this says whether it has been wrong before and when it started, which is
+	// the pair of questions every diagnosis opens with and the pair no live read can answer.
+	failures, cov, errF := e.appFailures(ctx, app, envName(env))
+	if errF != nil {
+		return StatusResult{}, fmt.Errorf("status %s: %w", app, errF)
+	}
+	res.Failures, res.Coverage = failures, cov
 	return res, nil
 }
 

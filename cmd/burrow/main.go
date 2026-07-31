@@ -137,6 +137,11 @@ func newRootCmd() *cobra.Command {
 		// Operate: act on deployed applications and their add-ons.
 		grouped(newAppCmd(), groupOperate),
 		grouped(newAddonCmd(), groupOperate),
+		// The cluster-wide failure listing (ADR-0074 §8). It sits under Operate rather than Govern
+		// because it is what someone runs when something is wrong, alongside the app they are
+		// operating — and it is top level rather than under `app` because its whole point is that it
+		// spans every object Burrow manages, not one app.
+		grouped(newFailuresCmd(), groupOperate),
 		// Govern: guardrail policy and the audit trail.
 		grouped(newGuardCmd(), groupGovern),
 		grouped(newAuditCmd(), groupGovern),

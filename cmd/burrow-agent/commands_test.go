@@ -53,6 +53,23 @@ func cannedControlPlane(t *testing.T) *httptest.Server {
 			{"operation": "deploy", "target": "web", "outcome": "executed"},
 		}})
 	})
+	mux.HandleFunc("/v1/failures", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"failures": []map[string]any{
+				{"object": map[string]any{"kind": "app", "name": "api", "environment": "prod"},
+					"reason": "Unschedulable", "detail": "no node could run it",
+					"first_seen": "2026-07-31T14:02:11Z", "last_seen": "2026-07-31T14:20:11Z", "occurrences": 18},
+				{"object": map[string]any{"kind": "addon", "name": "postgres", "environment": "prod"},
+					"reason": "Unschedulable", "detail": "no node could run it",
+					"first_seen": "2026-07-31T14:03:11Z", "last_seen": "2026-07-31T14:20:11Z", "occurrences": 17},
+			},
+			"coverage": map[string]any{
+				"since": "2026-07-30T14:20:11Z", "until": "2026-07-31T14:20:11Z",
+				"windows": []map[string]any{{"started_at": "2026-07-30T10:00:00Z", "until": "2026-07-31T14:20:11Z", "sweeps": 1700}},
+				"gaps":    []map[string]any{},
+			},
+		})
+	})
 	mux.HandleFunc("/v1/cluster", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ingress": map[string]any{"present": true, "classes": []string{"nginx"}}})
 	})
@@ -102,6 +119,7 @@ func TestReadOnlyVerbsWiring(t *testing.T) {
 		{"secret", []string{"secret", "web"}, `"DATABASE_URL"`},
 		{"guard", []string{"guard"}, `"app.deploy"`},
 		{"audit", []string{"audit", "--operation", "deploy"}, `"executed"`},
+		{"failures", []string{"failures", "--kind", "app"}, `"Unschedulable"`},
 		{"cluster", []string{"cluster"}, `"present": true`},
 		{"providers", []string{"providers"}, `"digitalocean"`},
 		{"addons", []string{"addons"}, `"logs"`},
@@ -140,6 +158,37 @@ func TestHistoryIsReadOnly(t *testing.T) {
 	}
 	if strings.Contains(out, `"outcome"`) {
 		t.Errorf("history emitted a mutation outcome envelope; it must be a read-only verb: %q", out)
+	}
+}
+
+// TestFailuresEmitsRowsNotGroups confirms the agent's view of the ledger is the one ADR-0074 §5
+// specifies: ROWS, plus the coverage behind them. The `burrow failures` listing groups a cascade by
+// shared reason so a person reads it as one event; that heuristic must not reach the agent, which is
+// the consumer expected to correlate on its own terms and form the cause and the fix.
+func TestFailuresEmitsRowsNotGroups(t *testing.T) {
+	srv := cannedControlPlane(t)
+	out := runAgent(t, srv, "failures")
+
+	var report struct {
+		Failures []map[string]any `json:"failures"`
+		Coverage map[string]any   `json:"coverage"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("failures output is not the report object: %v (out=%q)", err, out)
+	}
+	if len(report.Failures) != 2 {
+		t.Fatalf("failures = %v, want both rows of the cascade kept separate", report.Failures)
+	}
+	if report.Coverage == nil {
+		t.Error("the answer carries no coverage; a gap in the ledger would read as health")
+	}
+	for _, grouping := range []string{`"groups"`, `"group"`} {
+		if strings.Contains(out, grouping) {
+			t.Errorf("the agent surface carries the human listing's grouping (%s): %q", grouping, out)
+		}
+	}
+	if strings.Contains(out, `"outcome"`) {
+		t.Errorf("failures emitted a mutation outcome envelope; it must be a read-only verb: %q", out)
 	}
 }
 

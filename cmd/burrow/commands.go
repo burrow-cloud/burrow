@@ -154,7 +154,8 @@ func newStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, formatStatus(res))
+			out := cmd.OutOrStdout()
+			return emit(out, o.json, res, formatStatus(out, res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -461,7 +462,7 @@ func newAppDeleteCmd() *cobra.Command {
 	return cmd
 }
 
-func formatStatus(res client.StatusResult) string {
+func formatStatus(w io.Writer, res client.StatusResult) string {
 	s := "app: " + res.App + "\n"
 	if res.HasRelease {
 		s += fmt.Sprintf("release: %s (image %s, %s)\n", res.Release.ID, res.Release.Image, res.Release.Status)
@@ -480,5 +481,40 @@ func formatStatus(res client.StatusResult) string {
 	} else {
 		s += "workload: not running"
 	}
-	return s
+	return s + formatStatusFailures(w, res, time.Now())
+}
+
+// formatStatusFailures appends the app's recent failure history to its status (ADR-0074 §8). The
+// workload block above is the live present tense; this is the half nothing can reconstruct
+// afterwards — whether the app crash-looped at 02:00 and recovered, and when it started.
+//
+// It prints the coverage caveat whenever coverage is incomplete, INCLUDING when the history is
+// empty. An app with no rows because burrowd was down all night must not read as an app that had a
+// quiet night, and that is the same rule the cluster-wide listing follows.
+func formatStatusFailures(w io.Writer, res client.StatusResult, now time.Time) string {
+	var b strings.Builder
+	if len(res.Failures) > 0 {
+		width := 0
+		for _, f := range res.Failures {
+			if len(f.Reason) > width {
+				width = len(f.Reason)
+			}
+		}
+		b.WriteString(fmt.Sprintf("\nrecent failures (%s):\n", window(res.Coverage.Since, res.Coverage.Until)))
+		for _, f := range res.Failures {
+			b.WriteString(fmt.Sprintf("  %-*s  %-8s  %s\n", width, f.Reason, failureState(f), failureTiming(f, now)))
+			if f.Detail != "" {
+				b.WriteString("      " + f.Detail + "\n")
+			}
+		}
+	}
+	if res.Coverage.Complete() {
+		return strings.TrimRight(b.String(), "\n")
+	}
+	if len(res.Failures) == 0 {
+		b.WriteString(fmt.Sprintf("\nrecent failures (%s): none recorded\n", window(res.Coverage.Since, res.Coverage.Until)))
+	}
+	b.WriteString(strings.TrimRight(formatCoverage(w, res.Coverage, now), "\n") + "\n")
+	b.WriteString("  Run `burrow failures` for what else is broken.\n")
+	return strings.TrimRight(b.String(), "\n")
 }

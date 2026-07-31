@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/burrow-cloud/burrow/controlplane"
 )
@@ -125,6 +126,14 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
 	v1.HandleFunc("POST /v1/metrics/query", s.queryMetrics)
 	v1.HandleFunc("GET /v1/audit", s.audit)
+	// The cluster-wide failure listing (ADR-0074 §8): what, across everything Burrow manages, is
+	// broken — read from the ledger the observer writes, never from the cluster. Read-only, moves no
+	// secret value (a ledger row carries an object name, a reason from a closed set, and one bounded
+	// Burrow-authored line). It answers ROWS AND NOT GROUPS: grouping by shared reason is a
+	// presentation heuristic the `burrow failures` listing applies, and ADR-0074 §5 keeps it out of
+	// the API so an agent correlates on its own terms. Every answer carries its own observation
+	// coverage, so an empty list can be told apart from an hour nobody was watching.
+	v1.HandleFunc("GET /v1/failures", s.failures)
 	// Environments register namespace-per-environment targets (ADR-0035 phase 2). add records a
 	// name->namespace mapping (the namespace and burrowd's Role there are created kubeconfig-side by
 	// `burrow env add`); list returns them with the default environment `prod` first. They move no secret.
@@ -1009,6 +1018,47 @@ func (s *server) audit(w http.ResponseWriter, r *http.Request) {
 // auditResponse wraps the audit rows so the shape can grow without breaking object decoders.
 type auditResponse struct {
 	Entries []controlplane.AuditEntry `json:"entries"`
+}
+
+// failures serves the cluster-wide failure listing (ADR-0074 §8). The response is
+// controlplane.FailureReport verbatim: the ledger rows and the observation coverage behind them.
+//
+// `since` is a DURATION ("1h", "24h"), not a timestamp, and it is resolved against the control
+// plane's clock. The ledger's timestamps were written by that clock, so a client resolving "the last
+// hour" against its own would query a window skewed by however wrong that clock is — and it also
+// removes the one way a caller could ask this endpoint for a window it could not otherwise name.
+func (s *server) failures(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	query := controlplane.FailureQuery{
+		Kind:            controlplane.FailureKind(q.Get("kind")),
+		Name:            q.Get("name"),
+		Environment:     q.Get("env"),
+		Reason:          q.Get("reason"),
+		IncludeResolved: q.Get("all") == "true",
+	}
+	if v := q.Get("since"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("invalid since parameter %q: expected a positive duration such as 1h or 24h", v), "invalid")
+			return
+		}
+		query.Since = d
+	}
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid limit parameter %q", v), "invalid")
+			return
+		}
+		query.Limit = n
+	}
+	report, err := s.engine.Failures(r.Context(), query)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 // cluster reports the cluster's capabilities live (ADR-0034): a read-only probe of ingress,

@@ -76,8 +76,10 @@ const (
 
 	// buildJobTimeout caps how long burrowd waits for an in-cluster build to finish. A build is
 	// slower than a run or a pg_dump — a cold buildpacks build pulls a builder and a runtime — so it
-	// gets a longer ceiling.
-	buildJobTimeout = 30 * time.Minute
+	// gets a longer ceiling. It is declared in controlplane/apiwait.go rather than here, because a
+	// client's own bound has to outlast it and a bound only one side can see is how the two drift
+	// apart (issue #404).
+	buildJobTimeout = controlplane.BuildJobTimeout
 	// buildJobPoll is the interval between Job-status reads while waiting.
 	buildJobPoll = 3 * time.Second
 

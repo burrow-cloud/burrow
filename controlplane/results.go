@@ -44,6 +44,15 @@ type DeployResult struct {
 	// a nudge toward semver when the deployed tag cannot be classified for auto-update. They never
 	// gate or fail the deploy — any reference deploys (ADR-0007). Empty when there is nothing to note.
 	Hints []string `json:"hints,omitempty"`
+	// Dependencies is what the deploy-time dependency check found (ADR-0076 §4): for each thing
+	// Burrow provisioned for this app — a database it attached, a port it published — whether the app
+	// could actually reach it from inside its own container after the deploy.
+	//
+	// IT IS A REPORT AND NEVER A VERDICT ON THE DEPLOY. A failed entry here sits on a DeployResult
+	// that succeeded, because it does: the release is deployed, the rollout happened, and Burrow does
+	// not roll back by itself (ADR-0072 §6). Empty when Burrow provisioned nothing it can check, or
+	// when the check is turned off for this app.
+	Dependencies []DependencyResult `json:"dependencies,omitempty"`
 }
 
 // BuildRequest is the code-free description of an in-cluster build-then-deploy (ADR-0053): the app,

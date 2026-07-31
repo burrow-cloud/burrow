@@ -166,6 +166,13 @@ const (
 	// of its own: a hook runs as part of a deploy or a rollback and is gated by that operation's
 	// guardrail, so the decision was already recorded under `deploy` or `rollback`.
 	auditOpHook = "hook"
+	// auditOpDependencyCheck is one deploy-time dependency check's execution (ADR-0076 §4). Like a
+	// hook it carries no guardrail decision row of its own — it runs as part of a deploy already
+	// gated by `app.deploy` — and it is the record that makes a check's outcome legible AFTER the
+	// deploy result that carried it has been read and discarded. The row records each dependency's
+	// kind, outcome and closed-set reason and nothing else: never the detail, and never any part of
+	// the credential the check used.
+	auditOpDependencyCheck = "dependency_check"
 )
 
 // Audit returns audit rows matching filter, newest first (ADR-0027). It is a read-only,

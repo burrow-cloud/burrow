@@ -43,6 +43,9 @@ type Database struct {
 	// The declared health endpoints (ADR-0076 §5), keyed the same way exposures are, because the
 	// readiness default reads one against the other.
 	health map[string]controlplane.HealthEndpoint // "app\x00env" -> declared health endpoint
+	// Whether the deploy-time dependency check runs (ADR-0076 §4), keyed the same way. An absent
+	// entry means ENABLED: the check is Burrow's default, so only a decision against it is recorded.
+	depChecks map[string]bool // "app\x00env" -> the check runs
 
 	// The operator-set operational limits (ADR-0068 §1), kept apart from policy above because a
 	// limit carries a value rather than a disposition.
@@ -66,6 +69,7 @@ func NewDatabase() *Database {
 		policy:     controlplane.DefaultPolicy(),
 		exposures:  make(map[string]controlplane.Exposure),
 		health:     make(map[string]controlplane.HealthEndpoint),
+		depChecks:  make(map[string]bool),
 		limits:     controlplane.OperationalConfig{Values: map[controlplane.LimitCode]string{}},
 	}
 }

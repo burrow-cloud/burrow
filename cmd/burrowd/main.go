@@ -56,6 +56,29 @@ func main() {
 		}
 		return
 	}
+	// `burrowd install-probe <dir>` and `burrowd check-dependencies` are the two halves of the
+	// deploy-time dependency check (ADR-0076 §4), dispatched here for the same reason ship-backup is:
+	// they run inside a check Job's pod and connect to nothing this process normally needs. The
+	// second of the two runs in the USER's image — Burrow's binary made executable there by the
+	// first — so it must not reach for a database, a cluster or a token it will not find.
+	if len(os.Args) > 1 && os.Args[1] == controlplane.ProbeInstallCommand {
+		dir := ""
+		if len(os.Args) > 2 {
+			dir = os.Args[2]
+		}
+		if err := installProbe(dir); err != nil {
+			fmt.Fprintln(os.Stderr, "burrowd "+controlplane.ProbeInstallCommand+":", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == controlplane.ProbeCheckCommand {
+		if err := checkDependencies(context.Background(), os.Stdout, os.Getenv); err != nil {
+			fmt.Fprintln(os.Stderr, "burrowd "+controlplane.ProbeCheckCommand+":", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "burrowd:", err)
 		os.Exit(1)

@@ -95,6 +95,7 @@ func newAppCmd() *cobra.Command {
 		newAutoscaleCmd(),
 		newAppConfigCmd(),
 		newAppHealthCmd(),
+		newAppChecksCmd(),
 		newSecretCmd(),
 		newReachabilityCmd(),
 		newPublishCmd(),

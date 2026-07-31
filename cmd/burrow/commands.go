@@ -125,6 +125,12 @@ func newDeployCmd() *cobra.Command {
 			if res.SupersededReleaseID != "" {
 				human += fmt.Sprintf("; superseded release %s", res.SupersededReleaseID)
 			}
+			// The deploy-time dependency check's result (ADR-0076 §4), printed only when something
+			// did not pass. It follows the deploy line rather than replacing it, because the deploy
+			// succeeded: the check is a report about a live release, not a verdict on it.
+			if deps := deployDependencyHuman(res.Dependencies); deps != "" {
+				human += "\n\n" + deps
+			}
 			return emit(cmd.OutOrStdout(), o.json, res, human)
 		},
 	}

@@ -5,6 +5,7 @@ package controlplane
 
 import (
 	"context"
+	"time"
 
 	"golang.org/x/mod/semver"
 )
@@ -48,3 +49,9 @@ func SameMinorForTest(a, b string) bool {
 func SameMajorForTest(a, b string) bool {
 	return semver.Major(stableSemver(a)) == semver.Major(stableSemver(b))
 }
+
+// DependencyCheckDeadlineForTest exposes the bound on the deploy-time dependency check (ADR-0076
+// §4), so a test can assert it is bounded without the constant becoming public API. It is
+// deliberately not an operational limit: §4 asks for no knob, and a limit is a bound somebody is
+// enforcing rather than how long a report-only step may hold a landed deploy (ADR-0068 §2).
+func DependencyCheckDeadlineForTest() time.Duration { return dependencyCheckDeadline }

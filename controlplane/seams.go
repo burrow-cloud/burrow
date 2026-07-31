@@ -591,6 +591,20 @@ type Database interface {
 	// none is a no-op.
 	DeleteHealthEndpoints(ctx context.Context, app string) error
 
+	// DependencyChecksEnabled reports whether the deploy-time dependency check runs for app in env
+	// (ADR-0076 §4). It answers TRUE when nothing was recorded: the check is a Burrow-supplied
+	// default, so a row exists only where someone made a decision about it, and a missing row is the
+	// default rather than an error.
+	DependencyChecksEnabled(ctx context.Context, app, env string) (bool, error)
+	// SetDependencyChecks records whether the deploy-time dependency check runs for app in env — the
+	// write behind `burrow app checks enable|disable`, and the "disableable rather than silent" half
+	// of adding a Burrow-supplied default to a path ADR-0072 described as user-configured.
+	SetDependencyChecks(ctx context.Context, app, env string, enabled bool, at time.Time) error
+	// DeleteDependencyCheckSettings removes app's recorded setting across all environments — the
+	// durable side of an app teardown, alongside DeleteHealthEndpoints. Deleting for an app that
+	// never recorded one is a no-op.
+	DeleteDependencyCheckSettings(ctx context.Context, app string) error
+
 	// RecordFailure opens or extends the ledger row for one observed failure (ADR-0074 §4). The row
 	// is keyed by (object, reason) so concurrent reasons on one object coexist as separate rows with
 	// independent lifetimes (§5). A first sighting writes first_seen, last_seen and a count of one; a

@@ -439,9 +439,7 @@ func TestSetListUnsetHook(t *testing.T) {
 }
 
 // TestSetHookRejectsUnrunnableConfiguration asserts the phase vocabulary is closed and a command
-// that could not run is refused where a human is present to be told. `post-deploy` earns its own
-// answer: it is a real phase of the record, and a reader who typed it must not conclude they
-// misspelled something (ADR-0009).
+// that could not run is refused where a human is present to be told.
 func TestSetHookRejectsUnrunnableConfiguration(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newEngine(t, permissive())
@@ -453,7 +451,7 @@ func TestSetHookRejectsUnrunnableConfiguration(t *testing.T) {
 		want    string
 	}{
 		{"unknown phase", cp.HookPhase("during-deploy"), []string{"./x"}, "unknown phase"},
-		{"post-deploy is not wired yet", cp.HookPhase("post-deploy"), []string{"./x"}, "not available yet"},
+		{"post-rollback is not a phase", cp.HookPhase("post-rollback"), []string{"./x"}, "unknown phase"},
 		{"empty command", cp.HookPreDeploy, nil, "command is empty"},
 		{"blank program", cp.HookPreDeploy, []string{"  "}, "names no program"},
 	}
@@ -474,22 +472,33 @@ func TestSetHookRejectsUnrunnableConfiguration(t *testing.T) {
 }
 
 // TestHookPhasesAreClosedAndNamedForWhenTheyRun pins the vocabulary: every phase a hook may be set
-// on says WHEN it runs, and `post-deploy` is not among them until it fires.
+// on says WHEN it runs, the set is the three ADR-0072 names and no more, and it is listed in the
+// order the phases fire around an app's life rather than alphabetically.
+//
+// `post-rollback` is asserted ABSENT deliberately (§4): a rollback fires `post-deploy`, told it was
+// a rollback, because "did this settle and is it serving?" is the same question whichever direction
+// the image moved — a fourth name would be a second spelling of one answer.
 func TestHookPhasesAreClosedAndNamedForWhenTheyRun(t *testing.T) {
 	phases := cp.HookPhases()
-	if len(phases) != 2 || phases[0] != cp.HookPreDeploy || phases[1] != cp.HookPreRollback {
-		t.Fatalf("HookPhases() = %v, want [pre-deploy pre-rollback]", phases)
+	want := []cp.HookPhase{cp.HookPreDeploy, cp.HookPostDeploy, cp.HookPreRollback}
+	if len(phases) != len(want) {
+		t.Fatalf("HookPhases() = %v, want %v", phases, want)
+	}
+	for i, p := range want {
+		if phases[i] != p {
+			t.Fatalf("HookPhases() = %v, want %v (in firing order)", phases, want)
+		}
 	}
 	for _, p := range phases {
-		if !strings.HasPrefix(string(p), "pre-") {
+		if !strings.HasPrefix(string(p), "pre-") && !strings.HasPrefix(string(p), "post-") {
 			t.Errorf("phase %q does not say when it runs", p)
 		}
 		if !cp.KnownHookPhase(p) {
 			t.Errorf("KnownHookPhase(%q) = false", p)
 		}
 	}
-	if cp.KnownHookPhase("post-deploy") {
-		t.Error("KnownHookPhase(post-deploy) = true, but nothing fires it yet")
+	if cp.KnownHookPhase("post-rollback") {
+		t.Error("KnownHookPhase(post-rollback) = true: a rollback fires post-deploy, told it was one (ADR-0072 §4)")
 	}
 }
 

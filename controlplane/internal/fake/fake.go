@@ -82,6 +82,7 @@ const (
 	OpRunBackupJob         Op = "RunBackupJob"
 	OpRunRestoreJob        Op = "RunRestoreJob"
 	OpRunJob               Op = "RunJob"
+	OpAwaitRollout         Op = "AwaitRollout"
 	OpBackupJobPresent     Op = "BackupJobPresent"
 
 	OpCreateEnvironment Op = "CreateEnvironment"

@@ -389,7 +389,7 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	// serving on the old schema, and the failure is reported as the deploy's failure with the
 	// command's output. The release is recorded failed so the history shows the attempt; a failed
 	// release is not a rollback target, so the rollback handle is unchanged.
-	if err := e.runHook(ctx, k, HookPreDeploy, req.App, req.Env, req.Image, env); err != nil {
+	if err := e.runHook(ctx, k, HookPreDeploy, req.App, req.Env, req.Image, env, nil); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
 		e.recordExecution(ctx, auditOpDeploy, req.App, args, auditableHookError(err))
@@ -448,6 +448,16 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	if !declared {
 		res.Hints = append(res.Hints, NoHealthEndpointHint)
 	}
+	// The post-deploy hook runs LAST, after the release is recorded and the deploy is in every sense
+	// done (ADR-0072 §4). It waits for the rollout to settle and tells the hook how it went —
+	// succeeded or failed, and on failure the reason from ADR-0074 §2's closed vocabulary. With no
+	// hook set it does nothing at all and waits for nothing, so a deploy nobody asked to be told
+	// about is unchanged.
+	//
+	// It cannot fail the deploy, and that is the point of running it here rather than earlier: the
+	// image is live and the record is written, so there is nothing left to abort. Whatever it and the
+	// rollout report comes back as hints (§6 — Burrow reports, the hook decides).
+	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, k, req.App, req.Env, req.Image, rel.ID, DeployKindDeploy, env)...)
 	return res, nil
 }
 
@@ -2347,7 +2357,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	// rollback, the same rule §3 gives the other pre phase, because letting the older code serve
 	// against a half-stepped-back schema is the outcome the ordering exists to prevent. With no
 	// pre-rollback hook set nothing runs at all, which is the safe forward-only default.
-	if err := e.runHook(ctx, e.k8s.WithNamespace(ns), HookPreRollback, app, env, cur.Image, cfg); err != nil {
+	if err := e.runHook(ctx, e.k8s.WithNamespace(ns), HookPreRollback, app, env, cur.Image, cfg, nil); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
 		e.recordExecution(ctx, auditOpRollback, app, args, auditableHookError(err))
@@ -2378,7 +2388,16 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	if err := e.db.DisableAutoDeploy(ctx, app, envName(env), reasonDisabledByRollback); err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: disabling auto-deploy after rollback: %w", app, err)
 	}
-	return RollbackResult{Release: rel, RolledBackToReleaseID: target.ID, SupersededReleaseID: cur.ID}, nil
+	res := RollbackResult{Release: rel, RolledBackToReleaseID: target.ID, SupersededReleaseID: cur.ID}
+	// A rollback fires `post-deploy` too, told that the deploy it is reporting on was a rollback
+	// (ADR-0072 §4). "Did this settle and is it serving?" is the same question whichever direction
+	// the image moved, so a separate `post-rollback` phase would be a fourth name for an identical
+	// answer — and the case that most needs reporting is a rollback that did not fix things.
+	//
+	// It runs from the image now serving, target.Image: the post phase reports on what IS running,
+	// where `pre-rollback` ran from the image being left behind (§8).
+	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, e.k8s.WithNamespace(ns), app, env, target.Image, rel.ID, DeployKindRollback, cfg)...)
+	return res, nil
 }
 
 // AddEnvironment registers a named environment mapping name to namespace (ADR-0035 phase 2). It

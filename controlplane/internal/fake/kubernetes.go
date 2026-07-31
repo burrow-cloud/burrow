@@ -35,13 +35,15 @@ type Kubernetes struct {
 	addresses   map[string]string // app -> ingress external address (controller-assigned)
 	certReady   map[string]bool   // app -> whether the requested TLS certificate has been issued
 	addons      map[string]controlplane.AddonInfo
-	volumes     map[string]fakeVolume                 // claim name -> the add-on volume, present while the claim exists
-	secrets     map[string]map[string]string          // app -> per-app Secret (key -> value)
-	autoscalers map[string]controlplane.AutoscaleSpec // app -> applied HPA spec (namespace-keyed)
-	backups     *[]backupCall                         // RunBackupJob calls, in order
-	restores    *[]backupCall                         // RunRestoreJob calls, in order
-	runs        *[]runCall                            // RunJob calls, in order
-	runResult   *controlplane.RunResult               // canned result RunJob returns
+	volumes     map[string]fakeVolume                  // claim name -> the add-on volume, present while the claim exists
+	secrets     map[string]map[string]string           // app -> per-app Secret (key -> value)
+	autoscalers map[string]controlplane.AutoscaleSpec  // app -> applied HPA spec (namespace-keyed)
+	backups     *[]backupCall                          // RunBackupJob calls, in order
+	restores    *[]backupCall                          // RunRestoreJob calls, in order
+	runs        *[]runCall                             // RunJob calls, in order
+	rollouts    *[]rolloutCall                         // AwaitRollout calls, in order
+	rolloutOut  map[string]controlplane.RolloutOutcome // app -> canned AwaitRollout answer, when overridden
+	runResult   *controlplane.RunResult                // canned result RunJob returns
 	// runJobHook, when set, is called by RunJob OUTSIDE the fake's lock, so a test can observe how
 	// long a Job is in flight and whether two are ever in flight at once — the only way to assert
 	// that the engine serializes lifecycle hooks (ADR-0072 §9) rather than the fake's own mutex
@@ -137,6 +139,19 @@ type runCall struct {
 	Command    []string
 	TTLSeconds int32
 	Namespace  string
+	// Env is the container environment the Job was built with: the app's config, plus the BURROW_*
+	// variables the phase tells the hook (ADR-0072 §4). A test asserts on it because "what is a post
+	// hook actually told" is the whole question that phase exists to answer.
+	Env map[string]string
+}
+
+// rolloutCall records one AwaitRollout invocation so a test can assert a deploy waited for the
+// rollout to settle before running a post hook, and waited with the bound the operational
+// configuration resolved (ADR-0072 §5).
+type rolloutCall struct {
+	App       string
+	Timeout   time.Duration
+	Namespace string
 }
 
 type deployState struct {
@@ -206,6 +221,8 @@ func NewKubernetes() *Kubernetes {
 		backups:      &[]backupCall{},
 		restores:     &[]backupCall{},
 		runs:         &[]runCall{},
+		rollouts:     &[]rolloutCall{},
+		rolloutOut:   make(map[string]controlplane.RolloutOutcome),
 		runResult:    &controlplane.RunResult{},
 		runJobHook:   new(func()),
 		backupSiz:    new(int64),
@@ -588,6 +605,72 @@ func (k *Kubernetes) WorkloadStatus(ctx context.Context, app string) (controlpla
 	return d.status(app), nil
 }
 
+// AwaitRollout answers from the state the test seeded, WITHOUT WAITING. The real adapter polls
+// because a cluster changes underneath it; the fake's cluster changes only when a test says so, so a
+// loop here would either spin forever or make every test sleep. The verdict is the adapter's,
+// reached through the same WorkloadStatus both sides render:
+//
+//   - a blocking condition injected with SetIssue/SetImagePullFailure/SetWedgedRollout is a failure
+//     carrying that reason, exactly as the status surface reports it;
+//   - a workload that is not there is ReasonWorkloadMissing (ADR-0074 §6);
+//   - ready below desired, with nothing blocking, is the deadline BACKSTOP — the shape of a rollout
+//     that never finished and never said why (ADR-0072 §5), which is the case a test seeds with
+//     SetReady(app, n) below desired.
+//
+// The bound is recorded rather than honoured, so a test can still assert the engine resolved it from
+// the operational configuration (ADR-0072 §5).
+func (k *Kubernetes) AwaitRollout(ctx context.Context, app string, timeout time.Duration) (controlplane.RolloutOutcome, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	*k.rollouts = append(*k.rollouts, rolloutCall{App: app, Timeout: timeout, Namespace: k.ns})
+	if err := k.errs[OpAwaitRollout]; err != nil {
+		return controlplane.RolloutOutcome{}, err
+	}
+	if out, ok := k.rolloutOut[k.key(app)]; ok {
+		return out, nil
+	}
+	d := k.deploys[k.key(app)]
+	if d == nil {
+		return controlplane.RolloutOutcome{
+			Reason: controlplane.ReasonWorkloadMissing,
+			Detail: "the app's Deployment is not in the cluster, so there is no rollout to wait for",
+		}, nil
+	}
+	st := d.status(app)
+	if st.IssueReason != "" {
+		return controlplane.RolloutOutcome{
+			Reason: st.IssueReason,
+			Detail: fmt.Sprintf("%d of %d replicas updated, %d ready", st.UpdatedReplicas, st.DesiredReplicas, st.ReadyReplicas),
+		}, nil
+	}
+	if st.Available {
+		return controlplane.RolloutOutcome{Settled: true}, nil
+	}
+	return controlplane.RolloutOutcome{
+		Reason: controlplane.ReasonDeadlineExceeded,
+		Detail: fmt.Sprintf("waited %s; %d of %d replicas updated, %d ready", timeout, st.UpdatedReplicas, st.DesiredReplicas, st.ReadyReplicas),
+	}, nil
+}
+
+// SetRolloutOutcome overrides what AwaitRollout answers for app, for the one case seeded cluster
+// state cannot express: ApplyWorkload marks a fake workload ready on apply, so a rollout that is
+// still SHORT OF ITS REPLICAS after the deploy that started it — the shape behind an expired
+// settle-wait (ADR-0072 §5) — has no state a test could seed for it. The derived answer above stays
+// the default, so a test that seeds a real blocking condition still exercises the real mapping.
+func (k *Kubernetes) SetRolloutOutcome(app string, out controlplane.RolloutOutcome) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.rolloutOut[k.key(app)] = out
+}
+
+// Rollouts returns the recorded AwaitRollout invocations, in order, so a test can assert a settle
+// wait happened at all (and with which bound) rather than inferring it from the hook that followed.
+func (k *Kubernetes) Rollouts() []rolloutCall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]rolloutCall(nil), *k.rollouts...)
+}
+
 func (k *Kubernetes) ListWorkloads(ctx context.Context) ([]controlplane.WorkloadStatus, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -898,7 +981,11 @@ func (k *Kubernetes) RunJob(ctx context.Context, spec controlplane.RunSpec) (con
 		k.mu.Unlock()
 		return controlplane.RunResult{}, err
 	}
-	*k.runs = append(*k.runs, runCall{App: spec.App, Image: spec.Image, Command: append([]string(nil), spec.Command...), TTLSeconds: spec.TTLSeconds, Namespace: k.ns})
+	env := make(map[string]string, len(spec.Env))
+	for key, v := range spec.Env {
+		env[key] = v
+	}
+	*k.runs = append(*k.runs, runCall{App: spec.App, Image: spec.Image, Command: append([]string(nil), spec.Command...), TTLSeconds: spec.TTLSeconds, Namespace: k.ns, Env: env})
 	inFlight, res := *k.runJobHook, *k.runResult
 	k.mu.Unlock()
 	if inFlight != nil {

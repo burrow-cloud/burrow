@@ -51,7 +51,7 @@ This file is the place both questions get answered together.
 | Status | `burrow app status <app>`, `burrow app list` | Live workload state: desired/ready/updated replicas, availability, and — when the app is blocked — an actionable issue naming the fix, plus a machine-usable reason from a closed set: `ImagePullBackOff`, `ErrImagePull`, `Unschedulable`, `VolumeUnavailable`, `CrashLoopBackOff`, `CreateContainerConfigError`, `OOMKilled`, `ProgressDeadlineExceeded`, `DeadlineExceeded`. Conditions that resolve on their own (`ContainerCreating`, `PodInitializing`) are deliberately not reported. A crash loop carries a bounded tail of the container's own output; a missing config or secret **key** is named, a value never is. `status` also carries the app's recent failure history from the ledger (last 24h, up to 10 rows, resolved episodes included) and the observation coverage over that window. | [0011](adr/0011-kubernetes-integration.md), [0074](adr/0074-burrow-observes-what-it-manages.md) |
 | What is broken, cluster-wide | `burrow failures`, `burrow-agent failures` | Lists the ledger's failures across every managed object. See [Failure ledger](#failure-ledger). | [0074](adr/0074-burrow-observes-what-it-manages.md) |
 | Run a one-off command | `burrow app run <app> -- ./migrate` | Runs the command as a `batch/v1` Job from the app's **currently deployed image**, in the app's namespace, with the app's config and per-app Secret injected. Waits synchronously, captures the exit code and combined output. | [0048](adr/0048-one-off-command-runner.md) |
-| Run a command around a deploy | `burrow app hook set <app> --on pre-deploy -- ./migrate`, plus `hook list` / `hook unset` | Stores a command per (app, environment, phase). `pre-deploy` runs on **every** deploy path, automated ones included, from the image **being deployed**, before anything reaches the cluster; its failure aborts the deploy. `pre-rollback` is unset by default and runs from the image being rolled back **away from**. See [Lifecycle hooks](#lifecycle-hooks). | [0072](adr/0072-deploy-and-run-lifecycle-hooks.md) |
+| Run a command around a deploy | `burrow app hook set <app> --on pre-deploy -- ./migrate`, plus `hook list` / `hook unset` | Stores a command per (app, environment, phase). `pre-deploy` runs on **every** deploy path, automated ones included, from the image **being deployed**, before anything reaches the cluster; its failure aborts the deploy. `post-deploy` runs after the rollout settles, whether it succeeded or failed, told the outcome and — on failure — a machine-readable reason. `pre-rollback` is unset by default and runs from the image being rolled back **away from**. See [Lifecycle hooks](#lifecycle-hooks). | [0072](adr/0072-deploy-and-run-lifecycle-hooks.md) |
 | Auto-deploy on a new tag | `burrow app auto-deploy <app> <patch\|minor\|major\|off>` | burrowd polls the registry (~5 min, jittered) and fires the same guarded deploy for an in-level upgrade. Outbound-only, so it works on a NAT'd cluster. | [0052](adr/0052-pull-based-passive-deploy.md), [0058](adr/0058-auto-deploy-is-opt-in.md) |
 | Declare a health endpoint | `burrow app health set <app> --path /healthz [--port N]` | Turns the default TCP readiness check into an HTTP GET of that path; `burrow app health unset` returns to the default and `burrow app health show` reports what is in force. See [Health checks](#health-checks). | [0076](adr/0076-health-checks-readiness-only-and-dependencies-at-deploy-time.md) |
 | Delete an app | `burrow app delete <app>` | Removes the workload, its Service and Ingress, and its release history. Guarded by `app.delete`, **denied by default** — relax the guardrail (ideally per environment) before the verb will run on either CLI. | [0024](adr/0024-cli-command-taxonomy.md), [0065](adr/0065-what-belongs-on-the-agent-surface.md) |
@@ -157,12 +157,61 @@ hooks existed.
 | Phase | When it runs | From which image | Default |
 | --- | --- | --- | --- |
 | `pre-deploy` | Before **any** deploy's image reaches the cluster — an explicit `burrow app deploy`, a build that ends in a deploy, and an unattended auto-deploy alike | the image **being deployed**, so the migration ships with the code that needs it | unset |
+| `post-deploy` | After the rollout settles, **whether it succeeded or failed**, and after a rollback too | the image now **serving** | unset |
 | `pre-rollback` | Before a rollback puts the older image back | the image being rolled back **away from**, because that is where the code that knows how to undo its own migration lives | unset, and leaving it unset is correct for anyone who migrates forward only |
 
 **A rollback fires `pre-rollback` and never `pre-deploy`**, even though a rollback is mechanically a
 deploy of an older image. Rolling back B to A, A's migration tool does not know B's migration
 exists, so running it would step back one of *A's own* migrations instead — worse than doing
 nothing. This is pinned by a test.
+
+**There is no `post-rollback`.** A rollback fires `post-deploy`, told that it was a rollback:
+"did this settle and is it serving?" is the same question whichever direction the image moved, and a
+fourth phase would be a second name for one answer. This is pinned by a test too.
+
+### What a post-deploy hook is told
+
+A `post-deploy` hook runs **whether the rollout succeeded or failed** — a hook that fired only on
+success could not report the case it exists for, which is the crashloop an unattended 3am push
+actually produces. It is told the outcome through environment variables, beside the app's own config
+and Secret:
+
+| Variable | Value |
+| --- | --- |
+| `BURROW_HOOK_PHASE` | the phase running; set on **every** hook, so one script can serve several |
+| `BURROW_APP`, `BURROW_ENVIRONMENT`, `BURROW_IMAGE` | what the hook is talking about; set on every hook |
+| `BURROW_DEPLOY_KIND` | `deploy` or `rollback` |
+| `BURROW_DEPLOY_OUTCOME` | `succeeded` or `failed`, and nothing else |
+| `BURROW_DEPLOY_REASON` | on failure, a member of [ADR-0074](adr/0074-burrow-observes-what-it-manages.md)'s closed vocabulary — `CrashLoopBackOff`, `Unschedulable`, `OOMKilled`, `CreateContainerConfigError`, `ImagePullBackOff`, `ErrImagePull`, `VolumeUnavailable`, `ProgressDeadlineExceeded`, `DeadlineExceeded`, `WorkloadMissing`. **Set and empty on success**, so a script under `set -u` does not abort before it can report |
+| `BURROW_DEPLOY_DETAIL` | one Burrow-authored line of context — replica counts, a pod's phase, a container's waiting reason |
+| `BURROW_RELEASE` | the release being reported on |
+
+The reason is the point: a hook branches on `CreateContainerConfigError` and knows a retry is
+pointless, where a message inviting interpretation would have it retry. It is the **same string**
+`burrow app status` and `burrow failures` report for the same pod at the same moment — there is one
+vocabulary, not a second one invented for hooks.
+
+**The detail never carries the application's own output.** A crash-loop `Issue` on the live status
+surface includes a bounded tail of the app's previous log, which may contain anything it printed;
+read live and discarded that is an accepted trade, and it is not one for a value copied into a Job's
+environment where it would sit in a Kubernetes object. The hook gets the reason and Burrow's own
+replica summary; the app's output stays in `burrow app logs`.
+
+**A failed `post-deploy` hook undoes nothing.** By the time it runs the image is live and the release
+is recorded, so there is nothing left to abort — the failure is audited and comes back as a hint on
+an otherwise successful deploy. **Burrow never rolls back by itself**
+([ADR-0072](adr/0072-deploy-and-run-lifecycle-hooks.md) §6): the remedy for a failed deploy is a
+judgement about blast radius and data, and an automatic rollback of a deploy whose `pre-deploy`
+migration already ran can leave the schema ahead of the code it just restored. The hook is told what
+happened and decides — including by calling `burrow app rollback` itself.
+
+**What "succeeded" means.** The rollout completed — the newest revision is the only one left and it
+is available — and no pod reported a blocking condition. For an app that declares a health endpoint
+(or is published) that includes passing its readiness probe
+([ADR-0076](adr/0076-health-checks-readiness-only-and-dependencies-at-deploy-time.md)); for an app
+that declares nothing and is not published there is no probe, so it means the containers started. A
+smoke test is the natural `post-deploy` hook: Burrow tells the hook the deploy *happened*, and the
+hook decides whether it *worked*.
 
 The command runs as a `batch/v1` Job in the app's namespace, from the named image, with the app's
 config and per-app Secret injected exactly as `burrow app run` does — the same machinery, the same
@@ -181,18 +230,23 @@ Limits worth knowing: setting a hook is an **operator action** — `burrow app h
 every deploy. **Burrow does not understand migrations** — it runs your command, and versioning,
 ordering, and idempotency stay your tool's job. A hook shares `burrow app run`'s **ten-minute**
 bound, so a migration slower than that is reported as a failure. The audit log records the phase,
-the command, the image, and the exit code, and **never the command's output**. And `post-deploy` —
-the third phase [ADR-0072](adr/0072-deploy-and-run-lifecycle-hooks.md) §4 names — is **not built**:
-setting it is refused rather than silently stored (see
-[Decided but not built](#decided-but-not-built)).
+the command, the image, and the exit code, and **never the command's output**. A `post-deploy` hook
+makes a deploy of that app **wait for its rollout to settle** before returning, bounded by
+`deploy.settle_timeout` (see [Operational limits](#operational-limits)); a deploy with no
+`post-deploy` hook waits for nothing, exactly as before.
 
-### Deploy does not wait for the rollout
+### Deploy does not wait for the rollout, unless a post-deploy hook is set
 
 `deploy` returns once the Kubernetes API server accepts the Deployment write. A release marked
 `deployed` means "the object was accepted", not "the Pods are healthy". There is no readiness
-gate, no rollout timeout in Burrow, and **no automatic rollback on a failed rollout** — a bad
-release is surfaced afterwards by `burrow app status` (which reports the pull error or the
-stalled progress condition) and rolled back by an explicit `burrow app rollback`.
+gate on the deploy call, and **no automatic rollback on a failed rollout** — a bad release is
+surfaced afterwards by `burrow app status` (which reports the pull error or the stalled progress
+condition) and rolled back by an explicit `burrow app rollback`.
+
+The one exception is an app with a **`post-deploy` hook** ([Lifecycle hooks](#lifecycle-hooks)).
+There the deploy waits for the rollout to settle — bounded by `deploy.settle_timeout`, ending early
+on any blocking condition — so the hook can be told how it went. The deploy still does not fail on a
+failed rollout and still nothing rolls back: the hook is told, and the caller gets a hint.
 
 Release history is unbounded: releases are never pruned, only deleted wholesale when the app is.
 
@@ -757,6 +811,7 @@ refusal names the limit, the tier the effective bound came from, and the command
 | `build.job_retention` | how long a finished in-cluster build Job and its pods are kept before Kubernetes reaps them | `72h0m0s` (1m – 8760h) | cluster |
 | `addon.metric_retention` | how long the metrics add-on keeps samples, applied when its instance is created | `744h0m0s` (24h – 87600h) | cluster |
 | `status.unschedulable_grace` | how long a pod must have been unschedulable before Burrow reports it as an Issue | `30s` (0s – 1h) | cluster |
+| `deploy.settle_timeout` | how long a deploy waits for its rollout to settle before telling a `post-deploy` hook what it observed | `5m0s` (10s – 30m) | environment or cluster |
 
 Two operator-owned tiers, resolved in the order guardrail dispositions already use — the
 environment's value, then the cluster's, then the built-in default:
@@ -776,10 +831,18 @@ and useful, but ADR-0068 leaves the shape of an agent-side read undecided, so th
 
 Limits:
 
-- **Three of the four are cluster-only**, and deliberately: how long a build's logs are worth
+- **Three of the five are cluster-only**, and deliberately: how long a build's logs are worth
   keeping, how long metric samples are kept, and how long a pod may sit unschedulable are all facts
   about the cluster. An operator who tuned the last of them per environment would be encoding the
-  same scheduler fact twice and would eventually disagree with themselves.
+  same scheduler fact twice and would eventually disagree with themselves. The replica ceiling and
+  the settle timeout go the other way: a production ceiling and a development ceiling are the case
+  that motivates limits at all, and a production rollout of twenty replicas takes longer to settle
+  than a development one of one.
+- **`deploy.settle_timeout` costs nothing unless a `post-deploy` hook is set.** It is the bound on
+  the only wait Burrow performs on the deploy path, and that wait happens only when there is a hook
+  to tell the result to, so raising it cannot slow a deploy nobody asked to be told about. The wait
+  also ends early on any blocking condition, so the bound is reached only by a rollout wedged for a
+  reason no pod reports.
 - **`status.unschedulable_grace` is ONE value, everywhere.** The live status surface, the Job
   waiters behind `app run` / build / backup / restore, and the failure ledger
   ([ADR-0074](adr/0074-burrow-observes-what-it-manages.md)) all judge the same pod through the same
@@ -1041,7 +1104,6 @@ is built and what is not, and link the issue tracking the rest where there is on
 | A deploy with a port creates a ClusterIP Service on its own | [0041](adr/0041-flatten-path-to-a-reachable-app.md) | Not built — no `--port` on `deploy`; the Service is created by `publish`. |
 | One publish operation chaining Service, Ingress, TLS, DNS, and a cert wait | [0041](adr/0041-flatten-path-to-a-reachable-app.md) | Partial — `publish` does Service, Ingress, and the TLS request. DNS and waiting are separate commands. |
 | Multi-minor forward database upgrades in one step | [0055](adr/0055-multi-version-upgrades.md) | Proposed, not built — the gate allows one minor step. |
-| A `post-deploy` hook, told the outcome and the reason, running whether the deploy succeeded or failed | [0072](adr/0072-deploy-and-run-lifecycle-hooks.md) §4–§7 | Partly built. The phases that run **before** an image moves are built — `pre-deploy` and `pre-rollback`, one command with the phase named, serialized per app and environment, with a failed hook aborting the operation (see [Lifecycle hooks](#lifecycle-hooks)). `post-deploy` is not: nothing waits for a rollout to settle, so nothing can report how it went, and setting the phase is refused rather than stored as a command that never runs. That also means §6's "Burrow reports, the hook decides" has no reporter yet — a deploy that ships and then crashloops is still silent. [#386](https://github.com/burrow-cloud/burrow/issues/386) |
 | Scheduled backups with retention | [0032](adr/0032-postgres-backups.md) | Not built. |
 | Audit-log retention | [0027](adr/0027-audit-log.md) | Not built; deferred in the ADR. |
 | The environment forcing function on the local-handle axis | [0047](adr/0047-agent-environment-safety.md) | Not built (specified for the since-removed MCP layer); the burrowd-registry axis is built. |

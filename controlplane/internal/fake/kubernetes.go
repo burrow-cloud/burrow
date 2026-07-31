@@ -141,8 +141,14 @@ type runCall struct {
 	Namespace  string
 	// Env is the container environment the Job was built with: the app's config, plus the BURROW_*
 	// variables the phase tells the hook (ADR-0072 §4). A test asserts on it because "what is a post
-	// hook actually told" is the whole question that phase exists to answer.
+	// hook actually told" is the whole question that phase exists to answer, and because a dependency
+	// check must be given the app's own environment (ADR-0076 §4). No secret travels this way — the
+	// Secret arrives via envFrom in the real adapter, which is why it is absent here.
 	Env map[string]string
+	// Probe is the ADR-0076 §4 request to make Burrow's binary executable inside the app's image,
+	// nil for an ordinary run. A test asserts the deploy-time dependency check asked for it and that
+	// the plan it carried names key NAMES and addresses rather than values.
+	Probe *controlplane.ProbeSpec
 }
 
 // rolloutCall records one AwaitRollout invocation so a test can assert a deploy waited for the
@@ -985,7 +991,7 @@ func (k *Kubernetes) RunJob(ctx context.Context, spec controlplane.RunSpec) (con
 	for key, v := range spec.Env {
 		env[key] = v
 	}
-	*k.runs = append(*k.runs, runCall{App: spec.App, Image: spec.Image, Command: append([]string(nil), spec.Command...), TTLSeconds: spec.TTLSeconds, Namespace: k.ns, Env: env})
+	*k.runs = append(*k.runs, runCall{App: spec.App, Image: spec.Image, Command: append([]string(nil), spec.Command...), TTLSeconds: spec.TTLSeconds, Namespace: k.ns, Env: env, Probe: spec.Probe})
 	inFlight, res := *k.runJobHook, *k.runResult
 	k.mu.Unlock()
 	if inFlight != nil {

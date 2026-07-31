@@ -160,6 +160,14 @@ var catalogue = []Capability{
 	{Surface: Agent, Path: "health set", What: "declares the health endpoint one app serves, so Burrow probes it instead of just its port"},
 	{Surface: Agent, Path: "health unset", What: "returns one app to the default readiness probe"},
 
+	// The deploy-time dependency check (ADR-0076 §4), READ ONLY on this surface. The read moves no
+	// value — a dependency carries an environment variable's key NAME and an in-cluster address
+	// Burrow composed — and an agent needs it to reason about a failed dependency on a deploy result.
+	// Turning the check OFF is deliberately absent: it is standing authority to stop verifying what
+	// Burrow handed an app, the same class as a lifecycle hook or an auto-deploy level, and an agent
+	// that could silence a check it was failing could make its own work look correct.
+	{Surface: Agent, Path: "checks", What: "read-only: what Burrow checks after a deploy of one app, derived from what it provisioned"},
+
 	// Add-ons: in-cluster building blocks the control plane deploys into its OWN add-on
 	// namespace. burrowd holds only namespaced Roles and is forbidden from creating namespaces or
 	// RBAC, so an add-on install cannot widen anything — where an add-on needs a ServiceAccount

@@ -1394,3 +1394,54 @@ func TestHealthEndpoints(t *testing.T) {
 		}
 	}
 }
+
+// TestChecksEndpoints covers the deploy-time dependency check's API (ADR-0076 §4): the derived list
+// reads back, the write turns it off and on, and an unknown environment is a clean 404. It also pins
+// that the response carries key NAMES and Burrow-composed addresses and never a credential.
+func TestChecksEndpoints(t *testing.T) {
+	h, _, d := newAPI(t)
+
+	// An app Burrow provisioned nothing for: nothing to check, said so rather than left blank.
+	rr := do(h, "GET", "/v1/apps/web/checks", token, "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"enabled":true`) {
+		t.Fatalf("checks get = %d %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "provisioned nothing") {
+		t.Errorf("checks get does not explain an empty list: %s", rr.Body.String())
+	}
+
+	// Publishing the app derives an exposure dependency with no configuration at all.
+	if err := d.RecordExposure(context.Background(), cp.Exposure{App: "web", Environment: cp.DefaultEnvironment, Host: "web.example.com", Port: 8080}); err != nil {
+		t.Fatalf("RecordExposure: %v", err)
+	}
+	rr = do(h, "GET", "/v1/apps/web/checks", token, "")
+	if !strings.Contains(rr.Body.String(), `"kind":"exposure"`) {
+		t.Errorf("checks get after publishing = %s, want an exposure dependency", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "postgres://") {
+		t.Errorf("the checks response carries a connection string: %s", rr.Body.String())
+	}
+
+	// The write turns it off, and the read reflects it.
+	rr = do(h, "PUT", "/v1/apps/web/checks", token, `{"enabled":false}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"enabled":false`) {
+		t.Fatalf("checks set = %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := do(h, "GET", "/v1/apps/web/checks", token, ""); !strings.Contains(rr.Body.String(), `"enabled":false`) {
+		t.Errorf("checks get after disabling = %s", rr.Body.String())
+	}
+	rr = do(h, "PUT", "/v1/apps/web/checks", token, `{"enabled":true}`)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"enabled":true`) {
+		t.Fatalf("checks re-enable = %d %s", rr.Code, rr.Body.String())
+	}
+
+	for _, m := range []string{"GET", "PUT"} {
+		body := ""
+		if m == "PUT" {
+			body = `{"enabled":false}`
+		}
+		if rr := do(h, m, "/v1/apps/web/checks?env=ghost", token, body); rr.Code != 404 {
+			t.Errorf("%s unknown env code = %d, want 404", m, rr.Code)
+		}
+	}
+}

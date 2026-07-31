@@ -72,6 +72,13 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/health", s.getHealth)
 	v1.HandleFunc("PUT /v1/apps/{app}/health", s.setHealth)
 	v1.HandleFunc("DELETE /v1/apps/{app}/health", s.unsetHealth)
+	// checks: GET reports the deploy-time dependency check — whether it runs, and what Burrow
+	// derived from what it provisioned that it would check (ADR-0076 §4). PUT turns it on or off.
+	// The read is on the agent surface: it names key names and in-cluster addresses, never a value.
+	// The write is an operator action, like the auto-deploy level and a lifecycle hook: it decides
+	// whether Burrow keeps verifying what it handed the app, so it lives on this admin API only.
+	v1.HandleFunc("GET /v1/apps/{app}/checks", s.getChecks)
+	v1.HandleFunc("PUT /v1/apps/{app}/checks", s.setChecks)
 	// next-tag suggests the app's next semver release tags from its current running tag (ADR-0052 §8).
 	// It is read-only guidance the agent applies to its own build; there is no mutating counterpart.
 	v1.HandleFunc("GET /v1/apps/{app}/next-tag", s.nextTag)
@@ -700,6 +707,40 @@ func (s *server) unsetHealth(w http.ResponseWriter, r *http.Request) {
 type healthSetRequest struct {
 	Path string `json:"path"`
 	Port int32  `json:"port,omitempty"`
+}
+
+// getChecks reports the deploy-time dependency check for an app: whether it runs, and what Burrow
+// derived from what it provisioned that it would check (ADR-0076 §4). It is a read — no check is
+// run — and it moves no secret value: a Dependency carries an environment variable's KEY NAME and an
+// in-cluster address Burrow composed, never a credential.
+func (s *server) getChecks(w http.ResponseWriter, r *http.Request) {
+	rep, err := s.engine.AppChecks(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// setChecks turns the deploy-time dependency check on or off for an app. It is the "disableable
+// rather than silent" half of putting a Burrow-supplied default on a path ADR-0072 described as
+// user-configured.
+func (s *server) setChecks(w http.ResponseWriter, r *http.Request) {
+	var req checksSetRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	rep, err := s.engine.SetAppChecks(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), req.Enabled)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// checksSetRequest is the body of a checks call: whether the deploy-time dependency check runs.
+type checksSetRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 // nextTag returns the app's suggested next semver release tags from its current running tag

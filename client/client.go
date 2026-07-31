@@ -216,6 +216,10 @@ type DeployResult struct {
 	// Hints are non-blocking notes about the deploy (ADR-0052 §8): today, a nudge toward semver when
 	// the deployed tag cannot be classified for auto-update. They never gate the deploy.
 	Hints []string `json:"hints,omitempty"`
+	// Dependencies is what the deploy-time dependency check found (ADR-0076 §4): for each thing
+	// Burrow provisioned for this app, whether the app could reach it from inside its own container.
+	// A failed entry sits on a SUCCESSFUL deploy — the check is reported, never fatal.
+	Dependencies []DependencyResult `json:"dependencies,omitempty"`
 }
 
 type StatusResult struct {
@@ -1398,6 +1402,52 @@ func (c *Client) SetHealth(ctx context.Context, app, env, path string, port int3
 func (c *Client) UnsetHealth(ctx context.Context, app, env string) (HealthResult, error) {
 	var out HealthResult
 	err := c.do(ctx, http.MethodDelete, withEnv(c.appPath(app, "health"), env), nil, &out)
+	return out, err
+}
+
+// Dependency is one thing Burrow provisioned for an app and can therefore check at deploy time
+// (ADR-0076 §4). It carries no credential: EnvKey is a key NAME the app already reads, and Endpoint
+// is an in-cluster address Burrow composed.
+type Dependency struct {
+	Kind        string `json:"kind"`
+	Provisioned string `json:"provisioned"`
+	EnvKey      string `json:"env_key,omitempty"`
+	Endpoint    string `json:"endpoint,omitempty"`
+}
+
+// DependencyResult is what one deploy-time dependency check found: passed, failed, or skipped, with
+// a reason from a closed set and one bounded Burrow-authored line. A failed result never means the
+// deploy failed — the check is reported, never fatal (ADR-0076 §4).
+type DependencyResult struct {
+	Kind    string `json:"kind"`
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	Status  int    `json:"status,omitempty"`
+}
+
+// ChecksResult is what `burrow app checks` reports: whether the deploy-time dependency check runs
+// for an app, and what Burrow derived from what it provisioned that it would check (ADR-0076 §4).
+type ChecksResult struct {
+	App          string       `json:"app"`
+	Environment  string       `json:"environment,omitempty"`
+	Enabled      bool         `json:"enabled"`
+	Dependencies []Dependency `json:"dependencies"`
+	Note         string       `json:"note,omitempty"`
+}
+
+// Checks reports the deploy-time dependency check for an app (ADR-0076 §4). An empty env reads the
+// default environment. It runs no check — it reports what one would do.
+func (c *Client) Checks(ctx context.Context, app, env string) (ChecksResult, error) {
+	var out ChecksResult
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "checks"), env), nil, &out)
+	return out, err
+}
+
+// SetChecks turns the deploy-time dependency check on or off for app in env (ADR-0076 §4).
+func (c *Client) SetChecks(ctx context.Context, app, env string, enabled bool) (ChecksResult, error) {
+	var out ChecksResult
+	err := c.do(ctx, http.MethodPut, withEnv(c.appPath(app, "checks"), env), map[string]any{"enabled": enabled}, &out)
 	return out, err
 }
 

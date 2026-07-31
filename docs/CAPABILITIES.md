@@ -54,12 +54,14 @@ This file is the place both questions get answered together.
 | Run a command around a deploy | `burrow app hook set <app> --on pre-deploy -- ./migrate`, plus `hook list` / `hook unset` | Stores a command per (app, environment, phase). `pre-deploy` runs on **every** deploy path, automated ones included, from the image **being deployed**, before anything reaches the cluster; its failure aborts the deploy. `post-deploy` runs after the rollout settles, whether it succeeded or failed, told the outcome and — on failure — a machine-readable reason. `pre-rollback` is unset by default and runs from the image being rolled back **away from**. See [Lifecycle hooks](#lifecycle-hooks). | [0072](adr/0072-deploy-and-run-lifecycle-hooks.md) |
 | Auto-deploy on a new tag | `burrow app auto-deploy <app> <patch\|minor\|major\|off>` | burrowd polls the registry (~5 min, jittered) and fires the same guarded deploy for an in-level upgrade. Outbound-only, so it works on a NAT'd cluster. | [0052](adr/0052-pull-based-passive-deploy.md), [0058](adr/0058-auto-deploy-is-opt-in.md) |
 | Declare a health endpoint | `burrow app health set <app> --path /healthz [--port N]` | Turns the default TCP readiness check into an HTTP GET of that path; `burrow app health unset` returns to the default and `burrow app health show` reports what is in force. See [Health checks](#health-checks). | [0076](adr/0076-health-checks-readiness-only-and-dependencies-at-deploy-time.md) |
+| Deploy-time dependency checks | `burrow app checks show <app>`, `burrow-agent checks <app>`, plus `checks disable` / `checks enable` | After a deploy, Burrow verifies the things it **provisioned** for the app from inside the app's own container: an attached database (connect with the app's own `DATABASE_URL`, `SELECT 1`) and a published port (request it, report the status code). Derived from the registry, never configured. **Reported, never fatal** — a failure does not roll back and does not fail the deploy. See [Deploy-time dependency checks](#deploy-time-dependency-checks). | [0076](adr/0076-health-checks-readiness-only-and-dependencies-at-deploy-time.md) |
 | Delete an app | `burrow app delete <app>` | Removes the workload, its Service and Ingress, and its release history. Guarded by `app.delete`, **denied by default** — relax the guardrail (ideally per environment) before the verb will run on either CLI. | [0024](adr/0024-cli-command-taxonomy.md), [0065](adr/0065-what-belongs-on-the-agent-surface.md) |
 
 Every verb above except `auto-deploy` and `hook` also exists on `burrow-agent` (`deploy`, `scale`,
 `autoscale`, `rollback`, `run`, `delete`, `apps`, `status`, `history`, `health`/`health set`/
-`health unset`). Setting the auto-deploy level and setting a lifecycle hook are deliberately
-operator actions: both are standing authority for something that happens with nobody watching.
+`health unset`, `checks`). Setting the auto-deploy level, setting a lifecycle hook, and turning
+the deploy-time dependency check off are deliberately operator actions: each is standing
+authority for something that happens with nobody watching.
 Declaring a health endpoint deliberately is not, because the agent is the only party that can
 write one into the application's code.
 
@@ -105,11 +107,66 @@ the type carrying it has no field for a host and no exec handler — and a decla
 looks like a URL or names a host is refused before it is stored. One shared Postgres backs every
 app in an environment, so a readiness check that touched it would remove every replica of every
 app from service the moment that database blipped. Dependency checks belong at deploy time
-(ADR-0076 §4), which is not built yet.
+(ADR-0076 §4) — see [Deploy-time dependency checks](#deploy-time-dependency-checks).
 
 A failing probe surfaces through the existing vocabulary rather than a new one: pods never become
 ready, the rollout does not progress, and `burrow app status` reports
 `ProgressDeadlineExceeded` ([ADR-0074](adr/0074-burrow-observes-what-it-manages.md) §2).
+
+### Deploy-time dependency checks
+
+Once a deploy has landed, Burrow checks the things **it provisioned** for the app
+([ADR-0076](adr/0076-health-checks-readiness-only-and-dependencies-at-deploy-time.md) §4). The list
+is **derived from the registry, never configured** — Burrow attached the database and wrote the
+connection string into the app's Secret, and Burrow recorded the port the app publishes and made the
+Service in front of it, so it does not have to be told what the app depends on to verify what it gave
+it:
+
+| What Burrow provisioned | What the check does |
+| --- | --- |
+| A database and login role on the environment's Postgres instance (`burrow addon attach postgres`) | Connects with the app's own `DATABASE_URL` and runs `SELECT 1` |
+| A published port (`burrow app publish`) | Requests the app's port through its Service and reports the status code |
+
+**It runs inside the app's own container** — the app's image, filesystem, service account,
+namespace, network policy, config, and Secret. A check run anywhere else proves the *cluster* can
+reach the database and not that the *app* can, and the difference is exactly where misconfiguration
+lives. Because that image may have no shell and no client tools, an **init container running Burrow's
+own image copies the `burrowd` binary into an emptyDir** the check container executes it from, so
+nothing at all is required of the app's image.
+
+**A failed check is reported and never fatal.** It does not roll back, does not retroactively fail
+the release, and does not stop the deploy being recorded `deployed` — Burrow does not roll back by
+itself ([ADR-0072](adr/0072-deploy-and-run-lifecycle-hooks.md) §6). The result rides back on the
+deploy in a `dependencies` array and is recorded in the audit log; a check that could block a deploy
+would be a new way for an app to become undeployable during an incident.
+
+Each result carries an outcome (`passed`, `failed`, `skipped`) and, when it is not `passed`, a reason
+from a closed set: `CredentialUnset`, `CredentialUnparsable`, `HostUnresolvable`,
+`ConnectionRefused`, `AuthenticationFailed`, `TimedOut`, `QueryFailed`, `Unreachable`,
+`CheckNotRun`, `NotDerivable`. `skipped` is deliberately distinct from `failed`: a check pod that
+could not be scheduled says nothing about the database.
+
+**No secret value ever leaves the check.** The credential is read from the check container's own
+environment and handed to the driver; the driver's message is *discarded* rather than wrapped,
+because a driver may quote the connection string it was given. What a failure may name is the host
+and port — *selected* from the config the driver's own parser produced, rather than filtered out of
+the string — and a SQLSTATE. The credential is parsed up front for the same reason: `sql.Open` defers
+parsing, so a malformed connection string would otherwise be reported as an unreachable database.
+
+**An app Burrow provisioned nothing for runs no check pod at all**, so an unpublished app with no
+database costs nothing. `burrow app checks disable <app>` turns the check off for an app and
+`burrow app checks enable <app>` puts it back; the read is on both CLIs and the write is
+operator-only.
+
+The check waits for the rollout to **settle** before it runs, which is when
+[ADR-0072](adr/0072-deploy-and-run-lifecycle-hooks.md) §4's `post-deploy` phase fires, so the exposure
+check reaches the release that was just deployed rather than the one it replaced. A rollout that did
+*not* settle is checked anyway: an app that cannot reach the database it was given is a common reason
+a rollout never becomes ready.
+
+One thing §4 describes is **not** built: there is no volume check, because Burrow mounts no volume on
+a user's workload — the app Pod has no `Volumes` at all — so a volume dependency would have to be
+invented rather than derived.
 
 The one escape hatch is `Adapter.WithPodMutator` ([ADR-0061](adr/0061-deploy-pod-mutator-seam.md)),
 a `func(*corev1.PodSpec)` applied on both create and update. It is a **compile-time seam for an
@@ -951,7 +1008,7 @@ pinned by tests that fail if a verb is added or removed.
 
 **Read-only:** `apps`, `status`, `history`, `next-tag`, `logs`, `config`, `secret` (keys),
 `reachability`, `cluster`, `cluster capacity`, `addons`, `backups`, `logs-query`,
-`metrics-query`, `guard`, `audit`, `failures`, `health`, `providers`, `environments`.
+`metrics-query`, `guard`, `audit`, `failures`, `health`, `checks`, `providers`, `environments`.
 
 **Mutating** (each returns an outcome envelope — `executed` / `held_for_confirmation` /
 `denied` / `error`, exit codes 0/2/3/1): `deploy`, `build`, `rollback`, `scale`, `autoscale`,
@@ -961,7 +1018,8 @@ pinned by tests that fail if a verb is added or removed.
 **Absent from the agent binary entirely** — these are operator actions on the `burrow` CLI:
 `cluster install`, `cluster upgrade`, `cluster bootstrap`, `cluster ingress install`,
 `cluster registry install`, `cluster postgres install`, `cluster config set`, `join`, `env add`,
-`guard set`, `app secret set`, `app auto-deploy`, `app hook set`, `addon remove`, `addon remove --delete-data`,
+`guard set`, `app secret set`, `app auto-deploy`, `app hook set`, `app checks enable`/`app checks disable`,
+`addon remove`, `addon remove --delete-data`,
 `addon connect`, `addon detach`,
 `addon restore`, `config provider add`, `config registry login`, `agent <tool> install`,
 `app publish`/`unpublish` under those names, and the client-side `--build` deploy path.

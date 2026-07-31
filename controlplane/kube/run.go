@@ -145,6 +145,14 @@ func (a *Adapter) runJob(name string, spec controlplane.RunSpec) *batchv1.Job {
 		},
 	}
 
+	// A run that carries a ProbeSpec is the deploy-time dependency check (ADR-0076 §4): the app's own
+	// image, with Burrow's binary made executable inside it by an init container, because the image
+	// this most needs to run in is the one with no shell and no client tools. It is attached BEFORE
+	// the mutators below so the init container takes the same placement policy the check container
+	// does — a pod whose two halves could land under different constraints would be a pod that never
+	// schedules.
+	withProbe(&job.Spec.Template.Spec, spec.Probe, a.probeInitContainer())
+
 	// Apply the ADR-0061 extension point last, over the fully-constructed pod spec, exactly as
 	// buildDeployment does — same adapter, same hook, same app. Without it a run Job is authored with
 	// no toleration and no runtimeClassName on a cluster whose app pods only schedule with them, and

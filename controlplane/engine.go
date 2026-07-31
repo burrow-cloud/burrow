@@ -448,15 +448,31 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	if !declared {
 		res.Hints = append(res.Hints, NoHealthEndpointHint)
 	}
-	// The post-deploy hook runs LAST, after the release is recorded and the deploy is in every sense
-	// done (ADR-0072 §4). It waits for the rollout to settle and tells the hook how it went —
-	// succeeded or failed, and on failure the reason from ADR-0074 §2's closed vocabulary. With no
-	// hook set it does nothing at all and waits for nothing, so a deploy nobody asked to be told
-	// about is unchanged.
+	// The deploy-time dependency check (ADR-0076 §4), then the post-deploy hook (ADR-0072 §4). Both
+	// run LAST, after the release is recorded and the deploy is in every sense done, and neither can
+	// fail it: the image is live and the record is written, so there is nothing left to abort.
 	//
-	// It cannot fail the deploy, and that is the point of running it here rather than earlier: the
-	// image is live and the record is written, so there is nothing left to abort. Whatever it and the
-	// rollout report comes back as hints (§6 — Burrow reports, the hook decides).
+	// The CHECK goes first so the hook, which is the party that acts on the outcome, runs after
+	// everything Burrow has to say about this deploy is known. What it checks is DERIVED from what
+	// Burrow provisioned for this app — the database it attached, the port it published — so there is
+	// nothing to configure and nothing that can drift, and an app it provisioned nothing for runs no
+	// check pod at all. runDependencyChecks returns no error, deliberately: a check that failed, or a
+	// check pod that could not be scheduled, must not turn a live deploy into a reported failure
+	// (ADR-0076 §6). It waits for the rollout to settle first, which is what ADR-0072 §4's
+	// `post-deploy` phase means by when it fires — the hook's own wait then returns immediately,
+	// having already been satisfied.
+	res.Dependencies = e.runDependencyChecks(ctx, k, req.App, envName(req.Env), ns, req.Image, env)
+	for _, d := range res.Dependencies {
+		if d.Failed() {
+			res.Hints = append(res.Hints, DependencyFailureHint)
+			break
+		}
+	}
+	// The post-deploy hook waits for the rollout to settle and tells the hook how it went — succeeded
+	// or failed, and on failure the reason from ADR-0074 §2's closed vocabulary. With no hook set it
+	// does nothing at all and waits for nothing, so a deploy nobody asked to be told about is
+	// unchanged. Whatever it and the rollout report comes back as hints (ADR-0072 §6 — Burrow
+	// reports, the hook decides).
 	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, k, req.App, req.Env, req.Image, rel.ID, DeployKindDeploy, env)...)
 	return res, nil
 }
@@ -1391,6 +1407,12 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	// already gone, and failing the delete afterwards would report a completed teardown as broken.
 	if err := e.db.DeleteHealthEndpoints(ctx, app); err != nil {
 		slog.WarnContext(ctx, "removing the app's declared health endpoints failed", "app", app, "error", err)
+	}
+	// And the same for a decision to turn the deploy-time dependency check off (ADR-0076 §4): an app
+	// created later under the same name must start checked, which is Burrow's default, rather than
+	// silently inherit a previous occupant's opt-out. Best-effort for the same reason.
+	if err := e.db.DeleteDependencyCheckSettings(ctx, app); err != nil {
+		slog.WarnContext(ctx, "removing the app's dependency-check setting failed", "app", app, "error", err)
 	}
 	e.recordExecution(ctx, auditOpAppDelete, app, args, nil)
 	return nil

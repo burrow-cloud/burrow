@@ -80,6 +80,7 @@ func newRootCmd() *cobra.Command {
 		newLogsCmd(),
 		newConfigCmd(),
 		newHealthCmd(),
+		newChecksCmd(),
 		newSecretCmd(),
 		newReachabilityCmd(),
 		newClusterCmd(),

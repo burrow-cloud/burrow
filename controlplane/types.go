@@ -72,6 +72,27 @@ type RunSpec struct {
 	// TTLSeconds is the Job's ttlSecondsAfterFinished — how long the finished Job lingers before
 	// Kubernetes garbage-collects it (ADR-0048 §7). Zero deletes it as soon as it finishes.
 	TTLSeconds int32
+	// Probe, when set, asks the adapter to make Burrow's own binary executable inside this Job's
+	// container before Command runs: an init container from Burrow's image copies its own executable
+	// into an emptyDir that the app's container mounts at ProbeMountPath (ADR-0076 §4).
+	//
+	// It exists because the deploy-time dependency check has to run in the APP's image — the app's
+	// filesystem, service account, network policy and credential are where misconfiguration lives —
+	// and that image may contain no shell, no psql and no curl, which is exactly the minimal image
+	// users are told to build. nil (the default) is an ordinary run and authors nothing extra.
+	//
+	// No code travels here either (ADR-0004): the init container's image is Burrow's own published
+	// image, named by the adapter, and the only thing that moves is a reference to it.
+	Probe *ProbeSpec
+}
+
+// ProbeSpec is the extra a Job needs to run Burrow's probe inside the app's image (ADR-0076 §4).
+type ProbeSpec struct {
+	// Env is the probe's OWN configuration, applied to the check container after the app's config so
+	// it cannot be shadowed by an app that happens to set the same key. It is non-secret by
+	// construction — the plan carries environment variable NAMES and in-cluster addresses Burrow
+	// composed, never a value — which is what makes it safe in a Job spec.
+	Env map[string]string
 }
 
 // ExposeSpec describes how to make an app reachable at a hostname (ADR-0018). v0.2 routes

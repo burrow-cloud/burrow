@@ -107,6 +107,8 @@ const (
 	OpHealthEndpoint          Op = "HealthEndpoint"
 	OpSetHealthEndpoint       Op = "SetHealthEndpoint"
 	OpUnsetHealthEndpoint     Op = "UnsetHealthEndpoint"
+	OpDependencyChecksEnabled Op = "DependencyChecksEnabled"
+	OpSetDependencyChecks     Op = "SetDependencyChecks"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

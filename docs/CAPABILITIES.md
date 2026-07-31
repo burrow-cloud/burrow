@@ -658,19 +658,25 @@ Logical `pg_dump` / `pg_restore` backups for the Postgres add-on
 
 | Capability | Command | What it does |
 | --- | --- | --- |
-| Back up an app's database | `burrow addon backup postgres <app> [--destination <provider>]` | Runs `pg_dump -Fc` in a one-shot Job (`postgres:17-alpine`), writing `/backups/<app>/<id>.dump` on the PVC. With an object-storage provider registered, the same Job then writes that dump to the store and **reads it back** before the backup is recorded as completed. Waits up to 10 minutes; records id, path, destination, object key, size, and status in the control-plane database. |
+| Back up an app's database | `burrow addon backup postgres <app> [--destination <provider>]` | Runs `pg_dump -Fc` in a one-shot Job (`postgres:17-alpine`), writing `/backups/<app>/<id>.dump` on **that environment's** backup PVC. With an object-storage provider registered, the same Job then writes that dump to the store and **reads it back** before the backup is recorded as completed. Waits up to 10 minutes; records id, environment, claim, path, destination, object key, size, and status in the control-plane database. |
 | List backups | `burrow addon backups postgres [<app>]` | Reads the control-plane database, newest first, with a `WHERE` column saying which backups left the cluster. |
 | Backup health | `burrow addon backup-health postgres [<app>]` | Reports what Burrow itself observed: how long ago the last backup completed, how long ago the last one **left the cluster**, the last failure with its closed reason, how many rows are still pending, and whether each registered object-storage destination answers **right now**. Read-only, and computed from Burrow's own `Backup` rows rather than from any backup engine's status fields. |
-| Restore | `burrow addon restore postgres <app> --backup <id> --confirm` | Runs `pg_restore --clean --if-exists` into the app's database, overwriting live contents. Confirm-gated by the `addon.restore` guardrail. **Operator CLI only** — absent from `burrow-agent`. |
+| Restore | `burrow addon restore postgres <app> --backup <id> --confirm` | Runs `pg_restore --clean --if-exists` into the app's database, overwriting live contents. The backup must belong to the app **and** to the environment being restored into, and its dump must be on that environment's claim. Confirm-gated by the `addon.restore` guardrail. **Operator CLI only** — absent from `burrow-agent`. |
 
 The limits are as important as the capability:
 
 - **With no object-storage provider registered, the dump never leaves the cluster.** It lands on
-  a `burrow-postgres-backups` PVC, 10Gi, ReadWriteOnce, on the default StorageClass, in the same
-  `burrow-addons` namespace as the database it came from — so it shares a failure domain with its
-  source. That is recorded on the row (`destination: cluster`) rather than left to be inferred,
+  a 10Gi ReadWriteOnce PVC, on the default StorageClass, in the same `burrow-addons` namespace as
+  the database it came from — so it shares a failure domain with its source. That is recorded on the row (`destination: cluster`) rather than left to be inferred,
   and the listing shows it, because a set of in-cluster dumps should not be able to read as a
   backup strategy. Registering a destination (`burrow config provider add s3`) is what fixes it.
+- **Each environment has its own backup claim** ([ADR-0067](adr/0067-one-database-instance-per-environment.md)
+  §1), named for the instance the dumps came from: `burrow-postgres-backups` for `prod`,
+  `burrow-postgres-<env>.backups` for every other environment. The backup and restore Jobs of an
+  environment mount that claim and no other, so one environment's dumps are neither restorable into
+  another nor readable from it. The claim survives `addon remove`, including `--delete-data`
+  ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §4), and `addon list` reports each retained
+  claim with the environment it served.
 - **The PVC and the store are a tier, not alternatives.** `pg_dump` always writes to the volume,
   and `pg_restore` reads from it: [ADR-0066](adr/0066-postgres-on-cloudnativepg.md) §4 keeps the
   single-app logical restore deliberately, and it is the thing that reads the volume. The object

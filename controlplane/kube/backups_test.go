@@ -55,7 +55,7 @@ func TestRunBackupJobSpecAndSecretRef(t *testing.T) {
 
 	// The backup PVC was ensured in the add-on namespace, labelled as the Postgres add-on's so
 	// `addon list` can attribute it once the add-on is gone (ADR-0064 §6).
-	pvc, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, backupPVCName, metav1.GetOptions{})
+	pvc, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, controlplane.PostgresBackupVolume, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("backup PVC not created: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestBackupJobNoPlatformPodMutatorUnchanged(t *testing.T) {
 	a := New(fake.NewSimpleClientset(), "apps").WithAddonNamespace(addonNS)
 
 	connEnv := []corev1.EnvVar{{Name: "PGHOST", Value: "burrow-postgres." + addonNS + ".svc"}}
-	got := a.backupJob("burrow-pg-backup-bk1", "pg_dump -Fc", connEnv, nil, "")
+	got := a.backupJob("burrow-pg-backup-bk1", controlplane.PostgresBackupVolume, "pg_dump -Fc", connEnv, nil, "")
 
 	labels := map[string]string{
 		nameLabel:      "burrow-pg-backup-bk1",
@@ -264,7 +264,7 @@ func TestBackupJobNoPlatformPodMutatorUnchanged(t *testing.T) {
 					}},
 					Volumes: []corev1.Volume{{
 						Name:         "backups",
-						VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: backupPVCName}},
+						VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: controlplane.PostgresBackupVolume}},
 					}},
 				},
 			},
@@ -341,12 +341,12 @@ func TestBackupJobPlatformMutatorSeesConstructedPodSpec(t *testing.T) {
 			sawImage = pod.Containers[0].Image
 		}
 		for _, v := range pod.Volumes {
-			if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == backupPVCName {
+			if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == controlplane.PostgresBackupVolume {
 				sawVolume = true
 			}
 		}
 	})
-	a.backupJob("burrow-pg-backup-bk1", "pg_dump -Fc", nil, nil, "")
+	a.backupJob("burrow-pg-backup-bk1", controlplane.PostgresBackupVolume, "pg_dump -Fc", nil, nil, "")
 
 	if sawContainers != 1 {
 		t.Errorf("mutator saw %d containers, want 1 — it ran before the pod was built", sawContainers)
@@ -370,7 +370,7 @@ func TestBackupJobIgnoresAppPodMutator(t *testing.T) {
 	a := New(fake.NewSimpleClientset(), "apps").WithAddonNamespace(addonNS).
 		WithPodMutator(func(pod *corev1.PodSpec) { pod.NodeSelector = map[string]string{"pool": "tenant"} })
 
-	pod := a.backupJob("burrow-pg-backup-bk1", "pg_dump -Fc", nil, nil, "").Spec.Template.Spec
+	pod := a.backupJob("burrow-pg-backup-bk1", controlplane.PostgresBackupVolume, "pg_dump -Fc", nil, nil, "").Spec.Template.Spec
 	if len(pod.NodeSelector) != 0 {
 		t.Errorf("nodeSelector = %v, want none: the app hook must not reach a Burrow-image pod", pod.NodeSelector)
 	}
@@ -394,5 +394,125 @@ func TestBackupJobPresent(t *testing.T) {
 	present, err = a.BackupJobPresent(ctx, "bk2")
 	if err != nil || present {
 		t.Errorf("BackupJobPresent(bk2) = %v, %v; want false, nil", present, err)
+	}
+}
+
+// TestBackupAndRestoreMountTheirOwnEnvironmentsClaim asserts the Jobs of a NAMED environment create
+// and mount that environment's backup claim — not the shared one, which holds every other
+// environment's dumps (ADR-0067 §1, issue #349).
+//
+// The mount is where the isolation is real. The engine also refuses a restore whose row belongs to
+// another environment, but a refusal on the record still leaves a Job that had the bytes mounted;
+// this is the half that makes another environment's dumps unreachable rather than merely unasked
+// for.
+func TestBackupAndRestoreMountTheirOwnEnvironmentsClaim(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	var created []*batchv1.Job
+	succeedJobs(client, &created)
+
+	want, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, "staging")
+	if err != nil {
+		t.Fatalf("BackupVolumeName: %v", err)
+	}
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	if _, err := a.RunBackupJob(ctx, "shop", "staging", "bk1", nil); err != nil {
+		t.Fatalf("RunBackupJob: %v", err)
+	}
+	if err := a.RunRestoreJob(ctx, "shop", "staging", "bk1"); err != nil {
+		t.Fatalf("RunRestoreJob: %v", err)
+	}
+
+	// Staging's claim was created, carrying the labels `addon list` attributes a retained claim by —
+	// its name is no longer the compiled-in constant, so the role has to be written down.
+	pvc, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, want, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("staging's backup PVC not created: %v", err)
+	}
+	if pvc.Labels[addonEnvLabel] != "staging" || pvc.Labels[addonVolumeRole] != controlplane.AddonVolumeBackup {
+		t.Errorf("staging's backup PVC labels = %v, want %s=staging and %s=%s", pvc.Labels, addonEnvLabel, addonVolumeRole, controlplane.AddonVolumeBackup)
+	}
+	// And the shared claim was NOT: a backup taken in staging must not touch the volume holding the
+	// default environment's dumps.
+	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, controlplane.PostgresBackupVolume, metav1.GetOptions{}); err == nil {
+		t.Errorf("a backup taken in staging created the default environment's claim %q", controlplane.PostgresBackupVolume)
+	}
+
+	if len(created) != 2 {
+		t.Fatalf("created %d jobs, want 2 (backup and restore)", len(created))
+	}
+	for _, job := range created {
+		var claims []string
+		for _, v := range job.Spec.Template.Spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				claims = append(claims, v.PersistentVolumeClaim.ClaimName)
+			}
+		}
+		if len(claims) != 1 || claims[0] != want {
+			t.Errorf("job %q mounts claims %v, want only staging's own %q", job.Name, claims, want)
+		}
+	}
+}
+
+// TestAddonVolumeOwnerAttributesEachClaim asserts the retained-volume listing attributes a claim
+// from its LABELS, so a named environment's backup claim is reported as dumps rather than as an
+// add-on's data — and that the two label-less shapes an existing cluster holds are still read
+// correctly (ADR-0064 §6).
+func TestAddonVolumeOwnerAttributesEachClaim(t *testing.T) {
+	staging, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, "staging")
+	if err != nil {
+		t.Fatalf("BackupVolumeName: %v", err)
+	}
+	cases := []struct {
+		name     string
+		pvc      *corev1.PersistentVolumeClaim
+		wantRole string
+	}{
+		{
+			name: "a named environment's backup claim, by its role label",
+			pvc: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: staging, Labels: map[string]string{
+				addonLabel: string(controlplane.AddonPostgres), addonVolumeRole: controlplane.AddonVolumeBackup,
+			}}},
+			wantRole: controlplane.AddonVolumeBackup,
+		},
+		{
+			name: "an instance's data claim, by its role label",
+			pvc: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "burrow-postgres-staging", Labels: map[string]string{
+				addonLabel: string(controlplane.AddonPostgres), addonVolumeRole: controlplane.AddonVolumeData,
+			}}},
+			wantRole: controlplane.AddonVolumeData,
+		},
+		{
+			// Written before the role label existed: the compiled-in constant is what identifies it,
+			// and it is a constant rather than a prefix guess about what a user might have named
+			// something.
+			name: "the shared backup claim an existing cluster holds",
+			pvc: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: controlplane.PostgresBackupVolume, Labels: map[string]string{
+				addonLabel: string(controlplane.AddonPostgres),
+			}}},
+			wantRole: controlplane.AddonVolumeBackup,
+		},
+		{
+			name: "a data claim written before the role label",
+			pvc: &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "burrow-postgres", Labels: map[string]string{
+				addonLabel: string(controlplane.AddonPostgres),
+			}}},
+			wantRole: controlplane.AddonVolumeData,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			addon, role, ok := addonVolumeOwner(tc.pvc)
+			if !ok {
+				t.Fatalf("claim %q was not attributed to any add-on", tc.pvc.Name)
+			}
+			if addon != controlplane.AddonPostgres || role != tc.wantRole {
+				t.Errorf("claim %q attributed to %s/%s, want postgres/%s", tc.pvc.Name, addon, role, tc.wantRole)
+			}
+		})
+	}
+	// A claim Burrow did not create is not attributed at all.
+	if _, _, ok := addonVolumeOwner(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "someone-elses"}}); ok {
+		t.Error("a claim with no Burrow labels was attributed to an add-on")
 	}
 }

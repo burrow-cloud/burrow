@@ -214,3 +214,57 @@ func TestStoreBackupDestinationAndFailureRoundTrip(t *testing.T) {
 		t.Errorf("FailBackup on an unknown id = %v, want ErrNotFound", err)
 	}
 }
+
+// TestStoreBackupVolumeRoundTrip asserts the claim a dump was written to is stored and read back,
+// and that a row recorded without one lands on the claim that predates per-environment backups
+// (ADR-0067 §1, migration 00027).
+//
+// The fallback is the load-bearing half. `environment` says which instance a dump came FROM; only
+// `volume` says which disk it is ON, and the two disagree for a dump taken in a non-default
+// environment while a single shared claim still existed. A row that recorded nothing would leave a
+// restore deriving the claim from the environment and looking for that dump on a volume created
+// empty.
+func TestStoreBackupVolumeRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-app"
+
+	staging, err := cp.BackupVolumeName(cp.AddonPostgres, "staging")
+	if err != nil {
+		t.Fatalf("BackupVolumeName: %v", err)
+	}
+	recorded := cp.Backup{
+		ID:          t.Name() + "-b1",
+		App:         app,
+		Environment: "staging",
+		CreatedAt:   time.Date(2026, 6, 25, 1, 0, 0, 0, time.UTC),
+		Volume:      staging,
+		Path:        "/backups/" + app + "/" + t.Name() + "-b1.dump",
+		Status:      cp.BackupCompleted,
+	}
+	// A row written with no claim named: the only one it can be on is the claim that has ever held
+	// a dump, which is what the column was backfilled to.
+	unnamed := recorded
+	unnamed.ID, unnamed.Volume = t.Name()+"-b2", ""
+
+	for _, b := range []cp.Backup{recorded, unnamed} {
+		if err := s.RecordBackup(ctx, b); err != nil {
+			t.Fatalf("RecordBackup %s: %v", b.ID, err)
+		}
+	}
+
+	got, err := s.GetBackup(ctx, recorded.ID)
+	if err != nil {
+		t.Fatalf("GetBackup: %v", err)
+	}
+	if got.Volume != staging {
+		t.Errorf("volume = %q, want staging's own claim %q", got.Volume, staging)
+	}
+	got, err = s.GetBackup(ctx, unnamed.ID)
+	if err != nil {
+		t.Fatalf("GetBackup: %v", err)
+	}
+	if got.Volume != cp.PostgresBackupVolume {
+		t.Errorf("volume of a row recorded without one = %q, want %q", got.Volume, cp.PostgresBackupVolume)
+	}
+}

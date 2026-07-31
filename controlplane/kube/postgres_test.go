@@ -451,7 +451,7 @@ func TestDeleteAddonKeepsBackupVolume(t *testing.T) {
 	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
-	if err := a.ensureBackupPVC(ctx); err != nil {
+	if err := a.ensureBackupPVC(ctx, controlplane.DefaultEnvironment, controlplane.PostgresBackupVolume); err != nil {
 		t.Fatalf("ensureBackupPVC: %v", err)
 	}
 
@@ -459,11 +459,11 @@ func TestDeleteAddonKeepsBackupVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
-	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, backupPVCName, metav1.GetOptions{}); err != nil {
+	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, controlplane.PostgresBackupVolume, metav1.GetOptions{}); err != nil {
 		t.Errorf("the backup volume must outlive the database: %v", err)
 	}
-	if removal.RetainedBackupVolume != backupPVCName {
-		t.Errorf("RetainedBackupVolume = %q, want %q", removal.RetainedBackupVolume, backupPVCName)
+	if removal.RetainedBackupVolume != controlplane.PostgresBackupVolume {
+		t.Errorf("RetainedBackupVolume = %q, want %q", removal.RetainedBackupVolume, controlplane.PostgresBackupVolume)
 	}
 }
 

@@ -460,7 +460,7 @@ func runEnvAdd(ctx context.Context, o *commonOpts, name, envNamespace string, ve
 		if name == controlplane.DefaultEnvironment {
 			return fmt.Errorf("environment %q already exists: install creates it, mapped to your app namespace.\nAdd a different one, e.g. `burrow env add staging`", name)
 		}
-		return fmt.Errorf("environment name %q is reserved and cannot be added: install already created %q, the environment every unqualified operation resolves to.\nAdd a different one, e.g. `burrow env add staging`", name, controlplane.DefaultEnvironment)
+		return fmt.Errorf("environment name %q is reserved and cannot be added: Burrow already gives that name to a resource of its own.\nAdd a different one, e.g. `burrow env add staging`", name)
 	}
 
 	// (a) Privileged kubeconfig-side setup: create the environment's namespace and grant burrowd a

@@ -21,12 +21,6 @@ import (
 )
 
 const (
-	// backupPVCName is the ReadWriteOnce volume in the add-on namespace that holds dump bytes
-	// (ADR-0032). Backup/restore Jobs mount it; the instance pod does not. burrowd is never mounted
-	// to it — the list of backups comes from the control-plane database, not this volume. It is the
-	// controlplane constant, not a second copy, because add-on removal reports this volume by name as
-	// deliberately retained and the two sides must not drift.
-	backupPVCName = controlplane.PostgresBackupVolume
 	// backupMountPath is where the backup PVC is mounted inside the backup/restore Job container.
 	// It mirrors controlplane.BackupPath's prefix so the Job writes where the engine records.
 	backupMountPath = "/backups"
@@ -86,23 +80,38 @@ func ShipperImageForVersion(version string) string {
 	return shipperImageRepo + ":" + version
 }
 
-// backupDumpPath is the on-PVC path of app's dump for backupID — the same layout the engine records
-// via controlplane.BackupPath, so the Job writes where burrowd records.
+// backupDumpPath is the path of app's dump for backupID WITHIN its environment's claim — the same
+// layout the engine records via controlplane.BackupPath, so the Job writes where burrowd records.
+// The environment is carried by the CLAIM the Job mounts (backupVolumeName), not by this path, which
+// is why the layout is unchanged and every dump taken before backups were per-environment is still
+// exactly where its row says it is.
 func backupDumpPath(app, backupID string) string {
 	return controlplane.BackupPath(app, backupID)
 }
 
-// ensureBackupPVC creates the backup PVC in the add-on namespace if absent (idempotent, like the
-// add-on data PVC). It is created on first backup so a cluster that never backs up carries no extra
-// volume.
-func (a *Adapter) ensureBackupPVC(ctx context.Context) error {
-	// The add-on label records which add-on this claim serves, so `addon list` can attribute a
-	// retained claim without reading its name (ADR-0064 §6). Claims created before this label was
-	// written are still attributed, by their compiled-in constant name (addonVolumeOwner).
+// backupVolumeName is the claim environment env's dumps live on — one per environment, the same
+// shape as the instance they came from (ADR-0067 §1, controlplane.BackupVolumeName). It is derived
+// in the controlplane package so the engine's recorded row and the Job's mount cannot disagree about
+// which disk a dump is on.
+func backupVolumeName(env string) (string, error) {
+	return controlplane.BackupVolumeName(controlplane.AddonPostgres, env)
+}
+
+// ensureBackupPVC creates environment env's backup PVC in the add-on namespace if absent
+// (idempotent, like the add-on data PVC). It is created on first backup so a cluster that never
+// backs up carries no extra volume — and an environment that never backs up carries none either.
+func (a *Adapter) ensureBackupPVC(ctx context.Context, env, backupPVCName string) error {
+	// The add-on label records which add-on this claim serves and the role label what it holds, so
+	// `addon list` can attribute a retained claim without reading its name (ADR-0064 §6) — which now
+	// matters, because a named environment's backup claim is no longer the one compiled-in name.
+	// Claims created before these labels were written are still attributed, by that constant name
+	// (addonVolumeOwner). The environment label matches the one the instance carries.
 	labels := map[string]string{
-		nameLabel:      backupPVCName,
-		managedByLabel: managedByValue,
-		addonLabel:     string(controlplane.AddonPostgres),
+		nameLabel:       backupPVCName,
+		managedByLabel:  managedByValue,
+		addonLabel:      string(controlplane.AddonPostgres),
+		addonEnvLabel:   env,
+		addonVolumeRole: controlplane.AddonVolumeBackup,
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: backupPVCName, Namespace: a.addonNamespace, Labels: labels},
@@ -196,7 +205,13 @@ func (a *Adapter) RunBackupJob(ctx context.Context, app, env, backupID string, d
 	if err != nil {
 		return controlplane.BackupJobOutcome{}, err
 	}
-	if err := a.ensureBackupPVC(ctx); err != nil {
+	// The claim is this environment's, resolved from the same environment that chose the instance —
+	// so a dump taken from staging's server can only land on staging's disk (ADR-0067 §1).
+	claim, err := backupVolumeName(env)
+	if err != nil {
+		return controlplane.BackupJobOutcome{}, err
+	}
+	if err := a.ensureBackupPVC(ctx, env, claim); err != nil {
 		return controlplane.BackupJobOutcome{}, err
 	}
 	dump := backupDumpPath(app, backupID)
@@ -209,7 +224,7 @@ pg_dump -Fc -f %q
 stat -c%%s %q > /dev/termination-log`, dir, dump, dump)
 
 	name := backupJobName(backupID)
-	job := a.backupJob(name, script, connEnv, dest, dump)
+	job := a.backupJob(name, claim, script, connEnv, dest, dump)
 	return a.runBackupJobAwait(ctx, job, name, dest)
 }
 
@@ -243,6 +258,13 @@ func (a *Adapter) RunRestoreJob(ctx context.Context, app, env, backupID string) 
 	if err != nil {
 		return err
 	}
+	// The restore Job mounts THIS environment's backup claim and no other, so a dump belonging to
+	// another environment is not merely refused by the caller — it is not on a disk this Job can
+	// read (ADR-0067 §1).
+	claim, err := backupVolumeName(env)
+	if err != nil {
+		return err
+	}
 	dump := backupDumpPath(app, backupID)
 	// No --no-owner: the dump records the app role as the owner of the app's objects, and the Job
 	// connects as the burrow_admin superuser, so pg_restore reassigns ownership back to the app role
@@ -253,23 +275,24 @@ func (a *Adapter) RunRestoreJob(ctx context.Context, app, env, backupID string) 
 pg_restore --clean --if-exists -d %q %q`, app, dump)
 
 	name := fmt.Sprintf("burrow-pg-restore-%s", backupID)
-	job := a.backupJob(name, script, connEnv, nil, "")
+	job := a.backupJob(name, claim, script, connEnv, nil, "")
 	_, rerr := a.runJobAwaitSize(ctx, job, name)
 	return rerr
 }
 
 // backupJob builds a one-shot Job in the add-on namespace running the postgres image with script,
-// mounting the backup PVC and the caller-resolved connection env (host/user/db non-secret, password
-// via secretKeyRef). The env is resolved by the caller so the environment's instance is settled
-// before any Job exists (ADR-0067 §1). BackoffLimit 0: a failed attempt fails the Job rather than
-// retrying forever.
+// mounting the named backup claim and the caller-resolved connection env (host/user/db non-secret,
+// password via secretKeyRef). The environment is resolved by the caller into BOTH the instance the
+// Job dials and the claim it mounts, so both are settled before any Job exists (ADR-0067 §1) — and a
+// Job can only ever reach one environment's server and one environment's dumps. BackoffLimit 0: a
+// failed attempt fails the Job rather than retrying forever.
 //
 // The pod runs the postgres image — Burrow's choice, not the app's — so it takes the PLATFORM hook
 // (ADR-0073 §2), not the app one. Putting a pg_dump on the tenant pool is not what an operator who
 // sandboxed the tenant's image asked for. Both callers build their Job here, so backup and restore
 // necessarily share one placement policy; that matters most for restore, where an unschedulable Job
 // is discovered during an incident.
-func (a *Adapter) backupJob(name, script string, connEnv []corev1.EnvVar, dest *controlplane.BackupDestination, dumpPath string) *batchv1.Job {
+func (a *Adapter) backupJob(name, claim, script string, connEnv []corev1.EnvVar, dest *controlplane.BackupDestination, dumpPath string) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(controlplane.AddonPostgres)}
 	var backoff int32
 	pg := corev1.Container{
@@ -283,7 +306,7 @@ func (a *Adapter) backupJob(name, script string, connEnv []corev1.EnvVar, dest *
 	}
 	volumes := []corev1.Volume{{
 		Name:         "backups",
-		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: backupPVCName}},
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim}},
 	}}
 	containers := []corev1.Container{pg}
 	var initContainers []corev1.Container

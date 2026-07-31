@@ -756,14 +756,20 @@ func printRetainedVolumes(out io.Writer, vols []client.RetainedVolume) error {
 	}
 	fmt.Fprintf(out, "\nRetained volumes (%d) — kept by an earlier `addon remove`, still allocated and still billed:\n\n", len(vols))
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CLAIM\tADD-ON\tHOLDS\tSIZE\tNAMESPACE")
+	fmt.Fprintln(tw, "CLAIM\tADD-ON\tENV\tHOLDS\tSIZE\tNAMESPACE")
 	adoptable := false
 	for _, v := range vols {
 		size := v.Size
 		if size == "" {
 			size = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", v.Name, v.Addon, v.Role, size, v.Namespace)
+		// The environment is a column rather than something to read off the claim name, because a
+		// claim per environment (ADR-0067 §1) means several rows differ only by it.
+		env := v.Environment
+		if env == "" {
+			env = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", v.Name, v.Addon, env, v.Role, size, v.Namespace)
 		if v.ReinstallAdopts {
 			adoptable = true
 		}
@@ -921,15 +927,23 @@ func deleteDataConsequence(ctx context.Context, c *client.Client, name string, s
 	var b strings.Builder
 	fmt.Fprintf(&b, "--delete-data DESTROYS the data volume %q in namespace %s. This cannot be undone.",
 		name, connect.DefaultAddonNamespace)
-	if addonTypeOf(ctx, c, name) != string(controlplane.AddonPostgres) {
+	addonType, addonEnv := addonInstanceOf(ctx, c, name)
+	if addonType != string(controlplane.AddonPostgres) {
 		return b.String()
 	}
 	b.WriteString("\n  For the postgres add-on that volume holds every attached app's database")
 	if apps := attachedApps(ctx, c); len(apps) > 0 {
 		fmt.Fprintf(&b, ": %s", pluralApps(apps))
 	}
-	fmt.Fprintf(&b, ".\n  The backup volume %q is kept — recorded backups outlive the database they came from.",
-		controlplane.PostgresBackupVolume)
+	// This instance's OWN environment names the claim that survives: backups are held one claim per
+	// environment (ADR-0067 §1), and naming another environment's would describe a volume this
+	// removal is not touching. Best-effort like the rest of the notice — an unreadable listing costs
+	// the sentence, never the removal.
+	if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, addonEnv); err == nil {
+		fmt.Fprintf(&b, ".\n  The backup volume %q is kept — recorded backups outlive the database they came from.", claim)
+	} else {
+		b.WriteString(".\n  This environment's backup volume is kept — recorded backups outlive the database they came from.")
+	}
 	b.WriteString("\n  " + finalBackupNotice(ctx, c, skipFinalBackup))
 	return b.String()
 }
@@ -970,20 +984,27 @@ func finalBackupNotice(ctx context.Context, c *client.Client, skipFinalBackup bo
 		"  if it does not get there, nothing is removed.", strings.Join(names, " or "))
 }
 
-// addonTypeOf looks up the registered type of an installed add-on by name, returning "" when the
-// listing cannot be read or the name is not registered. Best-effort by contract: an unanswerable
-// lookup costs the notice its per-app detail, never the removal.
-func addonTypeOf(ctx context.Context, c *client.Client, name string) string {
+// addonInstanceOf looks up the registered type AND environment of an installed add-on by name,
+// returning empty strings when the listing cannot be read or the name is not registered. Both are
+// needed together: with an instance and a backup claim per environment (ADR-0067 §1), the type says
+// what the removal destroys and the environment says which claim survives it. Best-effort by
+// contract: an unanswerable lookup costs the notice its detail, never the removal.
+func addonInstanceOf(ctx context.Context, c *client.Client, name string) (addonType, env string) {
 	addons, err := c.Addons(ctx)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	for _, a := range addons {
 		if a.Name == name {
-			return a.Type
+			// A row written before add-ons were per-environment carries no environment and is the
+			// default one's, since that is the only instance that could have existed (ADR-0067 §3).
+			if a.Environment == "" {
+				return a.Type, controlplane.DefaultEnvironment
+			}
+			return a.Type, a.Environment
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // attachedApps enumerates, best-effort, the apps holding a Burrow-provisioned database on the

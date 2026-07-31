@@ -959,8 +959,13 @@ func removalConsequence(info AddonInfo, deleteData bool, apps []string, plan fin
 	case hasVolume && deleteData:
 		what += fmt.Sprintf(" AND DESTROYING its data volume %q", info.Name)
 		if info.Type == AddonPostgres {
-			what += ", " + destroyedDatabases(apps) +
-				fmt.Sprintf(" (the backup volume %q is kept)", PostgresBackupVolume)
+			what += ", " + destroyedDatabases(apps)
+			// This environment's backup claim, not the compiled-in one: with a claim per environment
+			// (ADR-0067 §1) naming the wrong one would tell the operator that a volume they are not
+			// touching is what survives.
+			if claim, err := BackupVolumeName(AddonPostgres, envName(info.Environment)); err == nil {
+				what += fmt.Sprintf(" (the backup volume %q is kept)", claim)
+			}
 		}
 		what += "; " + plan.consequence()
 	case hasVolume:
@@ -1198,11 +1203,19 @@ func (e *Engine) backupApp(ctx context.Context, app, targetEnv, destination stri
 		return Backup{}, BackupJobOutcome{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
 	}
 
+	// The claim is resolved before the row is written, from the SAME environment that chose the
+	// instance, so a row can never say a dump is on a volume the Job did not mount (ADR-0067 §1).
+	claim, err := BackupVolumeName(t, targetEnv)
+	if err != nil {
+		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
+		return Backup{}, BackupJobOutcome{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
+	}
 	backup := Backup{
 		ID:          backupID,
 		App:         app,
 		Environment: targetEnv,
 		CreatedAt:   e.clock.Now(),
+		Volume:      claim,
 		Path:        BackupPath(app, backupID),
 		Status:      BackupPending,
 		Destination: BackupDestinationCluster,
@@ -1270,6 +1283,35 @@ func (e *Engine) ListBackups(ctx context.Context, t AddonType, app, env string) 
 	return backups, nil
 }
 
+// checkBackupVolume reports whether b's dump is on the claim environment targetEnv actually mounts.
+//
+// It is a SECOND check, beside the environment one, because the row and the bytes are two facts and
+// the gap between them is what issue #349 was. `environment` says which instance a dump was taken
+// from; `volume` says which disk it is on. They agree for every backup taken since backups became
+// per-environment, and they disagree for exactly one population: a dump taken in a non-default
+// environment while a single shared claim still existed. Deriving the claim from the environment
+// instead of reading it would silently send the restore Job looking for that dump on a claim that
+// was created empty.
+//
+// A row with no volume recorded is read as the shared claim, which is the only one it can be: the
+// column was backfilled to it and nothing else has ever held a dump.
+func checkBackupVolume(t AddonType, b Backup, targetEnv string) error {
+	want, err := BackupVolumeName(t, targetEnv)
+	if err != nil {
+		return err
+	}
+	got := b.Volume
+	if got == "" {
+		got = PostgresBackupVolume
+	}
+	if got == want {
+		return nil
+	}
+	return fmt.Errorf("backup %q is on the volume %q, and environment %q restores from %q: it was taken before backups were held per environment, when every environment shared one volume. "+
+		"The dump is still there — copy it into %q, or take a fresh backup of this environment: %w",
+		b.ID, got, targetEnv, want, want, ErrInvalid)
+}
+
 // RestoreAddon restores app's database from a recorded backup, overwriting its live contents
 // (ADR-0032). It is behind the addon.restore confirm guardrail (it destroys live data), runs an
 // in-cluster Job that pg_restores the named dump, and records the restore in the audit log. The Job
@@ -1309,6 +1351,16 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, e
 	if bEnv := envName(backup.Environment); bEnv != targetEnv {
 		return fmt.Errorf("restore addon %s for %s: backup %q was taken from environment %q, not %q; a dump from another environment's instance is not a valid source: %w",
 			t, app, backupID, bEnv, targetEnv, ErrInvalid)
+	}
+	// And the BYTES have to be on the claim this environment mounts, which is a second question the
+	// row above cannot answer. Each environment's dumps live on its own claim (ADR-0067 §1), so the
+	// restore Job mounts one volume and one only; a row whose recorded claim is a different one is a
+	// dump taken before backups were per-environment, still sitting on the shared claim. Reaching it
+	// would mean mounting a volume holding every other environment's dumps into this environment's
+	// Job, which is the isolation this closed — so it is refused, naming where the dump actually is
+	// rather than letting the Job fail on a file that is not there.
+	if err := checkBackupVolume(t, backup, targetEnv); err != nil {
+		return fmt.Errorf("restore addon %s for %s: %w", t, app, err)
 	}
 
 	pol, err := e.db.Policy(ctx)

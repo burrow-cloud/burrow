@@ -81,8 +81,10 @@ const (
 	// A deploy waits on it whenever it has something to wait FOR: a `post-deploy` hook to tell
 	// (ADR-0072 §4), or a derived dependency to check once the rollout is ready (ADR-0076 §4) — an
 	// attached database or a published port. A deploy with neither returns exactly when it did before
-	// hooks existed. Raising this bound therefore does reach ordinary apps, and a caller's own bound
-	// has to outlast it: see MaxDeployWait in apiwait.go, which is what `client` sizes itself from.
+	// hooks existed, and a deploy with BOTH waits once and hands the same observation to each, so this
+	// bound is spent at most once per deploy however many things want the outcome (issue #407).
+	// Raising this bound therefore does reach ordinary apps, and a caller's own bound has to outlast
+	// it: see MaxDeployWait in apiwait.go, which is what `client` sizes itself from.
 	LimitDeploySettleTimeout LimitCode = "deploy.settle_timeout"
 )
 

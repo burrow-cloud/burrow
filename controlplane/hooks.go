@@ -481,7 +481,7 @@ func hookEnv(cfg, told map[string]string) map[string]string {
 //
 // It returns the hints to attach to the caller's result: what the rollout did, and what the hook did
 // about it.
-func (e *Engine) runPostDeployHook(ctx context.Context, k Kubernetes, app, env, image, releaseID, kind string, cfg map[string]string) []string {
+func (e *Engine) runPostDeployHook(ctx context.Context, k Kubernetes, app, env, image, releaseID, kind string, cfg map[string]string, settle rolloutSettle) []string {
 	command, err := e.db.AppHook(ctx, app, envName(env), HookPostDeploy)
 	if err != nil {
 		slog.WarnContext(ctx, "reading the post-deploy hook failed; the deploy is unaffected",
@@ -492,7 +492,11 @@ func (e *Engine) runPostDeployHook(ctx context.Context, k Kubernetes, app, env, 
 		return nil // unset means no hook and today's behaviour exactly (ADR-0072 §1)
 	}
 
-	outcome := e.awaitRollout(ctx, k, app, envName(env))
+	// The settle is asked for HERE rather than up the call stack, after the no-hook return above, so
+	// an app with no hook and no derived dependency still waits for nothing (§1). It is the deploy's
+	// one observation: when the dependency check already forced it, this is that same answer and no
+	// second wait happens.
+	outcome := settle()
 	told := map[string]string{
 		hookEnvRelease: releaseID,
 		hookEnvKind:    kind,
@@ -531,6 +535,35 @@ func postDeployHookHint(err error) string {
 	return detail + ". Nothing was rolled back: a post-deploy hook reports on a deploy that already happened. Its Job is left for an hour so the failure can be inspected."
 }
 
+// rolloutSettle hands back THE deploy's rollout observation. Calling it more than once returns the
+// observation already made rather than making a second one, so every consumer of it describes the
+// same rollout.
+type rolloutSettle func() RolloutOutcome
+
+// settleOnce builds the one settle observation a deploy makes, deferred until something asks for it.
+//
+// TWO THINGS IN THE DEPLOY TAIL WANT IT. The deploy-time dependency check waits for the rollout so
+// its exposure check reaches the release just deployed rather than the one it replaced (ADR-0076
+// §4), and the `post-deploy` hook is told how the rollout went (ADR-0072 §4). They arrived as
+// separate changes, each waiting for itself, so an app with both spent the settle bound TWICE — and
+// on a wedged rollout, which is precisely the case a bound exists for, that is two full timeouts
+// rather than one. MaxDeployWait had to declare the doubled figure, and every client budget derives
+// from that (issue #407).
+//
+// ONE OBSERVATION IS ALSO THE MORE TRUTHFUL ONE. The wait mutates nothing (ADR-0072 §6) and neither
+// does the check between them — its probe runs in a separate Job, under the Job's own name label, so
+// it is not even among the pods the wait inspects — which leaves elapsed time as the only thing the
+// second observation could have that the first did not. Waiting longer is not an outcome anyone
+// configured: `deploy.settle_timeout` is the bound the operator sets, and asking twice quietly
+// granted double it to whichever app happened to have both features on. Sharing one observation also
+// removes the case where the check and the hook report differently on the same rollout.
+//
+// IT IS LAZY. An app with neither a derived dependency nor a `post-deploy` hook still waits for
+// nothing at all: no consumer calls this, so no observation is made.
+func (e *Engine) settleOnce(ctx context.Context, k Kubernetes, app, env string) rolloutSettle {
+	return sync.OnceValue(func() RolloutOutcome { return e.awaitRollout(ctx, k, app, env) })
+}
+
 // awaitRollout waits for app's rollout to settle, bounded by the operational limit ADR-0072 §5 puts
 // the bound on rather than compiling it in. A configuration that cannot be read falls back to the
 // built-in default exactly as every other limit read does: the deploy has already landed, and
@@ -541,6 +574,9 @@ func postDeployHookHint(err error) string {
 // outcome, so an error from it means the call could not be made at all; that is reported as the
 // deadline backstop with a detail saying so, because the hook still has to be told something and
 // "Burrow could not observe the rollout" is what happened.
+//
+// It is reached through settleOnce, never called directly: a caller that waits for itself is how the
+// deploy came to wait twice.
 func (e *Engine) awaitRollout(ctx context.Context, k Kubernetes, app, env string) RolloutOutcome {
 	bound, _ := e.operationalConfig(ctx).Duration(env, LimitDeploySettleTimeout)
 	out, err := k.AwaitRollout(ctx, app, bound)

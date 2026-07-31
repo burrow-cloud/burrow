@@ -595,7 +595,7 @@ const dependencyJobTTLSeconds int32 = 3600
 //
 // It runs nothing at all when the app has no derived dependency, which is the common case for an
 // unpublished app with no database: no Job, no pull, no added latency.
-func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env, ns, image string, cfg map[string]string) []DependencyResult {
+func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env, ns, image string, cfg map[string]string, settle rolloutSettle) []DependencyResult {
 	enabled, err := e.db.DependencyChecksEnabled(ctx, app, env)
 	if err != nil {
 		slog.WarnContext(ctx, "reading whether the deploy-time dependency check is enabled failed",
@@ -625,10 +625,12 @@ func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env
 	// reason a rollout never becomes ready — so the checks run either way and the reason for the
 	// stall is reported by the surfaces that own it (the post-deploy hook, `burrow app status`).
 	//
-	// The post-deploy hook waits again straight after this. That second wait returns immediately on
-	// an already-settled rollout, so the cost of asking twice is one status read rather than a second
-	// timeout, and neither caller has to know whether the other ran.
-	e.awaitRollout(ctx, k, app, env)
+	// The wait is the deploy's ONE observation, shared with the `post-deploy` hook that follows
+	// (issue #407). Forcing it here is what puts the settle before the check; the hook then reads the
+	// same answer instead of waiting out the bound a second time. It is asked for after the
+	// nothing-to-check returns above, so an app Burrow provisioned nothing for still waits for
+	// nothing.
+	settle()
 
 	plan := ProbePlan{}
 	for _, d := range deps {

@@ -57,18 +57,22 @@ const (
 // of the phases that request runs, every phase at its own ceiling.
 const (
 	// MaxDeployWait is the longest a deploy request can occupy the server: a `pre-deploy` hook Job,
-	// then the rollout wait the deploy-time dependency check takes (ADR-0076 §4), then the check
-	// itself, then the rollout wait the `post-deploy` hook takes (ADR-0072 §4), then that hook's Job.
+	// then the rollout settle, then the deploy-time dependency check (ADR-0076 §4), then the
+	// `post-deploy` hook's Job (ADR-0072 §4).
 	//
-	// The settle bound appears TWICE deliberately. The check and the hook each wait for the rollout,
-	// and on a rollout that settles the second wait returns immediately — but on a WEDGED rollout,
-	// which is precisely the case a bound exists for, both waits run to the full timeout.
+	// The settle bound appears ONCE, and that is load-bearing. Both the check and the hook want to
+	// know how the rollout went, and each used to wait for itself — so on a WEDGED rollout, which is
+	// precisely the case a bound exists for, a deploy ran the settle timeout twice and this constant
+	// had to declare the doubled figure to every client that derives from it (issue #407). The deploy
+	// now settles once and hands the same observation to both, so the ceiling is the bound the
+	// operator actually configured rather than two of them.
 	//
-	// Rollback runs a `pre-rollback` hook and the same `post-deploy` wait and hook, which is strictly
+	// Rollback runs a `pre-rollback` hook and the same `post-deploy` settle and hook, which is strictly
 	// less than this, so a caller that sizes rollback to the deploy budget covers it.
 	MaxDeployWait = RunJobTimeout + // pre-deploy hook
-		MaxDeploySettleTimeout + dependencyCheckDeadline + // deploy-time dependency check
-		MaxDeploySettleTimeout + RunJobTimeout // post-deploy hook: its own settle wait, then its Job
+		MaxDeploySettleTimeout + // the rollout settle, made once and shared
+		dependencyCheckDeadline + // deploy-time dependency check
+		RunJobTimeout // post-deploy hook Job
 
 	// MaxBuildWait is the longest a build request can occupy the server: the build Job, then the
 	// deploy the built image rejoins (ADR-0053 §4).

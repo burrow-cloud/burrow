@@ -678,10 +678,19 @@ func (s *server) listAddonsHandler(w http.ResponseWriter, r *http.Request) {
 // the add-on's data volume; its absence is the safe default, so a caller that forgets it stops the
 // add-on rather than destroying every attached app's database (ADR-0025/0031). The response reports
 // what was kept so the caller can say so.
+//
+// skip_final_backup is the override for ADR-0064 §5's final backup, and it is absent-means-safe for
+// the same reason delete_data is: a caller that forgets it gets the backup, not the shortcut past
+// it. It is honoured only alongside delete_data, since it names nothing to skip otherwise.
 func (s *server) removeAddon(w http.ResponseWriter, r *http.Request) {
-	confirm := r.URL.Query().Get("confirm") == "true"
-	deleteData := r.URL.Query().Get("delete_data") == "true"
-	res, err := s.engine.RemoveAddon(r.Context(), r.PathValue("name"), deleteData, confirm)
+	q := r.URL.Query()
+	opts := controlplane.RemoveAddonOptions{
+		DeleteData:        q.Get("delete_data") == "true",
+		SkipFinalBackup:   q.Get("skip_final_backup") == "true",
+		BackupDestination: q.Get("backup_destination"),
+		Confirm:           q.Get("confirm") == "true",
+	}
+	res, err := s.engine.RemoveAddon(r.Context(), r.PathValue("name"), opts)
 	if err != nil {
 		writeEngineError(w, err)
 		return

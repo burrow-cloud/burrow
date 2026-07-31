@@ -24,7 +24,7 @@ func TestRetainedVolumeAppearsAfterRemoval(t *testing.T) {
 		t.Fatalf("an installed add-on's own volume is reported as retained: %+v", retained)
 	}
 
-	res, err := e.RemoveAddon(ctx, "burrow-postgres", false, true)
+	res, err := e.RemoveAddon(ctx, "burrow-postgres", cp.RemoveAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("RemoveAddon: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestInstalledAddonVolumeNotReportedAsRetained(t *testing.T) {
 
 	// Remove one of the two. Only the removed add-on's claim is retained; the surviving add-on's is
 	// still its own.
-	if _, err := e.RemoveAddon(ctx, "burrow-logs", false, true); err != nil {
+	if _, err := e.RemoveAddon(ctx, "burrow-logs", cp.RemoveAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("RemoveAddon(logs): %v", err)
 	}
 	retained, err := e.RetainedAddonVolumes(ctx)
@@ -130,7 +130,7 @@ func TestRetainedBackupVolumeIsReportedSeparately(t *testing.T) {
 	}
 
 	// Destroy the data volume: the dumps still outlive it, and the listing still has to say so.
-	if _, err := e.RemoveAddon(ctx, "burrow-postgres", true, true); err != nil {
+	if _, err := e.RemoveAddon(ctx, "burrow-postgres", cp.RemoveAddonOptions{DeleteData: true, Confirm: true}); err != nil {
 		t.Fatalf("RemoveAddon --delete-data: %v", err)
 	}
 	retained, err := e.RetainedAddonVolumes(ctx)

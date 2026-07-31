@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -721,16 +722,23 @@ func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
 // RemoveAddon removes the named add-on instance. It tears the add-on's WORKLOAD down and, by
 // default, LEAVES ITS DATA VOLUME IN PLACE: for Postgres that volume holds every attached app's
 // database (ADR-0031), so a removal meant as "stop this and reinstall it cleanly" must not destroy
-// it. Passing deleteData is the explicit, separate ask that destroys the volume.
+// it. Passing DeleteData is the explicit, separate ask that destroys the volume.
 //
 // It is guarded by addon.remove (ADR-0025), held for confirmation by default. The guardrail's
-// message carries the CONCRETE consequence — which volume goes or stays, and which apps are
-// affected by name — because a confirmation prompt that does not say what is destroyed is not
-// informed consent (ADR-0006: the gate hands back a reason the human and the agent can act on).
-// A hard refusal is deliberately NOT used for the attached-apps case: this system expresses "never"
-// as a policy disposition (`guard set addon.remove deny`, ADR-0020), not as a bespoke override flag,
-// and the destructive path already requires the caller to have typed deleteData.
-func (e *Engine) RemoveAddon(ctx context.Context, name string, deleteData, confirm bool) (RemoveAddonResult, error) {
+// message carries the CONCRETE consequence — which volume goes or stays, which apps are affected by
+// name, and whether a final backup will be taken first — because a confirmation prompt that does not
+// say what is destroyed is not informed consent (ADR-0006: the gate hands back a reason the human
+// and the agent can act on). A hard refusal is deliberately NOT used for the attached-apps case:
+// this system expresses "never" as a policy disposition (`guard set addon.remove deny`, ADR-0020),
+// not as a bespoke override flag, and the destructive path already requires the caller to have typed
+// DeleteData.
+//
+// WHERE AN OBJECT STORE IS REGISTERED, DeleteData TAKES A FINAL BACKUP FIRST AND ABORTS IF IT FAILS
+// (ADR-0064 §5). The ordering is the whole of the safety: nothing is destroyed until a copy is known
+// to exist off the cluster. planFinalBackup decides that before the guardrail is evaluated, so the
+// human confirming the removal is told whether a copy will be made; finalBackupBeforeDataDeletion
+// takes it, and any failure returns before the first destructive call.
+func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonOptions) (RemoveAddonResult, error) {
 	pol, err := e.db.Policy(ctx)
 	if err != nil {
 		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: loading guardrail policy: %w", name, err)
@@ -743,24 +751,49 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, deleteData, confi
 	if err != nil {
 		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, err)
 	}
-	apps := e.attachedApps(ctx, info)
+	apps, appsKnown := e.attachedApps(ctx, info)
+
+	// Planned before the guardrail so the held confirmation says whether a copy will be made, and
+	// NOT best-effort: a registry read that fails must not be read as "no object store is
+	// registered", because that reading destroys the volume while reporting that nothing was
+	// available to back it up to.
+	plan, err := e.planFinalBackup(ctx, info, opts)
+	if err != nil {
+		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, err)
+	}
 
 	// The audit row records the destructive INTENT alongside the operation, so the log distinguishes
-	// "stopped the add-on" from "destroyed its data" and names who was attached (ADR-0027). App names
-	// are not secrets; no credential or connection string goes near this.
-	args := map[string]string{"type": string(info.Type), "delete_data": strconv.FormatBool(deleteData)}
+	// "stopped the add-on" from "destroyed its data", names who was attached, and says whether the
+	// data was destroyed without a final backup (ADR-0027). App names are not secrets; no credential
+	// or connection string goes near this.
+	args := map[string]string{"type": string(info.Type), "delete_data": strconv.FormatBool(opts.DeleteData)}
+	if opts.DeleteData {
+		args["skip_final_backup"] = strconv.FormatBool(opts.SkipFinalBackup)
+	}
 	if len(apps) > 0 {
 		args["attached_apps"] = strings.Join(apps, ",")
 	}
 	if err := e.recordDecision(ctx, auditOpAddonRemove, name, args, GuardrailAddonRemove,
-		pol.evaluateGuardrail("", "addon remove", GuardrailAddonRemove, confirm,
-			removalConsequence(info, deleteData, apps))); err != nil {
+		pol.evaluateGuardrail("", "addon remove", GuardrailAddonRemove, opts.Confirm,
+			removalConsequence(info, opts.DeleteData, apps, plan))); err != nil {
 		return RemoveAddonResult{}, err
 	}
 
 	res := RemoveAddonResult{Name: name, Type: info.Type, AttachedApps: apps}
+	// Everything below this point destroys something, so the final backup goes ABOVE it. A failure
+	// returns here with the add-on, its claim and its registry row all untouched — which is also what
+	// makes a retry safe: there is no partial state to resume from (ADR-0064 §5).
+	if opts.DeleteData {
+		backups, ferr := e.finalBackupBeforeDataDeletion(ctx, info, apps, appsKnown, plan)
+		if ferr != nil {
+			e.recordExecution(ctx, auditOpAddonRemove, name, args, ferr)
+			return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, ferr)
+		}
+		res.FinalBackups = backups
+		res.FinalBackupSkipped, res.FinalBackupNote = plan.skipped, plan.note
+	}
 	if info.Mode == "installed" {
-		removal, derr := e.k8s.DeleteAddon(ctx, name, deleteData)
+		removal, derr := e.k8s.DeleteAddon(ctx, name, opts.DeleteData)
 		if derr != nil {
 			e.recordExecution(ctx, auditOpAddonRemove, name, args, derr)
 			return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, derr)
@@ -787,29 +820,46 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, deleteData, confi
 // add-on is often removed precisely because it is broken, and being unable to ask it who is attached
 // must never make it unremovable. The message the caller sees then falls back to the generic
 // consequence, which is still concrete about the volume.
-func (e *Engine) attachedApps(ctx context.Context, info AddonInfo) []string {
+//
+// The second return says WHICH KIND OF EMPTY the first one is, and it exists because collapsing the
+// two is a data-loss bug on the final-backup path (ADR-0064 §5). "No app is attached" means there is
+// nothing to back up and the volume is safe to destroy; "the instance would not answer" means we do
+// not know what is in there. A caller that reads the second as the first destroys every database on
+// a wedged instance and reports that the backup succeeded, which is precisely the false assurance
+// §5 exists to prevent. It is true (known) for an add-on type that has no per-app attachments at
+// all, because that is a fact about the type rather than an unanswered question.
+func (e *Engine) attachedApps(ctx context.Context, info AddonInfo) (apps []string, known bool) {
 	if info.Type != AddonPostgres || info.Mode != "installed" {
-		return nil
+		return nil, true
 	}
 	lister, ok := e.dbProvisioner.(AppDatabaseLister)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	// A registry row written before add-ons were per-environment carries no environment; it is the
 	// default environment's instance by construction, since that is the only one that could exist.
-	apps, err := lister.ListAppDatabases(ctx, envName(info.Environment))
+	found, err := lister.ListAppDatabases(ctx, envName(info.Environment))
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	return apps
+	// Sorted here rather than trusted from the provisioner, so the result the caller reports and the
+	// order the final backups are taken in are both deterministic.
+	sort.Strings(found)
+	return found, true
 }
 
 // removalConsequence renders what this removal will actually do, for the guardrail's confirmation
-// message: which volume is destroyed or kept (by name), how many apps are affected and which, and
-// that the backups outlive the database either way. It is deliberately concrete — "this is
-// destructive" tells a human nothing they can decide on; "this destroys the databases of 2 attached
-// apps (api, web)" does.
-func removalConsequence(info AddonInfo, deleteData bool, apps []string) string {
+// message: which volume is destroyed or kept (by name), how many apps are affected and which, that
+// the backups outlive the database either way, and — for a data-deleting removal — whether a final
+// off-cluster backup is taken first. It is deliberately concrete — "this is destructive" tells a
+// human nothing they can decide on; "this destroys the databases of 2 attached apps (api, web)"
+// does.
+//
+// The final-backup clause is in the message the human APPROVES rather than only in the output they
+// read afterwards, because the two answers lead to different decisions: "a copy is made first, and
+// the removal is abandoned if it fails" and "nothing is copied, this is the last moment the data
+// exists" are not the same question being confirmed (ADR-0064 §5).
+func removalConsequence(info AddonInfo, deleteData bool, apps []string, plan finalBackupPlan) string {
 	spec, known := LookupAddon(info.Type)
 	hasVolume := info.Mode == "installed" && known && spec.StorageGi > 0
 	what := fmt.Sprintf("removing the add-on %q", info.Name)
@@ -821,6 +871,7 @@ func removalConsequence(info AddonInfo, deleteData bool, apps []string) string {
 			what += ", " + destroyedDatabases(apps) +
 				fmt.Sprintf(" (the backup volume %q is kept)", PostgresBackupVolume)
 		}
+		what += "; " + plan.consequence()
 	case hasVolume:
 		what += fmt.Sprintf(" — its data volume %q is KEPT and reinstalling the add-on reuses it", info.Name)
 		if info.Type == AddonPostgres && len(apps) > 0 {
@@ -1023,7 +1074,26 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, destina
 	if err != nil {
 		return BackupResult{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
 	}
+	backup, _, err := e.backupApp(ctx, app, targetEnv, destination)
+	if err != nil {
+		return BackupResult{}, err
+	}
+	return BackupResult{Backup: backup}, nil
+}
 
+// backupApp is the body of a single backup, with the environment already resolved: it resolves the
+// destination, writes the pending row, runs the Job, and settles the row to completed or failed.
+//
+// It exists apart from BackupAddon because a data-deleting `addon remove` takes a final backup of
+// every attached database before it destroys anything (ADR-0064 §5), and that caller needs the
+// closed FAILURE REASON the Job reported, not just an error — it has to tell the operator why their
+// removal was refused. Returning the BackupJobOutcome alongside the row is what carries the reason
+// out; BackupAddon discards it because its own caller reads the row.
+//
+// The invariant BackupAddon documents is this function's: no path leaves a row that says completed
+// for bytes that did not arrive, and no known failure leaves a row pending.
+func (e *Engine) backupApp(ctx context.Context, app, targetEnv, destination string) (Backup, BackupJobOutcome, error) {
+	const t = AddonPostgres
 	backupID := e.ids.NewID()
 	// The redacted audit args carry the add-on, app, environment, backup, and destination NAMES only
 	// — never a credential (ADR-0032, ADR-0063 §1).
@@ -1034,7 +1104,7 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, destina
 	dest, err := e.resolveBackupDestination(ctx, destination, app, targetEnv, backupID)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
-		return BackupResult{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
+		return Backup{}, BackupJobOutcome{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
 	}
 
 	backup := Backup{
@@ -1054,7 +1124,7 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, destina
 	}
 	if err := e.db.RecordBackup(ctx, backup); err != nil {
 		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
-		return BackupResult{}, fmt.Errorf("backup addon %s for %s: recording backup: %w", t, app, err)
+		return Backup{}, BackupJobOutcome{}, fmt.Errorf("backup addon %s for %s: recording backup: %w", t, app, err)
 	}
 
 	outcome, err := e.k8s.RunBackupJob(ctx, app, targetEnv, backupID, dest)
@@ -1068,7 +1138,7 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, destina
 		// reader somewhere the failure is not.
 		_ = e.db.FailBackup(ctx, backupID, outcome.Reason, outcome.Detail)
 		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
-		return BackupResult{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
+		return Backup{}, outcome, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
 	}
 	if err := e.db.SetBackupStatus(ctx, backupID, BackupCompleted, outcome.SizeBytes); err != nil {
 		// The bytes reached the destination and the registry did not hear about it. Say so on the row
@@ -1076,12 +1146,12 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, destina
 		// has a backup they cannot see, which is the harmless direction of this failure.
 		_ = e.db.FailBackup(ctx, backupID, BackupReasonNotRecorded, "the backup reached its destination but its completion could not be written to the registry")
 		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
-		return BackupResult{}, fmt.Errorf("backup addon %s for %s: recording completion: %w", t, app, err)
+		return Backup{}, BackupJobOutcome{Reason: BackupReasonNotRecorded}, fmt.Errorf("backup addon %s for %s: recording completion: %w", t, app, err)
 	}
 	backup.Status = BackupCompleted
 	backup.SizeBytes = outcome.SizeBytes
 	e.recordExecution(ctx, auditOpAddonBackup, app, args, nil)
-	return BackupResult{Backup: backup}, nil
+	return backup, outcome, nil
 }
 
 // ListBackups returns recorded backups, newest first, from the control-plane database (ADR-0032).

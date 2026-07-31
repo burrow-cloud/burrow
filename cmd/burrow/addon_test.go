@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/burrow-cloud/burrow/client"
 )
 
 // isolateConfig points $BURROW_CONFIG at a temp file so a test never reads or writes the user's real
@@ -416,6 +418,14 @@ func TestAddonRemoveDeleteDataAsksAndReports(t *testing.T) {
 // whose Secret carries a DATABASE_URL; every other app answers with an unrelated key.
 func addonRemoveServer(t *testing.T, apps, attachedApps []string, deletes *[]string) *httptest.Server {
 	t.Helper()
+	return addonRemoveServerWithProviders(t, apps, attachedApps, nil, deletes)
+}
+
+// addonRemoveServerWithProviders is addonRemoveServer with the provider listing the notice reads to
+// say whether a final backup will be taken (ADR-0064 §5). An empty listing is the "nothing durable
+// is registered" case, which is what the plain helper serves.
+func addonRemoveServerWithProviders(t *testing.T, apps, attachedApps []string, providers []map[string]any, deletes *[]string) *httptest.Server {
+	t.Helper()
 	attached := map[string]bool{}
 	for _, a := range attachedApps {
 		attached[a] = true
@@ -433,6 +443,8 @@ func addonRemoveServer(t *testing.T, apps, attachedApps []string, deletes *[]str
 			_ = json.NewEncoder(w).Encode(map[string]any{"addons": []map[string]any{
 				{"name": "burrow-postgres", "type": "postgres", "mode": "installed", "endpoint": "burrow-postgres:5432", "capabilities": []string{"database"}, "ready": true},
 			}})
+		case r.URL.Path == "/v1/providers":
+			_ = json.NewEncoder(w).Encode(map[string]any{"providers": providers})
 		case r.URL.Path == "/v1/apps":
 			rows := make([]map[string]any, 0, len(apps))
 			for _, a := range apps {
@@ -737,5 +749,101 @@ func TestAddonListCleanWithoutRetainedVolumes(t *testing.T) {
 		if strings.Contains(s, unwanted) {
 			t.Errorf("listing mentions %q with no retained volumes:\n%s", unwanted, s)
 		}
+	}
+}
+
+// TestAddonRemoveNoticeNamesTheFinalBackup asserts the typed-name notice says a copy is made before
+// the name is typed, not only afterwards in the output (ADR-0064 §5). "A copy is written off-cluster
+// first and this is abandoned if that fails" and "this is the last moment the data exists" are
+// different things to be agreeing to.
+func TestAddonRemoveNoticeNamesTheFinalBackup(t *testing.T) {
+	var deletes []string
+	srv := addonRemoveServerWithProviders(t, []string{"web"}, []string{"web"}, []map[string]any{
+		{"name": "backups", "type": "s3", "capabilities": []string{"object-storage"}},
+	}, &deletes)
+
+	_, errb, err := execAddonRemove(t, srv.URL, "burrow-postgres\n", true, "burrow-postgres", "--delete-data", "--confirm")
+	if err != nil {
+		t.Fatalf("addon remove --delete-data: %v (stderr: %s)", err, errb)
+	}
+	for _, want := range []string{"final backup", "backups object store", "nothing is removed"} {
+		if !strings.Contains(errb, want) {
+			t.Errorf("the --delete-data notice is missing %q:\n%s", want, errb)
+		}
+	}
+}
+
+// TestAddonRemoveNoticeSaysWhenNoBackupIsTaken asserts the other half: with nothing durable
+// registered, and with --skip-final-backup, the operator is told plainly that no copy will exist —
+// which is the version of this decision that cannot be taken back.
+func TestAddonRemoveNoticeSaysWhenNoBackupIsTaken(t *testing.T) {
+	var deletes []string
+	srv := addonRemoveServer(t, []string{"web"}, []string{"web"}, &deletes)
+
+	_, errb, err := execAddonRemove(t, srv.URL, "burrow-postgres\n", true, "burrow-postgres", "--delete-data", "--confirm")
+	if err != nil {
+		t.Fatalf("addon remove --delete-data: %v (stderr: %s)", err, errb)
+	}
+	if !strings.Contains(errb, "No object-storage provider is registered") {
+		t.Errorf("the notice does not say that no off-cluster copy will be taken:\n%s", errb)
+	}
+
+	_, errb, err = execAddonRemove(t, srv.URL, "burrow-postgres\n", true, "burrow-postgres", "--delete-data", "--skip-final-backup", "--confirm")
+	if err != nil {
+		t.Fatalf("addon remove --delete-data --skip-final-backup: %v (stderr: %s)", err, errb)
+	}
+	if !strings.Contains(errb, "NO final backup will be taken") {
+		t.Errorf("the notice does not say the override skips the backup:\n%s", errb)
+	}
+	if len(deletes) != 2 || !strings.Contains(deletes[1], "skip_final_backup=true") {
+		t.Fatalf("the override did not reach the API: %v", deletes)
+	}
+}
+
+// TestAddonRemoveSkipFinalBackupNeedsDeleteData asserts a lone --skip-final-backup is refused rather
+// than accepted quietly. Its likely reading is "and destroy the data", which is not what it says,
+// and a destructive command is the wrong place to let a misread flag pass without comment.
+func TestAddonRemoveSkipFinalBackupNeedsDeleteData(t *testing.T) {
+	var deletes []string
+	srv := addonRemoveServer(t, []string{"web"}, []string{"web"}, &deletes)
+
+	_, _, err := execAddonRemove(t, srv.URL, "", true, "burrow-postgres", "--skip-final-backup", "--confirm")
+	if err == nil {
+		t.Fatal("--skip-final-backup without --delete-data should be refused")
+	}
+	if !strings.Contains(err.Error(), "--delete-data") {
+		t.Errorf("the refusal should say which flag it applies to, got: %v", err)
+	}
+	if len(deletes) != 0 {
+		t.Fatalf("a refused invocation must not reach the API, got %v", deletes)
+	}
+}
+
+// TestAddonRemoveSummaryReportsWhatHappenedToTheCopy asserts the outcome says what happened to the
+// copy immediately after what happened to the original — a taken backup by id and destination, and a
+// skipped one as plainly. An operator who destroyed a database believing a copy exists is worse off
+// than one who knows none does.
+func TestAddonRemoveSummaryReportsWhatHappenedToTheCopy(t *testing.T) {
+	taken := client.RemoveAddonResult{
+		Name: "burrow-postgres", Type: "postgres", DataDeleted: true,
+		FinalBackups: []client.Backup{{
+			ID: "bk1", App: "web", Status: "completed",
+			Destination: "object-store", Provider: "backups", ObjectKey: "web/bk1.dump",
+		}},
+	}
+	s := removeAddonSummary(taken)
+	for _, want := range []string{"final backup of \"web\" taken first", "bk1", "backups object store"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("summary missing %q:\n%s", want, s)
+		}
+	}
+
+	skipped := client.RemoveAddonResult{
+		Name: "burrow-postgres", Type: "postgres", DataDeleted: true,
+		FinalBackupSkipped: true, FinalBackupNote: "--skip-final-backup was passed",
+	}
+	s = removeAddonSummary(skipped)
+	if !strings.Contains(s, "NO final backup was taken — --skip-final-backup was passed") {
+		t.Errorf("summary does not state plainly that no copy exists:\n%s", s)
 	}
 }

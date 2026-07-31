@@ -708,20 +708,54 @@ type RemoveAddonResult struct {
 	RetainedBackupVolume string `json:"retained_backup_volume,omitempty"`
 	// AttachedApps are the apps that held a database on this instance at removal time.
 	AttachedApps []string `json:"attached_apps,omitempty"`
+	// FinalBackups are the backups taken before the data volume was destroyed, one per attached
+	// database (ADR-0064 §5). Each reached an object store — the removal is abandoned otherwise — so
+	// this is the list of copies that outlived the instance.
+	FinalBackups []Backup `json:"final_backups,omitempty"`
+	// FinalBackupSkipped reports that the data was destroyed with no off-cluster copy, and
+	// FinalBackupNote says why. Reported rather than inferred from an empty FinalBackups: "nothing
+	// was backed up" and "nothing needed backing up" must not look the same.
+	FinalBackupSkipped bool   `json:"final_backup_skipped,omitempty"`
+	FinalBackupNote    string `json:"final_backup_note,omitempty"`
 }
 
-// RemoveAddon removes the named add-on instance. deleteData is the explicit opt-in that also
-// DESTROYS the add-on's data volume — for Postgres, every attached app's database. Without it the
-// removal tears down the workload and leaves the volume, so a reinstall picks the data back up.
-func (c *Client) RemoveAddon(ctx context.Context, name string, deleteData, confirm bool) (RemoveAddonResult, error) {
+// RemoveAddonOptions is everything `addon remove` carries beyond the add-on's name. It is a struct
+// rather than a run of positional booleans because this is the most destructive call in the API.
+type RemoveAddonOptions struct {
+	// DeleteData is the explicit opt-in that also DESTROYS the add-on's data volume — for Postgres,
+	// every attached app's database. Without it the removal tears down the workload and leaves the
+	// volume, so a reinstall picks the data back up.
+	DeleteData bool
+	// SkipFinalBackup destroys the data without the final backup ADR-0064 §5 otherwise takes first.
+	// It exists because an add-on is often removed BECAUSE it is wedged, and a wedged instance
+	// cannot be dumped — without it a broken add-on would be undeletable.
+	SkipFinalBackup bool
+	// BackupDestination names the object-storage provider the final backup goes to, needed only when
+	// several are registered.
+	BackupDestination string
+	// Confirm satisfies the addon.remove guardrail hold. It is not the data-loss acknowledgement.
+	Confirm bool
+}
+
+// RemoveAddon removes the named add-on instance. With opts.DeleteData the add-on's data volume is
+// destroyed too, and — where an object-storage provider is registered — burrowd takes a final backup
+// of every attached database first and refuses the whole removal if it does not reach the store
+// (ADR-0064 §5).
+func (c *Client) RemoveAddon(ctx context.Context, name string, opts RemoveAddonOptions) (RemoveAddonResult, error) {
 	var out RemoveAddonResult
 	path := "/v1/addons/" + name
 	q := url.Values{}
-	if confirm {
+	if opts.Confirm {
 		q.Set("confirm", "true")
 	}
-	if deleteData {
+	if opts.DeleteData {
 		q.Set("delete_data", "true")
+	}
+	if opts.SkipFinalBackup {
+		q.Set("skip_final_backup", "true")
+	}
+	if opts.BackupDestination != "" {
+		q.Set("backup_destination", opts.BackupDestination)
 	}
 	if len(q) > 0 {
 		path += "?" + q.Encode()

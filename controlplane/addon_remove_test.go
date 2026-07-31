@@ -36,7 +36,7 @@ func TestRemoveAddonKeepsDataByDefault(t *testing.T) {
 	ctx := context.Background()
 	e, k, d, _ := installPostgres(t)
 
-	res, err := e.RemoveAddon(ctx, "burrow-postgres", false, true)
+	res, err := e.RemoveAddon(ctx, "burrow-postgres", cp.RemoveAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("RemoveAddon: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestRemoveAddonDeleteDataDestroysVolume(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := installPostgres(t)
 
-	res, err := e.RemoveAddon(ctx, "burrow-postgres", true, true)
+	res, err := e.RemoveAddon(ctx, "burrow-postgres", cp.RemoveAddonOptions{DeleteData: true, Confirm: true})
 	if err != nil {
 		t.Fatalf("RemoveAddon: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestRemoveAddonConfirmationNamesAttachedApps(t *testing.T) {
 	e, _, _, prov := installPostgres(t)
 	prov.SetAttachedApps(cp.DefaultEnvironment, "api", "web")
 
-	_, err := e.RemoveAddon(ctx, "burrow-postgres", true, false)
+	_, err := e.RemoveAddon(ctx, "burrow-postgres", cp.RemoveAddonOptions{DeleteData: true})
 	g, ok := cp.AsGuardrail(err)
 	if !ok {
 		t.Fatalf("err = %v, want a GuardrailError holding the removal", err)
@@ -118,7 +118,7 @@ func TestRemoveAddonConfirmationSaysDataIsKept(t *testing.T) {
 	e, _, _, prov := installPostgres(t)
 	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
 
-	_, err := e.RemoveAddon(ctx, "burrow-postgres", false, false)
+	_, err := e.RemoveAddon(ctx, "burrow-postgres", cp.RemoveAddonOptions{})
 	g, ok := cp.AsGuardrail(err)
 	if !ok {
 		t.Fatalf("err = %v, want a GuardrailError holding the removal", err)
@@ -140,7 +140,7 @@ func TestRemoveAddonReportsAttachedApps(t *testing.T) {
 	e, _, _, prov := installPostgres(t)
 	prov.SetAttachedApps(cp.DefaultEnvironment, "api", "web")
 
-	res, err := e.RemoveAddon(ctx, "burrow-postgres", false, true)
+	res, err := e.RemoveAddon(ctx, "burrow-postgres", cp.RemoveAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("RemoveAddon: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestRemoveAddonSucceedsWhenInstanceUnreachable(t *testing.T) {
 	e, k, _, prov := installPostgres(t)
 	prov.SetListError(errors.New("connection refused"))
 
-	res, err := e.RemoveAddon(ctx, "burrow-postgres", false, true)
+	res, err := e.RemoveAddon(ctx, "burrow-postgres", cp.RemoveAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("RemoveAddon over an unreachable instance: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestRemoveAddonBackupVolumeSurvivesDataDeletion(t *testing.T) {
 		t.Fatalf("BackupAddon: %v", err)
 	}
 
-	res, err := e.RemoveAddon(ctx, "burrow-postgres", true, true)
+	res, err := e.RemoveAddon(ctx, "burrow-postgres", cp.RemoveAddonOptions{DeleteData: true, Confirm: true})
 	if err != nil {
 		t.Fatalf("RemoveAddon: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestRemoveStatelessAddonHasNoVolume(t *testing.T) {
 		t.Fatalf("InstallAddon: %v", err)
 	}
 
-	if _, err := e.RemoveAddon(ctx, "burrow-cache", false, false); err != nil {
+	if _, err := e.RemoveAddon(ctx, "burrow-cache", cp.RemoveAddonOptions{}); err != nil {
 		g, ok := cp.AsGuardrail(err)
 		if !ok {
 			t.Fatalf("err = %v, want a held GuardrailError", err)
@@ -211,7 +211,7 @@ func TestRemoveStatelessAddonHasNoVolume(t *testing.T) {
 			t.Errorf("confirmation message %q does not say the add-on holds no data volume", g.Message)
 		}
 	}
-	res, err := e.RemoveAddon(ctx, "burrow-cache", false, true)
+	res, err := e.RemoveAddon(ctx, "burrow-cache", cp.RemoveAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("RemoveAddon: %v", err)
 	}

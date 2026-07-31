@@ -123,7 +123,7 @@ func TestDeployPostgresCreatesSuperuserSecretBeforeDeployment(t *testing.T) {
 
 	// A data-deleting removal takes the superuser Secret with the volume: the Secret only opens the
 	// volume, so once the volume is gone it is dead weight.
-	if _, err := a.DeleteAddon(ctx, "burrow-postgres", true); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-postgres", controlplane.AddonMechanismDefault, true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.CoreV1().Secrets(addonNS).Get(ctx, PostgresSecretName, metav1.GetOptions{}); err == nil {
@@ -265,7 +265,7 @@ func TestDeployPostgresAlwaysExportsMetrics(t *testing.T) {
 
 	// A data-deleting removal takes the init ConfigMap with the volume: it only ever runs during
 	// initdb on a fresh volume.
-	if _, err := a.DeleteAddon(ctx, "burrow-postgres", true); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-postgres", controlplane.AddonMechanismDefault, true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, PostgresInitConfigMap, metav1.GetOptions{}); err == nil {
@@ -392,7 +392,7 @@ func TestDeleteAddonKeepsVolumeAndCredentialByDefault(t *testing.T) {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
-	removal, err := a.DeleteAddon(ctx, "burrow-postgres", false)
+	removal, err := a.DeleteAddon(ctx, "burrow-postgres", controlplane.AddonMechanismDefault, false)
 	if err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
@@ -427,7 +427,7 @@ func TestDeleteAddonDeleteDataDestroysVolume(t *testing.T) {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
-	removal, err := a.DeleteAddon(ctx, "burrow-postgres", true)
+	removal, err := a.DeleteAddon(ctx, "burrow-postgres", controlplane.AddonMechanismDefault, true)
 	if err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestDeleteAddonKeepsBackupVolume(t *testing.T) {
 		t.Fatalf("ensureBackupPVC: %v", err)
 	}
 
-	removal, err := a.DeleteAddon(ctx, "burrow-postgres", true)
+	removal, err := a.DeleteAddon(ctx, "burrow-postgres", controlplane.AddonMechanismDefault, true)
 	if err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestDeleteAddonReportsNoBackupVolumeWhenAbsent(t *testing.T) {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
-	removal, err := a.DeleteAddon(ctx, "burrow-postgres", false)
+	removal, err := a.DeleteAddon(ctx, "burrow-postgres", controlplane.AddonMechanismDefault, false)
 	if err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestDeployPostgresPerEnvironmentIsASeparateInstance(t *testing.T) {
 	}
 
 	// Removing staging's instance with its data takes only staging's credential and init script.
-	if _, rerr := a.DeleteAddon(ctx, stg.Name, true); rerr != nil {
+	if _, rerr := a.DeleteAddon(ctx, stg.Name, controlplane.AddonMechanismDefault, true); rerr != nil {
 		t.Fatalf("DeleteAddon(staging): %v", rerr)
 	}
 	if _, gerr := client.CoreV1().Secrets(addonNS).Get(ctx, stg.Name, metav1.GetOptions{}); gerr == nil {

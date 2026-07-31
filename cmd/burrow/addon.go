@@ -908,7 +908,10 @@ const dataLossAckFlag = "acknowledge-data-loss"
 // acknowledgement flag (ADR-0064 §2). It refuses rather than proceeding, and names both ways out:
 // acknowledge the data loss explicitly, or drop the flag and keep the volume.
 func errDeleteDataNeedsTerminal(name string) error {
-	return fmt.Errorf("--delete-data destroys the add-on's data volume %q and asks for the add-on's name "+
+	// It names the ADD-ON rather than the claim, because this refusal deliberately runs before the
+	// control plane is contacted at all — so which mechanism stood the instance up, and therefore what
+	// its claim is called, is not a question that has been asked yet.
+	return fmt.Errorf("--delete-data destroys the data volume of the add-on %q and asks for the add-on's name "+
 		"to be typed back, which needs an interactive terminal; re-run with --%s to say so explicitly "+
 		"in a script, or drop --delete-data to keep the volume", name, dataLossAckFlag)
 }
@@ -945,13 +948,15 @@ func confirmDeleteData(ctx context.Context, c *client.Client, name string, skipF
 //
 // Every lookup here is BEST-EFFORT and never blocking (ADR-0064 §3): an add-on is often removed
 // precisely because it is wedged, and a control plane that will not answer must degrade to the
-// volume-concrete message rather than make a broken add-on unremovable. The volume name is known
-// without asking anyone — a stateful add-on's claim carries the add-on's own name.
+// volume-concrete message rather than make a broken add-on unremovable. The claim's name comes from
+// the instance and its mechanism (ADR-0066 §1) — under CloudNativePG it is the operator's
+// `<instance>-1`, not the instance's own name — and a listing that will not answer degrades to the
+// name Burrow's own mechanism uses rather than dropping the sentence.
 func deleteDataConsequence(ctx context.Context, c *client.Client, name string, skipFinalBackup bool) string {
 	var b strings.Builder
+	addonType, addonEnv, mech := addonInstanceOf(ctx, c, name)
 	fmt.Fprintf(&b, "--delete-data DESTROYS the data volume %q in namespace %s. This cannot be undone.",
-		name, connect.DefaultAddonNamespace)
-	addonType, addonEnv := addonInstanceOf(ctx, c, name)
+		controlplane.AddonDataVolumeName(name, mech), connect.DefaultAddonNamespace)
 	if addonType != string(controlplane.AddonPostgres) {
 		return b.String()
 	}
@@ -1008,27 +1013,32 @@ func finalBackupNotice(ctx context.Context, c *client.Client, skipFinalBackup bo
 		"  if it does not get there, nothing is removed.", strings.Join(names, " or "))
 }
 
-// addonInstanceOf looks up the registered type AND environment of an installed add-on by name,
-// returning empty strings when the listing cannot be read or the name is not registered. Both are
-// needed together: with an instance and a backup claim per environment (ADR-0067 §1), the type says
-// what the removal destroys and the environment says which claim survives it. Best-effort by
-// contract: an unanswerable lookup costs the notice its detail, never the removal.
-func addonInstanceOf(ctx context.Context, c *client.Client, name string) (addonType, env string) {
+// addonInstanceOf looks up the registered type, environment AND mechanism of an installed add-on by
+// name, returning empty strings when the listing cannot be read or the name is not registered. All
+// three are needed together: with an instance and a backup claim per environment (ADR-0067 §1), the
+// type says what the removal destroys and the environment says which claim survives it — and the
+// mechanism says what the destroyed claim is CALLED, which under CloudNativePG is the operator's
+// name rather than the instance's (ADR-0066 §1). Best-effort by contract: an unanswerable lookup
+// costs the notice its detail, never the removal.
+func addonInstanceOf(ctx context.Context, c *client.Client, name string) (addonType, env string, mech controlplane.AddonMechanism) {
 	addons, err := c.Addons(ctx)
 	if err != nil {
-		return "", ""
+		return "", "", controlplane.AddonMechanismDefault
 	}
 	for _, a := range addons {
 		if a.Name == name {
+			// The Backend the registry recorded IS the mechanism for the Postgres add-on, which is
+			// what lets the notice name the right claim without a second field to keep in step.
+			m := controlplane.AddonInfo{Backend: a.Backend}.Mechanism()
 			// A row written before add-ons were per-environment carries no environment and is the
 			// default one's, since that is the only instance that could have existed (ADR-0067 §3).
 			if a.Environment == "" {
-				return a.Type, controlplane.DefaultEnvironment
+				return a.Type, controlplane.DefaultEnvironment, m
 			}
-			return a.Type, a.Environment
+			return a.Type, a.Environment, m
 		}
 	}
-	return "", ""
+	return "", "", controlplane.AddonMechanismDefault
 }
 
 // attachedApps enumerates, best-effort, the apps holding a Burrow-provisioned database on the

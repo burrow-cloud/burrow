@@ -324,11 +324,13 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 		Ready:        true,
 	}
 	k.addons[name] = info
-	// A stateful add-on gets a data volume named after it, like the adapter's PVC. Whether that
-	// volume survives a removal is the thing tests assert on, so the fake has to hold it. A
-	// CloudNativePG-backed instance has none Burrow owns: the operator names and owns its claims.
-	if spec.StorageGi > 0 && mech != controlplane.AddonMechanismCloudNativePG {
-		k.volumes[name] = fakeVolume{
+	// A stateful add-on gets a data volume, like the adapter's PVC. Whether that volume survives a
+	// removal is the thing tests assert on, so the fake has to hold it — and it has to hold it under
+	// the NAME the mechanism gives it, because the two names are what a removal has to find. Burrow's
+	// own claim is named after the instance; CloudNativePG composes its claims from the `Cluster` and
+	// names them after the instance it makes, `<instance>-1`.
+	if spec.StorageGi > 0 {
+		k.volumes[controlplane.AddonDataVolumeName(name, mech)] = fakeVolume{
 			Addon: spec.Type,
 			Env:   fakeEnvName(env),
 			Role:  controlplane.AddonVolumeData,
@@ -390,7 +392,12 @@ func (k *Kubernetes) AddonVolumes(ctx context.Context) ([]controlplane.AddonVolu
 // DeleteAddon models the real teardown: the add-on always goes, its data volume only when deleteData
 // is set. The retained-volume names it reports mirror the adapter's, so an engine test asserts on the
 // same shape production produces.
-func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, deleteData bool) (controlplane.AddonRemoval, error) {
+//
+// The MECHANISM decides which claim that is, and modelling it here is what makes an engine test of a
+// CloudNativePG-backed removal mean something: the retained claim is the operator's `<instance>-1`,
+// not Burrow's `<instance>`, and a fake that kept the Deployment-path name would agree with a
+// removal that looked for the wrong volume (ADR-0066 §1, ADR-0064 §1).
+func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, mech controlplane.AddonMechanism, deleteData bool) (controlplane.AddonRemoval, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	removal := controlplane.AddonRemoval{Namespace: fakeAddonNamespace}
@@ -399,12 +406,13 @@ func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, deleteData bo
 		return removal, fmt.Errorf("fake: addon %q: %w", name, controlplane.ErrNotFound)
 	}
 	delete(k.addons, name)
-	if _, hasVol := k.volumes[name]; hasVol {
+	dataVolume := controlplane.AddonDataVolumeName(name, mech)
+	if _, hasVol := k.volumes[dataVolume]; hasVol {
 		if deleteData {
-			delete(k.volumes, name)
+			delete(k.volumes, dataVolume)
 			removal.DataDeleted = true
 		} else {
-			removal.RetainedDataVolume = name
+			removal.RetainedDataVolume = dataVolume
 		}
 	}
 	// The backup volume outlives the database either way (ADR-0032), and it is THIS environment's

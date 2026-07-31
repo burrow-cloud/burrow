@@ -842,6 +842,13 @@ func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
 // not as a bespoke override flag, and the destructive path already requires the caller to have typed
 // DeleteData.
 //
+// THE MECHANISM DOES NOT CHANGE THE CONTRACT. A CloudNativePG-backed instance (ADR-0066 §1) keeps
+// its data on removal exactly as a Deployment-backed one does, and the difference is entirely below
+// this line: the operator owns those claims, so keeping them means disowning them before its
+// `Cluster` is deleted rather than simply not deleting them. What that costs here is a single
+// argument — the mechanism is read from the registry row and handed to the seam, because a removal
+// that inferred it from the cluster would read a refused probe as an absent add-on.
+//
 // WHERE AN OBJECT STORE IS REGISTERED, DeleteData TAKES A FINAL BACKUP FIRST AND ABORTS IF IT FAILS
 // (ADR-0064 §5). The ordering is the whole of the safety: nothing is destroyed until a copy is known
 // to exist off the cluster. planFinalBackup decides that before the guardrail is evaluated, so the
@@ -859,23 +866,6 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 	info, err := e.db.Addon(ctx, name)
 	if err != nil {
 		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, err)
-	}
-	// A CloudNativePG-backed instance is refused here, before the guardrail and before the final
-	// backup, because removing it correctly is not built yet and this is the earliest point that can
-	// tell (ADR-0066 §1 moved the mechanism; ADR-0064's removal semantics have not moved with it).
-	//
-	// It is refused rather than attempted. ADR-0064 §1 makes a removal KEEP the data by default, and
-	// under this mechanism the volumes are the operator's: they carry the `Cluster` as their owner,
-	// so deleting it deletes them, and a fresh `Cluster` does not adopt what is left if it does not.
-	// Neither branch of `addon remove` is therefore expressible yet — the default would destroy the
-	// data it promises to keep, and a reinstall would not bring it back — so the honest answer is a
-	// refusal that says so rather than a removal that half-works on the object holding every
-	// attached app's database.
-	if info.Backend == AddonBackendCloudNativePG {
-		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: this instance runs on CloudNativePG, and "+
-			"removing one is not built yet: its volumes belong to the operator, so `addon remove` cannot "+
-			"keep the data the way it promises to (ADR-0064 §1). Nothing has been changed: %w",
-			name, ErrNotImplemented)
 	}
 	apps, appsKnown := e.attachedApps(ctx, info)
 
@@ -919,7 +909,11 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 		res.FinalBackupSkipped, res.FinalBackupNote = plan.skipped, plan.note
 	}
 	if info.Mode == "installed" {
-		removal, derr := e.k8s.DeleteAddon(ctx, name, opts.DeleteData)
+		// The MECHANISM comes from the registry row, which recorded it at install (ADR-0066 §1).
+		// Removal is the one operation that must not work it out from the cluster: a
+		// CloudNativePG-backed instance has no Deployment to find, and a probe that finds nothing is
+		// indistinguishable from a probe that was refused.
+		removal, derr := e.k8s.DeleteAddon(ctx, name, info.Mechanism(), opts.DeleteData)
 		if derr != nil {
 			e.recordExecution(ctx, auditOpAddonRemove, name, args, derr)
 			return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, derr)
@@ -989,10 +983,14 @@ func removalConsequence(info AddonInfo, deleteData bool, apps []string, plan fin
 	spec, known := LookupAddon(info.Type)
 	hasVolume := info.Mode == "installed" && known && spec.StorageGi > 0
 	what := fmt.Sprintf("removing the add-on %q", info.Name)
+	// The volume the removal ACTS on, which under CloudNativePG is the operator's claim rather than
+	// the instance's own name (ADR-0066 §1). A confirmation naming a volume that does not exist is
+	// worse than one naming none: it reads as precise.
+	volume := AddonDataVolumeName(info.Name, info.Mechanism())
 
 	switch {
 	case hasVolume && deleteData:
-		what += fmt.Sprintf(" AND DESTROYING its data volume %q", info.Name)
+		what += fmt.Sprintf(" AND DESTROYING its data volume %q", volume)
 		if info.Type == AddonPostgres {
 			what += ", " + destroyedDatabases(apps)
 			// This environment's backup claim, not the compiled-in one: with a claim per environment
@@ -1004,7 +1002,7 @@ func removalConsequence(info AddonInfo, deleteData bool, apps []string, plan fin
 		}
 		what += "; " + plan.consequence()
 	case hasVolume:
-		what += fmt.Sprintf(" — its data volume %q is KEPT and reinstalling the add-on reuses it", info.Name)
+		what += fmt.Sprintf(" — its data volume %q is KEPT and reinstalling the add-on reuses it", volume)
 		if info.Type == AddonPostgres && len(apps) > 0 {
 			what += fmt.Sprintf("; %s cannot reach a database until it is reinstalled", pluralApps(apps))
 		}

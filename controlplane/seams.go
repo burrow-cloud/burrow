@@ -406,6 +406,24 @@ type Database interface {
 	// is a no-op, not an error.
 	UnsetAppEnv(ctx context.Context, app, key string) error
 
+	// AppHook returns the command app runs at phase in env — the lifecycle hook configured beside the
+	// app's config (ADR-0072 §1). A phase with no hook yields a nil command and no error: unset means
+	// no hook and today's behaviour exactly, so absence is the ordinary answer and not ErrNotFound.
+	// The command is an argv, stored so an argument boundary survives rather than depending on a
+	// shell to re-split it. env is the canonical environment name ("prod" for the default one).
+	AppHook(ctx context.Context, app, env string, phase HookPhase) ([]string, error)
+	// AppHooks returns every hook configured for app in env. None yields an empty slice and no error.
+	AppHooks(ctx context.Context, app, env string) ([]Hook, error)
+	// SetAppHook upserts the command app runs at phase in env, replacing any command already set
+	// there — the write behind `burrow app hook set`. The command arrives validated (non-empty argv).
+	SetAppHook(ctx context.Context, app, env string, phase HookPhase, command []string) error
+	// UnsetAppHook removes app's hook at phase in env. Removing a hook that is not set is a no-op,
+	// not an error: afterwards that phase runs nothing, which is what the caller asked for.
+	UnsetAppHook(ctx context.Context, app, env string, phase HookPhase) error
+	// DeleteAppHooks removes every hook for app across every environment — the durable side of an app
+	// teardown, beside DeleteReleases. Deleting the hooks of an app that has none is a no-op.
+	DeleteAppHooks(ctx context.Context, app string) error
+
 	// Policy returns the current guardrail policy: the stored guardrail dispositions
 	// overlaid on the built-in defaults (DefaultPolicy), so a store with nothing set
 	// returns DefaultPolicy and newly-added guardrails get a sensible default (ADR-0020).

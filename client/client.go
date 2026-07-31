@@ -1182,6 +1182,46 @@ func (c *Client) UnsetSecret(ctx context.Context, app, env, key string, noRestar
 	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
 }
 
+// Hook is one configured lifecycle command: the phase it fires at and the command it runs, for one
+// app in one environment (ADR-0072 §1). Phase is `pre-deploy` (before a deploy's image reaches the
+// cluster, from that image) or `pre-rollback` (before a rollback's older image does, from the image
+// being left). Command is an argv, so argument boundaries survive the round trip.
+type Hook struct {
+	App         string   `json:"app"`
+	Environment string   `json:"environment"`
+	Phase       string   `json:"phase"`
+	Command     []string `json:"command"`
+}
+
+// Hooks returns the lifecycle hooks configured for an app in the target environment (ADR-0072 §1). A
+// phase with no hook is absent from the result: unset means no hook and today's behaviour exactly.
+func (c *Client) Hooks(ctx context.Context, app, env string) ([]Hook, error) {
+	var out struct {
+		Hooks []Hook `json:"hooks"`
+	}
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "hooks"), env), nil, &out)
+	return out.Hooks, err
+}
+
+// SetHook configures the command an app runs at a phase, replacing any command already set there
+// (ADR-0072 §1). A pre-deploy hook runs on EVERY deploy of the app in that environment, automated
+// ones included, so a command that starts failing blocks deploys until someone changes it.
+func (c *Client) SetHook(ctx context.Context, app, env, phase string, command []string) (Hook, error) {
+	var out Hook
+	err := c.do(ctx, http.MethodPut, withEnv(c.hookPath(app, phase), env), map[string]any{"command": command}, &out)
+	return out, err
+}
+
+// UnsetHook removes an app's hook at a phase. Unsetting a phase with no hook succeeds; afterwards
+// that phase runs nothing.
+func (c *Client) UnsetHook(ctx context.Context, app, env, phase string) error {
+	return c.do(ctx, http.MethodDelete, withEnv(c.hookPath(app, phase), env), nil, nil)
+}
+
+func (c *Client) hookPath(app, phase string) string {
+	return c.appPath(app, "hooks") + "/" + url.PathEscape(phase)
+}
+
 func (c *Client) appPath(app, verb string) string {
 	return "/v1/apps/" + url.PathEscape(app) + "/" + verb
 }

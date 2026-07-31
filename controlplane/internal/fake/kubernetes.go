@@ -27,24 +27,29 @@ var _ controlplane.Kubernetes = (*Kubernetes)(nil)
 // introspection helpers (Spec, SecretValue, …) read the receiver view's namespace; the
 // namespace-qualified variants (SpecInNamespace, SecretValueInNamespace) read a named one.
 type Kubernetes struct {
-	mu           *sync.Mutex
-	ns           string // the namespace this view's per-app operations act in
-	base         string // the namespace treated as the default (unprefixed) one
-	deploys      map[string]*deployState
-	exposed      map[string]controlplane.ExposeSpec
-	addresses    map[string]string // app -> ingress external address (controller-assigned)
-	certReady    map[string]bool   // app -> whether the requested TLS certificate has been issued
-	addons       map[string]controlplane.AddonInfo
-	volumes      map[string]fakeVolume                 // claim name -> the add-on volume, present while the claim exists
-	secrets      map[string]map[string]string          // app -> per-app Secret (key -> value)
-	autoscalers  map[string]controlplane.AutoscaleSpec // app -> applied HPA spec (namespace-keyed)
-	backups      *[]backupCall                         // RunBackupJob calls, in order
-	restores     *[]backupCall                         // RunRestoreJob calls, in order
-	runs         *[]runCall                            // RunJob calls, in order
-	runResult    *controlplane.RunResult               // canned result RunJob returns
-	backupSiz    *int64                                // size RunBackupJob reports
-	backupReason *controlplane.BackupJobOutcome        // reason/detail RunBackupJob reports on failure
-	metricsAvail *bool                                 // whether metrics-server is reported present
+	mu          *sync.Mutex
+	ns          string // the namespace this view's per-app operations act in
+	base        string // the namespace treated as the default (unprefixed) one
+	deploys     map[string]*deployState
+	exposed     map[string]controlplane.ExposeSpec
+	addresses   map[string]string // app -> ingress external address (controller-assigned)
+	certReady   map[string]bool   // app -> whether the requested TLS certificate has been issued
+	addons      map[string]controlplane.AddonInfo
+	volumes     map[string]fakeVolume                 // claim name -> the add-on volume, present while the claim exists
+	secrets     map[string]map[string]string          // app -> per-app Secret (key -> value)
+	autoscalers map[string]controlplane.AutoscaleSpec // app -> applied HPA spec (namespace-keyed)
+	backups     *[]backupCall                         // RunBackupJob calls, in order
+	restores    *[]backupCall                         // RunRestoreJob calls, in order
+	runs        *[]runCall                            // RunJob calls, in order
+	runResult   *controlplane.RunResult               // canned result RunJob returns
+	// runJobHook, when set, is called by RunJob OUTSIDE the fake's lock, so a test can observe how
+	// long a Job is in flight and whether two are ever in flight at once — the only way to assert
+	// that the engine serializes lifecycle hooks (ADR-0072 §9) rather than the fake's own mutex
+	// serializing them.
+	runJobHook   *func()
+	backupSiz    *int64                         // size RunBackupJob reports
+	backupReason *controlplane.BackupJobOutcome // reason/detail RunBackupJob reports on failure
+	metricsAvail *bool                          // whether metrics-server is reported present
 	// backupJobs records which backups still have a Job in the fake add-on namespace. The real
 	// adapter reads this off the cluster; here a test sets it, because the interesting state is the
 	// one no code path produces on purpose — a Job that is GONE while its row is still pending
@@ -202,6 +207,7 @@ func NewKubernetes() *Kubernetes {
 		restores:     &[]backupCall{},
 		runs:         &[]runCall{},
 		runResult:    &controlplane.RunResult{},
+		runJobHook:   new(func()),
 		backupSiz:    new(int64),
 		backupReason: new(controlplane.BackupJobOutcome),
 		metricsAvail: &metricsAvail,
@@ -876,12 +882,27 @@ func (k *Kubernetes) RunJobs() []runCall {
 	return append([]runCall(nil), *k.runs...)
 }
 
-func (k *Kubernetes) RunJob(ctx context.Context, spec controlplane.RunSpec) (controlplane.RunResult, error) {
+// SetRunJobHook installs a function RunJob calls while a Job is "in flight", OUTSIDE the fake's own
+// lock. It exists so a test can assert the ENGINE serializes lifecycle hooks per app and environment
+// (ADR-0072 §9): with the call inside the lock, every RunJob would appear serialized no matter what
+// the engine did, and the assertion would pass vacuously. Passing nil clears it.
+func (k *Kubernetes) SetRunJobHook(fn func()) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	*k.runJobHook = fn
+}
+
+func (k *Kubernetes) RunJob(ctx context.Context, spec controlplane.RunSpec) (controlplane.RunResult, error) {
+	k.mu.Lock()
 	if err := k.errs[OpRunJob]; err != nil {
+		k.mu.Unlock()
 		return controlplane.RunResult{}, err
 	}
 	*k.runs = append(*k.runs, runCall{App: spec.App, Image: spec.Image, Command: append([]string(nil), spec.Command...), TTLSeconds: spec.TTLSeconds, Namespace: k.ns})
-	return *k.runResult, nil
+	inFlight, res := *k.runJobHook, *k.runResult
+	k.mu.Unlock()
+	if inFlight != nil {
+		inFlight()
+	}
+	return res, nil
 }

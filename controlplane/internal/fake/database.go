@@ -25,6 +25,7 @@ type Database struct {
 	providers  map[string]controlplane.Provider
 	addons     map[string]controlplane.AddonInfo
 	appEnv     map[string]map[string]string                       // app -> key -> value
+	hooks      map[string]controlplane.Hook                       // (app, env, phase) -> configured lifecycle hook
 	autoDeploy map[string]map[string]controlplane.AutoDeployLevel // app -> env -> level
 	reason     map[string]map[string]string                       // app -> env -> disable reason
 	audit      []controlplane.AuditEntry                          // append-only, in append order
@@ -53,6 +54,7 @@ func NewDatabase() *Database {
 		providers:  make(map[string]controlplane.Provider),
 		addons:     make(map[string]controlplane.AddonInfo),
 		appEnv:     make(map[string]map[string]string),
+		hooks:      make(map[string]controlplane.Hook),
 		autoDeploy: make(map[string]map[string]controlplane.AutoDeployLevel),
 		reason:     make(map[string]map[string]string),
 		backups:    make(map[string]controlplane.Backup),
@@ -378,6 +380,85 @@ func (d *Database) UnsetAppEnv(ctx context.Context, app, key string) error {
 		return err
 	}
 	delete(d.appEnv[app], key)
+	return nil
+}
+
+// hookKey keys the lifecycle-hook store by (app, environment, phase) — the same key the real
+// store's primary key uses, so the fake cannot accidentally be more permissive than Postgres.
+func hookKey(app, env string, phase controlplane.HookPhase) string {
+	return app + "\x00" + env + "\x00" + string(phase)
+}
+
+// AppHook returns the command app runs at phase in env, or nil when no hook is set (ADR-0072 §1).
+func (d *Database) AppHook(ctx context.Context, app, env string, phase controlplane.HookPhase) ([]string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAppHook]; err != nil {
+		return nil, err
+	}
+	h, ok := d.hooks[hookKey(app, env, phase)]
+	if !ok {
+		return nil, nil
+	}
+	return append([]string(nil), h.Command...), nil
+}
+
+// AppHooks returns every hook configured for app in env, in phase order. None yields an empty slice.
+func (d *Database) AppHooks(ctx context.Context, app, env string) ([]controlplane.Hook, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAppHooks]; err != nil {
+		return nil, err
+	}
+	out := []controlplane.Hook{}
+	for _, phase := range controlplane.HookPhases() {
+		if h, ok := d.hooks[hookKey(app, env, phase)]; ok {
+			h.Command = append([]string(nil), h.Command...)
+			out = append(out, h)
+		}
+	}
+	return out, nil
+}
+
+// SetAppHook upserts the command app runs at phase in env, replacing any command already there.
+func (d *Database) SetAppHook(ctx context.Context, app, env string, phase controlplane.HookPhase, command []string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpSetAppHook]; err != nil {
+		return err
+	}
+	if len(command) == 0 {
+		return fmt.Errorf("database: set app hook: empty command")
+	}
+	d.hooks[hookKey(app, env, phase)] = controlplane.Hook{
+		App: app, Environment: env, Phase: phase, Command: append([]string(nil), command...),
+	}
+	return nil
+}
+
+// UnsetAppHook removes app's hook at phase in env. Removing one that is not set is a no-op.
+func (d *Database) UnsetAppHook(ctx context.Context, app, env string, phase controlplane.HookPhase) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpUnsetAppHook]; err != nil {
+		return err
+	}
+	delete(d.hooks, hookKey(app, env, phase))
+	return nil
+}
+
+// DeleteAppHooks removes every hook for app across every environment. Deleting none is a no-op.
+func (d *Database) DeleteAppHooks(ctx context.Context, app string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpDeleteAppHooks]; err != nil {
+		return err
+	}
+	for key, h := range d.hooks {
+		if h.App == app {
+			delete(d.hooks, key)
+		}
+	}
 	return nil
 }
 

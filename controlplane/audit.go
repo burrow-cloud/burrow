@@ -162,6 +162,10 @@ const (
 	auditOpAddonBackup  = "addon_backup"
 	auditOpAddonRestore = "addon_restore"
 	auditOpRun          = "run"
+	// auditOpHook is one lifecycle hook's execution (ADR-0072). It carries no guardrail decision row
+	// of its own: a hook runs as part of a deploy or a rollback and is gated by that operation's
+	// guardrail, so the decision was already recorded under `deploy` or `rollback`.
+	auditOpHook = "hook"
 )
 
 // Audit returns audit rows matching filter, newest first (ADR-0027). It is a read-only,

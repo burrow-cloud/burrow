@@ -296,6 +296,15 @@ var catalogue = []Capability{
 			"makes once, deliberately, and opts into (ADR-0058)",
 		Command: "burrow app auto-deploy <app> <patch|minor|major|off>",
 	},
+	{
+		Surface: Operator,
+		Path:    "hook set",
+		What:    "stores the command an app runs at a lifecycle phase (pre-deploy, pre-rollback)",
+		Why: "a pre-deploy hook runs on EVERY deploy of the app, including unattended ones, so setting " +
+			"one is standing authority for a command the agent would not be present to see fail " +
+			"(ADR-0072 §1); the agent can already sequence a command itself with `run`",
+		Command: "burrow app hook set <app> --on <phase> -- <command>",
+	},
 
 	// Setup. Every entry below creates namespaces, writes RBAC, replaces the running control
 	// plane, admits a node, or stores a credential. An agent reads untrusted input by its nature,

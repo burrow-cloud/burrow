@@ -78,9 +78,11 @@ const (
 	// PodDisruptionBudget takes longer to settle than a development one rolling one, and an operator
 	// who wants a quick verdict in staging should not have to accept it in production.
 	//
-	// NOTHING WAITS ON IT UNLESS A POST-DEPLOY HOOK IS SET. A deploy with no hook returns exactly
-	// when it did before hooks existed, so raising this bound cannot slow down a deploy nobody asked
-	// to be told about.
+	// A deploy waits on it whenever it has something to wait FOR: a `post-deploy` hook to tell
+	// (ADR-0072 §4), or a derived dependency to check once the rollout is ready (ADR-0076 §4) — an
+	// attached database or a published port. A deploy with neither returns exactly when it did before
+	// hooks existed. Raising this bound therefore does reach ordinary apps, and a caller's own bound
+	// has to outlast it: see MaxDeployWait in apiwait.go, which is what `client` sizes itself from.
 	LimitDeploySettleTimeout LimitCode = "deploy.settle_timeout"
 )
 
@@ -217,8 +219,10 @@ var knownLimits = []limitDef{
 		min: int64(10 * time.Second),
 		// Thirty minutes is the ceiling. Kubernetes' own progress deadline defaults to ten, so a
 		// rollout that has not resolved in thirty is not going to, and a bound long enough to hide
-		// that turns the hook into something nobody hears from.
-		max: int64(30 * time.Minute),
+		// that turns the hook into something nobody hears from. It is MaxDeploySettleTimeout rather
+		// than a literal because a caller's own bound is derived from that constant: the ceiling and
+		// the thing that has to outlast it are one symbol, so they cannot drift (issue #404).
+		max: int64(MaxDeploySettleTimeout),
 	},
 }
 

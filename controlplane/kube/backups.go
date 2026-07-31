@@ -36,8 +36,10 @@ const (
 	// pg_dump and pg_restore. It matches the add-on instance image (ADR-0031/0032) and is already on
 	// the CI preload list, so e2e adds no new image.
 	backupImage = "postgres:17-alpine"
-	// backupJobTimeout caps how long burrowd waits for a backup/restore Job to complete.
-	backupJobTimeout = 10 * time.Minute
+	// backupJobTimeout caps how long burrowd waits for a backup/restore Job to complete. It is
+	// declared in controlplane/apiwait.go rather than here, because a client's own bound has to
+	// outlast it (issue #404).
+	backupJobTimeout = controlplane.BackupJobTimeout
 	// backupJobPoll is the interval between Job-status reads while waiting.
 	backupJobPoll = 2 * time.Second
 

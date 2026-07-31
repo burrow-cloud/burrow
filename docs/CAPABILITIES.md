@@ -256,12 +256,10 @@ replica summary; the app's output stays in `burrow app logs`.
 
 **The deploy waits, so a slow verdict is a slow deploy call.** The wait is bounded by
 `deploy.settle_timeout` (5m by default) and ends early on any blocking condition, but a rollout
-wedged for a reason no pod reports takes the whole bound. `burrow` connects through the API-server
-proxy with no client-side timeout and simply waits; `burrow-agent` against a direct control-plane URL
-has a 60-second HTTP timeout, so on that path a long wait is reported to the caller as a timeout
-while burrowd carries on. Nothing is lost either way — the release is recorded and the image is live
-before the wait starts, and the hook still runs — but the caller may not see the result. Lower
-`deploy.settle_timeout` for that environment if it matters.
+wedged for a reason no pod reports takes the whole bound. Both clients wait it out: the bound each
+call gets is derived from the bound the control plane declares for that call, so a client can no
+longer give up on work the server is still entitled to be doing. Lower `deploy.settle_timeout` for
+that environment if a shorter verdict matters.
 
 **A failed `post-deploy` hook undoes nothing.** By the time it runs the image is live and the release
 is recorded, so there is nothing left to abort — the failure is audited and comes back as a hint on
@@ -298,10 +296,10 @@ ordering, and idempotency stay your tool's job. A hook shares `burrow app run`'s
 bound, so a migration slower than that is reported as a failure. The audit log records the phase,
 the command, the image, and the exit code, and **never the command's output**. A `post-deploy` hook
 makes a deploy of that app **wait for its rollout to settle** before returning, bounded by
-`deploy.settle_timeout` (see [Operational limits](#operational-limits)); a deploy with no
-`post-deploy` hook waits for nothing, exactly as before.
+`deploy.settle_timeout` (see [Operational limits](#operational-limits)). A deploy-time dependency
+check makes it wait for the same reason, so a hook is not the only way to get the wait.
 
-### Deploy does not wait for the rollout, unless a post-deploy hook is set
+### Deploy does not wait for the rollout, unless it has something to wait for
 
 `deploy` returns once the Kubernetes API server accepts the Deployment write. A release marked
 `deployed` means "the object was accepted", not "the Pods are healthy". There is no readiness
@@ -309,10 +307,14 @@ gate on the deploy call, and **no automatic rollback on a failed rollout** — a
 surfaced afterwards by `burrow app status` (which reports the pull error or the stalled progress
 condition) and rolled back by an explicit `burrow app rollback`.
 
-The one exception is an app with a **`post-deploy` hook** ([Lifecycle hooks](#lifecycle-hooks)).
-There the deploy waits for the rollout to settle — bounded by `deploy.settle_timeout`, ending early
-on any blocking condition — so the hook can be told how it went. The deploy still does not fail on a
-failed rollout and still nothing rolls back: the hook is told, and the caller gets a hint.
+The exception is an app the deploy has something to report on. That is an app with a **`post-deploy`
+hook** ([Lifecycle hooks](#lifecycle-hooks)), and it is also an app Burrow **derived a dependency**
+for — an attached Postgres add-on or a published port ([Deploy-time dependency
+checks](#deploy-time-dependency-checks)), which is most apps anyone actually runs. In both cases the
+deploy waits for the rollout to settle — bounded by `deploy.settle_timeout`, ending early on any
+blocking condition — so the hook can be told how it went and the check reaches the release that was
+just deployed rather than the one it replaced. The deploy still does not fail on a failed rollout and
+still nothing rolls back: the hook is told, and the caller gets a hint.
 
 Release history is unbounded: releases are never pruned, only deleted wholesale when the app is.
 
@@ -904,11 +906,13 @@ Limits:
   the settle timeout go the other way: a production ceiling and a development ceiling are the case
   that motivates limits at all, and a production rollout of twenty replicas takes longer to settle
   than a development one of one.
-- **`deploy.settle_timeout` costs nothing unless a `post-deploy` hook is set.** It is the bound on
-  the only wait Burrow performs on the deploy path, and that wait happens only when there is a hook
-  to tell the result to, so raising it cannot slow a deploy nobody asked to be told about. The wait
+- **`deploy.settle_timeout` costs nothing unless the deploy has something to report on.** It is the
+  bound on the only wait Burrow performs on the deploy path, and that wait happens when there is a
+  `post-deploy` hook to tell the result to or a derived dependency to check once the rollout is
+  ready — so an app with neither is unaffected, and an app with an attached database is not. The wait
   also ends early on any blocking condition, so the bound is reached only by a rollout wedged for a
-  reason no pod reports.
+  reason no pod reports. Both clients size their own request bound from it, so raising it does not
+  produce a caller that gives up while burrowd is still working.
 - **`status.unschedulable_grace` is ONE value, everywhere.** The live status surface, the Job
   waiters behind `app run` / build / backup / restore, and the failure ledger
   ([ADR-0074](adr/0074-burrow-observes-what-it-manages.md)) all judge the same pod through the same

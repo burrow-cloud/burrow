@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	// runJobTimeout caps how long burrowd waits for a one-off command Job to finish (ADR-0048 §3).
-	runJobTimeout = 10 * time.Minute
+	// runJobTimeout caps how long burrowd waits for a one-off command Job to finish (ADR-0048 §3),
+	// lifecycle hooks included (ADR-0072). It is declared in controlplane/apiwait.go rather than
+	// here, because a client's own bound has to outlast it (issue #404).
+	runJobTimeout = controlplane.RunJobTimeout
 	// runJobPoll is the interval between Job-status reads while waiting.
 	runJobPoll = 2 * time.Second
 	// runContainerName is the single container a run Job carries. It is fixed (not the app name) so

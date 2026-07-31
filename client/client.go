@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,12 +17,13 @@ import (
 	"time"
 )
 
-// Client is a thin HTTP client for the control-plane API (ADR-0005). The MCP server
-// holds the API bearer token to authenticate to the control plane, but never any
-// cluster credentials — those live only in the control plane. These DTOs mirror the
-// API's JSON contract; the MCP layer deliberately does not import the
-// control-plane packages, so it stays a decoupled client across the module
-// boundary (LICENSING.md).
+// Client is a thin HTTP client for the control-plane API (ADR-0005). The caller holds the API
+// bearer token to authenticate to the control plane, but never any cluster credentials — those live
+// only in the control plane. These DTOs mirror the API's JSON CONTRACT rather than the control
+// plane's Go types, so the client stays decoupled across the module boundary (LICENSING.md): the one
+// thing it takes from the control-plane package is the declared bound on how long a call may take
+// (see timeouts below), because two independently chosen bounds is exactly the defect that made a
+// successful deploy report as failed.
 //
 // The Client is auth-agnostic (ADR-0045): it holds no credential and sets no auth header.
 // Authentication is the job of the supplied *http.Client's RoundTripper — for self-host that
@@ -30,6 +32,9 @@ import (
 type Client struct {
 	baseURL string
 	http    *http.Client
+	// budget is the per-request timeout table. It is a field rather than a package-level constant
+	// read at the call site so a test can drive the loop with millisecond budgets instead of minutes.
+	budget budgets
 }
 
 // NewClient returns a control-plane API client for baseURL authenticating with token over
@@ -52,8 +57,10 @@ func NewClientVersion(baseURL, token, clientVersion string) *Client {
 // clientName (ClientNameCLI or ClientNameAgent) in X-Burrow-Client alongside the version. It is the
 // constructor the direct-URL transport uses, passing the binary's own name and release version.
 func NewNamedClient(baseURL, token, clientName, clientVersion string) *Client {
+	// No http.Client.Timeout: a single blanket bound cannot tell a status read from a deploy that
+	// waits for a rollout, and the one that was here — sixty seconds — was shorter than the deploy it
+	// waited on. The bound is per request now; see budgets.
 	hc := &http.Client{
-		Timeout:   60 * time.Second,
 		Transport: NewNamedTokenRoundTripper(token, clientName, clientVersion, nil),
 	}
 	return NewClientWithHTTP(baseURL, hc)
@@ -63,13 +70,21 @@ func NewNamedClient(baseURL, token, clientName, clientVersion string) *Client {
 // through its RoundTripper. The connect package uses this to route requests through the
 // Kubernetes API-server proxy with a kubeconfig-authenticated transport wrapped in
 // NewTokenRoundTripper (ADR-0014). A nil hc gets a default, unauthenticated client.
+//
+// The per-request budgets apply whatever transport is supplied, so both paths are bounded the same
+// way: the API-server proxy path previously had no client-side bound at all, which made a hung
+// request hang forever rather than misreport, and one place now decides how long a call may take.
+// An hc that carries its OWN http.Client.Timeout keeps it, and it wins where it is shorter — that is
+// the caller's deliberate choice, and it is the one way a bound too short for a deploy can still
+// exist.
 func NewClientWithHTTP(baseURL string, hc *http.Client) *Client {
 	if hc == nil {
-		hc = &http.Client{Timeout: 60 * time.Second}
+		hc = &http.Client{}
 	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    hc,
+		budget:  derivedBudgets(),
 	}
 }
 
@@ -592,9 +607,14 @@ func (c *Client) Capacity(ctx context.Context) (CapacityReport, error) {
 	return out, err
 }
 
+// Deploy applies an image to an app. It takes the DEPLOY budget, not the default one: a deploy runs
+// the app's lifecycle hooks and waits for the rollout to settle whenever there is something to wait
+// for — a `post-deploy` hook to tell (ADR-0072 §4), or a dependency Burrow derived from an attached
+// database or a published port to check (ADR-0076 §4) — and that wait is bounded by an operational
+// limit, not by anything this client picked (issue #404).
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
-	err := c.do(ctx, http.MethodPost, c.appPath(app, "deploy"), req, &out)
+	err := c.doWithin(ctx, c.budget.deploy, http.MethodPost, c.appPath(app, "deploy"), req, &out)
 	return out, err
 }
 
@@ -605,7 +625,7 @@ func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (Dep
 // with Confirm set only on explicit human approval.
 func (c *Client) Build(ctx context.Context, app string, req BuildRequest) (BuildResult, error) {
 	var out BuildResult
-	err := c.do(ctx, http.MethodPost, c.appPath(app, "build"), req, &out)
+	err := c.doWithin(ctx, c.budget.build, http.MethodPost, c.appPath(app, "build"), req, &out)
 	return out, err
 }
 
@@ -634,7 +654,7 @@ func (c *Client) History(ctx context.Context, app, env string) ([]Release, error
 // on explicit human approval.
 func (c *Client) Run(ctx context.Context, app string, req RunRequest) (RunResult, error) {
 	var out RunResult
-	err := c.do(ctx, http.MethodPost, c.appPath(app, "run"), req, &out)
+	err := c.doWithin(ctx, c.budget.run, http.MethodPost, c.appPath(app, "run"), req, &out)
 	return out, err
 }
 
@@ -798,7 +818,7 @@ func (c *Client) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 	if len(q) > 0 {
 		path += "?" + q.Encode()
 	}
-	return out, c.do(ctx, http.MethodDelete, path, nil, &out)
+	return out, c.doWithin(ctx, c.budget.backup, http.MethodDelete, path, nil, &out)
 }
 
 // AttachResult is the non-secret outcome of attaching an app to an add-on (ADR-0031): the KEY NAME
@@ -871,7 +891,7 @@ type BackupResult struct {
 func (c *Client) BackupAddon(ctx context.Context, addonType, app, env, destination string) (BackupResult, error) {
 	var out BackupResult
 	body := map[string]any{"addon": addonType, "app": app, "env": env, "destination": destination}
-	err := c.do(ctx, http.MethodPost, "/v1/addons/backup", body, &out)
+	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/backup", body, &out)
 	return out, err
 }
 
@@ -966,7 +986,7 @@ func (c *Client) BackupHealth(ctx context.Context, addonType, app, env string) (
 // (ADR-0032). It is held for confirmation by a guardrail by default; pass confirm=true to proceed.
 func (c *Client) RestoreAddon(ctx context.Context, addonType, app, backupID, env string, confirm bool) error {
 	body := map[string]any{"addon": addonType, "app": app, "backup": backupID, "env": env, "confirm": confirm}
-	return c.do(ctx, http.MethodPost, "/v1/addons/restore", body, nil)
+	return c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/restore", body, nil)
 }
 
 // LogEntry is one record from a logs query.
@@ -1029,13 +1049,16 @@ func (c *Client) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
 }
 
+// Rollback returns an app to its previous release. It takes the deploy budget: a rollback runs the
+// `pre-rollback` hook and then waits for the rollout to settle and tells the `post-deploy` hook the
+// same way a deploy does (ADR-0072 §8), so it waits on the same server-side bounds.
 func (c *Client) Rollback(ctx context.Context, app, env string, confirm bool) (RollbackResult, error) {
 	var out RollbackResult
 	path := c.appPath(app, "rollback")
 	if confirm {
 		path += "?confirm=true"
 	}
-	err := c.do(ctx, http.MethodPost, withEnv(path, env), nil, &out)
+	err := c.doWithin(ctx, c.budget.deploy, http.MethodPost, withEnv(path, env), nil, &out)
 	return out, err
 }
 
@@ -1484,7 +1507,7 @@ func (c *Client) NextTag(ctx context.Context, app, env string) (NextTagResult, e
 // recorded provider (ADR-0023).
 func (c *Client) AddProvider(ctx context.Context, req AddProviderRequest) (Provider, error) {
 	var out Provider
-	err := c.do(ctx, http.MethodPost, "/v1/providers", req, &out)
+	err := c.doWithin(ctx, c.budget.provider, http.MethodPost, "/v1/providers", req, &out)
 	return out, err
 }
 
@@ -1545,8 +1568,41 @@ func (c *Client) ListEnvironments(ctx context.Context) ([]Environment, error) {
 	return out.Environments, err
 }
 
-// do issues a request, decoding a 2xx body into out and a non-2xx body into an APIError.
+// do issues a request under the DEFAULT budget, decoding a 2xx body into out and a non-2xx body
+// into an APIError. It is the call for everything that does not wait on the cluster; a call that
+// does uses doWithin with the budget derived from the bound it is waiting on.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWithin(ctx, c.budget.def, method, path, body, out)
+}
+
+// doWithin is do under an explicit budget. The budget is applied as a context deadline rather than
+// an http.Client.Timeout because a deadline can differ per request and a client-wide timeout cannot
+// — which is the whole of issue #404.
+//
+// A caller's own deadline still wins where it is shorter: context.WithTimeout keeps the earlier of
+// the two, so an agent that gives a deploy thirty seconds gets thirty seconds. What can no longer
+// happen is this package silently imposing a bound shorter than the work it is waiting for.
+func (c *Client) doWithin(ctx context.Context, budget time.Duration, method, path string, body, out any) error {
+	reqCtx := ctx
+	if budget > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
+	err := c.request(reqCtx, method, path, body, out)
+	// A request THIS package's budget cut short gets a message saying what a bare "deadline
+	// exceeded" does not: the control plane is not a transaction that rolls back when the caller
+	// stops listening, so the operation may well be finishing right now. Retrying is what turns one
+	// deploy into two. A deadline the CALLER set is left to speak for itself — the caller knows what
+	// it asked for.
+	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w. Burrow gave up waiting after %s; the control plane may still be completing the operation, so check the app's status before retrying — a retry runs it again", err, budget)
+	}
+	return err
+}
+
+// request issues the prepared call, decoding a 2xx body into out and a non-2xx body into an APIError.
+func (c *Client) request(ctx context.Context, method, path string, body, out any) error {
 	var br io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)

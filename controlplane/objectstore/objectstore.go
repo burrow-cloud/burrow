@@ -46,9 +46,12 @@ type Factory struct {
 	now  func() time.Time
 }
 
-// NewFactory returns a Factory with a sensible HTTP timeout.
+// NewFactory returns a Factory bounding each object-store call by
+// controlplane.ObjectStoreCallTimeout. The bound is declared there rather than here because
+// registering a provider makes several of these calls in one API request, and the client waiting on
+// that request sizes itself from the same constant (issue #404).
 func NewFactory() *Factory {
-	return &Factory{http: &http.Client{Timeout: 30 * time.Second}, now: time.Now}
+	return &Factory{http: &http.Client{Timeout: controlplane.ObjectStoreCallTimeout}, now: time.Now}
 }
 
 // ObjectStore returns a client for the bucket-holding endpoint, signing with cred.

@@ -1,0 +1,622 @@
+{
+  "controller": "CloudNativePG",
+  "version": "1.30.0",
+  "source": "https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.30.0/cnpg-1.30.0.yaml",
+  "crd": "clusters.postgresql.cnpg.io",
+  "apiVersion": "postgresql.cnpg.io/v1",
+  "spec": {
+    "type": "object",
+    "properties": {
+      "affinity": {
+        "type": "object",
+        "properties": {
+          "additionalPodAffinity": {
+            "type": "object",
+            "properties": {
+              "preferredDuringSchedulingIgnoredDuringExecution": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "podAffinityTerm": {
+                      "type": "object",
+                      "properties": {
+                        "labelSelector": {
+                          "type": "object",
+                          "properties": {
+                            "matchExpressions": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "key": {
+                                    "type": "string"
+                                  },
+                                  "operator": {
+                                    "type": "string"
+                                  },
+                                  "values": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "matchLabels": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "matchLabelKeys": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "mismatchLabelKeys": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "namespaceSelector": {
+                          "type": "object",
+                          "properties": {
+                            "matchExpressions": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "key": {
+                                    "type": "string"
+                                  },
+                                  "operator": {
+                                    "type": "string"
+                                  },
+                                  "values": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "matchLabels": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "namespaces": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "topologyKey": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "weight": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "requiredDuringSchedulingIgnoredDuringExecution": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "labelSelector": {
+                      "type": "object",
+                      "properties": {
+                        "matchExpressions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "operator": {
+                                "type": "string"
+                              },
+                              "values": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "matchLabels": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "matchLabelKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "mismatchLabelKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "namespaceSelector": {
+                      "type": "object",
+                      "properties": {
+                        "matchExpressions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "operator": {
+                                "type": "string"
+                              },
+                              "values": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "matchLabels": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "namespaces": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "topologyKey": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "additionalPodAntiAffinity": {
+            "type": "object",
+            "properties": {
+              "preferredDuringSchedulingIgnoredDuringExecution": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "podAffinityTerm": {
+                      "type": "object",
+                      "properties": {
+                        "labelSelector": {
+                          "type": "object",
+                          "properties": {
+                            "matchExpressions": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "key": {
+                                    "type": "string"
+                                  },
+                                  "operator": {
+                                    "type": "string"
+                                  },
+                                  "values": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "matchLabels": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "matchLabelKeys": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "mismatchLabelKeys": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "namespaceSelector": {
+                          "type": "object",
+                          "properties": {
+                            "matchExpressions": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "key": {
+                                    "type": "string"
+                                  },
+                                  "operator": {
+                                    "type": "string"
+                                  },
+                                  "values": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "matchLabels": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "namespaces": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "topologyKey": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "weight": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "requiredDuringSchedulingIgnoredDuringExecution": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "labelSelector": {
+                      "type": "object",
+                      "properties": {
+                        "matchExpressions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "operator": {
+                                "type": "string"
+                              },
+                              "values": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "matchLabels": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "matchLabelKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "mismatchLabelKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "namespaceSelector": {
+                      "type": "object",
+                      "properties": {
+                        "matchExpressions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "operator": {
+                                "type": "string"
+                              },
+                              "values": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "matchLabels": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "namespaces": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "topologyKey": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "enablePodAntiAffinity": {
+            "type": "boolean"
+          },
+          "nodeAffinity": {
+            "type": "object",
+            "properties": {
+              "preferredDuringSchedulingIgnoredDuringExecution": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "preference": {
+                      "type": "object",
+                      "properties": {
+                        "matchExpressions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "operator": {
+                                "type": "string"
+                              },
+                              "values": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "matchFields": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "operator": {
+                                "type": "string"
+                              },
+                              "values": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "weight": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              "requiredDuringSchedulingIgnoredDuringExecution": {
+                "type": "object",
+                "properties": {
+                  "nodeSelectorTerms": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "matchExpressions": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "operator": {
+                                "type": "string"
+                              },
+                              "values": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "matchFields": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string"
+                              },
+                              "operator": {
+                                "type": "string"
+                              },
+                              "values": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "nodeSelector": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "podAntiAffinityType": {
+            "type": "string"
+          },
+          "tolerations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "effect": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                },
+                "operator": {
+                  "type": "string"
+                },
+                "tolerationSeconds": {
+                  "type": "integer"
+                },
+                "value": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "topologyKey": {
+            "type": "string"
+          }
+        }
+      },
+      "topologySpreadConstraints": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "labelSelector": {
+              "type": "object",
+              "properties": {
+                "matchExpressions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string"
+                      },
+                      "operator": {
+                        "type": "string"
+                      },
+                      "values": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "matchLabels": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "matchLabelKeys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "maxSkew": {
+              "type": "integer"
+            },
+            "minDomains": {
+              "type": "integer"
+            },
+            "nodeAffinityPolicy": {
+              "type": "string"
+            },
+            "nodeTaintsPolicy": {
+              "type": "string"
+            },
+            "topologyKey": {
+              "type": "string"
+            },
+            "whenUnsatisfiable": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

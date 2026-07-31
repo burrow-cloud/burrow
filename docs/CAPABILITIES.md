@@ -95,6 +95,18 @@ byte-for-byte unchanged, pinned per path by a test. **Wiring nothing sandboxes n
 seam that makes an operator's isolation reachable, not isolation Burrow enforces. Enforcement is
 admission policy on the cluster, not a hook the same binary can decline to wire.
 
+Pods Burrow **causes to exist but does not author** take a third seam,
+`Adapter.WithControllerPodPlacement` ([ADR-0077](adr/0077-placement-policy-for-pods-burrow-does-not-author.md)).
+Where a third-party controller composes the pod from a custom resource Burrow creates, there is no
+pod spec to hand a `func(*corev1.PodSpec)`, so this one is a **value** — `kube.PodPlacement`: node
+selector, tolerations, node/pod affinity, topology spread — translated into the fields that
+controller offers. Policy the target has no field for is **refused when it is wired**, naming the
+JSON path, because a CRD's structural schema prunes unknown fields silently and an operator who is
+not told their policy was dropped believes it is in force. The zero value writes nothing at all.
+Nothing in this repository wires it, and no resource is composed through it yet — the Postgres
+add-on becomes a CloudNativePG `Cluster` in a separate change
+([ADR-0066](adr/0066-postgres-on-cloudnativepg.md)).
+
 ### Deploy does not wait for the rollout
 
 `deploy` returns once the Kubernetes API server accepts the Deployment write. A release marked

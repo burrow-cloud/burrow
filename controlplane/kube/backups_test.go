@@ -375,3 +375,24 @@ func TestBackupJobIgnoresAppPodMutator(t *testing.T) {
 		t.Errorf("nodeSelector = %v, want none: the app hook must not reach a Burrow-image pod", pod.NodeSelector)
 	}
 }
+
+// TestBackupJobPresent: the observer's read reports a Job that is there and one that is not, and it
+// looks under the SAME name RunBackupJob creates — a backup row left pending by a burrowd that
+// restarted is otherwise indistinguishable from a backup still running (ADR-0074 §6).
+func TestBackupJobPresent(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: backupJobName("bk1"), Namespace: addonNS},
+	})
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+
+	present, err := a.BackupJobPresent(ctx, "bk1")
+	if err != nil || !present {
+		t.Errorf("BackupJobPresent(bk1) = %v, %v; want true, nil", present, err)
+	}
+	// A Job that is gone is absent, not an error: absence is the answer, not a failure to ask.
+	present, err = a.BackupJobPresent(ctx, "bk2")
+	if err != nil || present {
+		t.Errorf("BackupJobPresent(bk2) = %v, %v; want false, nil", present, err)
+	}
+}

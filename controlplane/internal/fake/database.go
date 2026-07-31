@@ -33,6 +33,12 @@ type Database struct {
 	envs       map[string]controlplane.Environment // registered environments by name
 	errs       map[Op]error
 	policy     controlplane.Policy
+	// The failure ledger and its coverage record (ADR-0074 §4). They are separate from the audit
+	// slice above for the same reason they are separate tables in the store: one is what Burrow was
+	// asked to do, the other is what happened afterwards, and only the second is pruned (§7).
+	failures  []controlplane.Failure
+	windows   []controlplane.ObservationWindow
+	exposures map[string]controlplane.Exposure // "app\x00env" -> recorded exposure intent
 }
 
 // NewDatabase returns an empty fake database with the default guardrail policy.
@@ -49,6 +55,7 @@ func NewDatabase() *Database {
 		envs:       make(map[string]controlplane.Environment),
 		errs:       make(map[Op]error),
 		policy:     controlplane.DefaultPolicy(),
+		exposures:  make(map[string]controlplane.Exposure),
 	}
 }
 

@@ -45,7 +45,12 @@ type Kubernetes struct {
 	backupSiz    *int64                                // size RunBackupJob reports
 	backupReason *controlplane.BackupJobOutcome        // reason/detail RunBackupJob reports on failure
 	metricsAvail *bool                                 // whether metrics-server is reported present
-	errs         map[Op]error
+	// backupJobs records which backups still have a Job in the fake add-on namespace. The real
+	// adapter reads this off the cluster; here a test sets it, because the interesting state is the
+	// one no code path produces on purpose — a Job that is GONE while its row is still pending
+	// (ADR-0074 §6).
+	backupJobs map[string]bool
+	errs       map[Op]error
 }
 
 // fakeBaseNamespace is the namespace the fake treats as the default: app resources in it are keyed
@@ -200,6 +205,7 @@ func NewKubernetes() *Kubernetes {
 		backupSiz:    new(int64),
 		backupReason: new(controlplane.BackupJobOutcome),
 		metricsAvail: &metricsAvail,
+		backupJobs:   make(map[string]bool),
 		errs:         make(map[Op]error),
 	}
 }
@@ -393,6 +399,30 @@ func (k *Kubernetes) ExposureStatus(ctx context.Context, app string) (controlpla
 		return controlplane.ExposureStatus{}, nil
 	}
 	return controlplane.ExposureStatus{Exposed: true, Host: spec.Host, Address: k.addresses[nk], TLS: spec.TLS, CertReady: k.certReady[nk]}, nil
+}
+
+// SetBackupJob marks whether the Job for a backup id exists in this fake cluster. A backup whose
+// Job was reaped, or whose burrowd restarted mid-backup, is the case ADR-0074 §6 is about: the row
+// stays pending and nothing is left to finish it.
+func (k *Kubernetes) SetBackupJob(backupID string, present bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if present {
+		k.backupJobs[backupID] = true
+		return
+	}
+	delete(k.backupJobs, backupID)
+}
+
+// BackupJobPresent reports whether the Job for a backup id still exists. A missing Job is absent
+// (false, nil), not an error, matching the adapter.
+func (k *Kubernetes) BackupJobPresent(ctx context.Context, backupID string) (bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpBackupJobPresent]; err != nil {
+		return false, err
+	}
+	return k.backupJobs[backupID], nil
 }
 
 // SetError makes op return err until cleared with SetError(op, nil).

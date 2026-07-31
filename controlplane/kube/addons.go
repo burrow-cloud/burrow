@@ -62,7 +62,7 @@ func addonName(t controlplane.AddonType, env string) (string, error) {
 // read-only Get before deploying the scraper.
 const vmagentServiceAccount = "burrow-vmagent"
 
-func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string) (controlplane.AddonInfo, error) {
+func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string, mech controlplane.AddonMechanism) (controlplane.AddonInfo, error) {
 	name, err := addonName(spec.Type, env)
 	if err != nil {
 		return controlplane.AddonInfo{}, err
@@ -75,6 +75,14 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 	// The data claim carries the role as well, so every claim Burrow creates says what it holds
 	// rather than only the ones whose name gives it away.
 	volumeLabels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(spec.Type), addonEnvLabel: env, addonVolumeRole: controlplane.AddonVolumeData}
+
+	// A CloudNativePG-backed instance is one custom resource and no authored pod at all, so it
+	// branches before anything below is created: the operator composes the workload, the volume and
+	// the services from the `Cluster` (ADR-0066 §1). Everything downstream of the install — the
+	// endpoint, the superuser Secret, attach, and the ADR-0032 backup Jobs — is unchanged.
+	if mech == controlplane.AddonMechanismCloudNativePG {
+		return a.deployPostgresCluster(ctx, spec, env, name, labels)
+	}
 
 	// The metrics add-on's vmagent scraper references a pre-provisioned ServiceAccount whose RBAC
 	// only a kubeconfig-holder can apply (burrowd cannot create RBAC). The CLI self-heals this
@@ -619,19 +627,44 @@ func (a *Adapter) scrapeNamespaces() string {
 	return a.namespace + ", " + a.addonNamespace
 }
 
-// AddonReady reports whether the named add-on's backing Deployment is available (ADR-0025).
-// Readiness is a live property of the cluster — the registry of what add-ons exist lives in the
-// database — so this is a cheap single-Deployment probe. A missing Deployment is reported as not
-// ready (false, nil); only a real API error is returned.
+// AddonReady reports whether the named add-on's backing workload is available (ADR-0025). Readiness
+// is a live property of the cluster — the registry of what add-ons exist lives in the database — so
+// this is a cheap single-object probe. A missing workload is reported as not ready (false, nil);
+// only a real API error is returned.
+//
+// WHICH OBJECT IS THE ADD-ON is resolved here rather than assumed, and that is what keeps a
+// CloudNativePG-backed instance from reading as an ADR-0074 §6 discrepancy. §6's diagnosis is an
+// ABSENCE — the registry says this exists and the cluster does not have it — and it is made by the
+// failure observer from exactly this seam's answer. A CNPG-backed Postgres instance has no
+// Deployment by design: the operator reconciles a StatefulSet from the `Cluster` Burrow wrote. A
+// probe that only looked for a Deployment would report a serving database as not running, once a
+// minute, forever, and the ledger would carry an AddonNotRunning row about an add-on that is fine —
+// a false absence, which is worse than no ledger at all because it is indistinguishable from a real
+// one.
+//
+// The Deployment is looked for FIRST because it is the common case and one Get answers it. The
+// custom resource is consulted only when there is no Deployment, so a cluster with no CloudNativePG
+// pays nothing for this and every existing add-on behaves exactly as before.
+//
+// No new REASON is introduced by any of this. A `Cluster` that will not come up is an add-on whose
+// workload is not available, which is what ReasonAddonNotRunning already says; the ledger's
+// vocabulary is closed (ADR-0074 §5) and this does not widen it.
 func (a *Adapter) AddonReady(ctx context.Context, name string) (bool, error) {
 	dep, err := a.client.AppsV1().Deployments(a.addonNamespace).Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return false, nil
+	if err == nil {
+		return deploymentAvailable(dep, 1), nil
 	}
-	if err != nil {
+	if !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("kube: reading addon %q: %w", name, err)
 	}
-	return deploymentAvailable(dep, 1), nil
+	cluster, found, err := a.getCNPGCluster(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	return cnpgClusterReady(cluster), nil
 }
 
 // DeleteAddon tears an add-on's workload down and, only when deleteData is set, destroys its data

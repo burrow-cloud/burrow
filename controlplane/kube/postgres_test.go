@@ -37,7 +37,7 @@ func TestDeployPostgresCreatesSuperuserSecretBeforeDeployment(t *testing.T) {
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment)
+	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, "")
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestDeployPostgresReusesExistingSecret(t *testing.T) {
 	})
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	sec, _ := client.CoreV1().Secrets(addonNS).Get(ctx, PostgresSecretName, metav1.GetOptions{})
@@ -159,7 +159,7 @@ func TestDeployPostgresAlwaysExportsMetrics(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -283,7 +283,7 @@ func TestMetricsCollectorDiscoversAppAndAddonNamespaces(t *testing.T) {
 	})
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	cm, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
@@ -305,7 +305,7 @@ func TestMetricsCollectorDedupesWhenNamespacesEqual(t *testing.T) {
 	})
 	a := New(client, addonNS).WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	cm, _ := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
@@ -388,7 +388,7 @@ func TestDeleteAddonKeepsVolumeAndCredentialByDefault(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -423,7 +423,7 @@ func TestDeleteAddonDeleteDataDestroysVolume(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -448,7 +448,7 @@ func TestDeleteAddonKeepsBackupVolume(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	if err := a.ensureBackupPVC(ctx, controlplane.DefaultEnvironment, controlplane.PostgresBackupVolume); err != nil {
@@ -474,7 +474,7 @@ func TestDeleteAddonReportsNoBackupVolumeWhenAbsent(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -564,11 +564,11 @@ func TestDeployPostgresPerEnvironmentIsASeparateInstance(t *testing.T) {
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonPostgres)
 
-	def, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment)
+	def, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, "")
 	if err != nil {
 		t.Fatalf("DeployAddon(default): %v", err)
 	}
-	stg, err := a.DeployAddon(ctx, spec, "staging")
+	stg, err := a.DeployAddon(ctx, spec, "staging", "")
 	if err != nil {
 		t.Fatalf("DeployAddon(staging): %v", err)
 	}

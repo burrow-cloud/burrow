@@ -560,6 +560,7 @@ func metricLabels(labels map[string]string) string {
 func newAddonInstallCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm bool
+	var cnpg bool
 	cmd := &cobra.Command{
 		Use:   "install [<name>]",
 		Short: "Install a vetted backing service (logs, metrics, cache, postgres)",
@@ -567,7 +568,11 @@ func newAddonInstallCmd() *cobra.Command {
 			"VictoriaLogs, metrics is VictoriaMetrics) and registers it so your agent can use it. The\n" +
 			"install is gated by the addon.install guardrail.\n\n" +
 			"Run `burrow addon install` with no name to list the add-ons you can install and which are\n" +
-			"already installed.",
+			"already installed.\n\n" +
+			"postgres can run on CloudNativePG instead of its own Deployment (--cnpg). That needs the\n" +
+			"operator on the cluster already (burrow cluster postgres install), and it is opt-in while\n" +
+			"the rest of that work lands: backups still go through the same dump path, and removing a\n" +
+			"CloudNativePG instance is not built yet.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -581,6 +586,14 @@ func newAddonInstallCmd() *cobra.Command {
 			// BEFORE the install API call: burrowd is forbidden from creating RBAC (least privilege),
 			// so the grant the add-on needs cannot be minted server-side. Most add-ons need none and
 			// this is a no-op.
+			mechanism := ""
+			if cnpg {
+				if name != string(controlplane.AddonPostgres) {
+					return fmt.Errorf("--cnpg backs the postgres add-on and no other; %q has no CloudNativePG mechanism", name)
+				}
+				mechanism = controlplane.AddonBackendCloudNativePG
+			}
+
 			kubeContext, controlPlaneNamespace, appNamespace := o.resolveAddonNamespaces()
 			if err := ensureAddonRBAC(ctx, name, o.kubeconfig, kubeContext, controlPlaneNamespace, appNamespace, out); err != nil {
 				return err
@@ -590,18 +603,29 @@ func newAddonInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := c.InstallAddon(ctx, name, o.env, confirm)
+			a, err := c.InstallAddon(ctx, name, o.env, client.InstallAddonOptions{
+				Mechanism: mechanism, Confirm: confirm,
+			})
 			if err != nil {
 				return err
 			}
 			human := fmt.Sprintf("installed the %s add-on %q (%s)\nin-cluster endpoint: %s\nprovides: %s",
 				a.Type, a.Name, a.Image, a.Endpoint, strings.Join(a.Capabilities, ", "))
+			// Which mechanism is behind an instance decides how it is run, backed up and removed, so
+			// the install that chose one says so rather than leaving it to `addon list --json`.
+			if a.Backend == controlplane.AddonBackendCloudNativePG {
+				human += "\nrunning on: CloudNativePG (backups still use the same dump path; removing this instance is not built yet)"
+			}
 			return emit(out, o.json, a, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	// The mechanism is offered on the operator CLI and not on the agent surface, which is where
+	// ADR-0066's Consequences put it: running the add-on on an operator presumes the operator is
+	// there, and putting it there needs cluster-admin the agent does not have and must not.
+	cmd.Flags().BoolVar(&cnpg, "cnpg", false, "run the postgres add-on on CloudNativePG (needs `burrow cluster postgres install` first)")
 	return cmd
 }
 

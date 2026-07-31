@@ -199,12 +199,34 @@ func fetch(url string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// extractCNPGPlacementSchema finds the Cluster CRD in a release manifest and returns the pruned
-// schema of the placement fields on its storage version, plus that version's name.
+// extractCNPGPlacementSchema returns the pruned schema of the placement fields on the Cluster CRD's
+// storage version, plus that version's name.
+func extractCNPGPlacementSchema(manifest []byte) (*schemaNode, string, error) {
+	resourceSpec, apiVersion, err := cnpgClusterSpecSchema(manifest)
+	if err != nil {
+		return nil, "", err
+	}
+	placement := &schemaNode{Type: "object", Properties: map[string]*schemaNode{}}
+	for _, field := range []string{"affinity", "topologySpreadConstraints"} {
+		node := resourceSpec.Properties[field]
+		if node == nil {
+			return nil, "", fmt.Errorf("the %s spec has no %s field; CNPG's placement surface "+
+				"has moved and the mapping in cnpgPlacement needs rewriting, not re-recording",
+				cnpgClusterCRD, field)
+		}
+		placement.Properties[field] = node
+	}
+	return placement, apiVersion, nil
+}
+
+// cnpgClusterSpecSchema finds the Cluster CRD in a release manifest and returns the WHOLE schema of
+// its spec on the storage version, plus that version's name. Both recordings start here and prune
+// differently: the placement one to ADR-0077's two fields, the Cluster one to the paths the
+// composition writes.
 //
 // It takes the STORAGE version rather than the first served one: the storage version is what the
 // API server persists and prunes against, which is the behaviour ADR-0077 §3 is about.
-func extractCNPGPlacementSchema(manifest []byte) (*schemaNode, string, error) {
+func cnpgClusterSpecSchema(manifest []byte) (*schemaNode, string, error) {
 	reader := utilyaml.NewYAMLReader(bufio.NewReader(strings.NewReader(string(manifest))))
 	for {
 		doc, err := reader.Read()
@@ -244,17 +266,7 @@ func extractCNPGPlacementSchema(manifest []byte) (*schemaNode, string, error) {
 			if resourceSpec == nil {
 				return nil, "", fmt.Errorf("the %s schema has no spec", cnpgClusterCRD)
 			}
-			placement := &schemaNode{Type: "object", Properties: map[string]*schemaNode{}}
-			for _, field := range []string{"affinity", "topologySpreadConstraints"} {
-				node := resourceSpec.Properties[field]
-				if node == nil {
-					return nil, "", fmt.Errorf("the %s spec has no %s field; CNPG's placement surface "+
-						"has moved and the mapping in cnpgPlacement needs rewriting, not re-recording",
-						cnpgClusterCRD, field)
-				}
-				placement.Properties[field] = node
-			}
-			return placement, crd.Spec.Group + "/" + v.Name, nil
+			return resourceSpec, crd.Spec.Group + "/" + v.Name, nil
 		}
 		return nil, "", fmt.Errorf("the %s CRD has no storage version", cnpgClusterCRD)
 	}

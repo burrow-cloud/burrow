@@ -18,7 +18,7 @@ import (
 func installPostgres(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Database, *fake.Provisioner) {
 	t.Helper()
 	e, k, d, prov := newPostgresEngine(t)
-	if _, err := e.InstallAddon(context.Background(), cp.AddonPostgres, "", true); err != nil {
+	if _, err := e.InstallAddon(context.Background(), cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
 	if _, ok := k.AddonVolume("burrow-postgres"); !ok {
@@ -198,7 +198,7 @@ func TestRemoveAddonBackupVolumeSurvivesDataDeletion(t *testing.T) {
 func TestRemoveStatelessAddonHasNoVolume(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newPostgresEngine(t)
-	if _, err := e.InstallAddon(ctx, cp.AddonCache, "", true); err != nil {
+	if _, err := e.InstallAddon(ctx, cp.AddonCache, "", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
 

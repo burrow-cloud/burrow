@@ -6,18 +6,28 @@ package kube
 import (
 	"fmt"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 // NewFromConfig builds an Adapter from a REST config and namespace.
+//
+// It wires the dynamic client alongside the typed one, so a production adapter can address the
+// custom resources Burrow creates (the CloudNativePG `Cluster` of ADR-0066 §1). Nothing else changes
+// by having it: a cluster with no CloudNativePG has no such object, and every path that reads one
+// answers "there is none" (getCNPGCluster).
 func NewFromConfig(cfg *rest.Config, namespace string) (*Adapter, error) {
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kube: building clientset: %w", err)
 	}
-	return New(client, namespace), nil
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("kube: building dynamic client: %w", err)
+	}
+	return New(client, namespace).WithDynamicClient(dyn), nil
 }
 
 // LoadConfig resolves the cluster connection the way a control plane should: the

@@ -159,8 +159,9 @@ func TestClusterPostgresInstallSkipsWhenRunning(t *testing.T) {
 }
 
 // TestClusterPostgresInstallIsHonestAboutTheAddon asserts the closing block does not imply the
-// Postgres add-on runs on the operator — it does not yet, and describing unbuilt behavior as done is
-// the one thing ADR-0009 forbids outright.
+// Postgres add-on runs on the operator by DEFAULT — it does not, the operator path is opt-in while
+// the rest of ADR-0066 lands, and describing unbuilt behavior as done is the one thing ADR-0009
+// forbids outright.
 func TestClusterPostgresInstallIsHonestAboutTheAddon(t *testing.T) {
 	stubClusterPostgresClientset(t, cnpgFakeClientset(false))
 	recordAppliedURL(t)
@@ -169,8 +170,10 @@ func TestClusterPostgresInstallIsHonestAboutTheAddon(t *testing.T) {
 	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
-	if !strings.Contains(out.String(), "does not run on the operator yet") {
-		t.Errorf("install must say the add-on does not use the operator yet:\n%s", out.String())
+	for _, want := range []string{"still stands up its own Deployment by default", "--cnpg", "is not built yet"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("install output must say %q, so the operator path reads as opt-in and partial:\n%s", want, out.String())
+		}
 	}
 }
 

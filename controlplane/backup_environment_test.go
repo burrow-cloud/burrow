@@ -311,7 +311,7 @@ func TestRemoveRetainsThisEnvironmentsBackupClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddonInstanceName: %v", err)
 	}
-	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, "staging", true); err != nil {
+	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, "staging", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
 	backup, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "")

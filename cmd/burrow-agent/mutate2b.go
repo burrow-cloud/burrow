@@ -245,7 +245,7 @@ func newAddonInstallCmd() *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "addon_install", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.InstallAddon(ctx, args[0], env, confirm)
+				return c.InstallAddon(ctx, args[0], env, client.InstallAddonOptions{Confirm: confirm})
 			})
 		},
 	}

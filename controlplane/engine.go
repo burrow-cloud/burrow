@@ -710,10 +710,13 @@ func (e *Engine) ListApps(ctx context.Context, env string) ([]WorkloadStatus, er
 // separate instance up beside it. The environment is resolved the same way a deploy's is, so an
 // install that names none while several environments are registered is refused rather than landing
 // on whichever one happens to be first (ADR-0047 §1).
-func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, confirm bool) (AddonInfo, error) {
+func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, opts InstallAddonOptions) (AddonInfo, error) {
 	spec, ok := LookupAddon(t)
 	if !ok {
 		return AddonInfo{}, fmt.Errorf("install addon: unknown type %q: %w", t, ErrInvalid)
+	}
+	if opts.Mechanism == AddonMechanismCloudNativePG && t != AddonPostgres {
+		return AddonInfo{}, fmt.Errorf("install addon %s: CloudNativePG backs the postgres add-on and no other: %w", t, ErrInvalid)
 	}
 	targetEnv, _, err := e.resolveMutatingEnvironment(ctx, env)
 	if err != nil {
@@ -723,17 +726,26 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, conf
 	if err != nil {
 		return AddonInfo{}, fmt.Errorf("install addon %s: loading guardrail policy: %w", t, err)
 	}
+	// The audit row and the confirmation message both name the MECHANISM when it is not the
+	// catalog's own, because "installing the postgres add-on" describes two materially different
+	// things once ADR-0066 exists, and a confirmation that does not say which one it is is not
+	// informed consent (ADR-0006).
 	args := map[string]string{"type": string(t), "image": spec.Image, "env": targetEnv}
+	mechanism := ""
+	if opts.Mechanism != AddonMechanismDefault {
+		args["mechanism"] = string(opts.Mechanism)
+		mechanism = fmt.Sprintf(" on %s", opts.Mechanism)
+	}
 	if err := e.recordDecision(ctx, auditOpAddonInstall, string(t), args, GuardrailAddonInstall,
 		// The DISPOSITION is looked up globally: addon.* is cluster-level and not EnvScopable
 		// (ADR-0035 phase 2c), so an environment cannot relax or tighten it. The environment still
 		// appears in the message and the audit args, because which environment an add-on operation
 		// lands in is exactly what the operator is being asked to approve (ADR-0067 §1).
-		pol.evaluateGuardrail("", "addon install", GuardrailAddonInstall, confirm,
-			fmt.Sprintf("installing the %s add-on (%s) in environment %s", t, spec.Image, targetEnv))); err != nil {
+		pol.evaluateGuardrail("", "addon install", GuardrailAddonInstall, opts.Confirm,
+			fmt.Sprintf("installing the %s add-on (%s) in environment %s%s", t, spec.Image, targetEnv, mechanism))); err != nil {
 		return AddonInfo{}, err
 	}
-	info, err := e.k8s.DeployAddon(ctx, spec, targetEnv)
+	info, err := e.k8s.DeployAddon(ctx, spec, targetEnv, opts.Mechanism)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonInstall, string(t), args, err)
 		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
@@ -847,6 +859,23 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 	info, err := e.db.Addon(ctx, name)
 	if err != nil {
 		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, err)
+	}
+	// A CloudNativePG-backed instance is refused here, before the guardrail and before the final
+	// backup, because removing it correctly is not built yet and this is the earliest point that can
+	// tell (ADR-0066 §1 moved the mechanism; ADR-0064's removal semantics have not moved with it).
+	//
+	// It is refused rather than attempted. ADR-0064 §1 makes a removal KEEP the data by default, and
+	// under this mechanism the volumes are the operator's: they carry the `Cluster` as their owner,
+	// so deleting it deletes them, and a fresh `Cluster` does not adopt what is left if it does not.
+	// Neither branch of `addon remove` is therefore expressible yet — the default would destroy the
+	// data it promises to keep, and a reinstall would not bring it back — so the honest answer is a
+	// refusal that says so rather than a removal that half-works on the object holding every
+	// attached app's database.
+	if info.Backend == AddonBackendCloudNativePG {
+		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: this instance runs on CloudNativePG, and "+
+			"removing one is not built yet: its volumes belong to the operator, so `addon remove` cannot "+
+			"keep the data the way it promises to (ADR-0064 §1). Nothing has been changed: %w",
+			name, ErrNotImplemented)
 	}
 	apps, appsKnown := e.attachedApps(ctx, info)
 

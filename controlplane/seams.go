@@ -261,10 +261,23 @@ type Kubernetes interface {
 	// named by AddonInstanceName, so the default environment lands on exactly the names an existing
 	// install already has and any other environment gets its own instance beside it — its own pod,
 	// its own volume, and for Postgres its own superuser credential.
-	DeployAddon(ctx context.Context, spec AddonSpec, env string) (AddonInfo, error)
-	// AddonReady reports whether the named add-on's backing Deployment is available. It is a
-	// cheap single-Deployment readiness probe — readiness is a live property, not stored in the
-	// registry. A missing Deployment is reported as not ready (false, nil), not an error.
+	//
+	// mech selects HOW the instance's workload is provided. The zero value is the catalog's own
+	// mechanism, a Deployment Burrow authors; AddonMechanismCloudNativePG backs a Postgres instance
+	// with a CloudNativePG `Cluster` instead (ADR-0066 §1). The instance's NAME, endpoint, superuser
+	// Secret and per-app contract are the same either way — the mechanism is a fact about who runs
+	// the server, not a second kind of add-on.
+	DeployAddon(ctx context.Context, spec AddonSpec, env string, mech AddonMechanism) (AddonInfo, error)
+	// AddonReady reports whether the named add-on's backing workload is available. It is a cheap
+	// single-object readiness probe — readiness is a live property, not stored in the registry — and
+	// a missing workload is reported as not ready (false, nil), not an error.
+	//
+	// WHICH object it reads is resolved from the cluster, not from the registry, because an add-on
+	// instance is not always a Deployment: a CloudNativePG-backed Postgres instance has none at all,
+	// and its readiness is its `Cluster`'s ready instance count (ADR-0066 §1). Reading only the
+	// Deployment would report every such instance as not running, and the failure observer would
+	// then open an ADR-0074 §6 discrepancy row against a database that is serving perfectly well —
+	// a false absence, which is precisely the diagnosis §6 exists to make correctly.
 	AddonReady(ctx context.Context, name string) (bool, error)
 	// DeleteAddon tears down the named add-on's WORKLOAD — its Deployment, Service, collector, and
 	// generated config — and, only when deleteData is true, destroys its data volume as well.

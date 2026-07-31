@@ -879,7 +879,7 @@ pinned by tests that fail if a verb is added or removed.
 
 **Read-only:** `apps`, `status`, `history`, `next-tag`, `logs`, `config`, `secret` (keys),
 `reachability`, `cluster`, `cluster capacity`, `addons`, `backups`, `logs-query`,
-`metrics-query`, `guard`, `audit`, `failures`, `providers`, `environments`.
+`metrics-query`, `guard`, `audit`, `failures`, `health`, `providers`, `environments`.
 
 **Mutating** (each returns an outcome envelope — `executed` / `held_for_confirmation` /
 `denied` / `error`, exit codes 0/2/3/1): `deploy`, `build`, `rollback`, `scale`, `autoscale`,

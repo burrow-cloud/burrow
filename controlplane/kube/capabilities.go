@@ -81,7 +81,7 @@ func (p *Prober) DetectCapabilities(ctx context.Context) (controlplane.ClusterCa
 // the ingress controller (a ready ingress-nginx controller Deployment) and its IngressClasses, the
 // default and all StorageClasses, the cloud
 // provider (from node providerIDs/labels), cert-manager and metrics-server (via API-group
-// discovery), and detects
+// discovery), the CloudNativePG operator (its API group plus a running controller), and detects
 // LoadBalancer support from whatever actually services LoadBalancers — a recognized cloud provider,
 // k3s's built-in servicelb, or MetalLB (ADR-0043). It performs only get/list reads and API-group
 // discovery — it never writes. It is a free function so the same detection runs whether driven by
@@ -125,6 +125,12 @@ func DetectCapabilities(ctx context.Context, client kubernetes.Interface) (contr
 		return controlplane.ClusterCapabilities{}, err
 	}
 	caps.MetricsServer = metricsServer
+
+	cnpg, err := DetectCloudNativePG(ctx, client)
+	if err != nil {
+		return controlplane.ClusterCapabilities{}, err
+	}
+	caps.CloudNativePG = cnpg
 
 	return caps, nil
 }

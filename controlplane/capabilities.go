@@ -30,6 +30,11 @@ type ClusterCapabilities struct {
 	// detected via API-group discovery. It powers `kubectl top`, HPA CPU/memory autoscaling, and the
 	// utilization layer of capacity reporting; Burrow auto-ensures it as a baseline (ADR-0054 §1).
 	MetricsServer MetricsServerCapability `json:"metrics_server"`
+	// CloudNativePG is the CloudNativePG operator's situation: whether its CRDs are served, whether
+	// a controller is actually running, and which release it is (ADR-0066 §1). It is the cluster
+	// prerequisite the Postgres add-on's mechanism moves onto, installed by an operator-CLI setup
+	// step because CRDs need cluster-admin.
+	CloudNativePG CloudNativePGCapability `json:"cloudnative_pg"`
 	// Provider is the detected cloud provider, inferred from node labels / providerID.
 	Provider ProviderCapability `json:"provider"`
 	// DNS is whether a DNS provider is configured in the registry (ADR-0023) — a control-plane
@@ -87,6 +92,28 @@ type CertManagerCapability struct {
 // needs no RBAC.
 type MetricsServerCapability struct {
 	Present bool `json:"present"`
+}
+
+// CloudNativePGCapability reports the CloudNativePG operator, the cluster prerequisite ADR-0066 §1
+// puts the Postgres add-on's mechanism on. It is three facts rather than one because they fail
+// apart, and each failure looks like the others from the outside:
+//
+//   - Present is whether the postgresql.cnpg.io API group is served — the CRDs are installed, so a
+//     `Cluster` object can be written. Detected via API-group discovery, which needs no RBAC.
+//   - Ready is whether a controller is actually RUNNING. CRDs are cluster-scoped and outlive the
+//     operator that installed them, so a cluster can accept a `Cluster` object that nothing will
+//     ever reconcile. Present without Ready is precisely that state, and it must not read as
+//     installed.
+//   - Version is the running operator's release, read from its image tag, empty when unknown.
+//     Pinned is the release Burrow targets — a constant, not a cluster read. They are reported
+//     side by side because the placement translation Burrow writes into a `Cluster` is a claim
+//     about a specific release's schema (ADR-0077 §3), so a cluster running an older operator is a
+//     fact the operator of it should be able to see rather than discover from a pruned field.
+type CloudNativePGCapability struct {
+	Present bool   `json:"present"`
+	Ready   bool   `json:"ready"`
+	Version string `json:"version,omitempty"`
+	Pinned  string `json:"pinned,omitempty"`
 }
 
 // ProviderCapability reports the detected cloud provider. Cloud is the provider id (e.g.

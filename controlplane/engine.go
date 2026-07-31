@@ -1300,6 +1300,9 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 		e.recordExecution(ctx, auditOpAppDelete, app, args, err)
 		return fmt.Errorf("delete app %s: removing release history: %w", app, err)
 	}
+	// The app is gone, so its recorded exposure is intent about nothing. Leaving it would have the
+	// observer report a missing Ingress for an app that was deliberately deleted (ADR-0074 §6).
+	e.forgetExposure(ctx, app, env)
 	e.recordExecution(ctx, auditOpAppDelete, app, args, nil)
 	return nil
 }
@@ -1728,6 +1731,9 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 		return ExposeResult{}, fmt.Errorf("expose %s: %w", req.App, err)
 	}
 	e.recordExecution(ctx, auditOpExpose, req.App, args, nil)
+	// Record what was asked for, so an Ingress that later disappears is a failure Burrow can see
+	// rather than an app that looks like it was never exposed (ADR-0074 §6).
+	e.recordExposure(ctx, Exposure{App: req.App, Environment: envName(req.Env), Host: req.Host, Port: req.Port, TLS: req.TLS})
 	scheme := "http"
 	if req.TLS {
 		scheme = "https"
@@ -1918,10 +1924,14 @@ func (e *Engine) Unexpose(ctx context.Context, app, env string) error {
 	}
 	if err := e.k8s.WithNamespace(ns).Unexpose(ctx, app); err != nil {
 		if errors.Is(err, ErrNotFound) {
+			// The routing is already gone, but a stale intent row would have the observer report a
+			// missing Ingress forever, so it is dropped on this path too.
+			e.forgetExposure(ctx, app, env)
 			return fmt.Errorf("unexpose %s: not exposed: %w", app, err)
 		}
 		return fmt.Errorf("unexpose %s: %w", app, err)
 	}
+	e.forgetExposure(ctx, app, env)
 	return nil
 }
 

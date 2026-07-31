@@ -206,9 +206,28 @@ mkdir -p %q
 pg_dump -Fc -f %q
 stat -c%%s %q > /dev/termination-log`, dir, dump, dump)
 
-	name := fmt.Sprintf("burrow-pg-backup-%s", backupID)
+	name := backupJobName(backupID)
 	job := a.backupJob(name, script, connEnv, dest, dump)
 	return a.runBackupJobAwait(ctx, job, name, dest)
+}
+
+// backupJobName is the Job name for a backup id. It is one function rather than a format string at
+// each use so the name the observer looks for cannot drift from the name the backup creates.
+func backupJobName(backupID string) string { return "burrow-pg-backup-" + backupID }
+
+// BackupJobPresent reports whether the Job for a backup id still exists (ADR-0074 §6). It is a plain
+// read, and it answers the one question the registry cannot: a row left `pending` by a burrowd that
+// restarted mid-backup looks exactly like a backup still running, and the difference is otherwise
+// discovered at restore time. A missing Job is absent (false, nil), not an error.
+func (a *Adapter) BackupJobPresent(ctx context.Context, backupID string) (bool, error) {
+	_, err := a.client.BatchV1().Jobs(a.addonNamespace).Get(ctx, backupJobName(backupID), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("kube: reading backup job for %q: %w", backupID, err)
+	}
+	return true, nil
 }
 
 // RunRestoreJob pg_restores app's dump from the backup PVC into its database via a one-shot Job and

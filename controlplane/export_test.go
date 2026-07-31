@@ -24,6 +24,13 @@ func (p *AutoDeployPoller) ReconcileOnceForTest(ctx context.Context) {
 	p.reconcile(ctx)
 }
 
+// ObserveOnceForTest runs a single observation sweep, so an external test can drive the observer
+// deterministically without the Run loop's timing. It is test-build only; production drives the same
+// sweep from Run on the injected cadence.
+func (o *Observer) ObserveOnceForTest(ctx context.Context) {
+	o.observe(ctx)
+}
+
 // CompareTagsForTest compares two image tags by stable semver order (negative, zero, positive), for
 // a test asserting the watcher never downgrades. Test-build only.
 func CompareTagsForTest(a, b string) int {

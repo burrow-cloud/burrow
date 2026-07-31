@@ -322,6 +322,14 @@ type Kubernetes interface {
 	// Deployment returns ErrNotFound; the caller treats that as "nothing running to roll".
 	RestartWorkload(ctx context.Context, app string, at time.Time) error
 
+	// BackupJobPresent reports whether the one-shot Job for the given backup id still exists in the
+	// add-on namespace. It is a READ, and it exists for one question the registry cannot answer on
+	// its own (ADR-0074 §6): a backup row left `pending` — by a burrowd that restarted mid-backup, or
+	// by a Job the cluster garbage-collected — is indistinguishable from a backup still running, and
+	// a backup that never completed is the sort of thing discovered at restore time unless something
+	// looks. A missing Job is reported as absent (false, nil), not an error.
+	BackupJobPresent(ctx context.Context, backupID string) (bool, error)
+
 	// RunBackupJob runs a one-shot Job in the add-on namespace that pg_dumps app's database on
 	// environment env's Postgres instance to /<backup-pvc>/<app>/<backupID>.dump (custom format),
 	// ensuring the backup PVC first (ADR-0032). The Job connects as the superuser, reading the
@@ -487,6 +495,79 @@ type Database interface {
 	ListBackups(ctx context.Context, app, env string) ([]Backup, error)
 	// GetBackup returns the backup with the given id, or ErrNotFound.
 	GetBackup(ctx context.Context, id string) (Backup, error)
+	// PendingBackups returns the recorded backups still in `pending` that were created before
+	// `before`, oldest first — the candidates for ADR-0074 §6's "a backup row still pending whose Job
+	// no longer exists". The cutoff is the caller's, not the store's: it is what separates a backup
+	// that is simply still running from one nothing is going to finish, and the observer sets it from
+	// the injected clock. None yields an empty slice and no error.
+	PendingBackups(ctx context.Context, before time.Time) ([]Backup, error)
+
+	// ManagedApps returns the distinct (app, environment) pairs the registry says Burrow OWNS A
+	// WORKLOAD FOR: an app whose release history shows a rollout that actually reached the cluster.
+	// It is the intent side of ADR-0074 §6's first comparison, so it is deliberately not "every app
+	// with a release row" — an app whose only deploy failed before a workload was ever applied has no
+	// Deployment to be missing, and reporting one would be a false positive on the day someone is
+	// already debugging a failed deploy. None yields an empty slice and no error.
+	ManagedApps(ctx context.Context) ([]AppEnvRef, error)
+
+	// RecordExposure upserts the intent behind a successful expose, keyed by (app, environment)
+	// (ADR-0074 §6). It records what was ASKED FOR — the host, the port, whether TLS was requested —
+	// and never whether it currently works, which stays a live read.
+	RecordExposure(ctx context.Context, ex Exposure) error
+	// DeleteExposure removes the recorded exposure for app in env. Removing one that is not recorded
+	// is a no-op, not an error: an unexpose must succeed whether or not the intent row survived.
+	DeleteExposure(ctx context.Context, app, env string) error
+	// Exposures returns every recorded exposure, ordered by app then environment. None yields an
+	// empty slice and no error.
+	Exposures(ctx context.Context) ([]Exposure, error)
+
+	// RecordFailure opens or extends the ledger row for one observed failure (ADR-0074 §4). The row
+	// is keyed by (object, reason) so concurrent reasons on one object coexist as separate rows with
+	// independent lifetimes (§5). A first sighting writes first_seen, last_seen and a count of one; a
+	// later sighting of the same still-active failure advances last_seen and increments the count,
+	// leaving first_seen — the answer to "when did it start" — alone. A sighting of a failure that
+	// had been RESOLVED opens a new row rather than reviving the old one, so a thing that broke,
+	// recovered and broke again reads as two episodes instead of one long outage.
+	//
+	// It is the ledger's only write path for failures, and it is not the audit log: they are separate
+	// tables deliberately (§7).
+	RecordFailure(ctx context.Context, obs FailureObservation) error
+	// ResolveFailures closes, at time at, every active ledger row that is not in keep and whose
+	// object is not in skip — the "did it recover on its own" half of §4, decided by absence.
+	//
+	// The two lists are what keep that decision honest. keep is every failure the sweep observed
+	// still happening. skip is every object the sweep could NOT read: those rows are left exactly as
+	// they are, because a failure Burrow could not check is not a failure that recovered. A row for
+	// an object that is in neither — one the sweep read and found healthy, or one that has left the
+	// registry entirely — is resolved.
+	ResolveFailures(ctx context.Context, at time.Time, keep []FailureKey, skip []ObjectRef) error
+	// Failures returns ledger rows matching filter, oldest first. Oldest-first is the order ADR-0074
+	// §5 asks for: when one cause has produced many rows, the earliest first_seen in the cascade is
+	// the likeliest thing to actually fix. No matches yields an empty slice and no error.
+	Failures(ctx context.Context, filter FailureFilter) ([]Failure, error)
+
+	// StartObservationWindow opens a new observation window beginning at `at` and returns its id.
+	// One is opened per RUN of the observer, never reused across a restart: a gap between windows is
+	// time nobody was watching, and it is the only thing that stops an empty ledger from reading as
+	// "nothing broke" (ADR-0074's consequences).
+	StartObservationWindow(ctx context.Context, at time.Time) (int64, error)
+	// ExtendObservationWindow advances window id's coverage to `until` and counts one more sweep. A
+	// non-empty degraded note counts the sweep as incomplete and is stored as the window's most
+	// recent degradation, so a stretch during which some objects could not be read is visible as
+	// partial coverage rather than as clean coverage. Extending a window that no longer exists
+	// returns ErrNotFound, which tells the caller to open a fresh one rather than stop recording.
+	ExtendObservationWindow(ctx context.Context, id int64, until time.Time, degraded string) error
+	// ObservationWindows returns the windows whose coverage ends at or after since, oldest first,
+	// capped by limit (a store default when unset). The gaps BETWEEN the returned windows are the
+	// answer the caller is really after. None yields an empty slice and no error.
+	ObservationWindows(ctx context.Context, since time.Time, limit int) ([]ObservationWindow, error)
+
+	// PruneLedger enforces ADR-0074 §4's retention bound: it removes failure rows RESOLVED before
+	// `before` and observation windows whose coverage ended before it. An ACTIVE failure is never
+	// removed, however old — a thing that is still broken is not history. Unbounded growth here is
+	// not untidiness; it is an outage in the control plane's own database, which is why the bound is
+	// a requirement rather than a setting.
+	PruneLedger(ctx context.Context, before time.Time) (LedgerPruneResult, error)
 
 	// CreateEnvironment registers a named environment mapping name to namespace (ADR-0035 phase 2).
 	// It rejects a duplicate name (the name is the primary key) with an ErrInvalid-wrapped error.

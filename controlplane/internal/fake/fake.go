@@ -75,11 +75,26 @@ const (
 	OpRunBackupJob         Op = "RunBackupJob"
 	OpRunRestoreJob        Op = "RunRestoreJob"
 	OpRunJob               Op = "RunJob"
+	OpBackupJobPresent     Op = "BackupJobPresent"
 
 	OpCreateEnvironment Op = "CreateEnvironment"
 	OpListEnvironments  Op = "ListEnvironments"
 	OpGetEnvironment    Op = "GetEnvironment"
 	OpDeleteEnvironment Op = "DeleteEnvironment"
+
+	// The failure ledger and what the observer reads to fill it (ADR-0074 §3–§6).
+	OpRecordFailure           Op = "RecordFailure"
+	OpResolveFailures         Op = "ResolveFailures"
+	OpFailures                Op = "Failures"
+	OpStartObservationWindow  Op = "StartObservationWindow"
+	OpExtendObservationWindow Op = "ExtendObservationWindow"
+	OpObservationWindows      Op = "ObservationWindows"
+	OpPruneLedger             Op = "PruneLedger"
+	OpManagedApps             Op = "ManagedApps"
+	OpPendingBackups          Op = "PendingBackups"
+	OpRecordExposure          Op = "RecordExposure"
+	OpDeleteExposure          Op = "DeleteExposure"
+	OpExposures               Op = "Exposures"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

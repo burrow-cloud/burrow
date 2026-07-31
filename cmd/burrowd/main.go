@@ -340,28 +340,67 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		poller := engine.NewAutoDeployPoller(controlplane.AutoDeployConfig{Interval: interval})
 		go poller.Run(ctx)
 	}
+
+	// Start the failure observer (ADR-0074 §3): it sweeps the workloads the registry says Burrow owns,
+	// compares them against the cluster, and writes what broke to the ledger. It is READ-ONLY against
+	// the cluster and never remediates (§9). A non-positive BURROW_OBSERVE_INTERVAL turns it off
+	// entirely, which leaves burrowd answering questions and recording no history — the state it was
+	// in before this existed. It runs for the life of the process on ctx; a restart interrupts
+	// observation, which is precisely why the ledger records its own coverage.
+	if observeInterval := observeInterval(); observeInterval < 0 {
+		log.Printf("burrowd: failure observer disabled (BURROW_OBSERVE_INTERVAL <= 0) — no failure history will be recorded")
+	} else {
+		observer := engine.NewObserver(controlplane.ObserverConfig{
+			Interval:  observeInterval,
+			Retention: ledgerRetention(),
+		})
+		go observer.Run(ctx)
+	}
 	return nil
 }
 
-// autoDeployInterval reads the auto-deploy poll cadence from BURROW_AUTODEPLOY_INTERVAL, a Go
-// duration (e.g. "5m", "30s"). It returns 0 when unset — the poller applies its conservative
-// default (~5 min, ADR-0052 §7) — and a negative sentinel when set to a non-positive value, which
-// turns the watcher off. An unparseable value is a non-fatal misconfiguration: it logs and falls
-// back to the default.
-func autoDeployInterval() time.Duration {
-	v := strings.TrimSpace(os.Getenv("BURROW_AUTODEPLOY_INTERVAL"))
+// observeInterval reads the observation cadence from BURROW_OBSERVE_INTERVAL, a Go duration. It
+// returns 0 when unset — the observer applies DefaultObserveInterval — and a negative sentinel when
+// set to a non-positive value, which turns observation off.
+func observeInterval() time.Duration {
+	return envDuration("BURROW_OBSERVE_INTERVAL")
+}
+
+// ledgerRetention reads how long resolved failures are kept from BURROW_LEDGER_RETENTION, a Go
+// duration (e.g. "720h"). Unset applies DefaultLedgerRetention; a non-positive value turns pruning
+// off, which an operator may deliberately want — the bound exists so unbounded growth in the control
+// plane's own database cannot happen by accident, not to stop someone choosing it deliberately.
+func ledgerRetention() time.Duration {
+	return envDuration("BURROW_LEDGER_RETENTION")
+}
+
+// envDuration parses a Go duration from an environment variable: 0 when unset (the caller's default
+// applies) and a negative sentinel when the value is non-positive, which every caller reads as an
+// explicit off. An unparseable value is a non-fatal misconfiguration — it logs and falls back to the
+// default, because refusing to start over a malformed duration is a worse failure than running on
+// the default cadence.
+func envDuration(key string) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
 		return 0
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
-		log.Printf("burrowd: ignoring invalid BURROW_AUTODEPLOY_INTERVAL %q: %v", v, err)
+		log.Printf("burrowd: ignoring invalid %s %q: %v", key, v, err)
 		return 0
 	}
 	if d <= 0 {
 		return -1 // an explicit off
 	}
 	return d
+}
+
+// autoDeployInterval reads the auto-deploy poll cadence from BURROW_AUTODEPLOY_INTERVAL, a Go
+// duration (e.g. "5m", "30s"). It returns 0 when unset — the poller applies its conservative
+// default (~5 min, ADR-0052 §7) — and a negative sentinel when set to a non-positive value, which
+// turns the watcher off.
+func autoDeployInterval() time.Duration {
+	return envDuration("BURROW_AUTODEPLOY_INTERVAL")
 }
 
 // serve runs the HTTP server and shuts it down gracefully on SIGINT/SIGTERM.

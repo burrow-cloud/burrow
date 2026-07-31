@@ -489,6 +489,25 @@ type Backup struct {
 	FailureDetail string `json:"failure_detail,omitempty"`
 }
 
+// Durable reports whether this row is a backup that SURVIVES LOSING THE CLUSTER: it completed, and
+// it completed at an object-store destination.
+//
+// Both halves are required and neither is redundant. A row only says `completed` for an object-store
+// destination once the object was written AND read back (ADR-0063 §7), so the pair is the strongest
+// fact Burrow holds about a backup — while a `cluster` destination says `completed` on a Job exiting
+// zero, and its bytes are on a volume in the same failure domain as the database they came from.
+// Checking the destination as well as the status also covers the row written before a provider was
+// deregistered, which is `completed` for a dump that never left the cluster.
+//
+// It is a method rather than a comparison written out at each call site because two decisions stand
+// on it and they must not drift: ADR-0064 §5 refuses to destroy a data volume unless the final
+// backup is durable, and the backup-age signal of ADR-0063 §7 / ADR-0066 §5 reports the age of the
+// last durable success. If those two ever disagreed, `--delete-data` would be refusing on one
+// definition of "safe" while the status surface reported another.
+func (b Backup) Durable() bool {
+	return b.Status == BackupCompleted && b.Destination == BackupDestinationObjectStore
+}
+
 // BackupResult reports the outcome of an on-demand backup (ADR-0032): the recorded backup row. It
 // carries the backup id, the app, the path, the destination, the size, and the status — never a
 // secret value.

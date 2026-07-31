@@ -64,7 +64,7 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupsCmd(), newAddonRestoreCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupsCmd(), newAddonBackupHealthCmd(), newAddonRestoreCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
 	return cmd
 }
 
@@ -169,6 +169,109 @@ func newAddonBackupsCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	return cmd
+}
+
+// newAddonBackupHealthCmd is `burrow addon backup-health postgres [<app>]`: ADR-0063 §7's status
+// surface, which ADR-0066 §5 requires the backup-age signal to live on. It answers "are my backups
+// working?" from what BURROW observed — its own recorded backups, plus a reachability probe of each
+// registered destination run at the moment of the call.
+//
+// It is a separate command from `backups` because it answers a different question. `backups` lists
+// what exists; this says whether what exists amounts to coverage — and in particular whether any of
+// it left the cluster, which a listing can only show one row at a time.
+func newAddonBackupHealthCmd() *cobra.Command {
+	o := &commonOpts{}
+	cmd := &cobra.Command{
+		Use:   "backup-health <addon> [<app>]",
+		Short: "Report backup coverage: last successful backup, last failure, destination reachability",
+		Long: "backup-health reports what Burrow itself observed about an add-on's backups: how long ago\n" +
+			"the last backup completed, how long ago the last one actually left the cluster, the most\n" +
+			"recent failure and why, and whether each registered object-storage destination answers now.\n\n" +
+			"The two ages are different questions. An in-cluster dump shares a failure domain with the\n" +
+			"database it came from, so only a backup that reached an object store is one that survives\n" +
+			"losing the cluster — and that is the age worth watching.\n\n" +
+			"With no app it spans every app; with no --env, every environment. Read-only.",
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			app := ""
+			if len(args) == 2 {
+				app = args[1]
+			}
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			health, err := c.BackupHealth(ctx, args[0], app, o.env)
+			if err != nil {
+				return err
+			}
+			return emit(cmd.OutOrStdout(), o.json, health, backupHealthHuman(health))
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	return cmd
+}
+
+// backupHealthHuman renders the health report for a human. The summary leads, because it is the
+// answer; the observations follow as the evidence for it. A destination that did not answer is
+// listed with what Burrow could not do, never with the vendor's own words.
+func backupHealthHuman(h client.BackupHealth) string {
+	var b strings.Builder
+	b.WriteString(h.Summary)
+	if h.LastSuccess != nil {
+		fmt.Fprintf(&b, "\n\nlast successful backup:  %s (%s, %s ago, %s)",
+			h.LastSuccess.ID, h.LastSuccess.App, backupAge(h.LastSuccess.AgeSeconds), backupWhereShort(*h.LastSuccess))
+	}
+	if h.LastDurableSuccess != nil && (h.LastSuccess == nil || h.LastDurableSuccess.ID != h.LastSuccess.ID) {
+		fmt.Fprintf(&b, "\nlast off-cluster backup: %s (%s, %s ago, %s)",
+			h.LastDurableSuccess.ID, h.LastDurableSuccess.App, backupAge(h.LastDurableSuccess.AgeSeconds), backupWhereShort(*h.LastDurableSuccess))
+	}
+	if h.LastFailure != nil {
+		fmt.Fprintf(&b, "\nlast failure:            %s (%s, %s ago, %s)",
+			h.LastFailure.ID, h.LastFailure.App, backupAge(h.LastFailure.AgeSeconds), h.LastFailure.Reason)
+		if h.LastFailure.Detail != "" {
+			fmt.Fprintf(&b, "\n                         %s", h.LastFailure.Detail)
+		}
+	}
+	if h.Pending > 0 {
+		fmt.Fprintf(&b, "\npending:                 %d (a pending backup is never counted as a successful one)", h.Pending)
+	}
+	if len(h.Destinations) > 0 {
+		b.WriteString("\n\ndestinations:")
+		for _, d := range h.Destinations {
+			mark := "unreachable"
+			if d.Reachable {
+				mark = "reachable"
+			}
+			fmt.Fprintf(&b, "\n  %s  %s (%s) — %s", d.Provider, mark, d.Bucket, d.Detail)
+		}
+	}
+	return b.String()
+}
+
+// backupWhereShort names where one backup's bytes went, in a few words.
+func backupWhereShort(o client.BackupObservation) string {
+	if o.Destination == "object-store" && o.Provider != "" {
+		return "the " + o.Provider + " object store"
+	}
+	return "a volume in this cluster"
+}
+
+// backupAge renders an age in seconds the way the server's own summary does, so the two lines of one
+// report do not describe the same duration differently.
+func backupAge(seconds int64) string {
+	switch {
+	case seconds < 60:
+		return fmt.Sprintf("%ds", seconds)
+	case seconds < 3600:
+		return fmt.Sprintf("%dm", seconds/60)
+	case seconds < 86400:
+		return fmt.Sprintf("%dh", seconds/3600)
+	default:
+		return fmt.Sprintf("%dd", seconds/86400)
+	}
 }
 
 // newAddonRestoreCmd is `burrow addon restore postgres <app> --backup <id>`: restore an app's

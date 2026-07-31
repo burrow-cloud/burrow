@@ -847,3 +847,80 @@ func TestAddonRemoveSummaryReportsWhatHappenedToTheCopy(t *testing.T) {
 		t.Errorf("summary does not state plainly that no copy exists:\n%s", s)
 	}
 }
+
+// TestAddonBackupHealthLeadsWithTheAnswer asserts `addon backup-health` prints the summary first and
+// then the evidence, and that the two ages are distinguishable in the output — the last successful
+// backup and the last one that actually left the cluster are different facts, and a report that
+// blurred them would let in-cluster dumps read as coverage (ADR-0063 §7, ADR-0066 §5).
+func TestAddonBackupHealthLeadsWithTheAnswer(t *testing.T) {
+	isolateConfig(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("addon"); got != "postgres" {
+			t.Errorf("addon query = %q, want postgres", got)
+		}
+		if got := r.URL.Query().Get("app"); got != "web" {
+			t.Errorf("app query = %q, want web", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"addon": "postgres", "app": "web", "state": "durable",
+			"summary": "backups of web: the last backup to leave the cluster was 2d ago, to the \"b2\" object store",
+			"last_success": map[string]any{
+				"id": "bk-new", "app": "web", "age_seconds": 3600,
+				"status": "completed", "destination": "cluster",
+			},
+			"last_durable_success": map[string]any{
+				"id": "bk-old", "app": "web", "age_seconds": 172800,
+				"status": "completed", "destination": "object-store", "provider": "b2",
+			},
+			"last_failure": map[string]any{
+				"id": "bk-bad", "app": "web", "age_seconds": 900,
+				"status": "failed", "reason": "StoreRejected", "detail": "the store answered and refused the write",
+			},
+			"pending": 2,
+			"destinations": []map[string]any{
+				{"provider": "b2", "bucket": "burrow-backups-x", "reachable": false, "detail": "the endpoint did not answer for this bucket"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "backup-health", "postgres", "web", "--control-plane", srv.URL, "--token", "tok"}, &out, &errb); err != nil {
+		t.Fatalf("addon backup-health: %v (stderr: %s)", err, errb.String())
+	}
+	s := out.String()
+	for _, want := range []string{
+		"the last backup to leave the cluster was 2d ago",
+		"last successful backup:", "bk-new", "1h ago", "a volume in this cluster",
+		"last off-cluster backup:", "bk-old", "2d ago", "the b2 object store",
+		"last failure:", "bk-bad", "StoreRejected", "the store answered and refused the write",
+		"pending:", "never counted as a successful one",
+		"destinations:", "b2", "unreachable", "the endpoint did not answer for this bucket",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("report missing %q:\n%s", want, s)
+		}
+	}
+	// The summary is the answer, so it comes before the evidence it is drawn from.
+	if i, j := strings.Index(s, "the last backup to leave the cluster"), strings.Index(s, "last successful backup:"); i == -1 || j == -1 || i > j {
+		t.Errorf("the summary must lead the report:\n%s", s)
+	}
+}
+
+// TestAddonBackupHealthOmitsARedundantSecondLine asserts the off-cluster line is not repeated when
+// the newest success IS the newest durable one — the same row printed twice reads as two backups.
+func TestAddonBackupHealthOmitsARedundantSecondLine(t *testing.T) {
+	h := client.BackupHealth{
+		State:              "durable",
+		Summary:            "backups: the last backup to leave the cluster was 5m ago, to the \"b2\" object store",
+		LastSuccess:        &client.BackupObservation{ID: "bk-1", App: "web", AgeSeconds: 300, Destination: "object-store", Provider: "b2"},
+		LastDurableSuccess: &client.BackupObservation{ID: "bk-1", App: "web", AgeSeconds: 300, Destination: "object-store", Provider: "b2"},
+	}
+	s := backupHealthHuman(h)
+	if strings.Contains(s, "last off-cluster backup:") {
+		t.Errorf("the same row must not be reported twice:\n%s", s)
+	}
+	if !strings.Contains(s, "last successful backup:  bk-1") {
+		t.Errorf("report missing the success line:\n%s", s)
+	}
+}

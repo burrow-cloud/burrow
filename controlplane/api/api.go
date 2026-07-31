@@ -109,6 +109,11 @@ func New(cfg Config) (http.Handler, error) {
 	// guardrail (it overwrites the live database).
 	v1.HandleFunc("POST /v1/addons/backup", s.backupAddon)
 	v1.HandleFunc("GET /v1/addons/backups", s.listBackupsHandler)
+	// backup-health is ADR-0063 §7's status surface: the age of the last successful backup, the age
+	// of the last one that left the cluster, the last failure, and whether each registered
+	// object-storage destination answers right now. Read-only, and it moves no secret — the
+	// destination probe signs a request with the stored credential and reports names, never values.
+	v1.HandleFunc("GET /v1/addons/backup-health", s.backupHealthHandler)
 	v1.HandleFunc("POST /v1/addons/restore", s.restoreAddon)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
@@ -763,6 +768,23 @@ func (s *server) listBackupsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, backupsResponse{Backups: backups})
+}
+
+// backupHealthHandler reports what Burrow observed about an add-on's backups (ADR-0063 §7,
+// ADR-0066 §5). An app query param narrows to one app and an env param to one environment; absent,
+// the report spans every app and environment, exactly as the backups listing does. Read-only; no
+// secret value.
+func (s *server) backupHealthHandler(w http.ResponseWriter, r *http.Request) {
+	addon := r.URL.Query().Get("addon")
+	if addon == "" {
+		addon = string(controlplane.AddonPostgres)
+	}
+	health, err := s.engine.BackupHealth(r.Context(), controlplane.AddonType(addon), r.URL.Query().Get("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, health)
 }
 
 // restoreAddon restores an app's database from a recorded backup, overwriting its live contents

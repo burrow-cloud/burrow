@@ -29,6 +29,11 @@ func newHookCmd() *cobra.Command {
 			"                the point: it is how a schema change ships with the code that needs it.\n" +
 			"                If it fails, the deploy does not happen and the running version keeps\n" +
 			"                serving on the old schema.\n" +
+			"  post-deploy   runs after the rollout settles, and runs whether it SUCCEEDED OR FAILED —\n" +
+			"                a hook that fired only on success could not report the case it exists for.\n" +
+			"                It also runs after a rollback, told that it was one. It cannot undo the\n" +
+			"                deploy: by the time it runs the deploy has happened, so a failure is\n" +
+			"                reported and nothing is rolled back.\n" +
 			"  pre-rollback  runs before a rollback puts the older image back, FROM the image being\n" +
 			"                rolled back AWAY from, because that is where the code that knows how to\n" +
 			"                undo its own migration lives. Unset by default, and leaving it unset is\n" +
@@ -36,15 +41,36 @@ func newHookCmd() *cobra.Command {
 			"A hook is a command in the app's own image, with the app's config and secrets, exactly as\n" +
 			"\"burrow app run\" is. Burrow does not understand migrations: it runs your command, and\n" +
 			"versioning and ordering stay your migration tool's job.\n\n" +
+			"Every hook is also given these environment variables:\n\n" +
+			"  BURROW_HOOK_PHASE    the phase running (e.g. post-deploy)\n" +
+			"  BURROW_APP           the app\n" +
+			"  BURROW_ENVIRONMENT   the environment\n" +
+			"  BURROW_IMAGE         the image the hook is running from\n\n" +
+			"and a post-deploy hook is additionally told how it went:\n\n" +
+			"  BURROW_DEPLOY_KIND     \"deploy\" or \"rollback\"\n" +
+			"  BURROW_DEPLOY_OUTCOME  \"succeeded\" or \"failed\"\n" +
+			"  BURROW_DEPLOY_REASON   why it failed, empty on success. One of a fixed set, so a script\n" +
+			"                         can branch on it: CrashLoopBackOff, Unschedulable, OOMKilled,\n" +
+			"                         CreateContainerConfigError, ImagePullBackOff, ErrImagePull,\n" +
+			"                         VolumeUnavailable, ProgressDeadlineExceeded, DeadlineExceeded,\n" +
+			"                         WorkloadMissing\n" +
+			"  BURROW_DEPLOY_DETAIL   one line of context behind the reason, for a human to read\n" +
+			"  BURROW_RELEASE         the release being reported on\n\n" +
+			"\"succeeded\" means the rollout completed and no pod reported a blocking condition. If the\n" +
+			"app declares a health endpoint (\"burrow app health set\") that includes passing its\n" +
+			"readiness probe; without one it means the containers started. A smoke test is the natural\n" +
+			"post-deploy hook: Burrow tells you the deploy happened, and your command decides whether\n" +
+			"it worked. Burrow never rolls back on its own — your hook can call \"burrow app rollback\".\n\n" +
 			"Pass the command after a -- separator:\n" +
-			"  burrow app hook set web --on pre-deploy -- ./manage.py migrate",
+			"  burrow app hook set web --on pre-deploy -- ./manage.py migrate\n" +
+			"  burrow app hook set web --on post-deploy -- ./notify-deploy.sh",
 	}
 	cmd.AddCommand(newHookSetCmd(), newHookListCmd(), newHookUnsetCmd())
 	return cmd
 }
 
 // hookPhaseFlagUsage describes --on once, so set and unset cannot drift on what a phase is.
-const hookPhaseFlagUsage = "when the command runs: pre-deploy (before a deploy's new image rolls out) or pre-rollback (before a rollback puts the older image back)"
+const hookPhaseFlagUsage = "when the command runs: pre-deploy (before a deploy's new image rolls out), post-deploy (after the rollout settles, told whether it succeeded or failed), or pre-rollback (before a rollback puts the older image back)"
 
 func newHookSetCmd() *cobra.Command {
 	o := &commonOpts{}
@@ -56,9 +82,12 @@ func newHookSetCmd() *cobra.Command {
 			"The command runs as a one-off Job in the app's own image, in the app's namespace, with the\n" +
 			"app's config and secrets injected exactly as the running app sees them. A pre-deploy hook\n" +
 			"runs from the image being deployed; a pre-rollback hook runs from the image being rolled\n" +
-			"back away from.\n\n" +
+			"back away from; a post-deploy hook runs from the image that is now serving.\n\n" +
 			"A pre-deploy hook runs on EVERY deploy of this app in this environment, automated ones\n" +
-			"included, and a command that starts failing blocks deploys until you change or remove it.",
+			"included, and a command that starts failing blocks deploys until you change or remove it.\n" +
+			"A post-deploy hook blocks nothing: it runs after the deploy has happened, and a failure is\n" +
+			"reported rather than undone. It does make a deploy of this app wait for its rollout to\n" +
+			"settle before returning (see \"burrow cluster config\", deploy.settle_timeout).",
 		// Exactly one positional (the app name) before any --; everything after -- is the command.
 		Args: func(cmd *cobra.Command, args []string) error {
 			n := len(args)

@@ -231,6 +231,27 @@ type Kubernetes interface {
 	// namespace (for an apps listing). No workloads is an empty slice, not an error.
 	ListWorkloads(ctx context.Context) ([]WorkloadStatus, error)
 
+	// AwaitRollout blocks until app's newest revision has SETTLED — the completion test
+	// `kubectl rollout status` uses, not merely that the write was accepted — or until it can say why
+	// it did not, bounded by timeout (ADR-0072 §4-§5). It is what makes a `post-deploy` hook possible:
+	// a hook cannot be told how a deploy went until something waits for it to go.
+	//
+	// EVERY OBSERVABLE CONDITION IS AN OUTCOME, NOT AN ERROR, exactly as a non-zero exit is a result
+	// rather than an error on RunJob (ADR-0048 §3). A crash loop, an unschedulable pod, a missing
+	// workload and an expired deadline all come back as a RolloutOutcome with a reason from the closed
+	// vocabulary, because the caller's next move is the same in every case: tell the hook. The error
+	// return is reserved for a call that could not be made at all (an invalid app identifier).
+	//
+	// It returns as soon as it has a verdict rather than sleeping out its bound: a pod reporting a
+	// blocking condition ends the wait immediately, which is the difference between a hook told
+	// "CrashLoopBackOff" in fifteen seconds and one told "timed out" in five minutes (issue #352).
+	// An expired bound is the BACKSTOP, and its outcome carries what was observed rather than the
+	// elapsed time (ADR-0072 §5).
+	//
+	// It mutates nothing. A rollout it reports as failed is left exactly as it is, for the hook to
+	// decide about — Burrow does not roll back by itself (ADR-0072 §6).
+	AwaitRollout(ctx context.Context, app string, timeout time.Duration) (RolloutOutcome, error)
+
 	// DeployAddon installs a building-block backing service per spec for environment env — a
 	// workload, a ClusterIP Service, and a persistent volume when the spec asks for one — and returns
 	// the instance's connection info (ADR-0025). Installing an already-installed add-on is

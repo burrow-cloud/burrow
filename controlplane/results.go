@@ -252,6 +252,11 @@ type RollbackResult struct {
 	RolledBackToReleaseID string `json:"rolled_back_to_release_id"`
 	// SupersededReleaseID is the release that was running before the rollback.
 	SupersededReleaseID string `json:"superseded_release_id"`
+	// Hints are non-blocking notes about the rollback, in the same shape DeployResult carries them:
+	// today, what the rollback's settle-wait observed and what a `post-deploy` hook made of it
+	// (ADR-0072 §4). They never gate or fail the rollback — it has already happened by the time any
+	// of them exists. Empty when there is nothing to note.
+	Hints []string `json:"hints,omitempty"`
 }
 
 // AddProviderRequest registers a vendor credential (ADR-0023, ADR-0030). The token VALUE travels

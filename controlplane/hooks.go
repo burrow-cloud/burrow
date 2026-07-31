@@ -7,17 +7,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
 )
 
 // Lifecycle hooks are named for THE MOMENT THEY RUN (ADR-0072 §1). `pre-deploy` runs before a
-// deploy's image reaches the cluster; `pre-rollback` runs before a rollback's older image does.
+// deploy's image reaches the cluster; `pre-rollback` runs before a rollback's older image does;
+// `post-deploy` runs after the rollout settles, either way, and is told how it went (§4).
 // The name answers the only question a reader has — when does my command run — which is why this
 // is not called a release command: in every other tool a release is the artifact that records what
 // shipped, and borrowing the word would ask the reader to learn a second meaning while answering
 // nothing (§1).
+//
+// THE PRE AND POST PHASES FAIL DIFFERENTLY, AND THAT IS THE WHOLE ASYMMETRY. A failed `pre` hook
+// aborts the operation it ran ahead of: nothing has reached the cluster yet, so a migration failure
+// becomes a deploy that did not happen rather than one that half-happened (§3). A failed `post` hook
+// aborts nothing, because the thing it reports on ALREADY HAPPENED — the image is live and the
+// release is recorded before the hook is even consulted. It is reported, audited, and returned as a
+// hint on an otherwise successful result. Burrow does not roll back by itself (§6).
 //
 // A hook is CONFIGURATION, held per app and environment beside the app's config (ADR-0028), because
 // the path that needs it has no caller to supply one: auto-deploy exists precisely so nobody has to
@@ -33,21 +42,27 @@ const (
 	// an explicit `burrow app deploy`, a build that ends in a deploy, and an unattended auto-deploy
 	// alike (ADR-0072 §2). Its failure aborts the deploy (§3).
 	HookPreDeploy HookPhase = "pre-deploy"
+	// HookPostDeploy runs AFTER THE ROLLOUT SETTLES, from the image that was deployed, and it runs
+	// whether the rollout succeeded or failed (ADR-0072 §4). A post hook that fired only on success
+	// could not report the case it exists for: the failure an unattended 3am push actually produces
+	// is a crashloop, not a failed migration.
+	//
+	// It fires after a ROLLBACK too, told that the deploy it is reporting on was one. "Did this
+	// settle and is it serving?" is the same question whichever direction the image moved, and a
+	// separate `post-rollback` phase would be a fourth name for an identical answer.
+	//
+	// Its failure changes nothing. The deploy already happened, so there is nothing to abort — see
+	// runPostDeployHook.
+	HookPostDeploy HookPhase = "post-deploy"
 	// HookPreRollback runs from the image being rolled back FROM, before traffic moves back
 	// (ADR-0072 §8). Unset means nothing runs, which is the safe default: a team practising
 	// expand/contract migrates forward only and would be harmed by anything running on a rollback.
 	HookPreRollback HookPhase = "pre-rollback"
 )
 
-// hookPhasePostDeploy is the third phase ADR-0072 names (§4). It is NOT accepted yet: the phases that
-// run before an image moves are built, and the phase that reports how a settled rollout went is
-// separate work. Storing a `post-deploy` command Burrow never runs would be a setting that silently
-// does nothing, which is worse than a refusal that says so (ADR-0009).
-const hookPhasePostDeploy HookPhase = "post-deploy"
-
 // hookPhases is the closed set of phases a hook may be set on, in the order a listing shows them:
 // the order they would fire in around an app's life, not alphabetical.
-var hookPhases = []HookPhase{HookPreDeploy, HookPreRollback}
+var hookPhases = []HookPhase{HookPreDeploy, HookPostDeploy, HookPreRollback}
 
 // HookPhases returns every phase a hook may be set on, so a caller can name the set without
 // reaching into the catalogue.
@@ -65,15 +80,10 @@ func KnownHookPhase(p HookPhase) bool {
 	return false
 }
 
-// validateHookPhase rejects a phase no hook may be set on. It answers `post-deploy` specifically
-// rather than lumping it in with a typo: it is a real phase of the record this implements, and a
-// reader who typed it deserves to know it is not wired rather than to conclude they misspelled it.
+// validateHookPhase rejects a phase no hook may be set on.
 func validateHookPhase(p HookPhase) error {
 	if KnownHookPhase(p) {
 		return nil
-	}
-	if p == hookPhasePostDeploy {
-		return fmt.Errorf("phase %q is not available yet; setting it would store a command Burrow never runs: %w", p, ErrInvalid)
 	}
 	names := make([]string, 0, len(hookPhases))
 	for _, known := range hookPhases {
@@ -153,10 +163,20 @@ func (e *HookError) Summary() string {
 
 // Error is the summary plus the command's captured output and what Burrow did about it — the whole
 // answer the caller who asked for the deploy needs.
+//
+// What Burrow did about it depends on the phase, and the two cases are opposite. A `pre` hook's
+// failure ABORTED the operation, so the message says the operation did not happen. A `post` hook's
+// failure aborted nothing — the deploy it was reporting on was already live and recorded — so the
+// message says exactly that, because a reader who saw "the deploy did not happen" after a deploy
+// that plainly did would trust the surface less, not more.
 func (e *HookError) Error() string {
 	var b strings.Builder
 	b.WriteString(e.Summary())
-	fmt.Fprintf(&b, ". The %s did not happen and the running version is untouched. The Job is left for diagnosis.", e.operation())
+	if e.Phase == HookPostDeploy {
+		b.WriteString(". The deploy it was reporting on had already happened and is untouched: a post-deploy hook cannot abort something that already occurred, and Burrow does not roll back by itself. The Job is left for diagnosis.")
+	} else {
+		fmt.Fprintf(&b, ". The %s did not happen and the running version is untouched. The Job is left for diagnosis.", e.operation())
+	}
 	if e.Output != "" {
 		b.WriteString("\noutput (combined stdout+stderr):\n")
 		b.WriteString(e.Output)
@@ -278,9 +298,13 @@ func validateHookCommand(command []string) error {
 }
 
 // runHook runs app's hook for phase, if one is set, from image — the image being deployed for a
-// pre-deploy hook and the image being left for a pre-rollback one (ADR-0072 §2, §8). It returns nil
-// when no hook is set (today's behaviour exactly) and when the command succeeded, and a *HookError
-// when it did not, which the caller turns into an aborted deploy or rollback (§3).
+// pre-deploy hook, the image being left for a pre-rollback one, the image now serving for a
+// post-deploy one (ADR-0072 §2, §4, §8). It returns nil when no hook is set (today's behaviour
+// exactly) and when the command succeeded, and a *HookError when it did not.
+//
+// WHAT THE CALLER DOES WITH THAT ERROR IS THE PHASE'S BUSINESS, NOT THIS FUNCTION'S. A pre phase
+// turns it into an aborted deploy or rollback (§3); the post phase turns it into a hint, because
+// what it reports on has already happened (§6).
 //
 // The command runs as a one-shot Job in the app's namespace, from the app's own image, with the
 // app's config env and per-app Secret injected exactly as `burrow app run` does (ADR-0048 §2) — so a
@@ -292,7 +316,11 @@ func validateHookCommand(command []string) error {
 // two migration Jobs against one database, so a deploy waits for the previous one's hook rather than
 // racing it. The wait respects ctx: a caller that gives up stops waiting rather than queueing behind
 // a hook nobody is watching.
-func (e *Engine) runHook(ctx context.Context, k Kubernetes, phase HookPhase, app, env, image string, cfg map[string]string) error {
+//
+// outcome carries what the POST phase is told beyond its own identity — how the rollout went
+// (ADR-0072 §4). It is nil for the pre phases, where there is no outcome yet: a variable that was
+// meaningful at some phases and not others would be worse than one that is simply absent.
+func (e *Engine) runHook(ctx context.Context, k Kubernetes, phase HookPhase, app, env, image string, cfg map[string]string, outcome map[string]string) error {
 	command, err := e.db.AppHook(ctx, app, envName(env), phase)
 	if err != nil {
 		return fmt.Errorf("reading the %s hook: %w", phase, err)
@@ -308,12 +336,34 @@ func (e *Engine) runHook(ctx context.Context, k Kubernetes, phase HookPhase, app
 
 	// The audit args carry the phase, the command, the image, the environment and the env KEY NAMES —
 	// never a value (ADR-0027). The command is the salient fact a reviewer reads.
+	//
+	// A post hook's args also carry the OUTCOME and the REASON it was told. Both are Burrow's own
+	// closed-vocabulary strings rather than anything a user's command or a user's application
+	// produced, and they are the fact that makes the row worth reading afterwards: "a command ran"
+	// and "a command ran because the rollout crash-looped" are different records.
 	args := map[string]string{
 		"phase":    string(phase),
 		"command":  strings.Join(command, " "),
 		"image":    image,
 		"env":      envName(env),
 		"env_keys": auditKeys(cfg),
+	}
+	for _, name := range []string{hookEnvOutcome, hookEnvReason, hookEnvKind} {
+		if v, ok := outcome[name]; ok && v != "" {
+			args[strings.ToLower(strings.TrimPrefix(name, "BURROW_"))] = v
+		}
+	}
+	// Every hook is told WHICH MOMENT IT IS RUNNING AT and what it is running against, so one script
+	// can serve several phases without having to be told twice — once in the stored argv and once in
+	// the code. The post phase adds the outcome on top of it.
+	told := map[string]string{
+		hookEnvPhase:       string(phase),
+		hookEnvApp:         app,
+		hookEnvEnvironment: envName(env),
+		hookEnvImage:       image,
+	}
+	for name, v := range outcome {
+		told[name] = v
 	}
 	// The Job's name derives from this ID, so leading with the phase makes a hook Job identifiable as
 	// one in `kubectl get jobs` without a second lookup.
@@ -322,7 +372,7 @@ func (e *Engine) runHook(ctx context.Context, k Kubernetes, phase HookPhase, app
 		ID:         string(phase) + "-" + e.ids.NewID(),
 		Image:      image,
 		Command:    command,
-		Env:        cfg,
+		Env:        hookEnv(cfg, told),
 		TTLSeconds: hookJobTTLSeconds,
 	})
 	if runErr == nil && res.ExitCode == 0 {
@@ -341,6 +391,180 @@ func (e *Engine) runHook(ctx context.Context, k Kubernetes, phase HookPhase, app
 	}
 	e.recordExecution(ctx, auditOpHook, app, args, errors.New(he.Summary()))
 	return he
+}
+
+// The environment variables a hook is told its situation through (ADR-0072 §4). They are variables
+// rather than arguments because a hook is a stored argv an operator wrote once: appending arguments
+// to it would change the command they configured, and a command that takes different arguments
+// depending on why it ran is a command that has to be rewritten to take them.
+//
+// Every one of them is a value BURROW authored — a phase name, an app name, an image reference, a
+// member of a closed vocabulary, or a line of replica counts. None is application output and none is
+// a secret; the app's own config and Secret still arrive exactly as they do for `burrow app run`,
+// through the config env and the per-app Secret's envFrom (ADR-0048 §2).
+const (
+	// hookEnvPhase is the phase that is running, so one script can serve several phases.
+	hookEnvPhase = "BURROW_HOOK_PHASE"
+	// hookEnvApp, hookEnvEnvironment and hookEnvImage are what the hook is talking about — the third
+	// thing ADR-0072 §4 requires a post hook to receive, so a notification can say which app in which
+	// environment on which image rather than "a deploy failed".
+	hookEnvApp         = "BURROW_APP"
+	hookEnvEnvironment = "BURROW_ENVIRONMENT"
+	hookEnvImage       = "BURROW_IMAGE"
+	// hookEnvRelease is the release the hook is reporting on, so a hook can link to it or record it.
+	hookEnvRelease = "BURROW_RELEASE"
+	// hookEnvKind says whether the deploy being reported on was a deploy or a rollback — §4's "it
+	// fires after a rollback too, told that it was one".
+	hookEnvKind = "BURROW_DEPLOY_KIND"
+	// hookEnvOutcome is "succeeded" or "failed" and nothing else (RolloutOutcome.Outcome).
+	hookEnvOutcome = "BURROW_DEPLOY_OUTCOME"
+	// hookEnvReason is the member of ADR-0074's closed vocabulary naming why it failed, EMPTY on
+	// success. It is what lets a hook branch on the cause without parsing prose: a hook that sees
+	// CreateContainerConfigError knows a retry is pointless, where a message inviting interpretation
+	// would have it retry.
+	hookEnvReason = "BURROW_DEPLOY_REASON"
+	// hookEnvDetail is one Burrow-authored line of context behind the reason — replica counts, a
+	// pod's phase, a container's waiting reason. It is for a human reading a notification; nothing
+	// should branch on it.
+	hookEnvDetail = "BURROW_DEPLOY_DETAIL"
+)
+
+// The values hookEnvKind takes, so a hook branches on a fixed string rather than on prose.
+const (
+	// DeployKindDeploy is an ordinary deploy, explicit or unattended.
+	DeployKindDeploy = "deploy"
+	// DeployKindRollback is a rollback: the same question — did this settle and is it serving —
+	// asked about an image that moved backwards (ADR-0072 §4).
+	DeployKindRollback = "rollback"
+)
+
+// hookEnv merges the app's config with what the phase tells the hook, without mutating either.
+//
+// BURROW'S OWN VARIABLES WIN over an app config key of the same name. That is a deliberate choice
+// with a cost: an app that happens to set BURROW_DEPLOY_OUTCOME in its config does not see its own
+// value inside a hook Job. The alternative is worse — a hook told "succeeded" by a stale config
+// value after a crash-looping rollout is a hook actively lying about the one thing it exists to
+// report — and the `BURROW_` prefix is what makes the collision unlikely enough to accept.
+// It always COPIES rather than writing into cfg: cfg is the app's config as read from the store, and
+// a hook Job's environment is not a place to leave BURROW_ keys behind for the next reader of it.
+func hookEnv(cfg, told map[string]string) map[string]string {
+	out := make(map[string]string, len(cfg)+len(told))
+	for k, v := range cfg {
+		out[k] = v
+	}
+	for k, v := range told {
+		out[k] = v
+	}
+	return out
+}
+
+// runPostDeployHook is ADR-0072 §4-§6: wait for the rollout to settle, then run the app's
+// `post-deploy` hook and tell it how it went — whether it went well or badly, and after a rollback
+// as well as after a deploy.
+//
+// NOTHING HAPPENS AT ALL WITH NO HOOK SET (§1). The hook is read first and the function returns
+// immediately when there is none, so a deploy that nobody asked to be told about does not wait for
+// its rollout, does not read the operational configuration, and returns exactly when it did before
+// this phase existed. The wait is the cost of the feature and it is paid only by those who asked
+// for it.
+//
+// THE WAIT DOES NOT HOLD THE HOOK LOCK. §9 serializes the hooks of one (app, environment) so two
+// migration Jobs never run against one database; it does not ask a five-minute observation to block
+// the next deploy's `pre-deploy` hook. The lock is taken by runHook, around the Job and nothing else.
+//
+// A FAILING HOOK IS NOT AN ERROR HERE, and this is the asymmetry with the pre phases. The deploy has
+// landed: the image is live, the release is recorded, and the previous one is superseded. There is
+// nothing left to abort, and Burrow does not roll back by itself (§6) — the hook is told what
+// happened and decides, including by calling `burrow rollback` itself. So a failure comes back as a
+// hint on a successful result, plus the audit row runHook already wrote. Returning it as the
+// deploy's error would report a deploy that happened as a deploy that did not.
+//
+// It returns the hints to attach to the caller's result: what the rollout did, and what the hook did
+// about it.
+func (e *Engine) runPostDeployHook(ctx context.Context, k Kubernetes, app, env, image, releaseID, kind string, cfg map[string]string) []string {
+	command, err := e.db.AppHook(ctx, app, envName(env), HookPostDeploy)
+	if err != nil {
+		slog.WarnContext(ctx, "reading the post-deploy hook failed; the deploy is unaffected",
+			"app", app, "env", envName(env), "error", err)
+		return nil
+	}
+	if len(command) == 0 {
+		return nil // unset means no hook and today's behaviour exactly (ADR-0072 §1)
+	}
+
+	outcome := e.awaitRollout(ctx, k, app, envName(env))
+	told := map[string]string{
+		hookEnvRelease: releaseID,
+		hookEnvKind:    kind,
+		hookEnvOutcome: outcome.Outcome(),
+		// Set even on success, and empty there. A hook running under `set -u` — which a careful
+		// migration script does — would abort on an unset variable before it could report anything,
+		// so the variable always exists and its emptiness IS the success signal.
+		hookEnvReason: outcome.Reason,
+		hookEnvDetail: outcome.Detail,
+	}
+
+	var hints []string
+	if outcome.Failed() {
+		hints = append(hints, fmt.Sprintf(
+			"the rollout of %s did not settle (%s): %s. The post-deploy hook was told so and decides what to do about it; Burrow does not roll back by itself (ADR-0072 §6)",
+			image, outcome.Reason, outcome.Detail))
+	}
+	if err := e.runHook(ctx, k, HookPostDeploy, app, env, image, cfg, told); err != nil {
+		// The hook failed. Its Job is left for diagnosis and its audit row is written; here it becomes
+		// a hint, because the operation it reported on is done either way. The SUMMARY is used rather
+		// than the full error: the summary carries the phase, the command and the exit code and none
+		// of the command's captured output, and a hint travels back over the API into an agent's
+		// context (ADR-0027).
+		hints = append(hints, postDeployHookHint(err))
+	}
+	return hints
+}
+
+// postDeployHookHint renders a failed post-deploy hook for the result's hints — the summary only,
+// never the command's output, and saying plainly that nothing was undone.
+func postDeployHookHint(err error) string {
+	detail := err.Error()
+	if h, ok := AsHook(err); ok {
+		detail = h.Summary()
+	}
+	return detail + ". Nothing was rolled back: a post-deploy hook reports on a deploy that already happened. Its Job is left for an hour so the failure can be inspected."
+}
+
+// awaitRollout waits for app's rollout to settle, bounded by the operational limit ADR-0072 §5 puts
+// the bound on rather than compiling it in. A configuration that cannot be read falls back to the
+// built-in default exactly as every other limit read does: the deploy has already landed, and
+// refusing to tell the hook anything because a settings table was briefly unavailable would be the
+// worse failure.
+//
+// A seam error is not a third outcome. AwaitRollout answers every observable condition as an
+// outcome, so an error from it means the call could not be made at all; that is reported as the
+// deadline backstop with a detail saying so, because the hook still has to be told something and
+// "Burrow could not observe the rollout" is what happened.
+func (e *Engine) awaitRollout(ctx context.Context, k Kubernetes, app, env string) RolloutOutcome {
+	bound, _ := e.operationalConfig(ctx).Duration(env, LimitDeploySettleTimeout)
+	out, err := k.AwaitRollout(ctx, app, bound)
+	if err != nil {
+		slog.WarnContext(ctx, "waiting for the rollout to settle failed; the post-deploy hook is told what was observed",
+			"app", app, "env", env, "error", err)
+		return RolloutOutcome{
+			Reason: ReasonDeadlineExceeded,
+			Detail: "Burrow could not observe the rollout, so whether it settled is unknown",
+		}
+	}
+	return out
+}
+
+// operationalConfig reads the operator-set limits, degrading to the built-in defaults when the read
+// fails. It is the read-side counterpart of ClusterConfigFrom's rule, applied on a path where an
+// unreadable settings table must not become a failed operation (ADR-0068 §6).
+func (e *Engine) operationalConfig(ctx context.Context) OperationalConfig {
+	cfg, err := e.db.OperationalConfig(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "reading operational configuration failed; operational limits fall back to their built-in defaults", "error", err)
+		return OperationalConfig{}
+	}
+	return cfg
 }
 
 // boundedOutput trims a captured output to hookOutputLimit, keeping the TAIL: a failing command's

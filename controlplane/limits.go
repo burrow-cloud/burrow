@@ -66,6 +66,22 @@ const (
 	// on tuning — the two would hold different definitions of "failure", and an agent reading both
 	// would get contradictory answers about one pod at one moment.
 	LimitUnschedulableGrace LimitCode = "status.unschedulable_grace"
+
+	// LimitDeploySettleTimeout is how long Burrow waits for a rollout to settle before it reports
+	// what it observed to a `post-deploy` hook. ADR-0072 §5 puts it here by name rather than leaving
+	// it a constant, and the reason is the one §5 gives: a rollout does not finish, it either
+	// completes, fails, or hangs, so the wait needs a bound — and a bound is a decision a human makes
+	// about their own cluster, not a number a program picks.
+	//
+	// Environment-scoped, on ADR-0068 §1's test — whether a sensible answer can differ per
+	// environment. It plainly can: a production environment rolling twenty replicas over a
+	// PodDisruptionBudget takes longer to settle than a development one rolling one, and an operator
+	// who wants a quick verdict in staging should not have to accept it in production.
+	//
+	// NOTHING WAITS ON IT UNLESS A POST-DEPLOY HOOK IS SET. A deploy with no hook returns exactly
+	// when it did before hooks existed, so raising this bound cannot slow down a deploy nobody asked
+	// to be told about.
+	LimitDeploySettleTimeout LimitCode = "deploy.settle_timeout"
 )
 
 // LimitKind is the shape of a limit's value, which decides how it is parsed, formatted, and
@@ -182,6 +198,27 @@ var knownLimits = []limitDef{
 		// An hour. A pod the scheduler has refused for an hour is not waiting for a node, and a
 		// grace long enough to hide that is a surface that has stopped reporting.
 		max: int64(time.Hour),
+	},
+	{
+		code:        LimitDeploySettleTimeout,
+		kind:        LimitKindDuration,
+		description: "how long a deploy waits for its rollout to settle before telling a post-deploy hook what it observed",
+		envScoped:   true,
+		// Five minutes. The wait ENDS EARLY on any blocking condition — a crash loop, an
+		// unschedulable pod, a missing config key — so this bound is only ever reached by a rollout
+		// that is wedged for a reason no pod reports, and five minutes of that is long enough to
+		// distinguish a slow start from a stall. It is also comfortably inside the window a caller
+		// will tolerate: the deploy has already landed by the time the wait begins, and a client that
+		// gives up mid-wait has not undone anything.
+		def: int64(5 * time.Minute),
+		// Ten seconds is the floor. Below that a healthy rolling update would routinely be reported as
+		// having failed to settle, which would tell every post hook the wrong thing — the one outcome
+		// worse than no hook at all.
+		min: int64(10 * time.Second),
+		// Thirty minutes is the ceiling. Kubernetes' own progress deadline defaults to ten, so a
+		// rollout that has not resolved in thirty is not going to, and a bound long enough to hide
+		// that turns the hook into something nobody hears from.
+		max: int64(30 * time.Minute),
 	},
 }
 

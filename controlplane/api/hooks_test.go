@@ -53,11 +53,13 @@ func TestHookEndpoints(t *testing.T) {
 	}
 }
 
-// TestHookSetRejectsAnUnrunnablePhase asserts an unknown phase and the not-yet-wired `post-deploy`
-// are refused as bad requests rather than stored as settings that never fire (ADR-0009).
+// TestHookSetRejectsAnUnrunnablePhase asserts a phase nothing fires is refused as a bad request
+// rather than stored as a setting that never runs (ADR-0009). `post-rollback` is the interesting
+// one: it is what a reader expects to exist, and it does not — a rollback fires `post-deploy`, told
+// it was a rollback (ADR-0072 §4).
 func TestHookSetRejectsAnUnrunnablePhase(t *testing.T) {
 	h, _, _ := newAPI(t)
-	for _, phase := range []string{"during-deploy", "post-deploy"} {
+	for _, phase := range []string{"during-deploy", "post-rollback"} {
 		rr := do(h, "PUT", "/v1/apps/web/hooks/"+phase, token, `{"command":["./x"]}`)
 		if rr.Code != 400 {
 			t.Errorf("set %s = %d %s, want 400", phase, rr.Code, rr.Body.String())

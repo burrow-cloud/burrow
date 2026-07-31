@@ -400,7 +400,7 @@ func TestIngressReporterDone(t *testing.T) {
 	// A bytes.Buffer is non-terminal, so the reporter prints only the final aligned line with a plain
 	// ✓ (no ANSI, no carriage return) and pads the component name into a column so lines scan.
 	var b bytes.Buffer
-	r := ingressReporter{w: &b}
+	r := installReporter{w: &b}
 	r.working("ingress-nginx", "installing") // no-op on non-terminal
 	r.done("ingress-nginx", "installed (13 created, 6 configured), controller ready")
 	r.done("cert-manager", "already present, webhook ready")

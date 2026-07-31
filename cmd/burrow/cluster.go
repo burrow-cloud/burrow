@@ -26,6 +26,7 @@ func toClientCaps(c controlplane.ClusterCapabilities) client.ClusterCapabilities
 		LoadBalancer:  client.LoadBalancerCapability{Supported: c.LoadBalancer.Supported, Inferred: c.LoadBalancer.Inferred, Provider: c.LoadBalancer.Provider},
 		CertManager:   client.CertManagerCapability{Present: c.CertManager.Present},
 		MetricsServer: client.MetricsServerCapability{Present: c.MetricsServer.Present},
+		CloudNativePG: client.CloudNativePGCapability{Present: c.CloudNativePG.Present, Ready: c.CloudNativePG.Ready, Version: c.CloudNativePG.Version, Pinned: c.CloudNativePG.Pinned},
 		Provider:      client.ProviderCapability{Cloud: c.Provider.Cloud, Name: c.Provider.Name},
 		DNS:           client.DNSCapability{Configured: c.DNS.Configured, Providers: c.DNS.Providers},
 	}
@@ -46,16 +47,18 @@ func newClusterCmd() *cobra.Command {
 			"subcommand it reports the cluster's capabilities, read live: whether an ingress controller\n" +
 			"is installed and which IngressClass to use, whether there is a default StorageClass for\n" +
 			"persistent volumes, whether Service type=LoadBalancer is likely supported or the cluster is\n" +
-			"NodePort-only, whether cert-manager is installed for TLS, the cloud provider, and whether\n" +
-			"a DNS provider is configured. That view is read-only and changes nothing.\n\n" +
+			"NodePort-only, whether cert-manager is installed for TLS, whether the CloudNativePG operator\n" +
+			"is running, the cloud provider, and whether a DNS provider is configured. That view is\n" +
+			"read-only and changes nothing.\n\n" +
 			"Its subcommands stand up and roll the cluster forward:\n" +
 			"`burrow cluster install` installs the control plane into a context, `burrow cluster upgrade`\n" +
 			"rolls it forward in place, and `burrow cluster bootstrap` turns a bare VPS into a\n" +
 			"single-node cluster with the control plane on it. Additive components are separate, opt-in\n" +
 			"subcommands: `burrow cluster ingress install` provisions the shared ingress/TLS\n" +
-			"infrastructure (ingress-nginx, cert-manager, a Let's Encrypt issuer), and\n" +
-			"`burrow cluster registry install` provisions the optional in-cluster image registry; each\n" +
-			"is a one-time operator setup.",
+			"infrastructure (ingress-nginx, cert-manager, a Let's Encrypt issuer),\n" +
+			"`burrow cluster registry install` provisions the optional in-cluster image registry, and\n" +
+			"`burrow cluster postgres install` provisions the CloudNativePG operator the Postgres add-on\n" +
+			"runs on; each is a one-time operator setup.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -80,6 +83,7 @@ func newClusterCmd() *cobra.Command {
 	cmd.AddCommand(newUpgradeCmd())
 	cmd.AddCommand(newIngressCmd())
 	cmd.AddCommand(newClusterRegistryCmd())
+	cmd.AddCommand(newClusterPostgresCmd())
 	cmd.AddCommand(newBootstrapCmd())
 	cmd.AddCommand(newCapacityCmd())
 	return cmd
@@ -188,6 +192,7 @@ func writeClusterReport(w io.Writer, caps client.ClusterCapabilities) {
 	fmt.Fprintf(tw, "Load balancer\t%s\n", loadBalancerLine(caps.LoadBalancer))
 	fmt.Fprintf(tw, "cert-manager\t%s\n", certManagerLine(caps.CertManager))
 	fmt.Fprintf(tw, "metrics-server\t%s\n", metricsServerLine(caps.MetricsServer))
+	fmt.Fprintf(tw, "CloudNativePG\t%s\n", cloudNativePGLine(caps.CloudNativePG))
 	fmt.Fprintf(tw, "Provider\t%s\n", providerLine(caps.Provider))
 	fmt.Fprintf(tw, "DNS\t%s\n", dnsLine(caps.DNS))
 	_ = tw.Flush()
@@ -243,6 +248,28 @@ func metricsServerLine(m client.MetricsServerCapability) string {
 		return "serving the Metrics API (kubectl top, HPA autoscaling, utilization)"
 	}
 	return "not serving the Metrics API (install adds it as a baseline; needed for HPA autoscaling)"
+}
+
+// cloudNativePGLine reports the CloudNativePG operator. The three states it can be in are said
+// apart, because they need different things done about them: absent (install it), CRDs installed
+// with no controller running (an orphaned install — the CRDs outlived the operator, so a `Cluster`
+// would be accepted and never reconciled), and running, in which case the release is named and a
+// mismatch with the release Burrow targets is said out loud rather than left to be discovered.
+func cloudNativePGLine(c client.CloudNativePGCapability) string {
+	if !c.Present {
+		return "not installed (the Postgres add-on's operator; burrow cluster postgres install)"
+	}
+	if !c.Ready {
+		return "CRDs installed but no controller running (burrow cluster postgres install)"
+	}
+	switch {
+	case c.Version == "":
+		return "running (version unknown)"
+	case c.Pinned != "" && c.Version != c.Pinned:
+		return "running " + c.Version + " (Burrow targets " + c.Pinned + ")"
+	default:
+		return "running " + c.Version
+	}
 }
 
 func providerLine(p client.ProviderCapability) string {

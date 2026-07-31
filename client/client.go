@@ -459,6 +459,7 @@ type ClusterCapabilities struct {
 	LoadBalancer  LoadBalancerCapability  `json:"load_balancer"`
 	CertManager   CertManagerCapability   `json:"cert_manager"`
 	MetricsServer MetricsServerCapability `json:"metrics_server"`
+	CloudNativePG CloudNativePGCapability `json:"cloudnative_pg"`
 	Provider      ProviderCapability      `json:"provider"`
 	DNS           DNSCapability           `json:"dns"`
 }
@@ -497,6 +498,17 @@ type CertManagerCapability struct {
 // utilization layer of capacity reporting.
 type MetricsServerCapability struct {
 	Present bool `json:"present"`
+}
+
+// CloudNativePGCapability reports the CloudNativePG operator (ADR-0066 §1). Present is whether its
+// API group is served (the CRDs are installed); Ready is whether a controller is actually running,
+// which is separate because a CRD outlives the operator that installed it; Version is the running
+// operator's release and Pinned the release Burrow targets.
+type CloudNativePGCapability struct {
+	Present bool   `json:"present"`
+	Ready   bool   `json:"ready"`
+	Version string `json:"version,omitempty"`
+	Pinned  string `json:"pinned,omitempty"`
 }
 
 // ProviderCapability reports the detected cloud provider.

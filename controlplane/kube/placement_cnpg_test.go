@@ -139,7 +139,7 @@ func TestCNPGPlacementSchemaIsTheRecordedRelease(t *testing.T) {
 			"network), or %s=record to rewrite it after moving CNPGVersion", cnpgSchemaEnv, cnpgSchemaEnv)
 	}
 
-	source := cnpgManifestURL(CNPGVersion)
+	source := CNPGManifestURL(CNPGVersion)
 	manifest, err := fetch(source)
 	if err != nil {
 		t.Fatalf("fetching %s: %v", source, err)
@@ -185,12 +185,6 @@ const (
 	// cnpgClusterCRD is the resource the placement fields live on.
 	cnpgClusterCRD = "clusters.postgresql.cnpg.io"
 )
-
-// cnpgManifestURL is the release artifact a CNPG version publishes its CRDs in — the same artifact
-// an install applies, so the schema recorded from it is the schema the cluster will hold.
-func cnpgManifestURL(version string) string {
-	return fmt.Sprintf("https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v%s/cnpg-%s.yaml", version, version)
-}
 
 func fetch(url string) ([]byte, error) {
 	client := &http.Client{Timeout: 2 * time.Minute}

@@ -4,9 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
-  # merge_group runs the required checks against the queued PR merged onto main, so the
-  # merge queue tests the actual merge result (not just the PR branch in isolation).
-  # Without this trigger an enabled queue stalls — its required checks never run.
+  # merge_group runs the required checks against the queued PR merged onto main. ADR-0075
+  # retires the merge queue, but the trigger stays until the `merge_queue` rule is actually
+  # off the `protect-main` ruleset: while a queue is enabled, a workflow without this trigger
+  # never produces the required check, so every queued PR stalls to the 60-minute timeout —
+  # including the PR that removes the trigger. It is dead weight afterwards and can be dropped
+  # once the ruleset change has landed.
   merge_group:
 
 jobs:
@@ -54,6 +57,17 @@ jobs:
               - '**'
               - '!README.md'
               - '!docs/**'
+            # A POSITIVE filter under `predicate-quantifier: every` must name EXACTLY ONE
+            # pattern. `every` is one input applying to every filter in this block and it is
+            # conjunctive, so a file has to match ALL of a filter's lines. That is what makes
+            # `code`'s '!' exclusions real — and it means a second positive line here asks for
+            # a file that is both 'docs/QUICKSTART.md' AND something else, which no file is:
+            # the filter would match nothing, silently, and stop gating the doc it exists to
+            # pin, with every check still green. Same failure class as the bug `every` fixed,
+            # wearing the other face — `some` kills negations, `every` kills multi-pattern
+            # positives. To pin a SECOND doc, add ANOTHER named filter with its own single
+            # pattern and OR it into the job condition, the way kube-integration's `if:`
+            # already ORs `quickstart` in. Do not add a line below.
             quickstart:
               - 'docs/QUICKSTART.md'
 
@@ -105,18 +119,22 @@ jobs:
   kube-integration:
     name: kubernetes integration (k3d)
     needs: changes
-    # Run the heavy (~9 min) integration job only in the merge queue, not on every PR push. The
-    # merge_group run tests the actual merged-onto-main result, so also running it on the PR branch
-    # just doubles the wait (PR run, then queue run). A skipped required check still counts as
-    # passing for branch protection and the queue (same as the docs-only skip above), so PRs stay
-    # green on the fast checks and this gate runs once, at merge.
+    # This job runs on PULL REQUESTS, and the absence of an event gate is deliberate (ADR-0075).
+    # It used to carry `&& github.event_name == 'merge_group'`, which made the merge queue the
+    # only place the k3d suite — the only place Burrow is exercised against a real API server —
+    # ever ran. On a PR it reported SKIPPED, the aggregate gate below counts a skip as fine, and
+    # the PR went green having never touched a Kubernetes API server. Do not re-add an event
+    # gate here: with the queue gone the condition would simply never be true again and the
+    # integration suite would silently leave the pipeline while every check stayed green.
+    # The cost is accepted knowingly — the ~9 min suite now runs on every code push rather than
+    # once per merge, which is affordable because the docs-only filter above genuinely skips.
     #
     # The `quickstart` disjunct is what keeps docs/QUICKSTART.md honest: it is docs-only by the
     # `code` filter, but the quickstart e2e step below is the test that pins it, so a change to
     # that doc has to run this job or the doc could rot unnoticed. Only THIS job gets the
     # disjunct — `build` stays gated on `code` alone, because editing a markdown file cannot
     # break gofmt, go vet, or go test, and this job recompiles the tree anyway.
-    if: (needs.changes.outputs.code == 'true' || needs.changes.outputs.quickstart == 'true') && github.event_name == 'merge_group'
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.quickstart == 'true'
     runs-on: ubuntu-latest
     # Make the `go test` steps compile with the same flags ko uses for the burrowd build, so ko
     # reuses the client-go objects the tests already compiled instead of a cold recompile. ko
@@ -213,11 +231,13 @@ jobs:
         if: always()
         run: k3d cluster delete burrow-ci
 
-  # pr-checks is the single aggregate gate, intended to be the ONLY required status check in branch
-  # protection. It passes when every other job passed or was legitimately skipped (a docs-only change,
-  # or the merge_group-only heavy job on a PR) and fails if any job failed or was cancelled. Requiring
-  # just this one check keeps the per-job checks from showing as "skipped/expected" on a PR while still
-  # gating the merge on their real results in the queue. Add new jobs to its `needs` to include them.
+  # pr-checks is the single aggregate gate and the ONLY required status check in branch protection.
+  # It passes when every other job passed or was legitimately skipped — which, since ADR-0075, means
+  # a docs-only change and nothing else: there is no longer a merge_group-only job for it to excuse,
+  # so a green PR that touched code is one where the k3d suite actually ran. It fails if any job
+  # failed or was cancelled. Requiring just this one check keeps the per-job checks from showing as
+  # "skipped/expected" on a PR while still gating the merge on their real results. Add new jobs to
+  # its `needs` to include them.
   pr-checks:
     name: PR checks
     needs: [changes, build, license, kube-integration]

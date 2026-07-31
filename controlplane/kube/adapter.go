@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 
@@ -52,7 +53,13 @@ const defaultAddonNamespace = "burrow-addons"
 // Adapter operates Burrow workloads in a single app namespace, and provisions add-ons in a
 // separate add-on namespace (ADR-0025) so backing services don't mix with user workloads.
 type Adapter struct {
-	client         kubernetes.Interface
+	client kubernetes.Interface
+	// dynamic addresses CUSTOM resources — today the CloudNativePG `Cluster` a Postgres add-on
+	// instance can be backed by (ADR-0066 §1). It is nil unless wired (WithDynamicClient), and every
+	// path that touches a custom resource treats nil as "this build cannot address them", which is
+	// indistinguishable from a cluster that has none. That keeps an Adapter built with New — every
+	// unit test, and any embedder that has not wired one — exactly as it was.
+	dynamic        dynamic.Interface
 	namespace      string
 	addonNamespace string
 	// podMutator is the ADR-0061 deploy-path extension point: an OPTIONAL hook applied to every pod
@@ -231,7 +238,7 @@ func (a *Adapter) applyPlatformPodMutator(pod *corev1.PodSpec) {
 // namespace (ADR-0035 phase 2). The add-on namespace is unchanged, so add-ons still land in their
 // own namespace. An empty ns, or ns equal to the current app namespace, returns the receiver
 // unchanged, so default-environment behavior is identical to before environments existed. The copy
-// is shallow: it shares the same client and ALL THREE placement seams — the app hook of ADR-0061,
+// is shallow: it shares the same clients (typed and dynamic) and ALL THREE placement seams — the app hook of ADR-0061,
 // the platform hook of ADR-0073, and the controller placement of ADR-0077 — so an environment-scoped
 // view applies the same policy, and a seam wired once at construction reaches every per-tenant view
 // of the adapter. That is load-bearing: policy that survived only on the receiver would work in a

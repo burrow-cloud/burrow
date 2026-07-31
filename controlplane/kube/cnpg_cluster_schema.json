@@ -1,0 +1,228 @@
+{
+  "controller": "CloudNativePG",
+  "version": "1.30.0",
+  "source": "https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.30.0/cnpg-1.30.0.yaml",
+  "crd": "clusters.postgresql.cnpg.io",
+  "apiVersion": "postgresql.cnpg.io/v1",
+  "spec": {
+    "type": "object",
+    "properties": {
+      "affinity": {
+        "type": "object",
+        "properties": {
+          "nodeSelector": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "tolerations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "operator": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "bootstrap": {
+        "type": "object",
+        "properties": {
+          "initdb": {
+            "type": "object",
+            "properties": {
+              "postInitSQL": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "enableSuperuserAccess": {
+        "type": "boolean"
+      },
+      "imageName": {
+        "type": "string"
+      },
+      "inheritedMetadata": {
+        "type": "object",
+        "properties": {
+          "annotations": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "instances": {
+        "type": "integer"
+      },
+      "managed": {
+        "type": "object",
+        "properties": {
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "ensure": {
+                  "type": "string"
+                },
+                "login": {
+                  "type": "boolean"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "passwordSecret": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "superuser": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "services": {
+            "type": "object",
+            "properties": {
+              "additional": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "selectorType": {
+                      "type": "string"
+                    },
+                    "serviceTemplate": {
+                      "type": "object",
+                      "properties": {
+                        "metadata": {
+                          "type": "object",
+                          "properties": {
+                            "labels": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "string"
+                              }
+                            },
+                            "name": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "spec": {
+                          "type": "object",
+                          "properties": {
+                            "ports": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "port": {
+                                    "type": "integer"
+                                  },
+                                  "protocol": {
+                                    "type": "string"
+                                  },
+                                  "targetPort": {}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "updateStrategy": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "postgresql": {
+        "type": "object",
+        "properties": {
+          "parameters": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "shared_preload_libraries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "resources": {
+        "type": "object",
+        "properties": {
+          "limits": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "requests": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        }
+      },
+      "storage": {
+        "type": "object",
+        "properties": {
+          "size": {
+            "type": "string"
+          }
+        }
+      },
+      "topologySpreadConstraints": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "maxSkew": {
+              "type": "integer"
+            },
+            "topologyKey": {
+              "type": "string"
+            },
+            "whenUnsatisfiable": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

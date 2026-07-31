@@ -29,6 +29,41 @@ const (
 	AddonPostgres AddonType = "postgres"
 )
 
+// AddonMechanism names HOW an add-on instance's backing workload is provided. It is a property of
+// one install rather than of the catalog: the same add-on type can be stood up two ways, and which
+// way this instance was stood up is a fact about that instance.
+//
+// It exists because ADR-0066 replaces the Postgres add-on's mechanism while keeping ADR-0031's
+// user-facing contract intact. Everything a tenant sees — an instance shared by an environment's
+// apps, a database and a login role per app, a DATABASE_URL in the app's own Secret — is the same
+// under both. What changes is who runs the server.
+type AddonMechanism string
+
+const (
+	// AddonMechanismDefault is the catalog's own mechanism: a Deployment Burrow authors, with a
+	// PersistentVolumeClaim and a Service beside it (ADR-0025, ADR-0031). It is the zero value, so a
+	// caller that expresses no preference gets exactly what it got before there was a choice.
+	AddonMechanismDefault AddonMechanism = ""
+	// AddonMechanismCloudNativePG backs a Postgres instance with a CloudNativePG `Cluster` — Burrow
+	// creates one custom resource and the operator composes the workload from it (ADR-0066 §1).
+	//
+	// IT IS OPT-IN, and that is a decision about SEQUENCING rather than about the destination.
+	// ADR-0066 §1's end state is that `addon install postgres` simply uses the operator; getting
+	// there is several slices, and until they land a CloudNativePG-backed instance is genuinely less
+	// capable than the Deployment it would replace — its backups are still ADR-0032 logical dumps
+	// rather than the operator's, and its removal is not built. Making it the automatic answer on
+	// every cluster that happens to have the operator installed would hand that gap to users who did
+	// not ask for it, and would assert a mechanism as done while it is being built, which is the one
+	// thing ADR-0009 forbids. The flag's default flips when the mechanism is complete.
+	AddonMechanismCloudNativePG AddonMechanism = "cloudnative-pg"
+)
+
+// AddonBackendCloudNativePG is the Backend recorded in the registry for a Postgres instance backed
+// by a CloudNativePG `Cluster`. It is deliberately the same string as the mechanism: "which concrete
+// implementation serves this add-on" is what Backend has always meant, so the mechanism needs no
+// second column and no migration to survive a restart.
+const AddonBackendCloudNativePG = string(AddonMechanismCloudNativePG)
+
 // AddonSpec is a catalog entry: how to deploy and reach one vetted backing service. The catalog
 // is curated and permissively licensed (Apache / MIT / BSD) so Burrow can bundle it without
 // copyleft friction (ADR-0025) — which is why logs is VictoriaLogs (Apache), not AGPL Loki.
@@ -135,6 +170,24 @@ func AddonInstanceName(t AddonType, env string) (string, error) {
 		return "", fmt.Errorf("add-on instance for %s: environment %q is not a valid DNS-1123 label: %w", t, env, ErrInvalid)
 	}
 	return "burrow-" + string(t) + "-" + env, nil
+}
+
+// InstallAddonOptions is everything `addon install` needs beyond the add-on's type and its
+// environment. It is a struct rather than more parameters for RemoveAddonOptions' reason: the answer
+// to "what does this install do" is now more than one bit, and two adjacent booleans at a call site
+// are a bug waiting to be written.
+//
+// The environment stays a positional argument rather than moving in here, deliberately. ADR-0067 §1
+// requires every add-on operation to name the environment it acts on — "a signature that can omit it
+// is a signature that will omit it" — and a field on an options struct is exactly the kind of thing
+// a caller omits.
+type InstallAddonOptions struct {
+	// Mechanism selects how the instance's workload is provided. The zero value is the catalog's
+	// own — a Deployment Burrow authors — so an install that expresses no preference behaves exactly
+	// as it did before there was a choice, on a cluster with an operator or without one.
+	Mechanism AddonMechanism
+	// Confirm satisfies the addon.install guardrail's confirmation hold (ADR-0020).
+	Confirm bool
 }
 
 // AddonCatalog returns the catalog entries in a stable order.

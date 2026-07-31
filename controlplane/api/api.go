@@ -832,7 +832,10 @@ func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), req.Env, req.Confirm)
+	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), req.Env, controlplane.InstallAddonOptions{
+		Mechanism: controlplane.AddonMechanism(req.Mechanism),
+		Confirm:   req.Confirm,
+	})
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1062,6 +1065,11 @@ type addonDetachRequest struct {
 // environment names which environment's instance to stand up).
 type addonInstallRequest struct {
 	Type string `json:"type"`
+	// Mechanism selects how the instance's workload is provided (ADR-0066 §1). Empty is the
+	// catalog's own mechanism, a Deployment Burrow authors; "cloudnative-pg" backs a Postgres
+	// instance with a CloudNativePG Cluster instead. It is opt-in while the mechanism is being
+	// built, so an omitted field is the behaviour every existing caller already gets.
+	Mechanism string `json:"mechanism,omitempty"`
 	// Env is the environment the instance serves (ADR-0067 §1). Each environment gets its own
 	// instance, so this decides both the registry key and the cluster resource names; empty targets
 	// the default environment, whose instance keeps the names an existing install already has.

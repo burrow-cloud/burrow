@@ -267,7 +267,7 @@ func TestClusterLevelGuardrailIgnoresEnv(t *testing.T) {
 	if err := e.SetGuardrail(ctx, "", cp.GuardrailAddonInstall, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(addon.install): %v", err)
 	}
-	_, err := e.InstallAddon(ctx, cp.AddonLogs, "staging", false)
+	_, err := e.InstallAddon(ctx, cp.AddonLogs, "staging", cp.InstallAddonOptions{})
 	g, ok := cp.AsGuardrail(err)
 	if !ok {
 		t.Fatalf("InstallAddon = %v, want a GuardrailError from the global deny", err)

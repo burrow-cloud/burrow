@@ -96,7 +96,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 
 	// Install the Postgres instance and wait for it to become ready. confirm=true clears the
 	// addon.install guardrail (the fake DB's default policy holds it for confirmation).
-	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "", true); err != nil {
+	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon postgres: %v", err)
 	}
 	waitForCond(t, 180*time.Second, "postgres ready", func() (bool, error) {
@@ -148,7 +148,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 	if err := db.CreateEnvironment(ctx, "staging", stagingNS); err != nil {
 		t.Fatalf("CreateEnvironment(staging): %v", err)
 	}
-	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "staging", true); err != nil {
+	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "staging", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon postgres (staging): %v", err)
 	}
 	stagingInstance, err := cp.AddonInstanceName(cp.AddonPostgres, "staging")
@@ -279,7 +279,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 
 	const app = "shop"
 
-	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "", true); err != nil {
+	if _, err := engine.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon postgres: %v", err)
 	}
 	waitForCond(t, 180*time.Second, "postgres ready", func() (bool, error) {

@@ -260,11 +260,11 @@ func TestInstallAddonPerEnvironmentStandsUpSeparateInstances(t *testing.T) {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 
-	def, err := e.InstallAddon(ctx, cp.AddonPostgres, cp.DefaultEnvironment, true)
+	def, err := e.InstallAddon(ctx, cp.AddonPostgres, cp.DefaultEnvironment, cp.InstallAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("InstallAddon(default): %v", err)
 	}
-	stg, err := e.InstallAddon(ctx, cp.AddonPostgres, "staging", true)
+	stg, err := e.InstallAddon(ctx, cp.AddonPostgres, "staging", cp.InstallAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("InstallAddon(staging): %v", err)
 	}
@@ -315,7 +315,7 @@ func TestRemoveAddonNamesOnlyItsOwnEnvironmentsApps(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
-	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, "staging", true); err != nil {
+	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, "staging", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon(staging): %v", err)
 	}
 	prov.SetAttachedApps(cp.DefaultEnvironment, "billing", "web")

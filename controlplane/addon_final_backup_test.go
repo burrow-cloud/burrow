@@ -42,7 +42,7 @@ func newFinalBackupEngine(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Dat
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := e.InstallAddon(context.Background(), cp.AddonPostgres, "", true); err != nil {
+	if _, err := e.InstallAddon(context.Background(), cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
 	seedObjectStoreProvider(t, d, creds, "backups")

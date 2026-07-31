@@ -192,6 +192,8 @@ func clusterAdminNotice(w io.Writer) string {
 func writeClusterPostgresDone(w io.Writer) {
 	fmt.Fprintln(w, "\nDone. The CloudNativePG operator is on the cluster.")
 	fmt.Fprintln(w, "Check it anytime: burrow cluster")
-	fmt.Fprintln(w, note(w)+"the Postgres add-on does not run on the operator yet. `burrow addon install postgres`")
-	fmt.Fprintln(w, "  still stands up its own Deployment; moving it onto CloudNativePG is the rest of ADR-0066.")
+	fmt.Fprintln(w, note(w)+"`burrow addon install postgres` still stands up its own Deployment by default.")
+	fmt.Fprintln(w, "  Pass --cnpg to run a new instance on the operator instead. That path is opt-in while the")
+	fmt.Fprintln(w, "  rest of ADR-0066 lands: backups still go through the same dump path, and removing a")
+	fmt.Fprintln(w, "  CloudNativePG instance is not built yet.")
 }

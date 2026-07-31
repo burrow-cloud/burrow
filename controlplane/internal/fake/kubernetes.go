@@ -295,19 +295,29 @@ func (k *Kubernetes) RestartedAt(app string) (time.Time, bool) {
 // controlplane.AddonInstanceName, so the default environment lands on the unqualified name an
 // existing install already has and any other environment gets a separate instance beside it
 // (ADR-0067 §1). Two environments therefore occupy two entries in this fake cluster, never one.
-func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string) (controlplane.AddonInfo, error) {
+//
+// mech models what the real adapter does with the mechanism, at the resolution the engine's tests
+// need: a CloudNativePG-backed instance is the same instance under the same name and endpoint, and
+// differs in the two facts anything downstream reads — the Backend the registry records, and the
+// absence of a Burrow-owned data volume, because under that mechanism the claims are the operator's
+// (ADR-0066 §1).
+func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string, mech controlplane.AddonMechanism) (controlplane.AddonInfo, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	name, err := controlplane.AddonInstanceName(spec.Type, env)
 	if err != nil {
 		return controlplane.AddonInfo{}, err
 	}
+	backend := spec.Backend
+	if mech == controlplane.AddonMechanismCloudNativePG {
+		backend = controlplane.AddonBackendCloudNativePG
+	}
 	info := controlplane.AddonInfo{
 		Name:         name,
 		Type:         spec.Type,
 		Environment:  env,
 		Mode:         "installed",
-		Backend:      spec.Backend,
+		Backend:      backend,
 		Image:        spec.Image,
 		Endpoint:     fmt.Sprintf("%s.default.svc:%d", name, spec.Port),
 		Capabilities: spec.Capabilities,
@@ -315,8 +325,9 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 	}
 	k.addons[name] = info
 	// A stateful add-on gets a data volume named after it, like the adapter's PVC. Whether that
-	// volume survives a removal is the thing tests assert on, so the fake has to hold it.
-	if spec.StorageGi > 0 {
+	// volume survives a removal is the thing tests assert on, so the fake has to hold it. A
+	// CloudNativePG-backed instance has none Burrow owns: the operator names and owns its claims.
+	if spec.StorageGi > 0 && mech != controlplane.AddonMechanismCloudNativePG {
 		k.volumes[name] = fakeVolume{
 			Addon: spec.Type,
 			Env:   fakeEnvName(env),

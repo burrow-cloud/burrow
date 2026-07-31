@@ -105,7 +105,7 @@ func TestInstallListQueryRemoveAddon(t *testing.T) {
 	ctx := context.Background()
 	e, d, c, logs, _ := newAddonEngine(t)
 
-	info, err := e.InstallAddon(ctx, cp.AddonLogs, "", true)
+	info, err := e.InstallAddon(ctx, cp.AddonLogs, "", cp.InstallAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestQueryLogsBackendSelector(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, logs, _ := newAddonEngine(t)
 
-	if _, err := e.InstallAddon(ctx, cp.AddonLogs, "", true); err != nil {
+	if _, err := e.InstallAddon(ctx, cp.AddonLogs, "", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
 	// Capture the installed default's resolved endpoint by querying it before a second add-on exists.

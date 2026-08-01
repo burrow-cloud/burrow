@@ -124,6 +124,10 @@ const agentInstallHint = "`brew install burrow-cloud/tap/burrow` installs burrow
 // drift visible here, before the control plane has to refuse a call to reveal it. It names both the
 // Homebrew and source remedies because the CLI cannot know how the agent binary was installed;
 // burrow-agent itself narrows that further when it is refused, where the installed path is knowable.
+//
+// The Homebrew remedy names the formula TAP-QUALIFIED, as every Homebrew instruction in Burrow does:
+// homebrew-core has an unrelated `burrow` formula, so a bare `brew upgrade burrow` upgrades somebody
+// else's project or fails as not-installed.
 func agentSkewHint(cliVer, agentVer string) string {
 	if !semver.IsValid(cliVer) || !semver.IsValid(agentVer) {
 		return ""
@@ -135,7 +139,7 @@ func agentSkewHint(cliVer, agentVer string) string {
 		return ""
 	}
 	return fmt.Sprintf("Your %s (%s) is behind your burrow CLI (%s). They are separate binaries: "+
-		"`brew upgrade burrow` updates both, or from source "+
+		"`brew upgrade burrow-cloud/tap/burrow` updates both, or from source "+
 		"`go install github.com/burrow-cloud/burrow/cmd/burrow-agent@%s`. "+
 		"Restart your agent session afterwards so it runs the new binary.",
 		agentBinary, agentVer, cliVer, cliVer)
@@ -265,7 +269,7 @@ func upgradeHints(cliVer, cpVer, latest string) []string {
 		hints = append(hints, fmt.Sprintf("Your control plane is behind. Run `burrow upgrade` to update it to %s.", latest))
 	}
 	if semver.IsValid(cliVer) && !module.IsPseudoVersion(cliVer) && semver.Compare(cliVer, latest) < 0 {
-		hints = append(hints, fmt.Sprintf("A newer burrow (%s) is available. Run `brew upgrade burrow`.", latest))
+		hints = append(hints, fmt.Sprintf("A newer burrow (%s) is available. Run `brew upgrade burrow-cloud/tap/burrow`.", latest))
 	}
 	if len(hints) == 0 {
 		hints = append(hints, "You are on the latest release.")

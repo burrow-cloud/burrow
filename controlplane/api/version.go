@@ -55,24 +55,30 @@ const (
 // to name a remedy that fixes THE BINARY THAT WAS REFUSED, so it branches on the client name:
 //
 //   - burrow-agent: say so explicitly, and say "not just the CLI" — the failure this replaces is a
-//     user who had already run `brew upgrade burrow`, was told to run `brew upgrade burrow`, and
-//     concluded Burrow was broken. It also names the session restart, because a running agent keeps
-//     executing the binary it launched with.
-//   - burrow: the CLI remedy, unqualified.
+//     user who had already run the Homebrew upgrade, was told to run it again, and concluded Burrow
+//     was broken. It also names the session restart, because a running agent keeps executing the
+//     binary it launched with.
+//   - burrow: the CLI remedy on its own.
 //   - unknown (a client older than the name header, which is exactly the stranded case being
 //     reported): name both binaries rather than guess at one.
 //
 // Both Homebrew and source remedies are given, because the control plane cannot know how the caller
 // was installed. A client that carries its own too-old handling narrows this further on the client
 // side, where the installed path is knowable.
+//
+// Every Homebrew remedy names the formula TAP-QUALIFIED — `burrow-cloud/tap/burrow`. Burrow ships
+// from its own tap, and homebrew-core already has an unrelated formula called `burrow` (LinkedIn's
+// Kafka consumer-lag checker), so a bare `brew upgrade burrow` never updates Burrow: it either fails
+// as not-installed or upgrades a different project. This text is read at the exact moment a user is
+// already blocked, so the one command it gives has to be the one that works.
 func tooOldMessage(clientName, clientVersion, serverVersion string) string {
 	switch clientName {
 	case burrowAgentBinary:
-		return fmt.Sprintf("your burrow-agent (%s) is too old for this control plane (%s); update the burrow-agent binary, not just the burrow CLI: they are separate binaries. `brew upgrade burrow` updates both, or from source `go install github.com/burrow-cloud/burrow/cmd/burrow-agent@%s`. Then restart your agent session so it runs the new binary.", clientVersion, serverVersion, serverVersion)
+		return fmt.Sprintf("your burrow-agent (%s) is too old for this control plane (%s); update the burrow-agent binary, not just the burrow CLI: they are separate binaries. `brew upgrade burrow-cloud/tap/burrow` updates both, or from source `go install github.com/burrow-cloud/burrow/cmd/burrow-agent@%s`. Then restart your agent session so it runs the new binary.", clientVersion, serverVersion, serverVersion)
 	case burrowCLIBinary:
-		return fmt.Sprintf("your burrow CLI (%s) is too old for this control plane (%s); run `brew upgrade burrow` (or reinstall the CLI from the release archive) to update it.", clientVersion, serverVersion)
+		return fmt.Sprintf("your burrow CLI (%s) is too old for this control plane (%s); run `brew upgrade burrow-cloud/tap/burrow` (or reinstall the CLI from the release archive) to update it.", clientVersion, serverVersion)
 	default:
-		return fmt.Sprintf("your burrow client (%s) is too old for this control plane (%s); burrow and burrow-agent are separate binaries and both must be current, so update the one that made this call. `brew upgrade burrow` updates both, or from source `go install github.com/burrow-cloud/burrow/cmd/burrow-agent@%s`. Then restart your agent session so it runs the new burrow-agent.", clientVersion, serverVersion, serverVersion)
+		return fmt.Sprintf("your burrow client (%s) is too old for this control plane (%s); burrow and burrow-agent are separate binaries and both must be current, so update the one that made this call. `brew upgrade burrow-cloud/tap/burrow` updates both, or from source `go install github.com/burrow-cloud/burrow/cmd/burrow-agent@%s`. Then restart your agent session so it runs the new burrow-agent.", clientVersion, serverVersion, serverVersion)
 	}
 }
 

@@ -682,7 +682,7 @@ func printJoinInstructions(stdout io.Writer, token string) {
 	fmt.Fprintln(stdout, "This token is ADMIN-grade — treat it like a kubeconfig: copy it over a private channel,")
 	fmt.Fprintln(stdout, "do not paste it into agent chat, and do not commit it.")
 	fmt.Fprintln(stdout, "\nOn your laptop:")
-	fmt.Fprintln(stdout, "  brew install burrow")
+	fmt.Fprintln(stdout, "  brew install burrow-cloud/tap/burrow")
 	fmt.Fprintln(stdout, "  burrow join <the token above>")
 	fmt.Fprintln(stdout, "\nEnsure your provider firewall allows inbound :6443 (API server, reached from your laptop),")
 	fmt.Fprintln(stdout, ":80 and :443 (public traffic).")

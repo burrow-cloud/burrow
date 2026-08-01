@@ -20,9 +20,15 @@ import (
 //
 // This is the half of issue #308 that the wording alone cannot fix. `burrow` and `burrow-agent` are
 // two binaries (ADR-0049 §1) that Homebrew installs together but that drift apart the moment either
-// is installed another way. A user who has already run `brew upgrade burrow` and is told, again, to
-// run `brew upgrade burrow` concludes the tool is broken. Naming the installed path and the matching
-// command turns that dead end into one step.
+// is installed another way. A user who has already run the Homebrew upgrade and is told, again, to
+// run it concludes the tool is broken. Naming the installed path and the matching command turns that
+// dead end into one step.
+//
+// Every Homebrew remedy below names the formula TAP-QUALIFIED — `burrow-cloud/tap/burrow`, never a
+// bare `burrow`. homebrew-core carries an unrelated formula called `burrow` (LinkedIn's Kafka
+// consumer-lag checker), so `brew upgrade burrow` never updates Burrow: it either fails as
+// not-installed or upgrades a different project. Sending a stranded user there is the same dead end
+// this file exists to remove.
 //
 // burrow-agent does NOT update itself. Distribution is Homebrew and signed release archives, with the
 // CLI as the unit a user installs (ADR-0016), and burrow-agent is deliberately capability-reduced —
@@ -41,7 +47,7 @@ const (
 	// or anything else the path does not identify. Its remedy names every option rather than guessing.
 	installUnknown installKind = iota
 	// installHomebrew is a `brew install burrow-cloud/tap/burrow`. The formula installs both binaries,
-	// so `brew upgrade burrow` really does update burrow-agent.
+	// so `brew upgrade burrow-cloud/tap/burrow` really does update burrow-agent.
 	installHomebrew
 	// installGoBin is a `go install` into GOBIN/GOPATH/bin. Homebrew will never update it, and saying
 	// otherwise is the misdirection this change exists to remove.
@@ -95,7 +101,8 @@ func goBinDirs(gobin, gopath, home string) []string {
 
 // tooOldRemedy is the sentence naming the command that updates the binary at execPath to
 // serverVersion. An empty serverVersion (a control plane that predates the server_version field)
-// degrades to "@latest" rather than printing an empty tag.
+// degrades to "@latest" rather than printing an empty tag. The Homebrew remedy is tap-qualified:
+// see the file comment on why a bare `burrow` is somebody else's formula.
 func tooOldRemedy(kind installKind, serverVersion string) string {
 	ref := "latest"
 	if serverVersion != "" {
@@ -104,11 +111,11 @@ func tooOldRemedy(kind installKind, serverVersion string) string {
 	goInstall := fmt.Sprintf("`go install %s@%s`", agentModulePath, ref)
 	switch kind {
 	case installHomebrew:
-		return "run `brew upgrade burrow` to update it (the formula installs burrow and burrow-agent together)"
+		return "run `brew upgrade burrow-cloud/tap/burrow` to update it (the formula installs burrow and burrow-agent together)"
 	case installGoBin:
-		return fmt.Sprintf("it was installed from source, so `brew upgrade burrow` will not touch it: run %s", goInstall)
+		return fmt.Sprintf("it was installed from source, so `brew upgrade burrow-cloud/tap/burrow` will not touch it: run %s", goInstall)
 	default:
-		return fmt.Sprintf("update THIS binary, not the `burrow` CLI: they are separate binaries and upgrading the CLI on its own does not replace it. From Homebrew, `brew upgrade burrow` updates both; from source, %s; otherwise replace it from the %s release archive", goInstall, ref)
+		return fmt.Sprintf("update THIS binary, not the `burrow` CLI: they are separate binaries and upgrading the CLI on its own does not replace it. From Homebrew, `brew upgrade burrow-cloud/tap/burrow` updates both; from source, %s; otherwise replace it from the %s release archive", goInstall, ref)
 	}
 }
 

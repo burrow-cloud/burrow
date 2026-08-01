@@ -130,8 +130,12 @@ func TestClassifyInstall(t *testing.T) {
 // TestTooOldMessageNamesTheCommandThatFixesThisBinary is the client half of the issue #308 pin. The
 // control plane can only give a generic remedy because it cannot know how the caller was installed;
 // burrow-agent can, so its message must name ONE command that works for the binary now running —
-// and, for a source install, must say outright that Homebrew will not help, because "run `brew
-// upgrade burrow`" is precisely the advice the reporter had already followed.
+// and, for a source install, must say outright that Homebrew will not help, because "run the
+// Homebrew upgrade" is precisely the advice the reporter had already followed.
+//
+// The Homebrew wants are pinned TAP-QUALIFIED on purpose. homebrew-core has an unrelated `burrow`
+// formula, so a bare `brew upgrade burrow` upgrades the wrong project or fails as not-installed;
+// the notWant on the bare form is what stops that regressing back in.
 func TestTooOldMessageNamesTheCommandThatFixesThisBinary(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -150,10 +154,10 @@ func TestTooOldMessageNamesTheCommandThatFixesThisBinary(t *testing.T) {
 				"your burrow-agent (v0.11.0)",
 				"at /opt/homebrew/bin/burrow-agent",
 				"this control plane (v0.13.0)",
-				"brew upgrade burrow",
+				"brew upgrade burrow-cloud/tap/burrow",
 				"restart your agent session",
 			},
-			notWant: []string{"go install"},
+			notWant: []string{"go install", "brew upgrade burrow`"},
 		},
 		{
 			name:     "source install: say Homebrew will NOT fix it, and give the command that does",
@@ -161,10 +165,11 @@ func TestTooOldMessageNamesTheCommandThatFixesThisBinary(t *testing.T) {
 			execPath: "/Users/dev/go/bin/burrow-agent",
 			server:   "v0.13.0",
 			want: []string{
-				"`brew upgrade burrow` will not touch it",
+				"`brew upgrade burrow-cloud/tap/burrow` will not touch it",
 				"go install github.com/burrow-cloud/burrow/cmd/burrow-agent@v0.13.0",
 				"restart your agent session",
 			},
+			notWant: []string{"brew upgrade burrow`"},
 		},
 		{
 			name:     "unknown install: name every option rather than guess at one",
@@ -173,10 +178,11 @@ func TestTooOldMessageNamesTheCommandThatFixesThisBinary(t *testing.T) {
 			server:   "v0.13.0",
 			want: []string{
 				"not the `burrow` CLI: they are separate binaries",
-				"brew upgrade burrow",
+				"brew upgrade burrow-cloud/tap/burrow",
 				"go install github.com/burrow-cloud/burrow/cmd/burrow-agent@v0.13.0",
 				"release archive",
 			},
+			notWant: []string{"brew upgrade burrow`"},
 		},
 		{
 			name:     "a control plane too old to report its version degrades to @latest",
@@ -211,7 +217,7 @@ func TestRetargetTooOldReplacesTheServerRemedy(t *testing.T) {
 	resolvedExecutable = func() string { return filepath.FromSlash("/opt/homebrew/Cellar/burrow/0.13.0/bin/burrow-agent") }
 	t.Cleanup(func() { resolvedExecutable = orig })
 
-	serverSaid := "your burrow client (v0.11.0) is too old for this control plane (v0.13.0); run `brew upgrade burrow` (or reinstall the CLI) to update it"
+	serverSaid := "your burrow client (v0.11.0) is too old for this control plane (v0.13.0); run `brew upgrade burrow-cloud/tap/burrow` (or reinstall the CLI) to update it"
 	tooOld := &client.APIError{StatusCode: 426, Code: client.CodeClientTooOld, Message: serverSaid, ServerVersion: "v0.13.0"}
 
 	var got *client.APIError
@@ -253,7 +259,7 @@ func TestTooOldSurfacesThroughTheOutcomeEnvelope(t *testing.T) {
 	oc := classify("app.deploy", &client.APIError{
 		StatusCode:    426,
 		Code:          client.CodeClientTooOld,
-		Message:       "your burrow client (v0.11.0) is too old for this control plane (v0.13.0); run `brew upgrade burrow` (or reinstall the CLI) to update it",
+		Message:       "your burrow client (v0.11.0) is too old for this control plane (v0.13.0); run `brew upgrade burrow-cloud/tap/burrow` (or reinstall the CLI) to update it",
 		ServerVersion: "v0.13.0",
 	})
 	if oc.Outcome != outcomeError {

@@ -289,7 +289,7 @@ func TestStoreBackupKindRoundTrip(t *testing.T) {
 		Status:      cp.BackupPending,
 		Destination: cp.BackupDestinationObjectStore,
 		Provider:    "backups",
-		ObjectKey:   cp.PgBackRestManifestKey(cp.DefaultEnvironment, "burrow-postgres", "20260801-020000F"),
+		ObjectKey:   cp.PgBackRestManifestKey(cp.PgBackRestRepoPath(cp.DefaultEnvironment), "burrow-postgres", "20260801-020000F"),
 	}
 	unstated := cp.Backup{
 		ID:          t.Name() + "-l1",

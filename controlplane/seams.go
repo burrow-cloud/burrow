@@ -418,13 +418,18 @@ type Kubernetes interface {
 	// pgBackRest plugin: there is nowhere for a base backup to go, and a `Backup` object created
 	// against it would sit in `pending` until the timeout rather than saying so.
 	//
+	// archive is the destination the caller resolved, and it is CHECKED against the instance's own
+	// `Stanza` rather than trusted: the two can differ, and a backup verified against the wrong bucket
+	// would be recorded as unreadable when it succeeded. The returned ObjectKey is derived from the
+	// stanza, so it addresses where this instance actually writes.
+	//
 	// The returned outcome carries pgBackRest's own backup LABEL on success — the name the repository
 	// knows this backup by, and the only handle a later restore has — and on failure the closed
 	// reason. A `Backup` object that failed and an archive that is not reaching the store are
 	// different reasons, because they are different problems (ADR-0063 §7). A non-nil error always
 	// accompanies a failure reason; the outcome is returned either way so the caller records WHY
 	// without parsing the error.
-	RunPhysicalBackup(ctx context.Context, env, backupID string) (PhysicalBackupOutcome, error)
+	RunPhysicalBackup(ctx context.Context, env, backupID string, archive *ArchiveDestination) (PhysicalBackupOutcome, error)
 	// PhysicalBackupPresent reports whether the `Backup` object for the given backup id still exists
 	// in the add-on namespace — BackupJobPresent's question for a physical backup, and it exists for
 	// the same reason (ADR-0074 §6): a row left `pending` by a burrowd that restarted mid-backup is

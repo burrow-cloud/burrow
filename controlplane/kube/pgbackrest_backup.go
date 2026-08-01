@@ -80,16 +80,26 @@ func (a *Adapter) cnpgScheduledBackups() (dynamic.ResourceInterface, error) {
 	return a.dynamic.Resource(cnpgScheduledBackupGVR).Namespace(a.addonNamespace), nil
 }
 
-// PhysicalBackupPresent reports whether the `Backup` object for a backup id still exists (ADR-0074
-// §6). A missing object, an unwired dynamic client, an absent CRD and a refused read are all
-// reported as absent, exactly as getCNPGCluster collapses them and for the same reason: on a cluster
-// where the read cannot succeed, Burrow cannot have created the object either, so "there is none" is
-// the true answer and an error would degrade a sweep that runs every minute.
+// PhysicalBackupPresent reports whether the `Backup` object for a backup id is STILL GOING (ADR-0074
+// §6). It is the physical answer to the one question a `pending` row cannot answer about itself: is
+// something still working on this, or is nothing ever going to finish it?
+//
+// EXISTENCE IS NOT THE TEST HERE, which is where it differs from the Job path. A Job is reaped on
+// success, so a Job that is gone is a backup that is over; a `Backup` object is owned by the
+// `Cluster` and Burrow never deletes it, so it outlives the backup by the life of the instance.
+// Asking only whether it exists would report every pending row as still running for ever, and the
+// case the sweep exists for — a burrowd that restarted mid-backup, leaving the row pending while the
+// operator went on and finished the backup — would never be caught. So the PHASE decides: a settled
+// object is not something that will finish this row.
+//
+// A missing object, an unwired dynamic client, an absent CRD and a refused read are all reported as
+// absent, exactly as getCNPGCluster collapses them and for the same reason: on a cluster where the
+// read cannot succeed, Burrow cannot have created the object either.
 func (a *Adapter) PhysicalBackupPresent(ctx context.Context, backupID string) (bool, error) {
 	if a.dynamic == nil {
 		return false, nil
 	}
-	_, err := a.dynamic.Resource(cnpgBackupGVR).Namespace(a.addonNamespace).
+	obj, err := a.dynamic.Resource(cnpgBackupGVR).Namespace(a.addonNamespace).
 		Get(ctx, physicalBackupName(backupID), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
 		return false, nil
@@ -97,7 +107,21 @@ func (a *Adapter) PhysicalBackupPresent(ctx context.Context, backupID string) (b
 	if err != nil {
 		return false, fmt.Errorf("kube: reading the physical backup for %q: %w", backupID, err)
 	}
-	return true, nil
+	phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+	return !cnpgBackupSettled(phase), nil
+}
+
+// cnpgBackupSettled reports whether a `Backup` phase is terminal. An unrecognised phase is NOT
+// settled, which is the safe direction in both readers: the waiter keeps waiting rather than
+// declaring a backup it does not understand completed, and the sweep leaves a row alone rather than
+// opening a failure against a backup that is still going.
+func cnpgBackupSettled(phase string) bool {
+	switch phase {
+	case cnpgBackupPhaseCompleted, cnpgBackupPhaseFailed, cnpgBackupPhaseWALArchivingFailing, cnpgBackupPhaseInvalid:
+		return true
+	default:
+		return false
+	}
 }
 
 // RunPhysicalBackup asks CloudNativePG for a base backup of environment env's instance and waits for
@@ -107,12 +131,13 @@ func (a *Adapter) PhysicalBackupPresent(ctx context.Context, backupID string) (b
 // carries no pgBackRest plugin has no repository to write a base backup to, and a `Backup` object
 // created against it would sit in `pending` until the wait timed out — ten minutes to learn something
 // a single read answers now, and the refusal can say what to do about it.
-func (a *Adapter) RunPhysicalBackup(ctx context.Context, env, backupID string) (controlplane.PhysicalBackupOutcome, error) {
+func (a *Adapter) RunPhysicalBackup(ctx context.Context, env, backupID string, archive *controlplane.ArchiveDestination) (controlplane.PhysicalBackupOutcome, error) {
 	instance, err := addonName(controlplane.AddonPostgres, env)
 	if err != nil {
 		return controlplane.PhysicalBackupOutcome{}, err
 	}
-	if err := a.requireArchivingInstance(ctx, env, instance); err != nil {
+	repoPath, err := a.requireArchivingInstance(ctx, env, instance, archive)
+	if err != nil {
 		return controlplane.PhysicalBackupOutcome{}, err
 	}
 
@@ -143,7 +168,7 @@ func (a *Adapter) RunPhysicalBackup(ctx context.Context, env, backupID string) (
 	if _, err := backups.Create(ctx, obj, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return controlplane.PhysicalBackupOutcome{}, fmt.Errorf("kube: creating the %s %q: %w", cnpgBackupKind, name, err)
 	}
-	return a.awaitPhysicalBackup(ctx, backups, name)
+	return a.awaitPhysicalBackup(ctx, backups, name, repoPath, pgBackRestStanzaName(instance))
 }
 
 // requireArchivingInstance refuses a physical backup of an instance that has no pgBackRest repository
@@ -154,23 +179,40 @@ func (a *Adapter) RunPhysicalBackup(ctx context.Context, env, backupID string) (
 // destination was registered. The second is the ordinary one — a user installs Postgres, then decides
 // they want backups — and re-running the install is what wires it, so the message says so rather than
 // leaving somebody to guess that reinstalling is safe.
-func (a *Adapter) requireArchivingInstance(ctx context.Context, env, instance string) error {
+func (a *Adapter) requireArchivingInstance(ctx context.Context, env, instance string, archive *controlplane.ArchiveDestination) (string, error) {
 	cluster, found, err := a.getCNPGCluster(ctx, instance)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !found {
-		return fmt.Errorf("kube: environment %q has no postgres instance to back up: %w", env, controlplane.ErrNotFound)
+		return "", fmt.Errorf("kube: environment %q has no postgres instance to back up: %w", env, controlplane.ErrNotFound)
 	}
 	if !cnpgClusterArchives(cluster) {
-		return fmt.Errorf("kube: the postgres instance %q archives nowhere, so there is no repository for a "+
+		return "", fmt.Errorf("kube: the postgres instance %q archives nowhere, so there is no repository for a "+
 			"physical backup to be written to. It was created before an object-storage destination was "+
 			"registered. Register one with `burrow config provider add --type s3`, then re-run `burrow addon "+
 			"install postgres --env %s` to wire the instance to it: the data is untouched by that, and the "+
 			"per-app `burrow addon backup postgres <app>` dumps keep working meanwhile (ADR-0066 §3): %w",
 			instance, env, controlplane.ErrInvalid)
 	}
-	return nil
+	// THE INSTANCE'S OWN STANZA IS THE AUTHORITY on where this backup will land, not the destination
+	// the caller resolved. They can differ — a second registered provider named on the command line,
+	// or a provider re-registered against a new bucket — and the difference matters twice: the
+	// read-back would look in the wrong bucket and report a good backup as unreadable, and the row
+	// would record a provider that does not hold it. So the two are compared before anything is
+	// created, and the repository path comes back from the stanza rather than being derived again.
+	stanzas, err := a.pgBackRestStanzas()
+	if err != nil {
+		return "", err
+	}
+	endpoint, err := pgBackRestArchiveEndpoint(archive.Config.Endpoint)
+	if err != nil {
+		return "", err
+	}
+	if err := a.checkStanzaMatchesDestination(ctx, stanzas, instance, endpoint, archive); err != nil {
+		return "", err
+	}
+	return archive.RepoPath, nil
 }
 
 // cnpgClusterArchives reports whether a `Cluster` has the pgBackRest plugin wired as its write-ahead
@@ -209,7 +251,7 @@ func cnpgClusterArchives(u *unstructured.Unstructured) bool {
 // tidy would delete the only account of why. A succeeded one is left too — it is owned by the
 // `Cluster` and goes when the instance does, and while it exists it is what `kubectl get backups`
 // shows an operator who wants to see the repository from the cluster side.
-func (a *Adapter) awaitPhysicalBackup(ctx context.Context, backups dynamic.ResourceInterface, name string) (controlplane.PhysicalBackupOutcome, error) {
+func (a *Adapter) awaitPhysicalBackup(ctx context.Context, backups dynamic.ResourceInterface, name, repoPath, stanza string) (controlplane.PhysicalBackupOutcome, error) {
 	deadline := time.Now().Add(backupJobTimeout)
 	for {
 		obj, err := backups.Get(ctx, name, metav1.GetOptions{})
@@ -229,7 +271,7 @@ func (a *Adapter) awaitPhysicalBackup(ctx context.Context, backups dynamic.Resou
 					Detail: "CloudNativePG reported the backup completed without naming the pgBackRest backup it produced, so there is no key to verify it at",
 				}, fmt.Errorf("kube: %s %q completed with no backup label", cnpgBackupKind, name)
 			}
-			return controlplane.PhysicalBackupOutcome{Label: label}, nil
+			return controlplane.PhysicalBackupOutcome{Label: label, ObjectKey: controlplane.PgBackRestManifestKey(repoPath, stanza, label)}, nil
 		case cnpgBackupPhaseFailed, cnpgBackupPhaseInvalid:
 			return controlplane.PhysicalBackupOutcome{
 				Reason: controlplane.BackupReasonDumpFailed,

@@ -96,7 +96,7 @@ func (e *Engine) BackupInstance(ctx context.Context, t AddonType, env, destinati
 		return BackupResult{}, fmt.Errorf("backup instance %s: recording backup: %w", t, err)
 	}
 
-	outcome, err := e.k8s.RunPhysicalBackup(ctx, targetEnv, backupID)
+	outcome, err := e.k8s.RunPhysicalBackup(ctx, targetEnv, backupID, archive)
 	if err != nil {
 		// Best-effort, and not gated on succeeding: a failed status write leaves the row pending,
 		// which still reads as a successful backup nowhere. An empty reason is left empty rather than
@@ -106,11 +106,9 @@ func (e *Engine) BackupInstance(ctx context.Context, t AddonType, env, destinati
 		return BackupResult{}, fmt.Errorf("backup instance %s in environment %s: %w", t, targetEnv, err)
 	}
 
-	instance, err := AddonInstanceName(t, targetEnv)
-	if err != nil {
-		return BackupResult{}, fmt.Errorf("backup instance %s: %w", t, err)
-	}
-	backup.ObjectKey = PgBackRestManifestKey(targetEnv, instance, outcome.Label)
+	// The key is the adapter's, derived from the instance's own `Stanza`, so the read-back looks
+	// where this instance actually wrote rather than where the engine would have configured it to.
+	backup.ObjectKey = outcome.ObjectKey
 	if err := e.verifyPhysicalBackup(ctx, archive, backup.ObjectKey); err != nil {
 		_ = e.db.FailBackup(ctx, backupID, BackupReasonObjectNotReadable,
 			"CloudNativePG reported the base backup completed, and the object store would not serve its manifest back at the key the repository says it is at")

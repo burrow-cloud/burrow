@@ -108,19 +108,26 @@ func (a *Adapter) deletePostgresCluster(ctx context.Context, name string, delete
 			}
 		}
 	}
-	// The archive configuration goes with the instance, whether or not the data does. What it removes
-	// is a `ScheduledBackup` that would otherwise keep firing at a `Cluster` that is not there, the
-	// `Stanza` describing a repository nothing writes to any more, and the credential copy that
-	// existed only so the sidecar could reach it. NO BACKUP IS DELETED: the repository is in the
-	// object store, and every base backup and archived segment in it survives this untouched — which
-	// is ADR-0064's contract read onto the one copy that is genuinely outside the cluster.
-	if err := a.deletePgBackRestArchive(ctx, name); err != nil {
-		return removal, err
-	}
 	if clusterFound {
 		if err := a.deleteCNPGCluster(ctx, name); err != nil {
 			return removal, err
 		}
+	}
+	// The archive configuration goes with the instance, whether or not the data does, and it goes
+	// AFTER the `Cluster` rather than before it. Deleting the stanza and the credential first would
+	// strip a still-running instance of the configuration it archives through, and a `Cluster` delete
+	// that then failed would leave a live database silently not archiving. Ordering it second means
+	// the worst outcome is leftover configuration for an instance that is gone, which the next
+	// removal or install cleans up and which loses nothing.
+	//
+	// What it removes is a `ScheduledBackup` that would otherwise keep firing at a `Cluster` that is
+	// not there, the `Stanza` describing a repository nothing writes to any more, and the credential
+	// copy that existed only so the sidecar could reach it. NO BACKUP IS DELETED: Burrow issues no
+	// `stanza-delete` and the plugin pinned here registers no finalizer that would, so the repository
+	// in the object store and every base backup and archived segment in it survive untouched — which
+	// is ADR-0064's contract read onto the one copy that is genuinely outside the cluster.
+	if err := a.deletePgBackRestArchive(ctx, name); err != nil {
+		return removal, err
 	}
 	if deleteData {
 		// Explicitly, by name, rather than on the strength of the owner reference. A claim retained by

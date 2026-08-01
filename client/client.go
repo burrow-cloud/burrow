@@ -696,6 +696,11 @@ type Addon struct {
 	Endpoint     string   `json:"endpoint"`
 	Capabilities []string `json:"capabilities"`
 	Ready        bool     `json:"ready"`
+	// Warning is a non-blocking note about the install, not persisted anywhere: today, that the
+	// instance was created WITHOUT write-ahead-log archiving because the cluster has no pgBackRest
+	// plugin, even though an object-storage destination is registered (ADR-0066 §3). Empty when
+	// there is nothing to say.
+	Warning string `json:"warning,omitempty"`
 }
 
 // InstallAddonOptions is everything `addon install` carries beyond the add-on's type and its
@@ -703,6 +708,9 @@ type Addon struct {
 type InstallAddonOptions struct {
 	// Confirm satisfies the addon.install guardrail's confirmation hold.
 	Confirm bool
+	// ArchiveDestination names the object-storage provider a Postgres instance archives to
+	// (ADR-0066 §3). Only needed when more than one is registered.
+	ArchiveDestination string
 }
 
 // InstallAddon installs the vetted backing service for an add-on type (e.g. "logs") in one
@@ -710,7 +718,7 @@ type InstallAddonOptions struct {
 // default environment `prod`, which keeps the instance an existing install already has.
 func (c *Client) InstallAddon(ctx context.Context, addonType, env string, opts InstallAddonOptions) (Addon, error) {
 	var out Addon
-	body := map[string]any{"type": addonType, "env": env, "confirm": opts.Confirm}
+	body := map[string]any{"type": addonType, "env": env, "confirm": opts.Confirm, "archive_destination": opts.ArchiveDestination}
 	err := c.do(ctx, http.MethodPost, "/v1/addons", body, &out)
 	return out, err
 }

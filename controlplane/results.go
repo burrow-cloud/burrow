@@ -5,6 +5,7 @@ package controlplane
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -643,7 +644,7 @@ func PgBackRestRepoPath(env string) string {
 }
 
 // PgBackRestManifestKey is the object key of the backup manifest pgBackRest writes for the backup
-// labelled label, in stanza, in environment env's repository.
+// labelled label, in stanza, in the repository at repoPath.
 //
 // It exists so a completed physical backup can be READ BACK before its row is allowed to say
 // completed (ADR-0063 §7). CloudNativePG reporting a `Backup` as completed is the operator's word
@@ -651,11 +652,13 @@ func PgBackRestRepoPath(env string) string {
 // repository says it is at, is a separate fact, and it is the one a restore depends on. The manifest
 // is the object pgBackRest itself reads first when it restores that backup, so its absence is not a
 // cosmetic discrepancy.
-func PgBackRestManifestKey(env, stanza, label string) string {
-	if env == "" {
-		env = DefaultEnvironment
-	}
-	return pgBackRestObjectPrefix + "/" + env + "/backup/" + stanza + "/" + label + "/backup.manifest"
+//
+// It takes the repository PATH rather than the environment, and that is load-bearing: the path is
+// read off the instance's OWN `Stanza`, so the key is where that instance actually writes rather than
+// where Burrow would have configured it to. An instance whose stanza says something else is a
+// mismatch to refuse, not a backup to go looking for in the wrong place.
+func PgBackRestManifestKey(repoPath, stanza, label string) string {
+	return strings.TrimPrefix(repoPath, "/") + "/backup/" + stanza + "/" + label + "/backup.manifest"
 }
 
 // pgBackRestObjectPrefix is where every pgBackRest repository Burrow configures lives in the bucket.

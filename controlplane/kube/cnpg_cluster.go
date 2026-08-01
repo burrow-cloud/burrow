@@ -5,6 +5,7 @@ package kube
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -128,9 +129,18 @@ func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.A
 	// sidecar reads, the `Stanza` naming the repository, and the schedule. A Cluster naming a Stanza
 	// that does not exist yet is the operator racing Burrow into a failure that looks like the
 	// plugin's (ADR-0066 §3).
+	var warning string
 	if archive != nil {
-		if err := a.ensurePgBackRestArchive(ctx, name, labels, archive); err != nil {
+		w, err := a.ensurePgBackRestArchive(ctx, name, labels, archive)
+		if err != nil {
 			return controlplane.AddonInfo{}, err
+		}
+		// A non-empty warning means the archive was NOT wired — the plugin is not on this cluster —
+		// so the `Cluster` below is composed as if no destination had been resolved. It is one
+		// decision read in two places, which is why the archive is nilled here rather than tested
+		// again: an instance whose spec names a plugin that does not exist would fail to reconcile.
+		if w != "" {
+			warning, archive = w, nil
 		}
 	}
 
@@ -166,6 +176,7 @@ func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.A
 		Image:        spec.Image,
 		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.addonNamespace, spec.Port),
 		Capabilities: spec.Capabilities,
+		Warning:      warning,
 	}, nil
 }
 
@@ -374,21 +385,13 @@ func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name str
 			},
 		},
 	}
-	// The pgBackRest plugin, when this instance archives (ADR-0066 §3). `isWALArchiver` is the field
-	// that matters: it is what makes PostgreSQL's archive_command hand every segment to the plugin's
-	// sidecar, and without it a base backup would be a snapshot with no write-ahead log behind it and
-	// therefore no point-in-time recovery — the gap ADR-0066 lists as the floor on data loss.
+	// The pgBackRest plugin, when this instance archives (ADR-0066 §3).
 	//
 	// An instance with no registered destination gets NO entry at all rather than a disabled one, so
 	// the `Cluster` written on a cluster with no object storage is byte-for-byte what it was before
 	// this existed.
 	if archive != nil {
-		out["plugins"] = []any{map[string]any{
-			"name":          PgBackRestPluginName,
-			"enabled":       true,
-			"isWALArchiver": true,
-			"parameters":    map[string]any{"stanzaRef": pgBackRestStanzaName(name)},
-		}}
+		out["plugins"] = []any{pgBackRestPluginEntry(name)}
 	}
 	// The operator's placement policy for pods Burrow causes to exist but does not author
 	// (ADR-0077 §2). It merges `affinity` and `topologySpreadConstraints` and NOTHING else when
@@ -470,11 +473,35 @@ func (a *Adapter) attachArchiveToExistingCluster(ctx context.Context, clusters d
 	if !found || cnpgClusterArchives(existing) {
 		return nil
 	}
-	patch := []byte(fmt.Sprintf(
-		`{"spec":{"plugins":[{"name":%q,"enabled":true,"isWALArchiver":true,"parameters":{"stanzaRef":%q}}]}}`,
-		PgBackRestPluginName, pgBackRestStanzaName(name)))
+	// A JSON merge patch REPLACES an array wholesale, and `spec.plugins` is a list somebody else may
+	// also be in — CNPG-I is a plugin interface, not a Burrow one. So the existing entries are read
+	// and Burrow's is APPENDED to them; a patch that carried only Burrow's entry would silently
+	// uninstall every other plugin the operator had wired.
+	plugins, _, err := unstructured.NestedSlice(existing.Object, "spec", "plugins")
+	if err != nil {
+		return fmt.Errorf("kube: reading the CloudNativePG Cluster %q's plugins: %w", name, err)
+	}
+	plugins = append(plugins, pgBackRestPluginEntry(name))
+	patch, err := json.Marshal(map[string]any{"spec": map[string]any{"plugins": plugins}})
+	if err != nil {
+		return fmt.Errorf("kube: composing the plugin patch for the CloudNativePG Cluster %q: %w", name, err)
+	}
 	if _, err := clusters.Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
 		return fmt.Errorf("kube: attaching the pgBackRest plugin to the CloudNativePG Cluster %q: %w", name, err)
 	}
 	return nil
+}
+
+// pgBackRestPluginEntry is the `spec.plugins` entry that makes an instance archive. It is one
+// function so the entry the composition writes and the entry the patch appends cannot drift.
+func pgBackRestPluginEntry(instance string) map[string]any {
+	return map[string]any{
+		"name":    PgBackRestPluginName,
+		"enabled": true,
+		// isWALArchiver is the load-bearing field: it is what makes PostgreSQL's archive_command hand
+		// every segment to the plugin's sidecar. Without it a base backup would be a copy with no
+		// write-ahead log behind it, and therefore no point-in-time recovery.
+		"isWALArchiver": true,
+		"parameters":    map[string]any{"stanzaRef": pgBackRestStanzaName(instance)},
+	}
 }

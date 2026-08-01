@@ -290,21 +290,23 @@ func (a *Adapter) ensurePgBackRestCredentials(ctx context.Context, instance stri
 // it is. Re-running an install to wire a destination registered later is the case that matters, and
 // it is the credential — the one thing that legitimately changes — that is updated rather than
 // skipped.
-func (a *Adapter) ensurePgBackRestArchive(ctx context.Context, instance string, labels map[string]string, archive *controlplane.ArchiveDestination) error {
+func (a *Adapter) ensurePgBackRestArchive(ctx context.Context, instance string, labels map[string]string, archive *controlplane.ArchiveDestination) (string, error) {
 	endpoint, err := pgBackRestArchiveEndpoint(archive.Config.Endpoint)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := a.requirePgBackRest(ctx); err != nil {
-		return err
+	if warning, ok, err := a.pgBackRestAvailable(ctx); err != nil {
+		return "", err
+	} else if !ok {
+		return warning, nil
 	}
 	if err := a.ensurePgBackRestCredentials(ctx, instance, labels, archive.Credential); err != nil {
-		return err
+		return "", err
 	}
 
 	stanzas, err := a.pgBackRestStanzas()
 	if err != nil {
-		return err
+		return "", err
 	}
 	stanza := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": pgBackRestStanzaAPIVersion,
@@ -316,10 +318,54 @@ func (a *Adapter) ensurePgBackRestArchive(ctx context.Context, instance string, 
 		},
 		"spec": stanzaSpec(instance, endpoint, archive),
 	}}
-	if _, err := stanzas.Create(ctx, stanza, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("kube: creating the pgBackRest Stanza %q: %w", pgBackRestStanzaName(instance), err)
+	if _, err := stanzas.Create(ctx, stanza, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("kube: creating the pgBackRest Stanza %q: %w", pgBackRestStanzaName(instance), err)
+		}
+		// A stanza that already exists is NOT re-pointed, and a destination that disagrees with it is
+		// refused rather than half-applied. The credential above was already updated in place, which
+		// is right for a rotated key and wrong for a different bucket — so the mismatch is caught
+		// here, before a `Cluster` is left archiving to a repository its stanza does not describe.
+		if err := a.checkStanzaMatchesDestination(ctx, stanzas, instance, endpoint, archive); err != nil {
+			return "", err
+		}
 	}
-	return a.ensureScheduledBackup(ctx, instance, labels)
+	return "", a.ensureScheduledBackup(ctx, instance, labels)
+}
+
+// checkStanzaMatchesDestination refuses when an instance's existing repository is not the one the
+// caller resolved. Re-pointing a stanza at a different bucket would leave every backup already in the
+// old one unreachable from the stanza that wrote them, while the instance carried on looking healthy.
+func (a *Adapter) checkStanzaMatchesDestination(ctx context.Context, stanzas dynamic.ResourceInterface, instance, endpoint string, archive *controlplane.ArchiveDestination) error {
+	existing, err := stanzas.Get(ctx, pgBackRestStanzaName(instance), metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("kube: reading the pgBackRest Stanza %q: %w", pgBackRestStanzaName(instance), err)
+	}
+	repo, ok := stanzaRepository(existing)
+	if !ok {
+		return nil
+	}
+	bucket, _ := repo["bucket"].(string)
+	path, _ := repo["repoPath"].(string)
+	host, _ := repo["endpoint"].(string)
+	if bucket == archive.Config.Bucket && path == archive.RepoPath && host == endpoint {
+		return nil
+	}
+	return fmt.Errorf("kube: the postgres instance %q already archives to bucket %q at %q, and this install "+
+		"resolved bucket %q at %q. An instance keeps the repository it was created against: re-pointing it "+
+		"would leave every backup already taken unreachable from the stanza that wrote them. Install against "+
+		"the original destination, or remove this instance and install a new one against the new destination: %w",
+		instance, bucket, path, archive.Config.Bucket, archive.RepoPath, controlplane.ErrInvalid)
+}
+
+// stanzaRepository returns the one S3 repository of a `Stanza`, or false when it has none.
+func stanzaRepository(stanza *unstructured.Unstructured) (map[string]any, bool) {
+	repos, found, err := unstructured.NestedSlice(stanza.Object, "spec", "stanzaConfiguration", "s3Repositories")
+	if err != nil || !found || len(repos) == 0 {
+		return nil, false
+	}
+	repo, ok := repos[0].(map[string]any)
+	return repo, ok
 }
 
 // ensureScheduledBackup creates the `ScheduledBackup` that takes an instance's base backup on a
@@ -364,34 +410,42 @@ func (a *Adapter) ensureScheduledBackup(ctx context.Context, instance string, la
 	return nil
 }
 
-// requirePgBackRest refuses to wire archiving unless the plugin's controller is actually RUNNING,
-// using the same detector `burrow cluster` reports from.
+// pgBackRestAvailable reports whether the plugin's controller is actually RUNNING, and — when it is
+// not — the one line the install returns saying what the instance therefore does not do.
 //
-// Present and Ready are checked separately for requireCloudNativePG's reason: the CRDs are
-// cluster-scoped and outlive the controller, so a `Stanza` written against a served CRD with nothing
-// behind it is accepted and reconciled by nothing — and the instance then comes up with an
-// `archive_command` handing segments to a sidecar that was never injected. The database works and
-// the backups do not, which is the failure this whole record exists to stop.
-func (a *Adapter) requirePgBackRest(ctx context.Context) error {
+// IT IS NOT A REFUSAL, and that is a deliberate change of posture from the operator's own
+// prerequisite. CloudNativePG is refused because without it there is no database at all. The backup
+// plugin is different: the database installs, works, and serves every app on it, and what is missing
+// is the archive. Refusing there would take the database away to protect a backup — on a cluster
+// where the plugin may not even be installable yet, since its manifest needs cert-manager and
+// `burrow cluster postgres install` skips it when that is absent. So the instance is created without
+// archiving, the omission is stated on the install's result, `burrow cluster` reports the plugin as
+// missing, and `burrow addon backup-instance` refuses by name. Nothing claims a backup that is not
+// happening.
+//
+// Present and Ready are both required, for requireCloudNativePG's reason: a `Stanza` written against
+// a served CRD with no controller behind it is accepted and reconciled by nothing, and the instance
+// then comes up handing its write-ahead log to a sidecar that was never injected.
+func (a *Adapter) pgBackRestAvailable(ctx context.Context) (string, bool, error) {
 	found, err := DetectPgBackRest(ctx, a.client)
 	if err != nil {
-		return fmt.Errorf("kube: checking for the pgBackRest plugin: %w", err)
+		return "", false, fmt.Errorf("kube: checking for the pgBackRest plugin: %w", err)
 	}
 	switch {
 	case !found.Present:
-		return fmt.Errorf("kube: an object-storage destination is registered, so this instance would archive "+
-			"its write-ahead log and take its base backups with the pgBackRest CloudNativePG plugin, and this "+
-			"cluster has no such plugin installed. Install it with `burrow cluster postgres install`, then "+
-			"install the add-on. That is an operator step run from a kubeconfig, not something the agent can "+
-			"do: it installs cluster-scoped CustomResourceDefinitions and needs cluster-admin (ADR-0066 §3): %w",
-			controlplane.ErrInvalid)
+		return "an object-storage destination is registered, but this cluster has no pgBackRest CloudNativePG " +
+			"plugin, so this instance was created WITHOUT write-ahead-log archiving and takes no base backups. " +
+			"Install the plugin with `burrow cluster postgres install` (an operator step: it installs " +
+			"cluster-scoped CustomResourceDefinitions and needs cluster-admin, and it needs cert-manager on the " +
+			"cluster first), then re-run this install to wire the instance to it. Per-app `burrow addon backup " +
+			"postgres <app>` dumps are unaffected.", false, nil
 	case !found.Ready:
-		return fmt.Errorf("kube: the pgBackRest plugin's CustomResourceDefinitions are installed but no "+
-			"controller is running, so a Stanza written now would be accepted and then reconciled by nothing, "+
-			"and the instance would come up handing its write-ahead log to a sidecar that was never injected. "+
-			"Re-run `burrow cluster postgres install` to repair the install: %w", controlplane.ErrInvalid)
+		return "the pgBackRest plugin's CustomResourceDefinitions are installed but no controller is running, " +
+			"so this instance was created WITHOUT write-ahead-log archiving rather than handing its segments to " +
+			"a sidecar nothing would inject. Re-run `burrow cluster postgres install` to repair the plugin, then " +
+			"re-run this install.", false, nil
 	}
-	return nil
+	return "", true, nil
 }
 
 // pgBackRestStanzas is the `Stanza` resource interface in the add-on namespace, or an error when no

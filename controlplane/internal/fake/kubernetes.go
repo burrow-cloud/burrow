@@ -540,7 +540,7 @@ func (k *Kubernetes) PhysicalBackups() []backupCall {
 // RunPhysicalBackup models asking CloudNativePG for a base backup of one environment's instance. It
 // refuses an instance that does not archive, exactly as the adapter does: a `Backup` object against a
 // `Cluster` with no plugin has nowhere to write.
-func (k *Kubernetes) RunPhysicalBackup(ctx context.Context, env, backupID string) (controlplane.PhysicalBackupOutcome, error) {
+func (k *Kubernetes) RunPhysicalBackup(ctx context.Context, env, backupID string, archive *controlplane.ArchiveDestination) (controlplane.PhysicalBackupOutcome, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	*k.physicals = append(*k.physicals, backupCall{Env: env, BackupID: backupID})
@@ -558,7 +558,12 @@ func (k *Kubernetes) RunPhysicalBackup(ctx context.Context, env, backupID string
 	if provider == "" {
 		return controlplane.PhysicalBackupOutcome{}, fmt.Errorf("fake: the postgres instance %q archives nowhere: %w", name, controlplane.ErrInvalid)
 	}
-	return controlplane.PhysicalBackupOutcome{Label: *k.physicalLabel}, nil
+	// The key comes from the destination the instance archives to, as the adapter derives it from the
+	// instance's own Stanza.
+	return controlplane.PhysicalBackupOutcome{
+		Label:     *k.physicalLabel,
+		ObjectKey: controlplane.PgBackRestManifestKey(archive.RepoPath, name, *k.physicalLabel),
+	}, nil
 }
 
 // BackupJobPresent reports whether the Job for a backup id still exists. A missing Job is absent

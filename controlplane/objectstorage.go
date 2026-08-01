@@ -665,6 +665,11 @@ type PhysicalBackupOutcome struct {
 	// and the path component under which the manifest that proves it arrived lives. Empty when the
 	// backup did not complete.
 	Label string
+	// ObjectKey is where the backup's manifest is in the bucket, derived by the adapter from the
+	// instance's OWN `Stanza` — its repository path and stanza name — rather than from what Burrow
+	// would have configured. It is the key the read-back verifies at and the address the row records.
+	// Empty when the backup did not complete.
+	ObjectKey string
 	// Reason is a member of the closed BackupFailureReason set, or of ADR-0074 §2's IssueReason set.
 	Reason string
 	// Detail is one Burrow-authored line elaborating it — never a vendor response body, never a

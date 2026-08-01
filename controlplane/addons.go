@@ -449,4 +449,15 @@ type AddonInfo struct {
 	// Ready is a live property — whether the instance's backing workload is available. It is probed
 	// from the cluster at list time and never persisted in the registry.
 	Ready bool `json:"ready"`
+	// Warning is a non-blocking note about the operation that produced this row. It is NOT persisted
+	// — the registry holds what an add-on IS, and this is a fact about one install — so it is empty
+	// on every row read back from the registry and only ever set on the value an install returns.
+	//
+	// It exists for one situation and is deliberately not a refusal: an object-storage destination is
+	// registered, so the operator plainly wants backups, and the cluster has no pgBackRest plugin to
+	// take them with (ADR-0066 §3). Refusing the install there would take the DATABASE away to
+	// protect a backup, on a cluster where installing the plugin may not even be possible yet; and
+	// installing silently would hand somebody an instance they believe is archiving. So the instance
+	// is created without archiving and the omission is stated.
+	Warning string `json:"warning,omitempty"`
 }

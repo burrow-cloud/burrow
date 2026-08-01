@@ -63,7 +63,7 @@ func seedManifest(t *testing.T, f *fake.ObjectStoreFactory, env, label string) {
 	if err != nil {
 		t.Fatalf("AddonInstanceName: %v", err)
 	}
-	key := cp.PgBackRestManifestKey(env, instance, label)
+	key := cp.PgBackRestManifestKey(cp.PgBackRestRepoPath(env), instance, label)
 	if err := f.Store.CreateBucket(context.Background(), "burrow-backups-backups"); err != nil {
 		t.Fatalf("seeding the repository bucket: %v", err)
 	}

@@ -836,7 +836,8 @@ func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), req.Env, controlplane.InstallAddonOptions{
-		Confirm: req.Confirm,
+		Confirm:            req.Confirm,
+		ArchiveDestination: req.ArchiveDestination,
 	})
 	if err != nil {
 		writeEngineError(w, err)
@@ -1052,6 +1053,11 @@ type addonRestoreRequest struct {
 	// source for this one's live database.
 	Env     string `json:"env,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
+	// ArchiveDestination names the object-storage provider a Postgres instance archives its
+	// write-ahead log and base backups to (ADR-0066 §3). Only needed when more than one is
+	// registered; Burrow refuses to guess, because an instance keeps the repository it was created
+	// against. A provider NAME, never a credential.
+	ArchiveDestination string `json:"archive_destination,omitempty"`
 }
 
 // backupsResponse wraps the backup list so the shape can grow without breaking object decoders.
@@ -1079,6 +1085,11 @@ type addonDetachRequest struct {
 	// Env is the environment whose instance the app's database is dropped from (ADR-0067 §1).
 	Env     string `json:"env,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
+	// ArchiveDestination names the object-storage provider a Postgres instance archives its
+	// write-ahead log and base backups to (ADR-0066 §3). Only needed when more than one is
+	// registered; Burrow refuses to guess, because an instance keeps the repository it was created
+	// against. A provider NAME, never a credential.
+	ArchiveDestination string `json:"archive_destination,omitempty"`
 }
 
 // addonInstallRequest is the body of an addon install (the type names the catalog entry, the
@@ -1090,6 +1101,11 @@ type addonInstallRequest struct {
 	// the default environment, whose instance keeps the names an existing install already has.
 	Env     string `json:"env,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
+	// ArchiveDestination names the object-storage provider a Postgres instance archives its
+	// write-ahead log and base backups to (ADR-0066 §3). Only needed when more than one is
+	// registered; Burrow refuses to guess, because an instance keeps the repository it was created
+	// against. A provider NAME, never a credential.
+	ArchiveDestination string `json:"archive_destination,omitempty"`
 }
 
 // addonConnectRequest is the body of an addon connect (the backend names the catalog entry; the

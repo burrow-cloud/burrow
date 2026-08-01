@@ -60,12 +60,19 @@ func TestRunPhysicalBackupCreatesTheBackupObject(t *testing.T) {
 	a, dyn := archivingInstance(t)
 	settledBackup(t, dyn, "b1", map[string]any{"phase": "completed", "backupName": "20260801-020000F"})
 
-	out, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1")
+	out, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1", testArchive(controlplane.DefaultEnvironment, 30))
 	if err != nil {
 		t.Fatalf("RunPhysicalBackup: %v", err)
 	}
 	if out.Label != "20260801-020000F" {
 		t.Errorf("label = %q, want pgBackRest's own backup label", out.Label)
+	}
+	// The key is derived from the INSTANCE's repository path and stanza, which is what makes the
+	// read-back look where this instance actually wrote.
+	want := controlplane.PgBackRestManifestKey(controlplane.PgBackRestRepoPath(controlplane.DefaultEnvironment),
+		"burrow-postgres", "20260801-020000F")
+	if out.ObjectKey != want {
+		t.Errorf("object key = %q, want %q", out.ObjectKey, want)
 	}
 
 	obj, err := dyn.Resource(backupGVR).Namespace(cnpgTestNamespace).Get(ctx, "burrow-pg-backup-b1", metav1.GetOptions{})
@@ -95,7 +102,7 @@ func TestRunPhysicalBackupTellsTheTwoFailuresApart(t *testing.T) {
 			a, dyn := archivingInstance(t)
 			settledBackup(t, dyn, "b1", map[string]any{"phase": tc.phase, "error": "pgbackrest exited 1"})
 
-			out, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1")
+			out, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1", testArchive(controlplane.DefaultEnvironment, 30))
 			if err == nil {
 				t.Fatalf("RunPhysicalBackup on phase %q must fail", tc.phase)
 			}
@@ -121,7 +128,7 @@ func TestRunPhysicalBackupRefusesAnInstanceThatDoesNotArchive(t *testing.T) {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
-	_, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1")
+	_, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1", testArchive(controlplane.DefaultEnvironment, 30))
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("RunPhysicalBackup on a non-archiving instance = %v, want ErrInvalid", err)
 	}
@@ -143,16 +150,16 @@ func TestRunPhysicalBackupRefusesAMissingInstance(t *testing.T) {
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	_, err := a.RunPhysicalBackup(context.Background(), controlplane.DefaultEnvironment, "b1")
+	_, err := a.RunPhysicalBackup(context.Background(), controlplane.DefaultEnvironment, "b1", testArchive(controlplane.DefaultEnvironment, 30))
 	if !errors.Is(err, controlplane.ErrNotFound) {
 		t.Fatalf("RunPhysicalBackup with no instance = %v, want ErrNotFound", err)
 	}
 }
 
-// TestPhysicalBackupPresent asserts the ADR-0074 §6 sweep's physical half: a `Backup` object that is
-// gone means a pending row will never complete. A cluster that cannot answer reports ABSENT rather
-// than erroring, exactly as the `Cluster` read does — on such a cluster Burrow cannot have created
-// the object either.
+// TestPhysicalBackupPresent asserts the ADR-0074 §6 sweep's physical half, including the part that
+// makes it work at all: a `Backup` object is owned by the `Cluster` and Burrow never deletes it, so
+// mere EXISTENCE would report every pending row as still running for ever. A settled object is not
+// something that will finish a pending row, and this asserts the phase is what decides.
 func TestPhysicalBackupPresent(t *testing.T) {
 	ctx := context.Background()
 	a, dyn := archivingInstance(t)
@@ -165,5 +172,31 @@ func TestPhysicalBackupPresent(t *testing.T) {
 	present, err = a.PhysicalBackupPresent(ctx, "b1")
 	if err != nil || !present {
 		t.Fatalf("PhysicalBackupPresent for a live object = (%v, %v), want (true, nil)", present, err)
+	}
+
+	// A settled object outlives the backup by the life of the instance, so it must NOT keep a stranded
+	// pending row looking like work in progress.
+	settledBackup(t, dyn, "b2", map[string]any{"phase": "completed", "backupName": "20260801-020000F"})
+	present, err = a.PhysicalBackupPresent(ctx, "b2")
+	if err != nil || present {
+		t.Fatalf("PhysicalBackupPresent for a completed object = (%v, %v), want (false, nil): a settled backup will never finish a pending row", present, err)
+	}
+}
+
+// TestRunPhysicalBackupRefusesAMismatchedDestination asserts the instance's own `Stanza` is the
+// authority on where its backups go, not the destination the caller resolved. They can differ — a
+// second registered provider named on the command line, or a provider re-registered against a new
+// bucket — and following the caller would verify a perfectly good backup against the wrong bucket
+// and record the wrong provider on the row.
+func TestRunPhysicalBackupRefusesAMismatchedDestination(t *testing.T) {
+	ctx := context.Background()
+	a, dyn := archivingInstance(t)
+	settledBackup(t, dyn, "b1", map[string]any{"phase": "completed", "backupName": "20260801-020000F"})
+
+	other := testArchive(controlplane.DefaultEnvironment, 30)
+	other.Config.Bucket = "somebody-elses-bucket"
+	_, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1", other)
+	if !errors.Is(err, controlplane.ErrInvalid) {
+		t.Fatalf("RunPhysicalBackup against a mismatched destination = %v, want ErrInvalid", err)
 	}
 }

@@ -356,19 +356,56 @@ func TestArchiveRefusesAPlaintextEndpoint(t *testing.T) {
 	}
 }
 
-// TestArchiveRefusedWithoutThePlugin asserts an install that WANTS to archive on a cluster with no
-// plugin refuses by name rather than writing a `Stanza` nothing will reconcile.
-func TestArchiveRefusedWithoutThePlugin(t *testing.T) {
+// TestArchiveSkippedWithoutThePluginIsStatedNotRefused asserts the posture the plugin gets, which is
+// deliberately not the operator's. CloudNativePG is a REFUSAL because without it there is no database
+// at all. The backup plugin is different: the database installs and serves every app on it, and what
+// is missing is the archive — so refusing would take the database away to protect a backup, on a
+// cluster where the plugin may not even be installable yet (its manifest needs cert-manager). The
+// instance is created without archiving and the omission is STATED, so nothing claims a backup that
+// is not happening.
+func TestArchiveSkippedWithoutThePluginIsStatedNotRefused(t *testing.T) {
 	ctx := context.Background()
 	client, dyn := cnpgReadyCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30))
-	if !errors.Is(err, controlplane.ErrInvalid) {
-		t.Fatalf("DeployAddon without the plugin = %v, want ErrInvalid", err)
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30))
+	if err != nil {
+		t.Fatalf("DeployAddon without the plugin must succeed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "burrow cluster postgres install") {
-		t.Errorf("the refusal must name the operator step that fixes it: %v", err)
+	if info.Warning == "" {
+		t.Fatal("an instance created without archiving must say so; a silent omission is a backup nobody knows they do not have")
+	}
+	if !strings.Contains(info.Warning, "burrow cluster postgres install") {
+		t.Errorf("the warning must name the operator step that fixes it: %q", info.Warning)
+	}
+	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
+	// And the Cluster names no plugin: a spec referencing a plugin that is not installed would not
+	// reconcile at all, which would take the database away by another route.
+	if _, found, _ := unstructured.NestedSlice(getCluster(t, dyn, instance).Object, "spec", "plugins"); found {
+		t.Error("the Cluster names a plugin the cluster does not have")
+	}
+	if _, err := dyn.Resource(stanzaGVR).Namespace(cnpgTestNamespace).Get(ctx, instance, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("a Stanza was written on a cluster with no plugin controller to reconcile it: %v", err)
+	}
+}
+
+// TestArchiveRefusesARepointedDestination asserts an instance keeps the repository it was created
+// against. Re-pointing a stanza at a different bucket would leave every backup already taken
+// unreachable from the stanza that wrote them, while the instance carried on looking healthy.
+func TestArchiveRefusesARepointedDestination(t *testing.T) {
+	ctx := context.Background()
+	client, dyn := archivingCluster()
+	a := kube.New(client, "burrow").WithDynamicClient(dyn)
+	spec := postgresSpec(t)
+
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
+		t.Fatalf("first DeployAddon: %v", err)
+	}
+	other := testArchive(controlplane.DefaultEnvironment, 30)
+	other.Config.Bucket = "a-different-bucket"
+	_, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, other)
+	if !errors.Is(err, controlplane.ErrInvalid) {
+		t.Fatalf("re-installing against a different bucket = %v, want ErrInvalid", err)
 	}
 }
 

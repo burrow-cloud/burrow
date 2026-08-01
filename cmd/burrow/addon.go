@@ -614,6 +614,7 @@ func metricLabels(labels map[string]string) string {
 func newAddonInstallCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm bool
+	var archiveDestination string
 	cmd := &cobra.Command{
 		Use:   "install [<name>]",
 		Short: "Install a vetted backing service (logs, metrics, cache, postgres)",
@@ -647,18 +648,29 @@ func newAddonInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := c.InstallAddon(ctx, name, o.env, client.InstallAddonOptions{Confirm: confirm})
+			a, err := c.InstallAddon(ctx, name, o.env, client.InstallAddonOptions{
+				Confirm:            confirm,
+				ArchiveDestination: archiveDestination,
+			})
 			if err != nil {
 				return err
 			}
 			human := fmt.Sprintf("installed the %s add-on %q (%s)\nin-cluster endpoint: %s\nprovides: %s",
 				a.Type, a.Name, a.Image, a.Endpoint, strings.Join(a.Capabilities, ", "))
+			// The warning goes on the human output as its own line rather than being folded into the
+			// summary: it says what this instance does NOT do, and an install that quietly took no
+			// backups is exactly the thing nobody should have to read carefully to notice.
+			if a.Warning != "" {
+				human += "\nnote: " + a.Warning
+			}
 			return emit(out, o.json, a, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	cmd.Flags().StringVar(&archiveDestination, "archive-destination", "",
+		"the object-storage `provider` a postgres instance archives to (only needed when more than one is registered)")
 	return cmd
 }
 

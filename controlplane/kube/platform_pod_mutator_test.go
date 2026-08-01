@@ -76,27 +76,31 @@ func assertNoPlacement(t *testing.T, what string, pod corev1.PodSpec) {
 	}
 }
 
-// TestPlatformPodMutatorReachesAddonInstance covers the add-on instance Deployment, the platform
-// hook's most consequential reach: the Postgres instance is stateful and holds tenant data, so an
-// operator whose only schedulable capacity is tainted otherwise has an add-on that sits Pending,
-// reporting zero ready replicas — which reads like a slow start rather than an unschedulable pod.
+// TestPlatformPodMutatorReachesAddonInstance covers the add-on instance Deployment: a stateful store
+// whose volume binds it to a node, so an operator whose only schedulable capacity is tainted
+// otherwise has an add-on that sits Pending reporting zero ready replicas — which reads like a slow
+// start rather than an unschedulable pod.
+//
+// The Postgres instance is deliberately NOT this case. Its pods are CloudNativePG's, composed from a
+// `Cluster` rather than authored here, so there is no PodSpec to hand to this hook at all — it takes
+// the placement seam ADR-0077 built, asserted by TestControllerPlacementReachesTheCluster.
 func TestPlatformPodMutatorReachesAddonInstance(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS).WithPlatformPodMutator(platformPlacement())
 
-	spec := controlplane.AddonSpec{Type: controlplane.AddonPostgres, Backend: "postgres", Image: "postgres:test", Port: 5432, StorageGi: 5}
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
+	spec := controlplane.AddonSpec{Type: controlplane.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428, StorageGi: 5}
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
-	dep, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-postgres", metav1.GetOptions{})
+	dep, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-logs", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	assertPlatformPlacement(t, "postgres add-on", dep.Spec.Template.Spec)
-	// Placement is all the hook changed: the instance still runs its server and its exporter sidecar.
-	if len(dep.Spec.Template.Spec.Containers) != 2 {
-		t.Errorf("containers = %d, want 2 (postgres + exporter sidecar)", len(dep.Spec.Template.Spec.Containers))
+	assertPlatformPlacement(t, "logs add-on", dep.Spec.Template.Spec)
+	// Placement is all the hook changed: the instance still runs its store.
+	if len(dep.Spec.Template.Spec.Containers) != 1 {
+		t.Errorf("containers = %d, want 1 (the store)", len(dep.Spec.Template.Spec.Containers))
 	}
 }
 
@@ -110,7 +114,7 @@ func TestPlatformPodMutatorReachesLogsCollector(t *testing.T) {
 	a := New(client, "apps").WithAddonNamespace(addonNS).WithPlatformPodMutator(platformPlacement())
 
 	spec := controlplane.AddonSpec{Type: controlplane.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428, StorageGi: 5}
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	ds, err := client.AppsV1().DaemonSets(addonNS).Get(ctx, "burrow-logs-collector", metav1.GetOptions{})
@@ -151,7 +155,7 @@ func TestPlatformPodMutatorReachesMetricsCollector(t *testing.T) {
 	a := New(client, "apps").WithAddonNamespace(addonNS).WithPlatformPodMutator(platformPlacement())
 
 	spec := controlplane.AddonSpec{Type: controlplane.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428, StorageGi: 10}
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	col, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
@@ -195,7 +199,7 @@ func TestPlatformPodMutatorSeesConstructedPodSpec(t *testing.T) {
 	})
 
 	spec := controlplane.AddonSpec{Type: controlplane.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428}
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	if !sawFluentBit {
@@ -219,7 +223,7 @@ func TestNoPlatformPodMutatorLeavesAddonDeploymentUnchanged(t *testing.T) {
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 
 	spec := controlplane.AddonSpec{Type: controlplane.AddonCache, Backend: "valkey", Image: "valkey:test", Port: 6379}
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	got, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-cache", metav1.GetOptions{})
@@ -268,7 +272,7 @@ func TestNoPlatformPodMutatorLeavesLogsCollectorUnchanged(t *testing.T) {
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 
 	spec := controlplane.AddonSpec{Type: controlplane.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428}
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	got, err := client.AppsV1().DaemonSets(addonNS).Get(ctx, "burrow-logs-collector", metav1.GetOptions{})
@@ -322,7 +326,7 @@ func TestNoPlatformPodMutatorLeavesMetricsCollectorUnchanged(t *testing.T) {
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 
 	spec := controlplane.AddonSpec{Type: controlplane.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428}
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	got, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
@@ -377,7 +381,7 @@ func TestAppPodMutatorDoesNotReachPlatformPods(t *testing.T) {
 	a := New(client, "apps").WithAddonNamespace(addonNS).WithPodMutator(platformPlacement())
 
 	spec := controlplane.AddonSpec{Type: controlplane.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428}
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, ""); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	store, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-logs", metav1.GetOptions{})
@@ -428,7 +432,7 @@ func TestWithNamespacePropagatesPlatformPodMutator(t *testing.T) {
 	scoped := a.WithNamespace("apps-staging")
 
 	spec := controlplane.AddonSpec{Type: controlplane.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428}
-	if _, err := scoped.DeployAddon(ctx, spec, "staging", ""); err != nil {
+	if _, err := scoped.DeployAddon(ctx, spec, "staging"); err != nil {
 		t.Fatalf("DeployAddon on the scoped view: %v", err)
 	}
 	store, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-logs-staging", metav1.GetOptions{})

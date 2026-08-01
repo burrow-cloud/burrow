@@ -5,7 +5,6 @@ package controlplane_test
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -14,68 +13,9 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane/internal/fake"
 )
 
-// TestInstallAddonOnCloudNativePGRecordsTheMechanism asserts the registry remembers which mechanism
-// an instance was stood up on. It is recorded as the Backend — "which concrete implementation serves
-// this add-on", which is what that field has always meant — so the fact survives a burrowd restart
-// with no new column and no migration behind it.
-func TestInstallAddonOnCloudNativePGRecordsTheMechanism(t *testing.T) {
-	ctx := context.Background()
-	e, _, d, _ := newPostgresEngine(t)
-
-	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{
-		Mechanism: cp.AddonMechanismCloudNativePG, Confirm: true,
-	})
-	if err != nil {
-		t.Fatalf("InstallAddon on CloudNativePG: %v", err)
-	}
-	if info.Backend != cp.AddonBackendCloudNativePG {
-		t.Errorf("backend = %q, want %q", info.Backend, cp.AddonBackendCloudNativePG)
-	}
-	stored, err := d.Addon(ctx, info.Name)
-	if err != nil {
-		t.Fatalf("reading the registry row back: %v", err)
-	}
-	if stored.Backend != cp.AddonBackendCloudNativePG {
-		t.Errorf("the registry recorded backend %q; the mechanism must outlive the process that chose it", stored.Backend)
-	}
-}
-
-// TestInstallAddonOnCloudNativePGIsPostgresOnly asserts the mechanism is refused for an add-on it
-// has no meaning for, at the engine rather than deeper down: CloudNativePG runs PostgreSQL, and
-// "install the cache on CloudNativePG" is a sentence with no referent.
-func TestInstallAddonOnCloudNativePGIsPostgresOnly(t *testing.T) {
-	e, _, _, _ := newPostgresEngine(t)
-
-	_, err := e.InstallAddon(context.Background(), cp.AddonCache, "", cp.InstallAddonOptions{
-		Mechanism: cp.AddonMechanismCloudNativePG, Confirm: true,
-	})
-	if !errors.Is(err, cp.ErrInvalid) {
-		t.Fatalf("InstallAddon(cache, cloudnative-pg) error = %v, want ErrInvalid", err)
-	}
-}
-
-// TestInstallAddonConfirmationNamesTheMechanism asserts a held confirmation says which of the two
-// materially different things "install the postgres add-on" now means. A confirmation that does not
-// state what is about to happen is not informed consent (ADR-0006), and the mechanism decides how
-// the database is run, backed up and removed.
-func TestInstallAddonConfirmationNamesTheMechanism(t *testing.T) {
-	e, _, _, _ := newPostgresEngine(t)
-
-	_, err := e.InstallAddon(context.Background(), cp.AddonPostgres, "", cp.InstallAddonOptions{
-		Mechanism: cp.AddonMechanismCloudNativePG,
-	})
-	if err == nil {
-		t.Fatal("an unconfirmed install was not held")
-	}
-	if !strings.Contains(err.Error(), string(cp.AddonMechanismCloudNativePG)) {
-		t.Errorf("the held confirmation does not name the mechanism: %v", err)
-	}
-}
-
 // TestRemoveAddonKeepsTheDataOfACloudNativePGInstance is ADR-0064 §1 over the mechanism ADR-0066 §1
-// introduced. The record's default does not move because the implementation did: removing a
-// CloudNativePG-backed instance tears the `Cluster` down and KEEPS the disk every attached app's
-// database lives on.
+// chose. The record's default does not move because the implementation did: removing a Postgres
+// instance tears its `Cluster` down and KEEPS the disk every attached app's database lives on.
 //
 // It asserts the retained claim by name because the name is the operator's, not Burrow's. A
 // `Cluster` composes one claim per instance and calls it `<instance>-1`, so a removal that reported
@@ -84,9 +24,7 @@ func TestRemoveAddonKeepsTheDataOfACloudNativePGInstance(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, _ := newPostgresEngine(t)
 
-	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{
-		Mechanism: cp.AddonMechanismCloudNativePG, Confirm: true,
-	})
+	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
@@ -110,18 +48,16 @@ func TestRemoveAddonKeepsTheDataOfACloudNativePGInstance(t *testing.T) {
 // defensible while the leftovers are VISIBLE, and a claim nobody can find is a silent bill rather
 // than a decision.
 //
-// It matters more under this mechanism than under the other one. The operator's claims deliberately
-// do not carry Burrow's selectable label while the `Cluster` owns them — a live instance's disk is
-// not a retained volume — so if nothing added it at removal time the §6 listing would be empty for
-// every CloudNativePG-backed instance ever removed, and "your data was kept" would be a promise with
-// no way to find what was kept.
+// It matters more for Postgres than for the add-ons Burrow deploys itself. The operator's claims
+// deliberately do not carry Burrow's selectable label while the `Cluster` owns them — a live
+// instance's disk is not a retained volume — so if nothing added it at removal time the §6 listing
+// would be empty for every Postgres instance ever removed, and "your data was kept" would be a
+// promise with no way to find what was kept.
 func TestRemovedCloudNativePGVolumeIsListedAsRetained(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newPostgresEngine(t)
 
-	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{
-		Mechanism: cp.AddonMechanismCloudNativePG, Confirm: true,
-	})
+	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
@@ -157,9 +93,7 @@ func TestRemoveAddonDeleteDataDestroysACloudNativePGInstance(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newPostgresEngine(t)
 
-	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{
-		Mechanism: cp.AddonMechanismCloudNativePG, Confirm: true,
-	})
+	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
@@ -184,16 +118,13 @@ func TestRemoveAddonDeleteDataDestroysACloudNativePGInstance(t *testing.T) {
 }
 
 // TestRemoveAddonConfirmationNamesTheCloudNativePGClaim is ADR-0064 §3: the held confirmation states
-// the volume BY NAME, and under this mechanism that name is the operator's rather than the
-// instance's. A confirmation that names a claim which does not exist is worse than one that names
+// the volume BY NAME, and for Postgres that name is the operator's rather than the instance's. A confirmation that names a claim which does not exist is worse than one that names
 // none — it reads as precise, and the operator approves it on that basis.
 func TestRemoveAddonConfirmationNamesTheCloudNativePGClaim(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newPostgresEngine(t)
 
-	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{
-		Mechanism: cp.AddonMechanismCloudNativePG, Confirm: true,
-	})
+	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
@@ -209,10 +140,9 @@ func TestRemoveAddonConfirmationNamesTheCloudNativePGClaim(t *testing.T) {
 }
 
 // TestRemoveAddonTakesAFinalBackupBeforeDestroyingACloudNativePGInstance asserts ADR-0064 §5 is not
-// weakened by the mechanism. The final backup is a logical dump taken through the ordinary backup
-// path, which reaches the instance at the endpoint every consumer resolves — so it works here for
-// exactly the reason attach and `addon backup` do, and nothing about it is conditional on how the
-// server is run.
+// weakened by the mechanism ADR-0066 chose. The final backup is a logical dump taken through the
+// ordinary backup path, which reaches the instance at the endpoint every consumer resolves — so it
+// works here for exactly the reason attach and `addon backup` do.
 func TestRemoveAddonTakesAFinalBackupBeforeDestroyingACloudNativePGInstance(t *testing.T) {
 	ctx := context.Background()
 	k := fake.NewKubernetes()
@@ -230,9 +160,7 @@ func TestRemoveAddonTakesAFinalBackupBeforeDestroyingACloudNativePGInstance(t *t
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{
-		Mechanism: cp.AddonMechanismCloudNativePG, Confirm: true,
-	})
+	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
@@ -251,34 +179,5 @@ func TestRemoveAddonTakesAFinalBackupBeforeDestroyingACloudNativePGInstance(t *t
 	}
 	if _, ok := k.AddonVolume(info.Name + "-1"); ok {
 		t.Error("the operator's claim survived a --delete-data removal")
-	}
-}
-
-// TestAddonInfoMechanismRoundTripsThroughTheRegistry asserts the mechanism a removal acts on is the
-// one the install recorded. It is the fact the whole removal path hangs off: the alternative is
-// working the mechanism out by probing the cluster, and every way of failing to probe the cluster
-// reads as "there is no such object" — which on a removal path means walking past a running database
-// and deleting the row that named it.
-func TestAddonInfoMechanismRoundTripsThroughTheRegistry(t *testing.T) {
-	ctx := context.Background()
-	e, _, d, _ := newPostgresEngine(t)
-
-	info, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{
-		Mechanism: cp.AddonMechanismCloudNativePG, Confirm: true,
-	})
-	if err != nil {
-		t.Fatalf("InstallAddon: %v", err)
-	}
-	stored, err := d.Addon(ctx, info.Name)
-	if err != nil {
-		t.Fatalf("reading the registry row back: %v", err)
-	}
-	if stored.Mechanism() != cp.AddonMechanismCloudNativePG {
-		t.Errorf("mechanism = %q, want %q", stored.Mechanism(), cp.AddonMechanismCloudNativePG)
-	}
-	// Anything else is the catalog's own mechanism, including a row written before there was a
-	// choice — the direction whose teardown fails safe.
-	if (cp.AddonInfo{Backend: "postgres"}).Mechanism() != cp.AddonMechanismDefault {
-		t.Error("a Deployment-backed instance does not report the default mechanism")
 	}
 }

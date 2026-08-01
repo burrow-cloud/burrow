@@ -715,9 +715,6 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, opts
 	if !ok {
 		return AddonInfo{}, fmt.Errorf("install addon: unknown type %q: %w", t, ErrInvalid)
 	}
-	if opts.Mechanism == AddonMechanismCloudNativePG && t != AddonPostgres {
-		return AddonInfo{}, fmt.Errorf("install addon %s: CloudNativePG backs the postgres add-on and no other: %w", t, ErrInvalid)
-	}
 	targetEnv, _, err := e.resolveMutatingEnvironment(ctx, env)
 	if err != nil {
 		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
@@ -726,26 +723,17 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, opts
 	if err != nil {
 		return AddonInfo{}, fmt.Errorf("install addon %s: loading guardrail policy: %w", t, err)
 	}
-	// The audit row and the confirmation message both name the MECHANISM when it is not the
-	// catalog's own, because "installing the postgres add-on" describes two materially different
-	// things once ADR-0066 exists, and a confirmation that does not say which one it is is not
-	// informed consent (ADR-0006).
 	args := map[string]string{"type": string(t), "image": spec.Image, "env": targetEnv}
-	mechanism := ""
-	if opts.Mechanism != AddonMechanismDefault {
-		args["mechanism"] = string(opts.Mechanism)
-		mechanism = fmt.Sprintf(" on %s", opts.Mechanism)
-	}
 	if err := e.recordDecision(ctx, auditOpAddonInstall, string(t), args, GuardrailAddonInstall,
 		// The DISPOSITION is looked up globally: addon.* is cluster-level and not EnvScopable
 		// (ADR-0035 phase 2c), so an environment cannot relax or tighten it. The environment still
 		// appears in the message and the audit args, because which environment an add-on operation
 		// lands in is exactly what the operator is being asked to approve (ADR-0067 §1).
 		pol.evaluateGuardrail("", "addon install", GuardrailAddonInstall, opts.Confirm,
-			fmt.Sprintf("installing the %s add-on (%s) in environment %s%s", t, spec.Image, targetEnv, mechanism))); err != nil {
+			fmt.Sprintf("installing the %s add-on (%s) in environment %s", t, spec.Image, targetEnv))); err != nil {
 		return AddonInfo{}, err
 	}
-	info, err := e.k8s.DeployAddon(ctx, spec, targetEnv, opts.Mechanism)
+	info, err := e.k8s.DeployAddon(ctx, spec, targetEnv)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonInstall, string(t), args, err)
 		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
@@ -842,12 +830,13 @@ func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
 // not as a bespoke override flag, and the destructive path already requires the caller to have typed
 // DeleteData.
 //
-// THE MECHANISM DOES NOT CHANGE THE CONTRACT. A CloudNativePG-backed instance (ADR-0066 §1) keeps
-// its data on removal exactly as a Deployment-backed one does, and the difference is entirely below
-// this line: the operator owns those claims, so keeping them means disowning them before its
-// `Cluster` is deleted rather than simply not deleting them. What that costs here is a single
-// argument — the mechanism is read from the registry row and handed to the seam, because a removal
-// that inferred it from the cluster would read a refused probe as an absent add-on.
+// THE MECHANISM DOES NOT CHANGE THE CONTRACT. A Postgres instance is a CloudNativePG `Cluster`
+// (ADR-0066 §1) and keeps its data on removal exactly as a Deployment-backed add-on does; the
+// difference is entirely below this line, because the operator owns those claims and keeping them
+// means disowning them before its `Cluster` is deleted rather than simply not deleting them. What
+// that costs here is a single argument — the add-on's TYPE is read from the registry row and handed
+// to the seam, because a removal that inferred the shape from the cluster would read a refused probe
+// as an absent add-on.
 //
 // WHERE AN OBJECT STORE IS REGISTERED, DeleteData TAKES A FINAL BACKUP FIRST AND ABORTS IF IT FAILS
 // (ADR-0064 §5). The ordering is the whole of the safety: nothing is destroyed until a copy is known
@@ -909,11 +898,11 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 		res.FinalBackupSkipped, res.FinalBackupNote = plan.skipped, plan.note
 	}
 	if info.Mode == "installed" {
-		// The MECHANISM comes from the registry row, which recorded it at install (ADR-0066 §1).
-		// Removal is the one operation that must not work it out from the cluster: a
-		// CloudNativePG-backed instance has no Deployment to find, and a probe that finds nothing is
+		// The TYPE comes from the registry row, and it is what decides the shape of the teardown
+		// (ADR-0066 §1). Removal is the one operation that must not work that out from the cluster: a
+		// Postgres instance has no Deployment to find, and a probe that finds nothing is
 		// indistinguishable from a probe that was refused.
-		removal, derr := e.k8s.DeleteAddon(ctx, name, info.Mechanism(), opts.DeleteData)
+		removal, derr := e.k8s.DeleteAddon(ctx, name, info.Type, opts.DeleteData)
 		if derr != nil {
 			e.recordExecution(ctx, auditOpAddonRemove, name, args, derr)
 			return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, derr)
@@ -983,10 +972,10 @@ func removalConsequence(info AddonInfo, deleteData bool, apps []string, plan fin
 	spec, known := LookupAddon(info.Type)
 	hasVolume := info.Mode == "installed" && known && spec.StorageGi > 0
 	what := fmt.Sprintf("removing the add-on %q", info.Name)
-	// The volume the removal ACTS on, which under CloudNativePG is the operator's claim rather than
-	// the instance's own name (ADR-0066 §1). A confirmation naming a volume that does not exist is
-	// worse than one naming none: it reads as precise.
-	volume := AddonDataVolumeName(info.Name, info.Mechanism())
+	// The volume the removal ACTS on, which for Postgres is CloudNativePG's claim rather than the
+	// instance's own name (ADR-0066 §1). A confirmation naming a volume that does not exist is worse
+	// than one naming none: it reads as precise.
+	volume := AddonDataVolumeName(info.Type, info.Name)
 
 	switch {
 	case hasVolume && deleteData:

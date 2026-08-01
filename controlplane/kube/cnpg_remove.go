@@ -19,13 +19,14 @@ import (
 )
 
 // This file is ADR-0064's removal contract, expressed over a CloudNativePG `Cluster` (ADR-0066 §1).
-// The contract does not change because the mechanism did: removal KEEPS the data and names the claim
-// it kept, `--delete-data` is the separate ask that destroys it, and the backup claim survives both.
+// The contract is the same one every other add-on's removal keeps: it KEEPS the data and names the
+// claim it kept, `--delete-data` is the separate ask that destroys it, and the backup claim survives
+// both.
 //
-// WHAT IS DIFFERENT IS WHO OWNS THE DISK, and it is the whole of the work here. Under ADR-0031 the
-// claim is Burrow's: it is created by Burrow, named after the instance, and simply not deleted. Under
-// CloudNativePG the claims are the OPERATOR's — it composes them from the `Cluster`, names them
-// `<cluster>-1`, and (verified in CNPG's own PVC builder, which calls the cluster's
+// WHAT IS DIFFERENT IS WHO OWNS THE DISK, and it is the whole of the work here. For an add-on Burrow
+// deploys itself the claim is Burrow's: created by Burrow, named after the instance, and simply not
+// deleted. CloudNativePG's claims are the OPERATOR's — it composes them from the `Cluster`, names
+// them `<cluster>-1`, and (verified in CNPG's own PVC builder, which calls the cluster's
 // SetInheritedDataAndOwnership on every claim it makes) stamps the `Cluster` on each one as an owner
 // reference. Deleting the `Cluster` therefore hands the claims to Kubernetes' garbage collector.
 //
@@ -88,8 +89,8 @@ func (a *Adapter) deletePostgresCluster(ctx context.Context, name string, delete
 	}
 
 	// Which environment this instance serves, taken from the object's own labels rather than parsed
-	// back out of its name — the same reading the Deployment-backed path takes, and the reason the
-	// backup claim it reports is this environment's rather than the compiled-in default's
+	// back out of its name, which is the reason the backup claim it reports is this environment's
+	// rather than the compiled-in default's
 	// (ADR-0067 §1). The claims carry it too, inherited from the `Cluster` (inheritedMetadata), which
 	// is what keeps the answer available when the `Cluster` itself is already gone.
 	env := controlplane.DefaultEnvironment

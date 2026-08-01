@@ -303,9 +303,12 @@ acceptance checklist. The theme and its sequencing stay here; the granularity is
   object storage. [#334](https://github.com/burrow-cloud/burrow/issues/334) (blocked by #331).
 - **The Postgres add-on runs on CloudNativePG** ([ADR-0066](adr/0066-postgres-on-cloudnativepg.md)) —
   the operator owns WAL archiving, schedules, retention and point-in-time recovery, and Burrow stops
-  orchestrating backups altogether. The operator itself is now installable and detected
-  (`burrow cluster postgres install`, reported by `burrow cluster`); the add-on still runs its own
-  Deployment.
+  orchestrating backups altogether. §1 has landed: the operator is installable and detected
+  (`burrow cluster postgres install`, reported by `burrow cluster`), it is a prerequisite of
+  `burrow addon install postgres`, and the add-on instance is a `Cluster` per environment and
+  nothing else — the Deployment ADR-0031 specified is gone from the tree. **The rest is not built.**
+  Backups are still `pg_dump` Jobs: no `Backup` or `ScheduledBackup` object, no pgBackRest plugin,
+  no WAL archiving, no retention window, no point-in-time recovery, no physical restore.
   [#338](https://github.com/burrow-cloud/burrow/issues/338) (blocked by #331).
 
 ## Deferred until requested

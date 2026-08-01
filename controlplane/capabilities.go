@@ -32,7 +32,7 @@ type ClusterCapabilities struct {
 	MetricsServer MetricsServerCapability `json:"metrics_server"`
 	// CloudNativePG is the CloudNativePG operator's situation: whether its CRDs are served, whether
 	// a controller is actually running, and which release it is (ADR-0066 §1). It is the cluster
-	// prerequisite the Postgres add-on's mechanism moves onto, installed by an operator-CLI setup
+	// prerequisite the Postgres add-on runs on, installed by an operator-CLI setup
 	// step because CRDs need cluster-admin.
 	CloudNativePG CloudNativePGCapability `json:"cloudnative_pg"`
 	// Provider is the detected cloud provider, inferred from node labels / providerID.
@@ -95,8 +95,8 @@ type MetricsServerCapability struct {
 }
 
 // CloudNativePGCapability reports the CloudNativePG operator, the cluster prerequisite ADR-0066 §1
-// puts the Postgres add-on's mechanism on. It is three facts rather than one because they fail
-// apart, and each failure looks like the others from the outside:
+// puts the Postgres add-on on — `addon install postgres` is refused without it. It is three facts
+// rather than one because they fail apart, and each failure looks like the others from the outside:
 //
 //   - Present is whether the postgresql.cnpg.io API group is served — the CRDs are installed, so a
 //     `Cluster` object can be written. Detected via API-group discovery, which needs no RBAC.

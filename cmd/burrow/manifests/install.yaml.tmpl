@@ -126,7 +126,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
-  # The Postgres add-on can run on CloudNativePG instead of a Deployment Burrow authors: burrowd
+  # The Postgres add-on IS a CloudNativePG `Cluster` and nothing else: burrowd
   # creates one `postgresql.cnpg.io/v1 Cluster` per environment in this namespace, reads its status
   # to answer "is this instance serving", and deletes it when the add-on is removed (ADR-0066 §1).
   # GET, CREATE and DELETE, scoped to the add-on namespace. There is deliberately no update or patch

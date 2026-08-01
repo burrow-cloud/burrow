@@ -295,29 +295,19 @@ func (k *Kubernetes) RestartedAt(app string) (time.Time, bool) {
 // controlplane.AddonInstanceName, so the default environment lands on the unqualified name an
 // existing install already has and any other environment gets a separate instance beside it
 // (ADR-0067 §1). Two environments therefore occupy two entries in this fake cluster, never one.
-//
-// mech models what the real adapter does with the mechanism, at the resolution the engine's tests
-// need: a CloudNativePG-backed instance is the same instance under the same name and endpoint, and
-// differs in the two facts anything downstream reads — the Backend the registry records, and the
-// absence of a Burrow-owned data volume, because under that mechanism the claims are the operator's
-// (ADR-0066 §1).
-func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string, mech controlplane.AddonMechanism) (controlplane.AddonInfo, error) {
+func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string) (controlplane.AddonInfo, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	name, err := controlplane.AddonInstanceName(spec.Type, env)
 	if err != nil {
 		return controlplane.AddonInfo{}, err
 	}
-	backend := spec.Backend
-	if mech == controlplane.AddonMechanismCloudNativePG {
-		backend = controlplane.AddonBackendCloudNativePG
-	}
 	info := controlplane.AddonInfo{
 		Name:         name,
 		Type:         spec.Type,
 		Environment:  env,
 		Mode:         "installed",
-		Backend:      backend,
+		Backend:      spec.Backend,
 		Image:        spec.Image,
 		Endpoint:     fmt.Sprintf("%s.default.svc:%d", name, spec.Port),
 		Capabilities: spec.Capabilities,
@@ -326,11 +316,11 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 	k.addons[name] = info
 	// A stateful add-on gets a data volume, like the adapter's PVC. Whether that volume survives a
 	// removal is the thing tests assert on, so the fake has to hold it — and it has to hold it under
-	// the NAME the mechanism gives it, because the two names are what a removal has to find. Burrow's
-	// own claim is named after the instance; CloudNativePG composes its claims from the `Cluster` and
-	// names them after the instance it makes, `<instance>-1`.
+	// the NAME the add-on's type gives it, because that is the name a removal has to find. Burrow's
+	// own claim is named after the instance; a Postgres instance is a CloudNativePG `Cluster`, which
+	// composes its claim and names it `<instance>-1`.
 	if spec.StorageGi > 0 {
-		k.volumes[controlplane.AddonDataVolumeName(name, mech)] = fakeVolume{
+		k.volumes[controlplane.AddonDataVolumeName(spec.Type, name)] = fakeVolume{
 			Addon: spec.Type,
 			Env:   fakeEnvName(env),
 			Role:  controlplane.AddonVolumeData,
@@ -393,11 +383,11 @@ func (k *Kubernetes) AddonVolumes(ctx context.Context) ([]controlplane.AddonVolu
 // is set. The retained-volume names it reports mirror the adapter's, so an engine test asserts on the
 // same shape production produces.
 //
-// The MECHANISM decides which claim that is, and modelling it here is what makes an engine test of a
-// CloudNativePG-backed removal mean something: the retained claim is the operator's `<instance>-1`,
-// not Burrow's `<instance>`, and a fake that kept the Deployment-path name would agree with a
-// removal that looked for the wrong volume (ADR-0066 §1, ADR-0064 §1).
-func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, mech controlplane.AddonMechanism, deleteData bool) (controlplane.AddonRemoval, error) {
+// The add-on's TYPE decides which claim that is, and modelling it here is what makes an engine test
+// of a Postgres removal mean something: the retained claim is the operator's `<instance>-1`, not
+// `<instance>`, and a fake that used the Deployment name would agree with a removal that looked for
+// the wrong volume (ADR-0066 §1, ADR-0064 §1).
+func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, t controlplane.AddonType, deleteData bool) (controlplane.AddonRemoval, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	removal := controlplane.AddonRemoval{Namespace: fakeAddonNamespace}
@@ -406,7 +396,7 @@ func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, mech controlp
 		return removal, fmt.Errorf("fake: addon %q: %w", name, controlplane.ErrNotFound)
 	}
 	delete(k.addons, name)
-	dataVolume := controlplane.AddonDataVolumeName(name, mech)
+	dataVolume := controlplane.AddonDataVolumeName(t, name)
 	if _, hasVol := k.volumes[dataVolume]; hasVol {
 		if deleteData {
 			delete(k.volumes, dataVolume)

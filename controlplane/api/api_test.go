@@ -1214,7 +1214,7 @@ func TestRemoveAddonEndpointDefaultsToKeepingData(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("remove addon = %d %s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), `"retained_data_volume":"burrow-postgres"`) {
+	if !strings.Contains(rr.Body.String(), `"retained_data_volume":"burrow-postgres-1"`) {
 		t.Errorf("removal response does not report the retained data volume: %s", rr.Body.String())
 	}
 	if !strings.Contains(rr.Body.String(), `"data_deleted":false`) {
@@ -1267,7 +1267,7 @@ func TestListAddonsReportsRetainedVolumes(t *testing.T) {
 		t.Fatalf("retained_volumes = %+v, want the claim the removal kept", body.RetainedVolumes)
 	}
 	v := body.RetainedVolumes[0]
-	if v.Name != "burrow-postgres" || v.Addon != "postgres" || v.Role != "data" {
+	if v.Name != "burrow-postgres-1" || v.Addon != "postgres" || v.Role != "data" {
 		t.Errorf("retained volume = %+v, want the postgres data claim", v)
 	}
 	if v.Size == "" || v.Namespace == "" {

@@ -21,48 +21,39 @@ const (
 	// AddonCache is an in-memory cache (ValKey, BSD-3) the agent wires an app to — a backing
 	// service the app connects to, not one the agent queries, so it has no query seam.
 	AddonCache AddonType = "cache"
-	// AddonPostgres is a PostgreSQL instance (the official postgres image, PostgreSQL License) the
-	// agent attaches an app to — Burrow provisions a database and login role per app inside it and
-	// writes the app's DATABASE_URL into the app's per-environment Secret (ADR-0031). There is one
-	// instance PER ENVIRONMENT, not one per cluster: the environment, not a naming convention inside
-	// a shared server, is what isolates one environment's data from another's (ADR-0067 §1).
+	// AddonPostgres is a PostgreSQL instance the agent attaches an app to — Burrow provisions a
+	// database and login role per app inside it and writes the app's DATABASE_URL into the app's
+	// per-environment Secret (ADR-0031). There is one instance PER ENVIRONMENT, not one per cluster:
+	// the environment, not a naming convention inside a shared server, is what isolates one
+	// environment's data from another's (ADR-0067 §1). The instance is a CloudNativePG `Cluster` and
+	// nothing else — Burrow writes one custom resource and the operator composes the workload, the
+	// volume and the services from it (ADR-0066 §1).
 	AddonPostgres AddonType = "postgres"
 )
 
-// AddonMechanism names HOW an add-on instance's backing workload is provided. It is a property of
-// one install rather than of the catalog: the same add-on type can be stood up two ways, and which
-// way this instance was stood up is a fact about that instance.
+// CNPGPostgresImage is the PostgreSQL operand image a Burrow-authored `Cluster` runs. Burrow ships
+// no third-party bytes: this names an image the CLUSTER pulls from the publisher who built it.
 //
-// It exists because ADR-0066 replaces the Postgres add-on's mechanism while keeping ADR-0031's
-// user-facing contract intact. Everything a tenant sees — an instance shared by an environment's
-// apps, a database and a login role per app, a DATABASE_URL in the app's own Secret — is the same
-// under both. What changes is who runs the server.
-type AddonMechanism string
-
-const (
-	// AddonMechanismDefault is the catalog's own mechanism: a Deployment Burrow authors, with a
-	// PersistentVolumeClaim and a Service beside it (ADR-0025, ADR-0031). It is the zero value, so a
-	// caller that expresses no preference gets exactly what it got before there was a choice.
-	AddonMechanismDefault AddonMechanism = ""
-	// AddonMechanismCloudNativePG backs a Postgres instance with a CloudNativePG `Cluster` — Burrow
-	// creates one custom resource and the operator composes the workload from it (ADR-0066 §1).
-	//
-	// IT IS OPT-IN, and that is a decision about SEQUENCING rather than about the destination.
-	// ADR-0066 §1's end state is that `addon install postgres` simply uses the operator; getting
-	// there is several slices, and until they land a CloudNativePG-backed instance is genuinely less
-	// capable than the Deployment it would replace — its backups are still ADR-0032 logical dumps
-	// rather than the operator's. Making it the automatic answer on every cluster that happens to
-	// have the operator installed would hand that gap to users who did not ask for it, and would
-	// assert a mechanism as done while it is being built, which is the one thing ADR-0009 forbids.
-	// The flag's default flips when the mechanism is complete.
-	AddonMechanismCloudNativePG AddonMechanism = "cloudnative-pg"
-)
-
-// AddonBackendCloudNativePG is the Backend recorded in the registry for a Postgres instance backed
-// by a CloudNativePG `Cluster`. It is deliberately the same string as the mechanism: "which concrete
-// implementation serves this add-on" is what Backend has always meant, so the mechanism needs no
-// second column and no migration to survive a restart.
-const AddonBackendCloudNativePG = string(AddonMechanismCloudNativePG)
+// Three things are deliberate about which image this is.
+//
+//   - It is CloudNativePG's own operand image rather than a stock `postgres` one. CNPG's instance
+//     manager runs as PID 1 inside it and the entrypoint is the operator's, so an arbitrary
+//     PostgreSQL image is not a substitution CNPG supports.
+//   - It is the MINIMAL variant. CNPG's standard operand images bundle barman-cloud, which shells
+//     out to GPL-3.0 tooling; ADR-0066 §3 declines barman on exactly that ground, and its rejection
+//     of the WAL-G plugin ("a plugin's licence is not its image's licence") is the record saying
+//     this project names images and not just repositories. The minimal image carries PostgreSQL and
+//     the instance manager and no backup tooling at all — which is also the right base for §3's
+//     pgBackRest plugin, since a CNPG-I plugin ships its own sidecar rather than living in this
+//     image.
+//   - It is PostgreSQL 17, the major version the add-on has always run, so adopting the operator is
+//     not also a major-version jump.
+//
+// It is pinned to a patch release for the reason every other image in the catalog is: an install
+// that happens twice should be the same install. It moves independently of the operator's own pin
+// (kube.CNPGVersion) — the operator and the operand are separately released, and CNPG supports a
+// range of operands per operator — so it is not derived from it.
+const CNPGPostgresImage = "ghcr.io/cloudnative-pg/postgresql:17.10-minimal-trixie"
 
 // AddonSpec is a catalog entry: how to deploy and reach one vetted backing service. The catalog
 // is curated and permissively licensed (Apache / MIT / BSD) so Burrow can bundle it without
@@ -120,13 +111,17 @@ var addonCatalog = map[AddonType]AddonSpec{
 		Summary:      "in-memory cache (ValKey)",
 	},
 	AddonPostgres: {
-		Type:    AddonPostgres,
-		Backend: "postgres",
-		Image:   "postgres:17-alpine", // official PostgreSQL image (Alpine variant — smaller, faster to pull), PostgreSQL License (BSD-style)
+		Type: AddonPostgres,
+		// The backend IS the mechanism, because "which concrete implementation serves this add-on" is
+		// what Backend has always meant, and for Postgres there is exactly one: CloudNativePG
+		// (Apache-2.0, a CNCF project, clearing ADR-0025's licence bar outright).
+		Backend: "cloudnative-pg",
+		Image:   CNPGPostgresImage,
 		Port:    5432,
-		// Persistent: a database is durable state, so it gets a volume; the generic stateful path
-		// gives it a Recreate Deployment + a PVC. The superuser password Secret and per-app
-		// database provisioning are handled by the install/attach special-cases (ADR-0031).
+		// Persistent: a database is durable state, so it gets a volume. Unlike every other add-on the
+		// claim is not Burrow's — the operator composes it from the `Cluster` and names it
+		// `<instance>-1` (AddonDataVolumeName) — so this size is what the `Cluster` asks for rather
+		// than what a Burrow-authored PersistentVolumeClaim requests.
 		StorageGi:    10,
 		Capabilities: []string{"database"},
 		Summary:      "PostgreSQL database (one instance per environment, a database and role per app)",
@@ -172,41 +167,36 @@ func AddonInstanceName(t AddonType, env string) (string, error) {
 	return "burrow-" + string(t) + "-" + env, nil
 }
 
-// AddonDataVolumeName is the PersistentVolumeClaim holding the data of the add-on instance named
-// instance, under mechanism mech. It exists so a message about a removal names the volume that
-// removal actually acts on (ADR-0064 §3) — "this destroys the data volume X" is only informed
-// consent while X is the volume being destroyed.
+// AddonDataVolumeName is the PersistentVolumeClaim holding the data of add-on type t's instance
+// named instance. It exists so a message about a removal names the volume that removal actually acts
+// on (ADR-0064 §3) — "this destroys the data volume X" is only informed consent while X is the
+// volume being destroyed.
 //
-// The two mechanisms name it differently, and neither name is a convention Burrow is free to pick.
-// The claim Burrow creates is named after the instance; CloudNativePG composes one claim per
-// instance from the `Cluster` and calls it `<instance>-<serial>`, and the single-instance `Cluster`
-// Burrow authors (ADR-0066 §1) therefore has exactly one, `<instance>-1`.
+// Postgres names it differently from every other add-on, and neither name is a convention Burrow is
+// free to pick. The claim Burrow creates for a Deployment-backed add-on (logs, metrics) is named
+// after the instance; a Postgres instance is a CloudNativePG `Cluster`, which composes one claim per
+// instance and calls it `<instance>-<serial>` — and the single-instance `Cluster` Burrow authors
+// (ADR-0066 §1) therefore has exactly one, `<instance>-1`.
 //
 // IT IS FOR SAYING, NOT FOR ACTING. Every path that DELETES or RETAINS a CloudNativePG claim finds
 // it by the label the operator puts on it rather than by this derivation, because a constructed name
 // that stopped matching would retain one claim out of a volume group and silently strand the rest.
 // A prose name that is wrong costs a confusing sentence; an act aimed at the wrong name costs data.
-func AddonDataVolumeName(instance string, mech AddonMechanism) string {
-	if mech == AddonMechanismCloudNativePG {
+func AddonDataVolumeName(t AddonType, instance string) string {
+	if t == AddonPostgres {
 		return instance + "-1"
 	}
 	return instance
 }
 
 // InstallAddonOptions is everything `addon install` needs beyond the add-on's type and its
-// environment. It is a struct rather than more parameters for RemoveAddonOptions' reason: the answer
-// to "what does this install do" is now more than one bit, and two adjacent booleans at a call site
-// are a bug waiting to be written.
+// environment.
 //
 // The environment stays a positional argument rather than moving in here, deliberately. ADR-0067 §1
 // requires every add-on operation to name the environment it acts on — "a signature that can omit it
 // is a signature that will omit it" — and a field on an options struct is exactly the kind of thing
 // a caller omits.
 type InstallAddonOptions struct {
-	// Mechanism selects how the instance's workload is provided. The zero value is the catalog's
-	// own — a Deployment Burrow authors — so an install that expresses no preference behaves exactly
-	// as it did before there was a choice, on a cluster with an operator or without one.
-	Mechanism AddonMechanism
 	// Confirm satisfies the addon.install guardrail's confirmation hold (ADR-0020).
 	Confirm bool
 }
@@ -449,23 +439,7 @@ type AddonInfo struct {
 	SecretKey string `json:"secret_key,omitempty"`
 	// CreatedAt is when the add-on was registered, read from the injected clock.
 	CreatedAt time.Time `json:"created_at,omitempty"`
-	// Ready is a live property — whether the backing Deployment is available. It is probed
+	// Ready is a live property — whether the instance's backing workload is available. It is probed
 	// from the cluster at list time and never persisted in the registry.
 	Ready bool `json:"ready"`
-}
-
-// Mechanism reports HOW this instance's workload is provided, recovered from the Backend the
-// registry recorded at install (ADR-0066 §1). It is the one place the string is turned back into the
-// choice, so an operation that has to act differently per mechanism — removing the instance is the
-// first — asks a question with two answers rather than comparing a backend name at each call site.
-//
-// Anything that is not the CloudNativePG backend is the catalog's own mechanism, including a
-// connected backend and a registry row written before there was a choice. That direction is the safe
-// one: a Deployment-shaped teardown of an instance that has no Deployment reports ErrNotFound and
-// changes nothing, while the reverse would look for a `Cluster` that was never created.
-func (a AddonInfo) Mechanism() AddonMechanism {
-	if a.Backend == AddonBackendCloudNativePG {
-		return AddonMechanismCloudNativePG
-	}
-	return AddonMechanismDefault
 }

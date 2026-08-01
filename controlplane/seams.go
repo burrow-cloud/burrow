@@ -262,22 +262,21 @@ type Kubernetes interface {
 	// install already has and any other environment gets its own instance beside it — its own pod,
 	// its own volume, and for Postgres its own superuser credential.
 	//
-	// mech selects HOW the instance's workload is provided. The zero value is the catalog's own
-	// mechanism, a Deployment Burrow authors; AddonMechanismCloudNativePG backs a Postgres instance
-	// with a CloudNativePG `Cluster` instead (ADR-0066 §1). The instance's NAME, endpoint, superuser
-	// Secret and per-app contract are the same either way — the mechanism is a fact about who runs
-	// the server, not a second kind of add-on.
-	DeployAddon(ctx context.Context, spec AddonSpec, env string, mech AddonMechanism) (AddonInfo, error)
+	// The add-on's TYPE decides what is written. Postgres is a CloudNativePG `Cluster` — one custom
+	// resource, from which the operator composes the workload, the volume and the services (ADR-0066
+	// §1) — and every other add-on is a Deployment Burrow authors. Which one it is follows from the
+	// spec; there is no mechanism to select.
+	DeployAddon(ctx context.Context, spec AddonSpec, env string) (AddonInfo, error)
 	// AddonReady reports whether the named add-on's backing workload is available. It is a cheap
 	// single-object readiness probe — readiness is a live property, not stored in the registry — and
 	// a missing workload is reported as not ready (false, nil), not an error.
 	//
-	// WHICH object it reads is resolved from the cluster, not from the registry, because an add-on
-	// instance is not always a Deployment: a CloudNativePG-backed Postgres instance has none at all,
-	// and its readiness is its `Cluster`'s ready instance count (ADR-0066 §1). Reading only the
-	// Deployment would report every such instance as not running, and the failure observer would
-	// then open an ADR-0074 §6 discrepancy row against a database that is serving perfectly well —
-	// a false absence, which is precisely the diagnosis §6 exists to make correctly.
+	// WHICH object it reads is resolved from the cluster rather than from the name, because an add-on
+	// instance is not always a Deployment: a Postgres instance has none at all, and its readiness is
+	// its CloudNativePG `Cluster`'s ready instance count (ADR-0066 §1). Reading only the Deployment
+	// would report every Postgres instance as not running, and the failure observer would then open
+	// an ADR-0074 §6 discrepancy row against a database that is serving perfectly well — a false
+	// absence, which is precisely the diagnosis §6 exists to make correctly.
 	AddonReady(ctx context.Context, name string) (bool, error)
 	// DeleteAddon tears down the named add-on's WORKLOAD — its Deployment, Service, collector, and
 	// generated config — and, only when deleteData is true, destroys its data volume as well.
@@ -287,14 +286,14 @@ type Kubernetes interface {
 	// usable again after a reinstall. It returns what was torn down and what was deliberately kept,
 	// so the caller can report it. Removing an add-on that is not installed returns ErrNotFound.
 	//
-	// mech says which mechanism stood this instance up, so the teardown matches the install
-	// (ADR-0066 §1). It comes from the registry rather than from the cluster, because a removal is
-	// the operation that must never guess: a CloudNativePG-backed instance has no Deployment, and
-	// probing for one and finding nothing is indistinguishable from a probe that was refused. Under
-	// that mechanism the claims belong to the OPERATOR and carry the `Cluster` as their owner, so
-	// keeping the data means disowning them before the `Cluster` is deleted rather than simply not
-	// deleting them — the same promise, a different act.
-	DeleteAddon(ctx context.Context, name string, mech AddonMechanism, deleteData bool) (AddonRemoval, error)
+	// t is the add-on's TYPE, taken from the registry row rather than probed for, and it decides
+	// which teardown runs: Postgres is a CloudNativePG `Cluster` and everything else is a Deployment
+	// (ADR-0066 §1). A removal is the operation that must never guess — a Postgres instance has no
+	// Deployment, and probing for one and finding nothing is indistinguishable from a probe that was
+	// refused. Under CloudNativePG the claims belong to the OPERATOR and carry the `Cluster` as their
+	// owner, so keeping the data means disowning them before the `Cluster` is deleted rather than
+	// simply not deleting them — the same promise, a different act.
+	DeleteAddon(ctx context.Context, name string, t AddonType, deleteData bool) (AddonRemoval, error)
 	// AddonVolumes returns every PersistentVolumeClaim in the add-on namespace that Burrow created
 	// for an add-on, whether or not the add-on that owns it still exists. It reads the CLUSTER, not
 	// the registry, because that is the only place a volume outliving its add-on can be seen at all

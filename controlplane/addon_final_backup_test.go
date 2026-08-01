@@ -56,7 +56,8 @@ func newFinalBackupEngine(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Dat
 func assertNothingDestroyed(t *testing.T, k *fake.Kubernetes, d *fake.Database) {
 	t.Helper()
 	ctx := context.Background()
-	if _, ok := k.AddonVolume("burrow-postgres"); !ok {
+	// The claim is the operator's `<instance>-1`, not the instance's own name (ADR-0066 §1).
+	if _, ok := k.AddonVolume("burrow-postgres-1"); !ok {
 		t.Error("the data volume was destroyed after the final backup failed — this is the data loss ADR-0064 §5 exists to prevent")
 	}
 	if ready, err := k.AddonReady(ctx, "burrow-postgres"); err != nil || !ready {

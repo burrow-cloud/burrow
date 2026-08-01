@@ -10,10 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -74,7 +72,7 @@ func TestDeployAddonOnCloudNativePGCreatesTheCluster(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 	spec := postgresSpec(t)
 
-	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, controlplane.AddonMechanismCloudNativePG)
+	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("DeployAddon on CloudNativePG: %v", err)
 	}
@@ -88,13 +86,14 @@ func TestDeployAddonOnCloudNativePGCreatesTheCluster(t *testing.T) {
 	if want := instance + "." + cnpgTestNamespace + ".svc:5432"; info.Endpoint != want {
 		t.Errorf("endpoint = %q, want %q — a CloudNativePG instance must be reachable where a Deployment-backed one is", info.Endpoint, want)
 	}
-	// The mechanism is recorded as the Backend, which is how it survives a burrowd restart with no
-	// new column and no migration.
-	if info.Backend != controlplane.AddonBackendCloudNativePG {
-		t.Errorf("backend = %q, want %q", info.Backend, controlplane.AddonBackendCloudNativePG)
+	// The Backend is what `addon list` shows an operator who asks what is running their database, and
+	// it is the catalog's — the add-on has one implementation, so the registry row carries it rather
+	// than a per-install choice.
+	if info.Backend != "cloudnative-pg" {
+		t.Errorf("backend = %q, want cloudnative-pg", info.Backend)
 	}
-	if info.Image != kube.CNPGPostgresImage {
-		t.Errorf("image = %q, want the pinned operand image %q", info.Image, kube.CNPGPostgresImage)
+	if info.Image != controlplane.CNPGPostgresImage {
+		t.Errorf("image = %q, want the pinned operand image %q", info.Image, controlplane.CNPGPostgresImage)
 	}
 
 	u := getCluster(t, dyn, instance)
@@ -104,8 +103,8 @@ func TestDeployAddonOnCloudNativePGCreatesTheCluster(t *testing.T) {
 	if got := nestedInt(t, u, "spec", "instances"); got != 1 {
 		t.Errorf("instances = %d, want the single-replica default ADR-0066 §1 keeps for the small self-hoster", got)
 	}
-	if got := nestedString(t, u, "spec", "imageName"); got != kube.CNPGPostgresImage {
-		t.Errorf("spec.imageName = %q, want %q", got, kube.CNPGPostgresImage)
+	if got := nestedString(t, u, "spec", "imageName"); got != controlplane.CNPGPostgresImage {
+		t.Errorf("spec.imageName = %q, want %q", got, controlplane.CNPGPostgresImage)
 	}
 	if got := nestedString(t, u, "spec", "storage", "size"); got != "10Gi" {
 		t.Errorf("spec.storage.size = %q, want the catalog's 10Gi", got)
@@ -159,7 +158,7 @@ func TestCloudNativePGClusterDoesNotInheritTheManagedByLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), "staging", controlplane.AddonMechanismCloudNativePG); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), "staging"); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -199,7 +198,7 @@ func TestCloudNativePGSuperuserSecretIsBasicAuthAndNeverInTheCluster(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, controlplane.AddonMechanismCloudNativePG); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -213,8 +212,8 @@ func TestCloudNativePGSuperuserSecretIsBasicAuthAndNeverInTheCluster(t *testing.
 	if string(sec.Data["username"]) != kube.PostgresSuperuser {
 		t.Errorf("username = %q, want %q", sec.Data["username"], kube.PostgresSuperuser)
 	}
-	// The password lives under the same key the Deployment-backed instance uses, which is why the
-	// provisioner and the backup Jobs need no change at all to reach this instance.
+	// The password lives under the key ADR-0031 specified, which is why the provisioner and the
+	// backup Jobs reach this instance with no special case at all.
 	password := string(sec.Data[kube.PostgresPasswordKey])
 	if password == "" {
 		t.Fatalf("the secret has no %q key, so nothing can open this database", kube.PostgresPasswordKey)
@@ -239,12 +238,26 @@ func TestDeployAddonOnCloudNativePGRefusesWithoutTheOperator(t *testing.T) {
 		map[schema.GroupVersionResource]string{cnpgClusterGVR: "ClusterList"})
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, controlplane.AddonMechanismCloudNativePG)
+	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment)
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("DeployAddon error = %v, want ErrInvalid", err)
 	}
 	if !strings.Contains(err.Error(), "burrow cluster postgres install") {
 		t.Errorf("the refusal does not name the command that fixes it: %v", err)
+	}
+	// It has to say WHY that command is not something the agent can run, or the reader's next move
+	// is to hand the agent a wider credential (ADR-0066 Consequences).
+	if !strings.Contains(err.Error(), "cluster-admin") {
+		t.Errorf("the refusal does not say the fix needs cluster-admin: %v", err)
+	}
+	// And it must not surface as a Kubernetes error about an unknown resource type: a dynamic client
+	// does no discovery, so a Create against an absent CRD returns a 404 indistinguishable from a
+	// missing object, and "clusters.postgresql.cnpg.io not found" tells the reader nothing to act on.
+	if strings.Contains(err.Error(), "clusters.postgresql.cnpg.io") {
+		t.Errorf("the refusal reads as a Kubernetes not-found rather than a missing prerequisite: %v", err)
+	}
+	if _, err := dyn.Resource(cnpgClusterGVR).Namespace(cnpgTestNamespace).Get(ctx, "burrow-postgres", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Error("a Cluster was written onto a cluster with no CloudNativePG at all")
 	}
 }
 
@@ -260,7 +273,7 @@ func TestDeployAddonOnCloudNativePGRefusesOrphanedCRDs(t *testing.T) {
 		map[schema.GroupVersionResource]string{cnpgClusterGVR: "ClusterList"})
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, controlplane.AddonMechanismCloudNativePG)
+	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment)
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("DeployAddon error = %v, want ErrInvalid on a cluster with CRDs and no controller", err)
 	}
@@ -269,57 +282,32 @@ func TestDeployAddonOnCloudNativePGRefusesOrphanedCRDs(t *testing.T) {
 	}
 }
 
-// TestDeployAddonOnCloudNativePGWillNotConvertAnExistingInstance is ADR-0066 §6 in code. Migration
-// off the ADR-0031 mechanism is explicit and one-way; an install does not do it to a database in
-// place. Both shapes of "there is already Postgres data here" are refused: the running Deployment,
-// and the claim a data-preserving removal deliberately kept (ADR-0064 §1) — the second being the
-// dangerous one, because the workload is already gone and an empty Cluster beside that volume would
-// look like a successful reinstall.
-func TestDeployAddonOnCloudNativePGWillNotConvertAnExistingInstance(t *testing.T) {
+// TestDeployAddonOnCloudNativePGRefusesADeploymentEraSuperuserSecret covers the one artefact a
+// Burrow release that ran the add-on as its own Deployment can leave behind in this instance's way:
+// an OPAQUE superuser Secret, which a data-keeping removal deliberately kept beside the volume it
+// opens (ADR-0064 §1). A Secret's type is immutable, so it cannot be converted; a `Cluster` written
+// beside it would be rejected by CNPG's role management on one hand and would come up EMPTY beside
+// data that is still on the old claim on the other. The refusal is what keeps that from reading as
+// a successful install.
+func TestDeployAddonOnCloudNativePGRefusesADeploymentEraSuperuserSecret(t *testing.T) {
+	ctx := context.Background()
 	instance, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		name     string
-		existing runtime.Object
-		wants    string
-	}{
-		{
-			name: "a running Deployment-backed instance",
-			existing: &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
-				Name: instance, Namespace: cnpgTestNamespace,
-				Labels: map[string]string{"burrow.cloud/addon": "postgres"},
-			}},
-			wants: "one-way",
-		},
-		{
-			name: "a retained data volume from an earlier removal",
-			existing: &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: instance, Namespace: cnpgTestNamespace},
-				Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")},
-				}},
-			},
-			wants: "does not adopt it",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			client, dyn := cnpgReadyCluster(tc.existing)
-			a := kube.New(client, "burrow").WithDynamicClient(dyn)
+	client, dyn := cnpgReadyCluster(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: instance, Namespace: cnpgTestNamespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{kube.PostgresPasswordKey: []byte("a-password-from-the-deployment-era")},
+	})
+	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-			_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, controlplane.AddonMechanismCloudNativePG)
-			if !errors.Is(err, controlplane.ErrInvalid) {
-				t.Fatalf("DeployAddon error = %v, want ErrInvalid", err)
-			}
-			if !strings.Contains(err.Error(), tc.wants) {
-				t.Errorf("the refusal does not explain itself (%q not in %v)", tc.wants, err)
-			}
-			if _, err := dyn.Resource(cnpgClusterGVR).Namespace(cnpgTestNamespace).Get(ctx, instance, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-				t.Error("a Cluster was created beside the existing instance's data")
-			}
-		})
+	_, err = a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment)
+	if !errors.Is(err, controlplane.ErrInvalid) {
+		t.Fatalf("DeployAddon error = %v, want ErrInvalid", err)
+	}
+	if _, err := dyn.Resource(cnpgClusterGVR).Namespace(cnpgTestNamespace).Get(ctx, instance, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Error("a Cluster was created beside a superuser Secret that opens a volume it does not adopt")
 	}
 }
 
@@ -332,7 +320,7 @@ func TestDeployAddonOnCloudNativePGIsIdempotent(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 	spec := postgresSpec(t)
 
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, controlplane.AddonMechanismCloudNativePG); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	instance, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
@@ -344,7 +332,7 @@ func TestDeployAddonOnCloudNativePGIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, controlplane.AddonMechanismCloudNativePG); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("re-install: %v", err)
 	}
 	again, err := client.CoreV1().Secrets(cnpgTestNamespace).Get(ctx, instance, metav1.GetOptions{})
@@ -424,30 +412,6 @@ func TestAddonReadyWithoutADynamicClientIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestDeployAddonWithoutTheMechanismWritesNoCluster asserts the default install is untouched: on a
-// cluster that HAS CloudNativePG, an install that did not ask for it still gets the Deployment it
-// always got. The mechanism is opt-in, so the operator's presence is not itself a decision
-// (ADR-0009: a mechanism under construction is not asserted as the answer).
-func TestDeployAddonWithoutTheMechanismWritesNoCluster(t *testing.T) {
-	ctx := context.Background()
-	client, dyn := cnpgReadyCluster()
-	a := kube.New(client, "burrow").WithDynamicClient(dyn)
-
-	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, controlplane.AddonMechanismDefault)
-	if err != nil {
-		t.Fatalf("DeployAddon: %v", err)
-	}
-	if info.Backend != "postgres" {
-		t.Errorf("backend = %q, want the catalog's own", info.Backend)
-	}
-	if _, err := client.AppsV1().Deployments(cnpgTestNamespace).Get(ctx, "burrow-postgres", metav1.GetOptions{}); err != nil {
-		t.Fatalf("the default install did not create its Deployment: %v", err)
-	}
-	if _, err := dyn.Resource(cnpgClusterGVR).Namespace(cnpgTestNamespace).Get(ctx, "burrow-postgres", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Error("a Cluster was created by an install that did not ask for the mechanism")
-	}
-}
-
 // TestControllerPlacementReachesTheCluster is ADR-0077 §2's seam arriving at the pod it was built
 // for. Until this slice the translation had no caller: the policy was validated at wiring time and
 // then written into nothing. The database is the pod ADR-0073 calls the platform hook's "most
@@ -463,7 +427,7 @@ func TestControllerPlacementReachesTheCluster(t *testing.T) {
 		t.Fatalf("WithControllerPodPlacement: %v", err)
 	}
 
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, controlplane.AddonMechanismCloudNativePG); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	u := getCluster(t, dyn, "burrow-postgres")

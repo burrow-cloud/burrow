@@ -27,8 +27,11 @@ const (
 	// backupPVCSizeGi is the backup volume's requested size.
 	backupPVCSizeGi = 10
 	// backupImage is the image the backup/restore Jobs run: the official postgres image carries
-	// pg_dump and pg_restore. It matches the add-on instance image (ADR-0031/0032) and is already on
-	// the CI preload list, so e2e adds no new image.
+	// pg_dump and pg_restore (ADR-0032). It is NOT the add-on instance's image — the instance runs
+	// CloudNativePG's operand (ADR-0066 §1) — and it does not need to be: these Jobs are clients
+	// dialling the instance over TCP, and what matters is that the client tooling is the server's
+	// major version or newer, which 17 is. It stays the alpine variant because it is the smallest
+	// thing that carries both binaries.
 	backupImage = "postgres:17-alpine"
 	// backupJobTimeout caps how long burrowd waits for a backup/restore Job to complete. It is
 	// declared in controlplane/apiwait.go rather than here, because a client's own bound has to

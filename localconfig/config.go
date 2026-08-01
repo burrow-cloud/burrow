@@ -10,6 +10,11 @@
 // operator CLI) and `burrow-agent` (the agent control channel) consume this package, hence it
 // is a shared top-level package rather than living under cmd/burrow.
 //
+// It also holds the TARGET the CLI points at (ADR-0078): the managed product, or a Kubernetes
+// cluster the person holds a kubeconfig context for. A target is the layer above an environment
+// handle — it says which control plane, where the handle says which environment inside it — and,
+// for a cluster, it records the context NAME only and never a copy of the credential.
+//
 // This package is foundation only (ADR-0036 slice 1): the config model plus the resolution
 // that decides the active target. Command wiring (`burrow env`, install, `burrow-agent`)
 // lands in later slices.
@@ -44,11 +49,18 @@ const (
 // Config is the on-disk selector state. APIVersion/Kind form the migratable header; Current
 // names the pinned handle, or is empty to follow the current kube context (the default);
 // Environments is the set of named handles.
+//
+// Targets/CurrentTarget are the ADR-0078 layer above the handles: WHERE the control plane is
+// (the managed product, or a cluster you hold a kubeconfig context for), chosen with `burrow auth
+// login`. They are additive — with no target recorded the CLI resolves exactly as it did before,
+// following the kubeconfig — and they never hold a credential (see target.go).
 type Config struct {
-	APIVersion   string        `yaml:"apiVersion"`
-	Kind         string        `yaml:"kind"`
-	Current      string        `yaml:"current,omitempty"`
-	Environments []Environment `yaml:"environments,omitempty"`
+	APIVersion    string        `yaml:"apiVersion"`
+	Kind          string        `yaml:"kind"`
+	Current       string        `yaml:"current,omitempty"`
+	Environments  []Environment `yaml:"environments,omitempty"`
+	Targets       []Target      `yaml:"targets,omitempty"`
+	CurrentTarget string        `yaml:"currentTarget,omitempty"`
 }
 
 // Environment is a user-named handle resolving to a kube context and the namespaces the
@@ -127,6 +139,12 @@ func loadFrom(path string) (*Config, error) {
 		return nil, fmt.Errorf("localconfig: parsing %s: %w", path, err)
 	}
 	if err := cfg.validateHeader(); err != nil {
+		return nil, fmt.Errorf("localconfig: %s: %w", path, err)
+	}
+	// Validate the targeting block on every load, so a hand-edited or half-written target is
+	// reported once, legibly, naming the file and the target — rather than surfacing as a confusing
+	// failure in whichever command happens to resolve it next (ADR-0078 "Consequences").
+	if err := cfg.validateTargets(); err != nil {
 		return nil, fmt.Errorf("localconfig: %s: %w", path, err)
 	}
 	return cfg, nil

@@ -1,0 +1,160 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Nicholas Phillips
+
+package localconfig
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestKubernetesTargetStoresOnlyTheContextName is the load-bearing property of ADR-0078 §1: a
+// Kubernetes target records the context NAME and nothing that could go stale. The assertion is on
+// the serialized form, because that is what a rotated kubeconfig would have to disagree with.
+func TestKubernetesTargetStoresOnlyTheContextName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	cfg := &Config{}
+	if err := cfg.SetTarget(KubernetesTarget("do-nyc1-cluster")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.saveTo(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "context: do-nyc1-cluster") {
+		t.Errorf("target file does not record the context name:\n%s", got)
+	}
+	// Nothing credential-shaped may be serialized: the kubeconfig stays the single source of truth.
+	for _, forbidden := range []string{"token", "certificate", "client-key", "ca.crt", "server:", "password"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("target file contains %q, but a target must never copy a credential:\n%s", forbidden, got)
+		}
+	}
+}
+
+// TestSetTargetReplacesAndActivates confirms re-authenticating against a target you already have
+// updates it in place rather than duplicating it, and makes it active either way.
+func TestSetTargetReplacesAndActivates(t *testing.T) {
+	cfg := &Config{}
+	if err := cfg.SetTarget(KubernetesTarget("dev")); err != nil {
+		t.Fatalf("SetTarget dev: %v", err)
+	}
+	if err := cfg.SetTarget(KubernetesTarget("prod")); err != nil {
+		t.Fatalf("SetTarget prod: %v", err)
+	}
+	if err := cfg.SetTarget(KubernetesTarget("dev")); err != nil {
+		t.Fatalf("SetTarget dev again: %v", err)
+	}
+	if len(cfg.Targets) != 2 {
+		t.Fatalf("targets = %d, want 2 (a repeat login must not duplicate)", len(cfg.Targets))
+	}
+	if cfg.CurrentTarget != "dev" {
+		t.Errorf("active target = %q, want dev", cfg.CurrentTarget)
+	}
+}
+
+// TestSwitchTargetNamesWhatIsConfigured confirms switching to an unknown target fails with a message
+// that lists what is actually there, and that a known one becomes active without touching anything
+// else.
+func TestSwitchTargetNamesWhatIsConfigured(t *testing.T) {
+	cfg := &Config{}
+	_ = cfg.SetTarget(KubernetesTarget("dev"))
+	_ = cfg.SetTarget(KubernetesTarget("prod"))
+
+	err := cfg.SwitchTarget("staging")
+	if err == nil {
+		t.Fatal("SwitchTarget on an unknown name: want an error")
+	}
+	if !strings.Contains(err.Error(), "dev, prod") {
+		t.Errorf("error does not name the configured targets: %v", err)
+	}
+	if err := cfg.SwitchTarget("dev"); err != nil {
+		t.Fatalf("SwitchTarget dev: %v", err)
+	}
+	if cfg.CurrentTarget != "dev" {
+		t.Errorf("active target = %q, want dev", cfg.CurrentTarget)
+	}
+	if len(cfg.Targets) != 2 {
+		t.Errorf("switching changed the target list (%d entries), it must only change the selection", len(cfg.Targets))
+	}
+}
+
+// TestLoadRejectsHandEditedTargets confirms a hand-edited targeting block produces a legible error
+// naming the file and the problem, rather than a confusing failure in a later command (ADR-0078
+// "Consequences").
+func TestLoadRejectsHandEditedTargets(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "unknown kind",
+			yaml: "apiVersion: burrow.dev/v1\nkind: Config\ntargets:\n  - name: weird\n    kind: mainframe\n",
+			want: "unknown kind",
+		},
+		{
+			name: "kubernetes target with no context",
+			yaml: "apiVersion: burrow.dev/v1\nkind: Config\ntargets:\n  - name: dev\n    kind: kubernetes\n",
+			want: "names no kube context",
+		},
+		{
+			name: "active target that is not in the list",
+			yaml: "apiVersion: burrow.dev/v1\nkind: Config\ncurrentTarget: ghost\ntargets:\n  - name: dev\n    kind: kubernetes\n    context: dev\n",
+			want: "is not in the targets list",
+		},
+		{
+			name: "duplicate target names",
+			yaml: "apiVersion: burrow.dev/v1\nkind: Config\ntargets:\n  - name: dev\n    kind: kubernetes\n    context: a\n  - name: dev\n    kind: kubernetes\n    context: b\n",
+			want: "listed twice",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			_, err := loadFrom(path)
+			if err == nil {
+				t.Fatal("loadFrom: want an error for a hand-edited target")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error = %q, want it to name the config file %s", err, path)
+			}
+		})
+	}
+}
+
+// TestActiveTargetAbsentIsNotAnError confirms a config with no targeting block resolves to "no
+// target", which is the pre-ADR-0078 world and must stay a working one.
+func TestActiveTargetAbsentIsNotAnError(t *testing.T) {
+	_, ok, err := (&Config{}).ActiveTarget()
+	if err != nil {
+		t.Fatalf("ActiveTarget: %v", err)
+	}
+	if ok {
+		t.Error("ActiveTarget reported a target on an empty config")
+	}
+}
+
+// TestCloudTargetDescribes confirms the managed target names its endpoint and carries no context.
+func TestCloudTargetDescribes(t *testing.T) {
+	tgt := CloudTarget()
+	if tgt.Context != "" {
+		t.Errorf("cloud target carries context %q, want none", tgt.Context)
+	}
+	if !strings.Contains(tgt.Describe(), CloudEndpoint) {
+		t.Errorf("Describe() = %q, want it to name %s", tgt.Describe(), CloudEndpoint)
+	}
+}

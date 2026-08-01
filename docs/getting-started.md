@@ -54,6 +54,22 @@ installed. (`burrow cluster registry` manages the registry that runs in your clu
 cluster credentials to pull from an external registry such as GHCR, use `burrow config registry` —
 see Private registries below.)
 
+### 3. Point the CLI at the cluster you mean (optional)
+
+If you work with more than one cluster, say which one Burrow talks to instead of relying on whatever
+`kubectl config use-context` last selected:
+
+```sh
+burrow auth login                      # asks where you use Burrow, and lists your kube contexts
+burrow auth status                     # what is configured, and which one is active
+burrow auth switch <name>              # change the active one
+```
+
+Only the context **name** is stored, in `~/.burrow/config` — your credential stays in the kubeconfig,
+so rotating it keeps working. This is also how a **second person** starts using a cluster that is
+already set up: they select the context they already have and install nothing. Signing in to the
+managed product is not part of this open-source CLI.
+
 ## Part 2 - Connect your agent
 
 Your AI agent drives Burrow through `burrow-agent`, a single scoped binary already on your PATH

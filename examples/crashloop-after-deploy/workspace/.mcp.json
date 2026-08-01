@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "burrow": {
+      "command": "/Users/nick/github.com/burrow-cloud/burrow/examples/.bin/burrow-mcp",
+      "args": [],
+      "env": {
+        "BURROW_KUBECONFIG": "/Users/nick/.config/k3d/kubeconfig-burrow-examples.yaml"
+      }
+    }
+  }
+}

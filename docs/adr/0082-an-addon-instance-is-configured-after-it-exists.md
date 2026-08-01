@@ -1,4 +1,4 @@
-# ADR-0082: An add-on instance can be rescaled after it exists
+# ADR-0082: An add-on instance is configured after it exists, not at install
 
 ## Status
 
@@ -6,15 +6,16 @@
 
 ## TL;DR
 
-An add-on's shape is fixed when it is installed. A Postgres instance created without a standby stays
-without one; a cache installed as a single node stays a single node. The only way to change either is
-to remove it and install it again, which for a database means restoring from a backup.
+An add-on's shape is fixed when it is installed and can never change. A Postgres instance created
+without a standby stays without one; a cache installed as a single node stays a single node. The only
+way to change either is to remove it and install it again, which for a database means restoring from
+a backup.
 
-- **`burrow addon scale <type> [flags]`** changes the shape of an instance that already exists.
-- **Nobody knows they need it at install time.** They find out the day the thing they built on it
-  matters, which is after they installed it.
-- **Growing is not shrinking.** Adding capacity is additive; taking it away can break an app that is
-  using what is removed, so shrinking asks and growing does not.
+- **`burrow addon config <type> [flags]`** changes an instance that already exists.
+- **Install stays shapeless.** It creates an instance and asks nothing, because the install is the
+  one moment nobody can answer these questions.
+- **Growing is not shrinking.** Adding capacity is additive; taking it away can break an app using
+  what is removed, so shrinking asks and growing does not.
 - **It is an operator's call**, because it provisions hardware.
 
 Extends [ADR-0025](0025-building-block-addons.md)'s add-on model with a lifecycle verb it lacked, and
@@ -48,26 +49,36 @@ for Postgres standbys alone would be renamed the first time the cache needed one
 
 ## Decision
 
-### 1. `burrow addon scale <type>` changes an existing instance's shape
+### 1. `burrow addon config <type>` changes an existing instance
 
 One verb, per add-on type, taking whatever flags that type's shape has:
 
 ```
-burrow addon scale postgres --standbys 1
-burrow addon scale postgres --storage 50Gi
+burrow addon config postgres --standbys 1
+burrow addon config postgres --storage 50Gi
 ```
 
-**Named `scale` because that is what people call it**, and because it is what `burrow scale` already
-means for an app — the same idea applied to the thing underneath. A person who has scaled an app can
-guess this exists and guess what it does.
+**Named `config` rather than `scale`, because shape is not only size.** A standby count and a volume
+size are quantities; a cache's topology is not, and neither is whatever the next add-on exposes.
+`scale` would have been the wrong word the first time something changed that has no bigger and
+smaller. It also matches what the CLI already says: `app config` is an app's settings,
+`cluster config` is the cluster's, and this is an instance's.
 
 The flags are the type's own. Postgres has standbys and storage; the cache will have a topology; a
 future add-on will have something else. **The verb is shared and the vocabulary is not**, because
-pretending a cache's topology and a database's standby count are the same parameter would produce a
-flag that means something different for every type.
+pretending a cache's topology and a database's standby count are one parameter would produce a flag
+that means something different for every type.
 
-`--env` scopes it, as everywhere else: [ADR-0067](0067-one-database-instance-per-environment.md) puts
-one instance per environment, so an instance is only identified once an environment is.
+**An instance is identified by type and environment**, as it is everywhere else —
+[ADR-0067](0067-one-database-instance-per-environment.md) puts one per environment, which is what
+`AddonInstanceName(type, env)` already encodes. So `--env` scopes it and there is no instance name to
+give.
+
+**When an environment can hold several** ([#432](https://github.com/burrow-cloud/burrow/issues/432)),
+the instance becomes a **positional argument** — `burrow addon config postgres <instance> --standbys 1`
+— because it is what the command acts on rather than a modifier, matching `app deploy <app>` and
+`addon restore-instance <addon>`. It is not a flag added now against that day: a flag that can only
+take one value teaches nothing and would have to change shape anyway.
 
 ### 2. Growing is not shrinking, and only one of them asks
 
@@ -99,7 +110,7 @@ This is why §2 holds the shrink for confirmation even though the platform under
 
 ### 4. It is operator-only, and the agent says what to run
 
-`addon scale` is absent from `burrow-agent` and reported by `guard`
+`addon config` is an operator command, absent from `burrow-agent` and reported by `guard`
 ([ADR-0065](0065-what-belongs-on-the-agent-surface.md) tier 1).
 
 It **provisions hardware**. An agent deploying an image spends nothing; an agent adding a standby or
@@ -107,7 +118,7 @@ doubling a volume spends money on infrastructure nobody approved, and the ease o
 change does not make the spend reversible.
 
 The refusal names the verb and that a human runs it, per ADR-0065 §7 — an agent that can say *"this
-instance has no standby, and a person can add one with `burrow addon scale postgres --standbys 1`"*
+instance has no standby, and a person can add one with `burrow addon config postgres --standbys 1`"*
 is doing the useful half of the work.
 
 ### 5. It is not a scheduler, and never runs by itself
@@ -134,8 +145,10 @@ having done it beforehand.
 is paying for it until the instance is rebuilt. Worth stating in the command's own output rather than
 letting somebody find out by trying.
 
-**Two ways to reach the same shape now exist** — `install --standbys 1`, or install then scale. They
-must produce the same thing. If they do not, one of them is wrong, and a test should say which.
+**There is exactly one way to reach a given shape**, because install takes no shape flags. An
+instance is created plain and configured afterwards, so there is no second route to keep in step with
+the first — a simplification worth having, and the reason `--standbys` was dropped from install
+rather than kept beside this.
 
 **The cache gets this verb for free when its topologies land**, which is the point of deciding it
 here rather than adding a Postgres-shaped flag to a Postgres-shaped command.
@@ -150,6 +163,12 @@ object store. Nobody should have to gamble a database to add a standby to it.
 **Only allow growing.** Removes §2's and §3's hard cases entirely, and leaves an operator who added a
 standby they no longer need paying for it forever, with removal only via the reinstall above. The
 asymmetry is real and belongs in the confirmation, not in the feature set.
+
+**Keeping a `--standbys` flag on install as well.** Two routes to one shape, which must then be kept
+in agreement forever, in exchange for saving one command in the case where somebody already knows.
+That case is rare — the install is precisely when they do not — and ADR-0081 §1 declines it for the
+sharper reason: a flag asked at a moment nobody can answer is answered wrong by the people it exists
+for.
 
 **A generic `--set key=value`** rather than typed flags per add-on. Fewer commands to maintain, and
 it gives up every check worth having: no validation at the point of asking, no help text naming what

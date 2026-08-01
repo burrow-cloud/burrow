@@ -15,7 +15,8 @@ rescheduled.
 independent Postgres — one per service, say — is a different axis, deferred by
 [ADR-0031](0031-postgres-addon.md) and untouched here.
 
-- **An instance may be given standbys** with `--standbys <n>` at install, defaulting to **none**.
+- **An instance may have standbys.** It is always created without them; adding one is
+  [ADR-0082](0082-an-addon-instance-can-be-rescaled.md)'s `burrow addon config`.
 - **A standby is both things at once.** CloudNativePG runs it as a hot standby: it takes over
   when the primary dies *and* it serves reads. There is no separate replica feature to build.
 - **A read address appears only when a standby exists**, and points at standbys only. Adding one
@@ -70,32 +71,24 @@ it is an app knowing how to reach the replica — which is a connection string, 
 
 ## Decision
 
-### 1. Standbys are set at install, and default to none
+### 1. An instance is created without standbys, always
 
-`burrow addon install postgres --standbys <n>`, defaulting to **0** — a primary alone, which is what
-runs today.
+`burrow addon install postgres` takes no shape flag. It creates a Postgres instance with a primary
+and nothing else, which is what it does today.
 
-**`--standbys` rather than `--instances`**, even though CloudNativePG's field is `instances` and the
-flag would map to it more directly. "Instance" already means a Postgres server in this codebase
-(ADR-0031, ADR-0067), and a flag that quietly redefines it would make `--instances 2` read as "give
-me a second Postgres server" — which is a real thing somebody might want and is not what it does.
-Counting standbys also cannot be misread: `--standbys 1` is one standby, never one pod in total.
+**There is no `--standbys` at install**, and leaving it out is the decision rather than an omission.
+Somebody installing Postgres is standing up a database for an app that does not exist yet, with no
+traffic and no way to know whether it will ever matter. Asking them then produces the answer "no"
+from everyone, including the people who will need one — so the flag would be answered wrong by
+exactly the population it exists for, and would sit in the help text of the most-run command teaching
+a question nobody can answer at that moment.
 
-**None is right for the common case**, and the reason is cost rather than caution: a standby is a
-pod and a persistent volume, and it is the most expensive thing an add-on provisions. Adding one to
-every app on a free tier would be paid by everyone to benefit few.
+**Install creates an instance. Changing one is a different verb**
+([ADR-0082](0082-an-addon-instance-can-be-rescaled.md)), reached when the need is real and the
+answer is knowable.
 
-The number is validated at the point of naming, not passed through — CloudNativePG accepts values
-that make no sense for the shape Burrow provisions, and a database that comes up wrong is worse than
-a refusal.
-
-**Adding a standby to an instance that already exists is [ADR-0082](0082-an-addon-instance-can-be-rescaled.md)'s
-subject, not this one's.** It is the normal case rather than an afterthought — nobody knows they want
-a standby until the day they do — and it generalizes past Postgres, so it belongs in a record that
-covers add-on shape rather than in one about what a Postgres standby is.
-
-What this record fixes is the shape a *new* instance is created with, and the meaning of the standby
-once it exists. ADR-0082 decides how an existing one changes.
+The word standby is used throughout rather than replica or instance: CloudNativePG runs it hot, so
+replica understates it, and instance already means the server.
 
 ### 2. A read address exists only when there is a standby to read from
 
@@ -119,19 +112,15 @@ reads to it, and without a standby it is either the primary wearing a second nam
 does nothing, quietly — or it points at no endpoint at all. Neither teaches the truth, which is that a
 read replica is something you provision and then write code for.
 
-### 3. Raising it is operator-only
+### 3. Adding a standby is an operator's call
 
-`--standbys` is absent from `burrow-agent` and reported by `guard` as a capability the agent does
-not have ([ADR-0065](0065-what-belongs-on-the-agent-surface.md) tier 1).
+Adding a standby **provisions hardware**, so it sits where [ADR-0082](0082-an-addon-instance-can-be-rescaled.md)
+§4 puts it: absent from `burrow-agent`, reported by `guard`, and refused with a message naming the
+command a human runs.
 
-The criterion is the blast radius of the effect, and this one **provisions hardware**. An agent that
-can deploy an image is spending nothing; an agent that can double a database's footprint is spending
-money on infrastructure nobody approved. That is a different kind of act, and the fact that it is
-easily reversed does not make the spend reversible.
-
-The agent still reports it: a refusal names the flag and that a human runs it, per ADR-0065 §7's rule
-that an absent capability which is legible is a refusal the agent can relay, where a dead end pushes
-it off the control channel entirely.
+The criterion is the blast radius of the effect. An agent that deploys an image spends nothing; an
+agent that doubles a database's footprint spends money on infrastructure nobody approved, and the
+ease of reversing the change does not make the spend reversible.
 
 ### 4. Backups are unchanged, and this is not an alternative to them
 
@@ -149,10 +138,8 @@ relax about backups is wrong, and the docs must not.
 with the standby it already has, and the platform's own registry gets Burrow's backup path
 without losing its standby.
 
-**Cost becomes something an operator chooses per instance**, and can get wrong in both directions —
-paying double for an app that did not need a standby, or discovering at the worst moment that the
-database holding everything was provisioned without one. Neither is preventable by design; the default handles the
-common case and the flag handles the rest.
+**Cost becomes something an operator chooses per instance**, when they choose it. Nobody pays for a
+standby they did not ask for, and nobody is asked at a moment when the answer is unknowable.
 
 **A standby is a second thing that can be unhealthy.** `burrow addon list` and the ADR-0074
 ledger surface an instance's readiness; with two, "the database is fine" becomes a question with a
@@ -167,19 +154,19 @@ that record's to make.
 
 ## Rejected alternatives
 
-**Leaving every instance standby-less and accepting the downgrade for cloud ADR-0030.** Honest, and
-it means the platform's own registry — every account and credential hash — runs as a single pod so
-that a configuration field can stay unwritten. The field is small; the thing it protects is not.
+**Leaving every instance standby-less permanently and accepting the downgrade for cloud ADR-0030.**
+Honest, and it means the platform's own registry — every account and credential hash — runs as a
+single pod so that a capability can stay unbuilt. The field is small; the thing it protects is not.
 
-**An operational limit under [ADR-0068](0068-operational-limits-are-configuration.md) instead of an
-install flag.** Those are *bounds a human sets* — ceilings on what may be asked for. A standby count
+**An operational limit under [ADR-0068](0068-operational-limits-are-configuration.md).** Those are *bounds a human sets* — ceilings on what may be asked for. A standby count
 is not a bound, it is a property of one instance, and two environments can legitimately want
 different values. Modelling it as a limit would make it cluster- or environment-wide and force
 the wrong answer on somebody.
 
-**A tier that implies it** — "production instances get a standby". Attractive for the managed product and
-premature for the open-source one, where there is no tier concept and an operator's needs are their
-own. The managed product can build tiers on top of this field; the field should not presuppose them.
+**A tier that implies it** — "production instances get a standby". Attractive for the managed product
+and premature for the open-source one, where there is no tier concept and an operator's needs are
+their own. The managed product can build tiers on top of this capability; the capability should not
+presuppose them.
 
 **A read address present whether or not a standby exists**, pointing at `-r` so it resolves to the primary
 when there is no standby. It buys one property — an app written once, unchanged when a standby

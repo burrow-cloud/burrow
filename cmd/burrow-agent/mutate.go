@@ -15,6 +15,7 @@ import (
 
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/controlplane"
+	"github.com/burrow-cloud/burrow/internal/targetname"
 )
 
 // The four outcomes a mutating verb resolves to. They are the stable top-level "outcome" value the
@@ -57,6 +58,14 @@ type outcome struct {
 	ConfirmRequired bool `json:"confirm_required,omitempty"`
 	// Hint spells out the confirm action in words, for the human the agent relays it to.
 	Hint string `json:"hint,omitempty"`
+	// Target names WHERE this happened (ADR-0078 §4): the target the operation reached, so the agent
+	// composing the result can relay the place along with the outcome. It is absent only when
+	// resolution failed before a target was known, since there is then nothing true to name.
+	//
+	// The failure the target model introduces is acting on the wrong target, and it cannot be
+	// prevented by design because both are legitimate things to do. Making it visible in the same
+	// breath as the change is the whole mitigation.
+	Target *targetname.Named `json:"target,omitempty"`
 }
 
 // exitError carries a process exit code without a message to print. A mutating verb has already
@@ -130,18 +139,24 @@ func emitOutcome(w io.Writer, oc outcome) error {
 // and target environment, runs fn, and prints exactly one outcome envelope: executed with the result,
 // or a held/denied/error envelope classified from the error. It never retries and never sets confirm
 // on its own — confirm reaches the control plane only via the caller's --confirm flag (ADR-0049 §2c).
+// It is also the single place the target is attached, so every mutating verb names where it acted
+// by construction rather than by each command remembering to (ADR-0078 §4) — including a held or
+// denied one, since "denied on which target" is the question a person asks next.
 func (o *connOpts) mutate(cmd *cobra.Command, operation string, fn func(ctx context.Context, c *client.Client, env string) (any, error)) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
-	c, env, err := o.resolve(ctx, cmd.ErrOrStderr())
+	c, env, target, err := o.resolve(ctx, cmd.ErrOrStderr())
 	if err != nil {
+		// Resolution failed, so nothing was reached and there is no target to name.
 		return emitOutcome(out, classify(operation, err))
 	}
 	res, err := fn(ctx, c, env)
 	if err != nil {
-		return emitOutcome(out, classify(operation, err))
+		oc := classify(operation, err)
+		oc.Target = &target
+		return emitOutcome(out, oc)
 	}
-	return emitOutcome(out, outcome{Outcome: outcomeExecuted, Operation: operation, Result: res})
+	return emitOutcome(out, outcome{Outcome: outcomeExecuted, Operation: operation, Result: res, Target: &target})
 }
 
 // newDeployCmd deploys an app by image reference plus small metadata (ADR-0004, ADR-0007). burrow-agent

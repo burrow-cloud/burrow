@@ -65,7 +65,7 @@ func newAutoDeployCmd() *cobra.Command {
 				return err
 			}
 			human := fmt.Sprintf("set %s auto-deploy to %s in environment %q", res.App, res.Level, res.Env)
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)

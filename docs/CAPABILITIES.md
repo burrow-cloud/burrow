@@ -797,6 +797,22 @@ an environment handle says which environment inside it.
 | `burrow auth status` | Lists the configured targets, marks the active one, says what each is, and flags a target whose kube context is no longer in your kubeconfig. Local only; contacts no cluster. |
 | `burrow auth switch <name>` | Makes an already-configured target active, without re-authenticating. |
 
+**Every command that changes something names the target it acted on**, in its own output, on the line
+that says what it did:
+
+```
+$ burrow app deploy web --image ghcr.io/acme/web:1.4.0
+deployed web as release rel-7f2 (image ghcr.io/acme/web:1.4.0, 2 replica(s), deployed) on target "prod-cluster"
+```
+
+The name shown is the one you chose in the picker — the same string `burrow auth status` prints. With
+no target selected, commands follow your current kube context and say so (`on kube context "dev"
+(no target selected)`) rather than inventing a name. A per-invocation `--context` override names what
+you overrode it *to*. `--json` carries the same thing as a `target` member of the result, and
+`burrow-agent`'s outcome envelope carries it too, so an agent relaying a result can say where it
+happened. Read-only commands deliberately do not print it: this is about irreversible acts, and a
+target stamped on every listing is noise.
+
 Targets live in `~/.burrow/config` (or `$BURROW_CONFIG`), alongside the environment handles, under
 `targets:` and `currentTarget:`. A Kubernetes target records the **context name and never a copy of
 your credential**, so rotating the kubeconfig, re-issuing a certificate, or letting a provider CLI
@@ -1279,7 +1295,6 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Audit-log retention | [0027](adr/0027-audit-log.md) | Not built; deferred in the ADR. |
 | The environment forcing function on the local-handle axis | [0047](adr/0047-agent-environment-safety.md) | Not built (specified for the since-removed MCP layer); the burrowd-registry axis is built. |
 | Registry onboarding via the developer's code-provider registry | [0046](adr/0046-registry-onboarding.md) | Proposed, held deliberately; only the in-cluster registry shipped, via ADR-0054. |
-| Every command that changes something names the target it changed | [0078](adr/0078-the-cli-points-at-a-target.md) §4 | Not built. §1–§3 are built — the target model, `burrow auth login`/`status`/`switch`, and the local state. Per-app operate commands already print the resolved target; the rest do not. [#414](https://github.com/burrow-cloud/burrow/issues/414) |
 | Authenticating to the Burrow Cloud target | [0078](adr/0078-the-cli-points-at-a-target.md) §1 | Not built here, and will not be. The picker offers `burrow-cloud.dev` and selecting it says plainly that sign-in is not available in this build, recording nothing; the device flow is cloud ADR-0028 and lives with the managed product. The open-source CLI carries the target kind and the seam. |
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |

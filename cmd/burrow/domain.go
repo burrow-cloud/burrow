@@ -48,7 +48,7 @@ func newDomainAddCmd() *cobra.Command {
 				return err
 			}
 			human := fmt.Sprintf("pointed %s at %s (%s record) via provider %q", res.Host, res.Address, res.Type, res.Provider)
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -78,7 +78,7 @@ func newDomainRemoveCmd() *cobra.Command {
 				return err
 			}
 			human := fmt.Sprintf("removed the DNS record for %s via provider %q", res.Host, res.Provider)
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)

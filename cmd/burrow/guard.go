@@ -139,15 +139,13 @@ func newGuardSetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if o.json {
-				return emit(cmd.OutOrStdout(), true, gs, "")
-			}
+			// The policy is written into whichever cluster this command reached, so it names that
+			// cluster like every other change does (ADR-0078 §4).
+			human := fmt.Sprintf("set guardrail %q to %q", args[0], args[1])
 			if o.env != "" && o.env != "default" {
-				fmt.Fprintf(cmd.OutOrStdout(), "set guardrail %q to %q in environment %q\n", args[0], args[1], o.env)
-			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "set guardrail %q to %q\n", args[0], args[1])
+				human = fmt.Sprintf("set guardrail %q to %q in environment %q", args[0], args[1], o.env)
 			}
-			return nil
+			return o.emitChange(cmd.OutOrStdout(), gs, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)

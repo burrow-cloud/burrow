@@ -81,7 +81,7 @@ func newSecretSetCmd() *cobra.Command {
 				if noRestart {
 					human += " (not restarted; lands on next deploy)"
 				}
-				if err := emit(cmd.OutOrStdout(), o.json, map[string]string{"app": app, "key": k}, human); err != nil {
+				if err := o.emitChange(cmd.OutOrStdout(), map[string]string{"app": app, "key": k}, human); err != nil {
 					return err
 				}
 			}
@@ -150,7 +150,7 @@ func newSecretUnsetCmd() *cobra.Command {
 			if noRestart {
 				human += " (not restarted; lands on next deploy)"
 			}
-			return emit(cmd.OutOrStdout(), o.json, map[string]string{"app": app, "key": key}, human)
+			return o.emitChange(cmd.OutOrStdout(), map[string]string{"app": app, "key": key}, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)

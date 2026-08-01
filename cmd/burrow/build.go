@@ -76,7 +76,7 @@ func newBuildCmd() *cobra.Command {
 			if res.Deploy.SupersededReleaseID != "" {
 				human += fmt.Sprintf("; superseded release %s", res.Deploy.SupersededReleaseID)
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)

@@ -41,7 +41,7 @@ func newPublishCmd() *cobra.Command {
 			}
 			human := fmt.Sprintf("published %s at %s (%s)\nReachable once an ingress controller is running and DNS points %s at the cluster.",
 				res.App, res.Host, res.URL, res.Host)
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -113,8 +113,7 @@ func newUnpublishCmd() *cobra.Command {
 			if err := c.Unexpose(ctx, args[0], env); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "unpublished %s\n", args[0])
-			return nil
+			return o.emitChange(cmd.OutOrStdout(), map[string]string{"app": args[0]}, fmt.Sprintf("unpublished %s", args[0]))
 		},
 	}
 	bindCommon(cmd.Flags(), o)

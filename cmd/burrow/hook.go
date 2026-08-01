@@ -118,7 +118,7 @@ func newHookSetCmd() *cobra.Command {
 				return err
 			}
 			human := fmt.Sprintf("set the %s hook on %s: %s", hook.Phase, app, strings.Join(hook.Command, " "))
-			return emit(cmd.OutOrStdout(), o.json, hook, human)
+			return o.emitChange(cmd.OutOrStdout(), hook, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -148,7 +148,7 @@ func newHookUnsetCmd() *cobra.Command {
 				return err
 			}
 			human := fmt.Sprintf("removed the %s hook from %s; that phase now runs nothing", phase, app)
-			return emit(cmd.OutOrStdout(), o.json, map[string]string{"app": app, "phase": phase}, human)
+			return o.emitChange(cmd.OutOrStdout(), map[string]string{"app": app, "phase": phase}, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)

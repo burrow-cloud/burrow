@@ -131,7 +131,7 @@ func newDeployCmd() *cobra.Command {
 			if deps := deployDependencyHuman(res.Dependencies); deps != "" {
 				human += "\n\n" + deps
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -240,7 +240,7 @@ func newRollbackCmd() *cobra.Command {
 			}
 			human := fmt.Sprintf("rolled %s back to release %s (image %s) as release %s; superseded release %s",
 				args[0], res.RolledBackToReleaseID, res.Release.Image, res.Release.ID, res.SupersededReleaseID)
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -271,7 +271,7 @@ func newScaleCmd() *cobra.Command {
 				return err
 			}
 			human := fmt.Sprintf("scaled %s from %d to %d replica(s)", args[0], res.PreviousReplicas, res.Replicas)
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -341,7 +341,7 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, formatRunResult(app, res))
+			return o.emitChange(cmd.OutOrStdout(), res, formatRunResult(app, res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -403,13 +403,13 @@ func newAutoscaleCmd() *cobra.Command {
 					return err
 				}
 				human := fmt.Sprintf("turned autoscaling off for %s", app)
-				return emit(cmd.OutOrStdout(), o.json, map[string]string{"app": app}, human)
+				return o.emitChange(cmd.OutOrStdout(), map[string]string{"app": app}, human)
 			}
 			res, err := c.Autoscale(ctx, app, client.AutoscaleRequest{Env: env, Min: min, Max: max, CPU: cpu, Memory: memory, Confirm: confirm})
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, formatAutoscale(cmd.OutOrStdout(), res))
+			return o.emitChange(cmd.OutOrStdout(), res, formatAutoscale(cmd.OutOrStdout(), res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -459,7 +459,7 @@ func newAppDeleteCmd() *cobra.Command {
 				return err
 			}
 			human := fmt.Sprintf("deleted app %s (workload, routing, and release history)", args[0])
-			return emit(cmd.OutOrStdout(), o.json, map[string]string{"app": args[0]}, human)
+			return o.emitChange(cmd.OutOrStdout(), map[string]string{"app": args[0]}, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)

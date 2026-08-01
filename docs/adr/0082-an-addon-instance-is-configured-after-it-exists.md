@@ -11,7 +11,8 @@ without a standby stays without one; a cache installed as a single node stays a 
 way to change either is to remove it and install it again, which for a database means restoring from
 a backup.
 
-- **`burrow addon config <type> [flags]`** changes an instance that already exists.
+- **`burrow addon config <type> <setting> <value>`** changes an instance that already exists, with
+  a subcommand per setting rather than a flag, because each one has consequences worth explaining.
 - **Install stays shapeless.** It creates an instance and asks nothing, because the install is the
   one moment nobody can answer these questions.
 - **Growing is not shrinking.** Adding capacity is additive; taking it away can break an app using
@@ -49,14 +50,29 @@ for Postgres standbys alone would be renamed the first time the cache needed one
 
 ## Decision
 
-### 1. `burrow addon config <type>` changes an existing instance
-
-One verb, per add-on type, taking whatever flags that type's shape has:
+### 1. Each setting is a subcommand under its add-on type
 
 ```
-burrow addon config postgres --standbys 1
-burrow addon config postgres --storage 50Gi
+burrow addon config postgres                    # what can be set, and what it is set to
+burrow addon config postgres standbys 1
+burrow addon config postgres storage 50Gi
+burrow addon config cache topology sentinel
 ```
+
+**Not flags on one command.** The settings an add-on has are specific to it — Postgres has standbys
+and storage, the cache has a topology, a future add-on has something else — and a shared flag set
+would either mean different things per type or collapse into a `--set key=value` that validates
+nothing.
+
+**A subcommand earns its place because these settings carry consequences that have to be explained
+where they are used.** Adding a standby restarts every attached app. Removing the last one withdraws
+the read address ([ADR-0081](0081-a-postgres-instance-may-have-a-standby.md) §2). Growing a volume
+cannot be undone. A flag gets one line of `--help` and no room to say any of that; a subcommand gets
+a paragraph, its own validation, and a refusal written for the specific thing being refused.
+
+**Bare `burrow addon config <type>` lists what is configurable and its current value.** An operator
+who does not know what an add-on can be told is one command away from finding out, and the same
+output is where a person confirms a change landed.
 
 **Named `config` rather than `scale`, because shape is not only size.** A standby count and a volume
 size are quantities; a cache's topology is not, and neither is whatever the next add-on exposes.
@@ -64,21 +80,16 @@ size are quantities; a cache's topology is not, and neither is whatever the next
 smaller. It also matches what the CLI already says: `app config` is an app's settings,
 `cluster config` is the cluster's, and this is an instance's.
 
-The flags are the type's own. Postgres has standbys and storage; the cache will have a topology; a
-future add-on will have something else. **The verb is shared and the vocabulary is not**, because
-pretending a cache's topology and a database's standby count are one parameter would produce a flag
-that means something different for every type.
-
-**An instance is identified by type and environment**, as it is everywhere else —
+**An instance is identified by type and environment**, as everywhere else —
 [ADR-0067](0067-one-database-instance-per-environment.md) puts one per environment, which is what
-`AddonInstanceName(type, env)` already encodes. So `--env` scopes it and there is no instance name to
-give.
+`AddonInstanceName(type, env)` already encodes. So `--env` scopes it and there is nothing else to
+name.
 
 **When an environment can hold several** ([#432](https://github.com/burrow-cloud/burrow/issues/432)),
-the instance becomes a **positional argument** — `burrow addon config postgres <instance> --standbys 1`
-— because it is what the command acts on rather than a modifier, matching `app deploy <app>` and
-`addon restore-instance <addon>`. It is not a flag added now against that day: a flag that can only
-take one value teaches nothing and would have to change shape anyway.
+the instance is selected by a **flag** rather than a positional. With settings as subcommands a
+positional would be ambiguous against them — `burrow addon config postgres <name-or-setting?>` — so
+the shape of the setting decides the shape of the selector. It is not added now: a flag that could
+only ever take one value teaches nothing.
 
 ### 2. Growing is not shrinking, and only one of them asks
 
@@ -118,7 +129,7 @@ doubling a volume spends money on infrastructure nobody approved, and the ease o
 change does not make the spend reversible.
 
 The refusal names the verb and that a human runs it, per ADR-0065 §7 — an agent that can say *"this
-instance has no standby, and a person can add one with `burrow addon config postgres --standbys 1`"*
+instance has no standby, and a person can add one with `burrow addon config postgres standbys 1`"*
 is doing the useful half of the work.
 
 ### 5. It is not a scheduler, and never runs by itself
@@ -170,9 +181,15 @@ That case is rare — the install is precisely when they do not — and ADR-0081
 sharper reason: a flag asked at a moment nobody can answer is answered wrong by the people it exists
 for.
 
-**A generic `--set key=value`** rather than typed flags per add-on. Fewer commands to maintain, and
-it gives up every check worth having: no validation at the point of asking, no help text naming what
-an add-on can be, and no way to refuse a volume shrink before it fails.
+**A generic `--set key=value`.** Fewer commands to maintain, and it gives up every check worth
+having: no validation at the point of asking, no help text naming what an add-on can be, and no way
+to refuse a volume shrink before it fails.
+
+**Flags on one `config` command** rather than a subcommand per setting — `--standbys 1
+--storage 50Gi`. Shorter to type and it flattens settings that are not alike: a flag gets one line of
+help, which is not enough to say that adding a standby restarts every attached app or that a volume
+cannot shrink back. It also grows one command's flag surface with every add-on that gains a setting,
+so `postgres` flags and `cache` flags end up on the same command meaning nothing to each other.
 
 **Making it an [ADR-0068](0068-operational-limits-are-configuration.md) operational limit.** Those are
 bounds a human sets — ceilings on what may be asked for. A standby count is a property of one

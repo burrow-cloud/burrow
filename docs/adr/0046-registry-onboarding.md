@@ -2,7 +2,7 @@
 
 ## Status
 
-🟡 Proposed
+✅ Accepted
 
 <!-- Held deliberately at Proposed: the decision shape is recorded, but building waits on a
 signal from users that registry onboarding is a real friction point (see Context). -->

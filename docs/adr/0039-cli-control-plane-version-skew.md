@@ -3,7 +3,7 @@
 ## Status
 
 ✅ Accepted (compatibility band widened by ADR-0055 from one minor to the same major down to
-the version floor — ADR-0055 is 🟡 Proposed, so until it is accepted and built the one-minor
+the version floor — ADR-0055 is ✅ Accepted, so until it is accepted and built the one-minor
 band stated here is the one in force; the anchor, no-hard-block, handshake, and additive-API
 guarantees stand)
 

@@ -107,7 +107,7 @@ func newAppChecksDisableCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, checksHuman(res))
+			return o.emitChange(cmd.OutOrStdout(), res, checksHuman(res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -134,7 +134,7 @@ func newAppChecksEnableCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, checksHuman(res))
+			return o.emitChange(cmd.OutOrStdout(), res, checksHuman(res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)

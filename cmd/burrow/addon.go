@@ -100,7 +100,7 @@ func newAddonBackupCmd() *cobra.Command {
 			b := res.Backup
 			human := fmt.Sprintf("backed up %q in environment %s (backup %s, status %s)\n%s",
 				b.App, b.Environment, b.ID, b.Status, backupWhere(b))
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	cmd.Flags().StringVar(&destination, "destination", "",
@@ -148,7 +148,7 @@ func newAddonBackupInstanceCmd() *cobra.Command {
 			b := res.Backup
 			human := fmt.Sprintf("backed up the whole %s instance in environment %s (backup %s, status %s)\n%s",
 				args[0], b.Environment, b.ID, b.Status, backupWhere(b))
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	cmd.Flags().StringVar(&destination, "destination", "",
@@ -355,8 +355,8 @@ func newAddonRestoreCmd() *cobra.Command {
 			if err := c.RestoreAddon(ctx, args[0], args[1], backup, o.env, confirm); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "restored %q from backup %s\n", args[1], backup)
-			return nil
+			human := fmt.Sprintf("restored %q from backup %s", args[1], backup)
+			return o.emitChange(cmd.OutOrStdout(), map[string]string{"addon": args[0], "app": args[1], "backup": backup}, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -397,7 +397,7 @@ func newAddonAttachCmd() *cobra.Command {
 			}
 			human := fmt.Sprintf("attached %q to the %s add-on in environment %s\nwrote the connection string into %s's Secret under key %q (the value is never shown)",
 				res.App, res.Addon, res.Environment, res.App, res.SecretKey)
-			return emit(cmd.OutOrStdout(), o.json, res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -424,8 +424,8 @@ func newAddonDetachCmd() *cobra.Command {
 			if err := c.DetachAddon(ctx, args[0], args[1], o.env, confirm); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "detached %q from the %s add-on\n", args[1], args[0])
-			return nil
+			human := fmt.Sprintf("detached %q from the %s add-on", args[1], args[0])
+			return o.emitChange(cmd.OutOrStdout(), map[string]string{"addon": args[0], "app": args[1]}, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -463,7 +463,7 @@ func newAddonConnectCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return emit(cmd.OutOrStdout(), o.json, a, connectHuman(a, ""))
+				return o.emitChange(cmd.OutOrStdout(), a, connectHuman(a, ""))
 			}
 
 			// --auth: prompt for the token and send it to burrowd over its authenticated
@@ -487,7 +487,7 @@ func newAddonConnectCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, a, connectHuman(a, key))
+			return o.emitChange(cmd.OutOrStdout(), a, connectHuman(a, key))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -663,7 +663,7 @@ func newAddonInstallCmd() *cobra.Command {
 			if a.Warning != "" {
 				human += "\nnote: " + a.Warning
 			}
-			return emit(out, o.json, a, human)
+			return o.emitChange(out, a, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -928,7 +928,7 @@ func newAddonRemoveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, removeAddonSummary(res))
+			return o.emitChange(cmd.OutOrStdout(), res, removeAddonSummary(res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)

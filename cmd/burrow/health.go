@@ -104,7 +104,7 @@ func newAppHealthSetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, healthHuman(res))
+			return o.emitChange(cmd.OutOrStdout(), res, healthHuman(res))
 		},
 	}
 	cmd.Flags().StringVar(&path, "path", "", "the HTTP path the app serves its readiness answer on (e.g. /healthz)")
@@ -134,7 +134,7 @@ func newAppHealthUnsetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, healthHuman(res))
+			return o.emitChange(cmd.OutOrStdout(), res, healthHuman(res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)

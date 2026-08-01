@@ -117,7 +117,9 @@ func newRootCmd() *cobra.Command {
 // result as JSON. Every client-backed verb funnels through it so wiring stays uniform.
 func (o *connOpts) withClient(cmd *cobra.Command, fn func(ctx context.Context, c *client.Client, env string) (any, error)) error {
 	ctx := cmd.Context()
-	c, env, err := o.resolve(ctx, cmd.ErrOrStderr())
+	// A read-only verb does not name the target: this is about irreversible acts, and printing it
+	// on every listing would make it noise, which is what gets skimmed past (ADR-0078 §4).
+	c, env, _, err := o.resolve(ctx, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}

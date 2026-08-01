@@ -173,7 +173,7 @@ func newProviderAddCmd() *cobra.Command {
 			human := fmt.Sprintf("registered provider %q (type %s, capabilities %s)\n"+
 				"token stored in burrow-credentials under key %q",
 				p.Name, p.Type, strings.Join(p.Capabilities, ", "), p.SecretKey)
-			return emit(cmd.OutOrStdout(), o.json, p, human)
+			return o.emitChange(cmd.OutOrStdout(), p, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -244,7 +244,7 @@ func addObjectStorageProvider(cmd *cobra.Command, o *commonOpts, opts objectStor
 	if err != nil {
 		return err
 	}
-	return emit(cmd.OutOrStdout(), o.json, p, objectStorageSummary(p))
+	return o.emitChange(cmd.OutOrStdout(), p, objectStorageSummary(p))
 }
 
 // objectStorageSummary is what a human is told after a registration. It reports the bucket Burrow

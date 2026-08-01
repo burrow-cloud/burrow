@@ -30,6 +30,7 @@ import (
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/internal/agentconn"
+	"github.com/burrow-cloud/burrow/internal/targetname"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -111,12 +112,17 @@ func bindEnv(flags *pflag.FlagSet, o *connOpts) {
 	flags.StringVar(&o.env, "env", "", "environment to operate in (default: the default environment)")
 }
 
-// resolve builds a control-plane client and the environment name to send with the operation,
-// applying the shared agentconn resolver's precedence (ADR-0038, ADR-0049). With --control-plane it talks to that URL directly and sends the raw --env. Otherwise it
+// resolve builds a control-plane client, the environment name to send with the operation, and the
+// name of the target it reached, applying the shared agentconn resolver's precedence (ADR-0038,
+// ADR-0049). With --control-plane it talks to that URL directly and sends the raw --env. Otherwise it
 // resolves the active handle (the pinned one, or the current kube context in follow mode) and applies
 // the flag overrides, defaulting to the scoped, burrowd-only agent credential. Strict mode
 // (BURROW_AGENT_REQUIRE_SCOPED) refuses the ambient fallback.
-func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Client, string, error) {
+//
+// The target it returns is what a mutating verb puts in its outcome envelope, so an agent composing
+// a result can say WHERE the change happened rather than only what happened (ADR-0078 §4). It names
+// the context actually connected to, which is why it is built here and not from the config alone.
+func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Client, string, targetname.Named, error) {
 	strict := truthy(os.Getenv("BURROW_AGENT_REQUIRE_SCOPED"))
 	if o.controlPlane != "" {
 		factory, err := agentconn.NewFactory(ctx, agentconn.Config{
@@ -126,22 +132,22 @@ func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Clien
 			Version:         agentVersion(),
 		}, stderr)
 		if err != nil {
-			return nil, "", err
+			return nil, "", targetname.Named{}, err
 		}
 		c, err := factory("")
 		if err != nil {
-			return nil, "", err
+			return nil, "", targetname.Named{}, err
 		}
-		return c, o.env, nil
+		return c, o.env, targetname.ForControlPlane(o.controlPlane), nil
 	}
 
 	cfg, err := localconfig.Load()
 	if err != nil {
-		return nil, "", err
+		return nil, "", targetname.Named{}, err
 	}
 	resolved, err := localconfig.Resolve(cfg, o.kubeconfig)
 	if err != nil {
-		return nil, "", err
+		return nil, "", targetname.Named{}, err
 	}
 	kubeContext := resolved.Context
 	if o.context != "" {
@@ -165,13 +171,13 @@ func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Clien
 		Version:         agentVersion(),
 	}, stderr)
 	if err != nil {
-		return nil, "", err
+		return nil, "", targetname.Named{}, err
 	}
 	c, err := factory(kubeContext)
 	if err != nil {
-		return nil, "", err
+		return nil, "", targetname.Named{}, err
 	}
-	return c, envName, nil
+	return c, envName, targetname.For(cfg, kubeContext, o.context != ""), nil
 }
 
 // truthy reports whether an environment-variable value enables a flag: 1, true, or yes

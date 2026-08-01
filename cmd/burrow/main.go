@@ -23,6 +23,7 @@ import (
 
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/internal/targetname"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -155,6 +156,11 @@ func newRootCmd() *cobra.Command {
 }
 
 // commonOpts holds the configuration the control-plane operations share.
+//
+// acted is the target this invocation reached, recorded when the connection is resolved and read
+// back by emitChange so a changing command names it (ADR-0078 §4). It is per-invocation state on a
+// per-command struct, not global state: newRootCmd builds a fresh commonOpts for every command on
+// every run, which is what keeps two commands in one process from seeing each other's target.
 type commonOpts struct {
 	controlPlane string
 	token        string
@@ -163,6 +169,7 @@ type commonOpts struct {
 	namespace    string
 	env          string
 	json         bool
+	acted        targetname.Named
 }
 
 // bindCommon registers the shared flags on the flag set, defaulting from the environment.
@@ -195,6 +202,7 @@ func bindClientFlags(flags *pflag.FlagSet, o *commonOpts) {
 // (install, env add, guard, audit, addon) use it so a pinned handle never silently redirects a
 // cluster-setup or policy command. Per-app commands use resolveAndConnect instead (ADR-0036).
 func (o *commonOpts) client(ctx context.Context) (*client.Client, error) {
+	o.acted = o.namePrivilegedTarget()
 	return o.connect(ctx, target{context: o.context, controlPlaneNamespace: o.namespace})
 }
 
@@ -229,6 +237,7 @@ func (o *commonOpts) resolveTarget() (target, error) {
 		if o.env != "" {
 			display += fmt.Sprintf(" (env %q)", o.env)
 		}
+		o.acted = targetname.ForControlPlane(o.controlPlane)
 		return target{env: o.env, display: display}, nil
 	}
 	cfg, err := localconfig.Load()
@@ -260,6 +269,10 @@ func (o *commonOpts) resolveTarget() (target, error) {
 		env:                   env,
 		display:               targetLine(resolved, o.context, o.env, kubeContext, env),
 	}
+	// Name the target from the context this command will actually connect to, so an override is
+	// named as what it was overridden TO and an unselected target reads as the kubeconfig it followed
+	// (ADR-0078 §4).
+	o.acted = targetname.For(cfg, kubeContext, o.context != "")
 	// Default the operate path to the scoped, burrowd-only agent credential (ADR-0038 phase 2) when
 	// the resolved handle carries one and the user overrode neither the kubeconfig nor the context.
 	// An explicit --kubeconfig or --context is a deliberate choice of the ambient/admin path, so it

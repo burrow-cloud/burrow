@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Nicholas Phillips
+
+// Package targetname names the target a command acted on, so a command that changes something can
+// say where it changed it ([ADR-0078](../../docs/adr/0078-the-cli-points-at-a-target.md) §4).
+//
+// The failure the target model introduces is acting on the WRONG target — deploying to a cluster
+// while believing you were deploying to the managed product, or the reverse. It cannot be prevented
+// by design, because both are legitimate things to do and neither CLI can know which was meant. The
+// only control left is making it immediately visible: the recoverable form of that mistake is
+// noticing in the same breath, and the unrecoverable form is hearing about it later from somebody
+// else.
+//
+// Two properties follow from that and are the reason this is a package rather than a helper in one
+// binary. First, the name shown is the one the person chose in the picker — the same string
+// `burrow auth status` prints — because a server URL or an internal identifier is not what they
+// would recognise. Second, it names what the command ACTUALLY reached: a recorded target is named
+// only when that target is what decided the connection, and the raw kube context is named otherwise.
+// Naming a target a command did not reach would manufacture the exact mistake this exists to catch.
+//
+// Both `burrow` and `burrow-agent` render it, so the shape lives here rather than twice.
+package targetname
+
+import (
+	"fmt"
+
+	"github.com/burrow-cloud/burrow/localconfig"
+)
+
+// KindNone is the kind reported when no configured target decided where the command went: the CLI
+// followed the ambient kubeconfig, which ADR-0078 §1 preserves, or a per-invocation flag overrode
+// the selection. It is deliberately not an empty string, so a reader of the JSON never has to
+// distinguish "no target" from "this field was not written".
+const KindNone = "none"
+
+// Named is the target a command acted on. It is emitted as the `target` member of a mutating
+// command's JSON result, so an agent composing a result can say where the change happened, and
+// rendered by Clause for the human line.
+//
+// Name is empty unless a configured target decided the connection; Context is the kube context that
+// was actually reached; Endpoint is set only when a --control-plane URL bypassed the target model
+// entirely. Detail is the sentence form, and for a configured target it is exactly what
+// `burrow auth status` prints for that target, so the two can never drift into describing the same
+// target differently.
+type Named struct {
+	Name     string `json:"name,omitempty"`
+	Kind     string `json:"kind"`
+	Context  string `json:"context,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Override bool   `json:"override,omitempty"`
+	Detail   string `json:"detail"`
+}
+
+// For names what an invocation acted on, given the kube context it connected to and whether a
+// per-invocation --context overrode the selection.
+//
+// A configured target is named only when it is a Kubernetes target whose context IS the one that was
+// reached. That covers the ordinary case (the target decided the context) and deliberately excludes
+// two others: a command that resolves through the kubeconfig without consulting the target at all,
+// and a Burrow Cloud target, which has no kube context and cannot be what a kubeconfig connection
+// reached. In both, naming the recorded target would assert something untrue about where the change
+// landed.
+//
+// An override wins over any recorded target, because ADR-0078 §4 keeps --context working as a
+// per-invocation override and what the person overrode it TO is what was acted on.
+func For(cfg *localconfig.Config, kubeContext string, override bool) Named {
+	if !override {
+		if t, ok, err := cfg.ActiveTarget(); err == nil && ok &&
+			t.Kind == localconfig.TargetKindKubernetes && t.Context == kubeContext {
+			return Named{Name: t.Name, Kind: string(t.Kind), Context: t.Context, Detail: t.Describe()}
+		}
+	}
+	n := Named{Kind: KindNone, Context: kubeContext, Override: override}
+	switch {
+	case kubeContext == "":
+		n.Detail = "no target is selected and no kube context could be determined"
+	case override:
+		n.Detail = fmt.Sprintf("kube context %q, chosen for this command with --context", kubeContext)
+	default:
+		n.Detail = fmt.Sprintf("no target is selected; following kube context %q", kubeContext)
+	}
+	return n
+}
+
+// ForControlPlane names a control plane addressed directly by URL with --control-plane. That flag
+// bypasses the target model rather than selecting within it, so there is no picker name to show and
+// the URL is the honest answer. A URL is not a credential; the token that goes with it is never
+// rendered here or anywhere else.
+func ForControlPlane(url string) Named {
+	return Named{
+		Kind:     KindNone,
+		Endpoint: url,
+		Override: true,
+		Detail:   "the control plane at " + url + ", chosen for this command with --control-plane",
+	}
+}
+
+// Clause renders the trailing phrase a changing command appends to what it did — "deployed web …
+// on target \"prod\"" — so the target arrives in the same breath as the change rather than in a
+// header several lines earlier that nobody reads.
+func (n Named) Clause() string {
+	switch {
+	case n.Name != "":
+		return fmt.Sprintf("on target %q", n.Name)
+	case n.Endpoint != "":
+		return "on the control plane at " + n.Endpoint
+	case n.Context != "" && n.Override:
+		return fmt.Sprintf("on kube context %q (--context override)", n.Context)
+	case n.Context != "":
+		return fmt.Sprintf("on kube context %q (no target selected)", n.Context)
+	default:
+		return "on an unnamed target (none is selected and no kube context could be determined)"
+	}
+}

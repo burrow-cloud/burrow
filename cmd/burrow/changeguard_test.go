@@ -169,10 +169,14 @@ var commandClasses = map[string]commandClass{
 	"addon backup":          {class: classChanges, why: "runs a backup Job and records the backup", args: []string{"addon", "backup", "postgres", "web"}},
 	"addon backup-instance": {class: classChanges, why: "asks CloudNativePG for a physical base backup of a whole instance and records it (ADR-0066 §2)", args: []string{"addon", "backup-instance", "postgres"}},
 	"addon restore":         {class: classChanges, why: "overwrites a live database from a backup", args: []string{"addon", "restore", "postgres", "web", "--backup", "b-1", "--confirm"}},
-	"addon remove":          {class: classChanges, why: "removes an installed add-on", args: []string{"addon", "remove", "logs", "--confirm"}},
-	"guard set":             {class: classChanges, why: "rewrites the guardrail policy the agent runs under", args: []string{"guard", "set", "app.deploy", "allow"}},
-	"cluster config set":    {class: classChanges, why: "writes an operational limit", args: []string{"cluster", "config", "set", "app.replicas.max", "5"}},
-	"config provider add":   {class: classChanges, why: "registers a provider credential through the control plane", args: []string{"config", "provider", "add", "cloudflare"}},
+	// The acknowledgement flag is part of the invocation because the command refuses off a terminal
+	// without it (ADR-0064 §2), and the guard runs it with a buffer for stdin. That is the gate
+	// working, not a workaround for it.
+	"addon restore-instance": {class: classChanges, why: "rewinds a whole Postgres instance, taking every app's database on it back together (ADR-0066 §4)", args: []string{"addon", "restore-instance", "postgres", "--latest", "--acknowledge-data-loss", "--confirm"}},
+	"addon remove":           {class: classChanges, why: "removes an installed add-on", args: []string{"addon", "remove", "logs", "--confirm"}},
+	"guard set":              {class: classChanges, why: "rewrites the guardrail policy the agent runs under", args: []string{"guard", "set", "app.deploy", "allow"}},
+	"cluster config set":     {class: classChanges, why: "writes an operational limit", args: []string{"cluster", "config", "set", "app.replicas.max", "5"}},
+	"config provider add":    {class: classChanges, why: "registers a provider credential through the control plane", args: []string{"config", "provider", "add", "cloudflare"}},
 }
 
 // changeGuardRationale is appended to every failure here so the message teaches rather than merely

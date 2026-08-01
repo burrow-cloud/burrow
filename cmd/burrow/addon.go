@@ -459,7 +459,11 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), o.json, res, restoreInstanceSummary(res))
+			// emitChange, not emit: this changes something on a target, so the result names the
+			// target it changed (ADR-0078 §4) — and of everything the CLI can do, a rewind of a whole
+			// database instance is the one where "which control plane was that?" must not be a
+			// question asked afterwards.
+			return o.emitChange(cmd.OutOrStdout(), res, restoreInstanceSummary(res))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -594,7 +598,7 @@ func restoreInstanceConsequence(ctx context.Context, c *client.Client, instance,
 // the instance" alone leaves both questions a person actually has unanswered.
 func restoreInstanceSummary(res client.RestoreInstanceResult) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "rewound the %s instance %q in environment %s to %s\n", res.Addon, res.Instance, res.Environment, res.Target)
+	fmt.Fprintf(&b, "rewound the %s instance %q in environment %s to %s\n", res.Addon, res.Instance, res.Environment, res.RecoveryTarget)
 	// What happened to the copy comes immediately after what happened to the original, because they
 	// are one fact read together (ADR-0064 §5's posture). A skipped backup is stated as plainly as a
 	// taken one.

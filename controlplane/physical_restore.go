@@ -115,8 +115,11 @@ type RestoreInstanceResult struct {
 	// Instance is the Postgres instance that was rewound, by the name every consumer resolves it at
 	// (AddonInstanceName).
 	Instance string `json:"instance"`
-	// Target is the recovery target in the same words the confirmation used.
-	Target string `json:"target"`
+	// RecoveryTarget is the point that was recovered to, in the same words the confirmation used. The
+	// JSON name is not `target`: `burrow`'s own result envelope carries a `target` — the control plane
+	// the command acted on (ADR-0078 §4) — and two different meanings under one key is how an agent
+	// composing this result says the wrong thing about where a rewind happened.
+	RecoveryTarget string `json:"recovery_target"`
 	// SafetyBackup is the id of the physical backup taken of the instance's state BEFORE the rewind,
 	// which is the way back from a restore to the wrong point. Empty when none was taken.
 	SafetyBackup string `json:"safety_backup,omitempty"`
@@ -273,12 +276,12 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 	// which apps were affected, and a missing key reads as "unknown" where an empty list reads as
 	// "none" — the same reason the guard report normalizes its own.
 	result := RestoreInstanceResult{
-		Addon:       t,
-		Environment: targetEnv,
-		Instance:    instance,
-		Target:      opts.target(),
-		Apps:        emptyIfNil(apps),
-		Reconnected: []string{},
+		Addon:          t,
+		Environment:    targetEnv,
+		Instance:       instance,
+		RecoveryTarget: opts.target(),
+		Apps:           emptyIfNil(apps),
+		Reconnected:    []string{},
 	}
 
 	// The safety backup, before anything is destroyed (ADR-0064 §5's ordering).

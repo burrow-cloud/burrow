@@ -1057,7 +1057,9 @@ type RestoreInstanceResult struct {
 	Addon       string `json:"addon"`
 	Environment string `json:"environment"`
 	Instance    string `json:"instance"`
-	Target      string `json:"target"`
+	// RecoveryTarget is the point that was recovered to. It is deliberately not `target`, which is
+	// the control plane the command acted on (ADR-0078 §4).
+	RecoveryTarget string `json:"recovery_target"`
 	// SafetyBackup is the physical backup taken of the pre-restore state, which is the way back from
 	// a restore to the wrong point. SafetyBackupNote says why there is none when there is none.
 	SafetyBackup     string `json:"safety_backup,omitempty"`

@@ -161,7 +161,12 @@ const (
 	auditOpAddonDetach  = "addon_detach"
 	auditOpAddonBackup  = "addon_backup"
 	auditOpAddonRestore = "addon_restore"
-	auditOpRun          = "run"
+	// auditOpAddonRestoreInstance is a PHYSICAL restore of a whole instance (ADR-0066 §4). It is a
+	// separate operation from auditOpAddonRestore rather than the same one with different args,
+	// because the two have different blast radii and an audit trail that collapsed them would answer
+	// "was anything rewound beyond the app it was asked about" with a shrug.
+	auditOpAddonRestoreInstance = "addon_restore_instance"
+	auditOpRun                  = "run"
 	// auditOpHook is one lifecycle hook's execution (ADR-0072). It carries no guardrail decision row
 	// of its own: a hook runs as part of a deploy or a rollback and is gated by that operation's
 	// guardrail, so the decision was already recorded under `deploy` or `rollback`.

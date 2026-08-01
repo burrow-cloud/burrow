@@ -153,9 +153,19 @@ func recordedCNPGClusterSchema() (*recordedPlacementSchema, error) {
 	return &s, nil
 }
 
-// composedClusterSpecAsJSON builds the `Cluster` spec for a representative instance and round-trips
-// it through JSON, which is what writing it to the API server does. The round trip matters: the
-// composition holds Go integers, and only after it are numbers the shape placementGaps checks.
+// composedClusterSpecAsJSON builds the union of every `Cluster` spec path Burrow writes and
+// round-trips it through JSON, which is what writing it to the API server does. The round trip
+// matters: the composition holds Go integers, and only after it are numbers the shape placementGaps
+// checks.
+//
+// IT IS A UNION RATHER THAN ONE SPEC, and the union is what the recording has to cover. Burrow
+// composes two `Cluster` specs — an install's (bootstrap.initdb) and a physical restore's
+// (bootstrap.recovery plus externalClusters, ADR-0066 §4) — and they differ in exactly the subtree
+// most likely to be pruned silently. A recording taken from the install spec alone would say nothing
+// about the recovery fields, and a pruned `bootstrap.recovery` does not fail: it initializes an EMPTY
+// database where a recovered one was asked for, which is the worst failure in this file's whole
+// subject. So both bootstraps appear together here. No `Cluster` is ever written in this shape;
+// nothing writes this value, it only walks the paths.
 //
 // The placement policy is FILLED, not left empty, so the merged fragment is exercised here too — an
 // operator who wires placement is the reader most exposed to a silently pruned field.
@@ -187,7 +197,30 @@ func composedClusterSpecAsJSON() (any, error) {
 		},
 		RepoPath: controlplane.PgBackRestRepoPath(controlplane.DefaultEnvironment),
 	}
-	return asJSON(a.postgresClusterSpec(spec, controlplane.DefaultEnvironment, name, labels, archive))
+	install := a.postgresClusterSpec(spec, controlplane.DefaultEnvironment, name, labels, archive)
+	recovery := a.postgresRecoveryClusterSpec(spec, controlplane.DefaultEnvironment, name, labels, controlplane.RestoreInstanceRequest{
+		Environment: controlplane.DefaultEnvironment,
+		// A recovery target is FILLED so `bootstrap.recovery.recoveryTarget.backupID` is walked. It is
+		// the field a restore names the base backup with, and a pruned one recovers the latest backup
+		// instead of the one the operator asked for — silently, and only discoverable by reading the
+		// data afterwards.
+		BackupLabel: "20260210-101333F",
+		Archive:     archive,
+	})
+	// The union: the recovery composition already carries everything the install one does apart from
+	// the bootstrap, which is the one key they genuinely disagree about.
+	bootstrap := map[string]any{}
+	for k, v := range install["bootstrap"].(map[string]any) {
+		bootstrap[k] = v
+	}
+	for k, v := range recovery["bootstrap"].(map[string]any) {
+		bootstrap[k] = v
+	}
+	recovery["bootstrap"] = bootstrap
+	// And `targetTime`, which is the other half of `recoveryTarget` and takes the same path a
+	// point-in-time restore does.
+	recovery["bootstrap"].(map[string]any)["recovery"].(map[string]any)["recoveryTarget"].(map[string]any)["targetTime"] = "2026-08-01T14:30:00Z"
+	return asJSON(recovery)
 }
 
 // pruneSchemaToValue returns the subtree of node covering exactly the paths value occupies, and an

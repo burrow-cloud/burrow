@@ -86,6 +86,7 @@ const (
 	OpBackupJobPresent      Op = "BackupJobPresent"
 	OpRunPhysicalBackup     Op = "RunPhysicalBackup"
 	OpPhysicalBackupPresent Op = "PhysicalBackupPresent"
+	OpRestoreInstance       Op = "RestoreInstance"
 
 	OpCreateEnvironment Op = "CreateEnvironment"
 	OpListEnvironments  Op = "ListEnvironments"

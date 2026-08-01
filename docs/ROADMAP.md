@@ -312,10 +312,14 @@ acceptance checklist. The theme and its sequencing stay here; the granularity is
   store, a daily `ScheduledBackup` takes a base backup, and `burrow addon backup-instance postgres`
   creates a `Backup` object on demand — Burrow reads `.status` and runs no backup tool. Retention is
   Burrow's declared window, written into the repository so there is one policy rather than two.
-  **What is not built is the restore.** Physical recovery — standing up a replacement `Cluster` from
-  the repository and cutting `DATABASE_URL` over — is still absent, and no restore from a real
-  object store has been exercised, so the per-app `pg_dump` path remains the only tested way back.
-  [#338](https://github.com/burrow-cloud/burrow/issues/338).
+  §4 has landed as `burrow addon restore-instance postgres`: a base backup of the current state is
+  taken first and the restore is abandoned if it does not reach the store, the instance is replaced by
+  one recovered from the repository under the same name, and every attached app is reissued a
+  `DATABASE_URL` and restarted. It is instance-scoped, guarded by `addon.restore_instance`, asks for
+  the instance's name to be typed back after naming every affected app, and is absent from
+  `burrow-agent`. **No restore from a real object store has ever been run**, which ADR-0066 §3
+  requires before the path is relied on — so the per-app `pg_dump` pair remains the only recovery this
+  project has watched work. [#338](https://github.com/burrow-cloud/burrow/issues/338).
 
 ## Deferred until requested
 

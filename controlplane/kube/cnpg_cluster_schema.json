@@ -45,11 +45,55 @@
                 }
               }
             }
+          },
+          "recovery": {
+            "type": "object",
+            "properties": {
+              "recoveryTarget": {
+                "type": "object",
+                "properties": {
+                  "backupID": {
+                    "type": "string"
+                  },
+                  "targetTime": {
+                    "type": "string"
+                  }
+                }
+              },
+              "source": {
+                "type": "string"
+              }
+            }
           }
         }
       },
       "enableSuperuserAccess": {
         "type": "boolean"
+      },
+      "externalClusters": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "plugin": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "parameters": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
       },
       "imageName": {
         "type": "string"

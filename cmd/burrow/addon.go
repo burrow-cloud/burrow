@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"text/template"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -64,7 +65,7 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupInstanceCmd(), newAddonBackupsCmd(), newAddonBackupHealthCmd(), newAddonRestoreCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupInstanceCmd(), newAddonBackupsCmd(), newAddonBackupHealthCmd(), newAddonRestoreCmd(), newAddonRestoreInstanceCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
 	return cmd
 }
 
@@ -365,6 +366,286 @@ func newAddonRestoreCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	_ = cmd.MarkFlagRequired("backup")
 	return cmd
+}
+
+// newAddonRestoreInstanceCmd is `burrow addon restore-instance postgres`: rewind one environment's
+// WHOLE Postgres instance to a point in its object-storage repository (ADR-0066 §4).
+//
+// IT IS A SEPARATE VERB FROM `addon restore`, NOT A FLAG ON IT, and that is the naming ADR-0066 §4
+// asks for. `addon restore <addon> <app>` acts on one app's database and refuses a physical backup by
+// name; this acts on the instance and refuses a logical dump by name. The two point at each other, so
+// whichever one is reached for under pressure says which one the situation actually calls for.
+//
+// It is on the operator CLI only. `burrow-agent` does not carry it — not gated, not permitted:
+// the verb is absent from the binary (ADR-0065 §2 tier 1), because rewinding the database every app
+// in an environment shares is not an agent operation in any configuration. `guard` reports it as
+// absent so the agent relays what it is and who can run it rather than failing with an unknown
+// command.
+//
+// On top of the addon.restore_instance guardrail it carries the typed confirmation ADR-0064 §2
+// established for `--delete-data`, because the blast radius is comparable: on a terminal the
+// instance's name is typed back after a notice naming every app that goes with it, and off a terminal
+// it refuses unless --acknowledge-data-loss is passed.
+func newAddonRestoreInstanceCmd() *cobra.Command {
+	o := &commonOpts{}
+	var backup, toTime, destination string
+	var latest, skipSafety, ackDataLoss, confirm bool
+	cmd := &cobra.Command{
+		Use:   "restore-instance <addon>",
+		Short: "Rewind an environment's whole Postgres instance to a point in its object-storage repository",
+		Long: "restore-instance replaces an environment's Postgres instance with one recovered from the\n" +
+			"pgBackRest repository in your object store, at a point you name. EVERY database on that\n" +
+			"instance goes back to that point together, so every app attached to it is affected — this is\n" +
+			"an instance operation and it cannot be scoped to one app.\n\n" +
+			"To restore ONE app's database, use `burrow addon restore <addon> <app> --backup <id>`, which\n" +
+			"replays that app's own dump and touches nothing else.\n\n" +
+			"Name exactly one recovery target: --backup for a recorded base backup, --to-time for any\n" +
+			"instant inside the write-ahead-log window, or --latest for the newest state the repository\n" +
+			"holds. Nothing is assumed.\n\n" +
+			"Burrow takes a physical backup of the instance's CURRENT state first and stops without\n" +
+			"changing anything if it does not reach the object store, so a rewind to the wrong point can\n" +
+			"itself be rewound. --skip-safety-backup goes ahead without one, for an instance too broken\n" +
+			"to back up.\n\n" +
+			"The instance's data volume is destroyed and rebuilt from the repository, and each attached\n" +
+			"app's DATABASE_URL is rewritten for the recovered instance and the app restarted: a recovered\n" +
+			"instance holds the login roles as they were at the recovery point, so the credential an app\n" +
+			"is holding may no longer work until it is reissued.",
+		Args: exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			addon := args[0]
+			// Everything that can be refused WITHOUT contacting the control plane is refused before
+			// the prompt. Asking somebody to type a database's name back and then telling them the
+			// add-on was wrong, or the timestamp unparseable, is a bad way to spend the one moment
+			// they are reading carefully.
+			if addon != string(controlplane.AddonPostgres) {
+				return fmt.Errorf("only the postgres add-on has physical restore; %q has no object-storage repository to recover from", addon)
+			}
+			if err := checkOneRecoveryTarget(backup, toTime, latest); err != nil {
+				return err
+			}
+			if toTime != "" {
+				if _, err := time.Parse(time.RFC3339, toTime); err != nil {
+					return fmt.Errorf("--to-time %q is not an RFC3339 instant (for example 2026-08-01T14:30:00Z)", toTime)
+				}
+			}
+			instance, err := controlplane.AddonInstanceName(controlplane.AddonType(addon), restoreEnvironment(o.env))
+			if err != nil {
+				return err
+			}
+			// The off-terminal refusal runs BEFORE anything is contacted, so a script that never said
+			// it destroys the current state cannot reach the restore call at all (ADR-0064 §2).
+			if !ackDataLoss && !stdinIsTerminal(cmd.InOrStdin()) {
+				return errRestoreInstanceNeedsTerminal(instance)
+			}
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			// The typed-name gate goes to stderr so a --json run keeps a clean stdout.
+			if !ackDataLoss {
+				if err := confirmRestoreInstance(ctx, c, instance, o.env, recoveryTargetLabel(backup, toTime), skipSafety, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
+					return err
+				}
+			}
+			res, err := c.RestoreInstance(ctx, addon, o.env, client.RestoreInstanceOptions{
+				Backup:           backup,
+				ToTime:           toTime,
+				Latest:           latest,
+				SkipSafetyBackup: skipSafety,
+				Destination:      destination,
+				Confirm:          confirm,
+			})
+			if err != nil {
+				return err
+			}
+			// emitChange, not emit: this changes something on a target, so the result names the
+			// target it changed (ADR-0078 §4) — and of everything the CLI can do, a rewind of a whole
+			// database instance is the one where "which control plane was that?" must not be a
+			// question asked afterwards.
+			return o.emitChange(cmd.OutOrStdout(), res, restoreInstanceSummary(res))
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVar(&backup, "backup", "", "recover exactly this recorded physical `backup` (from `burrow addon backups postgres`)")
+	cmd.Flags().StringVar(&toTime, "to-time", "", "recover to this RFC3339 `instant` inside the write-ahead-log window (e.g. 2026-08-01T14:30:00Z)")
+	cmd.Flags().BoolVar(&latest, "latest", false, "recover to the newest state the repository holds (the furthest point the archived write-ahead log reaches)")
+	cmd.Flags().StringVar(&destination, "destination", "",
+		"the object-storage `provider` holding this instance's repository (only needed when more than one is registered)")
+	cmd.Flags().BoolVar(&skipSafety, "skip-safety-backup", false, "rewind WITHOUT first backing up the state that is there. For an instance too broken to back up — the output says plainly that no copy was taken.")
+	cmd.Flags().BoolVar(&ackDataLoss, dataLossAckFlag, false, "acknowledge that this destroys the instance's current state, so it proceeds without the typed-name prompt (this is how a script asks for it). No shorthand: rewinding every app's database should not be a single keystroke.")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	return cmd
+}
+
+// checkOneRecoveryTarget refuses zero targets and more than one, in the CLI as well as on the server.
+// It is checked here so the typed-name prompt is never printed for an invocation that was going to be
+// refused anyway — asking someone to type a database's name and then telling them the flags were
+// wrong is a bad way to spend the one moment they are reading carefully.
+func checkOneRecoveryTarget(backup, toTime string, latest bool) error {
+	named := 0
+	for _, on := range []bool{backup != "", toTime != "", latest} {
+		if on {
+			named++
+		}
+	}
+	switch named {
+	case 1:
+		return nil
+	case 0:
+		return errors.New("name where to rewind to: --backup <id> for a recorded backup, --to-time <RFC3339> for an instant in the write-ahead-log window, or --latest for the newest state the repository holds")
+	default:
+		return errors.New("name exactly one recovery target: --backup, --to-time, or --latest")
+	}
+}
+
+// recoveryTargetLabel renders the target for the notice, in the same words the server uses in the
+// guardrail message and the result, so an operator reads one description of the point rather than
+// three.
+func recoveryTargetLabel(backup, toTime string) string {
+	switch {
+	case backup != "":
+		return "backup " + backup
+	case toTime != "":
+		return "the state at " + toTime
+	default:
+		return "the newest state in the repository"
+	}
+}
+
+// restoreEnvironment resolves the environment flag for the purpose of NAMING the instance in the
+// notice. An unnamed environment is the default one, which is what the server resolves it to when
+// exactly one environment is registered; with several the server refuses, so the name printed here
+// is never the one a restore silently went to.
+func restoreEnvironment(env string) string {
+	if env == "" {
+		return controlplane.DefaultEnvironment
+	}
+	return env
+}
+
+// errRestoreInstanceNeedsTerminal is the refusal a physical restore returns off a terminal without
+// the acknowledgement flag (ADR-0064 §2). It refuses rather than proceeding, and names both ways out.
+func errRestoreInstanceNeedsTerminal(instance string) error {
+	return fmt.Errorf("restore-instance rewinds every database on the postgres instance %q and asks for the "+
+		"instance's name to be typed back, which needs an interactive terminal; re-run with --%s to say so "+
+		"explicitly in a script. To restore a single app instead, use `burrow addon restore <addon> <app> "+
+		"--backup <id>`", instance, dataLossAckFlag)
+}
+
+// confirmRestoreInstance is the physical restore's human gate: it prints what the rewind would do and
+// requires the instance's name to be typed back before proceeding (ADR-0064 §2).
+//
+// THE INSTANCE'S NAME IS WHAT IS TYPED, not the add-on type on the command line. `postgres` is a word
+// somebody types without reading; `burrow-postgres-staging` is the environment's instance, and typing
+// it is the operator saying which environment they know they are rewinding. That is the difference
+// between a gate and a formality on a command whose argument does not name the thing it acts on.
+//
+// THIS PROMPT IS FOR HUMANS AND IS NOT A SECURITY CONTROL. Anything with a shell can type a word, so
+// it adds nothing against an agent: what keeps an agent away from this is that `addon restore-instance`
+// is not compiled into burrow-agent at all (ADR-0065 §2 tier 1). That structural absence must never be
+// relaxed on the grounds that "there's a confirmation anyway".
+func confirmRestoreInstance(ctx context.Context, c *client.Client, instance, env, target string, skipSafety bool, in io.Reader, out io.Writer) error {
+	fmt.Fprintln(out, warning(out)+restoreInstanceConsequence(ctx, c, instance, env, target, skipSafety))
+	fmt.Fprintln(out)
+	typed, err := readLine(in, out, fmt.Sprintf("Type the instance's name (%s) to proceed, or anything else to abort: ", instance))
+	if err != nil {
+		return err
+	}
+	if typed != instance {
+		return fmt.Errorf("aborted: %q is not the instance's name (%s); nothing was restored", typed, instance)
+	}
+	return nil
+}
+
+// restoreInstanceConsequence renders what the rewind is about to do, in the same terms the
+// addon.restore_instance guardrail's held confirmation uses — the instance by name, the point it goes
+// back to, and EVERY app whose database goes with it, listed rather than counted.
+//
+// A COUNT IS NOT CONSENT. "3 apps are affected" is a number to nod at; "api, web and worker all go
+// back to that point" is the sentence that makes somebody stop when one of those names should not be
+// on the list. That is the whole reason this reads the apps rather than reporting how many there are.
+//
+// It enumerates from the APPS' own Secrets rather than by asking the instance, which is the opposite
+// of what a removal's notice does and is right for the opposite reason: a restore is reached for when
+// the instance is the broken thing, so an enumeration that needed the instance would be least
+// reliable exactly here. Only key NAMES are read, never values (ADR-0028). Best-effort like every
+// other lookup behind a notice — an unreadable listing costs the sentence, and the server's own
+// guardrail message carries the authoritative list either way.
+func restoreInstanceConsequence(ctx context.Context, c *client.Client, instance, env, target string, skipSafety bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "restore-instance REWINDS the whole postgres instance %q in environment %s to %s.\n"+
+		"  Every database on it goes back to that point and everything written since is gone.",
+		instance, restoreEnvironment(env), target)
+	if apps := attachedAppsIn(ctx, c, env); len(apps) > 0 {
+		fmt.Fprintf(&b, "\n  On this instance: %s. All of them are rewound together, their DATABASE_URL is\n"+
+			"  reissued afterwards, and each app is restarted.", pluralApps(apps))
+	}
+	b.WriteString("\n  The instance's current data volume is DESTROYED and rebuilt from the repository.")
+	if skipSafety {
+		b.WriteString("\n  --skip-safety-backup: NO backup of the current state is taken first. This is the last\n" +
+			"  moment that state exists.")
+	} else {
+		b.WriteString("\n  A physical backup of the current state is written to the object store FIRST; if it does\n" +
+			"  not get there, nothing is changed. That backup is the way back from a rewind to the wrong point.")
+	}
+	return b.String()
+}
+
+// restoreInstanceSummary renders the human outcome of a physical restore. It always says what
+// happened to the state that was there and which apps came back onto the instance, because "restored
+// the instance" alone leaves both questions a person actually has unanswered.
+func restoreInstanceSummary(res client.RestoreInstanceResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "rewound the %s instance %q in environment %s to %s\n", res.Addon, res.Instance, res.Environment, res.RecoveryTarget)
+	// What happened to the copy comes immediately after what happened to the original, because they
+	// are one fact read together (ADR-0064 §5's posture). A skipped backup is stated as plainly as a
+	// taken one.
+	if res.SafetyBackup != "" {
+		fmt.Fprintf(&b, "backup of the pre-restore state taken first: %s — `burrow addon restore-instance %s --backup %s` puts it back\n",
+			res.SafetyBackup, res.Addon, res.SafetyBackup)
+	}
+	if res.SafetyBackupNote != "" {
+		fmt.Fprintf(&b, "%s\n", res.SafetyBackupNote)
+	}
+	if len(res.Reconnected) > 0 {
+		fmt.Fprintf(&b, "%d app(s) (%s) were reissued a DATABASE_URL for the recovered instance and restarted\n",
+			len(res.Reconnected), strings.Join(res.Reconnected, ", "))
+	}
+	for _, s := range res.Stranded {
+		fmt.Fprintf(&b, "%q was NOT reconnected: %s\n", s.App, s.Reason)
+	}
+	if len(res.Apps) == 0 {
+		b.WriteString("no app was attached to this instance\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// attachedAppsIn is attachedApps scoped to ONE environment (ADR-0067 §1). A physical restore rewinds
+// one environment's instance, so a notice listing another environment's apps would name apps this
+// operation does not touch — and understate or overstate the blast radius in the one message whose
+// job is to state it exactly.
+func attachedAppsIn(ctx context.Context, c *client.Client, env string) []string {
+	apps, err := c.Apps(ctx, env)
+	if err != nil {
+		return nil
+	}
+	var attached []string
+	for _, a := range apps {
+		keys, err := c.Secrets(ctx, a.App, env)
+		if err != nil {
+			continue
+		}
+		for _, k := range keys {
+			if k == databaseURLKey {
+				attached = append(attached, a.App)
+				break
+			}
+		}
+	}
+	sort.Strings(attached)
+	return attached
 }
 
 // newAddonAttachCmd is `burrow addon attach postgres <app> [--env]`: give an app its own database on
@@ -1091,25 +1372,7 @@ func addonInstanceOf(ctx context.Context, c *client.Client, name string) (addonT
 // values (ADR-0028). Any app or listing that will not answer is skipped rather than failing the
 // notice.
 func attachedApps(ctx context.Context, c *client.Client) []string {
-	apps, err := c.Apps(ctx, "")
-	if err != nil {
-		return nil
-	}
-	var attached []string
-	for _, a := range apps {
-		keys, err := c.Secrets(ctx, a.App, "")
-		if err != nil {
-			continue
-		}
-		for _, k := range keys {
-			if k == databaseURLKey {
-				attached = append(attached, a.App)
-				break
-			}
-		}
-	}
-	sort.Strings(attached)
-	return attached
+	return attachedAppsIn(ctx, c, "")
 }
 
 // databaseURLKey is the key `addon attach` writes an app's generated connection string under

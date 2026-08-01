@@ -637,7 +637,12 @@ func (e *Engine) resolveArchiveDestination(ctx context.Context, name, env string
 			names[i] = p.Name
 		}
 		sort.Strings(names)
-		return nil, fmt.Errorf("multiple object-storage providers are registered (%s) — pass --archive-destination to say which one holds this instance's write-ahead log and base backups; Burrow will not guess, because an instance keeps the repository it was created against: %w",
+		// The flag is spelled differently on the commands that reach this, so it is described rather
+		// than named: `addon install` takes --archive-destination (it is choosing a repository for a
+		// new instance) while `addon backup-instance` and `addon restore-instance` take --destination
+		// (they are naming the one an instance already has). An error that names a flag the command
+		// in front of the operator does not have is worse than one that names none.
+		return nil, fmt.Errorf("multiple object-storage providers are registered (%s) — name the one holding this instance's write-ahead log and base backups on the command line (--archive-destination on `addon install`, --destination on `addon backup-instance` and `addon restore-instance`); Burrow will not guess, because an instance keeps the repository it was created against: %w",
 			strings.Join(names, ", "), ErrInvalid)
 	}
 

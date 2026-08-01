@@ -436,6 +436,26 @@ type Kubernetes interface {
 	// otherwise indistinguishable from a backup still running. A missing object is absent (false,
 	// nil), not an error.
 	PhysicalBackupPresent(ctx context.Context, backupID string) (bool, error)
+	// RestoreInstance rewinds environment req.Environment's whole Postgres instance to a point in its
+	// pgBackRest repository and waits until the recovered instance is serving (ADR-0066 §4).
+	//
+	// IT REPLACES THE INSTANCE UNDER ITS OWN NAME. CloudNativePG never recovers in place — a recovery
+	// bootstraps a new `Cluster` — but the name every consumer of a Postgres instance resolves
+	// (AddonInstanceName: the Service, the superuser Secret, every DATABASE_URL) is not a detail a
+	// restore may move. So the pre-restore `Cluster` and its data claims are removed and the recovered
+	// one comes up under the same name, rather than a differently-named instance being stood up beside
+	// it and every derivation in Burrow being asked to follow.
+	//
+	// THE CALLER HAS ALREADY TAKEN A BACKUP OF WHAT THIS DESTROYS, and this seam does not check that —
+	// it is the engine's ordering (ADR-0064 §5) and the seam's job is the replacement. What the seam
+	// does refuse is a recovery it cannot address: an instance with no `Stanza`, or one whose stanza
+	// describes a repository other than req.Archive, because recovering from a bucket the instance
+	// never wrote to produces an empty database rather than an error.
+	//
+	// req carries a credential PAIR and therefore never crosses an API boundary. The archived
+	// write-ahead log and every base backup in the repository are left untouched: this reads from the
+	// repository and writes nothing to it.
+	RestoreInstance(ctx context.Context, req RestoreInstanceRequest) (RestoreInstanceOutcome, error)
 
 	// RunJob runs spec.Command as a one-shot Job in the app namespace (this seam view's namespace),
 	// built from the app's own current image (spec.Image) and its config env plus per-app Secret via

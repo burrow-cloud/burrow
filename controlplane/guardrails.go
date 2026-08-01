@@ -73,6 +73,20 @@ const (
 	// overwriting its live contents (ADR-0032). Held for confirmation by default, like detach.
 	// (Backup and list are not guarded: they destroy nothing.)
 	GuardrailAddonRestore GuardrailCode = "addon.restore"
+	// GuardrailAddonRestoreInstance: the operation would rewind a whole Postgres instance to a point
+	// in its object-storage repository, taking every app's database on it back together (ADR-0066
+	// §4). Held for confirmation by default.
+	//
+	// IT IS A SEPARATE CODE FROM addon.restore, and the separation is the point ADR-0064's
+	// "deliberately left open" section raised about `--delete-data` sharing `addon.remove`'s
+	// disposition. The two restores have materially different blast radii — one app's database against
+	// every app's — so an operator who wants per-app restore available and instance-wide rewinds
+	// denied has to be able to say so. Sharing one disposition would have made that unexpressable.
+	//
+	// The disposition is not the boundary here, which is worth stating so it is never mistaken for
+	// one: `addon restore-instance` is not compiled into `burrow-agent` at all (ADR-0065 §2 tier 1),
+	// and this code exists so the hold is legible and configurable for the human who can run it.
+	GuardrailAddonRestoreInstance GuardrailCode = "addon.restore_instance"
 	// GuardrailAppDelete: the operation would delete an app entirely — its workload, routing,
 	// and release history — so it disappears from the apps listing. The destructive teardown
 	// of a deployed application. Denied by default (ADR-0065 §3): destroying the release history
@@ -159,6 +173,7 @@ var knownGuardrails = []guardrailDef{
 	{code: GuardrailAddonRemove, description: "remove an installed add-on from the cluster"},
 	{code: GuardrailAddonDetach, description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)"},
 	{code: GuardrailAddonRestore, description: "restore an app's database from a backup, overwriting its live contents"},
+	{code: GuardrailAddonRestoreInstance, description: "rewind a whole Postgres instance to a point in its object-storage repository, taking every app's database on it back together"},
 	{code: GuardrailAppDelete, description: "delete an app entirely (its workload, routing, and release history)", envScoped: true},
 	{code: GuardrailRollback, description: "roll an application back to its previous release", envScoped: true},
 	{code: GuardrailAutoscale, description: "configure autoscaling for an application", envScoped: true},

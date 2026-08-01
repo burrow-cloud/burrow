@@ -6,11 +6,17 @@
 
 ## TL;DR
 
-Every Burrow Postgres instance is one pod. Nothing can ask for a second, so nothing can survive
-losing the first without a reschedule.
+A Burrow Postgres **instance** is one Postgres server — one per environment
+([ADR-0067](0067-one-database-instance-per-environment.md)), holding a database per attached app.
+Today it always runs as a **single pod**, so losing that pod takes the instance down until it is
+rescheduled.
 
-- **The instance count is settable at install**, defaulting to **one**.
-- **A second instance is both things at once.** CloudNativePG runs it as a hot standby: it takes over
+**This record is about the shape of one instance, not about how many exist.** Running a second,
+independent Postgres — one per service, say — is a different axis, deferred by
+[ADR-0031](0031-postgres-addon.md) and untouched here.
+
+- **An instance may be given standbys** with `--standbys <n>` at install, defaulting to **none**.
+- **A standby is both things at once.** CloudNativePG runs it as a hot standby: it takes over
   when the primary dies *and* it serves reads. There is no separate replica feature to build.
 - **A read address appears only when a standby exists**, and points at standbys only. Adding one
   restarts the attached apps, which costs nothing: using a replica means changing the app's code to
@@ -23,8 +29,19 @@ onto the add-on. Supersedes nothing.
 
 ## Context
 
-`controlplane/kube/cnpg_cluster.go` writes `"instances": int64(1)`, and nothing exposes it. Every
-database Burrow manages is a single pod, whatever it holds.
+**Two things are called an instance, and only one of them is this record's subject.**
+
+- A **Burrow instance** is a Postgres server: one CloudNativePG `Cluster`, one per environment
+  ([ADR-0067](0067-one-database-instance-per-environment.md)), holding a database and a login role
+  per attached app ([ADR-0031](0031-postgres-addon.md)).
+- CloudNativePG's own `spec.instances` counts the **pods inside** one such cluster — a primary and
+  its standbys.
+
+This record settles the second and says nothing about the first. To avoid the collision it uses
+**standby** for the replica and reserves **instance** for the server, matching ADR-0067.
+
+`controlplane/kube/cnpg_cluster.go` writes `"instances": int64(1)`, and nothing exposes it. So every
+Postgres server Burrow manages runs as a single pod, whatever it holds.
 
 CloudNativePG recovers a lost primary by rescheduling the pod and reattaching its volume, so this is
 not a data-loss story. It is an **outage of minutes rather than a failover of seconds** — and for a
@@ -46,24 +63,31 @@ hot standby and publishes three services for one cluster:
 | `<cluster>-ro` | Standbys only |
 | `<cluster>-r` | Any instance |
 
-So a second instance delivers failover **and** a readable replica together. What does not come with
+So a standby delivers failover **and** a readable replica together. What does not come with
 it is an app knowing how to reach the replica — which is a connection string, not a feature.
 
 ## Decision
 
-### 1. The instance count is set at install, and defaults to one
+### 1. Standbys are set at install, and default to none
 
-`burrow addon install postgres --instances <n>`, defaulting to **1**.
+`burrow addon install postgres --standbys <n>`, defaulting to **0** — a primary alone, which is what
+runs today.
 
-**One is right for the common case**, and the reason is cost rather than caution: an instance is a
-pod and a persistent volume, and it is the most expensive thing an add-on provisions. Doubling that
-for every app on a free tier would be a poor default paid by everyone to benefit few.
+**`--standbys` rather than `--instances`**, even though CloudNativePG's field is `instances` and the
+flag would map to it more directly. "Instance" already means a Postgres server in this codebase
+(ADR-0031, ADR-0067), and a flag that quietly redefines it would make `--instances 2` read as "give
+me a second Postgres server" — which is a real thing somebody might want and is not what it does.
+Counting standbys also cannot be misread: `--standbys 1` is one standby, never one pod in total.
+
+**None is right for the common case**, and the reason is cost rather than caution: a standby is a
+pod and a persistent volume, and it is the most expensive thing an add-on provisions. Adding one to
+every app on a free tier would be paid by everyone to benefit few.
 
 The number is validated at the point of naming, not passed through — CloudNativePG accepts values
 that make no sense for the shape Burrow provisions, and a database that comes up wrong is worse than
 a refusal.
 
-**Changing it on an existing instance is not built here.** CloudNativePG scales a `Cluster` up and
+**Changing the count on an existing instance is not built here.** CloudNativePG scales a `Cluster` up and
 down live, so this is a capability Burrow declines to expose yet rather than one that does not exist.
 It is deliberately left out because the interesting part is not the scale-up — it is what a scale-down
 does to a standby that a read address is currently pointing at.
@@ -76,7 +100,7 @@ else.
 
 **`-ro` rather than `-r`, and the conditional is what makes it the right choice.** `-r` selects any
 instance, so a read may land on the primary; `-ro` guarantees it does not, which is what splitting
-reads is for. `-ro` resolves to nothing at a single instance — which would be a trap if the address
+reads is for. `-ro` resolves to nothing on a standby-less instance — which would be a trap if the address
 were always present, and is not one when the address only exists where it works.
 
 **Adding a standby restarts the attached apps**, so they pick the new variable up. That is acceptable
@@ -86,13 +110,13 @@ is a deploy. A restart at the moment a standby is provisioned costs nothing that
 not already going to cost.
 
 **An address that is always there would be worse.** It reads as a thing to use, so a developer wires
-reads to it, and at one instance it is either the primary wearing a second name — a variable that
+reads to it, and without a standby it is either the primary wearing a second name — a variable that
 does nothing, quietly — or it points at no endpoint at all. Neither teaches the truth, which is that a
 read replica is something you provision and then write code for.
 
 ### 3. Raising it is operator-only
 
-`--instances` is absent from `burrow-agent` and reported by `guard` as a capability the agent does
+`--standbys` is absent from `burrow-agent` and reported by `guard` as a capability the agent does
 not have ([ADR-0065](0065-what-belongs-on-the-agent-surface.md) tier 1).
 
 The criterion is the blast radius of the effect, and this one **provisions hardware**. An agent that
@@ -117,15 +141,15 @@ relax about backups is wrong, and the docs must not.
 ## Consequences
 
 **Cloud ADR-0030's move stops being a downgrade.** `burrowd-cloud`'s database can move onto the add-on
-at the instance count it already runs, and the platform's own registry gets Burrow's backup path
+with the standby it already has, and the platform's own registry gets Burrow's backup path
 without losing its standby.
 
 **Cost becomes something an operator chooses per instance**, and can get wrong in both directions —
-paying double for an app that did not need it, or discovering at the worst moment that the database
-holding everything was provisioned at one. Neither is preventable by design; the default handles the
+paying double for an app that did not need a standby, or discovering at the worst moment that the
+database holding everything was provisioned without one. Neither is preventable by design; the default handles the
 common case and the flag handles the rest.
 
-**A second instance is a second thing that can be unhealthy.** `burrow addon list` and the ADR-0074
+**A standby is a second thing that can be unhealthy.** `burrow addon list` and the ADR-0074
 ledger surface an instance's readiness; with two, "the database is fine" becomes a question with a
 more interesting answer — a cluster serving from its primary with a standby that has fallen behind is
 degraded in a way one instance cannot be, and nothing here surfaces replication lag.
@@ -138,24 +162,24 @@ pointing at nothing. Better unbuilt than shipped without that answer.
 
 ## Rejected alternatives
 
-**Leaving it at one and accepting the downgrade for cloud ADR-0030.** Honest, and it means the
-platform's own registry — every account and credential hash — runs at one instance so that a
-configuration field can stay unwritten. The field is small; the thing it protects is not.
+**Leaving every instance standby-less and accepting the downgrade for cloud ADR-0030.** Honest, and
+it means the platform's own registry — every account and credential hash — runs as a single pod so
+that a configuration field can stay unwritten. The field is small; the thing it protects is not.
 
 **An operational limit under [ADR-0068](0068-operational-limits-are-configuration.md) instead of an
-install flag.** Those are *bounds a human sets* — ceilings on what may be asked for. An instance count
-is not a bound, it is a property of one instance, and two apps in one environment can legitimately
-want different values. Modelling it as a limit would make it cluster- or environment-wide and force
+install flag.** Those are *bounds a human sets* — ceilings on what may be asked for. A standby count
+is not a bound, it is a property of one instance, and two environments can legitimately want
+different values. Modelling it as a limit would make it cluster- or environment-wide and force
 the wrong answer on somebody.
 
-**A tier that implies it** — "production instances get two". Attractive for the managed product and
+**A tier that implies it** — "production instances get a standby". Attractive for the managed product and
 premature for the open-source one, where there is no tier concept and an operator's needs are their
 own. The managed product can build tiers on top of this field; the field should not presuppose them.
 
-**A read address present at every instance count**, pointing at `-r` so it resolves to the primary
+**A read address present whether or not a standby exists**, pointing at `-r` so it resolves to the primary
 when there is no standby. It buys one property — an app written once, unchanged when a standby
-appears — and pays for it twice. The variable reads as a thing to use while doing nothing at a single
-instance, and it forces `-r` over `-ro`, so even at two instances a read may land on the primary and
+appears — and pays for it twice. The variable reads as a thing to use while doing nothing on a
+standby-less instance, and it forces `-r` over `-ro`, so even with a standby a read may land on the primary and
 the feature does not fully work.
 
 The property it buys is also worth less than it looks. An app does not use a replica by having its

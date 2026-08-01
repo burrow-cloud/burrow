@@ -1,4 +1,4 @@
-# ADR-0081: A Postgres instance may have a standby, and apps get a read address either way
+# ADR-0081: A Postgres instance may have a standby
 
 ## Status
 
@@ -12,8 +12,9 @@ losing the first without a reschedule.
 - **The instance count is settable at install**, defaulting to **one**.
 - **A second instance is both things at once.** CloudNativePG runs it as a hot standby: it takes over
   when the primary dies *and* it serves reads. There is no separate replica feature to build.
-- **Apps always get a read address**, whether there is one instance or two. Written once, it is
-  correct at either count, so nothing in an app changes when a standby is added.
+- **A read address appears only when a standby exists**, and points at standbys only. Adding one
+  restarts the attached apps, which costs nothing: using a replica means changing the app's code to
+  send reads there, and that is a deploy anyway.
 - **Raising it is an operator's call, not an agent's**, because it provisions hardware.
 
 Extends [ADR-0066](0066-postgres-on-cloudnativepg.md), which put the add-on on CloudNativePG and
@@ -67,23 +68,27 @@ down live, so this is a capability Burrow declines to expose yet rather than one
 It is deliberately left out because the interesting part is not the scale-up — it is what a scale-down
 does to a standby that a read address is currently pointing at.
 
-### 2. Apps get a read address at any instance count
+### 2. A read address exists only when there is a standby to read from
 
-`attach` writes a second connection string beside `DATABASE_URL`, pointing at the cluster's
-**`-r`** service — the one that selects *any* instance.
+`attach` writes a second connection string beside `DATABASE_URL` **only when the instance has a
+standby**, pointing at the cluster's **`-ro`** service — the one that selects standbys and nothing
+else.
 
-**Not `-ro`, and the difference is the whole point.** `-ro` selects standbys only, so at one instance
-it resolves to nothing and an app using it fails. `-r` is the primary at one instance and spreads
-across both at two. So the address is **correct at either count**, an app is written once, and adding
-a standby later changes nothing in the app.
+**`-ro` rather than `-r`, and the conditional is what makes it the right choice.** `-r` selects any
+instance, so a read may land on the primary; `-ro` guarantees it does not, which is what splitting
+reads is for. `-ro` resolves to nothing at a single instance — which would be a trap if the address
+were always present, and is not one when the address only exists where it works.
 
-The cost of that choice, stated: `-r` does not *guarantee* a read misses the primary. An application
-that needs reads strictly off a standby is not served by this, and would need `-ro` and the
-instance-count awareness that comes with it. That is a narrower need than "let me spread reads", and
-this record serves the wider one.
+**Adding a standby restarts the attached apps**, so they pick the new variable up. That is acceptable
+because of *when* it happens: an app does not benefit from a replica by existing near one. Somebody
+has to change the application's code to route read-only queries down the second connection, and that
+is a deploy. A restart at the moment a standby is provisioned costs nothing that the code change was
+not already going to cost.
 
-**Always written, even at one instance.** An address that appears only above some replica count is an
-address nobody writes code against, because the code has to handle its absence anyway.
+**An address that is always there would be worse.** It reads as a thing to use, so a developer wires
+reads to it, and at one instance it is either the primary wearing a second name — a variable that
+does nothing, quietly — or it points at no endpoint at all. Neither teaches the truth, which is that a
+read replica is something you provision and then write code for.
 
 ### 3. Raising it is operator-only
 
@@ -125,9 +130,11 @@ ledger surface an instance's readiness; with two, "the database is fine" becomes
 more interesting answer — a cluster serving from its primary with a standby that has fallen behind is
 degraded in a way one instance cannot be, and nothing here surfaces replication lag.
 
-**Scale-down remains unbuilt and is now the sharper question.** With a read address always present,
-removing the standby it may be serving is not simply the reverse of adding one. Better to leave it
-out than to ship a scale-down whose effect on in-flight reads nobody has thought about.
+**Scale-down remains unbuilt, and §2 makes it sharper rather than easier.** Removing a standby
+removes the only endpoint the read address resolves to, so an app configured to use it breaks — not
+at the moment of the scale-down, but at its next query down that connection. Whatever eventually
+builds it has to decide whether the address is withdrawn (and the apps restarted again) or left
+pointing at nothing. Better unbuilt than shipped without that answer.
 
 ## Rejected alternatives
 
@@ -145,11 +152,12 @@ the wrong answer on somebody.
 premature for the open-source one, where there is no tier concept and an operator's needs are their
 own. The managed product can build tiers on top of this field; the field should not presuppose them.
 
-**Exposing `-ro` as the read address.** Strictly better for spreading reads off the primary, and it
-resolves to nothing at one instance — so every app using it would need to know the instance count,
-which is the coupling §2 exists to remove. A later record can add it for the narrower need without
-disturbing this one.
+**A read address present at every instance count**, pointing at `-r` so it resolves to the primary
+when there is no standby. It buys one property — an app written once, unchanged when a standby
+appears — and pays for it twice. The variable reads as a thing to use while doing nothing at a single
+instance, and it forces `-r` over `-ro`, so even at two instances a read may land on the primary and
+the feature does not fully work.
 
-**Setting the read address only when there is a standby.** Saves a variable and costs the property
-that makes it useful: an app cannot rely on an address that may or may not be there, so it branches,
-and the branch is exactly what a single always-correct address removes.
+The property it buys is also worth less than it looks. An app does not use a replica by having its
+address; somebody has to route read-only queries to it, which is a code change and a deploy. Since a
+restart is already being paid at that moment, avoiding one at provisioning time buys nothing.

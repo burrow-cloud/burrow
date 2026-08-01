@@ -486,6 +486,7 @@ type ClusterCapabilities struct {
 	CertManager   CertManagerCapability   `json:"cert_manager"`
 	MetricsServer MetricsServerCapability `json:"metrics_server"`
 	CloudNativePG CloudNativePGCapability `json:"cloudnative_pg"`
+	PgBackRest    PgBackRestCapability    `json:"pgbackrest"`
 	Provider      ProviderCapability      `json:"provider"`
 	DNS           DNSCapability           `json:"dns"`
 }
@@ -534,6 +535,17 @@ type CloudNativePGCapability struct {
 	Present bool   `json:"present"`
 	Ready   bool   `json:"ready"`
 	Version string `json:"version,omitempty"`
+	Pinned  string `json:"pinned,omitempty"`
+}
+
+// PgBackRestCapability reports the CloudNativePG pgBackRest plugin (ADR-0066 §3), the component a
+// Postgres instance archives its write-ahead log and takes its base backups through. Present is
+// whether its API group is served; Ready is whether its controller is actually running; Pinned is the
+// release Burrow targets. No running version is reported: the plugin's release artifact does not
+// carry one Burrow can read back.
+type PgBackRestCapability struct {
+	Present bool   `json:"present"`
+	Ready   bool   `json:"ready"`
 	Pinned  string `json:"pinned,omitempty"`
 }
 
@@ -684,6 +696,11 @@ type Addon struct {
 	Endpoint     string   `json:"endpoint"`
 	Capabilities []string `json:"capabilities"`
 	Ready        bool     `json:"ready"`
+	// Warning is a non-blocking note about the install, not persisted anywhere: today, that the
+	// instance was created WITHOUT write-ahead-log archiving because the cluster has no pgBackRest
+	// plugin, even though an object-storage destination is registered (ADR-0066 §3). Empty when
+	// there is nothing to say.
+	Warning string `json:"warning,omitempty"`
 }
 
 // InstallAddonOptions is everything `addon install` carries beyond the add-on's type and its
@@ -691,6 +708,9 @@ type Addon struct {
 type InstallAddonOptions struct {
 	// Confirm satisfies the addon.install guardrail's confirmation hold.
 	Confirm bool
+	// ArchiveDestination names the object-storage provider a Postgres instance archives to
+	// (ADR-0066 §3). Only needed when more than one is registered.
+	ArchiveDestination string
 }
 
 // InstallAddon installs the vetted backing service for an add-on type (e.g. "logs") in one
@@ -698,7 +718,7 @@ type InstallAddonOptions struct {
 // default environment `prod`, which keeps the instance an existing install already has.
 func (c *Client) InstallAddon(ctx context.Context, addonType, env string, opts InstallAddonOptions) (Addon, error) {
 	var out Addon
-	body := map[string]any{"type": addonType, "env": env, "confirm": opts.Confirm}
+	body := map[string]any{"type": addonType, "env": env, "confirm": opts.Confirm, "archive_destination": opts.ArchiveDestination}
 	err := c.do(ctx, http.MethodPost, "/v1/addons", body, &out)
 	return out, err
 }
@@ -868,8 +888,11 @@ func (c *Client) DetachAddon(ctx context.Context, addonType, app, env string, co
 // Backup is one recorded per-app database backup (ADR-0032): the control-plane index row for a dump
 // on the backup PVC. It names the app, the on-PVC path, the size, and the status — never a credential.
 type Backup struct {
-	ID  string `json:"id"`
-	App string `json:"app"`
+	ID string `json:"id"`
+	// Kind is which mechanism took it: "logical" (one app's `pg_dump`) or "physical" (a
+	// CloudNativePG base backup of the whole instance). A physical backup has no App.
+	Kind string `json:"kind,omitempty"`
+	App  string `json:"app"`
 	// Environment is the environment whose instance the dump was taken from (ADR-0067 §1). A dump is
 	// only a valid source for the environment it came from.
 	Environment string `json:"environment,omitempty"`
@@ -909,6 +932,21 @@ func (c *Client) BackupAddon(ctx context.Context, addonType, app, env, destinati
 	var out BackupResult
 	body := map[string]any{"addon": addonType, "app": app, "env": env, "destination": destination}
 	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/backup", body, &out)
+	return out, err
+}
+
+// BackupInstance takes a PHYSICAL base backup of one environment's whole Postgres instance
+// (ADR-0066 §2): every database on it, restorable to any point in the write-ahead-log window, taken
+// by CloudNativePG through the pgBackRest plugin and written to the object store. It is not
+// interchangeable with BackupAddon, which dumps ONE app's database and can be restored into that app
+// alone; a physical backup restores the whole instance and cannot be applied per app.
+//
+// destination names the object-storage provider holding the repository; empty resolves it, which
+// works when exactly one is registered. No secret value crosses this API.
+func (c *Client) BackupInstance(ctx context.Context, addonType, env, destination string) (BackupResult, error) {
+	var out BackupResult
+	body := map[string]any{"addon": addonType, "env": env, "destination": destination}
+	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/backup-instance", body, &out)
 	return out, err
 }
 

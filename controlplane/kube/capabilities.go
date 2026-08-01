@@ -132,6 +132,12 @@ func DetectCapabilities(ctx context.Context, client kubernetes.Interface) (contr
 	}
 	caps.CloudNativePG = cnpg
 
+	pgbackrest, err := DetectPgBackRest(ctx, client)
+	if err != nil {
+		return controlplane.ClusterCapabilities{}, err
+	}
+	caps.PgBackRest = pgbackrest
+
 	return caps, nil
 }
 
@@ -338,6 +344,15 @@ func metalLBInstalled(ctx context.Context, client kubernetes.Interface) (bool, e
 		}
 	}
 	return false, nil
+}
+
+// DetectCertManager reports whether cert-manager is installed. It is exported for the same reason
+// DetectCloudNativePG is: `burrow cluster postgres install` has to know, because the pgBackRest
+// plugin's release manifest contains cert-manager Certificate and Issuer objects and applying it
+// without cert-manager fails part-way through, leaving CRDs installed and no controller — and one
+// detector is how the setup command and `burrow cluster` cannot disagree about the answer.
+func DetectCertManager(client kubernetes.Interface) (controlplane.CertManagerCapability, error) {
+	return detectCertManager(client)
 }
 
 // detectCertManager reports whether cert-manager is installed by looking for its API group in

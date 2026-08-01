@@ -61,7 +61,7 @@ func addonName(t controlplane.AddonType, env string) (string, error) {
 // read-only Get before deploying the scraper.
 const vmagentServiceAccount = "burrow-vmagent"
 
-func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string) (controlplane.AddonInfo, error) {
+func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
 	name, err := addonName(spec.Type, env)
 	if err != nil {
 		return controlplane.AddonInfo{}, err
@@ -80,7 +80,7 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 	// the `Cluster` (ADR-0066 §1). Everything downstream of the install — the endpoint, the superuser
 	// Secret, attach, and the ADR-0032 backup Jobs — reaches it the same way it always did.
 	if spec.Type == controlplane.AddonPostgres {
-		return a.deployPostgresCluster(ctx, spec, env, name, labels)
+		return a.deployPostgresCluster(ctx, spec, env, name, labels, archive)
 	}
 
 	// The metrics add-on's vmagent scraper references a pre-provisioned ServiceAccount whose RBAC

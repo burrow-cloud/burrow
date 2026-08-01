@@ -35,6 +35,12 @@ type ClusterCapabilities struct {
 	// prerequisite the Postgres add-on runs on, installed by an operator-CLI setup
 	// step because CRDs need cluster-admin.
 	CloudNativePG CloudNativePGCapability `json:"cloudnative_pg"`
+	// PgBackRest is the CloudNativePG pgBackRest plugin's situation (ADR-0066 §3): the component that
+	// archives a Postgres instance's write-ahead log and takes its base backups. It is reported
+	// separately from CloudNativePG because the two fail apart — an operator with no plugin runs
+	// databases that cannot be backed up off-cluster — and installed by the same operator-CLI step,
+	// for the same reason: its CRDs need cluster-admin.
+	PgBackRest PgBackRestCapability `json:"pgbackrest"`
 	// Provider is the detected cloud provider, inferred from node labels / providerID.
 	Provider ProviderCapability `json:"provider"`
 	// DNS is whether a DNS provider is configured in the registry (ADR-0023) — a control-plane
@@ -113,6 +119,22 @@ type CloudNativePGCapability struct {
 	Present bool   `json:"present"`
 	Ready   bool   `json:"ready"`
 	Version string `json:"version,omitempty"`
+	Pinned  string `json:"pinned,omitempty"`
+}
+
+// PgBackRestCapability reports the CloudNativePG pgBackRest plugin, the component a Postgres
+// instance archives through (ADR-0066 §3). Present is whether its CRDs are served; Ready is whether
+// its controller is actually running, kept apart for CloudNativePGCapability's reason — a CRD
+// outlives the controller that installed it, and a `Stanza` written against a served CRD with
+// nothing behind it is accepted and reconciled by nothing.
+//
+// It reports NO running version, unlike CloudNativePGCapability. The plugin's release artifact does
+// not carry its version anywhere Burrow can read back, so what Burrow targets is stated (Pinned) and
+// what is running is stated as present or not — a version guessed off an image tag would be a claim
+// about the component holding the backups that Burrow cannot stand behind.
+type PgBackRestCapability struct {
+	Present bool   `json:"present"`
+	Ready   bool   `json:"ready"`
 	Pinned  string `json:"pinned,omitempty"`
 }
 

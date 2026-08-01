@@ -266,7 +266,16 @@ type Kubernetes interface {
 	// resource, from which the operator composes the workload, the volume and the services (ADR-0066
 	// §1) — and every other add-on is a Deployment Burrow authors. Which one it is follows from the
 	// spec; there is no mechanism to select.
-	DeployAddon(ctx context.Context, spec AddonSpec, env string) (AddonInfo, error)
+	//
+	// archive, when non-nil, is the pgBackRest repository this instance archives its write-ahead log
+	// and takes its base backups to (ADR-0066 §3). It applies to Postgres and is ignored by every
+	// other add-on. Passing it is what wires the plugin into the instance, so an instance created
+	// with a nil archive has no archiving at all and physical backups of it are refused by name; a
+	// later install with one wires it, because a destination registered after the instance was
+	// created is a normal sequence and not a reason to rebuild the database. Like BackupDestination
+	// it carries a credential PAIR and therefore never crosses an API boundary — the adapter puts it
+	// in a Secret the plugin's sidecar reads by reference and nowhere else.
+	DeployAddon(ctx context.Context, spec AddonSpec, env string, archive *ArchiveDestination) (AddonInfo, error)
 	// AddonReady reports whether the named add-on's backing workload is available. It is a cheap
 	// single-object readiness probe — readiness is a live property, not stored in the registry — and
 	// a missing workload is reported as not ready (false, nil), not an error.
@@ -398,6 +407,35 @@ type Kubernetes interface {
 	// operation where reaching the wrong environment's server overwrites live data with another
 	// environment's.
 	RunRestoreJob(ctx context.Context, app, env, backupID string) error
+
+	// RunPhysicalBackup asks CloudNativePG for a base backup of environment env's whole instance and
+	// waits for the answer (ADR-0066 §2). It CREATES A CUSTOM RESOURCE and reads `.status`: a
+	// `postgresql.cnpg.io/v1 Backup` with method `plugin`, handled by the pgBackRest plugin. Burrow
+	// runs no backup tool, handles no superuser credential on this path, and constructs no Job — the
+	// operator does the work and this seam reports what it said.
+	//
+	// It is refused, before any object is written, on an instance whose `Cluster` carries no
+	// pgBackRest plugin: there is nowhere for a base backup to go, and a `Backup` object created
+	// against it would sit in `pending` until the timeout rather than saying so.
+	//
+	// archive is the destination the caller resolved, and it is CHECKED against the instance's own
+	// `Stanza` rather than trusted: the two can differ, and a backup verified against the wrong bucket
+	// would be recorded as unreadable when it succeeded. The returned ObjectKey is derived from the
+	// stanza, so it addresses where this instance actually writes.
+	//
+	// The returned outcome carries pgBackRest's own backup LABEL on success — the name the repository
+	// knows this backup by, and the only handle a later restore has — and on failure the closed
+	// reason. A `Backup` object that failed and an archive that is not reaching the store are
+	// different reasons, because they are different problems (ADR-0063 §7). A non-nil error always
+	// accompanies a failure reason; the outcome is returned either way so the caller records WHY
+	// without parsing the error.
+	RunPhysicalBackup(ctx context.Context, env, backupID string, archive *ArchiveDestination) (PhysicalBackupOutcome, error)
+	// PhysicalBackupPresent reports whether the `Backup` object for the given backup id still exists
+	// in the add-on namespace — BackupJobPresent's question for a physical backup, and it exists for
+	// the same reason (ADR-0074 §6): a row left `pending` by a burrowd that restarted mid-backup is
+	// otherwise indistinguishable from a backup still running. A missing object is absent (false,
+	// nil), not an error.
+	PhysicalBackupPresent(ctx context.Context, backupID string) (bool, error)
 
 	// RunJob runs spec.Command as a one-shot Job in the app namespace (this seam view's namespace),
 	// built from the app's own current image (spec.Image) and its config env plus per-app Secret via

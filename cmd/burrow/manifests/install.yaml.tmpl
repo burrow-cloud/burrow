@@ -129,9 +129,12 @@ rules:
   # The Postgres add-on IS a CloudNativePG `Cluster` and nothing else: burrowd
   # creates one `postgresql.cnpg.io/v1 Cluster` per environment in this namespace, reads its status
   # to answer "is this instance serving", and deletes it when the add-on is removed (ADR-0066 §1).
-  # GET, CREATE and DELETE, scoped to the add-on namespace. There is deliberately no update or patch
-  # — a Cluster Burrow wrote is not edited in place — and no list: an instance is always addressed by
-  # the name the registry holds, never discovered by sweeping the namespace. DELETE is the whole of
+  # GET, CREATE, PATCH and DELETE, scoped to the add-on namespace, and no list: an instance is always
+  # addressed by the name the registry holds, never discovered by sweeping the namespace. PATCH is for
+  # ONE path, `spec.plugins`: an object-storage destination registered after the instance was created
+  # is an ordinary sequence, and the alternative offered to that user would be destroying and
+  # rebuilding the component holding every app's data (ADR-0066 §3). Nothing else about a Cluster
+  # Burrow wrote is edited in place. DELETE is the whole of
   # what removal needs from this API: keeping the data (ADR-0064 §1) is done by detaching the
   # operator's claims first, which is a patch on persistentvolumeclaims and already granted above.
   # Installing the OPERATOR is not this grant and never will be: CRDs and cluster RBAC need
@@ -139,6 +142,27 @@ rules:
   # kubeconfig.
   - apiGroups: ["postgresql.cnpg.io"]
     resources: ["clusters"]
+    verbs: ["get", "create", "patch", "delete"]
+  # A physical backup is a `Backup` object and a schedule is a `ScheduledBackup`; burrowd creates them
+  # and reads their status, and the operator does the work (ADR-0066 §2). GET and CREATE on backups:
+  # one is created per physical backup and read until it settles, and none is ever deleted by burrowd
+  # — each carries the `Cluster` as its owner, so Kubernetes collects them with the instance.
+  # scheduledbackups adds DELETE, because the schedule is created with the instance and has to go with
+  # it: a ScheduledBackup left behind fires at a Cluster that is not there. There is no list on either
+  # — a backup is addressed by the name its id gives it, never discovered by sweeping the namespace.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["backups"]
+    verbs: ["get", "create"]
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["scheduledbackups"]
+    verbs: ["get", "create", "delete"]
+  # The pgBackRest plugin's `Stanza` describes WHERE one instance's repository is: the bucket, the
+  # path, the retention window, and a reference to the two keys of the credential Secret above
+  # (ADR-0066 §3). burrowd creates one per instance and deletes it with the instance. No update or
+  # patch: a repository an instance was created against is not re-pointed under it, because the
+  # backups already there would become unreachable from the stanza that wrote them.
+  - apiGroups: ["pgbackrest.dalibo.com"]
+    resources: ["stanzas"]
     verbs: ["get", "create", "delete"]
   # Read-only check that an add-on's pre-provisioned ServiceAccount exists before burrowd deploys
   # that add-on's workload (e.g. the metrics scraper's ServiceAccount, which the CLI applies

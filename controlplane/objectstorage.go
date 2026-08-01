@@ -549,3 +549,132 @@ func (e *Engine) ObjectStoreCredentialFor(ctx context.Context, p Provider) (Obje
 	}
 	return ObjectStoreCredential{AccessKeyID: id, SecretAccessKey: secret}, nil
 }
+
+// ArchiveDestination is everything one environment's pgBackRest repository needs: where the bucket
+// is, the credential to reach it with, the repository path inside it, and how long a backup written
+// there must stay restorable (ADR-0063 §3, ADR-0066 §3).
+//
+// Like BackupDestination it carries a SECRET VALUE, so it is an internal in-memory shape only: no
+// JSON tags, never returned over the control-plane API, never audited, never logged, never placed in
+// an error. The engine assembles it from the provider row and the credential store at call time, and
+// the adapter puts the pair into a Secret in the add-on namespace that the plugin's sidecar reads by
+// reference — the pair never appears in the `Stanza`, in a container's environment, or in an argv.
+//
+// It is separate from BackupDestination rather than an extra field on it because the two address
+// different things. A BackupDestination names ONE OBJECT — the dump this backup is writing — and is
+// resolved per backup. An ArchiveDestination names a REPOSITORY that outlives every individual
+// backup in it, and is resolved when an instance is created, because that is when the write-ahead-log
+// path has to exist.
+type ArchiveDestination struct {
+	// Provider is the registry name of the object-storage provider. Not secret.
+	Provider string
+	// Config is the provider's non-secret configuration — endpoint, region, bucket, retention.
+	Config ObjectStoreConfig
+	// Credential is the pair pgBackRest signs its S3 requests with. Secret; see the type comment.
+	Credential ObjectStoreCredential
+	// RepoPath is the repository path within the bucket, from PgBackRestRepoPath — one per
+	// environment, so one environment's repository is not addressable from another's stanza.
+	RepoPath string
+}
+
+// RetentionDays is the window backups in this repository must stay restorable for, in days.
+//
+// IT IS BURROW'S NUMBER, AND IT IS THE ONLY ONE. pgBackRest has its own retention and CloudNativePG
+// has another; ADR-0063 §3 exists because two retention policies that disagree delete a backup
+// somebody was relying on, and the resolution is not to reconcile them afterwards but to have one.
+// The window declared on the provider — the same one the bucket's lifecycle rules are refused for
+// contradicting — is written INTO the repository's retention, so pgBackRest expires against Burrow's
+// window rather than beside it. Zero declares no window, and no retention is configured at all: an
+// unbounded repository is a cost problem, and a repository that quietly expires what a lifecycle
+// rule was reconciled against is a recovery problem.
+func (d ArchiveDestination) RetentionDays() int { return d.Config.RetentionDays }
+
+// resolveArchiveDestination returns the pgBackRest repository environment env's instance archives to,
+// or nil when no object-storage provider is registered (ADR-0063 §7, ADR-0066 §3).
+//
+// A nil destination is NOT an error, for resolveBackupDestination's reason turned up one notch: an
+// install with no object storage gets exactly the instance it got before — a `Cluster` with no
+// plugin, no sidecar and no archiving — and physical backups are refused by name when one is asked
+// for. Refusing to install Postgres at all because nothing durable is configured would take the
+// small self-hoster's database away to protect backups they did not ask for.
+//
+// Ambiguity IS an error, and it is resolveBackupDestination's again: several registered providers is
+// a supported state (ADR-0063 §6) and picking one silently is how the archive quietly goes somewhere
+// nobody is watching. Unlike a single backup, this choice is made once and then persists in the
+// instance's own spec, so guessing wrong is not a bad backup but a bad instance.
+func (e *Engine) resolveArchiveDestination(ctx context.Context, name, env string) (*ArchiveDestination, error) {
+	all, err := e.db.Providers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading providers: %w", err)
+	}
+	var stores []Provider
+	for _, p := range all {
+		if p.Serves(CapabilityObjectStorage) && p.ObjectStore != nil {
+			stores = append(stores, p)
+		}
+	}
+
+	var chosen Provider
+	switch {
+	case strings.TrimSpace(name) != "":
+		found := false
+		for _, p := range stores {
+			if p.Name == name {
+				chosen, found = p, true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("no object-storage provider named %q is registered to archive to — add one with `burrow config provider add --type s3`: %w", name, ErrNotFound)
+		}
+	case len(stores) == 0:
+		return nil, nil
+	case len(stores) == 1:
+		chosen = stores[0]
+	default:
+		names := make([]string, len(stores))
+		for i, p := range stores {
+			names[i] = p.Name
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("multiple object-storage providers are registered (%s) — pass --archive-destination to say which one holds this instance's write-ahead log and base backups; Burrow will not guess, because an instance keeps the repository it was created against: %w",
+			strings.Join(names, ", "), ErrInvalid)
+	}
+
+	cred, err := e.ObjectStoreCredentialFor(ctx, chosen)
+	if err != nil {
+		return nil, err
+	}
+	return &ArchiveDestination{
+		Provider:   chosen.Name,
+		Config:     *chosen.ObjectStore,
+		Credential: cred,
+		RepoPath:   PgBackRestRepoPath(env),
+	}, nil
+}
+
+// PhysicalBackupOutcome is what a CloudNativePG `Backup` object reported (ADR-0066 §2, §4).
+//
+// It is BackupJobOutcome's sibling and deliberately not the same type. A Job reports a byte count it
+// measured; a `Backup` object carries no size field of any kind, which is the gap ADR-0066 §4 makes
+// Burrow's to close, so what comes back here is an identity — pgBackRest's own label for the backup
+// — and the size is joined afterwards from the store rather than read off the status.
+type PhysicalBackupOutcome struct {
+	// Label is pgBackRest's backup label (for example `20260210-101333F`), read from the `Backup`
+	// object's status. It is the name the repository knows this backup by, the handle a restore names,
+	// and the path component under which the manifest that proves it arrived lives. Empty when the
+	// backup did not complete.
+	Label string
+	// ObjectKey is where the backup's manifest is in the bucket, derived by the adapter from the
+	// instance's OWN `Stanza` — its repository path and stanza name — rather than from what Burrow
+	// would have configured. It is the key the read-back verifies at and the address the row records.
+	// Empty when the backup did not complete.
+	ObjectKey string
+	// Reason is a member of the closed BackupFailureReason set, or of ADR-0074 §2's IssueReason set.
+	Reason string
+	// Detail is one Burrow-authored line elaborating it — never a vendor response body, never a
+	// credential. CloudNativePG's own `status.error` is a Burrow-safe field to relay: it is the
+	// operator's rendering of what pgBackRest exited with, and it holds no credential because the
+	// credential never reaches an argv.
+	Detail string
+}

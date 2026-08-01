@@ -64,7 +64,7 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupsCmd(), newAddonBackupHealthCmd(), newAddonRestoreCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupInstanceCmd(), newAddonBackupsCmd(), newAddonBackupHealthCmd(), newAddonRestoreCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
 	return cmd
 }
 
@@ -105,6 +105,54 @@ func newAddonBackupCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&destination, "destination", "",
 		"the object-storage `provider` to write this backup to (only needed when more than one is registered)")
+	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	return cmd
+}
+
+// newAddonBackupInstanceCmd is `burrow addon backup-instance postgres`: a PHYSICAL base backup of one
+// environment's whole Postgres instance (ADR-0066 §2). burrowd creates a `Backup` custom resource,
+// CloudNativePG hands it to the pgBackRest plugin, and burrowd reads the result back out of the
+// object store before recording it as completed. Burrow runs no backup tool on this path.
+//
+// It is a separate command from `addon backup` rather than a flag on it, and the naming is doing
+// work ADR-0066 §4 asks it to do: the two answer different questions and reaching for the wrong one
+// under pressure is the failure the record names. `backup <app>` is "this app's data is wrong";
+// `backup-instance` is "the instance is gone".
+func newAddonBackupInstanceCmd() *cobra.Command {
+	o := &commonOpts{}
+	var destination string
+	cmd := &cobra.Command{
+		Use:   "backup-instance <addon>",
+		Short: "Take a physical base backup of an environment's whole Postgres instance",
+		Long: "backup-instance asks CloudNativePG for a base backup of the WHOLE instance in one\n" +
+			"environment: every app's database on it, written to the pgBackRest repository in your\n" +
+			"object store, with the write-ahead log archived continuously behind it.\n\n" +
+			"It is not the same operation as `burrow addon backup <addon> <app>`. That dumps one app's\n" +
+			"database and restores into that app alone. This one covers the whole instance and can only\n" +
+			"be restored as the whole instance, so it answers \"the instance is gone\" rather than \"this\n" +
+			"app's data is wrong\". Both are worth having and neither replaces the other.\n\n" +
+			"It requires an object-storage provider to be registered and the instance to have been wired\n" +
+			"to it: there is no in-cluster tier for a physical backup.",
+		Args: exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := o.client(ctx)
+			if err != nil {
+				return err
+			}
+			res, err := c.BackupInstance(ctx, args[0], o.env, destination)
+			if err != nil {
+				return err
+			}
+			b := res.Backup
+			human := fmt.Sprintf("backed up the whole %s instance in environment %s (backup %s, status %s)\n%s",
+				args[0], b.Environment, b.ID, b.Status, backupWhere(b))
+			return emit(cmd.OutOrStdout(), o.json, res, human)
+		},
+	}
+	cmd.Flags().StringVar(&destination, "destination", "",
+		"the object-storage `provider` holding this instance's repository (only needed when more than one is registered)")
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	return cmd
@@ -161,7 +209,13 @@ func newAddonBackupsCmd() *cobra.Command {
 				if where == "" {
 					where = "cluster"
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", b.ID, b.App, b.Environment, b.CreatedAt, b.Status, where, b.SizeBytes)
+				// A physical backup belongs to no app, and an empty column would read as a missing
+				// value rather than as the fact that it covers all of them (ADR-0066 §4).
+				app := b.App
+				if app == "" {
+					app = "(whole instance)"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\n", b.ID, app, b.Environment, b.CreatedAt, b.Status, where, b.SizeBytes)
 			}
 			return tw.Flush()
 		},
@@ -560,6 +614,7 @@ func metricLabels(labels map[string]string) string {
 func newAddonInstallCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm bool
+	var archiveDestination string
 	cmd := &cobra.Command{
 		Use:   "install [<name>]",
 		Short: "Install a vetted backing service (logs, metrics, cache, postgres)",
@@ -593,18 +648,29 @@ func newAddonInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := c.InstallAddon(ctx, name, o.env, client.InstallAddonOptions{Confirm: confirm})
+			a, err := c.InstallAddon(ctx, name, o.env, client.InstallAddonOptions{
+				Confirm:            confirm,
+				ArchiveDestination: archiveDestination,
+			})
 			if err != nil {
 				return err
 			}
 			human := fmt.Sprintf("installed the %s add-on %q (%s)\nin-cluster endpoint: %s\nprovides: %s",
 				a.Type, a.Name, a.Image, a.Endpoint, strings.Join(a.Capabilities, ", "))
+			// The warning goes on the human output as its own line rather than being folded into the
+			// summary: it says what this instance does NOT do, and an install that quietly took no
+			// backups is exactly the thing nobody should have to read carefully to notice.
+			if a.Warning != "" {
+				human += "\nnote: " + a.Warning
+			}
 			return emit(out, o.json, a, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	cmd.Flags().StringVar(&archiveDestination, "archive-destination", "",
+		"the object-storage `provider` a postgres instance archives to (only needed when more than one is registered)")
 	return cmd
 }
 

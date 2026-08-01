@@ -134,6 +134,9 @@ func New(cfg Config) (http.Handler, error) {
 	// listing move no secret value (an in-cluster Job does the dump). restore is held by a confirm
 	// guardrail (it overwrites the live database).
 	v1.HandleFunc("POST /v1/addons/backup", s.backupAddon)
+	// A PHYSICAL backup is a separate route from a logical one rather than a mode of it, because it
+	// acts on a different thing: the whole instance rather than one app's database (ADR-0066 §4).
+	v1.HandleFunc("POST /v1/addons/backup-instance", s.backupInstance)
 	v1.HandleFunc("GET /v1/addons/backups", s.listBackupsHandler)
 	// backup-health is ADR-0063 §7's status surface: the age of the last successful backup, the age
 	// of the last one that left the cluster, the last failure, and whether each registered
@@ -833,7 +836,8 @@ func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), req.Env, controlplane.InstallAddonOptions{
-		Confirm: req.Confirm,
+		Confirm:            req.Confirm,
+		ArchiveDestination: req.ArchiveDestination,
 	})
 	if err != nil {
 		writeEngineError(w, err)
@@ -957,6 +961,24 @@ func (s *server) backupAddon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// backupInstance takes a physical base backup of one environment's whole Postgres instance
+// (ADR-0066 §2): burrowd creates a `postgresql.cnpg.io/v1 Backup`, CloudNativePG hands it to the
+// pgBackRest plugin, and burrowd reads the result back out of the object store before recording the
+// backup as completed. The response is the recorded backup row — no secret value; the repository
+// credential is read only to sign the read-back and is never logged or returned.
+func (s *server) backupInstance(w http.ResponseWriter, r *http.Request) {
+	var req addonBackupRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.engine.BackupInstance(r.Context(), controlplane.AddonType(req.Addon), req.Env, req.Destination)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // listBackupsHandler lists recorded backups from the control-plane database (ADR-0032). An app query
 // param restricts to one app and an env query param to one environment; absent, they list every
 // app's and every environment's (ADR-0067 §1). Read-only; no secret value.
@@ -1031,6 +1053,11 @@ type addonRestoreRequest struct {
 	// source for this one's live database.
 	Env     string `json:"env,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
+	// ArchiveDestination names the object-storage provider a Postgres instance archives its
+	// write-ahead log and base backups to (ADR-0066 §3). Only needed when more than one is
+	// registered; Burrow refuses to guess, because an instance keeps the repository it was created
+	// against. A provider NAME, never a credential.
+	ArchiveDestination string `json:"archive_destination,omitempty"`
 }
 
 // backupsResponse wraps the backup list so the shape can grow without breaking object decoders.
@@ -1058,6 +1085,11 @@ type addonDetachRequest struct {
 	// Env is the environment whose instance the app's database is dropped from (ADR-0067 §1).
 	Env     string `json:"env,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
+	// ArchiveDestination names the object-storage provider a Postgres instance archives its
+	// write-ahead log and base backups to (ADR-0066 §3). Only needed when more than one is
+	// registered; Burrow refuses to guess, because an instance keeps the repository it was created
+	// against. A provider NAME, never a credential.
+	ArchiveDestination string `json:"archive_destination,omitempty"`
 }
 
 // addonInstallRequest is the body of an addon install (the type names the catalog entry, the
@@ -1069,6 +1101,11 @@ type addonInstallRequest struct {
 	// the default environment, whose instance keeps the names an existing install already has.
 	Env     string `json:"env,omitempty"`
 	Confirm bool   `json:"confirm,omitempty"`
+	// ArchiveDestination names the object-storage provider a Postgres instance archives its
+	// write-ahead log and base backups to (ADR-0066 §3). Only needed when more than one is
+	// registered; Burrow refuses to guess, because an instance keeps the repository it was created
+	// against. A provider NAME, never a credential.
+	ArchiveDestination string `json:"archive_destination,omitempty"`
 }
 
 // addonConnectRequest is the body of an addon connect (the backend names the catalog entry; the

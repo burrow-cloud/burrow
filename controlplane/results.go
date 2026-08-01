@@ -5,6 +5,7 @@ package controlplane
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -419,12 +420,19 @@ const (
 // access key id is known to be echoed back. The body goes to the Job's pod log, which is the
 // operator's to read and is no wider an exposure than the credential the pod already mounts.
 const (
-	// BackupReasonDumpFailed is pg_dump itself failing: the database refused the connection, ran out
-	// of disk on the PVC, or the dump command errored. Nothing was offered to the store.
+	// BackupReasonDumpFailed is the backup command itself failing, with nothing offered to the store.
+	// For a logical dump that is pg_dump: the database refused the connection, the PVC ran out of
+	// disk, the command errored. For a physical one it is the `Backup` object reaching `failed` —
+	// pgBackRest would not take the base backup, or CloudNativePG rejected the request. A `Backup`
+	// OBJECT failing and a backup failing to LEAVE THE CLUSTER are different facts (ADR-0063 §7), and
+	// this is the first of them; the store reasons below are the second.
 	BackupReasonDumpFailed = "DumpFailed"
 	// BackupReasonStoreUnreachable is the destination not answering — DNS, TLS, connection refused,
 	// or a 5xx — after every retry. This is the one ADR-0063 §7 says to retry, because a transient
-	// network failure is the common case; reaching this reason means the retries were used up.
+	// network failure is the common case; reaching this reason means the retries were used up. On the
+	// physical path it is also what `walArchivingFailing` means: the instance is producing
+	// write-ahead log the repository is not accepting, so the archive the base backup depends on is
+	// not arriving.
 	BackupReasonStoreUnreachable = "StoreUnreachable"
 	// BackupReasonStoreRejected is the destination answering, and saying no: a credential that is
 	// wrong or has been revoked, a bucket that is gone, a write the policy forbids. It is NOT
@@ -473,7 +481,13 @@ func IsBackupFailureReason(reason string) bool {
 type Backup struct {
 	// ID is the backup identifier, minted from the IDs seam — also the dump filename stem.
 	ID string `json:"id"`
-	// App is the application whose database was dumped.
+	// Kind says which mechanism produced this row: a per-app logical dump, or a physical base backup
+	// of the whole instance (ADR-0066 §4). Empty on a row written before the two coexisted, which is
+	// logical by construction — nothing else existed to write it.
+	Kind BackupKind `json:"kind,omitempty"`
+	// App is the application whose database was dumped. EMPTY on a physical row: that backup covers
+	// every database on the instance, and naming one of them would make a listing claim a per-app
+	// backup exists where none does.
 	App string `json:"app"`
 	// Environment is the environment whose instance the dump was taken from ("prod" for the default
 	// one). Each environment has its own Postgres instance (ADR-0067 §1), so a dump
@@ -577,3 +591,78 @@ func BackupObjectKey(app, env, id string) string {
 
 // backupObjectPrefix is where every backup object Burrow writes lives in the bucket.
 const backupObjectPrefix = "burrow/backups"
+
+// BackupKind says which of the two backup mechanisms produced a row (ADR-0066 §4). They are not
+// interchangeable and the row has to say which it is, because the two answer different questions and
+// a reader under pressure reaches for whichever one the listing makes look applicable.
+//
+//	logical  — one app's database, as it was at the moment of the dump. `pg_dump -Fc` through a Job
+//	           Burrow runs, restorable into one app without touching any other (ADR-0032).
+//	physical — the whole instance, and every database on it, as a base backup CloudNativePG asked
+//	           pgBackRest for. It is the only kind with a write-ahead-log window behind it, and it
+//	           is the only kind that cannot be restored per app.
+type BackupKind string
+
+const (
+	// BackupKindLogical is a per-app `pg_dump`. It is the default a row carries when nothing says
+	// otherwise, which is what every backup recorded before physical backups existed is.
+	BackupKindLogical BackupKind = "logical"
+	// BackupKindPhysical is a CloudNativePG `Backup` object over the whole instance. Its App is
+	// empty — an instance-wide backup belongs to no single app, and attributing it to one would make
+	// a listing claim a coverage that app does not have.
+	BackupKindPhysical BackupKind = "physical"
+)
+
+// Valid reports whether k is a known BackupKind.
+func (k BackupKind) Valid() bool {
+	switch k {
+	case BackupKindLogical, BackupKindPhysical:
+		return true
+	default:
+		return false
+	}
+}
+
+// PgBackRestRepoPath is the pgBackRest repository path holding environment env's physical backups
+// and archived write-ahead log (ADR-0066 §3). It is derived here, beside BackupObjectKey, so the
+// engine and the `Stanza` the adapter writes cannot disagree about where an environment's repository
+// is.
+//
+// THE ENVIRONMENT IS IN THE PATH, and that is the isolation. Each environment has its own instance
+// (ADR-0067 §1) and therefore its own pgBackRest stanza; two stanzas sharing a repository path would
+// have each one's `create-stanza` looking at the other's backups, and a restore could reach an
+// instance it was never taken from. One path per environment makes that unreachable rather than
+// merely unlikely.
+//
+// It is returned with the leading slash pgBackRest's `repo-path` expects. The object KEYS underneath
+// it carry no leading slash, which is what PgBackRestManifestKey accounts for.
+func PgBackRestRepoPath(env string) string {
+	if env == "" {
+		env = DefaultEnvironment
+	}
+	return "/" + pgBackRestObjectPrefix + "/" + env
+}
+
+// PgBackRestManifestKey is the object key of the backup manifest pgBackRest writes for the backup
+// labelled label, in stanza, in the repository at repoPath.
+//
+// It exists so a completed physical backup can be READ BACK before its row is allowed to say
+// completed (ADR-0063 §7). CloudNativePG reporting a `Backup` as completed is the operator's word
+// that pgBackRest returned zero; that the object store will serve the result back, at the key the
+// repository says it is at, is a separate fact, and it is the one a restore depends on. The manifest
+// is the object pgBackRest itself reads first when it restores that backup, so its absence is not a
+// cosmetic discrepancy.
+//
+// It takes the repository PATH rather than the environment, and that is load-bearing: the path is
+// read off the instance's OWN `Stanza`, so the key is where that instance actually writes rather than
+// where Burrow would have configured it to. An instance whose stanza says something else is a
+// mismatch to refuse, not a backup to go looking for in the wrong place.
+func PgBackRestManifestKey(repoPath, stanza, label string) string {
+	return strings.TrimPrefix(repoPath, "/") + "/backup/" + stanza + "/" + label + "/backup.manifest"
+}
+
+// pgBackRestObjectPrefix is where every pgBackRest repository Burrow configures lives in the bucket.
+// It is a sibling of backupObjectPrefix rather than the same prefix: the logical dumps are Burrow's
+// own object layout and the repository underneath this one is pgBackRest's, and letting a lifecycle
+// rule or an operator scope to one without the other is worth the extra path segment.
+const pgBackRestObjectPrefix = "burrow/pgbackrest"

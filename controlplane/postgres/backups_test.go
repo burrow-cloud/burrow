@@ -268,3 +268,67 @@ func TestStoreBackupVolumeRoundTrip(t *testing.T) {
 		t.Errorf("volume of a row recorded without one = %q, want %q", got.Volume, cp.PostgresBackupVolume)
 	}
 }
+
+// TestStoreBackupKindRoundTrip exercises the column migration 00028 added (ADR-0066 §4): a physical
+// row belongs to no app, is on no claim, and comes back saying which mechanism took it.
+//
+// The two assertions that matter are the DEFAULT and the VOLUME. A row written with no kind is
+// logical, which is exact rather than a guess — nothing else could have written it. And a physical
+// row must NOT be backfilled onto the pre-per-environment backup claim the way a logical one is: its
+// bytes are in the object store, and a row naming a volume they are not on is how a restore goes
+// looking in the wrong place.
+func TestStoreBackupKindRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+
+	physical := cp.Backup{
+		ID:          t.Name() + "-p1",
+		Kind:        cp.BackupKindPhysical,
+		Environment: cp.DefaultEnvironment,
+		CreatedAt:   time.Date(2026, 8, 1, 2, 0, 0, 0, time.UTC),
+		Status:      cp.BackupPending,
+		Destination: cp.BackupDestinationObjectStore,
+		Provider:    "backups",
+		ObjectKey:   cp.PgBackRestManifestKey(cp.PgBackRestRepoPath(cp.DefaultEnvironment), "burrow-postgres", "20260801-020000F"),
+	}
+	unstated := cp.Backup{
+		ID:          t.Name() + "-l1",
+		App:         t.Name() + "-app",
+		Environment: cp.DefaultEnvironment,
+		CreatedAt:   time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC),
+		Status:      cp.BackupPending,
+	}
+	for _, b := range []cp.Backup{physical, unstated} {
+		if err := s.RecordBackup(ctx, b); err != nil {
+			t.Fatalf("RecordBackup %s: %v", b.ID, err)
+		}
+	}
+
+	got, err := s.GetBackup(ctx, physical.ID)
+	if err != nil {
+		t.Fatalf("GetBackup: %v", err)
+	}
+	if got.Kind != cp.BackupKindPhysical {
+		t.Errorf("kind = %q, want %q", got.Kind, cp.BackupKindPhysical)
+	}
+	if got.App != "" {
+		t.Errorf("app = %q, want empty on a physical row", got.App)
+	}
+	if got.Volume != "" {
+		t.Errorf("volume = %q, want empty: a physical backup is on no claim", got.Volume)
+	}
+	if got.ObjectKey != physical.ObjectKey {
+		t.Errorf("object key = %q, want %q", got.ObjectKey, physical.ObjectKey)
+	}
+
+	stated, err := s.GetBackup(ctx, unstated.ID)
+	if err != nil {
+		t.Fatalf("GetBackup: %v", err)
+	}
+	if stated.Kind != cp.BackupKindLogical {
+		t.Errorf("kind = %q, want %q: a row written with no kind is a logical dump", stated.Kind, cp.BackupKindLogical)
+	}
+	if stated.Volume != cp.PostgresBackupVolume {
+		t.Errorf("volume = %q, want the pre-per-environment claim %q", stated.Volume, cp.PostgresBackupVolume)
+	}
+}

@@ -168,6 +168,29 @@
           }
         }
       },
+      "plugins": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "isWALArchiver": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
       "postgresql": {
         "type": "object",
         "properties": {

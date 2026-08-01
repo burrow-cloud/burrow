@@ -28,7 +28,7 @@ func TestMetricsCollectorDiscoversAppAndAddonNamespaces(t *testing.T) {
 	})
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	cm, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
@@ -50,7 +50,7 @@ func TestMetricsCollectorDedupesWhenNamespacesEqual(t *testing.T) {
 	})
 	a := New(client, addonNS).WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	cm, _ := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})

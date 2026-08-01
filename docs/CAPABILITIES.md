@@ -766,6 +766,13 @@ The limits are as important as the capability:
   the safety backup is taken first and why skipping it is an explicit flag. The recovery path that
   has actually been watched work is still the per-app `pg_dump` / `pg_restore` pair, which recovers
   one app's database to the moment of its dump.
+- **The cutover finds an app through its workload or its release history, not through its Secret.**
+  A physical restore reissues `DATABASE_URL` to every app it can enumerate in the environment: the
+  workloads running there, plus the apps the registry says Burrow has deployed there. An app that
+  was attached and **never deployed** appears in neither, so it is absent from the confirmation's
+  list, is not cut over, and keeps a connection string the recovered instance no longer honours
+  until someone runs `burrow addon attach postgres <app>` again. Closing that needs a way to list
+  the Secrets in a namespace, which does not exist.
 - **Backup age is REPORTED, and nothing alerts on it.** `burrow addon backup-health postgres`
   answers [ADR-0063](adr/0063-object-storage-provider.md) §7's question on demand — destination
   reachability, the age of the last successful backup, the age of the last one that left the

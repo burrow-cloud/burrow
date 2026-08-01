@@ -6,7 +6,7 @@
 
 ## TL;DR
 
-A Burrow Postgres **instance** is one Postgres server — one per environment
+A **Postgres instance** is one Postgres server — one per environment
 ([ADR-0067](0067-one-database-instance-per-environment.md)), holding a database per attached app.
 Today it always runs as a **single pod**, so losing that pod takes the instance down until it is
 rescheduled.
@@ -31,14 +31,16 @@ onto the add-on. Supersedes nothing.
 
 **Two things are called an instance, and only one of them is this record's subject.**
 
-- A **Burrow instance** is a Postgres server: one CloudNativePG `Cluster`, one per environment
+- A **Postgres instance** — the add-on sense, the word `AddonInstanceName` already uses — is a
+  Postgres server: one CloudNativePG `Cluster`, one per environment
   ([ADR-0067](0067-one-database-instance-per-environment.md)), holding a database and a login role
   per attached app ([ADR-0031](0031-postgres-addon.md)).
 - CloudNativePG's own `spec.instances` counts the **pods inside** one such cluster — a primary and
   its standbys.
 
 This record settles the second and says nothing about the first. To avoid the collision it uses
-**standby** for the replica and reserves **instance** for the server, matching ADR-0067.
+**standby** for the replica and reserves **instance** for the server, matching ADR-0067 and the
+codebase's own `AddonInstanceName`.
 
 `controlplane/kube/cnpg_cluster.go` writes `"instances": int64(1)`, and nothing exposes it. So every
 Postgres server Burrow manages runs as a single pod, whatever it holds.
@@ -87,10 +89,13 @@ The number is validated at the point of naming, not passed through — CloudNati
 that make no sense for the shape Burrow provisions, and a database that comes up wrong is worse than
 a refusal.
 
-**Changing the count on an existing instance is not built here.** CloudNativePG scales a `Cluster` up and
-down live, so this is a capability Burrow declines to expose yet rather than one that does not exist.
-It is deliberately left out because the interesting part is not the scale-up — it is what a scale-down
-does to a standby that a read address is currently pointing at.
+**Adding a standby to an instance that already exists is [ADR-0082](0082-an-addon-instance-can-be-rescaled.md)'s
+subject, not this one's.** It is the normal case rather than an afterthought — nobody knows they want
+a standby until the day they do — and it generalizes past Postgres, so it belongs in a record that
+covers add-on shape rather than in one about what a Postgres standby is.
+
+What this record fixes is the shape a *new* instance is created with, and the meaning of the standby
+once it exists. ADR-0082 decides how an existing one changes.
 
 ### 2. A read address exists only when there is a standby to read from
 
@@ -154,11 +159,11 @@ ledger surface an instance's readiness; with two, "the database is fine" becomes
 more interesting answer — a cluster serving from its primary with a standby that has fallen behind is
 degraded in a way one instance cannot be, and nothing here surfaces replication lag.
 
-**Scale-down remains unbuilt, and §2 makes it sharper rather than easier.** Removing a standby
+**§2 hands [ADR-0082](0082-an-addon-instance-can-be-rescaled.md) its hardest case.** Removing a standby
 removes the only endpoint the read address resolves to, so an app configured to use it breaks — not
-at the moment of the scale-down, but at its next query down that connection. Whatever eventually
-builds it has to decide whether the address is withdrawn (and the apps restarted again) or left
-pointing at nothing. Better unbuilt than shipped without that answer.
+at the moment of the scale-down, but at its next query down that connection. Whether the address is
+withdrawn (and the apps restarted again) or left pointing at nothing is a real decision, and it is
+that record's to make.
 
 ## Rejected alternatives
 

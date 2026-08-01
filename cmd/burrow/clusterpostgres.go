@@ -33,6 +33,13 @@ var clusterPostgresClientset = func(kubeconfig string) (kubernetes.Interface, er
 // whether to install from the same read `burrow cluster` reports.
 var detectCloudNativePGFn = kube.DetectCloudNativePG
 
+// detectPgBackRestFn and detectCertManagerFn are the other two reads this command makes: the backup
+// plugin it installs beside the operator, and the prerequisite that plugin's manifest needs.
+var (
+	detectPgBackRestFn  = kube.DetectPgBackRest
+	detectCertManagerFn = kube.DetectCertManager
+)
+
 // clusterPostgresOptions are the inputs to `burrow cluster postgres install`.
 type clusterPostgresOptions struct {
 	kubeconfig string
@@ -53,11 +60,11 @@ type clusterPostgresOptions struct {
 func newClusterPostgresCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "postgres",
-		Short: "Set up the cluster's PostgreSQL operator (install)",
-		Long: "postgres provisions the CloudNativePG operator, the cluster-wide prerequisite the\n" +
-			"Postgres add-on runs on (ADR-0066). It is a one-time setup an operator runs\n" +
-			"with their kubeconfig, not an agent operation: it installs cluster-scoped CustomResource\n" +
-			"Definitions, which needs cluster-admin.\n\n" +
+		Short: "Set up the cluster's PostgreSQL operator and backup plugin (install)",
+		Long: "postgres provisions the CloudNativePG operator and its pgBackRest backup plugin, the\n" +
+			"cluster-wide prerequisites the Postgres add-on runs on (ADR-0066). It is a one-time setup an\n" +
+			"operator runs with their kubeconfig, not an agent operation: it installs cluster-scoped\n" +
+			"CustomResource Definitions, which needs cluster-admin.\n\n" +
 			"This is not `burrow addon install postgres`. That provisions a database instance for one\n" +
 			"environment and is what an app attaches to; this installs the operator underneath it, once\n" +
 			"per cluster.",
@@ -66,7 +73,7 @@ func newClusterPostgresCmd() *cobra.Command {
 	o := clusterPostgresOptions{}
 	install := &cobra.Command{
 		Use:   "install",
-		Short: "Install the CloudNativePG operator (skipped when it is already running)",
+		Short: "Install the CloudNativePG operator and pgBackRest plugin (each skipped when already running)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClusterPostgresInstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -135,7 +142,59 @@ func runClusterPostgresInstall(ctx context.Context, o clusterPostgresOptions, st
 	}
 	r.done("CloudNativePG", status)
 
+	if err := installPgBackRest(ctx, o, r, cs, stdout, stderr); err != nil {
+		return err
+	}
 	writeClusterPostgresDone(stdout)
+	return nil
+}
+
+// installPgBackRest applies the pinned pgBackRest plugin release when the cluster does not already
+// run it (ADR-0066 §3). It is the same detect-and-skip shape as the operator above, keyed on a
+// RUNNING controller for the same reason: the CRDs outlive the controller, and a `Stanza` written
+// against a served CRD with nothing behind it is accepted and reconciled by nothing.
+//
+// IT IS SKIPPED, NOT FAILED, WITHOUT CERT-MANAGER. The plugin's manifest contains cert-manager
+// Certificate and Issuer objects — the operator and the plugin authenticate to each other over TLS —
+// so applying it on a cluster without cert-manager fails part-way through and leaves exactly the
+// half-installed state this command exists to avoid. An operator who has not set up ingress yet has
+// no cert-manager and did not ask for one here; they get the operator, a plain instance, and a line
+// saying what is missing and which command installs it.
+func installPgBackRest(ctx context.Context, o clusterPostgresOptions, r installReporter, cs kubernetes.Interface, stdout, stderr io.Writer) error {
+	plugin, err := detectPgBackRestFn(ctx, cs)
+	if err != nil {
+		return err
+	}
+	if plugin.Ready {
+		r.done("pgBackRest plugin", "already running, leaving it as is")
+		return nil
+	}
+	certs, err := detectCertManagerFn(cs)
+	if err != nil {
+		return err
+	}
+	if !certs.Present {
+		r.skipped("pgBackRest plugin", "cert-manager is not installed and the plugin's manifest needs it; "+
+			"run `burrow cluster ingress install` first, then re-run this")
+		return nil
+	}
+
+	r.working("pgBackRest plugin", "installing")
+	manifest := kube.PgBackRestManifestURL(kube.PgBackRestVersion)
+	detail, err := applyURLDetail(ctx, o.kubeconfig, manifest, o.verbose, stdout, stderr)
+	if err != nil {
+		return err
+	}
+	status := "installed " + kube.PgBackRestVersion + parenthesize(detail)
+	if o.wait {
+		r.working("pgBackRest plugin", "waiting for the controller")
+		if err := waitForDeployment(ctx, cs, kube.PgBackRestNamespace, kube.PgBackRestControllerDeployment,
+			"pgBackRest plugin", io.Discard, cnpgWaitTimeout); err != nil {
+			return err
+		}
+		status += ", controller ready"
+	}
+	r.done("pgBackRest plugin", status)
 	return nil
 }
 
@@ -166,6 +225,8 @@ func writeClusterPostgresPlan(w io.Writer, manifest string, c controlplane.Cloud
 	default:
 		fmt.Fprintf(w, "  - install CloudNativePG %s: apply %s\n", kube.CNPGVersion, manifest)
 	}
+	fmt.Fprintf(w, "  - install the pgBackRest plugin %s if no controller is running: apply %s\n",
+		kube.PgBackRestVersion, kube.PgBackRestManifestURL(kube.PgBackRestVersion))
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, clusterAdminNotice(w))
 }
@@ -175,6 +236,8 @@ func writeClusterPostgresPlan(w io.Writer, manifest string, c controlplane.Cloud
 func writeClusterPostgresDryRunPlan(w io.Writer, manifest string) {
 	fmt.Fprintln(w, "Plan (dry run). Against your current cluster, postgres install would:")
 	fmt.Fprintf(w, "  - install CloudNativePG %s if no controller is running: apply %s\n", kube.CNPGVersion, manifest)
+	fmt.Fprintf(w, "  - install the pgBackRest plugin %s if no controller is running: apply %s\n",
+		kube.PgBackRestVersion, kube.PgBackRestManifestURL(kube.PgBackRestVersion))
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, clusterAdminNotice(w))
 }
@@ -192,8 +255,10 @@ func clusterAdminNotice(w io.Writer) string {
 func writeClusterPostgresDone(w io.Writer) {
 	fmt.Fprintln(w, "\nDone. The CloudNativePG operator is on the cluster.")
 	fmt.Fprintln(w, "Check it anytime: burrow cluster")
-	fmt.Fprintln(w, "Next: burrow addon install postgres [--env <environment>]")
-	fmt.Fprintln(w, note(w)+"backups are still Burrow's own pg_dump / pg_restore Jobs. WAL archiving, scheduled")
-	fmt.Fprintln(w, "  backups, retention and point-in-time recovery are what the operator was chosen for and")
-	fmt.Fprintln(w, "  are not built yet.")
+	fmt.Fprintln(w, "Next: burrow config provider add --type s3 ..., then burrow addon install postgres [--env <environment>]")
+	fmt.Fprintln(w, note(w)+"an instance archives its write-ahead log and takes its base backups only when an")
+	fmt.Fprintln(w, "  object-storage provider is registered BEFORE it is installed. Register one first, or")
+	fmt.Fprintln(w, "  re-run addon install afterwards to wire an instance you already have.")
+	fmt.Fprintln(w, note(w)+"restoring a whole instance from those backups is not built yet. Per-app dumps and")
+	fmt.Fprintln(w, "  their restore (burrow addon backup / restore) work as they always have.")
 }

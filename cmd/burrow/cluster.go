@@ -27,6 +27,7 @@ func toClientCaps(c controlplane.ClusterCapabilities) client.ClusterCapabilities
 		CertManager:   client.CertManagerCapability{Present: c.CertManager.Present},
 		MetricsServer: client.MetricsServerCapability{Present: c.MetricsServer.Present},
 		CloudNativePG: client.CloudNativePGCapability{Present: c.CloudNativePG.Present, Ready: c.CloudNativePG.Ready, Version: c.CloudNativePG.Version, Pinned: c.CloudNativePG.Pinned},
+		PgBackRest:    client.PgBackRestCapability{Present: c.PgBackRest.Present, Ready: c.PgBackRest.Ready, Pinned: c.PgBackRest.Pinned},
 		Provider:      client.ProviderCapability{Cloud: c.Provider.Cloud, Name: c.Provider.Name},
 		DNS:           client.DNSCapability{Configured: c.DNS.Configured, Providers: c.DNS.Providers},
 	}
@@ -197,6 +198,7 @@ func writeClusterReport(w io.Writer, caps client.ClusterCapabilities) {
 	fmt.Fprintf(tw, "cert-manager\t%s\n", certManagerLine(caps.CertManager))
 	fmt.Fprintf(tw, "metrics-server\t%s\n", metricsServerLine(caps.MetricsServer))
 	fmt.Fprintf(tw, "CloudNativePG\t%s\n", cloudNativePGLine(caps.CloudNativePG))
+	fmt.Fprintf(tw, "pgBackRest plugin\t%s\n", pgBackRestLine(caps.PgBackRest))
 	fmt.Fprintf(tw, "Provider\t%s\n", providerLine(caps.Provider))
 	fmt.Fprintf(tw, "DNS\t%s\n", dnsLine(caps.DNS))
 	_ = tw.Flush()
@@ -273,6 +275,23 @@ func cloudNativePGLine(c client.CloudNativePGCapability) string {
 		return "running " + c.Version + " (Burrow targets " + c.Pinned + ")"
 	default:
 		return "running " + c.Version
+	}
+}
+
+// pgBackRestLine reports the pgBackRest plugin, in the same three states as the operator above and
+// for the same reasons. The absent case says what is LOST rather than only what is missing: a
+// Postgres instance still installs and still works without it, and what it does not do is archive
+// anywhere — which is the fact worth reading off a capability listing.
+func pgBackRestLine(c client.PgBackRestCapability) string {
+	switch {
+	case !c.Present:
+		return "not installed (Postgres instances take no off-cluster backups; burrow cluster postgres install)"
+	case !c.Ready:
+		return "CRDs installed but no controller running (burrow cluster postgres install)"
+	case c.Pinned != "":
+		return "running (Burrow targets " + c.Pinned + ")"
+	default:
+		return "running"
 	}
 }
 

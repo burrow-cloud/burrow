@@ -174,7 +174,20 @@ func composedClusterSpecAsJSON() (any, error) {
 		return nil, err
 	}
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
-	return asJSON(a.postgresClusterSpec(spec, controlplane.DefaultEnvironment, name, labels))
+	// The archive destination is FILLED, so the `plugins` entry that wires pgBackRest is exercised
+	// here too (ADR-0066 §3). It is the field with the most to lose from silent pruning: a pruned
+	// `plugins` costs the instance its write-ahead-log archiving, the `Cluster` comes up healthy, and
+	// the first symptom is a base backup that has nowhere to go.
+	archive := &controlplane.ArchiveDestination{
+		Provider: "backups",
+		Config: controlplane.ObjectStoreConfig{
+			Endpoint: "https://s3.example.invalid",
+			Region:   "us-east-1",
+			Bucket:   "burrow-backups-abc123",
+		},
+		RepoPath: controlplane.PgBackRestRepoPath(controlplane.DefaultEnvironment),
+	}
+	return asJSON(a.postgresClusterSpec(spec, controlplane.DefaultEnvironment, name, labels, archive))
 }
 
 // pruneSchemaToValue returns the subtree of node covering exactly the paths value occupies, and an

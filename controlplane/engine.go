@@ -733,7 +733,26 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, opts
 			fmt.Sprintf("installing the %s add-on (%s) in environment %s", t, spec.Image, targetEnv))); err != nil {
 		return AddonInfo{}, err
 	}
-	info, err := e.k8s.DeployAddon(ctx, spec, targetEnv)
+	// Resolved AFTER the guardrail and before the first object is written. It is the pgBackRest
+	// repository the instance will archive to (ADR-0066 §3), and a nil one is the ordinary state of a
+	// cluster with no object storage: the instance is then exactly the `Cluster` it was before this
+	// existed, with no plugin and no archiving, and physical backups of it are refused by name.
+	//
+	// Only Postgres has one. Asking for a destination on behalf of the metrics add-on would read the
+	// provider registry, and possibly refuse for ambiguity, on an operation that has no repository.
+	var archive *ArchiveDestination
+	if t == AddonPostgres {
+		archive, err = e.resolveArchiveDestination(ctx, opts.ArchiveDestination, targetEnv)
+		if err != nil {
+			e.recordExecution(ctx, auditOpAddonInstall, string(t), args, err)
+			return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
+		}
+		if archive != nil {
+			// The provider NAME on the audit row, never a credential or an endpoint secret.
+			args["archive"] = archive.Provider
+		}
+	}
+	info, err := e.k8s.DeployAddon(ctx, spec, targetEnv, archive)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonInstall, string(t), args, err)
 		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
@@ -1233,7 +1252,10 @@ func (e *Engine) backupApp(ctx context.Context, app, targetEnv, destination stri
 		return Backup{}, BackupJobOutcome{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
 	}
 	backup := Backup{
-		ID:          backupID,
+		ID: backupID,
+		// Stated rather than left to the store's default, so the row says which of the two mechanisms
+		// took it even on an install that also takes physical ones (ADR-0066 §4).
+		Kind:        BackupKindLogical,
 		App:         app,
 		Environment: targetEnv,
 		CreatedAt:   e.clock.Now(),
@@ -1364,6 +1386,16 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, e
 	backup, err := e.db.GetBackup(ctx, backupID)
 	if err != nil {
 		return fmt.Errorf("restore addon %s for %s: backup %q: %w", t, app, backupID, err)
+	}
+	// A PHYSICAL backup is refused here rather than attempted, and the refusal is the point of the
+	// two paths being named differently (ADR-0066 §4). Physical recovery rewinds the WHOLE instance,
+	// so honouring `restore <app>` against one would roll back every other app sharing it — a
+	// cross-app data loss triggered by a single-app operation, asked for by somebody who picked the
+	// most recent id off a listing. It is checked before the app comparison so the message says what
+	// the backup IS, rather than that it belongs to an app named "".
+	if backup.Kind == BackupKindPhysical {
+		return fmt.Errorf("restore addon %s for %s: backup %q is a PHYSICAL backup of environment %s's whole instance, not a dump of %s's database. Restoring it would rewind every app sharing that instance, so it cannot be reached from a single-app restore; pick a backup taken with `burrow addon backup postgres %s`: %w",
+			t, app, backupID, envName(backup.Environment), app, app, ErrInvalid)
 	}
 	if backup.App != app {
 		return fmt.Errorf("restore addon %s for %s: backup %q belongs to app %q: %w", t, app, backupID, backup.App, ErrInvalid)

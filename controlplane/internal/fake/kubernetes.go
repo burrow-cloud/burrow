@@ -48,16 +48,23 @@ type Kubernetes struct {
 	// long a Job is in flight and whether two are ever in flight at once — the only way to assert
 	// that the engine serializes lifecycle hooks (ADR-0072 §9) rather than the fake's own mutex
 	// serializing them.
-	runJobHook   *func()
-	backupSiz    *int64                         // size RunBackupJob reports
-	backupReason *controlplane.BackupJobOutcome // reason/detail RunBackupJob reports on failure
-	metricsAvail *bool                          // whether metrics-server is reported present
+	runJobHook     *func()
+	backupSiz      *int64                              // size RunBackupJob reports
+	backupReason   *controlplane.BackupJobOutcome      // reason/detail RunBackupJob reports on failure
+	physicals      *[]backupCall                       // RunPhysicalBackup calls, in order
+	physicalLabel  *string                             // pgBackRest label RunPhysicalBackup reports
+	physicalReason *controlplane.PhysicalBackupOutcome // reason/detail RunPhysicalBackup reports
+	metricsAvail   *bool                               // whether metrics-server is reported present
 	// backupJobs records which backups still have a Job in the fake add-on namespace. The real
 	// adapter reads this off the cluster; here a test sets it, because the interesting state is the
 	// one no code path produces on purpose — a Job that is GONE while its row is still pending
 	// (ADR-0074 §6).
 	backupJobs map[string]bool
-	errs       map[Op]error
+	// physicalBackups is backupJobs' sibling for the `Backup` objects a physical backup creates, and
+	// archiving records which instances have a pgBackRest repository behind them.
+	physicalBackups map[string]bool
+	archiving       map[string]string
+	errs            map[Op]error
 }
 
 // fakeBaseNamespace is the namespace the fake treats as the default: app resources in it are keyed
@@ -223,29 +230,34 @@ func (d *deployState) status(app string) controlplane.WorkloadStatus {
 func NewKubernetes() *Kubernetes {
 	metricsAvail := true
 	return &Kubernetes{
-		mu:           &sync.Mutex{},
-		ns:           fakeBaseNamespace,
-		base:         fakeBaseNamespace,
-		deploys:      make(map[string]*deployState),
-		exposed:      make(map[string]controlplane.ExposeSpec),
-		addresses:    make(map[string]string),
-		certReady:    make(map[string]bool),
-		addons:       make(map[string]controlplane.AddonInfo),
-		volumes:      make(map[string]fakeVolume),
-		secrets:      make(map[string]map[string]string),
-		autoscalers:  make(map[string]controlplane.AutoscaleSpec),
-		backups:      &[]backupCall{},
-		restores:     &[]backupCall{},
-		runs:         &[]runCall{},
-		rollouts:     &[]rolloutCall{},
-		rolloutOut:   make(map[string]controlplane.RolloutOutcome),
-		runResult:    &controlplane.RunResult{},
-		runJobHook:   new(func()),
-		backupSiz:    new(int64),
-		backupReason: new(controlplane.BackupJobOutcome),
-		metricsAvail: &metricsAvail,
-		backupJobs:   make(map[string]bool),
-		errs:         make(map[Op]error),
+		mu:              &sync.Mutex{},
+		ns:              fakeBaseNamespace,
+		base:            fakeBaseNamespace,
+		deploys:         make(map[string]*deployState),
+		exposed:         make(map[string]controlplane.ExposeSpec),
+		addresses:       make(map[string]string),
+		certReady:       make(map[string]bool),
+		addons:          make(map[string]controlplane.AddonInfo),
+		volumes:         make(map[string]fakeVolume),
+		secrets:         make(map[string]map[string]string),
+		autoscalers:     make(map[string]controlplane.AutoscaleSpec),
+		backups:         &[]backupCall{},
+		restores:        &[]backupCall{},
+		runs:            &[]runCall{},
+		rollouts:        &[]rolloutCall{},
+		rolloutOut:      make(map[string]controlplane.RolloutOutcome),
+		runResult:       &controlplane.RunResult{},
+		runJobHook:      new(func()),
+		backupSiz:       new(int64),
+		backupReason:    new(controlplane.BackupJobOutcome),
+		metricsAvail:    &metricsAvail,
+		backupJobs:      make(map[string]bool),
+		physicalBackups: make(map[string]bool),
+		archiving:       make(map[string]string),
+		physicals:       new([]backupCall),
+		physicalLabel:   new(string),
+		physicalReason:  new(controlplane.PhysicalBackupOutcome),
+		errs:            make(map[Op]error),
 	}
 }
 
@@ -295,9 +307,21 @@ func (k *Kubernetes) RestartedAt(app string) (time.Time, bool) {
 // controlplane.AddonInstanceName, so the default environment lands on the unqualified name an
 // existing install already has and any other environment gets a separate instance beside it
 // (ADR-0067 §1). Two environments therefore occupy two entries in this fake cluster, never one.
-func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string) (controlplane.AddonInfo, error) {
+func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	// Whether the instance archives is remembered, because it is what decides whether a physical
+	// backup of it is possible at all (ADR-0066 §3) — the fake cluster has to be able to be in both
+	// states, since an install with no object-storage provider registered is the ordinary one.
+	if spec.Type == controlplane.AddonPostgres {
+		if n, err := controlplane.AddonInstanceName(spec.Type, env); err == nil {
+			if archive != nil {
+				k.archiving[n] = archive.Provider
+			} else if _, ok := k.archiving[n]; !ok {
+				k.archiving[n] = ""
+			}
+		}
+	}
 	name, err := controlplane.AddonInstanceName(spec.Type, env)
 	if err != nil {
 		return controlplane.AddonInfo{}, err
@@ -467,6 +491,74 @@ func (k *Kubernetes) SetBackupJob(backupID string, present bool) {
 		return
 	}
 	delete(k.backupJobs, backupID)
+}
+
+// SetPhysicalBackup marks whether the `Backup` object for a backup id exists in this fake cluster —
+// PhysicalBackupPresent's half of the ADR-0074 §6 sweep.
+func (k *Kubernetes) SetPhysicalBackup(backupID string, present bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if present {
+		k.physicalBackups[backupID] = true
+		return
+	}
+	delete(k.physicalBackups, backupID)
+}
+
+// PhysicalBackupPresent reports whether the `Backup` object for a backup id still exists.
+func (k *Kubernetes) PhysicalBackupPresent(ctx context.Context, backupID string) (bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpPhysicalBackupPresent]; err != nil {
+		return false, err
+	}
+	return k.physicalBackups[backupID], nil
+}
+
+// SetPhysicalBackupLabel sets pgBackRest's own backup label RunPhysicalBackup reports on success.
+func (k *Kubernetes) SetPhysicalBackupLabel(label string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	*k.physicalLabel = label
+}
+
+// SetPhysicalBackupFailure sets the closed reason and detail RunPhysicalBackup reports alongside its
+// injected error, modelling a `Backup` object reaching a terminal phase (ADR-0066 §2).
+func (k *Kubernetes) SetPhysicalBackupFailure(reason, detail string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	*k.physicalReason = controlplane.PhysicalBackupOutcome{Reason: reason, Detail: detail}
+}
+
+// PhysicalBackups returns the (environment, backupID) pairs RunPhysicalBackup was called with.
+func (k *Kubernetes) PhysicalBackups() []backupCall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]backupCall(nil), *k.physicals...)
+}
+
+// RunPhysicalBackup models asking CloudNativePG for a base backup of one environment's instance. It
+// refuses an instance that does not archive, exactly as the adapter does: a `Backup` object against a
+// `Cluster` with no plugin has nowhere to write.
+func (k *Kubernetes) RunPhysicalBackup(ctx context.Context, env, backupID string) (controlplane.PhysicalBackupOutcome, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	*k.physicals = append(*k.physicals, backupCall{Env: env, BackupID: backupID})
+	if err := k.errs[OpRunPhysicalBackup]; err != nil {
+		return *k.physicalReason, err
+	}
+	name, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, fakeEnvName(env))
+	if err != nil {
+		return controlplane.PhysicalBackupOutcome{}, err
+	}
+	provider, installed := k.archiving[name]
+	if !installed {
+		return controlplane.PhysicalBackupOutcome{}, fmt.Errorf("fake: environment %q has no postgres instance to back up: %w", env, controlplane.ErrNotFound)
+	}
+	if provider == "" {
+		return controlplane.PhysicalBackupOutcome{}, fmt.Errorf("fake: the postgres instance %q archives nowhere: %w", name, controlplane.ErrInvalid)
+	}
+	return controlplane.PhysicalBackupOutcome{Label: *k.physicalLabel}, nil
 }
 
 // BackupJobPresent reports whether the Job for a backup id still exists. A missing Job is absent

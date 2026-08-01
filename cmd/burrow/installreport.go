@@ -46,6 +46,16 @@ func (r installReporter) done(name, status string) {
 	fmt.Fprintf(r.w, "  %s %-*s  %s\n", okMark(r.w), componentCol, name, status)
 }
 
+// skipped reports a component that was NOT installed, with the reason. It is distinct from done
+// because "installed" and "deliberately not installed" must not look the same on a setup command's
+// output: a skipped component is something the operator now knows they do not have.
+func (r installReporter) skipped(name, why string) {
+	if !r.verbose && isTerminal(r.w) {
+		fmt.Fprint(r.w, "\r\033[K")
+	}
+	fmt.Fprintf(r.w, "  - %-*s  skipped: %s\n", componentCol, name, why)
+}
+
 // parenthesize wraps a non-empty apply detail in " (...)" for a component status line, and is empty
 // when there is no detail (e.g. verbose mode, where the per-resource listing is the detail).
 func parenthesize(detail string) string {

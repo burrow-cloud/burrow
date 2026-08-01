@@ -35,10 +35,11 @@ import (
 // applies.
 //
 // NO THRESHOLD IS ASSERTED HERE. ADR-0063 §7 phrases the signal as "no successful backup in N
-// hours", but nothing in Burrow schedules a backup yet — every backup is one somebody asked for — so
-// any N this surface picked would be a number Burrow invented and then alerted on. The surface
-// reports the ages; the threshold is configuration, and belongs with the scheduling that gives it a
-// meaning (ADR-0068).
+// hours". A Postgres instance wired to an object store now has a schedule — a daily base backup
+// through the `ScheduledBackup` CloudNativePG runs (ADR-0066 §2) — but an instance with no
+// destination has none, and a logical dump has never had one, so any N this surface picked would
+// still be a number Burrow invented and then alerted on for half its rows. The surface reports the
+// ages; the threshold is configuration and belongs with the limits record (ADR-0068).
 
 // BackupHealthState is the shape of what Burrow has observed about a scope's backups. It is
 // deliberately a statement of FACT rather than a verdict against a threshold: "durable" does not
@@ -66,7 +67,13 @@ const (
 type BackupObservation struct {
 	// ID is the backup identifier.
 	ID string `json:"id"`
-	// App is the application whose database was dumped.
+	// Kind is which mechanism took it — a per-app logical dump or a physical base backup of the whole
+	// instance (ADR-0066 §4). It is reported because the two are not interchangeable: a durable
+	// physical backup means every database on that instance is recoverable, and a durable logical one
+	// means exactly one app's is.
+	Kind BackupKind `json:"kind,omitempty"`
+	// App is the application whose database was dumped. Empty on a physical backup, which covers
+	// every database on the instance and belongs to no one app.
 	App string `json:"app"`
 	// Environment is the environment whose instance it was taken from.
 	Environment string `json:"environment,omitempty"`
@@ -233,6 +240,7 @@ func (e *Engine) observe(b Backup, now time.Time) *BackupObservation {
 	}
 	return &BackupObservation{
 		ID:          b.ID,
+		Kind:        b.Kind,
 		App:         b.App,
 		Environment: envName(b.Environment),
 		At:          b.CreatedAt,

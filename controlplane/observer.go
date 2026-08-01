@@ -322,18 +322,41 @@ func (o *Observer) observeBackups(ctx context.Context, sw *sweep) error {
 	}
 	for _, b := range pending {
 		ref := ObjectRef{Kind: FailureBackup, Name: b.ID, Environment: b.Environment}
-		present, err := o.engine.k8s.BackupJobPresent(ctx, b.ID)
+		// WHICH OBJECT WOULD STILL BE THERE DEPENDS ON THE MECHANISM. A logical dump leaves a Job; a
+		// physical backup leaves a `Backup` custom resource (ADR-0066 §2). Asking the wrong one would
+		// report every pending physical backup as abandoned once a minute, on a cluster where nothing
+		// is wrong — the exact opposite of what a coverage record is for.
+		present, err := o.backupObjectPresent(ctx, b)
 		if err != nil {
-			sw.skip(ref, fmt.Sprintf("the backup Job for %q could not be read", b.ID))
+			sw.skip(ref, fmt.Sprintf("the in-cluster object for backup %q could not be read", b.ID))
 			continue
 		}
 		if !present {
-			sw.record(ref, ReasonBackupJobMissing, fmt.Sprintf(
-				"this backup of %q has been pending since %s and its Job no longer exists, so it will never complete",
-				b.App, b.CreatedAt.UTC().Format(time.RFC3339)))
+			sw.record(ref, ReasonBackupJobMissing, backupAbandonedDetail(b))
 		}
 	}
 	return nil
+}
+
+// backupObjectPresent asks the cluster whether the object that would be finishing this pending
+// backup still exists, choosing the question by the row's kind.
+func (o *Observer) backupObjectPresent(ctx context.Context, b Backup) (bool, error) {
+	if b.Kind == BackupKindPhysical {
+		return o.engine.k8s.PhysicalBackupPresent(ctx, b.ID)
+	}
+	return o.engine.k8s.BackupJobPresent(ctx, b.ID)
+}
+
+// backupAbandonedDetail is the line a stranded pending row is recorded with. It names the app for a
+// logical dump and the environment's instance for a physical one, because those are the things the
+// two back up and "this backup of \"\"" is not a sentence.
+func backupAbandonedDetail(b Backup) string {
+	since := b.CreatedAt.UTC().Format(time.RFC3339)
+	if b.Kind == BackupKindPhysical {
+		return fmt.Sprintf("this physical backup of environment %s's instance has been pending since %s and its Backup object no longer exists, so it will never complete",
+			envName(b.Environment), since)
+	}
+	return fmt.Sprintf("this backup of %q has been pending since %s and its Job no longer exists, so it will never complete", b.App, since)
 }
 
 // observeExposures checks each recorded exposure against the cluster: the Ingress that routes the

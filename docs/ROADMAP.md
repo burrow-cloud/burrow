@@ -306,10 +306,16 @@ acceptance checklist. The theme and its sequencing stay here; the granularity is
   orchestrating backups altogether. §1 has landed: the operator is installable and detected
   (`burrow cluster postgres install`, reported by `burrow cluster`), it is a prerequisite of
   `burrow addon install postgres`, and the add-on instance is a `Cluster` per environment and
-  nothing else — the Deployment ADR-0031 specified is gone from the tree. **The rest is not built.**
-  Backups are still `pg_dump` Jobs: no `Backup` or `ScheduledBackup` object, no pgBackRest plugin,
-  no WAL archiving, no retention window, no point-in-time recovery, no physical restore.
-  [#338](https://github.com/burrow-cloud/burrow/issues/338) (blocked by #331).
+  nothing else — the Deployment ADR-0031 specified is gone from the tree. §2 and §3 have landed too:
+  `burrow cluster postgres install` also installs the pgBackRest CNPG-I plugin, an instance installed
+  with an object-storage provider registered archives its write-ahead log continuously to that
+  store, a daily `ScheduledBackup` takes a base backup, and `burrow addon backup-instance postgres`
+  creates a `Backup` object on demand — Burrow reads `.status` and runs no backup tool. Retention is
+  Burrow's declared window, written into the repository so there is one policy rather than two.
+  **What is not built is the restore.** Physical recovery — standing up a replacement `Cluster` from
+  the repository and cutting `DATABASE_URL` over — is still absent, and no restore from a real
+  object store has been exercised, so the per-app `pg_dump` path remains the only tested way back.
+  [#338](https://github.com/burrow-cloud/burrow/issues/338).
 
 ## Deferred until requested
 

@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/burrow-cloud/burrow/controlplane"
@@ -116,12 +117,21 @@ func cnpgClusterReady(u *unstructured.Unstructured) bool {
 // by name, before any object is written — because the alternative is a dynamic client that does no
 // discovery returning a 404 the caller cannot tell from a missing object, and an operator being told
 // their add-on failed on `clusters.postgresql.cnpg.io not found` learns nothing they can act on.
-func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.AddonSpec, env, name string, labels map[string]string) (controlplane.AddonInfo, error) {
+func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.AddonSpec, env, name string, labels map[string]string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
 	if err := a.requireCloudNativePG(ctx); err != nil {
 		return controlplane.AddonInfo{}, err
 	}
 	if err := a.ensureCNPGSuperuserSecret(ctx, name, labels); err != nil {
 		return controlplane.AddonInfo{}, err
+	}
+	// Everything the `Cluster` will REFERENCE is written first: the credential Secret the plugin's
+	// sidecar reads, the `Stanza` naming the repository, and the schedule. A Cluster naming a Stanza
+	// that does not exist yet is the operator racing Burrow into a failure that looks like the
+	// plugin's (ADR-0066 §3).
+	if archive != nil {
+		if err := a.ensurePgBackRestArchive(ctx, name, labels, archive); err != nil {
+			return controlplane.AddonInfo{}, err
+		}
 	}
 
 	clusters, err := a.cnpgClusters()
@@ -136,10 +146,15 @@ func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.A
 			"namespace": a.addonNamespace,
 			"labels":    toStringMap(labels),
 		},
-		"spec": a.postgresClusterSpec(spec, env, name, labels),
+		"spec": a.postgresClusterSpec(spec, env, name, labels, archive),
 	}}
-	if _, err := clusters.Create(ctx, obj, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return controlplane.AddonInfo{}, fmt.Errorf("kube: creating the CloudNativePG Cluster %q: %w", name, err)
+	if _, err := clusters.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return controlplane.AddonInfo{}, fmt.Errorf("kube: creating the CloudNativePG Cluster %q: %w", name, err)
+		}
+		if err := a.attachArchiveToExistingCluster(ctx, clusters, name, archive); err != nil {
+			return controlplane.AddonInfo{}, err
+		}
 	}
 
 	return controlplane.AddonInfo{
@@ -252,7 +267,7 @@ const cnpgSecretUsernameKey = "username"
 // (cnpg_placement_schema.json records the placement subtree of the same artifact), and a key that
 // is not is PRUNED by the API server silently — which is why nothing here is invented and why the
 // placement fragment is produced by the translation ADR-0077 built rather than spelled again.
-func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name string, labels map[string]string) map[string]any {
+func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name string, labels map[string]string, archive *controlplane.ArchiveDestination) map[string]any {
 	out := map[string]any{
 		// One replica is ADR-0066 §1's default for the small self-hoster ADR-0031 was written for.
 		// Under an operator it is a number rather than a constant of the design, which is the point:
@@ -359,6 +374,22 @@ func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name str
 			},
 		},
 	}
+	// The pgBackRest plugin, when this instance archives (ADR-0066 §3). `isWALArchiver` is the field
+	// that matters: it is what makes PostgreSQL's archive_command hand every segment to the plugin's
+	// sidecar, and without it a base backup would be a snapshot with no write-ahead log behind it and
+	// therefore no point-in-time recovery — the gap ADR-0066 lists as the floor on data loss.
+	//
+	// An instance with no registered destination gets NO entry at all rather than a disabled one, so
+	// the `Cluster` written on a cluster with no object storage is byte-for-byte what it was before
+	// this existed.
+	if archive != nil {
+		out["plugins"] = []any{map[string]any{
+			"name":          PgBackRestPluginName,
+			"enabled":       true,
+			"isWALArchiver": true,
+			"parameters":    map[string]any{"stanzaRef": pgBackRestStanzaName(name)},
+		}}
+	}
 	// The operator's placement policy for pods Burrow causes to exist but does not author
 	// (ADR-0077 §2). It merges `affinity` and `topologySpreadConstraints` and NOTHING else when
 	// nothing is wired, so an unwired adapter writes byte-for-byte the object above (ADR-0073 §4).
@@ -412,4 +443,38 @@ func mustJSON(v any) any {
 		return map[string]any{}
 	}
 	return out
+}
+
+// attachArchiveToExistingCluster wires the pgBackRest plugin into a `Cluster` that already exists,
+// which is what a re-run of `addon install postgres` does after an object-storage destination has
+// been registered.
+//
+// A `Cluster` Burrow wrote is not otherwise edited in place, and this is the deliberate exception
+// rather than a softening of that rule. It PATCHES ONE PATH, `spec.plugins`, and never touches the
+// instance count, the storage, the image, the roles or the services — because the destination is
+// configuration that legitimately arrives after the database does, and the alternative offered to a
+// user who registered object storage second is to destroy and rebuild the component holding every
+// app's data. CloudNativePG supports adding a plugin to a live `Cluster`; the sidecar is injected on
+// the next reconcile.
+//
+// It is a no-op when there is nothing to attach or the plugin is already there, so a plain re-install
+// stays the read-only operation it has always been.
+func (a *Adapter) attachArchiveToExistingCluster(ctx context.Context, clusters dynamic.ResourceInterface, name string, archive *controlplane.ArchiveDestination) error {
+	if archive == nil {
+		return nil
+	}
+	existing, found, err := a.getCNPGCluster(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !found || cnpgClusterArchives(existing) {
+		return nil
+	}
+	patch := []byte(fmt.Sprintf(
+		`{"spec":{"plugins":[{"name":%q,"enabled":true,"isWALArchiver":true,"parameters":{"stanzaRef":%q}}]}}`,
+		PgBackRestPluginName, pgBackRestStanzaName(name)))
+	if _, err := clusters.Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("kube: attaching the pgBackRest plugin to the CloudNativePG Cluster %q: %w", name, err)
+	}
+	return nil
 }

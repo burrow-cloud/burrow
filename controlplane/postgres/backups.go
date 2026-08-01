@@ -14,7 +14,7 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-const backupColumns = `id, app, environment, created_at, path, volume, size_bytes, status, ` +
+const backupColumns = `id, kind, app, environment, created_at, path, volume, size_bytes, status, ` +
 	`destination, provider, object_key, failure_reason, failure_detail`
 
 // RecordBackup persists a new backup row (ADR-0032). burrowd records it pending before starting the
@@ -26,11 +26,11 @@ func (s *Store) RecordBackup(ctx context.Context, b controlplane.Backup) error {
 		return fmt.Errorf("postgres: record backup: empty ID")
 	}
 	const q = `
-INSERT INTO postgres_backups (id, app, environment, created_at, path, volume, size_bytes, status,
+INSERT INTO postgres_backups (id, kind, app, environment, created_at, path, volume, size_bytes, status,
                               destination, provider, object_key, failure_reason, failure_detail)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 ON CONFLICT (id) DO UPDATE SET
-    app = EXCLUDED.app, environment = EXCLUDED.environment, created_at = EXCLUDED.created_at,
+    kind = EXCLUDED.kind, app = EXCLUDED.app, environment = EXCLUDED.environment, created_at = EXCLUDED.created_at,
     path = EXCLUDED.path, volume = EXCLUDED.volume, size_bytes = EXCLUDED.size_bytes, status = EXCLUDED.status,
     destination = EXCLUDED.destination, provider = EXCLUDED.provider, object_key = EXCLUDED.object_key,
     failure_reason = EXCLUDED.failure_reason, failure_detail = EXCLUDED.failure_detail`
@@ -38,11 +38,19 @@ ON CONFLICT (id) DO UPDATE SET
 	if env == "" {
 		env = controlplane.DefaultEnvironment
 	}
+	kind := b.Kind
+	if kind == "" {
+		// A row arriving with no kind is a logical dump. It is the only thing it can be: physical
+		// backups did not exist before the column did, and an older burrowd writing against a newer
+		// schema is writing the only kind it knows how to take.
+		kind = controlplane.BackupKindLogical
+	}
 	vol := b.Volume
-	if vol == "" {
-		// A row arriving with no claim named can only mean the shared claim that predates
+	if vol == "" && kind == controlplane.BackupKindLogical {
+		// A LOGICAL row arriving with no claim named can only mean the shared claim that predates
 		// per-environment backups; writing it blank would leave the restore unable to say which
-		// volume the dump is on (ADR-0067 §1).
+		// volume the dump is on (ADR-0067 §1). A physical backup is on no claim at all — it is in the
+		// object store — so the same default there would name a volume the bytes are not on.
 		vol = controlplane.PostgresBackupVolume
 	}
 	dest := b.Destination
@@ -51,7 +59,7 @@ ON CONFLICT (id) DO UPDATE SET
 		// would leave the listing unable to say which backups survive losing the cluster.
 		dest = controlplane.BackupDestinationCluster
 	}
-	if _, err := s.db.ExecContext(ctx, q, b.ID, b.App, env, b.CreatedAt, b.Path, vol, b.SizeBytes, string(b.Status),
+	if _, err := s.db.ExecContext(ctx, q, b.ID, string(kind), b.App, env, b.CreatedAt, b.Path, vol, b.SizeBytes, string(b.Status),
 		string(dest), b.Provider, b.ObjectKey, b.FailureReason, b.FailureDetail); err != nil {
 		return fmt.Errorf("postgres: record backup %s: %w", b.ID, err)
 	}
@@ -156,14 +164,16 @@ func scanBackup(sc scanner) (controlplane.Backup, error) {
 	var (
 		b       controlplane.Backup
 		created time.Time
+		kind    string
 		status  string
 		dest    string
 	)
-	if err := sc.Scan(&b.ID, &b.App, &b.Environment, &created, &b.Path, &b.Volume, &b.SizeBytes, &status,
+	if err := sc.Scan(&b.ID, &kind, &b.App, &b.Environment, &created, &b.Path, &b.Volume, &b.SizeBytes, &status,
 		&dest, &b.Provider, &b.ObjectKey, &b.FailureReason, &b.FailureDetail); err != nil {
 		return controlplane.Backup{}, err
 	}
 	b.CreatedAt = created
+	b.Kind = controlplane.BackupKind(kind)
 	b.Status = controlplane.BackupStatus(status)
 	b.Destination = controlplane.BackupDestinationKind(dest)
 	return b, nil

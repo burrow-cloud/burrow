@@ -108,6 +108,15 @@ func (a *Adapter) deletePostgresCluster(ctx context.Context, name string, delete
 			}
 		}
 	}
+	// The archive configuration goes with the instance, whether or not the data does. What it removes
+	// is a `ScheduledBackup` that would otherwise keep firing at a `Cluster` that is not there, the
+	// `Stanza` describing a repository nothing writes to any more, and the credential copy that
+	// existed only so the sidecar could reach it. NO BACKUP IS DELETED: the repository is in the
+	// object store, and every base backup and archived segment in it survives this untouched — which
+	// is ADR-0064's contract read onto the one copy that is genuinely outside the cluster.
+	if err := a.deletePgBackRestArchive(ctx, name); err != nil {
+		return removal, err
+	}
 	if clusterFound {
 		if err := a.deleteCNPGCluster(ctx, name); err != nil {
 			return removal, err

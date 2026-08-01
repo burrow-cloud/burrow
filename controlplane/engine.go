@@ -1105,7 +1105,9 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env string) 
 	// roll the app there to pick it up — the ADR-0029 secret path, the same one `secret set` uses.
 	// The value never crosses the audit log, the agent control channel, or Postgres.
 	k := e.k8s.WithNamespace(ns)
-	const key = "DATABASE_URL"
+	// The one constant three operations agree about: attach writes this key, detach removes it, and a
+	// physical restore rewrites it during its cutover (physical_restore.go).
+	const key = databaseURLSecretKey
 	if err := k.SetSecretValue(ctx, app, key, url); err != nil {
 		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
 		// SetSecretValue's error names the app and key only — never the value.
@@ -1155,7 +1157,7 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	// Remove the DATABASE_URL key first (the app stops seeing the credential), then drop the
 	// database/role. Both act in this environment only. A missing key is a no-op.
 	k := e.k8s.WithNamespace(ns)
-	if err := k.UnsetSecretKey(ctx, app, "DATABASE_URL"); err != nil {
+	if err := k.UnsetSecretKey(ctx, app, databaseURLSecretKey); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
 		return fmt.Errorf("detach addon %s for %s: removing DATABASE_URL: %w", t, app, err)
 	}

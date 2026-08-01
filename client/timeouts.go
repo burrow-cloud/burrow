@@ -49,6 +49,10 @@ const (
 	// before destroying a volume (ADR-0064 §5).
 	BackupTimeout = controlplane.MaxBackupWait + TimeoutMargin
 
+	// RestoreInstanceTimeout bounds a physical restore of a whole Postgres instance (ADR-0066 §4):
+	// the safety backup, the wait for the pre-restore volume to go, and the recovery.
+	RestoreInstanceTimeout = controlplane.MaxRestoreInstanceWait + TimeoutMargin
+
 	// ProviderTimeout bounds registering a provider, which for an object store verifies the
 	// destination with a run of calls to the vendor before it answers (ADR-0063 §2-§4).
 	ProviderTimeout = controlplane.MaxProviderWait + TimeoutMargin
@@ -57,23 +61,29 @@ const (
 // budgets is one client's per-request timeout table. A test substitutes a table of milliseconds so
 // the per-request behaviour is exercised without waiting out a real bound.
 type budgets struct {
-	def      time.Duration
-	deploy   time.Duration
-	build    time.Duration
-	run      time.Duration
-	backup   time.Duration
-	provider time.Duration
+	def    time.Duration
+	deploy time.Duration
+	build  time.Duration
+	run    time.Duration
+	backup time.Duration
+	// restoreInstance is separate from backup because a physical restore waits for a recovery, which
+	// is bounded by how much data there is rather than by a Job's timeout — giving it the backup
+	// budget would report a recovery that is still running as a failure, which is the exact defect
+	// issue #404 was.
+	restoreInstance time.Duration
+	provider        time.Duration
 }
 
 // derivedBudgets is the table every constructed client gets: the constants above, each derived from
 // the control plane's declared bound for that call.
 func derivedBudgets() budgets {
 	return budgets{
-		def:      DefaultTimeout,
-		deploy:   DeployTimeout,
-		build:    BuildTimeout,
-		run:      RunTimeout,
-		backup:   BackupTimeout,
-		provider: ProviderTimeout,
+		def:             DefaultTimeout,
+		deploy:          DeployTimeout,
+		build:           BuildTimeout,
+		run:             RunTimeout,
+		backup:          BackupTimeout,
+		restoreInstance: RestoreInstanceTimeout,
+		provider:        ProviderTimeout,
 	}
 }

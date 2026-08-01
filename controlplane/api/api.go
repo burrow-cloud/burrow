@@ -144,6 +144,11 @@ func New(cfg Config) (http.Handler, error) {
 	// destination probe signs a request with the stored credential and reports names, never values.
 	v1.HandleFunc("GET /v1/addons/backup-health", s.backupHealthHandler)
 	v1.HandleFunc("POST /v1/addons/restore", s.restoreAddon)
+	// A PHYSICAL restore is a separate route from the per-app one, not a flag on it. The two act on
+	// different things — one app's database against the whole instance — and a single endpoint whose
+	// blast radius depended on which fields were populated would be one decode away from rewinding an
+	// environment somebody meant to restore one app of (ADR-0066 §4).
+	v1.HandleFunc("POST /v1/addons/restore-instance", s.restoreInstance)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
@@ -1026,6 +1031,57 @@ func (s *server) restoreAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"addon": req.Addon, "app": req.App, "backup": req.Backup})
+}
+
+// restoreInstance rewinds one environment's whole Postgres instance to a point in its object-storage
+// repository (ADR-0066 §4): burrowd takes a physical backup of the current state first, replaces the
+// instance with one recovered from the repository, waits for it to serve, and re-points every
+// attached app's DATABASE_URL at it. It is held by the addon.restore_instance confirm guardrail by
+// default.
+//
+// The response names the instance, the recovery target, the safety backup and the affected apps — no
+// secret value. The repository credential is assembled server-side and never crosses this boundary in
+// either direction; nor does any regenerated connection string.
+func (s *server) restoreInstance(w http.ResponseWriter, r *http.Request) {
+	var req addonRestoreInstanceRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.engine.RestoreInstance(r.Context(), controlplane.AddonType(req.Addon), req.Env, controlplane.RestoreInstanceOptions{
+		Backup:           req.Backup,
+		ToTime:           req.ToTime,
+		Latest:           req.Latest,
+		SkipSafetyBackup: req.SkipSafetyBackup,
+		Destination:      req.Destination,
+		Confirm:          req.Confirm,
+	})
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// addonRestoreInstanceRequest is the body of a physical restore: the add-on type, the environment
+// whose instance is rewound, and exactly one recovery target. No secret.
+type addonRestoreInstanceRequest struct {
+	Addon string `json:"addon"`
+	// Env is the environment whose Postgres instance is rewound (ADR-0067 §1); empty targets the
+	// default environment, and is refused when more than one environment is registered.
+	Env string `json:"env,omitempty"`
+	// Backup names a recorded PHYSICAL backup to recover exactly.
+	Backup string `json:"backup,omitempty"`
+	// ToTime is an RFC3339 instant inside the write-ahead-log window to recover to.
+	ToTime string `json:"to_time,omitempty"`
+	// Latest recovers to the furthest point the archived write-ahead log reaches.
+	Latest bool `json:"latest,omitempty"`
+	// SkipSafetyBackup rewinds WITHOUT first backing up the state that is there.
+	SkipSafetyBackup bool `json:"skip_safety_backup,omitempty"`
+	// Destination NAMES the object-storage provider holding this instance's repository (ADR-0063 §6);
+	// empty resolves it when exactly one is registered. A registry name, never a credential.
+	Destination string `json:"destination,omitempty"`
+	// Confirm satisfies the addon.restore_instance guardrail's confirmation hold.
+	Confirm bool `json:"confirm,omitempty"`
 }
 
 // addonBackupRequest is the body of an addon backup: the add-on type, the app, and the environment

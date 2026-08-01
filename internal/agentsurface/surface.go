@@ -252,6 +252,22 @@ var catalogue = []Capability{
 			"(ADR-0032); the agent can take backups, which destroy nothing",
 		Command: "burrow addon restore <addon> <app> --backup <id>",
 	},
+	// The instance-wide restore is a SEPARATE entry from the per-app one, and keeping them apart is
+	// the point ADR-0066 §4 makes about naming: the two operations differ by blast radius, not by
+	// mechanism, and an agent told "restore is not something I can do" learns less than one told which
+	// restore and why. `addon restore` fails reversibility for one app; this fails SCOPE — it rewinds
+	// the instance every app in the environment shares — which is the disqualifying test, so it is
+	// tier 1 in its own right rather than by association.
+	{
+		Surface: Operator,
+		Path:    "addon restore-instance",
+		What:    "rewinds a whole Postgres instance to a point in its object-storage repository",
+		Why: "tier 1 (ADR-0065 §2, ADR-0066 §4): a physical recovery cannot be scoped to one app — every " +
+			"database on the instance goes back to the same point together, so its blast radius is every " +
+			"app in the environment no matter which one the agent was asked about. It also destroys the " +
+			"instance's current state, which is a decision for a human at a terminal",
+		Command: "burrow addon restore-instance <addon> --backup <id>",
+	},
 
 	// Object storage. ADR-0063 §5 splits the two bucket operations across two tiers, and the split
 	// is the point of the record. CREATION is tier 3: additive, reversible, part of a legitimate

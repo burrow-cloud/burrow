@@ -661,6 +661,32 @@ func PgBackRestManifestKey(repoPath, stanza, label string) string {
 	return strings.TrimPrefix(repoPath, "/") + "/backup/" + stanza + "/" + label + "/backup.manifest"
 }
 
+// PgBackRestLabelFromManifestKey reads pgBackRest's backup LABEL back out of a manifest key
+// PgBackRestManifestKey composed, and returns "" for anything that is not one.
+//
+// It exists because a physical restore has to NAME the base backup it recovers, and the name the
+// repository knows it by is pgBackRest's label rather than Burrow's backup id. The label is already on
+// the row — inside the object key, which is recorded before the row is allowed to say completed — so
+// this reads it back rather than adding a column that would have to be backfilled for every physical
+// backup taken before restore existed. The key is one Burrow composed from the label itself, so the
+// derivation is exact rather than a guess at somebody else's layout.
+//
+// It is the INVERSE of PgBackRestManifestKey and lives beside it so the two cannot drift: a change to
+// the layout that did not change this would leave a restore naming a backup the repository has never
+// heard of, which fails at the one moment there is nothing to fall back on.
+func PgBackRestLabelFromManifestKey(key string) string {
+	const suffix = "/backup.manifest"
+	if !strings.HasSuffix(key, suffix) {
+		return ""
+	}
+	trimmed := strings.TrimSuffix(key, suffix)
+	i := strings.LastIndex(trimmed, "/")
+	if i < 0 {
+		return ""
+	}
+	return trimmed[i+1:]
+}
+
 // pgBackRestObjectPrefix is where every pgBackRest repository Burrow configures lives in the bucket.
 // It is a sibling of backupObjectPrefix rather than the same prefix: the logical dumps are Burrow's
 // own object layout and the repository underneath this one is pgBackRest's, and letting a lifecycle

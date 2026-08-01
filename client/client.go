@@ -1044,6 +1044,72 @@ func (c *Client) RestoreAddon(ctx context.Context, addonType, app, backupID, env
 	return c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/restore", body, nil)
 }
 
+// StrandedApp is one app a physical restore's DATABASE_URL cutover did not finish for, and why.
+type StrandedApp struct {
+	App    string `json:"app"`
+	Reason string `json:"reason"`
+}
+
+// RestoreInstanceResult is what a physical restore did (ADR-0066 §4). It names the instance, the
+// point it was rewound to, the backup taken of what was there, and every app that was on it — never
+// a credential and never a connection string.
+type RestoreInstanceResult struct {
+	Addon       string `json:"addon"`
+	Environment string `json:"environment"`
+	Instance    string `json:"instance"`
+	Target      string `json:"target"`
+	// SafetyBackup is the physical backup taken of the pre-restore state, which is the way back from
+	// a restore to the wrong point. SafetyBackupNote says why there is none when there is none.
+	SafetyBackup     string `json:"safety_backup,omitempty"`
+	SafetyBackupNote string `json:"safety_backup_note,omitempty"`
+	// Apps is every app that was on the instance, by name — the blast radius, recorded rather than
+	// counted. Reconnected is those now pointing at the recovered instance; Stranded is those the
+	// cutover could not finish for.
+	Apps        []string      `json:"apps"`
+	Reconnected []string      `json:"reconnected"`
+	Stranded    []StrandedApp `json:"stranded,omitempty"`
+}
+
+// RestoreInstanceOptions is everything `addon restore-instance` needs beyond the add-on type and the
+// environment. Exactly one recovery target is required — the server refuses zero and refuses several.
+type RestoreInstanceOptions struct {
+	Backup           string
+	ToTime           string
+	Latest           bool
+	SkipSafetyBackup bool
+	// Destination names the object-storage provider holding this instance's repository; empty
+	// resolves it when exactly one is registered.
+	Destination string
+	Confirm     bool
+}
+
+// RestoreInstance rewinds one environment's WHOLE Postgres instance to a point in its object-storage
+// repository (ADR-0066 §4): every database on it goes back together, the instance is replaced by one
+// recovered from the repository, and every attached app is re-pointed at it and restarted.
+//
+// It is NOT the same operation as RestoreAddon, and the difference is the blast radius rather than
+// the mechanism. RestoreAddon replaces one app's database from that app's own dump and touches no
+// other app; this replaces the instance every app in the environment shares. It is held for
+// confirmation by the addon.restore_instance guardrail by default.
+//
+// It takes its own budget: a recovery waits for a base backup to be restored and write-ahead log
+// replayed, which is bounded by how much data there is rather than by a Job's timeout.
+func (c *Client) RestoreInstance(ctx context.Context, addonType, env string, opts RestoreInstanceOptions) (RestoreInstanceResult, error) {
+	var out RestoreInstanceResult
+	body := map[string]any{
+		"addon":              addonType,
+		"env":                env,
+		"backup":             opts.Backup,
+		"to_time":            opts.ToTime,
+		"latest":             opts.Latest,
+		"skip_safety_backup": opts.SkipSafetyBackup,
+		"destination":        opts.Destination,
+		"confirm":            opts.Confirm,
+	}
+	err := c.doWithin(ctx, c.budget.restoreInstance, http.MethodPost, "/v1/addons/restore-instance", body, &out)
+	return out, err
+}
+
 // LogEntry is one record from a logs query.
 type LogEntry struct {
 	Time    string `json:"time,omitempty"`

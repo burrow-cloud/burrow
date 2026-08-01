@@ -271,6 +271,14 @@ func DefaultPolicy() Policy {
 			GuardrailAddonRemove:  DispositionConfirm,
 			GuardrailAddonDetach:  DispositionConfirm,
 			GuardrailAddonRestore: DispositionConfirm,
+			// Rewinding a whole instance is held for confirmation rather than denied, and the choice
+			// is the opposite of the one app.delete gets for a reason worth writing down. A default
+			// deny is right where an ALLOWED path exists to the same outcome; here there is none — a
+			// denied instance restore is an environment that cannot be recovered, and the operation is
+			// reached for during the incident where that matters. What keeps it away from an agent is
+			// that the verb is not on the agent binary at all (ADR-0065 §2 tier 1), not this row, so
+			// denying it by default would buy nothing and cost the recovery path.
+			GuardrailAddonRestoreInstance: DispositionConfirm,
 			// Deleting a public DNS record is denied by default (ADR-0065 §3, tier 2): it takes an
 			// application off the internet, and the record may not be one Burrow created, so a confirm
 			// prompt protects only an attentive reader. It fails reversibility, not scope, so the

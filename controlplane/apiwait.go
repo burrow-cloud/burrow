@@ -46,6 +46,20 @@ const (
 	// (ADR-0032, ADR-0063).
 	BackupJobTimeout = 10 * time.Minute
 
+	// PostgresRecoveryTimeout is how long the control plane waits for an instance recovered from its
+	// pgBackRest repository to start serving (ADR-0066 §4). It is much larger than a backup's bound
+	// because a recovery restores a base backup and then replays archived write-ahead log, both
+	// proportional to the data — and unlike a backup, giving up on the wait does NOT stop the work:
+	// the recovering `Cluster` is left in place and the operator watches it.
+	PostgresRecoveryTimeout = 30 * time.Minute
+
+	// PostgresClaimRemovalTimeout is how long the control plane waits for the pre-restore instance's
+	// data claim to actually disappear before recovering into its name (ADR-0066 §4). A claim is held
+	// by the pvc-protection finalizer while any pod mounts it, so the delete returns long before the
+	// object does — and creating the recovering instance too early would reattach it to the volume it
+	// was asked to leave behind.
+	PostgresClaimRemovalTimeout = 5 * time.Minute
+
 	// ObjectStoreCallTimeout bounds ONE HTTP call to an S3-compatible object store (ADR-0063).
 	// Registering an object-storage provider makes several in a row — create the bucket, write,
 	// read and delete the probe object, read and reconcile the lifecycle configuration — so the
@@ -84,6 +98,16 @@ const (
 	// MaxBackupWait is the longest a backup, a restore, or an add-on removal that takes a final
 	// backup first (ADR-0064 §5) can occupy the server.
 	MaxBackupWait = BackupJobTimeout
+
+	// MaxRestoreInstanceWait is the longest a physical restore can occupy the server: the safety
+	// backup of the state it is about to destroy, the wait for that state's volume to go, and the
+	// recovery itself (ADR-0066 §4).
+	//
+	// The DATABASE_URL cutover afterwards is not a phase with its own ceiling — it is a handful of
+	// admin statements and a Secret write per app — and it is not added here rather than being given
+	// an invented bound, which is the rule this file holds: a client's budget is a sum of bounds the
+	// control plane declares, never of ones a reader estimated.
+	MaxRestoreInstanceWait = MaxBackupWait + PostgresClaimRemovalTimeout + PostgresRecoveryTimeout
 
 	// MaxProviderWait is the longest registering an object-storage provider can occupy the server:
 	// six object-store calls at their own bound — create the bucket, put/get/delete the probe

@@ -54,7 +54,9 @@ type Kubernetes struct {
 	physicals      *[]backupCall                       // RunPhysicalBackup calls, in order
 	physicalLabel  *string                             // pgBackRest label RunPhysicalBackup reports
 	physicalReason *controlplane.PhysicalBackupOutcome // reason/detail RunPhysicalBackup reports
-	metricsAvail   *bool                               // whether metrics-server is reported present
+	// instanceRestores records RestoreInstance calls, in order (ADR-0066 §4).
+	instanceRestores *[]RestoreInstanceCall
+	metricsAvail     *bool // whether metrics-server is reported present
 	// backupJobs records which backups still have a Job in the fake add-on namespace. The real
 	// adapter reads this off the cluster; here a test sets it, because the interesting state is the
 	// one no code path produces on purpose — a Job that is GONE while its row is still pending
@@ -230,34 +232,35 @@ func (d *deployState) status(app string) controlplane.WorkloadStatus {
 func NewKubernetes() *Kubernetes {
 	metricsAvail := true
 	return &Kubernetes{
-		mu:              &sync.Mutex{},
-		ns:              fakeBaseNamespace,
-		base:            fakeBaseNamespace,
-		deploys:         make(map[string]*deployState),
-		exposed:         make(map[string]controlplane.ExposeSpec),
-		addresses:       make(map[string]string),
-		certReady:       make(map[string]bool),
-		addons:          make(map[string]controlplane.AddonInfo),
-		volumes:         make(map[string]fakeVolume),
-		secrets:         make(map[string]map[string]string),
-		autoscalers:     make(map[string]controlplane.AutoscaleSpec),
-		backups:         &[]backupCall{},
-		restores:        &[]backupCall{},
-		runs:            &[]runCall{},
-		rollouts:        &[]rolloutCall{},
-		rolloutOut:      make(map[string]controlplane.RolloutOutcome),
-		runResult:       &controlplane.RunResult{},
-		runJobHook:      new(func()),
-		backupSiz:       new(int64),
-		backupReason:    new(controlplane.BackupJobOutcome),
-		metricsAvail:    &metricsAvail,
-		backupJobs:      make(map[string]bool),
-		physicalBackups: make(map[string]bool),
-		archiving:       make(map[string]string),
-		physicals:       new([]backupCall),
-		physicalLabel:   new(string),
-		physicalReason:  new(controlplane.PhysicalBackupOutcome),
-		errs:            make(map[Op]error),
+		mu:               &sync.Mutex{},
+		ns:               fakeBaseNamespace,
+		base:             fakeBaseNamespace,
+		deploys:          make(map[string]*deployState),
+		exposed:          make(map[string]controlplane.ExposeSpec),
+		addresses:        make(map[string]string),
+		certReady:        make(map[string]bool),
+		addons:           make(map[string]controlplane.AddonInfo),
+		volumes:          make(map[string]fakeVolume),
+		secrets:          make(map[string]map[string]string),
+		autoscalers:      make(map[string]controlplane.AutoscaleSpec),
+		backups:          &[]backupCall{},
+		restores:         &[]backupCall{},
+		runs:             &[]runCall{},
+		rollouts:         &[]rolloutCall{},
+		rolloutOut:       make(map[string]controlplane.RolloutOutcome),
+		runResult:        &controlplane.RunResult{},
+		runJobHook:       new(func()),
+		backupSiz:        new(int64),
+		backupReason:     new(controlplane.BackupJobOutcome),
+		metricsAvail:     &metricsAvail,
+		backupJobs:       make(map[string]bool),
+		physicalBackups:  make(map[string]bool),
+		archiving:        make(map[string]string),
+		physicals:        new([]backupCall),
+		physicalLabel:    new(string),
+		physicalReason:   new(controlplane.PhysicalBackupOutcome),
+		instanceRestores: new([]RestoreInstanceCall),
+		errs:             make(map[Op]error),
 	}
 }
 
@@ -564,6 +567,60 @@ func (k *Kubernetes) RunPhysicalBackup(ctx context.Context, env, backupID string
 		Label:     *k.physicalLabel,
 		ObjectKey: controlplane.PgBackRestManifestKey(archive.RepoPath, name, *k.physicalLabel),
 	}, nil
+}
+
+// RestoreInstanceCall records one RestoreInstance invocation, so a test can assert what the engine
+// asked the cluster to recover — the environment and the point — without reaching into the adapter.
+// It deliberately does NOT record the ArchiveDestination: that value carries a credential, and a
+// fake that stored one would be a fixture holding a secret (ADR-0063 §1).
+type RestoreInstanceCall struct {
+	Env         string
+	BackupLabel string
+	TargetTime  string
+	Provider    string
+}
+
+// RestoreInstances returns the RestoreInstance calls, in order.
+func (k *Kubernetes) RestoreInstances() []RestoreInstanceCall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]RestoreInstanceCall(nil), *k.instanceRestores...)
+}
+
+// RestoreInstance models rewinding an environment's whole Postgres instance from its repository
+// (ADR-0066 §4). Like the adapter it refuses an instance that has no repository behind it, because
+// there is nothing to recover from — and unlike a backup it does NOT refuse a missing instance: "the
+// instance is gone" is the case a physical restore exists for.
+func (k *Kubernetes) RestoreInstance(ctx context.Context, req controlplane.RestoreInstanceRequest) (controlplane.RestoreInstanceOutcome, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	provider := ""
+	if req.Archive != nil {
+		provider = req.Archive.Provider
+	}
+	*k.instanceRestores = append(*k.instanceRestores, RestoreInstanceCall{
+		Env: req.Environment, BackupLabel: req.BackupLabel, TargetTime: req.TargetTime, Provider: provider,
+	})
+	if err := k.errs[OpRestoreInstance]; err != nil {
+		return controlplane.RestoreInstanceOutcome{}, err
+	}
+	name, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, fakeEnvName(req.Environment))
+	if err != nil {
+		return controlplane.RestoreInstanceOutcome{}, err
+	}
+	if k.archiving[name] == "" {
+		return controlplane.RestoreInstanceOutcome{}, fmt.Errorf("fake: the postgres instance %q has no pgBackRest repository to recover from: %w", name, controlplane.ErrNotFound)
+	}
+	// The recovered instance comes up under the instance's OWN name, and the data claim of the one
+	// that was there is destroyed to make room for it — the adapter's behaviour, modelled so a test
+	// can assert that the environment still resolves to the same instance afterwards.
+	claim := controlplane.AddonDataVolumeName(controlplane.AddonPostgres, name)
+	destroyed := []string{}
+	if _, ok := k.volumes[claim]; ok {
+		delete(k.volumes, claim)
+		destroyed = append(destroyed, claim)
+	}
+	return controlplane.RestoreInstanceOutcome{Instance: name, VolumesDestroyed: destroyed}, nil
 }
 
 // BackupJobPresent reports whether the Job for a backup id still exists. A missing Job is absent

@@ -2,3 +2,4 @@
 .bin/
 .run-env
 **/workspace/.claude/
+**/workspace/.mcp.json

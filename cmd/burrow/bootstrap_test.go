@@ -338,7 +338,7 @@ func TestBootstrapDeploysClusterOnly(t *testing.T) {
 	if !strings.Contains(s, "burrow join "+prefixForTest) {
 		t.Errorf("bootstrap output missing the `burrow join <token>` line:\n%s", s)
 	}
-	for _, want := range []string{"ADMIN-grade", "brew install burrow", ":6443"} {
+	for _, want := range []string{"ADMIN-grade", "brew install burrow-cloud/tap/burrow", ":6443"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("bootstrap output missing %q:\n%s", want, s)
 		}

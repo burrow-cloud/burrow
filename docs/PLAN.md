@@ -209,9 +209,10 @@ the MCP server, and burrowd get along across versions, and prepares the OSS/ente
 - **Version-skew handshake** ([ADR-0039](adr/0039-cli-control-plane-version-skew.md)) — every client
   sends its release version in `X-Burrow-Client-Version`; burrowd is the compatibility anchor: it serves
   any client within one minor and never hard-blocks on a version difference alone, but turns genuine skew
-  into an actionable error. A client too old is told to `brew upgrade burrow`; a newer client calling a
-  route this control plane lacks is told to ask an operator to run `burrow upgrade`, instead of an opaque
-  404. The acting client version is recorded in the audit log next to the principal (migration 00012).
+  into an actionable error. A client too old is told to `brew upgrade burrow-cloud/tap/burrow`; a newer
+  client calling a route this control plane lacks is told to ask an operator to run `burrow upgrade`,
+  instead of an opaque 404. The acting client version is recorded in the audit log next to the
+  principal (migration 00012).
 - **Control-plane transport seam** ([ADR-0045](adr/0045-oss-enterprise-boundary.md)) — the CLI's
   control-plane transport/auth is an explicit `client.Transport` interface (a direct-URL transport and
   the kubeconfig API-server proxy), importable by both `burrow` and `burrow-agent`; the `Client`'s request

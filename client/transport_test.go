@@ -129,8 +129,8 @@ func TestDirectTransportConnect(t *testing.T) {
 // TestNamedTokenRoundTripperSendsClientName confirms the client-NAME half of the ADR-0039 handshake
 // rides X-Burrow-Client, and that an unnamed client omits the header rather than sending an empty
 // one. burrowd needs the name because Burrow ships two client binaries whose remedies differ: the
-// refusal for a stale burrow-agent must not send the user to `brew upgrade burrow` as if the CLI
-// were at fault (issue #308).
+// refusal for a stale burrow-agent must not send the user to the CLI's Homebrew upgrade as if the
+// CLI were at fault (issue #308).
 func TestNamedTokenRoundTripperSendsClientName(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

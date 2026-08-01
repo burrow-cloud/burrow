@@ -166,12 +166,12 @@ func TestUpgradeHints(t *testing.T) {
 		},
 		{
 			name: "cli behind", cli: "v0.7.0", cp: "v0.7.2", latest: "v0.7.2",
-			wantHas:   []string{"A newer burrow (v0.7.2) is available. Run `brew upgrade burrow`."},
+			wantHas:   []string{"A newer burrow (v0.7.2) is available. Run `brew upgrade burrow-cloud/tap/burrow`."},
 			wantNotIn: []string{"burrow upgrade", "You are on the latest release."},
 		},
 		{
 			name: "both behind", cli: "v0.7.0", cp: "v0.7.0", latest: "v0.7.2",
-			wantHas: []string{"burrow upgrade", "brew upgrade burrow"},
+			wantHas: []string{"burrow upgrade", "brew upgrade burrow-cloud/tap/burrow"},
 		},
 		{
 			name: "both current", cli: "v0.7.2", cp: "v0.7.2", latest: "v0.7.2",
@@ -433,7 +433,7 @@ func TestAgentSkewHint(t *testing.T) {
 			for _, want := range []string{
 				"burrow-agent", tc.agentVer, tc.cliVer,
 				"separate binaries",
-				"brew upgrade burrow",
+				"brew upgrade burrow-cloud/tap/burrow",
 				"go install github.com/burrow-cloud/burrow/cmd/burrow-agent@" + tc.cliVer,
 				"Restart your agent session",
 			} {

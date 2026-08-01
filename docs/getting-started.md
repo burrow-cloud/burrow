@@ -141,8 +141,11 @@ Burrow installs two binaries: `burrow`, the CLI you run, and `burrow-agent`, the
 agent runs. Homebrew updates both together:
 
 ```sh
-brew update && brew upgrade burrow
+brew update && brew upgrade burrow-cloud/tap/burrow
 ```
+
+Name the formula in full. Burrow ships from its own tap, and Homebrew's core repository has an
+unrelated formula called `burrow`, so a bare `brew upgrade burrow` will not update Burrow.
 
 Then **restart your agent session** (for example `claude --resume`). A running session keeps
 executing the `burrow-agent` it started with, so it does not pick up the new one until it restarts.
@@ -161,7 +164,7 @@ burrow-agent:     v0.13.0 (/opt/homebrew/bin/burrow-agent)
 control plane:    v0.13.0 (context "prod", namespace "burrow")
 ```
 
-If you installed `burrow-agent` from source rather than with Homebrew, `brew upgrade burrow` will
+If you installed `burrow-agent` from source rather than with Homebrew, the `brew upgrade` above will
 not replace it; update it with `go install github.com/burrow-cloud/burrow/cmd/burrow-agent@<version>`.
 
 `burrow cluster upgrade` updates the installed control plane in place and preserves your state.

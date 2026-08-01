@@ -165,8 +165,13 @@ func doClient(h http.Handler, method, path, tok, clientName, clientVersion, body
 // The reported failure was not the refusal: skew is expected and ADR-0039 governs it. The failure
 // was that the refusal sent the user somewhere that could not fix it. `burrow` and `burrow-agent`
 // are two binaries (ADR-0049 §1); when the stale one was burrow-agent, the message still read "your
-// burrow client ... run `brew upgrade burrow` (or reinstall the CLI)", so a user who had just
-// upgraded the CLI was told to upgrade the CLI and concluded Burrow was broken.
+// burrow client ... run `brew upgrade burrow-cloud/tap/burrow` (or reinstall the CLI)", so a user
+// who had just upgraded the CLI was told to upgrade the CLI and concluded Burrow was broken.
+//
+// The Homebrew wants are pinned TAP-QUALIFIED, and the bare form is a notWant. Burrow's formula
+// lives in burrow-cloud/homebrew-tap and homebrew-core has an unrelated `burrow`, so `brew upgrade
+// burrow` is the same dead end by another route: it fails as not-installed or upgrades a different
+// project.
 //
 // This asserts the message names the remedy for the binary that was ACTUALLY refused, in all three
 // cases the control plane can be in: it knows the caller is burrow-agent, it knows the caller is the
@@ -197,18 +202,19 @@ func TestTooOldNamesTheRemedyForTheRefusedBinary(t *testing.T) {
 		{
 			name:       "the CLI gets the CLI remedy and is not told about the agent binary",
 			clientName: "burrow",
-			want:       []string{"your burrow CLI", "brew upgrade burrow"},
-			notWant:    []string{"burrow-agent", "restart your agent session"},
+			want:       []string{"your burrow CLI", "brew upgrade burrow-cloud/tap/burrow"},
+			notWant:    []string{"burrow-agent", "restart your agent session", "brew upgrade burrow`"},
 		},
 		{
 			name:       "a client too old to name itself is told both binaries must be current",
 			clientName: "",
 			want: []string{
 				"burrow and burrow-agent are separate binaries",
-				"brew upgrade burrow",
+				"brew upgrade burrow-cloud/tap/burrow",
 				"go install github.com/burrow-cloud/burrow/cmd/burrow-agent@v0.9.1",
 				"restart your agent session",
 			},
+			notWant: []string{"brew upgrade burrow`"},
 		},
 	}
 

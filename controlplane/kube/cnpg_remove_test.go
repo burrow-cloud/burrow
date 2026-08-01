@@ -146,7 +146,7 @@ func TestDeleteAddonKeepsTheCloudNativePGDataClaim(t *testing.T) {
 	cluster, claim := cnpgInstance(name, controlplane.DefaultEnvironment)
 	a, client, dyn := cnpgRemovalAdapter([]runtime.Object{claim}, cluster)
 
-	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, false)
+	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, false)
 	if err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestRetainedCloudNativePGClaimIsLabelledForTheListing(t *testing.T) {
 	cluster, claim := cnpgInstance(name, "staging")
 	a, _, _ := cnpgRemovalAdapter([]runtime.Object{claim}, cluster)
 
-	if _, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, false); err != nil {
+	if _, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, false); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestRetainedCloudNativePGClaimIsNotMarkedDetached(t *testing.T) {
 	cluster, claim := cnpgInstance(name, controlplane.DefaultEnvironment)
 	a, client, _ := cnpgRemovalAdapter([]runtime.Object{claim}, cluster)
 
-	if _, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, false); err != nil {
+	if _, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, false); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 
@@ -242,7 +242,7 @@ func TestDeleteAddonWithDeleteDataDestroysTheClusterAndItsClaims(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cnpgTestNamespace}}
 	a, client, dyn := cnpgRemovalAdapter([]runtime.Object{claim, secret}, cluster)
 
-	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, true)
+	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, true)
 	if err != nil {
 		t.Fatalf("DeleteAddon --delete-data: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestDeleteDataDestroysAnAlreadyDetachedCloudNativePGClaim(t *testing.T) {
 	claim.OwnerReferences = nil // as a previous `addon remove` (no --delete-data) left it
 	a, client, _ := cnpgRemovalAdapter([]runtime.Object{claim}, cluster)
 
-	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, true)
+	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, true)
 	if err != nil {
 		t.Fatalf("DeleteAddon --delete-data: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestDeleteAddonKeepsTheBackupClaimUnderEitherBranch(t *testing.T) {
 			}}
 			a, client, _ := cnpgRemovalAdapter([]runtime.Object{claim, backup}, cluster)
 
-			removal, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, deleteData)
+			removal, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, deleteData)
 			if err != nil {
 				t.Fatalf("DeleteAddon: %v", err)
 			}
@@ -329,7 +329,7 @@ func TestDeleteAddonReportsThisEnvironmentsBackupClaim(t *testing.T) {
 	}
 	a, _, _ := cnpgRemovalAdapter(backups, cluster)
 
-	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, false)
+	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, false)
 	if err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestDeleteAddonLeavesAnotherEnvironmentsInstanceAlone(t *testing.T) {
 	}
 	a, client, dyn := cnpgRemovalAdapter(typed, prod, staging)
 
-	if _, err := a.DeleteAddon(ctx, "burrow-postgres-staging", controlplane.AddonMechanismCloudNativePG, true); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-postgres-staging", controlplane.AddonPostgres, true); err != nil {
 		t.Fatalf("DeleteAddon staging --delete-data: %v", err)
 	}
 
@@ -384,7 +384,7 @@ func TestDeleteAddonRefusesWhenTheClusterCannotBeRead(t *testing.T) {
 			errors.New("clusters.postgresql.cnpg.io is forbidden"))
 	})
 
-	_, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, true)
+	_, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, true)
 	if err == nil {
 		t.Fatal("a removal proceeded over a Cluster it could not read")
 	}
@@ -411,7 +411,7 @@ func TestDeleteAddonRefusesWhenTheClaimCannotBeDetached(t *testing.T) {
 		return true, nil, errors.New("the API server said no")
 	})
 
-	if _, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, false); err == nil {
+	if _, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, false); err == nil {
 		t.Fatal("a removal deleted the Cluster after failing to detach the volume it promised to keep")
 	}
 	if _, err := dyn.Resource(cnpgClusterGVR).Namespace(cnpgTestNamespace).Get(ctx, name, metav1.GetOptions{}); err != nil {
@@ -430,7 +430,7 @@ func TestDeleteAddonRemovesAnInstanceWhoseClusterIsAlreadyGone(t *testing.T) {
 	_, claim := cnpgInstance(name, controlplane.DefaultEnvironment)
 	a, client, _ := cnpgRemovalAdapter([]runtime.Object{claim})
 
-	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, false)
+	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, false)
 	if err != nil {
 		t.Fatalf("DeleteAddon over an absent Cluster: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestDeleteAddonRemovesAnInstanceWhoseClusterIsAlreadyGone(t *testing.T) {
 func TestDeleteAddonOnAnAbsentCloudNativePGInstanceIsNotFound(t *testing.T) {
 	a, _, _ := cnpgRemovalAdapter(nil)
 
-	_, err := a.DeleteAddon(context.Background(), "burrow-postgres", controlplane.AddonMechanismCloudNativePG, false)
+	_, err := a.DeleteAddon(context.Background(), "burrow-postgres", controlplane.AddonPostgres, false)
 	if !errors.Is(err, controlplane.ErrNotFound) {
 		t.Fatalf("DeleteAddon error = %v, want ErrNotFound", err)
 	}
@@ -462,7 +462,7 @@ func TestDeleteAddonOnACloudNativePGInstanceMidCreation(t *testing.T) {
 	cluster, _ := cnpgInstance(name, controlplane.DefaultEnvironment)
 	a, _, dyn := cnpgRemovalAdapter(nil, cluster)
 
-	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonMechanismCloudNativePG, true)
+	removal, err := a.DeleteAddon(ctx, name, controlplane.AddonPostgres, true)
 	if err != nil {
 		t.Fatalf("DeleteAddon on a Cluster with no volume yet: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestDeleteAddonOnACloudNativePGInstanceMidCreation(t *testing.T) {
 func TestDeleteAddonOnCloudNativePGWithNoDynamicClientRefuses(t *testing.T) {
 	a := kube.New(fake.NewSimpleClientset(), "burrow")
 
-	_, err := a.DeleteAddon(context.Background(), "burrow-postgres", controlplane.AddonMechanismCloudNativePG, false)
+	_, err := a.DeleteAddon(context.Background(), "burrow-postgres", controlplane.AddonPostgres, false)
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("DeleteAddon error = %v, want ErrInvalid", err)
 	}
@@ -490,19 +490,19 @@ func TestDeleteAddonOnCloudNativePGWithNoDynamicClientRefuses(t *testing.T) {
 	}
 }
 
-// TestDeleteAddonDefaultMechanismNeverTouchesTheCustomResource pins the routing from the other side:
-// the mechanism is TOLD, so a Deployment-backed instance is torn down exactly as it always was and a
-// `Cluster` sharing the namespace is not read, not deleted, and not consulted.
-func TestDeleteAddonDefaultMechanismNeverTouchesTheCustomResource(t *testing.T) {
+// TestDeleteAddonOfAnotherTypeNeverTouchesTheCustomResource pins the routing from the other side:
+// the TYPE is told, so removing a Deployment-backed add-on tears down a Deployment and a `Cluster`
+// sharing the namespace is not read, not deleted, and not consulted.
+func TestDeleteAddonOfAnotherTypeNeverTouchesTheCustomResource(t *testing.T) {
 	ctx := context.Background()
-	cluster, _ := cnpgInstance("burrow-postgres-staging", "staging")
+	cluster, _ := cnpgInstance("burrow-postgres", controlplane.DefaultEnvironment)
 	a, _, dyn := cnpgRemovalAdapter(nil, cluster)
 
-	_, err := a.DeleteAddon(ctx, "burrow-postgres-staging", controlplane.AddonMechanismDefault, false)
+	_, err := a.DeleteAddon(ctx, "burrow-logs", controlplane.AddonLogs, false)
 	if !errors.Is(err, controlplane.ErrNotFound) {
-		t.Fatalf("DeleteAddon error = %v, want ErrNotFound — the Deployment path must not find a Cluster", err)
+		t.Fatalf("DeleteAddon error = %v, want ErrNotFound — a Deployment-backed add-on must not find a Cluster", err)
 	}
-	if _, err := dyn.Resource(cnpgClusterGVR).Namespace(cnpgTestNamespace).Get(ctx, "burrow-postgres-staging", metav1.GetOptions{}); err != nil {
-		t.Errorf("the Deployment-path teardown deleted a Cluster: %v", err)
+	if _, err := dyn.Resource(cnpgClusterGVR).Namespace(cnpgTestNamespace).Get(ctx, "burrow-postgres", metav1.GetOptions{}); err != nil {
+		t.Errorf("removing another add-on deleted the Postgres Cluster: %v", err)
 	}
 }

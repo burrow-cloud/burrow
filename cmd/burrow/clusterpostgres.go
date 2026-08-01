@@ -55,7 +55,7 @@ func newClusterPostgresCmd() *cobra.Command {
 		Use:   "postgres",
 		Short: "Set up the cluster's PostgreSQL operator (install)",
 		Long: "postgres provisions the CloudNativePG operator, the cluster-wide prerequisite the\n" +
-			"Postgres add-on's mechanism runs on (ADR-0066). It is a one-time setup an operator runs\n" +
+			"Postgres add-on runs on (ADR-0066). It is a one-time setup an operator runs\n" +
 			"with their kubeconfig, not an agent operation: it installs cluster-scoped CustomResource\n" +
 			"Definitions, which needs cluster-admin.\n\n" +
 			"This is not `burrow addon install postgres`. That provisions a database instance for one\n" +
@@ -187,13 +187,13 @@ func clusterAdminNotice(w io.Writer) string {
 		"and cannot run it."
 }
 
-// writeClusterPostgresDone prints the closing block: what is ready, and the honest limit that the
-// add-on does not use the operator yet (ADR-0009).
+// writeClusterPostgresDone prints the closing block: what is ready, what to do next, and the honest
+// limit that the operator is not yet doing the backups it was chosen for (ADR-0009).
 func writeClusterPostgresDone(w io.Writer) {
 	fmt.Fprintln(w, "\nDone. The CloudNativePG operator is on the cluster.")
 	fmt.Fprintln(w, "Check it anytime: burrow cluster")
-	fmt.Fprintln(w, note(w)+"`burrow addon install postgres` still stands up its own Deployment by default.")
-	fmt.Fprintln(w, "  Pass --cnpg to run a new instance on the operator instead. That path is opt-in while the")
-	fmt.Fprintln(w, "  rest of ADR-0066 lands: backups still go through the same dump path, and removing a")
-	fmt.Fprintln(w, "  CloudNativePG instance is not built yet.")
+	fmt.Fprintln(w, "Next: burrow addon install postgres [--env <environment>]")
+	fmt.Fprintln(w, note(w)+"backups are still Burrow's own pg_dump / pg_restore Jobs. WAL archiving, scheduled")
+	fmt.Fprintln(w, "  backups, retention and point-in-time recovery are what the operator was chosen for and")
+	fmt.Fprintln(w, "  are not built yet.")
 }

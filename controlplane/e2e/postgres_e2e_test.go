@@ -16,6 +16,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
@@ -34,6 +35,14 @@ import (
 // points at a disposable cluster; it creates its own namespaces and cleans them up. The round-trip
 // runs inside the cluster because the add-on Service (burrow-postgres.<ns>.svc) is only reachable
 // from in-cluster.
+//
+// The instance is a CloudNativePG `Cluster` (ADR-0066 §1), which makes the OPERATOR a prerequisite
+// of this test rather than a variant of it: there is no second mechanism to fall back to. The
+// harness installs it (scripts/with-k3d.sh, and the CI job's own step), and a cluster without it
+// skips with the command that fixes it rather than failing on a refusal it cannot do anything about.
+// Everything below the install is unchanged by the mechanism, which is the point of asserting it
+// here: attach, DATABASE_URL, the round-trip and detach are ADR-0031's contract and they are
+// expressed against an endpoint, not against a workload kind.
 //
 // It then does the whole thing again in a SECOND environment with the SAME app name, which is the
 // end-to-end statement of ADR-0067 §1 (issue #339): staging gets its own instance, its own database,
@@ -56,6 +65,18 @@ func TestPostgresAddonE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clientset: %v", err)
 	}
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		t.Fatalf("dynamic client: %v", err)
+	}
+	found, err := kube.DetectCloudNativePG(ctx, client)
+	if err != nil {
+		t.Fatalf("detecting CloudNativePG: %v", err)
+	}
+	if !found.Ready {
+		t.Skipf("the postgres add-on is a CloudNativePG Cluster (ADR-0066 §1) and no controller is running on this cluster; "+
+			"install the operator first (kubectl apply --server-side -f %s)", kube.CNPGManifestURL(kube.CNPGVersion))
+	}
 
 	stamp := time.Now().UnixNano()
 	appNS := fmt.Sprintf("burrow-pg-app-%d", stamp)
@@ -69,7 +90,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 		t.Cleanup(func() { _ = client.CoreV1().Namespaces().Delete(context.Background(), ns, metav1.DeleteOptions{}) })
 	}
 
-	k8s := kube.New(client, appNS).WithAddonNamespace(addonNS)
+	k8s := kube.New(client, appNS).WithAddonNamespace(addonNS).WithDynamicClient(dyn)
 	prov := kube.NewPostgresProvisioner(client, addonNS)
 	db := fake.NewDatabase()
 	engine, err := cp.New(cp.Deps{
@@ -246,6 +267,18 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clientset: %v", err)
 	}
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		t.Fatalf("dynamic client: %v", err)
+	}
+	found, err := kube.DetectCloudNativePG(ctx, client)
+	if err != nil {
+		t.Fatalf("detecting CloudNativePG: %v", err)
+	}
+	if !found.Ready {
+		t.Skipf("the postgres add-on is a CloudNativePG Cluster (ADR-0066 §1) and no controller is running on this cluster; "+
+			"install the operator first (kubectl apply --server-side -f %s)", kube.CNPGManifestURL(kube.CNPGVersion))
+	}
 
 	stamp := time.Now().UnixNano()
 	appNS := fmt.Sprintf("burrow-pgbak-app-%d", stamp)
@@ -258,7 +291,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 		t.Cleanup(func() { _ = client.CoreV1().Namespaces().Delete(context.Background(), ns, metav1.DeleteOptions{}) })
 	}
 
-	k8s := kube.New(client, appNS).WithAddonNamespace(addonNS)
+	k8s := kube.New(client, appNS).WithAddonNamespace(addonNS).WithDynamicClient(dyn)
 	prov := kube.NewPostgresProvisioner(client, addonNS)
 	engine, err := cp.New(cp.Deps{
 		Kubernetes:          k8s,

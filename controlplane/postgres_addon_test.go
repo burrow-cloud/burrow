@@ -38,14 +38,24 @@ func newPostgresEngine(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Databa
 }
 
 // TestPostgresCatalogEntry asserts the catalog carries a well-formed AddonPostgres entry: the
-// official image, port 5432, persistent storage, the "database" capability, and a summary.
+// pinned CloudNativePG operand image, port 5432, persistent storage, the "database" capability, and
+// a summary. The image is asserted against the constant rather than a literal because the licence
+// argument is about WHICH image (ADR-0066 §3: the minimal variant, which carries no backup tooling
+// and therefore no barman), and the constant is where that reasoning is written down.
 func TestPostgresCatalogEntry(t *testing.T) {
 	spec, ok := cp.LookupAddon(cp.AddonPostgres)
 	if !ok {
 		t.Fatal("AddonPostgres is not in the catalog")
 	}
-	if spec.Image != "postgres:17-alpine" {
-		t.Errorf("image = %q, want postgres:17-alpine", spec.Image)
+	if spec.Image != cp.CNPGPostgresImage {
+		t.Errorf("image = %q, want the pinned operand image %q", spec.Image, cp.CNPGPostgresImage)
+	}
+	if !strings.Contains(spec.Image, "minimal") {
+		t.Errorf("image = %q, want the MINIMAL operand variant: the standard one bundles barman-cloud, "+
+			"which shells out to GPL-3.0 tooling ADR-0066 §3 declines", spec.Image)
+	}
+	if spec.Backend != "cloudnative-pg" {
+		t.Errorf("backend = %q, want cloudnative-pg — the add-on has one implementation", spec.Backend)
 	}
 	if spec.Port != 5432 {
 		t.Errorf("port = %d, want 5432", spec.Port)

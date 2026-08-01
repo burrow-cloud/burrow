@@ -299,7 +299,7 @@ func TestInstallAddonPerEnvironmentStandsUpSeparateInstances(t *testing.T) {
 		if ready, rerr := k.AddonReady(ctx, name); rerr != nil || !ready {
 			t.Errorf("instance %q is not in the cluster (ready=%v err=%v)", name, ready, rerr)
 		}
-		if _, hasVol := k.AddonVolume(name); !hasVol {
+		if _, hasVol := k.AddonVolume(cp.AddonDataVolumeName(cp.AddonPostgres, name)); !hasVol {
 			t.Errorf("instance %q has no data volume of its own", name)
 		}
 	}

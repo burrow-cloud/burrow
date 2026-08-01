@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -62,7 +61,7 @@ func addonName(t controlplane.AddonType, env string) (string, error) {
 // read-only Get before deploying the scraper.
 const vmagentServiceAccount = "burrow-vmagent"
 
-func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string, mech controlplane.AddonMechanism) (controlplane.AddonInfo, error) {
+func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string) (controlplane.AddonInfo, error) {
 	name, err := addonName(spec.Type, env)
 	if err != nil {
 		return controlplane.AddonInfo{}, err
@@ -76,11 +75,11 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 	// rather than only the ones whose name gives it away.
 	volumeLabels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: string(spec.Type), addonEnvLabel: env, addonVolumeRole: controlplane.AddonVolumeData}
 
-	// A CloudNativePG-backed instance is one custom resource and no authored pod at all, so it
-	// branches before anything below is created: the operator composes the workload, the volume and
-	// the services from the `Cluster` (ADR-0066 §1). Everything downstream of the install — the
-	// endpoint, the superuser Secret, attach, and the ADR-0032 backup Jobs — is unchanged.
-	if mech == controlplane.AddonMechanismCloudNativePG {
+	// A Postgres instance is one custom resource and no authored pod at all, so it branches before
+	// anything below is created: the operator composes the workload, the volume and the services from
+	// the `Cluster` (ADR-0066 §1). Everything downstream of the install — the endpoint, the superuser
+	// Secret, attach, and the ADR-0032 backup Jobs — reaches it the same way it always did.
+	if spec.Type == controlplane.AddonPostgres {
 		return a.deployPostgresCluster(ctx, spec, env, name, labels)
 	}
 
@@ -115,62 +114,6 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 		mounts = []corev1.VolumeMount{{Name: "data", MountPath: addonDataPath(spec.Type)}}
 	}
 
-	// Postgres needs a fixed superuser role and a generated superuser password before its pod
-	// starts: burrowd creates the burrow-postgres Secret (the generated password) BEFORE the
-	// Deployment and points the pod's POSTGRES_PASSWORD at it via secretKeyRef, so the password is
-	// never inlined in the pod spec, never logged, and never returned (ADR-0031). Other add-ons
-	// add no env.
-	var podEnv []corev1.EnvVar
-	// readiness gates the Service (and AddonReady) on the backing service actually accepting
-	// connections, not merely on the container running. Postgres needs it: on first boot the
-	// official image runs initdb and a temporary socket-only server before binding TCP 5432, so a
-	// pod can be "running" for several seconds before it serves — a TCP probe on its port becomes
-	// ready only when the real server is up.
-	var readiness *corev1.Probe
-	// Postgres declares a memory footprint (request + limit) so it fits a small VPS predictably;
-	// other add-ons keep the cluster's defaults for now.
-	var resources corev1.ResourceRequirements
-	// The Postgres pod runs an always-on metrics-exporter sidecar and carries scrape annotations so
-	// the metrics add-on (whenever it is installed, before or after Postgres) discovers and scrapes
-	// it (ADR-0051); other add-ons add neither.
-	var extraContainers []corev1.Container
-	var podAnnotations map[string]string
-	if spec.Type == controlplane.AddonPostgres {
-		if podEnv, err = a.ensurePostgresSuperuserEnv(ctx, name, labels); err != nil {
-			return controlplane.AddonInfo{}, err
-		}
-		resources = postgresResources()
-		readiness = &corev1.Probe{
-			ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(spec.Port)}},
-			InitialDelaySeconds: 3,
-			PeriodSeconds:       3,
-			TimeoutSeconds:      2,
-			// ~90s of grace for initdb on a cold first boot before the pod is marked unready.
-			FailureThreshold: 30,
-		}
-
-		// Always export metrics: a postgres_exporter sidecar connects to the local server as the
-		// superuser and exposes Prometheus metrics on :9187, including pg_stat_statements slow-query
-		// stats. The password is wired via secretKeyRef into burrow-postgres, never inlined (ADR-0031).
-		extraContainers = append(extraContainers, postgresExporterContainer(name))
-		// Annotate the pod so the metrics add-on's vmagent scrapes the exporter's /metrics on :9187 —
-		// the same annotation style app pods use (adapter.go buildDeployment). Discovery is namespace
-		// based, so install order (metrics before or after Postgres) does not matter (ADR-0051).
-		podAnnotations = map[string]string{
-			"prometheus.io/scrape": "true",
-			"prometheus.io/port":   strconv.Itoa(int(postgresExporterPort)),
-			"prometheus.io/path":   "/metrics",
-		}
-		// Create the pg_stat_statements extension on first boot via an init script the official image
-		// runs during initdb; shared_preload_libraries (set in addonArgs) loads the module itself.
-		initVol, initMount, ierr := a.ensurePostgresInitScript(ctx, name, labels)
-		if ierr != nil {
-			return controlplane.AddonInfo{}, ierr
-		}
-		volumes = append(volumes, initVol)
-		mounts = append(mounts, initMount)
-	}
-
 	replicas := int32(1)
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: labels},
@@ -181,9 +124,9 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 			// would deadlock — recreate instead.
 			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
-					Containers: append([]corev1.Container{{
+					Containers: []corev1.Container{{
 						Name:  string(spec.Type),
 						Image: spec.Image,
 						// The metrics add-on's sample retention is cluster configuration read HERE,
@@ -191,25 +134,22 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 						// retention it was created with — the args are a field on its pod template,
 						// not a policy the add-on re-reads — so a change applies to the next install
 						// of it rather than to the running one.
-						Args:           addonArgs(spec, a.limits.ClusterDuration(ctx, controlplane.LimitAddonMetricRetention)),
-						Env:            podEnv,
-						Ports:          []corev1.ContainerPort{{ContainerPort: spec.Port}},
-						VolumeMounts:   mounts,
-						ReadinessProbe: readiness,
-						Resources:      resources,
-					}}, extraContainers...),
+						Args:         addonArgs(spec, a.limits.ClusterDuration(ctx, controlplane.LimitAddonMetricRetention)),
+						Ports:        []corev1.ContainerPort{{ContainerPort: spec.Port}},
+						VolumeMounts: mounts,
+					}},
 					Volumes: volumes,
 				},
 			},
 		},
 	}
-	// An add-on instance runs an image BURROW chose (Postgres, VictoriaLogs, VictoriaMetrics,
-	// Valkey), not the app's, so it takes the PLATFORM hook (ADR-0073 §2) — an operator who
-	// sandboxed the tenant's image on tenant-only nodes did not ask for their own Postgres there.
-	// Applied last, over the fully-constructed pod spec, so it sees the containers, volumes, and
-	// exporter sidecar composed above; a nil mutator leaves the Deployment exactly as built (§4).
-	// This is also the hook's most dangerous reach: the Postgres instance is stateful, and moving it
-	// to a pool where its volume cannot attach breaks the add-on rather than one deploy.
+	// An add-on instance runs an image BURROW chose (VictoriaLogs, VictoriaMetrics, Valkey), not the
+	// app's, so it takes the PLATFORM hook (ADR-0073 §2) — an operator who sandboxed the tenant's
+	// image on tenant-only nodes did not ask for their own log store there. Applied last, over the
+	// fully-constructed pod spec, so it sees the containers and volumes composed above; a nil mutator
+	// leaves the Deployment exactly as built (§4). The Postgres instance takes the placement seam
+	// ADR-0077 built instead, because its pods are the OPERATOR's and there is no PodSpec here to
+	// hand over.
 	a.applyPlatformPodMutator(&dep.Spec.Template.Spec)
 	if _, err := a.client.AppsV1().Deployments(a.addonNamespace).Create(ctx, dep, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return controlplane.AddonInfo{}, fmt.Errorf("kube: creating addon %q: %w", name, err)
@@ -296,12 +236,6 @@ func postgresSecretName(env string) (string, error) {
 	return addonName(controlplane.AddonPostgres, env)
 }
 
-// postgresInitConfigMap is the first-boot SQL ConfigMap for environment env's instance. It is
-// per-instance for the same reason the Secret is: it is consumed during that server's initdb, and a
-// removal that destroys one environment's data must not delete the script another environment's
-// instance would need on its next fresh boot.
-func postgresInitConfigMap(instance string) string { return instance + "-init" }
-
 // PostgresPasswordKey is the key under which the superuser password is stored in PostgresSecretName.
 const PostgresPasswordKey = "password"
 
@@ -316,118 +250,8 @@ func generatePassword() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// ensurePostgresSuperuserEnv creates the burrow-postgres Secret holding a freshly generated
-// superuser password (idempotently — an already-present Secret is left untouched, so a re-install
-// keeps the existing password and the running database) and returns the pod env that wires the
-// Postgres container to it: POSTGRES_USER=burrow_admin (a literal, not a secret), POSTGRES_PASSWORD
-// from a secretKeyRef into that Secret, and PGDATA under a subdirectory of the mounted volume. The
-// generated password is written ONLY into the Secret — it is never inlined into the pod spec,
-// returned, or logged (ADR-0031).
-func (a *Adapter) ensurePostgresSuperuserEnv(ctx context.Context, instance string, labels map[string]string) ([]corev1.EnvVar, error) {
-	secrets := a.client.CoreV1().Secrets(a.addonNamespace)
-	if _, err := secrets.Get(ctx, instance, metav1.GetOptions{}); apierrors.IsNotFound(err) {
-		pw, gerr := generatePassword()
-		if gerr != nil {
-			return nil, gerr
-		}
-		sec := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: instance, Namespace: a.addonNamespace, Labels: labels},
-			Type:       corev1.SecretTypeOpaque,
-			Data:       map[string][]byte{PostgresPasswordKey: []byte(pw)},
-		}
-		if _, cerr := secrets.Create(ctx, sec, metav1.CreateOptions{}); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
-			// The error names the Secret only — never the generated value.
-			return nil, fmt.Errorf("kube: creating postgres superuser secret %q: %w", instance, cerr)
-		}
-	} else if err != nil {
-		return nil, fmt.Errorf("kube: reading postgres superuser secret %q: %w", instance, err)
-	}
-
-	return []corev1.EnvVar{
-		{Name: "POSTGRES_USER", Value: PostgresSuperuser},
-		{Name: "POSTGRES_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: instance},
-				Key:                  PostgresPasswordKey,
-			},
-		}},
-		// The add-on standardizes on the "postgres" maintenance database: it is what the control
-		// plane connects to (postgres.go connectAdmin), what the metrics exporter reads, and where the
-		// init script must create pg_stat_statements — so setting POSTGRES_DB=postgres runs the init
-		// script against "postgres" and keeps all three in agreement (ADR-0051). The image otherwise
-		// defaults POSTGRES_DB to the POSTGRES_USER name (burrow_admin), which would leave the
-		// extension in the wrong database. "postgres" always exists from initdb, so this adds no db.
-		{Name: "POSTGRES_DB", Value: "postgres"},
-		// The official image refuses to initialize a non-empty data directory (a mounted PVC has a
-		// lost+found), so put PGDATA in a subdirectory of the mount.
-		{Name: "PGDATA", Value: addonDataPath(controlplane.AddonPostgres) + "/pgdata"},
-	}, nil
-}
-
-// postgresExporterImage is the pinned Postgres metrics exporter (prometheus-community, Apache-2.0).
-// It runs as an always-on sidecar on the Postgres add-on pod, connects to the local server as the
-// superuser, and exposes Prometheus metrics — including pg_stat_statements slow-query stats — so the
-// metrics add-on's vmagent can scrape database health when it is installed (ADR-0051).
-const postgresExporterImage = "quay.io/prometheuscommunity/postgres-exporter:v0.20.1"
-
 // postgresExporterPort is the port postgres_exporter listens on (its documented default).
 const postgresExporterPort int32 = 9187
-
-// PostgresInitConfigMap is the ConfigMap whose first-boot SQL the official postgres image runs
-// during initdb (mounted into /docker-entrypoint-initdb.d) for the DEFAULT environment's instance.
-// It creates the pg_stat_statements extension so the metrics exporter's slow-query collector has
-// data (ADR-0051). It lives in the add-on namespace and is removed with the add-on it belongs to;
-// every other environment's instance gets its own, named by postgresInitConfigMap (ADR-0067 §1).
-const PostgresInitConfigMap = "burrow-postgres-init"
-
-// postgresExporterContainer builds the always-on postgres_exporter sidecar. It connects to the local
-// server over localhost as the Burrow superuser, with the password sourced by secretKeyRef from the
-// burrow-postgres Secret — never inlined into the pod spec (ADR-0031) — and enables the
-// stat_statements collector so slow-query metrics are exported. Its footprint is tiny (32Mi request,
-// 64Mi limit) so the always-on cost is negligible.
-func postgresExporterContainer(instance string) corev1.Container {
-	return corev1.Container{
-		Name:  "metrics-exporter",
-		Image: postgresExporterImage,
-		// Enable the pg_stat_statements collector (disabled by default) so slow-query stats export.
-		Args: []string{"--collector.stat_statements"},
-		Env: []corev1.EnvVar{
-			// The exporter connects over the pod loopback to the co-located server; sslmode=disable
-			// because the traffic never leaves the pod. The "postgres" maintenance database always
-			// exists, and pg_stat_statements is a shared, cluster-wide view reachable from it.
-			{Name: "DATA_SOURCE_URI", Value: "localhost:5432/postgres?sslmode=disable"},
-			{Name: "DATA_SOURCE_USER", Value: PostgresSuperuser},
-			{Name: "DATA_SOURCE_PASS", ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: instance},
-					Key:                  PostgresPasswordKey,
-				},
-			}},
-		},
-		Ports: []corev1.ContainerPort{{ContainerPort: postgresExporterPort}},
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("32Mi")},
-			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")},
-		},
-	}
-}
-
-// ensurePostgresInitScript creates (idempotently) the ConfigMap holding the first-boot SQL that
-// creates the pg_stat_statements extension, and returns the pod volume + mount that hands it to the
-// official image's /docker-entrypoint-initdb.d hook. The script runs only on a fresh initdb; on a
-// re-install over an existing volume it is a harmless no-op (CREATE EXTENSION IF NOT EXISTS).
-func (a *Adapter) ensurePostgresInitScript(ctx context.Context, instance string, labels map[string]string) (corev1.Volume, corev1.VolumeMount, error) {
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: postgresInitConfigMap(instance), Namespace: a.addonNamespace, Labels: labels},
-		Data:       map[string]string{"10-pg-stat-statements.sql": "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;\n"},
-	}
-	if _, err := a.client.CoreV1().ConfigMaps(a.addonNamespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("kube: creating postgres init config %q: %w", postgresInitConfigMap(instance), err)
-	}
-	vol := corev1.Volume{Name: "init", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: postgresInitConfigMap(instance)}}}}
-	mount := corev1.VolumeMount{Name: "init", MountPath: "/docker-entrypoint-initdb.d"}
-	return vol, mount, nil
-}
 
 // fluentBitImage is the pinned log collector (Apache-2.0). It ships pod logs to the store.
 const fluentBitImage = "fluent/fluent-bit:3.2.10"
@@ -632,19 +456,18 @@ func (a *Adapter) scrapeNamespaces() string {
 // this is a cheap single-object probe. A missing workload is reported as not ready (false, nil);
 // only a real API error is returned.
 //
-// WHICH OBJECT IS THE ADD-ON is resolved here rather than assumed, and that is what keeps a
-// CloudNativePG-backed instance from reading as an ADR-0074 §6 discrepancy. §6's diagnosis is an
-// ABSENCE — the registry says this exists and the cluster does not have it — and it is made by the
-// failure observer from exactly this seam's answer. A CNPG-backed Postgres instance has no
-// Deployment by design: the operator reconciles a StatefulSet from the `Cluster` Burrow wrote. A
-// probe that only looked for a Deployment would report a serving database as not running, once a
-// minute, forever, and the ledger would carry an AddonNotRunning row about an add-on that is fine —
-// a false absence, which is worse than no ledger at all because it is indistinguishable from a real
-// one.
+// WHICH OBJECT IS THE ADD-ON is resolved here rather than assumed, and that is what keeps a Postgres
+// instance from reading as an ADR-0074 §6 discrepancy. §6's diagnosis is an ABSENCE — the registry
+// says this exists and the cluster does not have it — and it is made by the failure observer from
+// exactly this seam's answer. A Postgres instance has no Deployment by design: the operator
+// reconciles a StatefulSet from the `Cluster` Burrow wrote. A probe that only looked for a
+// Deployment would report a serving database as not running, once a minute, forever, and the ledger
+// would carry an AddonNotRunning row about an add-on that is fine — a false absence, which is worse
+// than no ledger at all because it is indistinguishable from a real one.
 //
-// The Deployment is looked for FIRST because it is the common case and one Get answers it. The
-// custom resource is consulted only when there is no Deployment, so a cluster with no CloudNativePG
-// pays nothing for this and every existing add-on behaves exactly as before.
+// The Deployment is looked for FIRST because it answers for every other add-on in one Get. The
+// custom resource is consulted only when there is none, so a cluster running no Postgres add-on
+// pays nothing for this.
 //
 // No new REASON is introduced by any of this. A `Cluster` that will not come up is an add-on whose
 // workload is not available, which is what ReasonAddonNotRunning already says; the ledger's
@@ -669,40 +492,28 @@ func (a *Adapter) AddonReady(ctx context.Context, name string) (bool, error) {
 
 // DeleteAddon tears an add-on's workload down and, only when deleteData is set, destroys its data
 // volume with it. The default is data-preserving: the PVC of a stateful add-on outlives the removal,
-// so `addon remove postgres` stops the instance without destroying every attached app's database
-// (ADR-0025/0031). The retained volume keeps its resource name, which is also the add-on name, so a
-// re-install lands on exactly the same claim and the instance comes back with its data.
+// so `addon remove` stops the instance without destroying what it holds (ADR-0025, ADR-0064 §1). The
+// retained volume keeps its resource name, which is also the add-on name, so a re-install lands on
+// exactly the same claim and the instance comes back with its data.
 //
-// What is retained is deliberately consistent: for Postgres the superuser Secret and the init
-// ConfigMap are kept alongside the volume, because the official image only honours POSTGRES_PASSWORD
-// during initdb. A reinstall over a retained volume never re-runs initdb, so a FRESHLY generated
-// superuser password would not take — burrowd, the metrics exporter, and the backup Jobs would all
-// be locked out of a database that is still there. Keeping the volume therefore means keeping the
-// credential that opens it; the two are deleted together or kept together, never split.
-//
-// mech says which mechanism stood the instance up, and it is TOLD rather than discovered. The
-// registry recorded it at install (AddonInfo.Backend, ADR-0066 §1), and a removal is the one
-// operation that must not infer it: inferring means reading the cluster, and every way of failing to
-// read the cluster looks like "the object is not there" — which on this path would mean walking past
-// a running database and deleting the row that named it. The mechanism decides which teardown runs;
-// the teardown itself still refuses anything it cannot read (cnpg_remove.go).
-func (a *Adapter) DeleteAddon(ctx context.Context, name string, mech controlplane.AddonMechanism, deleteData bool) (controlplane.AddonRemoval, error) {
-	if mech == controlplane.AddonMechanismCloudNativePG {
+// t is the add-on's TYPE, and it is TOLD rather than discovered. The registry recorded it at install,
+// and it decides which teardown runs: a Postgres instance is a CloudNativePG `Cluster` (ADR-0066 §1)
+// with no Deployment at all, and every other add-on is the Deployment below. A removal is the one
+// operation that must not infer that — inferring means reading the cluster, and every way of failing
+// to read the cluster looks like "the object is not there", which on this path would mean walking
+// past a running database and deleting the registry row that named it. The teardown itself still
+// refuses anything it cannot read (cnpg_remove.go).
+func (a *Adapter) DeleteAddon(ctx context.Context, name string, t controlplane.AddonType, deleteData bool) (controlplane.AddonRemoval, error) {
+	if t == controlplane.AddonPostgres {
 		return a.deletePostgresCluster(ctx, name, deleteData)
 	}
 	removal := controlplane.AddonRemoval{Namespace: a.addonNamespace}
 	deps := a.client.AppsV1().Deployments(a.addonNamespace)
-	// The instance's own label says what it is. Reading it beats comparing the name against a
-	// derived one: with an instance per environment (ADR-0067 §1) the Postgres instances are
-	// burrow-postgres, burrow-postgres-staging, and so on, and a removal must recognize every one of
-	// them without reconstructing which environment it came from.
-	dep, err := deps.Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
+	if _, err := deps.Get(ctx, name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		return removal, fmt.Errorf("kube: addon %q: %w", name, controlplane.ErrNotFound)
 	} else if err != nil {
 		return removal, fmt.Errorf("kube: reading addon %q: %w", name, err)
 	}
-	isPostgres := dep.Labels[addonLabel] == string(controlplane.AddonPostgres)
 	// The Deployment is the source of truth for existence; the workload and its Service always go.
 	if err := deps.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return removal, fmt.Errorf("kube: deleting addon %q: %w", name, err)
@@ -723,35 +534,8 @@ func (a *Adapter) DeleteAddon(ctx context.Context, name string, mech controlplan
 		} else if !apierrors.IsNotFound(err) {
 			return removal, fmt.Errorf("kube: deleting addon volume %q: %w", name, err)
 		}
-		// A Postgres instance owns its superuser Secret (ADR-0031) and its pg_stat_statements
-		// init-script ConfigMap (ADR-0051), both named after the instance. They exist to open and
-		// initialize THIS volume, so they go exactly when it does — and another environment's
-		// instance keeps its own, which is the point of the credential being per-instance
-		// (ADR-0067 §1).
-		if isPostgres {
-			_ = a.client.CoreV1().Secrets(a.addonNamespace).Delete(ctx, name, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().ConfigMaps(a.addonNamespace).Delete(ctx, postgresInitConfigMap(name), metav1.DeleteOptions{})
-		}
 	} else if _, err := pvcs.Get(ctx, name, metav1.GetOptions{}); err == nil {
 		removal.RetainedDataVolume = name
-	}
-
-	// The backup volume ALWAYS survives, including a data-deleting removal (ADR-0032). Backups
-	// outliving the database they were taken from is the whole point of taking them, and it is what
-	// makes destroying the data survivable: the recorded backup rows in the control-plane database
-	// still resolve to dumps that are still there. It is reported rather than silently left so the
-	// operator knows the storage is still allocated and can reclaim it deliberately.
-	// It is THIS environment's backup claim that is reported, resolved from the instance's own
-	// environment label — one claim per environment (ADR-0067 §1), so naming the compiled-in constant
-	// here would tell an operator removing staging's instance that production's dumps were what
-	// survived. An instance installed before that label existed carries none, and is the default
-	// environment's by construction, which is exactly what envName resolves an empty value to.
-	if isPostgres {
-		if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, addonEnvironment(dep.Labels)); err == nil {
-			if _, err := pvcs.Get(ctx, claim, metav1.GetOptions{}); err == nil {
-				removal.RetainedBackupVolume = claim
-			}
-		}
 	}
 	return removal, nil
 }
@@ -852,10 +636,6 @@ func addonDataPath(t controlplane.AddonType) string {
 		return "/vlogs"
 	case controlplane.AddonMetrics:
 		return "/victoria-metrics-data"
-	case controlplane.AddonPostgres:
-		// The official postgres image's conventional data mount. PGDATA is set to a subdirectory
-		// of this (see ensurePostgresSuperuserEnv) so the image can initialize over a mounted PVC.
-		return "/var/lib/postgresql/data"
 	default:
 		return "/data"
 	}
@@ -884,17 +664,6 @@ func addonArgs(spec controlplane.AddonSpec, metricRetention time.Duration) []str
 			"-storageDataPath=" + addonDataPath(spec.Type),
 			fmt.Sprintf("-retentionPeriod=%ds", int64(metricRetention.Seconds())),
 		}
-	case controlplane.AddonPostgres:
-		// Run the shared Postgres instance with lean server settings suited to a low-traffic
-		// metadata store (see LeanPostgresSettings), plus pg_stat_statements preloaded so the
-		// always-on metrics exporter can read slow-query stats (ADR-0051). The official image's
-		// entrypoint forwards args beginning with `-` to the postgres server, so these `-c key=value`
-		// pairs tune it with no custom config file. shared_preload_libraries must be set at server
-		// start (it cannot be loaded later), and the extension itself is created by the init script.
-		return append(postgresTuningArgs(),
-			"-c", "shared_preload_libraries=pg_stat_statements",
-			"-c", "pg_stat_statements.track=top",
-		)
 	default:
 		return nil
 	}
@@ -902,7 +671,8 @@ func addonArgs(spec controlplane.AddonSpec, metricRetention time.Duration) []str
 
 // LeanPostgresSettings are the server settings Burrow runs its Postgres instances with — both the
 // control-plane state database (ADR-0012, rendered into cmd/burrow/manifests/install.yaml.tmpl) and
-// the shared Postgres add-on. Burrow's databases are low-traffic control-plane/metadata stores, so
+// the Postgres add-on, whose `Cluster` carries them as spec.postgresql.parameters
+// (leanPostgresParameters). Burrow's databases are low-traffic control-plane/metadata stores, so
 // the stock postgres defaults (128MB shared_buffers, 100 max_connections, default work_mem) are
 // wildly generous; these lean values let the whole stack (k3s + burrowd + Postgres) fit a 1-2GB VPS
 // with real headroom. The install manifest hard-codes the SAME values as postgres args — keep the
@@ -913,15 +683,6 @@ var LeanPostgresSettings = []string{
 	"work_mem=4MB",
 	"maintenance_work_mem=32MB",
 	"effective_cache_size=256MB",
-}
-
-// postgresTuningArgs renders LeanPostgresSettings as `postgres` container args (`-c key=value`).
-func postgresTuningArgs() []string {
-	args := make([]string, 0, len(LeanPostgresSettings)*2)
-	for _, s := range LeanPostgresSettings {
-		args = append(args, "-c", s)
-	}
-	return args
 }
 
 // postgresResources is the memory footprint declared on every Burrow Postgres pod (control-plane and

@@ -214,7 +214,7 @@ func TestAddonDeployListDelete(t *testing.T) {
 	a := kube.New(client, ns).WithAddonNamespace(addonNS)
 
 	spec := cp.AddonSpec{Type: cp.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428, StorageGi: 5, Capabilities: []string{"logs"}}
-	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, "")
+	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestAddonDeployListDelete(t *testing.T) {
 	}
 
 	// Delete removes it; deleting a missing add-on is ErrNotFound.
-	if _, err := a.DeleteAddon(ctx, "burrow-logs", cp.AddonMechanismDefault, true); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-logs", cp.AddonLogs, true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-logs", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -274,7 +274,7 @@ func TestAddonDeployListDelete(t *testing.T) {
 	if _, err := client.AppsV1().DaemonSets(addonNS).Get(ctx, "burrow-logs-collector", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("collector should be gone, got %v", err)
 	}
-	if _, err := a.DeleteAddon(ctx, "nope", cp.AddonMechanismDefault, true); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := a.DeleteAddon(ctx, "nope", cp.AddonLogs, true); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("delete missing = %v, want ErrNotFound", err)
 	}
 }
@@ -290,7 +290,7 @@ func TestAddonMetricsDeployDelete(t *testing.T) {
 	a := kube.New(client, ns).WithAddonNamespace(addonNS)
 
 	spec := cp.AddonSpec{Type: cp.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428, StorageGi: 10, Capabilities: []string{"metrics"}}
-	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, "")
+	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestAddonMetricsDeployDelete(t *testing.T) {
 	}
 
 	// Delete removes the store and the vmagent collector Deployment + ConfigMap.
-	if _, err := a.DeleteAddon(ctx, "burrow-metrics", cp.AddonMechanismDefault, true); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-metrics", cp.AddonMetrics, true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -350,7 +350,7 @@ func TestAddonMetricsRequiresVmagentServiceAccount(t *testing.T) {
 	a := kube.New(client, ns).WithAddonNamespace(addonNS)
 
 	spec := cp.AddonSpec{Type: cp.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428, StorageGi: 10, Capabilities: []string{"metrics"}}
-	_, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, "")
+	_, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment)
 	if err == nil {
 		t.Fatal("DeployAddon should fail when the vmagent ServiceAccount is absent")
 	}
@@ -383,7 +383,7 @@ func TestAddonCacheDeployDelete(t *testing.T) {
 
 	// A cache is ephemeral (StorageGi 0) and has no collector — the generic deploy path.
 	spec := cp.AddonSpec{Type: cp.AddonCache, Backend: "valkey", Image: "valkey:test", Port: 6379, StorageGi: 0, Capabilities: []string{"cache"}}
-	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, "")
+	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestAddonCacheDeployDelete(t *testing.T) {
 		t.Errorf("cache should have no collector, got %v", err)
 	}
 
-	if _, err := a.DeleteAddon(ctx, "burrow-cache", cp.AddonMechanismDefault, true); err != nil {
+	if _, err := a.DeleteAddon(ctx, "burrow-cache", cp.AddonCache, true); err != nil {
 		t.Fatalf("DeleteAddon: %v", err)
 	}
 	if _, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-cache", metav1.GetOptions{}); !apierrors.IsNotFound(err) {

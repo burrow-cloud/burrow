@@ -37,7 +37,7 @@ var installableAddons = []installableAddon{
 	{string(controlplane.AddonLogs), "log aggregation (VictoriaLogs)"},
 	{string(controlplane.AddonMetrics), "metrics (VictoriaMetrics + a vmagent scraper)"},
 	{string(controlplane.AddonCache), "in-memory cache (ValKey)"},
-	{string(controlplane.AddonPostgres), "cluster-shared PostgreSQL"},
+	{string(controlplane.AddonPostgres), "PostgreSQL on CloudNativePG (needs `burrow cluster postgres install` first)"},
 }
 
 // metricsRBACManifest is the per-add-on metrics RBAC template, embedded like the install manifests
@@ -560,7 +560,6 @@ func metricLabels(labels map[string]string) string {
 func newAddonInstallCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm bool
-	var cnpg bool
 	cmd := &cobra.Command{
 		Use:   "install [<name>]",
 		Short: "Install a vetted backing service (logs, metrics, cache, postgres)",
@@ -569,10 +568,9 @@ func newAddonInstallCmd() *cobra.Command {
 			"install is gated by the addon.install guardrail.\n\n" +
 			"Run `burrow addon install` with no name to list the add-ons you can install and which are\n" +
 			"already installed.\n\n" +
-			"postgres can run on CloudNativePG instead of its own Deployment (--cnpg). That needs the\n" +
-			"operator on the cluster already (burrow cluster postgres install), and it is opt-in while\n" +
-			"the rest of that work lands: backups still go through the same dump path, and removing a\n" +
-			"CloudNativePG instance is not built yet.",
+			"postgres runs on CloudNativePG, so the operator has to be on the cluster first:\n" +
+			"`burrow cluster postgres install`. That is a one-time operator step — it installs\n" +
+			"cluster-scoped CustomResourceDefinitions and needs cluster-admin.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -586,14 +584,6 @@ func newAddonInstallCmd() *cobra.Command {
 			// BEFORE the install API call: burrowd is forbidden from creating RBAC (least privilege),
 			// so the grant the add-on needs cannot be minted server-side. Most add-ons need none and
 			// this is a no-op.
-			mechanism := ""
-			if cnpg {
-				if name != string(controlplane.AddonPostgres) {
-					return fmt.Errorf("--cnpg backs the postgres add-on and no other; %q has no CloudNativePG mechanism", name)
-				}
-				mechanism = controlplane.AddonBackendCloudNativePG
-			}
-
 			kubeContext, controlPlaneNamespace, appNamespace := o.resolveAddonNamespaces()
 			if err := ensureAddonRBAC(ctx, name, o.kubeconfig, kubeContext, controlPlaneNamespace, appNamespace, out); err != nil {
 				return err
@@ -603,29 +593,18 @@ func newAddonInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			a, err := c.InstallAddon(ctx, name, o.env, client.InstallAddonOptions{
-				Mechanism: mechanism, Confirm: confirm,
-			})
+			a, err := c.InstallAddon(ctx, name, o.env, client.InstallAddonOptions{Confirm: confirm})
 			if err != nil {
 				return err
 			}
 			human := fmt.Sprintf("installed the %s add-on %q (%s)\nin-cluster endpoint: %s\nprovides: %s",
 				a.Type, a.Name, a.Image, a.Endpoint, strings.Join(a.Capabilities, ", "))
-			// Which mechanism is behind an instance decides how it is run, backed up and removed, so
-			// the install that chose one says so rather than leaving it to `addon list --json`.
-			if a.Backend == controlplane.AddonBackendCloudNativePG {
-				human += "\nrunning on: CloudNativePG (backups still use the same dump path; removing this instance is not built yet)"
-			}
 			return emit(out, o.json, a, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
-	// The mechanism is offered on the operator CLI and not on the agent surface, which is where
-	// ADR-0066's Consequences put it: running the add-on on an operator presumes the operator is
-	// there, and putting it there needs cluster-admin the agent does not have and must not.
-	cmd.Flags().BoolVar(&cnpg, "cnpg", false, "run the postgres add-on on CloudNativePG (needs `burrow cluster postgres install` first)")
 	return cmd
 }
 
@@ -837,7 +816,8 @@ func newAddonRemoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove <name>",
 		Short: "Remove an installed add-on (keeps its data volume)",
-		Long: "remove tears down an add-on's workload — its Deployment, Service, and collectors — and\n" +
+		Long: "remove tears down an add-on's workload — for postgres its CloudNativePG Cluster, for\n" +
+			"every other add-on its Deployment, Service, and collectors — and\n" +
 			"KEEPS its data volume, so reinstalling the add-on picks the data back up. Pass --delete-data\n" +
 			"to destroy the volume as well; for the postgres add-on that destroys every attached app's\n" +
 			"database. Recorded backups are on a separate volume and survive either way.\n\n" +
@@ -909,8 +889,8 @@ const dataLossAckFlag = "acknowledge-data-loss"
 // acknowledge the data loss explicitly, or drop the flag and keep the volume.
 func errDeleteDataNeedsTerminal(name string) error {
 	// It names the ADD-ON rather than the claim, because this refusal deliberately runs before the
-	// control plane is contacted at all — so which mechanism stood the instance up, and therefore what
-	// its claim is called, is not a question that has been asked yet.
+	// control plane is contacted at all — so which type this instance is, and therefore what its claim
+	// is called, is not a question that has been asked yet.
 	return fmt.Errorf("--delete-data destroys the data volume of the add-on %q and asks for the add-on's name "+
 		"to be typed back, which needs an interactive terminal; re-run with --%s to say so explicitly "+
 		"in a script, or drop --delete-data to keep the volume", name, dataLossAckFlag)
@@ -949,14 +929,14 @@ func confirmDeleteData(ctx context.Context, c *client.Client, name string, skipF
 // Every lookup here is BEST-EFFORT and never blocking (ADR-0064 §3): an add-on is often removed
 // precisely because it is wedged, and a control plane that will not answer must degrade to the
 // volume-concrete message rather than make a broken add-on unremovable. The claim's name comes from
-// the instance and its mechanism (ADR-0066 §1) — under CloudNativePG it is the operator's
-// `<instance>-1`, not the instance's own name — and a listing that will not answer degrades to the
-// name Burrow's own mechanism uses rather than dropping the sentence.
+// the instance and its TYPE (ADR-0066 §1) — for postgres it is CloudNativePG's `<instance>-1`, not
+// the instance's own name — and a listing that will not answer degrades to the instance name rather
+// than dropping the sentence.
 func deleteDataConsequence(ctx context.Context, c *client.Client, name string, skipFinalBackup bool) string {
 	var b strings.Builder
-	addonType, addonEnv, mech := addonInstanceOf(ctx, c, name)
+	addonType, addonEnv := addonInstanceOf(ctx, c, name)
 	fmt.Fprintf(&b, "--delete-data DESTROYS the data volume %q in namespace %s. This cannot be undone.",
-		controlplane.AddonDataVolumeName(name, mech), connect.DefaultAddonNamespace)
+		controlplane.AddonDataVolumeName(controlplane.AddonType(addonType), name), connect.DefaultAddonNamespace)
 	if addonType != string(controlplane.AddonPostgres) {
 		return b.String()
 	}
@@ -1013,32 +993,29 @@ func finalBackupNotice(ctx context.Context, c *client.Client, skipFinalBackup bo
 		"  if it does not get there, nothing is removed.", strings.Join(names, " or "))
 }
 
-// addonInstanceOf looks up the registered type, environment AND mechanism of an installed add-on by
-// name, returning empty strings when the listing cannot be read or the name is not registered. All
-// three are needed together: with an instance and a backup claim per environment (ADR-0067 §1), the
-// type says what the removal destroys and the environment says which claim survives it — and the
-// mechanism says what the destroyed claim is CALLED, which under CloudNativePG is the operator's
-// name rather than the instance's (ADR-0066 §1). Best-effort by contract: an unanswerable lookup
-// costs the notice its detail, never the removal.
-func addonInstanceOf(ctx context.Context, c *client.Client, name string) (addonType, env string, mech controlplane.AddonMechanism) {
+// addonInstanceOf looks up the registered type and environment of an installed add-on by name,
+// returning empty strings when the listing cannot be read or the name is not registered. Both are
+// needed together: with an instance and a backup claim per environment (ADR-0067 §1), the type says
+// what the removal destroys and what its claim is CALLED — for postgres that is CloudNativePG's
+// `<instance>-1` rather than the instance's own name (ADR-0066 §1) — and the environment says which
+// backup claim survives it. Best-effort by contract: an unanswerable lookup costs the notice its
+// detail, never the removal.
+func addonInstanceOf(ctx context.Context, c *client.Client, name string) (addonType, env string) {
 	addons, err := c.Addons(ctx)
 	if err != nil {
-		return "", "", controlplane.AddonMechanismDefault
+		return "", ""
 	}
 	for _, a := range addons {
 		if a.Name == name {
-			// The Backend the registry recorded IS the mechanism for the Postgres add-on, which is
-			// what lets the notice name the right claim without a second field to keep in step.
-			m := controlplane.AddonInfo{Backend: a.Backend}.Mechanism()
 			// A row written before add-ons were per-environment carries no environment and is the
 			// default one's, since that is the only instance that could have existed (ADR-0067 §3).
 			if a.Environment == "" {
-				return a.Type, controlplane.DefaultEnvironment, m
+				return a.Type, controlplane.DefaultEnvironment
 			}
-			return a.Type, a.Environment, m
+			return a.Type, a.Environment
 		}
 	}
-	return "", "", controlplane.AddonMechanismDefault
+	return "", ""
 }
 
 // attachedApps enumerates, best-effort, the apps holding a Burrow-provisioned database on the

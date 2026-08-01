@@ -195,7 +195,7 @@ func (e *Engine) finalBackupBeforeDataDeletion(ctx context.Context, info AddonIn
 	}
 	if !appsKnown {
 		return nil, fmt.Errorf("refusing to destroy the data volume %q: the instance would not say which databases it holds, so a final backup cannot be taken and cannot be verified — fix the add-on and retry, or pass --skip-final-backup to destroy the data without a backup: %w",
-			AddonDataVolumeName(info.Name, info.Mechanism()), ErrInvalid)
+			AddonDataVolumeName(info.Type, info.Name), ErrInvalid)
 	}
 	env := envName(info.Environment)
 	backups := make([]Backup, 0, len(apps))
@@ -233,7 +233,7 @@ func (e *Engine) finalBackupBeforeDataDeletion(ctx context.Context, info AddonIn
 func finalBackupRefusal(info AddonInfo, app, reason, detail string, cause error) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "the final backup of %q failed, so nothing was removed and the data volume %q is intact",
-		app, AddonDataVolumeName(info.Name, info.Mechanism()))
+		app, AddonDataVolumeName(info.Type, info.Name))
 	if reason != "" {
 		fmt.Fprintf(&b, " (%s)", reason)
 	}

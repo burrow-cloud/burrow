@@ -158,10 +158,11 @@ func TestClusterPostgresInstallSkipsWhenRunning(t *testing.T) {
 	}
 }
 
-// TestClusterPostgresInstallIsHonestAboutTheAddon asserts the closing block does not imply the
-// Postgres add-on runs on the operator by DEFAULT — it does not, the operator path is opt-in while
-// the rest of ADR-0066 lands, and describing unbuilt behavior as done is the one thing ADR-0009
-// forbids outright.
+// TestClusterPostgresInstallIsHonestAboutTheAddon asserts the closing block points at the next step
+// and does NOT imply the operator is already doing the backups it was chosen for. It is not:
+// backups are still Burrow's own pg_dump Jobs, and there is no WAL archiving, no schedule and no
+// point-in-time recovery. Describing unbuilt behavior as done is the one thing ADR-0009 forbids
+// outright, and this is the output an operator reads immediately after installing the operator.
 func TestClusterPostgresInstallIsHonestAboutTheAddon(t *testing.T) {
 	stubClusterPostgresClientset(t, cnpgFakeClientset(false))
 	recordAppliedURL(t)
@@ -170,10 +171,13 @@ func TestClusterPostgresInstallIsHonestAboutTheAddon(t *testing.T) {
 	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
-	for _, want := range []string{"still stands up its own Deployment by default", "--cnpg", "is not built yet"} {
+	for _, want := range []string{"burrow addon install postgres", "pg_dump", "are not built yet"} {
 		if !strings.Contains(out.String(), want) {
-			t.Errorf("install output must say %q, so the operator path reads as opt-in and partial:\n%s", want, out.String())
+			t.Errorf("install output must say %q, so the next step is named and the gap stays stated:\n%s", want, out.String())
 		}
+	}
+	if strings.Contains(out.String(), "--cnpg") {
+		t.Errorf("install output still offers --cnpg; the add-on has one mechanism:\n%s", out.String())
 	}
 }
 

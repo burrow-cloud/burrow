@@ -21,7 +21,9 @@ func installPostgres(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Database
 	if _, err := e.InstallAddon(context.Background(), cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
-	if _, ok := k.AddonVolume("burrow-postgres"); !ok {
+	// A Postgres instance's claim is CloudNativePG's `<instance>-1`, not the instance's own name
+	// (ADR-0066 §1) — the name every removal assertion below is about.
+	if _, ok := k.AddonVolume("burrow-postgres-1"); !ok {
 		t.Fatal("install did not create a data volume to test removal against")
 	}
 	return e, k, d, prov
@@ -40,16 +42,16 @@ func TestRemoveAddonKeepsDataByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RemoveAddon: %v", err)
 	}
-	if vol, ok := k.AddonVolume("burrow-postgres"); !ok {
+	if vol, ok := k.AddonVolume("burrow-postgres-1"); !ok {
 		t.Fatal("the data volume was destroyed by a removal that did not ask for it")
-	} else if vol != "burrow-postgres" {
-		t.Errorf("retained volume = %q, want burrow-postgres", vol)
+	} else if vol != "burrow-postgres-1" {
+		t.Errorf("retained volume = %q, want burrow-postgres-1", vol)
 	}
 	if res.DataDeleted {
 		t.Error("result reports DataDeleted for a removal that kept the data")
 	}
-	if res.RetainedDataVolume != "burrow-postgres" {
-		t.Errorf("RetainedDataVolume = %q, want burrow-postgres", res.RetainedDataVolume)
+	if res.RetainedDataVolume != "burrow-postgres-1" {
+		t.Errorf("RetainedDataVolume = %q, want burrow-postgres-1", res.RetainedDataVolume)
 	}
 	if res.Namespace == "" {
 		t.Error("the result does not say which namespace the retained volume is in")
@@ -71,7 +73,7 @@ func TestRemoveAddonDeleteDataDestroysVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RemoveAddon: %v", err)
 	}
-	if _, ok := k.AddonVolume("burrow-postgres"); ok {
+	if _, ok := k.AddonVolume("burrow-postgres-1"); ok {
 		t.Error("--delete-data did not destroy the data volume")
 	}
 	if !res.DataDeleted {
@@ -165,7 +167,7 @@ func TestRemoveAddonSucceedsWhenInstanceUnreachable(t *testing.T) {
 		t.Errorf("AttachedApps = %v, want none when the instance could not be asked", res.AttachedApps)
 	}
 	// The data still survives — an unreachable instance is the last case in which to destroy a volume.
-	if _, ok := k.AddonVolume("burrow-postgres"); !ok {
+	if _, ok := k.AddonVolume("burrow-postgres-1"); !ok {
 		t.Error("the data volume was destroyed on the unreachable-instance path")
 	}
 }

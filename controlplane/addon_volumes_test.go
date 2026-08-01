@@ -40,8 +40,8 @@ func TestRetainedVolumeAppearsAfterRemoval(t *testing.T) {
 		t.Fatalf("retained volumes = %+v, want exactly the removed add-on's data claim", retained)
 	}
 	v := retained[0]
-	if v.Name != "burrow-postgres" {
-		t.Errorf("claim = %q, want burrow-postgres", v.Name)
+	if v.Name != "burrow-postgres-1" {
+		t.Errorf("claim = %q, want burrow-postgres-1", v.Name)
 	}
 	// The add-on it belonged to, its size, and where it lives — the three facts ADR-0064 §6 asks for,
 	// the last two being what turns "there is a claim" into a decision about a bill.

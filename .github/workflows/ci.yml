@@ -182,7 +182,7 @@ jobs:
         run: k3d cluster create burrow-ci --wait --timeout 120s
       - name: preload test images
         run: |
-          images="busybox:1.36 busybox:1.37 mendhak/http-https-echo:31 nginx:alpine nginx:1.27-alpine victoriametrics/victoria-logs:v1.51.0 victoriametrics/victoria-metrics:v1.115.0 victoriametrics/vmagent:v1.115.0 fluent/fluent-bit:3.2.10 grafana/loki:3.2.1 prom/prometheus:v3.1.0 valkey/valkey:8.0 postgres:17-alpine curlimages/curl:8.11.1"
+          images="busybox:1.36 busybox:1.37 mendhak/http-https-echo:31 nginx:alpine nginx:1.27-alpine victoriametrics/victoria-logs:v1.51.0 victoriametrics/victoria-metrics:v1.115.0 victoriametrics/vmagent:v1.115.0 fluent/fluent-bit:3.2.10 grafana/loki:3.2.1 prom/prometheus:v3.1.0 valkey/valkey:8.0 postgres:17-alpine curlimages/curl:8.11.1 ghcr.io/cloudnative-pg/cloudnative-pg:1.30.0 ghcr.io/cloudnative-pg/postgresql:17.10-minimal-trixie"
           # Pull in parallel (serial pulls dominated this step) with a short retry for transient
           # registry hiccups, then import them all into k3d in a single call.
           printf '%s\n' $images | xargs -P 8 -n1 sh -c '
@@ -193,6 +193,19 @@ jobs:
             done
             exit 1' _
           k3d image import $images -c burrow-ci
+      # The Postgres add-on IS a CloudNativePG `Cluster` (ADR-0066 §1), so the operator is a
+      # prerequisite of the suite rather than a variant of it: without it the Postgres e2e skips and
+      # the thing this job exists to exercise is not exercised. The release applied here is the pin
+      # `burrow cluster postgres install` applies (controlplane/kube CNPGVersion); server-side apply
+      # because the CRDs are far past the client-side annotation limit.
+      - name: install the CloudNativePG operator
+        run: |
+          KCFG=$(k3d kubeconfig write burrow-ci)
+          version=$(sed -n 's/^const CNPGVersion = "\(.*\)"$/\1/p' controlplane/kube/placement_cnpg.go)
+          test -n "$version" || { echo "could not read CNPGVersion from the source" >&2; exit 1; }
+          kubectl --kubeconfig "$KCFG" apply --server-side \
+            -f "https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v${version}/cnpg-${version}.yaml"
+          kubectl --kubeconfig "$KCFG" -n cnpg-system rollout status deploy/cnpg-controller-manager --timeout=180s
       - name: run the kube, engine e2e, and connect proxy tests against k3d
         run: |
           KCFG=$(k3d kubeconfig write burrow-ci)
@@ -218,11 +231,13 @@ jobs:
             exit 1
           fi
           go test ./controlplane/kube/ -run TestIntegration -v -timeout 280s
-          # The Postgres e2e now stands up TWO instances — one per environment (ADR-0067 §1) — and
+          # The Postgres e2e stands up TWO instances — one per environment (ADR-0067 §1) — and
           # round-trips a row through each to prove two environments' apps of the same name do not
-          # share a database. Two Postgres pods, two attaches and several psql Jobs do not fit the
-          # previous budget, so the package gets a wider one; it is a ceiling, not a target.
-          go test ./controlplane/e2e/ -v -timeout 600s
+          # share a database. Each is a CloudNativePG `Cluster`, so the operator has a bootstrap job
+          # and a StatefulSet to reconcile before the server accepts a connection; that plus two
+          # attaches and several psql Jobs is why the package's budget is wide. It is a ceiling, not
+          # a target.
+          go test ./controlplane/e2e/ -v -timeout 900s
           go test ./connect/ -run TestProxyForwardsCustomHeader -v -timeout 300s
       - name: capstone e2e (install + deploy through the CLI)
         run: bash test/e2e/install-and-deploy.sh

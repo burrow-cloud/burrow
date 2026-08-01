@@ -199,10 +199,9 @@ selector, tolerations, node/pod affinity, topology spread — translated into th
 controller offers. Policy the target has no field for is **refused when it is wired**, naming the
 JSON path, because a CRD's structural schema prunes unknown fields silently and an operator who is
 not told their policy was dropped believes it is in force. The zero value writes nothing at all.
-Nothing in this repository wires it. It now has somewhere to land: a Postgres add-on instance
-installed with `--cnpg` is a CloudNativePG `Cluster`, and the wired policy is written into its
-`spec.affinity` and `spec.topologySpreadConstraints`
-([ADR-0066](adr/0066-postgres-on-cloudnativepg.md) §1).
+Nothing in this repository wires it. It has somewhere to land: the Postgres add-on instance is a
+CloudNativePG `Cluster`, and the wired policy is written into its `spec.affinity` and
+`spec.topologySpreadConstraints` ([ADR-0066](adr/0066-postgres-on-cloudnativepg.md) §1).
 
 ### Lifecycle hooks
 
@@ -524,16 +523,25 @@ A capability enters here only when a Burrow feature requires it.
 ## Add-ons
 
 A curated, compiled-in catalog of permissively licensed backing services
-([ADR-0025](adr/0025-building-block-addons.md)). All four install into the `burrow-addons`
+([ADR-0025](adr/0025-building-block-addons.md)). Three of the four install into the `burrow-addons`
 namespace as a single-replica `Recreate` Deployment plus a ClusterIP Service, with a
 ReadWriteOnce PVC when they need storage. **There are exactly four.**
+
+`postgres` is the exception, and it is the whole of
+[ADR-0066](adr/0066-postgres-on-cloudnativepg.md) §1: it is a **CloudNativePG `Cluster`** and
+nothing else. Burrow writes one custom resource and the operator composes the StatefulSet, the pod,
+the volume and the services from it. That makes the operator a **cluster prerequisite**:
+`burrow cluster postgres install` first, once per cluster, with a kubeconfig — installing
+cluster-scoped CustomResourceDefinitions needs cluster-admin, which the agent does not have
+(see [Cluster lifecycle](#cluster-lifecycle)). Installing the add-on on a cluster without it is
+refused by name, naming that command.
 
 | Add-on | Image | Port | Storage | Extra workload |
 | --- | --- | --- | --- | --- |
 | `logs` | `victoriametrics/victoria-logs:v1.51.0` | 9428 | 10Gi PVC | a Fluent Bit DaemonSet (`fluent/fluent-bit:3.2.10`) reading `/var/log`, tolerating all taints |
 | `metrics` | `victoriametrics/victoria-metrics:v1.115.0` | 8428 | 10Gi PVC, retention per `addon.metric_retention` (default 744h — the month it was) | a vmagent Deployment (`victoriametrics/vmagent:v1.115.0`) scraping the app **and** add-on namespaces |
 | `cache` | `valkey/valkey:8.0` | 6379 | **none — ephemeral** | — |
-| `postgres` | `postgres:17-alpine` | 5432 | 10Gi PVC | an always-on `quay.io/prometheuscommunity/postgres-exporter:v0.20.1` sidecar on port 9187 |
+| `postgres` | `ghcr.io/cloudnative-pg/postgresql:17.10-minimal-trixie`, run by the CloudNativePG operator (`1.30.0`) — the **minimal** operand variant, because the standard one bundles barman-cloud, which shells out to GPL-3.0 tooling (ADR-0066 §3) | 5432 | 10Gi, on a claim the operator composes and names `<instance>-1` | none — CNPG's instance manager exports the metrics a sidecar used to |
 
 `burrow addon install <type>` takes **no tuning flags** — no `--size`, no `--storage-class`,
 no `--retention`, no version override. (`--env` selects which environment the instance serves, not
@@ -541,10 +549,14 @@ how it is built.) Sizes and images are compile-time constants; the metrics add-o
 one tunable, set cluster-wide with `burrow cluster config set addon.metric_retention <duration>`
 before the instance is installed ([Operational limits](#operational-limits)). No PVC sets a
 `storageClassName`, so every volume lands on the cluster default
-StorageClass. `burrow addon remove <type>` deletes the Deployment, Service, and collectors and
-**keeps the data PVC**: reinstalling the add-on lands on the same claim and picks the data back
-up, so for `postgres` the databases, roles, and role passwords survive and attached apps
-reconnect on their existing `DATABASE_URL`. Destroying the volume is the separate, explicit
+StorageClass. `burrow addon remove <type>` deletes the workload — the Deployment, Service and
+collectors, or for `postgres` the `Cluster` — and **keeps the data PVC**: reinstalling the add-on
+lands on the same claim and picks the data back up, so for `postgres` the databases, roles, and role
+passwords survive and attached apps reconnect on their existing `DATABASE_URL`. Keeping it takes an
+extra step under CloudNativePG, because the operator stamps the `Cluster` on the claims it composes
+and deleting the `Cluster` would otherwise take them: the claims are **disowned before the `Cluster`
+is deleted**, and `--delete-data` deletes them by name rather than leaving them to a garbage
+collector ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §1). Destroying the volume is the separate, explicit
 `--delete-data`. The removal output names the volume it kept and how to reclaim it; the
 confirmation the `addon.remove` guardrail holds names the affected apps.
 
@@ -605,20 +617,16 @@ the provider, and ADR-0064 leaves that choice open. Reporting cost would need a 
 per storage class and region, obtained from the provider's API or a table Burrow would have to keep
 current — a confident wrong number about money is worse than an honest one about bytes.
 
-One accepted decision changes the `postgres` row above and is **partly built.**
-[ADR-0066](adr/0066-postgres-on-cloudnativepg.md) replaces the mechanism with a CloudNativePG
-`Cluster` custom resource, handing WAL archiving, scheduled backups, retention and point-in-time
-recovery to the operator. What exists is the `Cluster`: with the operator installed
-(`burrow cluster postgres install`), `burrow addon install postgres --cnpg` creates one per
-environment and reads its status, and the instance is reached, attached to, dumped and restored
-exactly where a Deployment-backed one is. Removing one honours the same contract the Deployment path
-does, which under this mechanism takes an extra step: CloudNativePG stamps the `Cluster` on the
-claims it composes, so `addon remove` **disowns them before deleting the `Cluster`**, and
-`--delete-data` deletes them by name rather than leaving them to the garbage collector
-([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §1). What does not exist is everything the
-operator was chosen for — backups still go through [ADR-0032](adr/0032-postgres-backups.md)'s
-`pg_dump` Jobs, there is no WAL archiving and no `Backup` object. The default install is unchanged: the single-replica `postgres:17-alpine` Deployment in
-the table, on a cluster with the operator or without one. [ADR-0067](adr/0067-one-database-instance-per-environment.md) is built in full: one
+[ADR-0066](adr/0066-postgres-on-cloudnativepg.md) is **partly built**, and the built part is §1: the
+`Cluster` is the only mechanism, created per environment and read for status, and the instance is
+reached, attached to, dumped and restored exactly where the Deployment it replaced was —
+`<instance>.burrow-addons.svc:5432`, opened as `burrow_admin`. **What does not exist is everything
+the operator was chosen for.** Backups still go through [ADR-0032](adr/0032-postgres-backups.md)'s
+`pg_dump` Jobs: there is no `Backup` or `ScheduledBackup` object, no pgBackRest plugin, no WAL
+archiving, no retention window, and no point-in-time recovery. A restore is still the single-app
+logical one; physical recovery — standing up a replacement `Cluster` and cutting `DATABASE_URL`
+over — is not built.
+[ADR-0067](adr/0067-one-database-instance-per-environment.md) is built in full: one
 instance **per environment** (§1), and the first environment a registered one named `prod` mapped
 to the existing app namespace (§2–§3).
 
@@ -635,7 +643,8 @@ to the existing app namespace (§2–§3).
 
 **Add-on instances are per environment, and every add-on operation names one.**
 `burrow addon install postgres --env staging` stands up a second instance (`burrow-postgres-staging`)
-beside `prod`'s `burrow-postgres`, with its own volume and its own superuser credential; attach,
+beside `prod`'s `burrow-postgres`, with its own `Cluster`, its own volume and its own superuser
+credential; attach,
 detach, backup and restore all act on the named environment's instance
 ([ADR-0067](adr/0067-one-database-instance-per-environment.md) §1). Databases keep their simple
 names, so `web` in staging and `web` in production are two databases on two servers — the isolation
@@ -643,24 +652,25 @@ is the instance, not a naming convention. An operation that names no environment
 is registered is refused rather than defaulted (ADR-0047 §1), and the provisioning seam takes the
 environment non-optionally: there is no value meaning "whichever instance is there".
 
-An install predating this keeps everything it had: the default environment (`prod`) resolves to
-`burrow-postgres`, the same pod, volume, and password, so nothing migrates. The unqualified instance
+An install predating this keeps the names it had: the default environment (`prod`) resolves to
+`burrow-postgres`, the same instance name, the same Secret, so nothing is renamed. The unqualified instance
 name belongs to whichever environment is the default, so renaming that environment from `default`
 to `prod` (§2) renamed no instance. Sharing one instance across environments is not supported and
 cannot be expressed (ADR-0067 §5); a user who wants one server runs one environment.
 
-The Postgres exporter is always on and reports connection and transaction health plus
-`pg_stat_statements` slow-query stats, and the metrics scraper discovers the add-on namespace,
-so installing the two in either order works ([ADR-0051](adr/0051-postgres-always-exports-metrics.md)).
-Its stated limit holds: an **already-installed** Postgres add-on only gains the exporter on
-reinstall.
+Postgres metrics are always on and report connection and transaction health plus
+`pg_stat_statements` slow-query stats. Under CloudNativePG they come from the operator's own
+instance manager on port 9187 rather than from a sidecar Burrow adds; the `Cluster` carries the same
+scrape annotations, and the metrics scraper discovers the add-on namespace, so installing the two in
+either order works ([ADR-0051](adr/0051-postgres-always-exports-metrics.md)).
 
 Limits: only Postgres supports `attach`/`detach` — cache, logs, and metrics are wired by
 reading the endpoint from `addon list` and setting it as app config. Log queries take **no
 time range** (the Loki adapter hardcodes the last hour). Metrics queries are **instant only**;
 a range query exists in the engine but no CLI, agent verb, or API route reaches it. Add-on
 readiness is judged from the store Deployment alone, so a broken Fluent Bit DaemonSet or
-vmagent still reports ready.
+vmagent still reports ready. Postgres readiness is the `Cluster`'s ready-instance count, which is
+"a server is serving" and not "the operator agrees the instance is healthy".
 
 ---
 
@@ -1109,7 +1119,7 @@ truth and this one does not restate it.
 | Provision a VPS | `burrow cluster bootstrap` (on the VPS) | Installs k3s (Traefik disabled, servicelb kept, so the node IP is a free LoadBalancer) plus the control plane, then prints a `burrow join <token>`. Refuses under ~1900 MiB RAM without `--yes`. **Burrow never SSHes anywhere** — this is run once, over your own SSH session. | [0044](adr/0044-single-vps-k3s-cluster.md) |
 | Join from a laptop | `burrow join <token>` | Merges the admin context into the ambient kubeconfig and writes the scoped agent kubeconfig under `~/.burrow/agents/`. Idempotent. | [0044](adr/0044-single-vps-k3s-cluster.md) |
 | Upgrade | `burrow cluster upgrade` | Re-renders the install manifest with a new burrowd image, preserving the API token, database password, and namespaces read back from the cluster. Postgres and its PVC are untouched. Migrations are applied by burrowd at startup. | [0013](adr/0013-database-migrations-and-upgrade-policy.md) |
-| Install the PostgreSQL operator | `burrow cluster postgres install` | Applies the pinned CloudNativePG release (`1.30.0`) from its own upstream artifact, skipping when a controller is already running and re-applying when the CRDs are there without one. Needs **cluster-admin** (it installs cluster-scoped CRDs), which is why it is an operator step and absent from the agent. It installs the operator only: the Postgres add-on runs its own Deployment unless an install asks for the operator with `--cnpg`. | [0066](adr/0066-postgres-on-cloudnativepg.md) |
+| Install the PostgreSQL operator | `burrow cluster postgres install` | Applies the pinned CloudNativePG release (`1.30.0`) from its own upstream artifact, skipping when a controller is already running and re-applying when the CRDs are there without one. Needs **cluster-admin** (it installs cluster-scoped CRDs), which is why it is an operator step and absent from the agent. It is a **prerequisite of `burrow addon install postgres`**, which is refused by name on a cluster without it. It installs the operator only — no database. | [0066](adr/0066-postgres-on-cloudnativepg.md) |
 | Inspect the cluster | `burrow cluster` | Ingress classes, default StorageClass, LoadBalancer support and whether it is free or billable, cert-manager, metrics-server, the CloudNativePG operator (present / running / its release beside the one Burrow targets), cloud provider, configured DNS providers. | [0034](adr/0034-agent-native-onboarding.md), [0043](adr/0043-public-reachability-is-a-loadbalancer.md) |
 | Scheduling headroom | `burrow cluster capacity` | Per-node and cluster-total allocatable, committed and free CPU/memory and pod counts, top consumers, and whether a build would fit. Computed from node allocatable versus summed Pod requests — no metrics-server needed. | [0054](adr/0054-install-is-control-plane-only.md) |
 | Version | `burrow version` | The CLI version, the installed control plane's image tag, and the latest published release. | [0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md), [0039](adr/0039-cli-control-plane-version-skew.md) |
@@ -1202,7 +1212,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
 | Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Partly built. The destination registration is built: the `s3` provider type and object-storage capability, the credential pair as two keys in `burrow-credentials`, the configuration-time probe write/delete, the recorded globally-unique bucket, lifecycle-versus-retention reconciliation, and `bucket.create` at `confirm` with bucket deletion absent from both CLIs. The backup WRITE path is built too: the dump is shipped to the store and read back before the row says `completed`, retries are for a store that will not answer and never for one that answered and refused, and `burrow addon backup-health postgres` reports destination reachability, the age of the last successful backup, the age of the last one that left the cluster, and the last failure. What is left of §7 is the ALERT: there is no threshold to alert against, because nothing schedules a backup yet. [#331](https://github.com/burrow-cloud/burrow/issues/331) |
 | A final backup before `--delete-data` | [0064](adr/0064-addon-removal-keeps-its-data.md) §5 | Not built — it waits on an object-storage provider ([ADR-0063](adr/0063-object-storage-provider.md)); until then the retained backup claim is the only copy. The rest of ADR-0064 is built: removal keeps the data PVC and names it, `--delete-data` is operator-CLI-only and carries §2's typed confirmation, the backup claim always survives, and `addon list` reports retained volumes (§6). [#334](https://github.com/burrow-cloud/burrow/issues/334) |
-| The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Partly built. The OPERATOR is: `burrow cluster postgres install` applies the pinned CloudNativePG release, skips a controller that is already running, and states the cluster-admin requirement; `burrow cluster` reports whether the CRDs are served, whether a controller is actually running, and which release it is beside the one Burrow targets. The `Cluster` is: `burrow addon install postgres --cnpg` creates one per environment (single replica, `ghcr.io/cloudnative-pg/postgresql:17.10-minimal-trixie`, `burrow_admin` declared as a managed role, and a managed service carrying the instance's own name onto the primary so every existing consumer resolves it unchanged), refuses when no controller is running, refuses to convert an existing Deployment-backed instance, and reports readiness from the `Cluster`'s ready-instance count. REMOVAL is: `burrow addon remove` on such an instance keeps the data by ADR-0064 §1's default even though CloudNativePG's own default is to take it — the operator stamps the `Cluster` on the claims it composes, so the claims are disowned and labelled as retained volumes before the `Cluster` is deleted, and `--delete-data` deletes them by name rather than trusting a garbage collector that would leave an already-disowned claim behind. It refuses rather than assumes when the `Cluster` cannot be read, removes an instance whose `Cluster` is already gone but whose claim is not, and leaves another environment's instance and backup claim untouched. It is OPT-IN: the default install is still the Deployment, on a cluster with the operator or without one. What is NOT built is what the operator was chosen for — backups are still Burrow-orchestrated `pg_dump` / `pg_restore` Jobs, there is no `Backup` or `ScheduledBackup` object, no WAL archiving, no plugin, no physical restore. §5 is built: `burrow addon backup-health postgres` reports the backup-age signal from what Burrow itself observed, which is the part of the record that is deliberately independent of the mechanism and stays correct across the swap. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
+| The Postgres add-on runs on CloudNativePG, with the operator owning WAL archiving, schedules, retention, and point-in-time recovery | [0066](adr/0066-postgres-on-cloudnativepg.md) | Partly built — §1 is done, §2–§4 are not. The OPERATOR is: `burrow cluster postgres install` applies the pinned CloudNativePG release, skips a controller that is already running, and states the cluster-admin requirement; `burrow cluster` reports whether the CRDs are served, whether a controller is actually running, and which release it is beside the one Burrow targets. §1 IS THE MECHANISM, AND IT IS THE ONLY ONE: `burrow addon install postgres` creates one `Cluster` per environment (single replica, `ghcr.io/cloudnative-pg/postgresql:17.10-minimal-trixie`, `burrow_admin` declared as a managed role, and a managed service carrying the instance's own name onto the primary so every existing consumer resolves it unchanged), refuses by name on a cluster with no controller running, and reports readiness from the `Cluster`'s ready-instance count. The ADR-0031 Deployment is gone from the tree, and with it the flag that used to select between them. REMOVAL keeps the data by ADR-0064 §1's default even though CloudNativePG's own default is to take it — the operator stamps the `Cluster` on the claims it composes, so the claims are disowned and labelled as retained volumes before the `Cluster` is deleted, and `--delete-data` deletes them by name rather than trusting a garbage collector that would leave an already-disowned claim behind. It refuses rather than assumes when the `Cluster` cannot be read, removes an instance whose `Cluster` is already gone but whose claim is not, and leaves another environment's instance and backup claim untouched. What is NOT built is what the operator was chosen for — backups are still Burrow-orchestrated `pg_dump` / `pg_restore` Jobs, there is no `Backup` or `ScheduledBackup` object, no pgBackRest plugin, no WAL archiving, no retention window, no point-in-time recovery, and no physical restore. §5 is built: `burrow addon backup-health postgres` reports the backup-age signal from what Burrow itself observed, which is the part of the record that is deliberately independent of the mechanism and stays correct across the swap. §6's migration is NOT built and will not be: no tenant Postgres existed under the old mechanism, so the path deleted rather than converted. [#338](https://github.com/burrow-cloud/burrow/issues/338) |
 
 The rows above are summaries. Per-ADR implementation tracking — the code as it stands, the sections
 each issue covers, and an acceptance checklist — lives in the issues labelled

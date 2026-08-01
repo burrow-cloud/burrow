@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. The first **backend** building block, extending the add-on model
+♻️ Superseded by [ADR-0066](0066-postgres-on-cloudnativepg.md)
+
+The first **backend** building block, extending the add-on model
 ([ADR-0025](0025-building-block-addons.md)) from observability into the data tier. It builds on
 the per-app secrets fabric ([ADR-0029](0029-secrets-through-the-control-plane.md)) — the generated
 `DATABASE_URL` lands in the app's per-app Secret — and the Burrow-owned credential path

@@ -499,7 +499,9 @@ func TestAddonRemoveDeleteDataTypedNameProceeds(t *testing.T) {
 		t.Fatalf("addon remove --delete-data with the name typed back: %v (stderr: %s)", err, errb)
 	}
 	for _, want := range []string{
-		"DESTROYS the data volume \"burrow-postgres\"",
+		// CloudNativePG's claim, not the instance's own name (ADR-0066 §1): the notice has to name
+		// the volume the removal actually destroys.
+		"DESTROYS the data volume \"burrow-postgres-1\"",
 		"burrow-addons",
 		"This cannot be undone",
 		"every attached app's database: 2 attached apps (api, web)",

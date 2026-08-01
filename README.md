@@ -75,6 +75,8 @@ Postgres always exports its own metrics, so once you install the metrics addon y
 
 By default the agent asks before standing anything up: it proposes, you approve. Make it hands-off with `burrow guard set addon.install allow`, or install it yourself with `burrow addon install postgres`.
 
+Postgres runs on [CloudNativePG](https://cloudnative-pg.io), so it needs a one-time setup step on the cluster before the first database: `burrow cluster postgres install`. It asks for cluster-admin, which is why it is yours to run and not your agent's.
+
 Want an addon we do not have yet? [Request one](https://github.com/burrow-cloud/burrow/issues/new?labels=addon).
 
 ## Built for day two

@@ -676,10 +676,9 @@ type Addon struct {
 	// own instance, so this is what distinguishes two rows of the same type.
 	Environment string `json:"environment,omitempty"`
 	Mode        string `json:"mode"`
-	// Backend is the concrete implementation serving this instance — which for the Postgres add-on
-	// is also its MECHANISM: "postgres" is the Deployment Burrow authors, "cloudnative-pg" is a
-	// CloudNativePG Cluster the operator reconciles (ADR-0066 §1). It is what says which of the two
-	// an instance is, and the two behave differently on backup and removal.
+	// Backend is the concrete implementation serving this instance: "victorialogs" for logs,
+	// "cloudnative-pg" for the Postgres add-on, whose instance is a CloudNativePG Cluster the
+	// operator reconciles (ADR-0066 §1).
 	Backend      string   `json:"backend,omitempty"`
 	Image        string   `json:"image,omitempty"`
 	Endpoint     string   `json:"endpoint"`
@@ -688,13 +687,8 @@ type Addon struct {
 }
 
 // InstallAddonOptions is everything `addon install` carries beyond the add-on's type and its
-// environment. The zero value is the install every caller made before there was anything to choose.
+// environment.
 type InstallAddonOptions struct {
-	// Mechanism selects how the instance's workload is provided (ADR-0066 §1). Empty is the
-	// catalog's own — a Deployment Burrow authors — and "cloudnative-pg" backs a Postgres instance
-	// with a CloudNativePG Cluster, which requires the operator to already be on the cluster
-	// (`burrow cluster postgres install`).
-	Mechanism string
 	// Confirm satisfies the addon.install guardrail's confirmation hold.
 	Confirm bool
 }
@@ -705,9 +699,6 @@ type InstallAddonOptions struct {
 func (c *Client) InstallAddon(ctx context.Context, addonType, env string, opts InstallAddonOptions) (Addon, error) {
 	var out Addon
 	body := map[string]any{"type": addonType, "env": env, "confirm": opts.Confirm}
-	if opts.Mechanism != "" {
-		body["mechanism"] = opts.Mechanism
-	}
 	err := c.do(ctx, http.MethodPost, "/v1/addons", body, &out)
 	return out, err
 }

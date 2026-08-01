@@ -32,30 +32,6 @@ const (
 	cnpgClusterAPIVersion = CNPGAPIGroup + "/v1"
 )
 
-// CNPGPostgresImage is the PostgreSQL operand image a Burrow-authored `Cluster` runs. Burrow ships
-// no third-party bytes: this names an image the CLUSTER pulls from the publisher who built it.
-//
-// Three things are deliberate about which image this is.
-//
-//   - It is CloudNativePG's own operand image rather than `postgres:17-alpine`. CNPG's instance
-//     manager runs as PID 1 inside it and the entrypoint is the operator's, so an arbitrary
-//     PostgreSQL image is not a substitution CNPG supports.
-//   - It is the MINIMAL variant. CNPG's standard operand images bundle barman-cloud, which shells
-//     out to GPL-3.0 tooling; ADR-0066 §3 declines barman on exactly that ground, and its rejection
-//     of the WAL-G plugin ("a plugin's licence is not its image's licence") is the record saying
-//     this project names images and not just repositories. The minimal image carries PostgreSQL and
-//     the instance manager and no backup tooling at all — which is also the right base for §3's
-//     pgBackRest plugin, since a CNPG-I plugin ships its own sidecar rather than living in this
-//     image.
-//   - It is PostgreSQL 17, the major version ADR-0031's `postgres:17-alpine` already runs, so
-//     choosing the mechanism is not also choosing a major-version jump.
-//
-// It is pinned to a patch release for the reason every other image in the catalog is: an install
-// that happens twice should be the same install. It moves independently of CNPGVersion — the
-// operator and the operand are separately released, and CNPG supports a range of operands per
-// operator — so this is not derived from the pin.
-const CNPGPostgresImage = "ghcr.io/cloudnative-pg/postgresql:17.10-minimal-trixie"
-
 // WithDynamicClient wires the client custom resources are read and written through — today the
 // CloudNativePG `Cluster` behind a Postgres add-on instance (ADR-0066 §1).
 //
@@ -126,30 +102,22 @@ func cnpgClusterReady(u *unstructured.Unstructured) bool {
 	return err == nil && found && ready > 0
 }
 
-// deployPostgresCluster installs a Postgres add-on instance as a CloudNativePG `Cluster` rather than
-// a Deployment Burrow authors (ADR-0066 §1). Burrow creates one custom resource; CNPG composes the
-// StatefulSet, the pods, the volumes and the services from it.
+// deployPostgresCluster installs a Postgres add-on instance, which is a CloudNativePG `Cluster` and
+// nothing else (ADR-0066 §1). Burrow creates one custom resource; CNPG composes the StatefulSet, the
+// pods, the volumes and the services from it.
 //
-// WHAT THE REST OF BURROW SEES IS UNCHANGED, and that is the whole design of this slice. An
-// environment's instance is still reached at `<instance>.<addon-ns>.svc:5432`, still opened as
-// `burrow_admin` with the password in the Secret named after the instance, and still dumped by the
-// ADR-0032 backup Jobs. Attach, backup, restore and the app's DATABASE_URL are untouched, so the
-// mechanism is a fact about how the server is run rather than a second way to be a Postgres add-on.
+// WHAT THE REST OF BURROW SEES IS UNCHANGED, and that is the design. An environment's instance is
+// reached at `<instance>.<addon-ns>.svc:5432`, opened as `burrow_admin` with the password in the
+// Secret named after the instance, and dumped by the ADR-0032 backup Jobs. Attach, backup, restore
+// and the app's DATABASE_URL are all expressed against that contract, which is ADR-0031's and is
+// what ADR-0066 keeps: only who runs the server changed.
 //
-// It REFUSES rather than converts (ADR-0066 §6). An ADR-0031 instance in this environment — its
-// Deployment, or the data claim a data-preserving removal left behind — means there is Postgres data
-// under the name this `Cluster` would take, and CNPG does not adopt it: the `Cluster` would come up
-// empty beside it and the old data would sit there unreferenced. §6 makes migration an explicit,
-// one-way sequence a user runs deliberately, and this is where that is enforced.
+// THE OPERATOR IS A PREREQUISITE, NOT A FALLBACK. A cluster without CloudNativePG is refused here,
+// by name, before any object is written — because the alternative is a dynamic client that does no
+// discovery returning a 404 the caller cannot tell from a missing object, and an operator being told
+// their add-on failed on `clusters.postgresql.cnpg.io not found` learns nothing they can act on.
 func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.AddonSpec, env, name string, labels map[string]string) (controlplane.AddonInfo, error) {
-	if spec.Type != controlplane.AddonPostgres {
-		return controlplane.AddonInfo{}, fmt.Errorf("kube: the %s add-on has no CloudNativePG mechanism; only postgres does (ADR-0066 §1): %w",
-			spec.Type, controlplane.ErrInvalid)
-	}
 	if err := a.requireCloudNativePG(ctx); err != nil {
-		return controlplane.AddonInfo{}, err
-	}
-	if err := a.requireNoDeploymentBackedInstance(ctx, name, env); err != nil {
 		return controlplane.AddonInfo{}, err
 	}
 	if err := a.ensureCNPGSuperuserSecret(ctx, name, labels); err != nil {
@@ -175,16 +143,12 @@ func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.A
 	}
 
 	return controlplane.AddonInfo{
-		Name:        name,
-		Type:        spec.Type,
-		Environment: env,
-		Mode:        "installed",
-		// The registry records the MECHANISM here, because that is what Backend has always meant:
-		// which concrete implementation serves this instance. It needs no new column and no
-		// migration, and it is what `addon list` shows an operator who asks what is running their
-		// database.
-		Backend:      controlplane.AddonBackendCloudNativePG,
-		Image:        CNPGPostgresImage,
+		Name:         name,
+		Type:         spec.Type,
+		Environment:  env,
+		Mode:         "installed",
+		Backend:      spec.Backend,
+		Image:        spec.Image,
 		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.addonNamespace, spec.Port),
 		Capabilities: spec.Capabilities,
 	}, nil
@@ -206,9 +170,11 @@ func (a *Adapter) requireCloudNativePG(ctx context.Context) error {
 	}
 	switch {
 	case !found.Present:
-		return fmt.Errorf("kube: CloudNativePG is not installed on this cluster, so the postgres add-on "+
-			"cannot run on it. Install the operator first: `burrow cluster postgres install` (it needs "+
-			"cluster-admin, so it is an operator step): %w", controlplane.ErrInvalid)
+		return fmt.Errorf("kube: the postgres add-on runs on CloudNativePG, and this cluster has no "+
+			"CloudNativePG installed. Install the operator first with `burrow cluster postgres install`, "+
+			"then install the add-on. That is an operator step run from a kubeconfig, not something the "+
+			"agent can do: it installs cluster-scoped CustomResourceDefinitions and needs cluster-admin "+
+			"(ADR-0066): %w", controlplane.ErrInvalid)
 	case !found.Ready:
 		return fmt.Errorf("kube: CloudNativePG's CustomResourceDefinitions are installed but no controller "+
 			"is running, so a Cluster written now would be accepted and then reconciled by nothing. "+
@@ -217,53 +183,22 @@ func (a *Adapter) requireCloudNativePG(ctx context.Context) error {
 	return nil
 }
 
-// requireNoDeploymentBackedInstance enforces ADR-0066 §6's one-way, explicit migration at the only
-// point that can see both mechanisms: an environment whose Postgres instance is already an ADR-0031
-// Deployment, or whose data claim a data-preserving removal deliberately kept (ADR-0064 §1), does
-// not silently become a `Cluster`.
-//
-// The claim is checked as well as the Deployment because the dangerous case is the one where the
-// workload is already gone. `addon remove postgres` keeps the volume by default precisely so a
-// reinstall comes back with its data; a reinstall that came back as an empty `Cluster` beside that
-// volume would look like a successful reinstall and be a total data loss from the user's side.
-func (a *Adapter) requireNoDeploymentBackedInstance(ctx context.Context, name, env string) error {
-	_, err := a.client.AppsV1().Deployments(a.addonNamespace).Get(ctx, name, metav1.GetOptions{})
-	if err == nil {
-		return fmt.Errorf("kube: environment %q already runs a Deployment-backed postgres instance (%s). "+
-			"Moving it onto CloudNativePG is a deliberate, one-way sequence — back up, install the new "+
-			"instance, restore, cut over — not something an install does to a database in place "+
-			"(ADR-0066 §6): %w", env, name, controlplane.ErrInvalid)
-	}
-	if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("kube: reading addon %q: %w", name, err)
-	}
-	_, err = a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace).Get(ctx, name, metav1.GetOptions{})
-	if err == nil {
-		return fmt.Errorf("kube: environment %q has a retained Deployment-backed postgres volume (%s) that "+
-			"an earlier removal deliberately kept. A CloudNativePG Cluster does not adopt it: it would come "+
-			"up empty beside data that is still there. Reinstall the add-on as it was, or delete that claim "+
-			"once you are certain (ADR-0064 §1, ADR-0066 §6): %w", env, name, controlplane.ErrInvalid)
-	}
-	if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("kube: reading addon volume %q: %w", name, err)
-	}
-	return nil
-}
-
 // ensureCNPGSuperuserSecret creates (idempotently) the per-instance superuser Secret a
 // CNPG-backed instance uses, in the shape CNPG's declarative role management requires: type
 // `kubernetes.io/basic-auth`, with `username` and `password`.
 //
-// It is the SAME Secret name, and the same `password` key, that the ADR-0031 instance uses, which is
-// what lets the provisioner, the metrics path and the ADR-0032 backup Jobs reach a CNPG-backed
-// instance with no change at all — they read `Data["password"]` from the Secret named after the
-// instance, and that is still exactly what is there. The added `username` key is what CNPG's
-// `passwordSecret` reference requires, and it holds a role name, not a secret.
+// It is the Secret name, and the `password` key, ADR-0031 specified, which is what lets the
+// provisioner, the metrics path and the ADR-0032 backup Jobs reach the instance with no special
+// case — they read `Data["password"]` from the Secret named after the instance. The added `username`
+// key is what CNPG's `passwordSecret` reference requires, and it holds a role name, not a secret.
 //
 // An existing Secret is left untouched (a re-install keeps the running database's credential), but a
 // Secret in the WRONG SHAPE is refused rather than worked around: a Secret's type is immutable, so
-// an Opaque one left by an ADR-0031 install cannot be converted, and CNPG would reject the role
-// reference and leave `burrow_admin` uncreated on a database that otherwise looks installed.
+// an Opaque one — which is what a Burrow release that ran Postgres as a Deployment created, and what
+// a data-keeping removal under that release deliberately left behind beside the volume — cannot be
+// converted, and CNPG would reject the role reference and leave `burrow_admin` uncreated on a
+// database that otherwise looks installed. Refusing there is also what keeps such a leftover from
+// being quietly stood beside a fresh, empty `Cluster` that does not adopt it.
 //
 // The generated password is written only into the Secret. It is never inlined into the Cluster spec,
 // returned, or logged (ADR-0031).
@@ -275,8 +210,10 @@ func (a *Adapter) ensureCNPGSuperuserSecret(ctx context.Context, instance string
 		if existing.Type != corev1.SecretTypeBasicAuth || len(existing.Data[cnpgSecretUsernameKey]) == 0 {
 			return fmt.Errorf("kube: the superuser secret %s/%s exists but is not in the shape CloudNativePG's "+
 				"role management requires (type %s with a %q key). A Secret's type cannot be changed, so this "+
-				"one belongs to a Deployment-backed instance and the two mechanisms must not share it "+
-				"(ADR-0066 §6): %w", a.addonNamespace, instance, corev1.SecretTypeBasicAuth, cnpgSecretUsernameKey,
+				"one was left by a Burrow release that ran the postgres add-on as its own Deployment; the data "+
+				"volume it opens is still there and a new instance would not adopt it. Reclaim or delete that "+
+				"volume and this Secret deliberately before installing (ADR-0064 §1): %w",
+				a.addonNamespace, instance, corev1.SecretTypeBasicAuth, cnpgSecretUsernameKey,
 				controlplane.ErrInvalid)
 		}
 		return nil
@@ -321,7 +258,7 @@ func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name str
 		// Under an operator it is a number rather than a constant of the design, which is the point:
 		// raising it is configuration, not a rewrite.
 		"instances": int64(1),
-		"imageName": CNPGPostgresImage,
+		"imageName": spec.Image,
 		// The `postgres` superuser stays disabled (CNPG's own default). Burrow connects as
 		// burrow_admin, declared below, so there is no second superuser credential in the cluster
 		// that nothing uses and nothing rotates.
@@ -329,21 +266,20 @@ func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name str
 		"storage": map[string]any{
 			"size": fmt.Sprintf("%dGi", spec.StorageGi),
 		},
-		// The same footprint the Deployment-backed instance declares, so choosing the mechanism does
-		// not quietly change what the database costs on a small VPS. The pod runs one more process
-		// than the ADR-0031 pod did — CNPG's instance manager, a few tens of megabytes — which the
-		// 320Mi limit absorbs because the lean settings below keep PostgreSQL itself around 150MB.
+		// The same footprint every Burrow Postgres pod declares (postgresResources), so the add-on
+		// instance and the control-plane database are sized by one decision. The pod runs CNPG's
+		// instance manager as well as PostgreSQL — a few tens of megabytes — which the 320Mi limit
+		// absorbs because the lean settings below keep PostgreSQL itself around 150MB.
 		"resources": mustJSON(postgresResources()),
 		"postgresql": map[string]any{
-			// The SAME lean tuning the Deployment-backed instance is started with (LeanPostgresSettings,
-			// passed there as `-c` args). Under an operator the server is not launched by Burrow, so the
-			// settings move to the field CNPG reconciles them from — but they must be the same
-			// settings, or a mechanism swap is silently also a retuning, and the resource limit above
-			// was chosen against these values.
+			// The lean tuning every Burrow Postgres server runs with (LeanPostgresSettings, which the
+			// control-plane database takes as `-c` args). This server is not launched by Burrow, so the
+			// settings go in the field CNPG reconciles them from — the same values, because the
+			// resource limit above was chosen against them.
 			"parameters": leanPostgresParameters(),
 			// pg_stat_statements is preloaded here and created below, so slow-query statistics exist
-			// for whatever scrapes them (ADR-0051) — under this mechanism that is CNPG's own metrics
-			// exporter rather than a sidecar. It is a separate field from `parameters` because CNPG
+			// for whatever scrapes them (ADR-0051) — CNPG's instance manager exports them itself, so
+			// there is no exporter sidecar. It is a separate field from `parameters` because CNPG
 			// manages the preload list itself and merges this into it. The pinned operand image
 			// carries the module.
 			"shared_preload_libraries": []any{"pg_stat_statements"},
@@ -351,8 +287,8 @@ func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name str
 		"bootstrap": map[string]any{
 			"initdb": map[string]any{
 				// postInitSQL runs as a superuser against the `postgres` maintenance database — the
-				// one the provisioner connects to and the one the ADR-0031 init script targeted, for
-				// the same reason: the extension has to exist where the queries run.
+				// one the provisioner connects to — because the extension has to exist where the
+				// queries run.
 				"postInitSQL": []any{"CREATE EXTENSION IF NOT EXISTS pg_stat_statements"},
 			},
 		},
@@ -401,10 +337,9 @@ func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name str
 				}},
 			},
 		},
-		// What CNPG puts on the resources it creates for this cluster. The annotations are the same
-		// ones the ADR-0031 pod carries so the metrics add-on's vmagent discovers the instance
-		// wherever it was installed (ADR-0051) — CNPG's instance manager already exports on 9187, so
-		// there is no exporter sidecar under this mechanism.
+		// What CNPG puts on the resources it creates for this cluster. The annotations are what the
+		// metrics add-on's vmagent discovers the instance by, whichever order the two were installed
+		// in (ADR-0051); CNPG's instance manager exports on 9187 itself.
 		//
 		// THE `managed-by` LABEL IS DELIBERATELY ABSENT. AddonVolumes selects Burrow's add-on claims
 		// by it and then attributes an unroled claim as a DATA claim a reinstall adopts (ADR-0064
@@ -434,12 +369,12 @@ func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name str
 	return out
 }
 
-// leanPostgresParameters renders LeanPostgresSettings — the `key=value` list the Deployment-backed
-// instance is started with — as the `spec.postgresql.parameters` map CNPG reconciles.
+// leanPostgresParameters renders LeanPostgresSettings — the `key=value` list the control-plane
+// database is started with — as the `spec.postgresql.parameters` map CNPG reconciles.
 //
-// It is derived from that list rather than restated, so the two mechanisms cannot drift: the comment
-// on LeanPostgresSettings already asks two places to be kept in step, and a third copied by hand is
-// how that stops being true. A malformed entry is skipped rather than written as a parameter with no
+// It is derived from that list rather than restated, so the two cannot drift: the comment on
+// LeanPostgresSettings already asks two places to be kept in step, and a third copied by hand is how
+// that stops being true. A malformed entry is skipped rather than written as a parameter with no
 // value, which CNPG would reject and which would make an add-on install fail on a typo in a tuning
 // constant.
 func leanPostgresParameters() map[string]any {

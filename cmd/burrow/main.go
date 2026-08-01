@@ -123,6 +123,9 @@ func newRootCmd() *cobra.Command {
 		// upgrade now live under `burrow cluster` (the cluster-lifecycle surface); the top-level
 		// `burrow install` / `burrow upgrade` stay as deprecated, hidden aliases so existing muscle
 		// memory and scripts keep working (they print a one-line migration hint).
+		// auth leads the golden path: it is where a person says which Burrow they talk to, and it
+		// is the first command anyone runs (ADR-0078).
+		grouped(newAuthCmd(), groupGetStarted),
 		grouped(newJoinCmd(), groupGetStarted),
 		newInstallAliasCmd(),
 		newUpgradeAliasCmd(),
@@ -274,6 +277,8 @@ func (o *commonOpts) resolveTarget() (target, error) {
 // names the exact override target instead.
 func targetLine(resolved localconfig.Resolved, ctxOverride, envOverride, finalContext, finalEnv string) string {
 	if ctxOverride == "" && envOverride == "" {
+		// ModeTargeted needs no "targeting" prefix: Render already leads with the target it resolved
+		// through, and prefixing it would stutter ("targeting target ...").
 		if resolved.Mode == localconfig.ModePinned {
 			return "targeting " + resolved.Render()
 		}

@@ -168,7 +168,7 @@ func newHookListCmd() *cobra.Command {
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
+			c, env, err := o.resolveAndConnectRead(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

@@ -269,6 +269,12 @@ type target struct {
 	// control plane answers on, in place of the kube context there is none of. It is empty for every
 	// cluster target, so the kubeconfig path is reached exactly as it was.
 	cloudEndpoint string
+	// flagOverride records that a flag on this invocation named something other than what would
+	// otherwise have been resolved: --context or --env on the resolved path, --env on the
+	// --control-plane one. It is the one thing a READ-ONLY command still says out loud, because the
+	// person asked for a target other than the active one and seeing that reflected is the point of
+	// having asked.
+	flagOverride bool
 	// installID is the Burrow install the selected target was pointed at (ADR-0084 §5), sent on every
 	// request so a control plane that is a different install refuses rather than acts. It comes from
 	// the target and nowhere else: a context name is how the request gets there, and this is what
@@ -291,7 +297,10 @@ func (o *commonOpts) resolveTarget() (target, error) {
 			display += fmt.Sprintf(" (env %q)", o.env)
 		}
 		o.acted = targetname.ForControlPlane(o.controlPlane)
-		return target{env: o.env, display: display}, nil
+		// An explicit --env names itself here for the same reason it does below: the person asked for
+		// an environment other than the one this invocation would otherwise use, and a read that
+		// swallowed that would leave them guessing whether the flag took.
+		return target{env: o.env, display: display, flagOverride: o.env != ""}, nil
 	}
 	cfg, err := localconfig.Load()
 	if err != nil {
@@ -327,6 +336,7 @@ func (o *commonOpts) resolveTarget() (target, error) {
 		controlPlaneNamespace: cpn,
 		env:                   env,
 		display:               targetLine(resolved, o.context, o.env, kubeContext, env),
+		flagOverride:          o.context != "" || o.env != "",
 		installID:             resolved.InstallID,
 	}
 	// An explicit --context is a deliberate choice of a different cluster from the one the target
@@ -365,7 +375,7 @@ func (o *commonOpts) cloudTarget(cfg *localconfig.Config, resolved localconfig.R
 		return target{}, fmt.Errorf("the active target %q is not in the targets list; choose one with \"burrow auth switch <name>\"", resolved.Target)
 	}
 	o.acted = targetname.ForCloud(t)
-	return target{env: o.env, display: resolved.Render(), cloudEndpoint: resolved.Endpoint}, nil
+	return target{env: o.env, display: "targeting " + resolved.Render(), cloudEndpoint: resolved.Endpoint}, nil
 }
 
 // kubeOnlyFlag names the kubeconfig-shaped flag this invocation set, or "" if none did. Those flags
@@ -386,18 +396,23 @@ func (o *commonOpts) kubeOnlyFlag() string {
 	}
 }
 
-// targetLine renders the one-line target shown on stderr before a per-app operation so a context
-// switch or a pin is never silent (ADR-0036). With no flag overrides it uses the resolved handle's
-// own description (pinned, or following the current kube context); an explicit --context or --env
-// names the exact override target instead.
+// targetLine renders the one-line target shown on stderr before a command that CHANGES something,
+// so a pin or a context switch is never silent (ADR-0036, ADR-0078 §1). It names the target and
+// nothing else — "targeting prod" — because the kube context and namespace behind that name are
+// Burrow's own resolution detail; `burrow auth status` reports them for anyone who wants them.
+//
+// An explicit --context or --env is the exception, and the only one. There the person asked for
+// something other than the active target, so the line names the exact override instead: saying more
+// is right precisely because they did something unusual, and it is the one line a read-only command
+// prints too.
 func targetLine(resolved localconfig.Resolved, ctxOverride, envOverride, finalContext, finalEnv string) string {
 	if ctxOverride == "" && envOverride == "" {
-		// ModeTargeted needs no "targeting" prefix: Render already leads with the target it resolved
-		// through, and prefixing it would stutter ("targeting target ...").
-		if resolved.Mode == localconfig.ModePinned {
-			return "targeting " + resolved.Render()
+		if resolved.Name == "" && resolved.Target == "" && resolved.Context == "" {
+			// Nothing resolved, so there is nothing to say the command is targeting; Render's own
+			// wording ("no current kube context") is the whole line.
+			return resolved.Render()
 		}
-		return resolved.Render()
+		return "targeting " + resolved.Render()
 	}
 	s := fmt.Sprintf("targeting context %q", finalContext)
 	if finalEnv != "" {
@@ -407,15 +422,40 @@ func targetLine(resolved localconfig.Resolved, ctxOverride, envOverride, finalCo
 	return s
 }
 
-// resolveAndConnect resolves the active target (ADR-0036), prints it to stderr so it never
-// pollutes stdout or a --json result, connects to the resolved cluster, and returns the client and
-// the burrowd env NAME to send with the operation.
+// resolveAndConnect resolves the active target (ADR-0036), names it on stderr so it never pollutes
+// stdout or a --json result, connects to the resolved cluster, and returns the client and the
+// burrowd env NAME to send with the operation.
+//
+// It is for the commands that CHANGE something. ADR-0078 §1 scopes the rule to those: the failure
+// it guards against is acting on the wrong target, and a listing that acts on nothing pays a tax it
+// does not owe — which is how the target line came to be the only line an empty read printed. A
+// read-only command calls resolveAndConnectRead instead.
 func (o *commonOpts) resolveAndConnect(ctx context.Context, stderr io.Writer) (*client.Client, string, error) {
+	return o.resolveConnect(ctx, stderr, true)
+}
+
+// resolveAndConnectRead is resolveAndConnect for a command that only READS. It prints no target
+// line: the result itself says which environment it describes, and a banner in front of a listing
+// is noise. An explicit --context or --env still prints, because the person asked for a target
+// other than the active one and should see that reflected.
+//
+// Which commands are which is not a judgement call made here. It is the classification every
+// command already carries in changeguard_test.go: classChanges names its target, everything else
+// does not.
+func (o *commonOpts) resolveAndConnectRead(ctx context.Context, stderr io.Writer) (*client.Client, string, error) {
+	return o.resolveConnect(ctx, stderr, false)
+}
+
+// resolveConnect is the shared body of the two: resolve, name the target if this invocation should,
+// then connect.
+func (o *commonOpts) resolveConnect(ctx context.Context, stderr io.Writer, changing bool) (*client.Client, string, error) {
 	tgt, err := o.resolveTarget()
 	if err != nil {
 		return nil, "", err
 	}
-	fmt.Fprintln(stderr, tgt.display)
+	if changing || tgt.flagOverride {
+		fmt.Fprintln(stderr, tgt.display)
+	}
 	tgt = applyScopedFallback(tgt, stderr)
 	c, err := o.connect(ctx, tgt)
 	if err != nil {

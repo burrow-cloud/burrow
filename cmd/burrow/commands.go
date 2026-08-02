@@ -25,7 +25,7 @@ func newAppListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
+			c, env, err := o.resolveAndConnectRead(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -152,7 +152,7 @@ func newStatusCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
+			c, env, err := o.resolveAndConnectRead(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -178,15 +178,14 @@ func newLogsCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
+			c, env, err := o.resolveAndConnectRead(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			// Print the source note and a divider to stderr up front — after the targeting line
-			// resolveAndConnect already emitted and before the logs — so the metadata leads and the
-			// log lines are the last, uninterrupted thing (a bottom note would be missed, and never
-			// appear at all once these logs are streamed/followed). `app logs` reads live Kubernetes
+			// Print the source note and a divider to stderr up front, before the logs, so the metadata
+			// leads and the log lines are the last, uninterrupted thing (a bottom note would be missed,
+			// and never appear at all once these logs are streamed/followed). `app logs` reads live Kubernetes
 			// pod logs (current pods only, lost on restart/reschedule), which is easy to mistake for
 			// a durable history, so it points at the logs add-on for retained, queryable logs. Stderr
 			// keeps it off a piped or redirected log stream; skipped for --json (metadata-free result).

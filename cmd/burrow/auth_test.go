@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -378,6 +379,66 @@ func TestAuthStatusEmptySaysWhatHappensToday(t *testing.T) {
 	}
 	if !strings.Contains(got, "burrow auth login") {
 		t.Errorf("status = %q, want it to name how to choose one", got)
+	}
+}
+
+// TestAuthStatusReportsTheClusterCoordinates confirms status is where the kube context and the app
+// namespace are reported.
+//
+// A command's target line names the environment and stops there: the context and the namespace are
+// how Burrow found that environment rather than what it is. They are still worth knowing when
+// something looks wrong, so they have to be askable — and this is where somebody asks.
+func TestAuthStatusReportsTheClusterCoordinates(t *testing.T) {
+	stubAuth(t, authContexts(), false)
+	kc := kubeconfigWithCurrent(t, "ctx-prod", "ctx-prod")
+	cfg := &localconfig.Config{
+		Current: "prod",
+		Environments: []localconfig.Environment{
+			{Name: "prod", Context: "ctx-prod", AppNamespace: "burrow-apps", Env: "prod"},
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(&out, authStatusOpts{kubeconfig: kc}); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{`"prod" environment`, "kube context", "ctx-prod", "app namespace", "burrow-apps"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestAuthStatusJSONCarriesTheClusterCoordinates confirms the same three values reach an agent
+// parsing the result, not only a person reading a terminal.
+func TestAuthStatusJSONCarriesTheClusterCoordinates(t *testing.T) {
+	stubAuth(t, authContexts(), false)
+	kc := kubeconfigWithCurrent(t, "ctx-prod", "ctx-prod")
+	cfg := &localconfig.Config{
+		Current: "prod",
+		Environments: []localconfig.Environment{
+			{Name: "prod", Context: "ctx-prod", AppNamespace: "burrow-apps", Env: "prod"},
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(&out, authStatusOpts{kubeconfig: kc, json: true}); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	var got authStatusResult
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("--json is not clean JSON: %v\n%s", err, out.String())
+	}
+	if got.Environment != "prod" || got.Context != "ctx-prod" || got.Namespace != "burrow-apps" {
+		t.Errorf("got environment=%q context=%q namespace=%q, want prod/ctx-prod/burrow-apps",
+			got.Environment, got.Context, got.Namespace)
 	}
 }
 

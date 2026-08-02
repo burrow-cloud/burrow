@@ -53,8 +53,10 @@ func fakeBurrowdEnv(c *targetCapture) *httptest.Server {
 }
 
 // TestPinnedHandleRoutesToHandleContextAndEnv confirms a pinned handle decides both the cluster
-// (its context, not the current kube context) and the env NAME sent to burrowd, and that the
-// resolved target is printed to stderr (ADR-0036 slice 5a).
+// (its context, not the current kube context) and the env NAME sent to burrowd (ADR-0036 slice 5a).
+//
+// It runs a read, so nothing is printed to stderr. That the pin is announced on a command that
+// CHANGES something is asserted by TestAChangingCommandNamesTheEnvironmentAndNothingElse below.
 func TestPinnedHandleRoutesToHandleContextAndEnv(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
@@ -93,8 +95,49 @@ func TestPinnedHandleRoutesToHandleContextAndEnv(t *testing.T) {
 	if prod.env != "prod" {
 		t.Errorf("env sent = %q, want the handle's env NAME prod (not the namespace)", prod.env)
 	}
+	if strings.Contains(errb.String(), "targeting") {
+		t.Errorf("stderr = %q, want no target line: `app status` reads and names no target", errb.String())
+	}
+}
+
+// TestAChangingCommandNamesTheEnvironmentAndNothingElse is ADR-0036's property in its current form:
+// a command that changes something says which environment it is about, so a pin (or a context
+// switch) is never silent. What it does NOT say is how Burrow got there — the kube context and the
+// namespace are resolution detail, and `burrow auth status` is where somebody asks for them.
+func TestAChangingCommandNamesTheEnvironmentAndNothingElse(t *testing.T) {
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	tempConfig(t)
+
+	var stg, prod targetCapture
+	staging := fakeBurrowdEnv(&stg)
+	prodSrv := fakeBurrowdEnv(&prod)
+	defer staging.Close()
+	defer prodSrv.Close()
+
+	// Current kube context is staging; pin the prod handle so the line has something to announce.
+	kc := writeKubeconfig(t, twoContextConfig(staging.URL, prodSrv.URL))
+	cfg := &localconfig.Config{
+		Current: "prod",
+		Environments: []localconfig.Environment{
+			{Name: "prod", Context: "prod", AppNamespace: "team-prod", Env: "prod"},
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"app", "scale", "web", "2", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("run: %v\n%s", err, errb.String())
+	}
 	if !strings.Contains(errb.String(), "targeting prod") {
-		t.Errorf("stderr target line = %q, want it to name the pinned target", errb.String())
+		t.Errorf("stderr = %q, want it to name the pinned environment", errb.String())
+	}
+	for _, unwanted := range []string{"context", "namespace", "team-prod", "kubectl"} {
+		if strings.Contains(errb.String(), unwanted) {
+			t.Errorf("stderr = %q, want no %q: the line names the environment, not how it was resolved", errb.String(), unwanted)
+		}
 	}
 }
 
@@ -134,14 +177,18 @@ func TestFollowModeUsesCurrentContextAndEnv(t *testing.T) {
 	if stg.env != "staging" {
 		t.Errorf("env sent = %q, want the followed handle's env staging", stg.env)
 	}
-	if !strings.Contains(errb.String(), "following kubectl") {
-		t.Errorf("stderr target line = %q, want it to show follow mode", errb.String())
+	if strings.Contains(errb.String(), "targeting") {
+		t.Errorf("stderr = %q, want no target line: `app status` reads and names no target", errb.String())
 	}
 }
 
 // TestContextAndEnvOverrideResolved confirms the low-level --context and --env flags override the
 // resolved handle: the command targets the named context and sends the raw env name, preserving the
 // ADR-0035 escape hatches.
+//
+// It runs a READ, and the override line still prints. That is the one thing a read says out loud:
+// the person asked for a target other than the active one, and seeing it reflected is why they
+// asked.
 func TestContextAndEnvOverrideResolved(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
@@ -185,7 +232,8 @@ func TestContextAndEnvOverrideResolved(t *testing.T) {
 }
 
 // TestTargetLinePrintsToStderrJSONStdoutClean confirms the resolved-target line goes to stderr, so
-// stdout (and a --json result) stays clean (ADR-0036).
+// stdout (and a --json result) stays clean (ADR-0036). It uses a changing command, because that is
+// what prints the line.
 func TestTargetLinePrintsToStderrJSONStdoutClean(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
@@ -206,7 +254,7 @@ func TestTargetLinePrintsToStderrJSONStdoutClean(t *testing.T) {
 	}
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"app", "status", "web", "--kubeconfig", kc, "--json"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"app", "scale", "web", "2", "--kubeconfig", kc, "--json"}, &out, &errb); err != nil {
 		t.Fatalf("run: %v\n%s", err, errb.String())
 	}
 	var res map[string]any

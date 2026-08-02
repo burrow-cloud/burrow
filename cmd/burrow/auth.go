@@ -301,9 +301,19 @@ type authTargetStatus struct {
 }
 
 // authStatusResult is the JSON shape of `burrow auth status`.
+//
+// Environment, Context and Namespace describe where commands go right now: the environment the
+// active target resolves to, and the cluster coordinates behind it. This is where the kube context
+// and the app namespace are reported, because the target line a command prints names the
+// environment alone. They are worth knowing; they are not worth printing unbidden on every command,
+// so they are here, for somebody who asked. All three are absent for the managed product, which has
+// no cluster.
 type authStatusResult struct {
 	Targets      []authTargetStatus `json:"targets"`
 	Active       string             `json:"active"`
+	Environment  string             `json:"environment,omitempty"`
+	Context      string             `json:"context,omitempty"`
+	Namespace    string             `json:"namespace,omitempty"`
 	AgentWired   bool               `json:"agentWired"`
 	AgentPresent bool               `json:"agentPresent"`
 }
@@ -326,6 +336,12 @@ func runAuthStatus(out io.Writer, o authStatusOpts) error {
 	result := authStatusResult{
 		Active:       cfg.CurrentTarget,
 		AgentPresent: claudeCodeDetected(),
+	}
+	// Where commands actually go, resolved the same way they resolve it. A resolution error is
+	// swallowed on purpose: status is what somebody runs to find out what is wrong, and it reports
+	// the targets either way rather than failing in place of the command that would have failed.
+	if resolved, rerr := localconfig.ResolveOperate(cfg, o.kubeconfig); rerr == nil {
+		result.Environment, result.Context, result.Namespace = resolved.Name, resolved.Context, resolved.Namespace
 	}
 	result.AgentWired = result.AgentPresent && claudeCodeWired()
 	for _, t := range cfg.Targets {
@@ -355,6 +371,7 @@ func writeAuthStatus(out io.Writer, r authStatusResult) {
 	if len(r.Targets) == 0 {
 		fmt.Fprintln(out, "No target is configured, so commands follow your current kube context.")
 		fmt.Fprintln(out, "Choose where you use Burrow:  burrow auth login")
+		writeActiveEnvironment(out, r)
 		writeAgentStatusLine(out, r)
 		return
 	}
@@ -382,7 +399,38 @@ func writeAuthStatus(out io.Writer, r authStatusResult) {
 				"moved or the context may have been renamed; point at it again with `burrow auth login`.\n", t.Name)
 		}
 	}
+	writeActiveEnvironment(out, r)
 	writeAgentStatusLine(out, r)
+}
+
+// writeActiveEnvironment prints where commands go right now: the environment they resolve to, and
+// the kube context and app namespace behind it.
+//
+// This is the home of the cluster coordinates. A command's target line names the environment and
+// stops there, because that is the answer to "where is this going" and the rest is how Burrow found
+// it. The rest is still worth knowing when something looks wrong, so it is reported HERE, to
+// somebody who asked for it, instead of on every command to somebody who did not.
+//
+// Nothing is printed for the managed product: it has no cluster, and the targets table above
+// already names the endpoint.
+func writeActiveEnvironment(out io.Writer, r authStatusResult) {
+	if r.Context == "" {
+		return
+	}
+	fmt.Fprintln(out)
+	if r.Environment != "" {
+		fmt.Fprintf(out, "Commands target the %q environment.\n", r.Environment)
+	} else {
+		fmt.Fprintln(out, "No environment is registered for the context commands resolve to.")
+	}
+	namespace := r.Namespace
+	if namespace == "" {
+		namespace = "(the install's default)"
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(tw, "  kube context\t%s\n", r.Context)
+	fmt.Fprintf(tw, "  app namespace\t%s\n", namespace)
+	_ = tw.Flush()
 }
 
 // writeAgentStatusLine adds the one actionable line about an unwired coding agent. It appears here

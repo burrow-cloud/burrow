@@ -294,42 +294,35 @@ func currentContext(kubeconfigPath string) (context, namespace string, err error
 	return context, namespace, nil
 }
 
-// Render formats a resolved target for display on a command, so the target is never
-// ambiguous (ADR-0036, ADR-0078). Examples:
+// Render names a resolved target for display on a command, so the target is never ambiguous
+// (ADR-0036, ADR-0078). Examples:
 //
-//	nonprod (context "do-nyc1-nonprod", namespace "team-x")
-//	following kubectl: do-nyc1-dev (unregistered)
-//	target "do-nyc1" (no environment registered)
-//	target "burrow-cloud.dev" (the managed product)
+//	prod
+//	"do-nyc1" (no environment registered)
+//	kube context "do-nyc1-dev" (no environment registered)
+//	"burrow-cloud.dev" (the managed product)
+//
+// It names the environment and nothing else. The kube context and the namespace are how Burrow
+// FOUND that environment rather than what it is, and they are exactly the Kubernetes vocabulary the
+// rest of the CLI keeps out of sight; `burrow auth status` reports them for anyone who wants them.
+//
+// The remaining branches have no environment name to give, so each says what it did resolve through
+// — the selected target, or the kube context being followed — and says plainly that no environment
+// is registered for it. Naming the context there is not the mechanism leaking back in: it is the
+// only name the resolution has.
 func (r Resolved) Render() string {
-	if r.Cloud() {
+	switch {
+	case r.Cloud():
 		// The target is named after the endpoint, so naming both would stutter; what a reader needs
 		// from this line is that the command is going to the managed product and not to a cluster.
-		return fmt.Sprintf("target %q (the managed product)", r.Target)
+		return fmt.Sprintf("%q (the managed product)", r.Target)
+	case r.Name != "":
+		return r.Name
+	case r.Mode == ModeTargeted:
+		return fmt.Sprintf("%q (no environment registered)", r.Target)
+	case r.Context != "":
+		return fmt.Sprintf("kube context %q (no environment registered)", r.Context)
+	default:
+		return "no current kube context"
 	}
-	if r.Mode == ModeFollowing && r.Name == "" {
-		if r.Context == "" {
-			return "no current kube context"
-		}
-		return fmt.Sprintf("following kubectl: %s (unregistered)", r.Context)
-	}
-	if r.Mode == ModeTargeted && r.Name == "" {
-		// A kubeconfig target is named after its context, so naming both would stutter.
-		if r.Target == r.Context {
-			return fmt.Sprintf("target %q (no environment registered)", r.Target)
-		}
-		return fmt.Sprintf("target %q: context %q (no environment registered)", r.Target, r.Context)
-	}
-	out := fmt.Sprintf("%s (context %q", r.Name, r.Context)
-	if r.Namespace != "" {
-		out += fmt.Sprintf(", namespace %q", r.Namespace)
-	}
-	out += ")"
-	switch {
-	case r.Mode == ModeFollowing:
-		out += " (following kubectl)"
-	case r.Target != "":
-		out += fmt.Sprintf(" (target %q)", r.Target)
-	}
-	return out
 }

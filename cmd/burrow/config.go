@@ -105,7 +105,7 @@ func newAppConfigListCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
+			c, env, err := o.resolveAndConnectRead(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -116,6 +116,12 @@ func newAppConfigListCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			if o.json {
 				return emit(out, true, cfg, "")
+			}
+			// An empty listing says so. Printing nothing leaves the reader unable to tell an app
+			// with no config from a command that failed quietly, and the answer costs one line.
+			if len(cfg) == 0 {
+				fmt.Fprintf(out, "No config vars set for %s. Set one with `burrow app config set %s KEY=VALUE`.\n", args[0], args[0])
+				return nil
 			}
 			keys := make([]string, 0, len(cfg))
 			for k := range cfg {

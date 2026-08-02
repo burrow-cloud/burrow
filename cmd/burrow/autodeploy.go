@@ -49,7 +49,14 @@ func newAutoDeployCmd() *cobra.Command {
 					return err
 				}
 			}
-			c, env, err := o.resolveAndConnect(ctx, cmd.ErrOrStderr())
+			// One command, two acts: with one argument this shows the level and changes nothing,
+			// with two it sets it. Only the setting form names the target, on the same rule as
+			// every other command — the show is a read (ADR-0078 §1).
+			connect := o.resolveAndConnect
+			if len(args) == 1 {
+				connect = o.resolveAndConnectRead
+			}
+			c, env, err := connect(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

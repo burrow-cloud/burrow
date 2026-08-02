@@ -445,6 +445,12 @@ func newEnvAddCmd() *cobra.Command {
 }
 
 func runEnvAdd(ctx context.Context, o *commonOpts, name, envNamespace string, verbose bool, stdout, stderr io.Writer) error {
+	// Checked before step (a) for the same reason the reserved names are: step (a) creates a
+	// namespace and RBAC with the user's own kubeconfig, so a refusal arriving at step (b) would
+	// already have left them on a cluster nobody chose (clusteronly.go).
+	if err := o.requireCluster(); err != nil {
+		return err
+	}
 	// The reserved names are rejected HERE, before step (a), not only by burrowd in step (b). Step
 	// (a) creates a namespace and RBAC with the user's own kubeconfig, and a refusal that arrives
 	// after it has run leaves an empty `burrow-apps-prod` namespace behind for a command that never

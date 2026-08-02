@@ -171,6 +171,9 @@ func runRegistry(t *testing.T, cs *fake.Clientset, args ...string) string {
 // so the prompt paths are exercised without a real TTY.
 func execRegistry(t *testing.T, cs *fake.Clientset, stdin string, terminal bool, args ...string) (string, string, error) {
 	t.Helper()
+	// These subcommands now read the local config to check which target is active, so isolate it:
+	// otherwise the result depends on what the developer running the tests last signed in to.
+	isolateConfig(t)
 	orig := registryClientset
 	registryClientset = func(string) (kubernetes.Interface, error) { return cs, nil }
 	t.Cleanup(func() { registryClientset = orig })

@@ -69,8 +69,14 @@ func newRegistryCmd() *cobra.Command {
 	parent.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 
 	// resolve builds a clientset and determines the app namespace (from the flag or the
-	// install) for whichever subcommand runs.
+	// install) for whichever subcommand runs. It refuses first while the managed product is selected:
+	// these subcommands write a pull Secret into a cluster with the ambient kubeconfig and consult no
+	// target, so with no cluster to write to they would otherwise land the credential on whatever
+	// context happened to be current (clusteronly.go).
 	resolve := func(ctx context.Context) (kubernetes.Interface, string, error) {
+		if err := refuseCloudTarget(); err != nil {
+			return nil, "", err
+		}
 		cs, err := registryClientset(kubeconfig)
 		if err != nil {
 			return nil, "", err

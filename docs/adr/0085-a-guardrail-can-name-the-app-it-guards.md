@@ -9,7 +9,8 @@
 Guardrails scope to an environment, not to an app. So "the agent must not redeploy *this one thing*"
 has no way to be said, and the only way to say it is to put that thing in an environment of its own.
 
-- **`guard set --app <name>`** — a disposition for one app, or one add-on.
+- **`guard set --app <name>`** or **`--addon <name>`** — a disposition for one app, or one add-on
+  instance.
 - **Three tiers, most specific wins**: app, then environment, then the built-in default.
 - **No migration.** The policy key is a string and lookup never parses it.
 - **Each guardrail declares whether it is app-scopable**, the same way `envScoped` already works.
@@ -66,15 +67,32 @@ production"*, which is a real question and a different one.
 
 ## Decision
 
-### 1. A disposition can name an app
+### 1. A disposition can name an app, or an add-on instance
 
 ```
 burrow guard set --app burrowd-cloud app.deploy deny
 burrow guard set --env prod --app burrowd-cloud app.deploy deny
+burrow guard set --env prod --addon postgres-prod addon.restore_instance deny
 ```
 
-`--app` names an application, or an add-on for the `addon.*` codes. The guardrail code already says
-which kind of thing it targets, so one flag covers both without ambiguity.
+`--app` and `--addon` are separate and mutually exclusive. Each is refused on a code of the other
+kind, with a message naming what that guardrail actually targets rather than reporting an unknown
+flag.
+
+**One flag meaning both would have been shorter and worse.** "`--app` names an application, or an
+add-on when the code begins with `addon.`" is a rule the reader has to hold, to save one flag.
+
+**Add-ons need no new identity for this.** They are already addressed by name — `addon remove
+<name>`, `restore-instance <addon>`, `attach`/`detach <addon> <app>` — and
+`AddonInstanceName(type, env)` is what produces it. So this is **instance-level from the start**, and
+stays correct when an environment can hold several instances
+([#432](https://github.com/burrow-cloud/burrow/issues/432)) rather than needing a fourth tier later.
+
+**Some guardrails name two things.** `addon.detach` is `detach <addon> <app>`: detaching `web` from
+`postgres-prod` destroys `web`'s database, and either target could plausibly scope it. **It scopes by
+the add-on**, because that is where the data lives and where the blast radius is bounded. Scoping by
+app would let an operator protect `web` while the identical verb wipes `api` on the same instance —
+which reads as protection and is not.
 
 ### 2. Resolution is three tiers, most specific first
 
@@ -144,6 +162,11 @@ prefix scheme extends to a third tier by constructing one more candidate key.
 not. Reads as a tidy rule and is wrong in the case that matters: `addon.restore_instance` starts with
 `addon.` and takes every app on the instance down together. ADR-0068 §5 already decided this axis
 should be declared rather than inferred, for this reason.
+
+**Scope add-on guardrails by the app rather than the add-on.** For the two-target verbs it is the
+more natural reading — `detach <addon> <app>` is something done *to* an app. Rejected because the
+protection would be illusory in exactly the case it exists for: the destructive reach of a verb on a
+shared Postgres instance is the instance, not the one app named on the command line.
 
 **Scope to an app *instead of* an environment.** Simpler, one tier. It loses "deny in production,
 allow in staging", which is the thing environment scoping was built for and the more common want.

@@ -28,7 +28,7 @@ revoke one of them, record which one acted, or refuse one of them anything.
 Supersedes [ADR-0014](0014-self-host-connectivity-via-kubeconfig.md)'s use of the kubeconfig as the
 route to a shared credential, and replaces the credential [ADR-0038](0038-scoped-agent-credential.md)
 mints for the agent. Fills the seam [ADR-0027](0027-audit-log.md) and ADR-0038 both left open.
-Makes [ADR-0083](0083-a-cluster-command-acts-on-the-target-you-chose.md)'s question moot.
+Makes ADR-0083's question moot — that record was closed unaccepted rather than merged, so §4 here is where the answer lives ([#439](https://github.com/burrow-cloud/burrow/pull/439)).
 
 ## Context
 
@@ -296,7 +296,7 @@ described and sold.
 control-plane cluster runs a context switcher alongside `burrow auth switch`, because some commands
 follow one and some the other. After §3 there is one switch, and it is Burrow's.
 
-**[ADR-0083](0083-a-cluster-command-acts-on-the-target-you-chose.md) stops being a question.** It
+**ADR-0083 stops being a question.** It
 asks which cluster `burrow guard set` acts on when a cluster target is selected — a question that
 exists only because those commands reach a cluster directly rather than reaching a control plane.
 Under this record they reach the target's burrowd with a token like everything else, and there is

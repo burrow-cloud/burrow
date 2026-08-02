@@ -163,6 +163,16 @@ environment install created is the baseline the others diverge from. `burrow gua
 guardrail stands and whether it came from the environment, the global policy, or the built-in
 default.
 
+One app can also differ from its neighbours, for the case where a single thing in an environment
+must not be touched while everything around it stays agent-operable:
+
+```sh
+burrow guard set --env prod --name payments app.deploy deny
+```
+
+`--name` needs `--env`, because on its own a name cannot be told apart from an environment of the
+same name.
+
 Leave the guardrail alone for now: the agent path below is where the deny earns its keep, and the
 cleanup at the end deletes the whole cluster anyway.
 

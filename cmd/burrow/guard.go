@@ -9,7 +9,9 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
+	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/internal/agentsurface"
 )
 
@@ -31,6 +33,7 @@ func newGuardCmd() *cobra.Command {
 
 func newGuardListCmd() *cobra.Command {
 	o := &commonOpts{}
+	var name string
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List the guardrails and their dispositions, and the capabilities absent from burrow-agent",
@@ -41,7 +44,7 @@ func newGuardListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			gs, err := c.Guardrails(ctx, o.env)
+			gs, err := c.Guardrails(ctx, client.GuardScope{Env: o.env, Name: name})
 			if err != nil {
 				return err
 			}
@@ -54,14 +57,15 @@ func newGuardListCmd() *cobra.Command {
 			if o.json {
 				return emit(out, true, agentsurface.NewGuardReport(gs, absent), "")
 			}
-			named := o.env != "" && o.env != "default"
+			named := name != "" || (o.env != "" && o.env != "default")
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			if named {
-				// The SOURCE column shows whether each effective disposition is set for this
-				// environment or inherited from the global policy or the built-in default.
+				// The SOURCE column shows which tier each effective disposition came from: set for
+				// the named app or add-on instance, set for this environment, or inherited from the
+				// global policy or the built-in default.
 				fmt.Fprintln(tw, "GUARDRAIL\tDISPOSITION\tSOURCE\tDESCRIPTION")
 				for _, g := range gs {
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", g.Code, g.Disposition, guardSourceLabel(g.Source), g.Description)
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", g.Code, g.Disposition, guardSourceLabel(g.Source, name), g.Description)
 				}
 			} else {
 				fmt.Fprintln(tw, "GUARDRAIL\tDISPOSITION\tDESCRIPTION")
@@ -78,6 +82,7 @@ func newGuardListCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	bindGuardName(cmd.Flags(), &name, "read the effective policy for")
 	return cmd
 }
 
@@ -109,11 +114,14 @@ func writeAbsentCapabilities(w io.Writer, absent []agentsurface.Capability) {
 	_ = tw.Flush()
 }
 
-// guardSourceLabel renders a guardrail's source for the env-scoped listing. An env-specific override
-// reads as "environment"; the inherited cases name where the value comes from so it is clear nothing
-// was set for this environment.
-func guardSourceLabel(source string) string {
+// guardSourceLabel renders a guardrail's source for a scoped listing. A disposition set for the
+// named app or add-on instance reads as that name, so the row says what it is about; an env-specific
+// override reads as "environment"; the inherited cases name where the value comes from so it is
+// clear nothing was set for the thing that was asked about.
+func guardSourceLabel(source, name string) string {
 	switch source {
+	case "name":
+		return name
 	case "env":
 		return "environment"
 	case "global":
@@ -123,26 +131,45 @@ func guardSourceLabel(source string) string {
 	}
 }
 
+// bindGuardName registers the --name flag shared by `guard list` and `guard set`. One flag covers
+// both kinds of target because the guardrail code already says which kind it is: an application for
+// the app.* codes, an add-on instance for the addon.* ones (ADR-0085 §1).
+func bindGuardName(flags *pflag.FlagSet, name *string, verb string) {
+	flags.StringVar(name, "name", "", "app or add-on instance to "+verb+" (requires --env; the guardrail decides which kind of name it is)")
+}
+
 func newGuardSetCmd() *cobra.Command {
 	o := &commonOpts{}
+	var name string
 	cmd := &cobra.Command{
 		Use:   "set <guardrail> <allow|confirm|deny>",
 		Short: "Set a guardrail's disposition",
-		Args:  exactArgs(2),
+		Long: "Set a guardrail's disposition, for the whole cluster, for one environment, or for one\n" +
+			"app or add-on instance in an environment.\n\n" +
+			"  burrow guard set app.deploy confirm                                    every app, everywhere\n" +
+			"  burrow guard set --env staging app.deploy allow                        every app in staging\n" +
+			"  burrow guard set --env prod --name website app.deploy deny             one app\n" +
+			"  burrow guard set --env prod --name burrow-postgres addon.remove deny   one add-on instance\n\n" +
+			"--name needs --env: on its own a name cannot be told apart from an environment of the\n" +
+			"same name. Not every guardrail can be set for one thing; those that cannot say why.",
+		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := o.client(ctx)
 			if err != nil {
 				return err
 			}
-			gs, err := c.SetGuardrail(ctx, o.env, args[0], args[1])
+			gs, err := c.SetGuardrail(ctx, client.GuardScope{Env: o.env, Name: name}, args[0], args[1])
 			if err != nil {
 				return err
 			}
 			// The policy is written into whichever cluster this command reached, so it names that
 			// cluster like every other change does (ADR-0078 §4).
 			human := fmt.Sprintf("set guardrail %q to %q", args[0], args[1])
-			if o.env != "" && o.env != "default" {
+			switch {
+			case name != "":
+				human = fmt.Sprintf("set guardrail %q to %q for %q in environment %q", args[0], args[1], name, envOrDefault(o.env))
+			case o.env != "" && o.env != "default":
 				human = fmt.Sprintf("set guardrail %q to %q in environment %q", args[0], args[1], o.env)
 			}
 			return o.emitChange(cmd.OutOrStdout(), gs, human)
@@ -150,5 +177,15 @@ func newGuardSetCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	bindGuardName(cmd.Flags(), &name, "set it for")
 	return cmd
+}
+
+// envOrDefault names the environment a message refers to. The control plane refuses a name without
+// an environment, so this only ever fills in a blank the server has already accepted.
+func envOrDefault(env string) string {
+	if env == "" {
+		return "prod"
+	}
+	return env
 }

@@ -549,8 +549,9 @@ type configSetRequest struct {
 
 func (s *server) guardList(w http.ResponseWriter, r *http.Request) {
 	// The optional env query selects a named environment's effective policy; empty is the global
-	// policy, reproducing the pre-environments behavior (ADR-0035 phase 2c).
-	gs, err := s.engine.Guardrails(r.Context(), r.URL.Query().Get("env"))
+	// policy, reproducing the pre-environments behavior (ADR-0035 phase 2c). The optional name
+	// query narrows it further, to one app or add-on instance in that environment (ADR-0085 §4).
+	gs, err := s.engine.Guardrails(r.Context(), guardScope(r))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -563,20 +564,29 @@ func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	// The optional env query scopes the set to a named environment (storing the env-prefixed code);
-	// empty sets the global disposition (ADR-0035 phase 2c).
-	env := r.URL.Query().Get("env")
+	// The env query scopes the set to a named environment (storing the env-prefixed code) and the
+	// name query to one app or add-on instance within it (storing env.name.code); neither sets the
+	// global disposition (ADR-0035 phase 2c, ADR-0085 §1).
+	scope := guardScope(r)
 	code := controlplane.GuardrailCode(r.PathValue("code"))
-	if err := s.engine.SetGuardrail(r.Context(), env, code, controlplane.Disposition(req.Disposition)); err != nil {
+	if err := s.engine.SetGuardrail(r.Context(), scope, code, controlplane.Disposition(req.Disposition)); err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	gs, err := s.engine.Guardrails(r.Context(), env)
+	gs, err := s.engine.Guardrails(r.Context(), scope)
 	if err != nil {
 		writeEngineError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, guardResponse{Guardrails: gs})
+}
+
+// guardScope reads the guardrail scope off the query string. Both parts are optional here and the
+// engine decides which combinations are legal, so one refusal is written once, on the server, and
+// says the same thing to every client (ADR-0020).
+func guardScope(r *http.Request) controlplane.GuardrailScope {
+	q := r.URL.Query()
+	return controlplane.GuardrailScope{Env: q.Get("env"), Name: q.Get("name")}
 }
 
 // limitsList returns every operational limit with its effective value (ADR-0068 §3). The optional

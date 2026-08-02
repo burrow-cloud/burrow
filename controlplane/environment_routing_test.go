@@ -182,10 +182,10 @@ func TestPerEnvironmentGuardrailGatesOnlyThatEnv(t *testing.T) {
 	}
 
 	// Permissive globally, locked in staging.
-	if err := e.SetGuardrail(ctx, "", cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
 		t.Fatalf("SetGuardrail(global): %v", err)
 	}
-	if err := e.SetGuardrail(ctx, "staging", cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging"}, cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(staging): %v", err)
 	}
 
@@ -215,10 +215,10 @@ func TestSetGuardrailEnvValidation(t *testing.T) {
 	}
 
 	// A registered env + app-level code stores the env-prefixed disposition, visible in staging's listing.
-	if err := e.SetGuardrail(ctx, "staging", cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging"}, cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(staging, app.delete): %v", err)
 	}
-	gs, err := e.Guardrails(ctx, "staging")
+	gs, err := e.Guardrails(ctx, cp.GuardrailScope{Env: "staging"})
 	if err != nil {
 		t.Fatalf("Guardrails(staging): %v", err)
 	}
@@ -236,19 +236,19 @@ func TestSetGuardrailEnvValidation(t *testing.T) {
 	}
 
 	// An unknown environment is a clear ErrNotFound (catches typos).
-	if err := e.SetGuardrail(ctx, "ghost", cp.GuardrailAppDelete, cp.DispositionDeny); !errors.Is(err, cp.ErrNotFound) {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "ghost"}, cp.GuardrailAppDelete, cp.DispositionDeny); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("SetGuardrail(ghost) = %v, want ErrNotFound", err)
 	}
 	// A cluster-level guardrail cannot be scoped to an environment.
-	if err := e.SetGuardrail(ctx, "staging", cp.GuardrailAddonInstall, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging"}, cp.GuardrailAddonInstall, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetGuardrail(staging, addon.install) = %v, want ErrInvalid (cluster-level)", err)
 	}
-	if err := e.SetGuardrail(ctx, "staging", cp.GuardrailDNSWrite, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging"}, cp.GuardrailDNSWrite, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetGuardrail(staging, dns.write) = %v, want ErrInvalid (cluster-level)", err)
 	}
 
 	// Listing an unknown environment is likewise a clear error.
-	if _, err := e.Guardrails(ctx, "ghost"); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.Guardrails(ctx, cp.GuardrailScope{Env: "ghost"}); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("Guardrails(ghost) = %v, want ErrNotFound", err)
 	}
 }
@@ -264,7 +264,7 @@ func TestClusterLevelGuardrailIgnoresEnv(t *testing.T) {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 	// Deny add-on install globally; there is no way to make it depend on an environment.
-	if err := e.SetGuardrail(ctx, "", cp.GuardrailAddonInstall, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, cp.GuardrailAddonInstall, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(addon.install): %v", err)
 	}
 	_, err := e.InstallAddon(ctx, cp.AddonLogs, "staging", cp.InstallAddonOptions{})

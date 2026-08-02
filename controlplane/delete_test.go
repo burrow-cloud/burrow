@@ -146,7 +146,7 @@ func TestDeleteAppDenyDefaultIsAPerEnvironmentFloor(t *testing.T) {
 		}
 	}
 
-	if err := e.SetGuardrail(ctx, "dev", cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "dev"}, cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
 		t.Fatalf("SetGuardrail(dev, app.delete, allow): %v", err)
 	}
 

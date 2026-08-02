@@ -265,9 +265,11 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 		return RestoreInstanceResult{}, fmt.Errorf("restore instance %s: loading guardrail policy: %w", t, err)
 	}
 	if err := e.recordDecision(ctx, auditOpAddonRestoreInstance, instance, args, GuardrailAddonRestoreInstance,
-		// Disposition looked up globally (addon.* is cluster-level, not EnvScopable); the environment
-		// is named in the message and the audit args (ADR-0035 phase 2c, ADR-0067 §1).
-		pol.evaluateGuardrail("", "addon restore-instance", GuardrailAddonRestoreInstance, opts.Confirm,
+		// Scoped by the INSTANCE this rewinds (ADR-0085 §1): the instance is exactly the blast
+		// radius, so naming it describes the reach truthfully where naming one app would not.
+		// addon.* is not EnvScopable, so the environment reaches the lookup through the instance
+		// name rather than as a tier of its own (ADR-0035 phase 2c, ADR-0067 §1).
+		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon restore-instance", GuardrailAddonRestoreInstance, opts.Confirm,
 			restoreInstanceConsequence(instance, targetEnv, opts.target(), apps))); err != nil {
 		return RestoreInstanceResult{}, err
 	}

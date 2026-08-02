@@ -35,7 +35,7 @@ func TestEvaluateReplicas(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := c.policy.evaluateReplicas("", "test", c.replicas, c.confirmed)
+			err := c.policy.evaluateReplicas(GuardrailScope{}, "test", c.replicas, c.confirmed)
 			if c.wantCode == "" {
 				if err != nil {
 					t.Fatalf("evaluateReplicas(%d, confirmed=%v) = %v, want allowed", c.replicas, c.confirmed, err)
@@ -92,7 +92,7 @@ func TestEvaluateDeploy(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := c.policy.evaluateDeploy(c.env, c.replicas, c.confirmed)
+			err := c.policy.evaluateDeploy(GuardrailScope{Env: c.env}, c.replicas, c.confirmed)
 			if c.wantCode == "" {
 				if err != nil {
 					t.Fatalf("evaluateDeploy(env=%q, %d, confirmed=%v) = %v, want allowed", c.env, c.replicas, c.confirmed, err)
@@ -137,14 +137,14 @@ func TestDispositionEnvFallback(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := p.disposition(c.env, GuardrailAppDelete); got != c.want {
+			if got := p.disposition(GuardrailScope{Env: c.env}, GuardrailAppDelete); got != c.want {
 				t.Errorf("disposition(%q, app.delete) = %q, want %q", c.env, got, c.want)
 			}
 		})
 	}
 
 	// A guardrail with no override anywhere reads as the deny-when-unset default, in any env.
-	if got := p.disposition("staging", GuardrailRollback); got != DispositionDeny {
+	if got := p.disposition(GuardrailScope{Env: "staging"}, GuardrailRollback); got != DispositionDeny {
 		t.Errorf("unset guardrail in staging = %q, want deny (the safe default)", got)
 	}
 }
@@ -156,13 +156,13 @@ func TestDispositionSource(t *testing.T) {
 		With(GuardrailAppDelete, DispositionAllow).
 		With(GuardrailCode("staging."+string(GuardrailAppDelete)), DispositionDeny)
 
-	if d, src := p.dispositionSource("staging", GuardrailAppDelete); d != DispositionDeny || src != "env" {
+	if d, src := p.dispositionSource(GuardrailScope{Env: "staging"}, GuardrailAppDelete); d != DispositionDeny || src != "env" {
 		t.Errorf("staging app.delete = (%q, %q), want (deny, env)", d, src)
 	}
-	if d, src := p.dispositionSource("dev", GuardrailAppDelete); d != DispositionAllow || src != "global" {
+	if d, src := p.dispositionSource(GuardrailScope{Env: "dev"}, GuardrailAppDelete); d != DispositionAllow || src != "global" {
 		t.Errorf("dev app.delete = (%q, %q), want (allow, global)", d, src)
 	}
-	if d, src := p.dispositionSource("staging", GuardrailRollback); d != DispositionDeny || src != "default" {
+	if d, src := p.dispositionSource(GuardrailScope{Env: "staging"}, GuardrailRollback); d != DispositionDeny || src != "default" {
 		t.Errorf("staging app.rollback (unset) = (%q, %q), want (deny, default)", d, src)
 	}
 }
@@ -172,7 +172,7 @@ func TestDispositionSource(t *testing.T) {
 func TestGuardrailsForMarksSource(t *testing.T) {
 	p := DefaultPolicy().With(GuardrailCode("staging."+string(GuardrailAppDelete)), DispositionDeny)
 
-	for _, g := range p.GuardrailsFor("staging") {
+	for _, g := range p.GuardrailsFor(GuardrailScope{Env: "staging"}) {
 		if g.Source == "" {
 			t.Errorf("env listing left Source empty for %s", g.Code)
 		}
@@ -269,7 +269,7 @@ func TestAsGuardrailWrapped(t *testing.T) {
 func TestDenyRefusalSteersTowardScoping(t *testing.T) {
 	p := DefaultPolicy()
 
-	err := p.evaluateGuardrail("staging", "app delete", GuardrailAppDelete, true, "deleting the app")
+	err := p.evaluateGuardrail(GuardrailScope{Env: "staging"}, "app delete", GuardrailAppDelete, true, "deleting the app")
 	g, ok := AsGuardrail(err)
 	if !ok {
 		t.Fatalf("app.delete under the default policy = %v, want a GuardrailError", err)
@@ -281,13 +281,13 @@ func TestDenyRefusalSteersTowardScoping(t *testing.T) {
 	}
 
 	// With no named environment there is no name to print, so the placeholder keeps the --env shape.
-	err = p.evaluateGuardrail("", "app delete", GuardrailAppDelete, true, "deleting the app")
+	err = p.evaluateGuardrail(GuardrailScope{}, "app delete", GuardrailAppDelete, true, "deleting the app")
 	g, _ = AsGuardrail(err)
 	if !strings.Contains(g.Message, "guard set --env <env> app.delete confirm") {
 		t.Errorf("unscoped app.delete refusal %q should still show the --env form", g.Message)
 	}
 
-	err = p.evaluateGuardrail("", "domain remove", GuardrailDNSDelete, true, "removing the DNS record")
+	err = p.evaluateGuardrail(GuardrailScope{}, "domain remove", GuardrailDNSDelete, true, "removing the DNS record")
 	g, ok = AsGuardrail(err)
 	if !ok {
 		t.Fatalf("dns.delete under the default policy = %v, want a GuardrailError", err)
@@ -299,5 +299,189 @@ func TestDenyRefusalSteersTowardScoping(t *testing.T) {
 	}
 	if strings.Contains(g.Message, "--env") {
 		t.Errorf("dns.delete refusal %q offers a --env form it cannot honour", g.Message)
+	}
+}
+
+// TestNameTierWinsOverEnvironmentAndGlobal walks the three tiers on one code, most specific first
+// (ADR-0085 §2). The scenario is the one the record was written for: a control plane and a marketing
+// site in the same environment, where one must not be deployable by the agent and the other must.
+func TestNameTierWinsOverEnvironmentAndGlobal(t *testing.T) {
+	p := Policy{}.
+		With(GuardrailAppDeploy, DispositionAllow).                                 // every app, everywhere
+		With(GuardrailCode("staging.app.deploy"), DispositionConfirm).              // every app in staging
+		With(GuardrailCode("prod.control-plane.app.deploy"), DispositionDeny).      // one app in prod
+		With(GuardrailCode("staging.control-plane.app.deploy"), DispositionConfirm) // the same app in staging
+
+	cases := []struct {
+		name       string
+		scope      GuardrailScope
+		want       Disposition
+		wantSource string
+	}{
+		{"the named app in prod has its own deny", GuardrailScope{Env: "prod", Name: "control-plane"}, DispositionDeny, sourceName},
+		{"an unnamed environment falls through to prod's global allow", GuardrailScope{Env: "prod", Name: "website"}, DispositionAllow, sourceGlobal},
+		{"the same app in staging has its own row", GuardrailScope{Env: "staging", Name: "control-plane"}, DispositionConfirm, sourceName},
+		{"another app in staging takes the environment's", GuardrailScope{Env: "staging", Name: "website"}, DispositionConfirm, sourceEnv},
+		{"naming nothing in staging is the environment's", GuardrailScope{Env: "staging"}, DispositionConfirm, sourceEnv},
+		{"naming nothing at all is the global one", GuardrailScope{}, DispositionAllow, sourceGlobal},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d, src := p.dispositionSource(c.scope, GuardrailAppDeploy)
+			if d != c.want || src != c.wantSource {
+				t.Errorf("dispositionSource(%+v) = (%q, %q), want (%q, %q)", c.scope, d, src, c.want, c.wantSource)
+			}
+		})
+	}
+}
+
+// TestNameTierIsConsultedInTheDefaultEnvironment pins the half of ADR-0085 §2 that does NOT follow
+// the environment tier's rule. An empty env, or `prod`, reproduces the global policy for the
+// ENVIRONMENT tier, because with one environment there is nothing for a per-environment override to
+// differ from (ADR-0067 §2). That reasoning does not carry over: there is no baseline app whose
+// policy is the global one, so a name-scoped row is always a deliberate divergence and is read in
+// `prod` exactly as it is in `staging`. The record's own motivating case lives in `prod`, so a name
+// tier that skipped it would implement nothing.
+func TestNameTierIsConsultedInTheDefaultEnvironment(t *testing.T) {
+	p := Policy{}.
+		With(GuardrailAppDeploy, DispositionAllow).
+		With(GuardrailCode("prod.control-plane.app.deploy"), DispositionDeny)
+
+	// An empty env and an explicit `prod` are the same key, so both find the row.
+	for _, env := range []string{"", DefaultEnvironment} {
+		d, src := p.dispositionSource(GuardrailScope{Env: env, Name: "control-plane"}, GuardrailAppDeploy)
+		if d != DispositionDeny || src != sourceName {
+			t.Errorf("env %q: control-plane app.deploy = (%q, %q), want (deny, name)", env, d, src)
+		}
+	}
+	// And the listing marks a Source for it, where an unnamed prod listing leaves Source empty.
+	for _, g := range p.GuardrailsFor(GuardrailScope{Env: DefaultEnvironment, Name: "control-plane"}) {
+		if g.Source == "" {
+			t.Errorf("named listing left Source empty for %s", g.Code)
+		}
+	}
+	for _, g := range p.GuardrailsFor(GuardrailScope{Env: DefaultEnvironment}) {
+		if g.Source != "" {
+			t.Errorf("unnamed prod listing set Source %q for %s; prod's policy IS the global policy", g.Source, g.Code)
+		}
+	}
+}
+
+// TestNamePolicyKeyShape pins the stored key, which is a persistence format: it is what is written
+// into guardrail_policy, and a change to it silently orphans every row an operator has set. The
+// environment segment is always present and spells `prod` out, which is what keeps an app called
+// `staging` from sharing a key with the `staging` environment (ADR-0085 §2).
+func TestNamePolicyKeyShape(t *testing.T) {
+	cases := []struct {
+		env, name string
+		code      GuardrailCode
+		want      GuardrailCode
+	}{
+		{"", "website", GuardrailAppRun, "prod.website.app.run"},
+		{DefaultEnvironment, "website", GuardrailAppRun, "prod.website.app.run"},
+		{"staging", "website", GuardrailAppDeploy, "staging.website.app.deploy"},
+		{"prod", "burrow-postgres", GuardrailAddonRestoreInstance, "prod.burrow-postgres.addon.restore_instance"},
+	}
+	for _, c := range cases {
+		if got := namePolicyKey(c.env, c.name, c.code); got != c.want {
+			t.Errorf("namePolicyKey(%q, %q, %q) = %q, want %q", c.env, c.name, c.code, got, c.want)
+		}
+	}
+
+	// The shapes cannot collide: an app row always has one more segment than the environment row it
+	// would otherwise be mistaken for, and no environment name can contain the dot that would close
+	// the gap.
+	if namePolicyKey("staging", "web", GuardrailAppDeploy) == envPolicyKey("staging", GuardrailAppDeploy) {
+		t.Error("an app-scoped key collided with an environment-scoped one")
+	}
+}
+
+// TestNameScopableIsDeclaredNotInferred pins ADR-0085 §3 for the second axis. Reading scopability
+// off the code's prefix would say every `addon.` code is per-app, which is false for the one that
+// matters most: `addon.restore_instance` takes every app on the instance back together. So each
+// guardrail declares what one name of its own bounds — an app, an add-on instance, or nothing — and
+// anything that declares nothing carries a sentence saying how far it does reach, because a refusal
+// that only reports an unsupported flag teaches an operator nothing.
+func TestNameScopableIsDeclaredNotInferred(t *testing.T) {
+	if NameScopable(GuardrailCode("app.not_a_real_code")) {
+		t.Error("an unknown code beginning with `app.` is name-scopable, so scopability is inferred from the name")
+	}
+	if NameScopable(GuardrailCode("")) {
+		t.Error("the empty code is name-scopable")
+	}
+
+	wantTarget := map[GuardrailCode]string{
+		GuardrailAppDeploy:            "app",
+		GuardrailScaleToZero:          "app",
+		GuardrailExposePublic:         "app",
+		GuardrailAppDelete:            "app",
+		GuardrailRollback:             "app",
+		GuardrailAutoscale:            "app",
+		GuardrailAppRun:               "app",
+		GuardrailAddonInstall:         "add-on instance",
+		GuardrailAddonRemove:          "add-on instance",
+		GuardrailAddonDetach:          "add-on instance",
+		GuardrailAddonRestore:         "add-on instance",
+		GuardrailAddonRestoreInstance: "add-on instance",
+		GuardrailDNSWrite:             "",
+		GuardrailDNSDelete:            "",
+		GuardrailBucketCreate:         "",
+	}
+	if len(wantTarget) != len(knownGuardrails) {
+		t.Fatalf("the catalogue has %d guardrails and this test names %d; a new guardrail has to decide what one name of it bounds", len(knownGuardrails), len(wantTarget))
+	}
+	for _, g := range knownGuardrails {
+		want, ok := wantTarget[g.code]
+		if !ok {
+			t.Errorf("%q is not covered by this test", g.code)
+			continue
+		}
+		if got := GuardrailTarget(g.code); got != want {
+			t.Errorf("GuardrailTarget(%q) = %q, want %q", g.code, got, want)
+		}
+		if want == "" && GuardrailReach(g.code) == "" {
+			t.Errorf("%q cannot be scoped to one thing and says nothing about how far it does reach", g.code)
+		}
+		// An app-scoped guardrail's key nests inside an environment, so it must also be
+		// env-scopable — otherwise the environment segment of its key would name a tier the code
+		// does not have.
+		if want == "app" && !g.envScoped {
+			t.Errorf("%q is scoped to an app but not to an environment; its key would carry an environment it does not honour", g.code)
+		}
+	}
+}
+
+// TestRefusalNamesTheThingItWasSetFor covers what the caller is told when a name-scoped disposition
+// is the one that answered. "app.deploy is denied for burrowd-cloud" is a sentence an operator can
+// act on; a bare "app.deploy is denied", on an install where every other app deploys fine, reads
+// like a bug (ADR-0085's consequences). The hint then names the narrow lever rather than the wide
+// one, so relaxing this refusal does not relax the environment.
+func TestRefusalNamesTheThingItWasSetFor(t *testing.T) {
+	p := DefaultPolicy().With(GuardrailCode("prod.burrowd-cloud.app.deploy"), DispositionDeny)
+
+	err := p.evaluateGuardrail(GuardrailScope{Env: "prod", Name: "burrowd-cloud"}, "deploy", GuardrailAppDeploy, true, "deploying a new release")
+	g, ok := AsGuardrail(err)
+	if !ok {
+		t.Fatalf("deploy of the named app = %v, want a GuardrailError", err)
+	}
+	for _, want := range []string{`for the app "burrowd-cloud"`, "guard set --env prod --name burrowd-cloud app.deploy confirm", "touches nothing else"} {
+		if !strings.Contains(g.Message, want) {
+			t.Errorf("refusal %q missing %q", g.Message, want)
+		}
+	}
+
+	// Another app in the same environment is not touched by that row at all.
+	if err := p.evaluateGuardrail(GuardrailScope{Env: "prod", Name: "website"}, "deploy", GuardrailAppDeploy, true, "deploying a new release"); err != nil {
+		t.Errorf("deploy of website = %v, want it to proceed under the default allow", err)
+	}
+
+	// An add-on instance's refusal names the instance and the add-on lever, not an app.
+	p = DefaultPolicy().With(GuardrailCode("prod.burrow-postgres.addon.restore_instance"), DispositionDeny)
+	err = p.evaluateGuardrail(GuardrailScope{Env: "prod", Name: "burrow-postgres"}, "addon restore-instance", GuardrailAddonRestoreInstance, true, "rewinding the instance")
+	g, _ = AsGuardrail(err)
+	for _, want := range []string{`for the add-on instance "burrow-postgres"`, "guard set --env prod --name burrow-postgres addon.restore_instance confirm"} {
+		if !strings.Contains(g.Message, want) {
+			t.Errorf("instance refusal %q missing %q", g.Message, want)
+		}
 	}
 }

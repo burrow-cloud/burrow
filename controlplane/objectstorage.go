@@ -350,7 +350,7 @@ func (e *Engine) createBucket(ctx context.Context, store ObjectStore, provider s
 	if err != nil {
 		return "", fmt.Errorf("add provider %s: reading the guardrail policy: %w", provider, err)
 	}
-	if err := policy.evaluateGuardrail("", "create bucket", GuardrailBucketCreate, confirmed,
+	if err := policy.evaluateGuardrail(GuardrailScope{}, "create bucket", GuardrailBucketCreate, confirmed,
 		fmt.Sprintf("creating a bucket for provider %s", provider)); err != nil {
 		return "", err
 	}

@@ -320,7 +320,7 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 		args["auto_tag"] = prov.tag
 	}
 	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, GuardrailAppDeploy,
-		pol.evaluateDeploy(req.Env, replicas, req.Confirm)); err != nil {
+		pol.evaluateDeploy(GuardrailScope{Env: req.Env, Name: req.App}, replicas, req.Confirm)); err != nil {
 		return DeployResult{}, err
 	}
 
@@ -723,13 +723,21 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, opts
 	if err != nil {
 		return AddonInfo{}, fmt.Errorf("install addon %s: loading guardrail policy: %w", t, err)
 	}
+	// The INSTANCE this install would create, named before the guardrail because it is what scopes
+	// the disposition (ADR-0085 §1): an operator can deny standing up one particular instance
+	// without denying every add-on on the cluster. The name is derived from the type and the
+	// environment, so it is known before anything is created.
+	instance, err := AddonInstanceName(t, targetEnv)
+	if err != nil {
+		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
+	}
 	args := map[string]string{"type": string(t), "image": spec.Image, "env": targetEnv}
 	if err := e.recordDecision(ctx, auditOpAddonInstall, string(t), args, GuardrailAddonInstall,
-		// The DISPOSITION is looked up globally: addon.* is cluster-level and not EnvScopable
-		// (ADR-0035 phase 2c), so an environment cannot relax or tighten it. The environment still
+		// addon.* is not EnvScopable (ADR-0035 phase 2c), so an environment on its own cannot relax
+		// or tighten it — the instance name carries the environment instead. The environment still
 		// appears in the message and the audit args, because which environment an add-on operation
 		// lands in is exactly what the operator is being asked to approve (ADR-0067 §1).
-		pol.evaluateGuardrail("", "addon install", GuardrailAddonInstall, opts.Confirm,
+		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon install", GuardrailAddonInstall, opts.Confirm,
 			fmt.Sprintf("installing the %s add-on (%s) in environment %s", t, spec.Image, targetEnv))); err != nil {
 		return AddonInfo{}, err
 	}
@@ -898,7 +906,7 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 		args["attached_apps"] = strings.Join(apps, ",")
 	}
 	if err := e.recordDecision(ctx, auditOpAddonRemove, name, args, GuardrailAddonRemove,
-		pol.evaluateGuardrail("", "addon remove", GuardrailAddonRemove, opts.Confirm,
+		pol.evaluateGuardrail(GuardrailScope{Env: info.Environment, Name: name}, "addon remove", GuardrailAddonRemove, opts.Confirm,
 			removalConsequence(info, opts.DeleteData, apps, plan))); err != nil {
 		return RemoveAddonResult{}, err
 	}
@@ -1145,11 +1153,20 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	if err != nil {
 		return fmt.Errorf("detach addon %s: loading guardrail policy: %w", t, err)
 	}
+	// A detach names two things — the instance and the app — and the disposition is scoped by the
+	// INSTANCE (ADR-0085 §1). That is where the data lives and where the reach stops: every database
+	// this verb can drop sits on this one instance, so protecting one app by name would leave the
+	// same verb free to wipe the next, which reads as protection and is not.
+	instance, err := AddonInstanceName(t, targetEnv)
+	if err != nil {
+		return fmt.Errorf("detach addon %s for %s: %w", t, app, err)
+	}
 	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv}
 	if err := e.recordDecision(ctx, auditOpAddonDetach, app, args, GuardrailAddonDetach,
-		// Disposition looked up globally (addon.* is cluster-level, not EnvScopable); the environment
-		// is named in the message and the audit args (ADR-0035 phase 2c, ADR-0067 §1).
-		pol.evaluateGuardrail("", "addon detach", GuardrailAddonDetach, confirm,
+		// addon.* is not EnvScopable, so the environment reaches the lookup through the instance
+		// name rather than as a tier of its own; it is named in the message and the audit args
+		// (ADR-0035 phase 2c, ADR-0067 §1).
+		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon detach", GuardrailAddonDetach, confirm,
 			fmt.Sprintf("detaching %q from the %s add-on in environment %s (drops its database and role)", app, t, targetEnv))); err != nil {
 		return err
 	}
@@ -1423,11 +1440,17 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, e
 	if err != nil {
 		return fmt.Errorf("restore addon %s: loading guardrail policy: %w", t, err)
 	}
+	// Scoped by the INSTANCE, for the reason a detach is: the databases this verb overwrites all
+	// live on one instance (ADR-0085 §1).
+	instance, err := AddonInstanceName(t, targetEnv)
+	if err != nil {
+		return fmt.Errorf("restore addon %s for %s: %w", t, app, err)
+	}
 	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "backup": backupID}
 	if err := e.recordDecision(ctx, auditOpAddonRestore, app, args, GuardrailAddonRestore,
-		// Disposition looked up globally (addon.* is cluster-level, not EnvScopable); the environment
-		// is named in the message and the audit args (ADR-0035 phase 2c, ADR-0067 §1).
-		pol.evaluateGuardrail("", "addon restore", GuardrailAddonRestore, confirm,
+		// addon.* is not EnvScopable, so the environment reaches the lookup through the instance
+		// name rather than as a tier of its own (ADR-0035 phase 2c, ADR-0067 §1).
+		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon restore", GuardrailAddonRestore, confirm,
 			fmt.Sprintf("restoring %q in environment %s from backup %s (overwrites its live database)", app, targetEnv, backupID))); err != nil {
 		return err
 	}
@@ -1482,7 +1505,7 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	}
 	args := map[string]string{"env": envName(env)}
 	if err := e.recordDecision(ctx, auditOpAppDelete, app, args, GuardrailAppDelete,
-		pol.evaluateGuardrail(env, "app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app))); err != nil {
+		pol.evaluateGuardrail(GuardrailScope{Env: env, Name: app}, "app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app))); err != nil {
 		return err
 	}
 
@@ -1790,7 +1813,7 @@ func (e *Engine) Scale(ctx context.Context, app, env string, replicas int32, con
 		return ScaleResult{}, fmt.Errorf("scale %s: loading guardrail policy: %w", app, err)
 	}
 	args := map[string]string{"replicas": strconv.Itoa(int(replicas)), "env": envName(env)}
-	if err := e.recordDecision(ctx, auditOpScale, app, args, "", pol.evaluateReplicas(env, "scale", replicas, confirm)); err != nil {
+	if err := e.recordDecision(ctx, auditOpScale, app, args, "", pol.evaluateReplicas(GuardrailScope{Env: env, Name: app}, "scale", replicas, confirm)); err != nil {
 		return ScaleResult{}, err
 	}
 
@@ -1852,7 +1875,7 @@ func (e *Engine) Autoscale(ctx context.Context, app, env string, spec AutoscaleS
 		"memory": strconv.Itoa(int(spec.MemoryPercent)),
 		"env":    envName(env),
 	}
-	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale, pol.evaluateAutoscale(env, confirm)); err != nil {
+	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale, pol.evaluateAutoscale(GuardrailScope{Env: env, Name: app}, confirm)); err != nil {
 		return AutoscaleResult{}, err
 	}
 
@@ -1905,7 +1928,7 @@ func (e *Engine) DisableAutoscale(ctx context.Context, app, env string, confirm 
 	}
 	args := map[string]string{"env": envName(env), "off": "true"}
 	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale,
-		pol.evaluateGuardrail(env, "autoscale", GuardrailAutoscale, confirm, "disabling autoscaling")); err != nil {
+		pol.evaluateGuardrail(GuardrailScope{Env: env, Name: app}, "autoscale", GuardrailAutoscale, confirm, "disabling autoscaling")); err != nil {
 		return err
 	}
 	if err := k.DeleteAutoscaler(ctx, app); err != nil {
@@ -1944,7 +1967,7 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 	}
 	args := map[string]string{"host": req.Host, "port": strconv.Itoa(int(req.Port)), "tls": strconv.FormatBool(req.TLS), "env": envName(req.Env)}
 	if err := e.recordDecision(ctx, auditOpExpose, req.App, args, GuardrailExposePublic,
-		pol.evaluateGuardrail(req.Env, "expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host))); err != nil {
+		pol.evaluateGuardrail(GuardrailScope{Env: req.Env, Name: req.App}, "expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host))); err != nil {
 		return ExposeResult{}, err
 	}
 
@@ -2195,20 +2218,29 @@ func (e *Engine) Unexpose(ctx context.Context, app, env string) error {
 // effective policy under the env to global to default fallback, each entry marking whether its
 // disposition is env-specific or inherited (ADR-0035 phase 2c). That environment must be registered;
 // an unknown one is a clear ErrNotFound.
-func (e *Engine) Guardrails(ctx context.Context, env string) ([]GuardrailInfo, error) {
-	if env != "" && env != DefaultEnvironment {
-		if _, err := e.db.GetEnvironment(ctx, env); err != nil {
+//
+// With a name it returns the effective policy for that one app or add-on instance, each entry
+// marking whether the disposition was set for the name, for the environment, globally, or is the
+// built-in default (ADR-0085 §4) — which is what makes "why is this denied for this app" answerable
+// without walking the fallback chain by hand. A name is only meaningful inside an environment, so
+// it requires one, for the reason SetGuardrail does.
+func (e *Engine) Guardrails(ctx context.Context, scope GuardrailScope) ([]GuardrailInfo, error) {
+	if scope.Name != "" && scope.Env == "" {
+		return nil, fmt.Errorf("guardrails: %q names something without saying which environment it is in; add --env: %w", scope.Name, ErrInvalid)
+	}
+	if scope.Env != "" && scope.Env != DefaultEnvironment {
+		if _, err := e.db.GetEnvironment(ctx, scope.Env); err != nil {
 			if errors.Is(err, ErrNotFound) {
-				return nil, fmt.Errorf("guardrails: unknown environment %q: %w", env, ErrNotFound)
+				return nil, fmt.Errorf("guardrails: unknown environment %q: %w", scope.Env, ErrNotFound)
 			}
-			return nil, fmt.Errorf("guardrails: resolving environment %q: %w", env, err)
+			return nil, fmt.Errorf("guardrails: resolving environment %q: %w", scope.Env, err)
 		}
 	}
 	p, err := e.db.Policy(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("guardrails: loading policy: %w", err)
 	}
-	return p.GuardrailsFor(env), nil
+	return p.GuardrailsFor(scope), nil
 }
 
 // SetGuardrail sets one guardrail's disposition (ADR-0020). It rejects an unknown guardrail
@@ -2226,7 +2258,27 @@ func (e *Engine) Guardrails(ctx context.Context, env string) ([]GuardrailInfo, e
 // app-level guardrails are env-scopable: a cluster-level guardrail (addon.*, dns.*) gates a
 // cluster-wide operation and can only be set globally, so env-scoping one is rejected as
 // ErrInvalid.
-func (e *Engine) SetGuardrail(ctx context.Context, env string, code GuardrailCode, d Disposition) error {
+//
+// With a NAME it sets the disposition for that one app or add-on instance, stored under
+// env.name.code (ADR-0085 §1). Three rules govern it, and each is a refusal rather than a
+// best-effort guess:
+//
+//   - The guardrail must DECLARE that one name bounds its effect (ADR-0085 §3). `guard set
+//     dns.write --name web` is refused saying how far dns.write actually reaches, because a
+//     guardrail settable as though it were narrower than it is describes its own blast radius
+//     falsely.
+//   - The name must come with an ENVIRONMENT. Without one the key would have to be name.code,
+//     which is byte-identical to the key an ENVIRONMENT of that name produces — app and
+//     environment names are both DNS labels, so nothing tells `website.app.run` apart from
+//     "everything in the `website` environment". Quietly widening it to the environment tier
+//     instead would be worse than an error: it would relax or tighten every app in an environment
+//     nobody named. Note this is the one place `--env prod` is required and does not mean the
+//     global policy — `prod` is a segment of the key here, not a synonym for the baseline.
+//   - The name is checked for SHAPE but not for existence. A disposition may legitimately be set
+//     before the thing it names exists, and arming a deny ahead of an install is a reasonable order
+//     to work in; a name that never matches anything shows up as inherited dispositions under
+//     `guard list --name`.
+func (e *Engine) SetGuardrail(ctx context.Context, scope GuardrailScope, code GuardrailCode, d Disposition) error {
 	if !KnownGuardrail(code) {
 		// A limit code arriving here is the ADR-0068 §2 correction landing on someone who learned
 		// the old shape — `guard set app.replica_ceiling allow` was how the ceiling was turned off.
@@ -2240,20 +2292,65 @@ func (e *Engine) SetGuardrail(ctx context.Context, env string, code GuardrailCod
 	if !d.Valid() {
 		return fmt.Errorf("set guardrail: invalid disposition %q (want allow, confirm, or deny): %w", d, ErrInvalid)
 	}
+	if scope.Name != "" {
+		return e.setNamedGuardrail(ctx, scope, code, d)
+	}
 	stored := code
-	if env != "" && env != DefaultEnvironment {
+	if scope.Env != "" && scope.Env != DefaultEnvironment {
 		if !EnvScopable(code) {
+			// A code that names one thing gets pointed at that lever rather than at a flat
+			// refusal: --env alone does nothing for it, --env with --name is how it is narrowed.
+			if NameScopable(code) {
+				return fmt.Errorf("set guardrail: %q is a cluster-level guardrail and cannot be scoped to an environment on its own; set it globally without --env, or for one %s with `--env %s --name <name>`: %w", code, GuardrailTarget(code), scope.Env, ErrInvalid)
+			}
 			return fmt.Errorf("set guardrail: %q is a cluster-level guardrail and cannot be scoped to an environment; set it globally without --env: %w", code, ErrInvalid)
 		}
-		if _, err := e.db.GetEnvironment(ctx, env); err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return fmt.Errorf("set guardrail: unknown environment %q: %w", env, ErrNotFound)
-			}
-			return fmt.Errorf("set guardrail: resolving environment %q: %w", env, err)
+		if err := e.requireEnvironment(ctx, scope.Env); err != nil {
+			return err
 		}
-		stored = GuardrailCode(env + "." + string(code))
+		stored = envPolicyKey(scope.Env, code)
 	}
 	return e.db.SetGuardrail(ctx, stored, d)
+}
+
+// setNamedGuardrail writes the disposition for one app or add-on instance (ADR-0085 §1). The
+// refusals it can produce are the point of it: each says what the guardrail actually targets, so an
+// operator learns the shape of the policy from the message rather than from the source.
+func (e *Engine) setNamedGuardrail(ctx context.Context, scope GuardrailScope, code GuardrailCode, d Disposition) error {
+	if !NameScopable(code) {
+		return fmt.Errorf("set guardrail: %q cannot be set for one thing by name: %s. Set it for the whole cluster with `burrow guard set %s %s`: %w",
+			code, GuardrailReach(code), code, d, ErrInvalid)
+	}
+	if scope.Env == "" {
+		return fmt.Errorf("set guardrail: %q names the %s %q but no environment; add --env, because a name on its own is indistinguishable from an environment of the same name: %w",
+			code, GuardrailTarget(code), scope.Name, ErrInvalid)
+	}
+	// A name is a DNS-1123 label wherever it comes from — an app name, or the instance name
+	// AddonInstanceName produces. Checking the shape here is what keeps the composed key
+	// unambiguous: a name carrying a dot would be a name that could pose as another tier.
+	if err := (App{Name: scope.Name}).Validate(); err != nil {
+		return fmt.Errorf("set guardrail: %s name %q is not usable as a policy key: %v: %w", GuardrailTarget(code), scope.Name, err, ErrInvalid)
+	}
+	if err := e.requireEnvironment(ctx, scope.Env); err != nil {
+		return err
+	}
+	return e.db.SetGuardrail(ctx, namePolicyKey(scope.Env, scope.Name, code), d)
+}
+
+// requireEnvironment refuses an environment that is not registered, so a typo lands as a clear
+// ErrNotFound rather than as a policy row nothing will ever read. The default environment always
+// exists and is not looked up.
+func (e *Engine) requireEnvironment(ctx context.Context, env string) error {
+	if env == "" || env == DefaultEnvironment {
+		return nil
+	}
+	if _, err := e.db.GetEnvironment(ctx, env); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("set guardrail: unknown environment %q: %w", env, ErrNotFound)
+		}
+		return fmt.Errorf("set guardrail: resolving environment %q: %w", env, err)
+	}
+	return nil
 }
 
 // Limits returns every operational limit with its effective value for env, each marking the tier
@@ -2425,7 +2522,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	}
 	args := map[string]string{"image": target.Image, "to_release": target.ID, "env": envName(env)}
 	if err := e.recordDecision(ctx, auditOpRollback, app, args, GuardrailRollback,
-		pol.evaluateGuardrail(env, "rollback", GuardrailRollback, confirm,
+		pol.evaluateGuardrail(GuardrailScope{Env: env, Name: app}, "rollback", GuardrailRollback, confirm,
 			fmt.Sprintf("rolling %q back to its previous release %s (image %s)", app, target.ID, target.Image))); err != nil {
 		return RollbackResult{}, err
 	}

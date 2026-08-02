@@ -471,6 +471,57 @@ func TestAddonNamespacesComeFromTheClusterTheGrantLandsOn(t *testing.T) {
 	}
 }
 
+// TestPrivilegedPathCarriesTheTargetsInstallID. Before the target decided this path, a privileged
+// command had no target to read and so sent no install id (ADR-0084 §5); against a cluster torn down
+// and rebuilt under a reused context name — the case §5 is about, since provider CLIs generate
+// deterministic names — `guard set` would have got a bare 401 from a cluster the caller did not know
+// they had reached. Now the id rides along and the refusal can name the cause.
+//
+// The override half is the same rule resolveTarget applies on the per-app path: an explicit
+// --context is a deliberate choice of a different cluster, so the target's id no longer describes
+// what is on the other end. Carrying it would refuse the override on the grounds that it is an
+// override.
+//
+// Asserted where the id is decided rather than on the wire. A wire assertion is not reliable here:
+// client-go reuses transports across connects within one process, so a second connection in the same
+// test binary can answer with the first one's headers. That reuse is nothing this path introduces —
+// a CLI invocation connects once — but it makes the header a poor witness for a rule about
+// resolution.
+func TestPrivilegedPathCarriesTheTargetsInstallID(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		context string
+		want    string
+	}{
+		{name: "the target's id is sent", want: "install-abc"},
+		{name: "an explicit --context drops it", context: "staging", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempConfig(t)
+			kubeconfig := writeKubeconfig(t, twoContextConfig("https://staging.invalid", "https://prod.invalid"))
+			selectTarget(t, "prod")
+			cfg, err := localconfig.Load()
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			if !cfg.SetInstallID("prod", "install-abc") {
+				t.Fatal("SetInstallID recorded nothing for the selected target")
+			}
+			if err := cfg.Save(); err != nil {
+				t.Fatalf("save config: %v", err)
+			}
+
+			o := &commonOpts{kubeconfig: kubeconfig, context: tc.context}
+			if _, err := o.clusterContext(io.Discard); err != nil {
+				t.Fatalf("clusterContext: %v", err)
+			}
+			if o.installID != tc.want {
+				t.Errorf("installID = %q, want %q", o.installID, tc.want)
+			}
+		})
+	}
+}
+
 // TestControlPlaneFlagResolvesNoTarget. --control-plane names the control plane outright and opens
 // no kubeconfig, so a target whose context has been renamed away must not break it — that would turn
 // a stale local file into a failure for a scripted or CI invocation that has no kubeconfig at all.

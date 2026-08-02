@@ -6,7 +6,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,22 +88,26 @@ func authContexts() []connect.Context {
 }
 
 // TestAuthLoginReturnReachesTheManagedProduct confirms ADR-0078 §2's default: pressing return at the
-// first prompt selects burrow-cloud.dev, and a person with no cluster is never shown a Kubernetes
-// concept on the way there. Signing in is cloud ADR-0028 and does not exist in this build, so the
-// selection lands on the seam and says so truthfully rather than pretending (ADR-0009).
+// first prompt signs in to burrow-cloud.dev and records it as the active target, and a person with
+// no cluster is never shown a Kubernetes concept on the way there.
 func TestAuthLoginReturnReachesTheManagedProduct(t *testing.T) {
 	stubAuth(t, authContexts(), true)
+	startCloud(t, issuedPair())
 
 	var out bytes.Buffer
-	err := runAuthLogin(context.Background(), authLoginOpts{}, strings.NewReader("\n"), &out)
-	if err == nil {
-		t.Fatal("want the cloud sign-in seam's truthful stop, got a success")
+	// The empty first line takes the default (the managed product); "n" declines the agent-wiring
+	// offer that follows.
+	if err := runAuthLogin(context.Background(), authLoginOpts{}, strings.NewReader("\nn\n"), &out); err != nil {
+		t.Fatalf("runAuthLogin: %v", err)
 	}
-	if !strings.Contains(err.Error(), localconfig.CloudEndpoint) {
-		t.Errorf("error = %q, want it to name the managed product", err)
+
+	cfg := loadAuthConfig(t)
+	if cfg.CurrentTarget != localconfig.CloudEndpoint {
+		t.Fatalf("active target = %q, want %s", cfg.CurrentTarget, localconfig.CloudEndpoint)
 	}
-	if !strings.Contains(err.Error(), "not available in this build") {
-		t.Errorf("error = %q, want it to say plainly that sign-in is not built here", err)
+	target, _ := cfg.LookupTarget(localconfig.CloudEndpoint)
+	if target.Kind != localconfig.TargetKindCloud {
+		t.Errorf("target kind = %q, want %q", target.Kind, localconfig.TargetKindCloud)
 	}
 
 	// The prompt itself is the ADR's: the managed product first and default, Other second, and no
@@ -117,8 +123,22 @@ func TestAuthLoginReturnReachesTheManagedProduct(t *testing.T) {
 	if idx := strings.Index(prompt, localconfig.CloudEndpoint); idx < 0 || idx > strings.Index(prompt, "Other") {
 		t.Errorf("the managed product is not the first entry:\n%s", prompt)
 	}
+	// One command, and the person never sees a credential.
+	if strings.Contains(prompt, fakeCLISecret) || strings.Contains(prompt, fakeAgentSecret) {
+		t.Fatal("a token was printed by login")
+	}
+}
 
-	// A failed sign-in records nothing: a target nothing can reach is worse than no target.
+// TestAuthLoginCloudFailureRecordsNoTarget confirms a sign-in that did not complete leaves nothing
+// behind: a target nothing can reach is worse than no target.
+func TestAuthLoginCloudFailureRecordsNoTarget(t *testing.T) {
+	stubAuth(t, authContexts(), true)
+	startCloud(t, oauthReply("access_denied"))
+
+	var out bytes.Buffer
+	if err := runAuthLogin(context.Background(), authLoginOpts{cloud: true}, strings.NewReader(""), &out); err == nil {
+		t.Fatal("want the declined sign-in to fail")
+	}
 	if cfg := loadAuthConfig(t); len(cfg.Targets) != 0 {
 		t.Errorf("targets = %v, want none recorded when sign-in did not happen", cfg.Targets)
 	}
@@ -256,26 +276,35 @@ func TestAuthLoginInstallsNothing(t *testing.T) {
 }
 
 // TestAuthLoginSelfHostedMakesNoCloudCall confirms nothing about choosing Other is second-class: the
-// self-hosted path never invokes the managed product's sign-in seam, which is the only thing in this
-// CLI that could reach it.
+// self-hosted path needs no account, makes no request to the managed product, and opens no browser.
+// forbidCloud fails the test on either, so this holds whatever the sign-in code does.
 func TestAuthLoginSelfHostedMakesNoCloudCall(t *testing.T) {
 	stubAuth(t, authContexts(), true)
-
-	called := false
-	origSignIn := cloudSignInFn
-	cloudSignInFn = func(context.Context, io.Writer) (localconfig.Target, error) {
-		called = true
-		return localconfig.CloudTarget(), nil
-	}
-	t.Cleanup(func() { cloudSignInFn = origSignIn })
+	forbidCloud(t)
 
 	var out bytes.Buffer
 	if err := runAuthLogin(context.Background(), authLoginOpts{}, strings.NewReader("2\n1\nn\n"), &out); err != nil {
 		t.Fatalf("runAuthLogin: %v", err)
 	}
-	if called {
-		t.Error("choosing Other contacted the managed product; the self-hosted path must need no account and no call")
+
+	// Nor does it write a credential: a Kubernetes target's credential is the kubeconfig the person
+	// already had (ADR-0078 §1).
+	dir := filepath.Dir(loadAuthConfigPath(t))
+	for _, sub := range []string{"credentials", "agents"} {
+		if _, err := os.Stat(filepath.Join(dir, sub, cloudCredentialFile)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("choosing a cluster wrote a managed-product credential under %s", sub)
+		}
 	}
+}
+
+// loadAuthConfigPath returns the config path the fixture pointed $BURROW_CONFIG at.
+func loadAuthConfigPath(t *testing.T) string {
+	t.Helper()
+	p, err := localconfig.Path()
+	if err != nil {
+		t.Fatalf("resolving the config path: %v", err)
+	}
+	return p
 }
 
 // TestAuthStatusReportsTheActiveTarget confirms status lists what is configured, marks the active

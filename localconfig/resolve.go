@@ -32,7 +32,9 @@ const (
 // AgentKubeconfig/AgentContext carry the resolved handle's scoped, burrowd-only credential
 // (ADR-0038) so the operate path can default to it; both are empty when the handle records none.
 // Target names the ADR-0078 target that decided the cluster, and is empty when no target is
-// selected (the pre-ADR-0078 behaviour, and still the default).
+// selected (the pre-ADR-0078 behaviour, and still the default). Kind is that target's kind, and
+// Endpoint is set only for a Burrow Cloud target: the host to reach it at, in place of the kube
+// context a cluster target resolves to.
 type Resolved struct {
 	Name                  string
 	Context               string
@@ -41,9 +43,17 @@ type Resolved struct {
 	Env                   string
 	Mode                  Mode
 	Target                string
+	Kind                  TargetKind
+	Endpoint              string
 	AgentKubeconfig       string
 	AgentContext          string
 }
+
+// Cloud reports whether this resolution is the managed product, which is reached over HTTPS with the
+// credential sign-in stored rather than through a kubeconfig. It is the one branch a caller needs:
+// everything else about a cloud resolution — no context, no namespace, no scoped kubeconfig — falls
+// out of there being no cluster.
+func (r Resolved) Cloud() bool { return r.Kind == TargetKindCloud }
 
 // Resolve decides which environment a command targets (ADR-0036, ADR-0078).
 //
@@ -60,6 +70,26 @@ type Resolved struct {
 // handle by context name, that handle's Name and Env (the burrowd env name to send) are surfaced;
 // otherwise both are empty.
 func Resolve(cfg *Config, kubeconfigPath string) (Resolved, error) {
+	resolved, err := ResolveOperate(cfg, kubeconfigPath)
+	if err != nil {
+		return Resolved{}, err
+	}
+	if resolved.Cloud() {
+		return Resolved{}, errNeedsKubeconfig(resolved.Target, resolved.Endpoint)
+	}
+	return resolved, nil
+}
+
+// ResolveOperate is Resolve for the ordinary application-facing commands — deploy, status, logs and
+// the rest — which can act through EITHER kind of target, because the control plane they call is the
+// same API whether it is reached through a cluster's API server or over HTTPS at the managed
+// product (ADR-0078 §1).
+//
+// It is a separate entry point rather than a change to Resolve on purpose. A caller that genuinely
+// needs a cluster — anything that reads a kubeconfig, mints a scoped credential, or installs
+// something — keeps getting the refusal it gets today, so forgetting to opt in fails safe with a
+// legible message instead of silently acting on whatever cluster the kubeconfig happens to point at.
+func ResolveOperate(cfg *Config, kubeconfigPath string) (Resolved, error) {
 	target, hasTarget, err := cfg.ActiveTarget()
 	if err != nil {
 		return Resolved{}, err
@@ -70,10 +100,28 @@ func Resolve(cfg *Config, kubeconfigPath string) (Resolved, error) {
 	return resolveWithoutTarget(cfg, kubeconfigPath)
 }
 
+// errNeedsKubeconfig is what a command that can only reach a cluster says when the active target is
+// the managed product. It names the target, says why this particular command cannot use it, and
+// gives the one command that changes the answer — rather than failing somewhere further down with a
+// kubeconfig error that sends the reader looking for a cluster problem they do not have.
+func errNeedsKubeconfig(name, endpoint string) error {
+	return fmt.Errorf(
+		"localconfig: the active target %q is the managed product at %s, which this command cannot use: it works through a cluster's kubeconfig, and a Burrow Cloud tenant has no cluster of its own. Switch to a cluster target with \"burrow auth switch <name>\" (see \"burrow auth status\")",
+		name, endpoint)
+}
+
 // resolveWithTarget resolves against the selected ADR-0078 target. A Burrow Cloud target carries no
-// kubeconfig context, so a command that reaches the cluster through one is told plainly which
-// target is active and how to switch, instead of silently acting on some other cluster.
+// kubeconfig context: it resolves to the endpoint it names, and the caller decides whether that is
+// something it can act through.
 func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resolved, error) {
+	if target.Kind == TargetKindCloud {
+		return Resolved{
+			Mode:     ModeTargeted,
+			Target:   target.Name,
+			Kind:     target.Kind,
+			Endpoint: target.Endpoint,
+		}, nil
+	}
 	if target.Kind != TargetKindKubernetes {
 		return Resolved{}, fmt.Errorf(
 			"localconfig: the active target %q is %s, which this command reaches through a kubeconfig and cannot; switch to a cluster target with \"burrow auth switch <name>\" (see \"burrow auth status\")",
@@ -96,6 +144,7 @@ func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resol
 		ControlPlaneNamespace: DefaultControlPlaneNamespace,
 		Mode:                  ModeTargeted,
 		Target:                target.Name,
+		Kind:                  target.Kind,
 	}
 	// A pinned handle narrows the target only when it is a handle in the SAME cluster; a pin left
 	// over from another cluster is not a narrowing of this one and is skipped rather than silently
@@ -106,7 +155,9 @@ func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resol
 			return Resolved{}, errUnknownPin(cfg.Current)
 		}
 		if env.Context == target.Context {
-			return fromHandle(env, ModePinned, target.Name), nil
+			pinned := fromHandle(env, ModePinned, target.Name)
+			pinned.Kind = target.Kind
+			return pinned, nil
 		}
 	}
 	if cfg != nil {
@@ -220,7 +271,13 @@ func currentContext(kubeconfigPath string) (context, namespace string, err error
 //	nonprod (context "do-nyc1-nonprod", namespace "team-x")
 //	following kubectl: do-nyc1-dev (unregistered)
 //	target "do-nyc1" (no environment registered)
+//	target "burrow-cloud.dev" (the managed product)
 func (r Resolved) Render() string {
+	if r.Cloud() {
+		// The target is named after the endpoint, so naming both would stutter; what a reader needs
+		// from this line is that the command is going to the managed product and not to a cluster.
+		return fmt.Sprintf("target %q (the managed product)", r.Target)
+	}
 	if r.Mode == ModeFollowing && r.Name == "" {
 		if r.Context == "" {
 			return "no current kube context"

@@ -23,6 +23,7 @@ import (
 
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/internal/cloudcred"
 	"github.com/burrow-cloud/burrow/internal/targetname"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
@@ -222,6 +223,10 @@ type target struct {
 	// override, which both keep the ambient/admin kubeconfig.
 	agentKubeconfig string
 	agentContext    string
+	// cloudEndpoint is set when the active target is the managed product (ADR-0078 §1): the host its
+	// control plane answers on, in place of the kube context there is none of. It is empty for every
+	// cluster target, so the kubeconfig path is reached exactly as it was.
+	cloudEndpoint string
 }
 
 // resolveTarget decides which cluster + environment a per-app command targets (ADR-0036). With
@@ -244,9 +249,15 @@ func (o *commonOpts) resolveTarget() (target, error) {
 	if err != nil {
 		return target{}, err
 	}
-	resolved, err := localconfig.Resolve(cfg, o.kubeconfig)
+	// ResolveOperate rather than Resolve: an ordinary app command works against either kind of target,
+	// because the control-plane API it calls is the same one whether it is reached through a cluster's
+	// API server or over HTTPS at the managed product (ADR-0078 §1).
+	resolved, err := localconfig.ResolveOperate(cfg, o.kubeconfig)
 	if err != nil {
 		return target{}, err
+	}
+	if resolved.Cloud() {
+		return o.cloudTarget(cfg, resolved)
 	}
 	kubeContext := resolved.Context
 	if o.context != "" {
@@ -282,6 +293,42 @@ func (o *commonOpts) resolveTarget() (target, error) {
 		tgt.agentContext = resolved.AgentContext
 	}
 	return tgt, nil
+}
+
+// cloudTarget builds the target for a selected Burrow Cloud target. There is no cluster to resolve:
+// the endpoint is the whole address, --env is sent as written (the managed control plane resolves
+// environment names the same way a self-hosted one does), and the credential is picked up later, at
+// connect time, so nothing reads a token to decide where a command is going.
+func (o *commonOpts) cloudTarget(cfg *localconfig.Config, resolved localconfig.Resolved) (target, error) {
+	if flag := o.kubeOnlyFlag(); flag != "" {
+		return target{}, fmt.Errorf(
+			"%s picks a cluster out of your kubeconfig, and the active target %q is the managed product at %s, which has no cluster of its own. Drop the flag, or switch to a cluster target with \"burrow auth switch <name>\"",
+			flag, resolved.Target, resolved.Endpoint)
+	}
+	t, ok := cfg.LookupTarget(resolved.Target)
+	if !ok { // unreachable: ActiveTarget resolved it out of this same config
+		return target{}, fmt.Errorf("the active target %q is not in the targets list; choose one with \"burrow auth switch <name>\"", resolved.Target)
+	}
+	o.acted = targetname.ForCloud(t)
+	return target{env: o.env, display: resolved.Render(), cloudEndpoint: resolved.Endpoint}, nil
+}
+
+// kubeOnlyFlag names the kubeconfig-shaped flag this invocation set, or "" if none did. Those flags
+// describe a cluster, so with the managed product selected they cannot be honoured — and a command
+// that quietly ignored one would run somewhere the person did not ask for. Naming the flag is the
+// difference between an error a reader can act on and a kubeconfig failure that sends them hunting
+// for a cluster problem they do not have.
+func (o *commonOpts) kubeOnlyFlag() string {
+	switch {
+	case o.kubeconfig != "":
+		return "--kubeconfig"
+	case o.context != "":
+		return "--context"
+	case o.namespace != "" && o.namespace != connect.DefaultNamespace:
+		return "--namespace"
+	default:
+		return ""
+	}
 }
 
 // targetLine renders the one-line target shown on stderr before a per-app operation so a context
@@ -365,7 +412,20 @@ func (o *commonOpts) transport(tgt target) (client.Transport, error) {
 		}
 		return client.DirectTransport{BaseURL: o.controlPlane, Token: o.token, Name: client.ClientNameCLI, Version: cliVersion()}, nil
 	}
+	if tgt.cloudEndpoint != "" {
+		return cloudcred.Transport(cloudBaseURLFor(tgt.cloudEndpoint), cloudcred.KindCLI, client.ClientNameCLI, cliVersion())
+	}
 	return connect.KubeconfigTransport{Options: o.connectOptions(tgt)}, nil
+}
+
+// cloudBaseURLFor is the origin to call for a target's endpoint. The known managed endpoint goes
+// through cloudBaseURL, the same variable the sign-in flow uses, so one seam points every call at
+// the managed product and a test can redirect all of them at once.
+func cloudBaseURLFor(endpoint string) string {
+	if endpoint == localconfig.CloudEndpoint {
+		return cloudBaseURL
+	}
+	return "https://" + endpoint
 }
 
 // connectOptions builds the auto-connect options for a target. It uses the scoped, burrowd-only

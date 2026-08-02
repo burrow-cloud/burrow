@@ -578,7 +578,10 @@ func newEnvironmentsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resolved, err := localconfig.Resolve(cfg, o.kubeconfig)
+			// ResolveOperate, so this stays a pure local read even with the managed product selected:
+			// a cloud target has no kube context and no handle applies to it, which is reported as
+			// empty fields rather than as an error on a command that reaches nothing.
+			resolved, err := localconfig.ResolveOperate(cfg, o.kubeconfig)
 			if err != nil {
 				return err
 			}

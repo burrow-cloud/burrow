@@ -82,6 +82,20 @@ func For(cfg *localconfig.Config, kubeContext string, override bool) Named {
 	return n
 }
 
+// ForCloud names a Burrow Cloud target a command acted through. It is a separate constructor from
+// For because there is no kube context to check the target against: what decided the connection is
+// the target itself, so the name is the one the person picked and the detail is the same sentence
+// `burrow auth status` prints. The endpoint is recorded too — it is where the change landed, and it
+// is not a credential; the token that goes with it is never rendered.
+func ForCloud(t localconfig.Target) Named {
+	return Named{
+		Name:     t.Name,
+		Kind:     string(localconfig.TargetKindCloud),
+		Endpoint: t.Endpoint,
+		Detail:   t.Describe(),
+	}
+}
+
 // ForControlPlane names a control plane addressed directly by URL with --control-plane. That flag
 // bypasses the target model rather than selecting within it, so there is no picker name to show and
 // the URL is the honest answer. A URL is not a credential; the token that goes with it is never

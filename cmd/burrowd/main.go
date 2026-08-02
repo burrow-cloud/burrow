@@ -99,7 +99,6 @@ func run() error {
 	if token == "" {
 		return errors.New("BURROW_API_TOKEN is required (the bearer token clients authenticate with)")
 	}
-
 	ctx := context.Background()
 
 	// Start the HTTP server immediately and reflect startup state through readiness, rather
@@ -351,7 +350,13 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	}
 	log.Printf("burrowd: environment %q serves namespace %q", defaultEnv.Name, defaultEnv.Namespace)
 
-	handler, err := api.New(api.Config{Engine: engine, Token: token, Version: version})
+	// This install's own id (ADR-0084 §5), rendered into the environment by the install manifests
+	// from the ConfigMap that records it. It is read here rather than beside the token because it is
+	// not a secret and not required: a control plane installed before ids existed carries none, and
+	// one that does not know its own id serves every caller rather than refusing on an unknown.
+	installID := os.Getenv("BURROW_INSTALL_ID")
+
+	handler, err := api.New(api.Config{Engine: engine, Token: token, Version: version, InstallID: installID})
 	if err != nil {
 		return err
 	}

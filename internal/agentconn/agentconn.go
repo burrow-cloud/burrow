@@ -114,6 +114,18 @@ func ConnectOptions(kubeContext, kubeconfig, namespace string, strict bool, stde
 	if kubeconfig != "" {
 		return opts, nil
 	}
+	// The install this context's handle was registered against (ADR-0084 §5), so the agent is subject
+	// to the same check the CLI is. It matters more here than there: the agent is what deploys, and a
+	// cluster destroyed and recreated under a kube context name a provider generates deterministically
+	// is a deploy landing on a stranger's cluster. A handle with no id — one registered before ids
+	// existed, or joined to a control plane that predates them — sends no header and is served.
+	//
+	// It is resolved here rather than above the explicit-kubeconfig return because an explicit
+	// kubeconfig is the operator's deliberate escape hatch: it names the route by hand, so the id
+	// recorded for a context in the local config no longer describes what is on the other end.
+	if env, ok := lookupByContext(kubeContext); ok {
+		opts.InstallID = env.InstallID
+	}
 	agentKubeconfig, agentContext, err := scopedAgentKubeconfig(kubeContext, strict, stderr)
 	if err != nil {
 		return connect.Options{}, err

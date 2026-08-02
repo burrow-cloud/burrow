@@ -206,6 +206,30 @@ stringData:
   password: "{{.DBPassword}}"
   url: "postgres://burrow:{{.DBPassword}}@postgres:5432/burrow?sslmode=disable"
 ---
+# This install's own id (ADR-0084 §5). A kube context name says how to REACH a cluster; it does not
+# say which Burrow answered. Context names are user-controlled and reusable, and providers generate
+# them deterministically — `doctl kubernetes cluster kubeconfig save` writes names like
+# `do-nyc3-burrow`, so destroying a cluster and standing another one up yields a byte-identical
+# context name for an entirely different cluster. The id is what a client compares against, so
+# arriving at the wrong Burrow is a refusal that names the cause rather than a deploy landing
+# somewhere nobody intended.
+#
+# A ConfigMap and NOT a Secret, deliberately: the id authorises nothing — it identifies an install,
+# it does not open it — and a second person joining this install has to be able to read it. Putting a
+# non-secret behind the RBAC that gates real credentials would make joining need permissions it has
+# no reason to need.
+#
+# `burrow upgrade` reads this back and re-renders the same value rather than minting a new one, the
+# same treatment it gives the API token and the database password. A regenerated id would make every
+# target already pointed here report a mismatch after a routine upgrade.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: burrow-install
+  namespace: {{.Namespace}}
+data:
+  id: "{{.InstallID}}"
+---
 # The vendor-credential Secret (ADR-0023, ADR-0030): one opaque bag of provider tokens, one key
 # per provider. Install creates it empty; `burrow provider add` sends the token over burrowd's
 # authenticated control-plane API, which writes the key here through the scoped Role below.
@@ -452,6 +476,19 @@ spec:
             # burrow-credentials Secret — distinct from BURROW_NAMESPACE, the app namespace.
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            # This install's id (ADR-0084 §5), so burrowd can tell a caller that named a different
+            # install that it has reached the wrong Burrow. It is read from the ConfigMap above
+            # rather than restated here, so the value a client compares against and the value the
+            # cluster records can never drift apart.
+            #
+            # optional: true because the design's answer to "this install has no id" is to serve
+            # every caller, and a container that will not start cannot serve anybody. Without it, a
+            # ConfigMap that was deleted, or not yet applied, wedges burrowd in
+            # CreateContainerConfigError — turning a check that is meant to degrade into permissive
+            # into a control plane that is down. The id is a refinement of an existing relationship;
+            # it must never be a precondition for burrowd running at all.
+            - name: BURROW_INSTALL_ID
+              valueFrom: { configMapKeyRef: { name: burrow-install, key: id, optional: true } }
             - name: BURROW_API_TOKEN
               valueFrom: { secretKeyRef: { name: burrowd-api-token, key: token } }
             - name: BURROW_DATABASE_URL

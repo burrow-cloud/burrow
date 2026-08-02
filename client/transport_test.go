@@ -195,3 +195,91 @@ func TestAPIErrorCarriesServerVersion(t *testing.T) {
 		t.Errorf("ServerVersion = %q, want v0.13.0", api.ServerVersion)
 	}
 }
+
+// TestInstallRoundTripperSendsInstallHeader confirms the install a caller expects to reach rides
+// X-Burrow-Install on every request (ADR-0084 §5), and that an empty id omits the header entirely
+// rather than sending a blank one. The absent header is what keeps a target recorded before install
+// ids existed working: burrowd serves a request that claims nothing.
+func TestInstallRoundTripperSendsInstallHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		installID string
+		want      string
+	}{
+		{name: "set", installID: "abc123", want: "abc123"},
+		{name: "empty omits header", installID: "", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			var present bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get(client.InstallHeader)
+				_, present = r.Header[client.InstallHeader]
+				_, _ = w.Write([]byte("{}"))
+			}))
+			defer srv.Close()
+
+			hc := &http.Client{Transport: client.NewInstallTokenRoundTripper("tok", client.ClientNameCLI, "v1.0.0", tc.installID, nil)}
+			c := client.NewClientWithHTTP(srv.URL, hc)
+			if _, err := c.ListEnvironments(context.Background()); err != nil {
+				t.Fatalf("ListEnvironments: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("%s = %q, want %q", client.InstallHeader, got, tc.want)
+			}
+			if tc.installID == "" && present {
+				t.Errorf("%s was sent for an empty install id; want the header absent", client.InstallHeader)
+			}
+		})
+	}
+}
+
+// TestDirectTransportSendsInstallID confirms the direct-URL transport carries an install id it is
+// given alongside the credential, so the check is a property of every transport in this package
+// rather than of one route. It asserts what THIS transport does with a configured id; whether a
+// given caller has one to configure is that caller's business (the `burrow` CLI's --control-plane
+// path resolves no target, so it has none).
+func TestDirectTransportSendsInstallID(t *testing.T) {
+	var gotInstall string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotInstall = r.Header.Get(client.InstallHeader)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+
+	c, err := client.DirectTransport{BaseURL: srv.URL, Token: "s3cr3t", InstallID: "abc123"}.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.ListEnvironments(context.Background()); err != nil {
+		t.Fatalf("ListEnvironments: %v", err)
+	}
+	if gotInstall != "abc123" {
+		t.Errorf("%s = %q, want abc123", client.InstallHeader, gotInstall)
+	}
+}
+
+// TestAPIErrorCarriesServerInstallID confirms the id of the install that actually answered survives
+// onto the structured error (ADR-0084 §5), the same way the too-old refusal carries server_version:
+// a caller can re-point a target at what is really there without parsing the message.
+func TestAPIErrorCarriesServerInstallID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"wrong install","code":"install_mismatch","server_install_id":"abc123"}`))
+	}))
+	defer srv.Close()
+
+	c := client.NewClient(srv.URL, "tok")
+	_, err := c.ListEnvironments(context.Background())
+	var api *client.APIError
+	if !errors.As(err, &api) {
+		t.Fatalf("error = %v, want an *client.APIError", err)
+	}
+	if api.Code != client.CodeInstallMismatch {
+		t.Errorf("code = %q, want %q", api.Code, client.CodeInstallMismatch)
+	}
+	if api.ServerInstallID != "abc123" {
+		t.Errorf("ServerInstallID = %q, want abc123", api.ServerInstallID)
+	}
+}

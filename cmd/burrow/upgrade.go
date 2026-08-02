@@ -63,7 +63,10 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	if image == "" {
 		return errNoBurrowdImage()
 	}
-	cs, err := clientset(kubeconfig)
+	// clientsetFn with an empty context is exactly clientset(kubeconfig) — both resolve the
+	// kubeconfig's current context — and going through the seam install already owns lets an upgrade
+	// be driven end to end against a fake cluster.
+	cs, err := clientsetFn(kubeconfig, "")
 	if err != nil {
 		return err
 	}
@@ -88,6 +91,7 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	if !wait {
 		fmt.Fprintf(stdout, "\nBurrow upgrade applied in namespace %q (not waiting for readiness).\n", namespace)
 		backfillAgentCredential(ctx, kubeconfig, namespace, stdout)
+		recordUpgradedInstallID(kubeconfig, opts.InstallID, stdout)
 		return nil
 	}
 	if err := waitForReady(ctx, kubeconfig, "", namespace, stdout); err != nil {
@@ -95,7 +99,27 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	}
 	fmt.Fprintf(stdout, "\n%s Burrow is upgraded and ready in namespace %q.\n", okMark(stdout), namespace)
 	backfillAgentCredential(ctx, kubeconfig, namespace, stdout)
+	recordUpgradedInstallID(kubeconfig, opts.InstallID, stdout)
 	return nil
+}
+
+// recordUpgradedInstallID records the upgraded install's id on the target pointed at the upgraded
+// cluster (ADR-0084 §5). It is the local-side counterpart of upgradeOptions minting an id for an
+// install that predates them: without it, an install that gains an id at upgrade would have one the
+// cluster knows and no target ever learns, so the check would only ever protect clusters installed
+// after this shipped. For an install that already had an id this re-records the same value and
+// changes nothing.
+//
+// It is silent about a kube context it cannot resolve, because backfillAgentCredential — which runs
+// immediately before it, on the same context, for the same reason — has already said so. Beyond
+// that it is exactly as best-effort as the backfill: the control plane is upgraded and running, and
+// a local bookkeeping problem must not turn that into a failure.
+func recordUpgradedInstallID(kubeconfig, installID string, stdout io.Writer) {
+	ctxName, err := connect.TargetContextName(kubeconfig, "")
+	if err != nil {
+		return
+	}
+	recordInstallID(ctxName, installID, stdout)
 }
 
 // backfillAgentCredential provisions the local scoped agent kubeconfig for the operator's own
@@ -146,9 +170,10 @@ func backfillAgentCredential(ctx context.Context, kubeconfig, namespace string, 
 }
 
 // upgradeOptions reads the install state that an upgrade must preserve — the API token, the
-// database password, and the app namespace — from the cluster, and returns render options
-// that keep them while swapping in the new image. Re-minting the secrets would invalidate the
-// running token and orphan the existing Postgres volume, so they are read, not regenerated.
+// database password, the install id, and the app namespace — from the cluster, and returns render
+// options that keep them while swapping in the new image. Re-minting them would invalidate the
+// running token, orphan the existing Postgres volume, and turn every target pointed at this install
+// into a mismatch, so they are read, not regenerated.
 func upgradeOptions(ctx context.Context, cs kubernetes.Interface, namespace, image string) (installOptions, error) {
 	token, err := secretValue(ctx, cs, namespace, connect.DefaultTokenSecret, connect.DefaultTokenKey)
 	if err != nil {
@@ -169,6 +194,10 @@ func upgradeOptions(ctx context.Context, cs kubernetes.Interface, namespace, ima
 	if err != nil {
 		return installOptions{}, err
 	}
+	installID, err := installIDOf(ctx, cs, namespace)
+	if err != nil {
+		return installOptions{}, err
+	}
 	return installOptions{
 		Namespace:      namespace,
 		AppNamespace:   appNamespace,
@@ -177,8 +206,35 @@ func upgradeOptions(ctx context.Context, cs kubernetes.Interface, namespace, ima
 		Image:          image,
 		Token:          token,
 		DBPassword:     dbPassword,
+		InstallID:      installID,
 		Port:           connect.DefaultPort,
 	}, nil
+}
+
+// installIDOf returns the id this install already carries, or a freshly minted one when it has none
+// (ADR-0084 §5).
+//
+// Preserving it is the whole point. An install id is what a target compares against to know it
+// reached the Burrow it was pointed at, so an upgrade that minted a new one would turn every target
+// already pointed here into a mismatch — a routine upgrade breaking exactly the people who were
+// using the feature correctly. It gets the same read-do-not-regenerate treatment as the API token
+// and the database password.
+//
+// An install that predates ids has no ConfigMap, and minting one here is how it acquires one: the
+// upgrade is where an existing install gains the id it never had. No target is pointed at an id it
+// does not yet know, so nothing can mismatch against it — the first thing to record it is whatever
+// install or join happens next.
+func installIDOf(ctx context.Context, cs kubernetes.Interface, namespace string) (string, error) {
+	cm, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, connect.DefaultInstallConfigMap, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("reading configmap %s/%s: %w", namespace, connect.DefaultInstallConfigMap, err)
+	}
+	if err == nil {
+		if id := cm.Data[connect.DefaultInstallIDKey]; id != "" {
+			return id, nil
+		}
+	}
+	return randHex(16)
 }
 
 // appNamespaceOf reads the app namespace from the running burrowd Deployment's

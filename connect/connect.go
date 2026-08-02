@@ -30,6 +30,16 @@ const (
 	DefaultPort        = 8080
 	DefaultTokenSecret = "burrowd-api-token"
 	DefaultTokenKey    = "token"
+	// DefaultInstallConfigMap and DefaultInstallIDKey name where an install records its own id
+	// (ADR-0084 §5): a ConfigMap in the control-plane namespace, holding the random, opaque
+	// identifier `burrow install` generated for it. A ConfigMap and not a Secret on purpose — the id
+	// authorises nothing, and a second person joining the install has to be able to read it.
+	//
+	// `burrow upgrade` reads it back and re-renders it rather than minting a new one, exactly as it
+	// does for the API token and the database password: a regenerated id would make every target
+	// already pointed at this install report a mismatch after a routine upgrade.
+	DefaultInstallConfigMap = "burrow-install"
+	DefaultInstallIDKey     = "id"
 	// DefaultAddonNamespace is where `install` provisions Burrow's curated backing services
 	// (logs, metrics) and their collectors — separate from both the control-plane namespace
 	// (which holds credentials) and the app namespace (user workloads), so add-ons don't
@@ -88,6 +98,11 @@ type Options struct {
 	// ClientVersion is this client's release version, forwarded as X-Burrow-Client-Version so
 	// burrowd can make version skew legible (ADR-0039). Empty omits the header.
 	ClientVersion string
+	// InstallID is the install the caller's target expects to reach, forwarded as X-Burrow-Install so
+	// burrowd refuses a request that names an install it is not (ADR-0084 §5). The kube context is
+	// how the request gets there; this is what says it arrived. Empty omits the header, which is what
+	// a target recorded before install ids existed sends.
+	InstallID string
 }
 
 func (o *Options) setDefaults() {
@@ -149,8 +164,9 @@ func Client(ctx context.Context, o Options) (*client.Client, error) {
 	}
 	// The kubeconfig transport authenticates to the API server; wrap it so every request also
 	// carries the burrowd API token in X-Burrow-Token, which the proxy forwards untouched
-	// (ADR-0015, ADR-0045). The Client itself stays auth-agnostic.
-	hc.Transport = client.NewNamedTokenRoundTripper(token, o.ClientName, o.ClientVersion, hc.Transport)
+	// (ADR-0015, ADR-0045), plus the handshake headers and the install the caller expects to reach
+	// (ADR-0039, ADR-0084 §5). The Client itself stays auth-agnostic.
+	hc.Transport = client.NewInstallTokenRoundTripper(token, o.ClientName, o.ClientVersion, o.InstallID, hc.Transport)
 	return client.NewClientWithHTTP(proxyBaseURL(cfg.Host, o.Namespace, o.Service, o.Port), hc), nil
 }
 

@@ -35,10 +35,26 @@ const (
 	ClientNameAgent = "burrow-agent"
 )
 
+// InstallHeader carries the install id the caller expects the control plane to be (ADR-0084 §5). It
+// is the request half of the install check: burrowd knows its own id, the client sends the one its
+// target recorded, and a difference is refused with a message naming both instead of a command
+// quietly acting on a cluster nobody meant to reach.
+//
+// It is a header rather than part of the credential for the same reason X-Burrow-Client and
+// X-Burrow-Client-Version are: it says something about the CALL, not about who is making it. The id
+// authorises nothing — it identifies an install — and Authorization is unavailable on the
+// API-server proxy path in any case, where client-go owns that header to authenticate to the API
+// server itself (ADR-0015). Like the rest of the X-Burrow- family it survives the proxy untouched.
+//
+// It is exported because both round trippers in this package set it and the control plane's
+// middleware reads it; keeping one spelling in one place is the point.
+const InstallHeader = "X-Burrow-Install"
+
 // tokenRoundTripper adds Burrow's per-request headers — the X-Burrow-Token credential and, when
-// set, the X-Burrow-Client and X-Burrow-Client-Version handshake headers (ADR-0039) — to every
-// request, wrapping an inner RoundTripper that performs the actual transport (a plain transport for
-// the direct path, or client-go's kubeconfig-authenticated proxy transport for the in-cluster path).
+// set, the X-Burrow-Client and X-Burrow-Client-Version handshake headers (ADR-0039) and the
+// X-Burrow-Install expectation (ADR-0084 §5) — to every request, wrapping an inner RoundTripper
+// that performs the actual transport (a plain transport for the direct path, or client-go's
+// kubeconfig-authenticated proxy transport for the in-cluster path).
 //
 // The token rides X-Burrow-Token only — never Authorization. On the API-server proxy path the
 // kubeconfig transport (the inner RoundTripper) authenticates to the API server via the
@@ -51,6 +67,7 @@ type tokenRoundTripper struct {
 	token         string
 	clientName    string
 	clientVersion string
+	installID     string
 	inner         http.RoundTripper
 }
 
@@ -74,10 +91,23 @@ func NewTokenRoundTripper(token, clientVersion string, inner http.RoundTripper) 
 // so a transport that does not know what it is (or a test) sends nothing rather than something
 // misleading; burrowd treats an absent header as a pre-handshake client and serves it (ADR-0039).
 func NewNamedTokenRoundTripper(token, clientName, clientVersion string, inner http.RoundTripper) http.RoundTripper {
+	return NewInstallTokenRoundTripper(token, clientName, clientVersion, "", inner)
+}
+
+// NewInstallTokenRoundTripper is NewNamedTokenRoundTripper plus the install the caller expects to be
+// talking to, sent in X-Burrow-Install (ADR-0084 §5). A target that records an install id supplies
+// it here, and the control plane refuses a request that names an install it is not, so a cluster
+// rebuilt under a name a provider generates deterministically is caught on arrival rather than
+// deployed into.
+//
+// An empty installID omits the header, which is the ordinary case and must stay served: a target
+// recorded before install ids existed has none, and a control plane older than this check ignores
+// the header if one is sent. Skew in both directions keeps working.
+func NewInstallTokenRoundTripper(token, clientName, clientVersion, installID string, inner http.RoundTripper) http.RoundTripper {
 	if inner == nil {
 		inner = http.DefaultTransport
 	}
-	return &tokenRoundTripper{token: token, clientName: clientName, clientVersion: clientVersion, inner: inner}
+	return &tokenRoundTripper{token: token, clientName: clientName, clientVersion: clientVersion, installID: installID, inner: inner}
 }
 
 // RoundTrip sets the Burrow headers on a clone of req (a RoundTripper must not mutate the request
@@ -90,6 +120,9 @@ func (t *tokenRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	if t.clientVersion != "" {
 		r.Header.Set("X-Burrow-Client-Version", t.clientVersion)
+	}
+	if t.installID != "" {
+		r.Header.Set(InstallHeader, t.installID)
 	}
 	return t.inner.RoundTrip(r)
 }
@@ -111,10 +144,20 @@ type DirectTransport struct {
 	// Version is this client's release version, sent as X-Burrow-Client-Version so burrowd can make
 	// version skew legible instead of opaque (ADR-0039). Empty omits the header.
 	Version string
+	// InstallID is the install this caller expects to reach, sent as X-Burrow-Install so a control
+	// plane that is a different install refuses the request and says so (ADR-0084 §5). Empty omits
+	// the header, and is served.
+	InstallID string
 }
 
 // Connect returns a client for the configured URL and token. It needs no context because the
 // direct path resolves no credential; the parameter satisfies the Transport interface.
 func (t DirectTransport) Connect(_ context.Context) (*Client, error) {
-	return NewNamedClient(t.BaseURL, t.Token, t.Name, t.Version), nil
+	// The http.Client is assembled here rather than through NewNamedClient so the install-id header
+	// rides the same round tripper as the credential and the handshake, with no fifth positional
+	// constructor. With an empty InstallID this is exactly what NewNamedClient builds.
+	hc := &http.Client{
+		Transport: NewInstallTokenRoundTripper(t.Token, t.Name, t.Version, t.InstallID, nil),
+	}
+	return NewClientWithHTTP(t.BaseURL, hc), nil
 }

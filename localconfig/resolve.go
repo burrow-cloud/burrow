@@ -47,6 +47,11 @@ type Resolved struct {
 	Endpoint              string
 	AgentKubeconfig       string
 	AgentContext          string
+	// InstallID is the install this resolution expects to be talking to (ADR-0084 §5). It comes from
+	// the selected target when there is one and from the registered handle otherwise, so the check
+	// covers both the CLI's targeted path and the handle-based path `burrow-agent` resolves through.
+	// A context that matches neither carries none, and sends no header.
+	InstallID string
 }
 
 // Cloud reports whether this resolution is the managed product, which is reached over HTTPS with the
@@ -145,6 +150,7 @@ func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resol
 		Mode:                  ModeTargeted,
 		Target:                target.Name,
 		Kind:                  target.Kind,
+		InstallID:             target.InstallID,
 	}
 	// A pinned handle narrows the target only when it is a handle in the SAME cluster; a pin left
 	// over from another cluster is not a narrowing of this one and is skipped rather than silently
@@ -157,6 +163,13 @@ func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resol
 		if env.Context == target.Context {
 			pinned := fromHandle(env, ModePinned, target.Name)
 			pinned.Kind = target.Kind
+			// The handle narrows WHICH ENVIRONMENT inside the cluster the target names; it does not
+			// change which install that is, so the target's id survives the narrowing. The handle's
+			// own id stands in when the target has none — they name the same cluster, and the more
+			// recently recorded of the two is the one that knows what is actually installed there.
+			if target.InstallID != "" {
+				pinned.InstallID = target.InstallID
+			}
 			return pinned, nil
 		}
 	}
@@ -166,6 +179,12 @@ func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resol
 			resolved.Env = env.Env
 			resolved.AgentKubeconfig = env.AgentKubeconfig
 			resolved.AgentContext = env.AgentContext
+			// The target's id wins; the handle's stands in when the target has none. A target
+			// written by `burrow auth login` carries no id (that command contacts no cluster), so
+			// without this the CLI would go unchecked on a cluster the handle knows perfectly well.
+			if resolved.InstallID == "" {
+				resolved.InstallID = env.InstallID
+			}
 		}
 	}
 	return resolved, nil
@@ -198,6 +217,7 @@ func resolveWithoutTarget(cfg *Config, kubeconfigPath string) (Resolved, error) 
 			resolved.Env = env.Env
 			resolved.AgentKubeconfig = env.AgentKubeconfig
 			resolved.AgentContext = env.AgentContext
+			resolved.InstallID = env.InstallID
 		}
 	}
 	return resolved, nil
@@ -216,6 +236,7 @@ func fromHandle(env Environment, mode Mode, target string) Resolved {
 		Target:                target,
 		AgentKubeconfig:       env.AgentKubeconfig,
 		AgentContext:          env.AgentContext,
+		InstallID:             env.InstallID,
 	}
 }
 

@@ -252,6 +252,12 @@ type target struct {
 	// control plane answers on, in place of the kube context there is none of. It is empty for every
 	// cluster target, so the kubeconfig path is reached exactly as it was.
 	cloudEndpoint string
+	// installID is the Burrow install the selected target was pointed at (ADR-0084 §5), sent on every
+	// request so a control plane that is a different install refuses rather than acts. It comes from
+	// the target and nowhere else: a context name is how the request gets there, and this is what
+	// says it arrived. Empty when no target is selected, when the target predates install ids, or
+	// when it is the managed product — all of which are served exactly as they are today.
+	installID string
 }
 
 // resolveTarget decides which cluster + environment a per-app command targets (ADR-0036). With
@@ -304,6 +310,13 @@ func (o *commonOpts) resolveTarget() (target, error) {
 		controlPlaneNamespace: cpn,
 		env:                   env,
 		display:               targetLine(resolved, o.context, o.env, kubeContext, env),
+		installID:             resolved.InstallID,
+	}
+	// An explicit --context is a deliberate choice of a different cluster from the one the target
+	// names, so the target's install id no longer describes what is on the other end and is dropped.
+	// Carrying it would refuse the override on the grounds that it is an override.
+	if o.context != "" {
+		tgt.installID = ""
 	}
 	// Name the target from the context this command will actually connect to, so an override is
 	// named as what it was overridden TO and an unselected target reads as the kubeconfig it followed
@@ -430,12 +443,17 @@ func (o *commonOpts) connect(ctx context.Context, tgt target) (*client.Client, e
 // proxy transport, carrying the scoped-credential and namespace choices connectOptions resolves. The
 // direct-vs-kubeconfig branch stays here so command files stay unchanged; a private module can plug a
 // different Transport in without touching them.
+//
+// Each arm forwards the target's install id (ADR-0084 §5). On the --control-plane arm that is
+// always empty today, and honestly so: naming a URL and a token bypasses target resolution
+// entirely, so there is no recorded id to forward. The field is passed rather than omitted so the
+// id travels the moment that path resolves a target, instead of the omission having to be noticed.
 func (o *commonOpts) transport(tgt target) (client.Transport, error) {
 	if o.controlPlane != "" {
 		if o.token == "" {
 			return nil, errors.New("--token (or BURROW_API_TOKEN) is required with --control-plane")
 		}
-		return client.DirectTransport{BaseURL: o.controlPlane, Token: o.token, Name: client.ClientNameCLI, Version: cliVersion()}, nil
+		return client.DirectTransport{BaseURL: o.controlPlane, Token: o.token, Name: client.ClientNameCLI, Version: cliVersion(), InstallID: tgt.installID}, nil
 	}
 	if tgt.cloudEndpoint != "" {
 		return cloudcred.Transport(cloudBaseURLFor(tgt.cloudEndpoint), cloudcred.KindCLI, client.ClientNameCLI, cliVersion())
@@ -466,7 +484,14 @@ func (o *commonOpts) connectOptions(tgt target) connect.Options {
 		kubeconfig = tgt.agentKubeconfig
 		kubeContext = tgt.agentContext
 	}
-	return connect.Options{Kubeconfig: kubeconfig, Context: kubeContext, Namespace: tgt.controlPlaneNamespace, ClientName: client.ClientNameCLI, ClientVersion: cliVersion()}
+	return connect.Options{
+		Kubeconfig:    kubeconfig,
+		Context:       kubeContext,
+		Namespace:     tgt.controlPlaneNamespace,
+		ClientName:    client.ClientNameCLI,
+		ClientVersion: cliVersion(),
+		InstallID:     tgt.installID,
+	}
 }
 
 // emit prints v as indented JSON when asJSON, otherwise the human-readable line.

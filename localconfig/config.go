@@ -88,6 +88,16 @@ type Environment struct {
 	// write them.
 	AgentKubeconfig string `yaml:"agentKubeconfig,omitempty"`
 	AgentContext    string `yaml:"agentContext,omitempty"`
+	// InstallID is the id of the Burrow install this handle's cluster is running (ADR-0084 §5). It
+	// is recorded here as well as on a target because the two are read by different callers: a
+	// target is what the `burrow` CLI resolves through, and a handle is what `burrow-agent` resolves
+	// through. The agent is the primary caller — it is the thing doing deploys — so a check that
+	// only covered targets would leave the deploy path, which is most of the failure the record is
+	// about, unprotected.
+	//
+	// Empty for every handle registered before install ids existed, and for one joined to a control
+	// plane that predates them. An empty id sends no header and is served.
+	InstallID string `yaml:"installID,omitempty"`
 }
 
 // controlPlaneNamespaceOrDefault returns the handle's control-plane namespace, or the

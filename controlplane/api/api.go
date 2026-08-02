@@ -36,6 +36,14 @@ type Config struct {
 	// and an unknown route reports this version so a newer client learns to upgrade the control
 	// plane. Optional — empty (a local or e2e build) makes the handshake permissive.
 	Version string
+	// InstallID is this install's own id (ADR-0084 §5): the random, opaque, non-secret identifier
+	// `burrow install` generated for it, recorded in a ConfigMap in the control-plane namespace and
+	// handed to burrowd in its environment. A caller that names a different install is refused, so a
+	// cluster destroyed and recreated under a kube context name a provider generates deterministically
+	// is caught on arrival instead of deployed into. Optional — empty (an install predating ids, or a
+	// local build) makes the check permissive, since a control plane that does not know its own id
+	// cannot establish that a caller is wrong.
+	InstallID string
 }
 
 // New builds the control-plane HTTP handler. The /v1 routes require the bearer token;
@@ -178,12 +186,17 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/cluster/capacity", s.capacity)
 
 	root := http.NewServeMux()
-	// Authenticate first, then apply the client-version handshake (ADR-0039): the too-old gate wraps
-	// the mux, clientVersionContext records the acting client's version onto the request context for
-	// the audit log, and v1NotFound turns a route this server lacks into a structured "upgrade the
-	// control plane" error. Only authenticated callers reach the version machinery, so it never leaks
-	// the server version to an anonymous request.
-	root.Handle("/v1/", requireToken(cfg.Token, versionGate(cfg.Version, clientVersionContext(v1NotFound(cfg.Version, v1)))))
+	// Authenticate first, then check WHICH INSTALL the caller meant (ADR-0084 §5), then apply the
+	// client-version handshake (ADR-0039): the too-old gate wraps the mux, clientVersionContext
+	// records the acting client's version onto the request context for the audit log, and v1NotFound
+	// turns a route this server lacks into a structured "upgrade the control plane" error. Only
+	// authenticated callers reach any of it, so neither this install's id nor its version leaks to an
+	// anonymous request.
+	//
+	// The install check precedes the version handshake deliberately. A caller that has reached the
+	// wrong Burrow needs to hear that; telling them instead to upgrade a client, against a control
+	// plane they never meant to talk to, is a remedy for the wrong problem.
+	root.Handle("/v1/", requireToken(cfg.Token, installGate(cfg.InstallID, versionGate(cfg.Version, clientVersionContext(v1NotFound(cfg.Version, v1))))))
 	root.HandleFunc("GET /healthz", health)
 	return root, nil
 }
@@ -1542,6 +1555,10 @@ type errorResponse struct {
 	// the client can name the version it must reach in its own, install-aware remedy (ADR-0039).
 	// The control plane cannot know how the caller was installed; the caller can.
 	ServerVersion string `json:"server_version,omitempty"`
+	// ServerInstallID is this install's own id, set on the install_mismatch refusal so the caller can
+	// re-point a target at the install that actually answered without reading it out of the message
+	// (ADR-0084 §5). It is not a secret, and only an authenticated caller ever sees it.
+	ServerInstallID string `json:"server_install_id,omitempty"`
 }
 
 func writeError(w http.ResponseWriter, status int, msg, code string) {

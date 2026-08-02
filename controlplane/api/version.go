@@ -136,6 +136,89 @@ func versionGate(serverVersion string, next http.Handler) http.Handler {
 	})
 }
 
+// The install check (ADR-0084 §5). A kube context name says HOW TO GET somewhere; it does not say
+// WHETHER YOU ARRIVED. It is user-controlled, it is reusable, and cloud providers generate it
+// deterministically — `doctl kubernetes cluster kubeconfig save` writes names like `do-nyc3-burrow`,
+// so destroying a cluster and standing another one up produces a byte-identical context name for an
+// entirely different cluster. Every visible signal reads correct and the command lands somewhere
+// nobody meant.
+//
+// So each install gets an id, and the caller says which install it means. The id is not a secret and
+// authorises nothing: it identifies an install so that arriving at the wrong one is a refusal that
+// names the cause, rather than a surprise or a bare 401 from a cluster the caller did not know they
+// had reached.
+//
+// It rides a header for the same reason the ADR-0039 handshake does, and it is checked here, beside
+// versionGate, for the same reason: both are facts about the CALL rather than about the caller, both
+// are one choke point on each end, and both serve a request that says nothing.
+
+// installHeader carries the install id the CALLER EXPECTS this control plane to be (ADR-0084 §5). It
+// is X-Burrow-Install rather than part of Authorization because it is not a credential — the id
+// grants nothing, and a second person joining an install has to be able to read it — and because
+// Authorization is not available on the API-server proxy path at all, where client-go owns that
+// header to authenticate to the API server itself (ADR-0015). Like X-Burrow-Token and the two
+// handshake headers, the proxy forwards it untouched.
+const installHeader = "X-Burrow-Install"
+
+// installMismatchCode is the machine-readable tag on the refusal, alongside "client_too_old" and
+// "unknown_operation". A caller branches on it to offer re-pointing the target rather than treating
+// the failure as the cluster being down.
+const installMismatchCode = "install_mismatch"
+
+// installMismatchMessage renders the refusal for a caller that reached an install it did not mean
+// to. It names BOTH ids, because the useful fact is not "something is wrong" but "the Burrow you
+// recorded and the Burrow that answered are different things" — which is what tells a reader that
+// the cluster behind a context name they still recognise has been rebuilt, rather than sending them
+// to look for a network or credential problem they do not have.
+//
+// It says "the cluster at this context" rather than naming the context, because the control plane
+// does not know what the caller's kubeconfig calls it: the name is local to the machine that made
+// the call, and inventing one here would print something the reader cannot find.
+//
+// The remedy names `burrow cluster install` and deliberately NOT `burrow auth login`. Login records
+// a context name and contacts no cluster, so it has no id to learn and leaves the target unchecked;
+// `burrow cluster install` against an already-installed cluster performs the local join, which reads
+// this install's id out of its ConfigMap and records it. Only one of those two leaves the target
+// pointed at the install that is actually there, and this is the one message the whole check exists
+// to print — a remedy that does not fix it would be worse than no remedy.
+func installMismatchMessage(want, have string) string {
+	return fmt.Sprintf("this is not the Burrow install you are pointed at: your target expects the Burrow installed as %s, "+
+		"and the cluster at this context is running install %s. A cluster rebuilt under the same kube context name is the "+
+		"usual cause — the name still resolves, the Burrow behind it is a different one. If this cluster is the one you "+
+		"want, re-point your target at it with `burrow cluster install <your kube context>`, which joins the install "+
+		"already there and records its id; otherwise select a different target with `burrow auth switch <name>`.", want, have)
+}
+
+// installGate refuses a request whose X-Burrow-Install names an install this control plane is not,
+// with a structured error carrying this install's own id (ADR-0084 §5), and otherwise serves it.
+//
+// Two absences are served, and both are load-bearing rather than lenient:
+//
+//   - No header. The caller's target predates install ids, or is a Burrow Cloud target, or is a
+//     command reaching a control plane directly. It has made no claim about which install this is,
+//     so there is nothing to contradict — the same tolerance versionGate gives a client that
+//     predates the handshake.
+//   - No installID configured on this server. burrowd was installed before ids existed and does not
+//     know its own. It cannot establish that the caller is wrong, and refusing on an unknown would
+//     break every caller of an older install the moment their CLI learned to send the header.
+//
+// It runs after authentication, so an anonymous request never learns this install's id, and before
+// versionGate, so a caller who has reached the wrong Burrow is told that rather than being handed a
+// version remedy for a control plane they did not mean to talk to.
+func installGate(installID string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if want := r.Header.Get(installHeader); installID != "" && want != "" && want != installID {
+			writeJSON(w, http.StatusConflict, errorResponse{
+				Error:           installMismatchMessage(want, installID),
+				Code:            installMismatchCode,
+				ServerInstallID: installID,
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // clientVersionContext puts the request's X-Burrow-Client-Version on the context so the engine can
 // record which client drove a guarded operation in the audit log, next to the principal (ADR-0039).
 // It runs inside the version gate — on an authenticated, in-window request — so an audited operation

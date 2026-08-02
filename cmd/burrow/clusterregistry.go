@@ -422,9 +422,13 @@ type registryDNSClient interface {
 // registryDNSClientFn builds the control-plane client the DNS step drives. install runs with the
 // developer's kubeconfig, so it auto-connects to burrowd the same way `burrow domain add` does (reading
 // the API token from the install Secret). It is a package var so tests inject a fake.
+//
+// clusterClient rather than client: installing is a cluster-lifecycle act that names its own cluster
+// and is exempt from the cluster-only refusal (ADR-0078 §3), so this follow-on step must reach the
+// burrowd that was just installed even with the managed product selected.
 var registryDNSClientFn = func(ctx context.Context, o clusterRegistryOptions) (registryDNSClient, error) {
 	co := &commonOpts{kubeconfig: o.kubeconfig, namespace: o.namespace}
-	return co.client(ctx)
+	return co.clusterClient(ctx)
 }
 
 // provisionRegistryDNS points the registry's public host at the cluster ingress. When a DNS provider is

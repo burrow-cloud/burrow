@@ -202,7 +202,32 @@ func bindClientFlags(flags *pflag.FlagSet, o *commonOpts) {
 // without resolving the active environment handle. Commands that do not target an app
 // (install, env add, guard, audit, addon) use it so a pinned handle never silently redirects a
 // cluster-setup or policy command. Per-app commands use resolveAndConnect instead (ADR-0036).
+//
+// Because this path reaches a cluster and never consults the selected target, it refuses outright
+// while the managed product is selected rather than acting on whatever the kubeconfig points at
+// (clusteronly.go).
 func (o *commonOpts) client(ctx context.Context) (*client.Client, error) {
+	if err := o.requireCluster(); err != nil {
+		return nil, err
+	}
+	return o.clusterClient(ctx)
+}
+
+// requireCluster refuses this invocation when it needs a cluster and the active target is the
+// managed product (clusteronly.go). --control-plane names the control plane outright, so no target
+// is consulted for it — here or in resolveTarget, which returns early on it for the same reason.
+// A command that writes to a cluster before it connects calls this itself, first.
+func (o *commonOpts) requireCluster() error {
+	if o.controlPlane != "" {
+		return nil
+	}
+	return refuseCloudTarget()
+}
+
+// clusterClient is client without the cluster-only check, for the one caller that has already
+// established it is acting on a cluster: `burrow cluster registry install`, whose DNS follow-on step
+// talks to the burrowd it just installed alongside. Nothing else should use it.
+func (o *commonOpts) clusterClient(ctx context.Context) (*client.Client, error) {
 	o.acted = o.namePrivilegedTarget()
 	return o.connect(ctx, target{context: o.context, controlPlaneNamespace: o.namespace})
 }

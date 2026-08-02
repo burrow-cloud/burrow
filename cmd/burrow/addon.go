@@ -911,6 +911,14 @@ func newAddonInstallCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
+			// Checked here rather than left to the connection below, because the RBAC staging that comes
+			// first writes to a cluster: by the time client() refused, a grant would already be on
+			// whatever cluster the kubeconfig pointed at. The no-argument listing is refused too — it is
+			// a menu of things this target cannot install, and offering it would be the misdirection
+			// this refusal exists to remove.
+			if err := o.requireCluster(); err != nil {
+				return err
+			}
 			if len(args) == 0 {
 				return listInstallableAddons(ctx, o, out)
 			}

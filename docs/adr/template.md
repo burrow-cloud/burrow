@@ -8,8 +8,12 @@
 
 ## TL;DR
 
-<Two or three sentences: what was decided and why it matters, enough to orient a reader who
-will not read the whole record.>
+<Compressed. Drop articles and filler, use fragments, keep every technical term, number and
+name exact. Plain words over the technical term. This section only — the Context, Decision,
+Consequences and Alternatives below stay in normal prose, and so does the index row in
+README.md.>
+
+<A short lead line saying what was decided, then tight bullets. Not a paragraph.>
 
 <A trailing line for relationships: Extends / builds on / realizes / interacts with ADR-XXXX
 (one clause each, in prose). End with "Supersedes nothing." or "Supersedes ADR-YYYY.">

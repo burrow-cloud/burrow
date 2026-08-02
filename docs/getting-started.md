@@ -73,7 +73,9 @@ The first entry in the picker is `burrow-cloud.dev`, the managed product. Select
 code and opens your browser on an approval page; check the code there matches the one in your
 terminal, approve, and you are signed in. Two credentials are issued, yours and `burrow-agent`'s,
 written to files only you can read (`~/.burrow/credentials/` and `~/.burrow/agents/`) and never
-displayed. Everything below needs none of that — the self-hosted path needs no account.
+displayed. From then on the application commands — `burrow app list`, `deploy`, `status`, `logs` and
+the rest — act against your Burrow Cloud tenant, with no cluster and no kubeconfig involved.
+Everything below needs none of that — the self-hosted path needs no account.
 
 ## Part 2 - Connect your agent
 

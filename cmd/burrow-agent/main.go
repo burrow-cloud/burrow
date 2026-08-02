@@ -30,6 +30,7 @@ import (
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/internal/agentconn"
+	"github.com/burrow-cloud/burrow/internal/cloudcred"
 	"github.com/burrow-cloud/burrow/internal/targetname"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
@@ -145,9 +146,15 @@ func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Clien
 	if err != nil {
 		return nil, "", targetname.Named{}, err
 	}
-	resolved, err := localconfig.Resolve(cfg, o.kubeconfig)
+	// ResolveOperate rather than Resolve: the operate-verbs this binary carries work against either
+	// kind of target, because the control-plane API is the same one whether it is reached through a
+	// cluster's API server or over HTTPS at the managed product (ADR-0078 §1).
+	resolved, err := localconfig.ResolveOperate(cfg, o.kubeconfig)
 	if err != nil {
 		return nil, "", targetname.Named{}, err
+	}
+	if resolved.Cloud() {
+		return o.resolveCloud(ctx, cfg, resolved)
 	}
 	kubeContext := resolved.Context
 	if o.context != "" {
@@ -178,6 +185,58 @@ func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Clien
 		return nil, "", targetname.Named{}, err
 	}
 	return c, envName, targetname.For(cfg, kubeContext, o.context != ""), nil
+}
+
+// cloudBaseURL is the origin the managed product answers on, and the one seam a test redirects so no
+// test reaches a real burrow-cloud.dev. It is a variable for that reason only; nothing changes it at
+// runtime.
+var cloudBaseURL = "https://" + localconfig.CloudEndpoint
+
+// resolveCloud connects through a selected Burrow Cloud target. There is no cluster to resolve: the
+// endpoint is the whole address, --env is sent as written, and the credential is the AGENT's — never
+// the person's, which is the entire point of sign-in issuing two (cloud ADR-0028 §2). Revoking the
+// agent's credential must stop the agent without signing the person's terminal out.
+//
+// The kubeconfig-shaped flags describe a cluster, so they cannot be honoured here and are refused by
+// name rather than ignored: an agent that silently dropped --context would act somewhere nobody
+// asked for.
+func (o *connOpts) resolveCloud(ctx context.Context, cfg *localconfig.Config, resolved localconfig.Resolved) (*client.Client, string, targetname.Named, error) {
+	if flag := o.kubeOnlyFlag(); flag != "" {
+		return nil, "", targetname.Named{}, fmt.Errorf(
+			"%s picks a cluster out of a kubeconfig, and the active target %q is the managed product at %s, which has no cluster of its own; drop the flag, or switch to a cluster target with \"burrow auth switch <name>\"",
+			flag, resolved.Target, resolved.Endpoint)
+	}
+	t, ok := cfg.LookupTarget(resolved.Target)
+	if !ok { // unreachable: ActiveTarget resolved it out of this same config
+		return nil, "", targetname.Named{}, fmt.Errorf("the active target %q is not in the targets list", resolved.Target)
+	}
+	base := cloudBaseURL
+	if resolved.Endpoint != localconfig.CloudEndpoint {
+		base = "https://" + resolved.Endpoint
+	}
+	tr, err := cloudcred.Transport(base, cloudcred.KindAgent, client.ClientNameAgent, agentVersion())
+	if err != nil {
+		return nil, "", targetname.Named{}, err
+	}
+	c, err := tr.Connect(ctx)
+	if err != nil {
+		return nil, "", targetname.Named{}, err
+	}
+	return c, o.env, targetname.ForCloud(t), nil
+}
+
+// kubeOnlyFlag names the kubeconfig-shaped flag this invocation set, or "" if none did.
+func (o *connOpts) kubeOnlyFlag() string {
+	switch {
+	case o.kubeconfig != "":
+		return "--kubeconfig"
+	case o.context != "":
+		return "--context"
+	case o.namespace != "" && o.namespace != connect.DefaultNamespace:
+		return "--namespace"
+	default:
+		return ""
+	}
 }
 
 // truthy reports whether an environment-variable value enables a flag: 1, true, or yes

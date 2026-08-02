@@ -158,3 +158,102 @@ func TestCloudTargetDescribes(t *testing.T) {
 		t.Errorf("Describe() = %q, want it to name %s", tgt.Describe(), CloudEndpoint)
 	}
 }
+
+// TestTargetWithoutInstallIDLoads is the compatibility property of ADR-0084 §5: every target already
+// on disk carries no install id, and one written by `burrow auth login` carries none either, because
+// that command contacts no cluster. Requiring one would turn every existing config into a load
+// error, which is the outcome the whole design exists to avoid.
+func TestTargetWithoutInstallIDLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	yaml := "apiVersion: burrow.dev/v1\nkind: Config\ncurrentTarget: do-nyc1-cluster\ntargets:\n  - name: do-nyc1-cluster\n    kind: kubernetes\n    context: do-nyc1-cluster\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	tgt, ok := cfg.LookupTarget("do-nyc1-cluster")
+	if !ok {
+		t.Fatalf("target was not loaded: %+v", cfg.Targets)
+	}
+	if tgt.InstallID != "" {
+		t.Errorf("InstallID = %q, want empty for a target recorded before install ids existed", tgt.InstallID)
+	}
+}
+
+// TestSetTargetInstallIDRecordsByContext confirms the id `burrow install` learns is recorded on every
+// target that names the context it installed into, and on no other (ADR-0084 §5). The writer knows a
+// context; which targets point at it is this package's business.
+func TestSetTargetInstallIDRecordsByContext(t *testing.T) {
+	cfg := &Config{Targets: []Target{
+		{Name: "prod", Kind: TargetKindKubernetes, Context: "do-nyc3-burrow"},
+		{Name: "prod-alias", Kind: TargetKindKubernetes, Context: "do-nyc3-burrow"},
+		{Name: "staging", Kind: TargetKindKubernetes, Context: "do-lon1-burrow"},
+		CloudTarget(),
+	}}
+
+	if !cfg.SetTargetInstallID("do-nyc3-burrow", "install-1") {
+		t.Fatal("SetTargetInstallID reported nothing updated, want the two targets on that context")
+	}
+	for _, name := range []string{"prod", "prod-alias"} {
+		tgt, _ := cfg.LookupTarget(name)
+		if tgt.InstallID != "install-1" {
+			t.Errorf("target %s InstallID = %q, want install-1", name, tgt.InstallID)
+		}
+	}
+	if tgt, _ := cfg.LookupTarget("staging"); tgt.InstallID != "" {
+		t.Errorf("a target on another context was given the id: %q", tgt.InstallID)
+	}
+	if tgt, _ := cfg.LookupTarget(CloudEndpoint); tgt.InstallID != "" {
+		t.Errorf("the managed target was given an install id: %q", tgt.InstallID)
+	}
+}
+
+// TestSetTargetInstallIDWithNoTargetIsNotAnError confirms installing without having run `burrow auth
+// login` first is an ordinary state: there is nowhere to record the id, nothing is changed, and the
+// caller is told so rather than failing.
+func TestSetTargetInstallIDWithNoTargetIsNotAnError(t *testing.T) {
+	cfg := &Config{}
+	if cfg.SetTargetInstallID("do-nyc3-burrow", "install-1") {
+		t.Error("SetTargetInstallID reported an update against a config with no targets")
+	}
+}
+
+// TestResolveCarriesTheTargetInstallID confirms the id reaches the resolution a command connects
+// with, which is the only way it can reach the wire.
+func TestResolveCarriesTheTargetInstallID(t *testing.T) {
+	cfg := &Config{
+		CurrentTarget: "prod",
+		Targets:       []Target{{Name: "prod", Kind: TargetKindKubernetes, Context: "do-nyc1-nonprod", InstallID: "install-1"}},
+	}
+	resolved, err := ResolveOperate(cfg, writeKubeconfig(t))
+	if err != nil {
+		t.Fatalf("ResolveOperate: %v", err)
+	}
+	if resolved.InstallID != "install-1" {
+		t.Errorf("resolved InstallID = %q, want install-1", resolved.InstallID)
+	}
+}
+
+// TestResolveCarriesTheInstallIDThroughAPinnedHandle confirms a pinned handle inside the target's
+// cluster narrows WHICH ENVIRONMENT is acted on without changing WHICH INSTALL that is: the id
+// survives the narrowing, so the check still holds on the path most people are actually on.
+func TestResolveCarriesTheInstallIDThroughAPinnedHandle(t *testing.T) {
+	cfg := &Config{
+		Current:       "nonprod",
+		CurrentTarget: "prod",
+		Environments:  []Environment{{Name: "nonprod", Context: "do-nyc1-nonprod", AppNamespace: "apps"}},
+		Targets:       []Target{{Name: "prod", Kind: TargetKindKubernetes, Context: "do-nyc1-nonprod", InstallID: "install-1"}},
+	}
+	resolved, err := ResolveOperate(cfg, writeKubeconfig(t))
+	if err != nil {
+		t.Fatalf("ResolveOperate: %v", err)
+	}
+	if resolved.Mode != ModePinned {
+		t.Fatalf("mode = %q, want pinned (the handle narrows the target)", resolved.Mode)
+	}
+	if resolved.InstallID != "install-1" {
+		t.Errorf("resolved InstallID = %q, want install-1", resolved.InstallID)
+	}
+}

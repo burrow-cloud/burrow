@@ -912,3 +912,191 @@ func TestObjectStorageCredentialWidensNoRBAC(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderManifestsRecordsTheInstallID confirms an install writes its own id where both halves of
+// the check can reach it (ADR-0084 §5): a ConfigMap in the control-plane namespace, which is what a
+// joining person and `burrow upgrade` read, and burrowd's own environment, which is what the request
+// check compares against. burrowd reads the value FROM the ConfigMap rather than having it restated,
+// so the recorded id and the enforced id cannot drift apart.
+func TestRenderManifestsRecordsTheInstallID(t *testing.T) {
+	out, err := renderManifests(installOptions{
+		Namespace: "burrow", AppNamespace: "apps", Image: "img:1",
+		Token: "t", DBPassword: "p", InstallID: "install-abc", Port: 8080,
+	})
+	if err != nil {
+		t.Fatalf("renderManifests: %v", err)
+	}
+	for _, want := range []string{
+		"kind: ConfigMap",
+		"name: " + connect.DefaultInstallConfigMap,
+		`id: "install-abc"`,
+		"- name: BURROW_INSTALL_ID",
+		"configMapKeyRef: { name: " + connect.DefaultInstallConfigMap + ", key: " + connect.DefaultInstallIDKey + " }",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered manifests missing %q:\n%s", want, out)
+		}
+	}
+	// The id is not a secret and must not be filed as one: a second person joining the install has to
+	// be able to read it, and gating it behind the RBAC that protects real credentials would make
+	// joining need permissions it has no reason to need.
+	if strings.Contains(out, `kind: Secret`+"\n"+`metadata:`+"\n"+`  name: `+connect.DefaultInstallConfigMap) {
+		t.Errorf("the install id was rendered as a Secret; it must be a ConfigMap:\n%s", out)
+	}
+}
+
+// TestInstallRecordsTheInstallIDOnTheTarget confirms a fresh install records which Burrow it just
+// stood up on the target pointed at that context (ADR-0084 §5), and that the recorded id is the one
+// actually applied to the cluster. Without this the target knows how to reach a cluster and nothing
+// about which install answers there.
+func TestInstallRecordsTheInstallIDOnTheTarget(t *testing.T) {
+	stubInstall(t, twoContexts(), nil)
+
+	// Capture everything this install applies, so the recorded id can be checked against the one the
+	// cluster was actually given rather than merely being non-empty. An install applies more than the
+	// control-plane manifests (the metrics-server baseline follows), so the captures accumulate.
+	var applied strings.Builder
+	origApply := applyFn
+	applyFn = func(_ context.Context, _, _ string, manifests string, _ bool, _, _ io.Writer) error {
+		applied.WriteString(manifests)
+		return nil
+	}
+	t.Cleanup(func() { applyFn = origApply })
+
+	// A target pointed at the context being installed into, as `burrow auth login --context prod`
+	// would have left it: a context name and no id.
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.KubernetesTarget("prod")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"install", "prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("install prod: %v\n%s", err, errb.String())
+	}
+
+	cfg, err = localconfig.Load()
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	tgt, ok := cfg.LookupTarget("prod")
+	if !ok {
+		t.Fatalf("the target went missing: %+v", cfg.Targets)
+	}
+	if tgt.InstallID == "" {
+		t.Fatal("install recorded no install id on the target")
+	}
+	if !strings.Contains(applied.String(), `id: "`+tgt.InstallID+`"`) {
+		t.Errorf("the id recorded on the target (%q) is not the one applied to the cluster", tgt.InstallID)
+	}
+}
+
+// TestInstallWithoutATargetRecordsNothing confirms installing without having run `burrow auth login`
+// first is an ordinary success: there is nowhere to record the id, so nothing is recorded and nothing
+// complains. The id is on the cluster either way, and a target pointed here later picks it up.
+func TestInstallWithoutATargetRecordsNothing(t *testing.T) {
+	stubInstall(t, twoContexts(), nil)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"install", "prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("install prod: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if len(cfg.Targets) != 0 {
+		t.Errorf("install registered a target it was not asked for: %+v", cfg.Targets)
+	}
+	if strings.Contains(out.String(), "install id") {
+		t.Errorf("install talked about install ids with no target to record one on:\n%s", out.String())
+	}
+}
+
+// TestInstallJoinRecordsTheInstallIDFromTheCluster covers the second person: joining an existing
+// install reads the id out of the ConfigMap with ordinary access and records it on their target
+// (ADR-0084 §5). This is the reason the id is a ConfigMap and not a Secret — it authorises nothing,
+// and somebody joining has to be able to read it.
+func TestInstallJoinRecordsTheInstallIDFromTheCluster(t *testing.T) {
+	stubInstallJoin(t, nil)
+
+	// The joined cluster carries an install id, which the fixture in stubInstallJoin does not.
+	origCS := clientsetFn
+	clientsetFn = func(string, string) (kubernetes.Interface, error) {
+		return fake.NewSimpleClientset(
+			&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: connect.DefaultTokenSecret, Namespace: connect.DefaultNamespace},
+				Data:       map[string][]byte{connect.DefaultTokenKey: []byte("existing-token")},
+			},
+			&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: connect.DefaultInstallConfigMap, Namespace: connect.DefaultNamespace},
+				Data:       map[string]string{connect.DefaultInstallIDKey: "install-abc"},
+			},
+		), nil
+	}
+	t.Cleanup(func() { clientsetFn = origCS })
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.KubernetesTarget("prod")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"install", "prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("install join: %v\n%s", err, errb.String())
+	}
+
+	cfg, err = localconfig.Load()
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	tgt, _ := cfg.LookupTarget("prod")
+	if tgt.InstallID != "install-abc" {
+		t.Errorf("joined target InstallID = %q, want install-abc read from the cluster", tgt.InstallID)
+	}
+}
+
+// TestInstallJoinTolerantOfAnInstallWithoutAnID covers joining a control plane that predates install
+// ids: there is no ConfigMap, so there is nothing to record, and the join succeeds exactly as it did
+// before ids existed.
+func TestInstallJoinTolerantOfAnInstallWithoutAnID(t *testing.T) {
+	stubInstallJoin(t, nil)
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.KubernetesTarget("prod")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"install", "prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("install join: %v\n%s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "Joined the existing Burrow install") {
+		t.Errorf("the join did not complete:\n%s", out.String())
+	}
+	cfg, err = localconfig.Load()
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	if tgt, _ := cfg.LookupTarget("prod"); tgt.InstallID != "" {
+		t.Errorf("an install with no id recorded %q on the target", tgt.InstallID)
+	}
+}

@@ -241,3 +241,78 @@ func TestAlreadyInstalled(t *testing.T) {
 		}
 	})
 }
+
+// installConfigMap is the ConfigMap an install records its own id in (ADR-0084 §5), for fixtures
+// modelling a cluster that already carries one.
+func installConfigMap(ns, id string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: connect.DefaultInstallConfigMap, Namespace: ns},
+		Data:       map[string]string{connect.DefaultInstallIDKey: id},
+	}
+}
+
+// TestUpgradeOptionsPreservesInstallID is the property that makes install ids safe to rely on: a
+// routine upgrade must re-render the id the install already has. Minting a new one would make every
+// target pointed at this install report a mismatch immediately after upgrading — breaking exactly
+// the people who had it configured correctly (ADR-0084 §5).
+func TestUpgradeOptionsPreservesInstallID(t *testing.T) {
+	cs := existingInstall("burrow", "apps")
+	if _, err := cs.CoreV1().ConfigMaps("burrow").Create(context.Background(), installConfigMap("burrow", "install-abc"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the install ConfigMap: %v", err)
+	}
+
+	opts, err := upgradeOptions(context.Background(), cs, "burrow", "img:2")
+	if err != nil {
+		t.Fatalf("upgradeOptions: %v", err)
+	}
+	if opts.InstallID != "install-abc" {
+		t.Errorf("install id not preserved: got %q, want install-abc", opts.InstallID)
+	}
+	manifests, err := renderManifests(opts)
+	if err != nil {
+		t.Fatalf("renderManifests: %v", err)
+	}
+	if !strings.Contains(manifests, `id: "install-abc"`) {
+		t.Errorf("the re-rendered manifests do not carry the existing install id:\n%s", manifests)
+	}
+}
+
+// TestUpgradeOptionsMintsAnInstallIDWhenAbsent covers upgrading an install that predates install ids:
+// there is no ConfigMap to read, so the upgrade is where the install acquires one. Nothing can
+// mismatch against an id no target has seen yet.
+func TestUpgradeOptionsMintsAnInstallIDWhenAbsent(t *testing.T) {
+	cs := existingInstall("burrow", "apps")
+
+	opts, err := upgradeOptions(context.Background(), cs, "burrow", "img:2")
+	if err != nil {
+		t.Fatalf("upgradeOptions: %v", err)
+	}
+	if opts.InstallID == "" {
+		t.Fatal("upgrading an install that predates install ids must mint one, got an empty id")
+	}
+	manifests, err := renderManifests(opts)
+	if err != nil {
+		t.Fatalf("renderManifests: %v", err)
+	}
+	if !strings.Contains(manifests, `id: "`+opts.InstallID+`"`) {
+		t.Errorf("the minted install id was not rendered into the manifests:\n%s", manifests)
+	}
+}
+
+// TestUpgradeOptionsMintsAnInstallIDWhenTheKeyIsEmpty covers a ConfigMap that exists but carries no
+// id — a partially applied or hand-edited install. An empty id would be rendered into burrowd's
+// environment and disable the check silently, so it is treated as absent and replaced.
+func TestUpgradeOptionsMintsAnInstallIDWhenTheKeyIsEmpty(t *testing.T) {
+	cs := existingInstall("burrow", "apps")
+	if _, err := cs.CoreV1().ConfigMaps("burrow").Create(context.Background(), installConfigMap("burrow", ""), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the install ConfigMap: %v", err)
+	}
+
+	opts, err := upgradeOptions(context.Background(), cs, "burrow", "img:2")
+	if err != nil {
+		t.Fatalf("upgradeOptions: %v", err)
+	}
+	if opts.InstallID == "" {
+		t.Error("an empty id in the ConfigMap must be replaced with a minted one")
+	}
+}

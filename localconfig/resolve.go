@@ -47,6 +47,10 @@ type Resolved struct {
 	Endpoint              string
 	AgentKubeconfig       string
 	AgentContext          string
+	// InstallID is the install the selected target expects to be talking to (ADR-0084 §5). It comes
+	// from the target and nowhere else: it is a property of what was pointed at, not of the
+	// kubeconfig a command happens to follow, so a resolution with no target selected carries none.
+	InstallID string
 }
 
 // Cloud reports whether this resolution is the managed product, which is reached over HTTPS with the
@@ -145,6 +149,7 @@ func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resol
 		Mode:                  ModeTargeted,
 		Target:                target.Name,
 		Kind:                  target.Kind,
+		InstallID:             target.InstallID,
 	}
 	// A pinned handle narrows the target only when it is a handle in the SAME cluster; a pin left
 	// over from another cluster is not a narrowing of this one and is skipped rather than silently
@@ -157,6 +162,9 @@ func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resol
 		if env.Context == target.Context {
 			pinned := fromHandle(env, ModePinned, target.Name)
 			pinned.Kind = target.Kind
+			// The handle narrows WHICH ENVIRONMENT inside the cluster the target names; it does not
+			// change which install that is, so the target's id survives the narrowing.
+			pinned.InstallID = target.InstallID
 			return pinned, nil
 		}
 	}

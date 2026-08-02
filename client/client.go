@@ -100,12 +100,22 @@ type APIError struct {
 	// ServerVersion is the control plane's release version, set on a CodeClientTooOld refusal so a
 	// client can name the version it must reach in an install-aware remedy of its own (ADR-0039).
 	ServerVersion string
+	// ServerInstallID is the id of the install that answered, set on a CodeInstallMismatch refusal
+	// (ADR-0084 §5). It is the counterpart of ServerVersion: the refusal message already names both
+	// ids, and carrying the answering one structurally lets a caller re-point a target at the install
+	// that is actually there without parsing prose.
+	ServerInstallID string
 }
 
 // CodeClientTooOld is the machine-readable code burrowd returns when it refuses a client outside
 // the compatibility window (ADR-0039). A client matches on it to replace the server's necessarily
 // generic remedy with one it can establish locally — which binary it is, and where it is installed.
 const CodeClientTooOld = "client_too_old"
+
+// CodeInstallMismatch is the machine-readable code burrowd returns when the caller named an install
+// id and this control plane is a different install (ADR-0084 §5) — the kube context resolved, the
+// credential was accepted, and the Burrow on the other end is not the one the target was pointed at.
+const CodeInstallMismatch = "install_mismatch"
 
 func (e *APIError) Error() string {
 	hint := ""
@@ -1782,6 +1792,7 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 			Code              string `json:"code"`
 			NeedsConfirmation bool   `json:"needs_confirmation"`
 			ServerVersion     string `json:"server_version"`
+			ServerInstallID   string `json:"server_install_id"`
 		}
 		_ = json.Unmarshal(data, &e)
 		msg := e.Error
@@ -1790,7 +1801,14 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 				msg = resp.Status
 			}
 		}
-		return &APIError{StatusCode: resp.StatusCode, Code: e.Code, Message: msg, NeedsConfirmation: e.NeedsConfirmation, ServerVersion: e.ServerVersion}
+		return &APIError{
+			StatusCode:        resp.StatusCode,
+			Code:              e.Code,
+			Message:           msg,
+			NeedsConfirmation: e.NeedsConfirmation,
+			ServerVersion:     e.ServerVersion,
+			ServerInstallID:   e.ServerInstallID,
+		}
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {

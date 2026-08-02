@@ -136,6 +136,12 @@ type installOptions struct {
 	Token               string
 	DBPassword          string
 	Port                int
+	// InstallID identifies this install (ADR-0084 §5). It is rendered into a ConfigMap in the
+	// control-plane namespace and into burrowd's environment, and it is the one rendered value that
+	// is NOT a secret: it authorises nothing, and a second person joining the install reads it. A
+	// fresh install mints one; an upgrade reads the existing one back and re-renders it, because a
+	// regenerated id would make every target already pointed here report a mismatch.
+	InstallID string
 }
 
 // installArgs are the resolved inputs to an install run: the target kube context (the required
@@ -237,18 +243,28 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 		return errNoBurrowdImage()
 	}
 
-	// render builds the manifests (minting fresh secrets) on demand: dry-run prints them without
-	// touching a cluster, and the real path applies them once a target context is resolved.
-	render := func() (string, error) {
+	// render builds the manifests (minting fresh secrets and a fresh install id) on demand: dry-run
+	// prints them without touching a cluster, and the real path applies them once a target context is
+	// resolved. It returns the install id as well as the manifests, because the id is the one minted
+	// value the local side also has to record — on the target, so a later command can tell whether it
+	// arrived at this install or at some other one wearing the same context name (ADR-0084 §5).
+	render := func() (manifests, installID string, err error) {
 		token, err := randHex(16)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		dbPassword, err := randHex(12)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
-		return renderManifests(installOptions{
+		// Sixteen random bytes, the same size as the API token. The id is not a secret, so its size is
+		// about collision rather than guessing: two installs must never mint the same id, including
+		// across the rebuild-under-the-same-name case this whole mechanism exists to catch.
+		installID, err = randHex(16)
+		if err != nil {
+			return "", "", err
+		}
+		out, err := renderManifests(installOptions{
 			Namespace:      a.namespace,
 			AppNamespace:   a.appNamespace,
 			AddonNamespace: connect.DefaultAddonNamespace,
@@ -256,13 +272,18 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 			Image:          a.image,
 			Token:          token,
 			DBPassword:     dbPassword,
+			InstallID:      installID,
 			Port:           connect.DefaultPort,
 		})
+		if err != nil {
+			return "", "", err
+		}
+		return out, installID, nil
 	}
 
 	// dry-run prints the manifests without contacting a cluster and without needing a context.
 	if a.dryRun {
-		manifests, err := render()
+		manifests, _, err := render()
 		if err != nil {
 			return err
 		}
@@ -287,7 +308,7 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 			a.kubeContext, contextNames(contexts))
 	}
 
-	manifests, err := render()
+	manifests, installID, err := render()
 	if err != nil {
 		return err
 	}
@@ -309,7 +330,7 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 		// install performs the local JOIN instead of erroring: it reads the existing scoped agent
 		// credential and writes only this user's local config, making no cluster changes. This is the
 		// second-user and re-run path (ADR-0038 §4).
-		return joinExistingInstall(ctx, a, stdout)
+		return joinExistingInstall(ctx, a, cs, stdout)
 	}
 
 	if err := applyFn(ctx, a.kubeconfig, a.kubeContext, manifests, a.verbose, stdout, stderr); err != nil {
@@ -355,6 +376,11 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	if err := recordEnvironment(ctx, a, cs, stdout); err != nil {
 		return err
 	}
+
+	// Record which install this is on the target pointed at this context (ADR-0084 §5), so a later
+	// command can tell whether it arrived here or at a different Burrow standing behind the same
+	// context name.
+	recordInstallID(a.kubeContext, installID, stdout)
 
 	if a.wait {
 		fmt.Fprintf(stdout, "%s %s", okMark(stdout), postInstallGuidance)
@@ -485,7 +511,7 @@ func saveJoinedEnvironment(cfg *localconfig.Config, name string, updateExisting 
 // re-run path. It is idempotent: a handle already registered for this context is updated in place
 // with the (possibly refreshed) credential rather than duplicated. A join that cannot read the agent
 // credential surfaces readAgentToken's actionable error.
-func joinExistingInstall(ctx context.Context, a installArgs, stdout io.Writer) error {
+func joinExistingInstall(ctx context.Context, a installArgs, cs kubernetes.Interface, stdout io.Writer) error {
 	cfg, err := localconfig.Load()
 	if err != nil {
 		return err
@@ -502,11 +528,65 @@ func joinExistingInstall(ctx context.Context, a installArgs, stdout io.Writer) e
 		return err
 	}
 
+	// The joining person learns which install this is from the cluster itself, which is why the id
+	// lives in a ConfigMap rather than a Secret (ADR-0084 §5): reading it needs no privileged access,
+	// because it grants none. An install that predates ids has no ConfigMap and records nothing.
+	if id, err := readInstallID(ctx, cs, a.namespace); err == nil {
+		recordInstallID(a.kubeContext, id, stdout)
+	}
+
 	fmt.Fprintf(stdout, "\nJoined the existing Burrow install in namespace %q.\n", a.namespace)
 	fmt.Fprintln(stdout, "This wrote only your local config (~/.burrow); no cluster changes were made.")
 	fmt.Fprintf(stdout, "Environment %q is now your current environment.\n", name)
 	fmt.Fprintf(stdout, "Rename it any time:  burrow env rename %s <new-name>\n", name)
 	return nil
+}
+
+// recordInstallID writes the id of the install now running behind a kube context onto the target
+// pointed at that context (ADR-0084 §5). The context name is how a command gets to a cluster; the id
+// is how it knows it arrived at this Burrow rather than at another one standing behind a name that
+// was reused.
+//
+// It is best-effort and quiet on both of the ways it can do nothing:
+//
+//   - There is no target for this context. Installing does not require having run `burrow auth
+//     login` first, so this is an ordinary state, not a failure. The id is recorded on the cluster
+//     regardless, and the target picks it up whenever one is pointed here.
+//   - The local config cannot be loaded or saved. The control plane is installed and working at this
+//     point; a bookkeeping problem is worth saying out loud but must not fail the install behind it.
+//
+// It prints nothing on success. The id is machinery, not a thing anyone needs to read or keep.
+func recordInstallID(kubeContext, installID string, stdout io.Writer) {
+	if kubeContext == "" || installID == "" {
+		return
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		fmt.Fprintf(stdout, "\n%scould not load the local config to record which install this is: %v\n", warning(stdout), err)
+		return
+	}
+	if !cfg.SetTargetInstallID(kubeContext, installID) {
+		return
+	}
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(stdout, "\n%scould not record which install this is on your target: %v\n", warning(stdout), err)
+	}
+}
+
+// readInstallID reads an install's own id out of the ConfigMap it records it in (ADR-0084 §5). A
+// missing ConfigMap, or one with no id in it, is reported as an error the caller decides about: for
+// the join path it means the install predates install ids, which is not a problem to report to
+// anybody — there is simply no id to record yet, and the next upgrade mints one.
+func readInstallID(ctx context.Context, cs kubernetes.Interface, namespace string) (string, error) {
+	cm, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, connect.DefaultInstallConfigMap, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("reading configmap %s/%s: %w", namespace, connect.DefaultInstallConfigMap, err)
+	}
+	id := cm.Data[connect.DefaultInstallIDKey]
+	if id == "" {
+		return "", fmt.Errorf("configmap %s/%s has no %q", namespace, connect.DefaultInstallConfigMap, connect.DefaultInstallIDKey)
+	}
+	return id, nil
 }
 
 // errNoCluster is the clear stop when there is no kubeconfig (or it holds no contexts): Burrow

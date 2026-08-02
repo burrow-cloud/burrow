@@ -43,6 +43,14 @@ type BearerTransport struct {
 	// Version is this client's release version, sent as X-Burrow-Client-Version so the control plane
 	// can make version skew legible instead of opaque (ADR-0039). Empty omits the header.
 	Version string
+	// InstallID is the install this caller expects to reach, sent as X-Burrow-Install (ADR-0084 §5).
+	// It is empty for the managed product, which is one control plane rather than an install someone
+	// stood up and could stand up again — there is no id to record and nothing to confuse it with.
+	// The field is here because this is the second of the two places every outbound request passes
+	// through, and a self-hosted burrowd given a front door of its own (ADR-0084 §7) is reached over
+	// exactly this transport. Leaving the header out of one choke point would make the check hold
+	// only for whichever route a caller happened to take.
+	InstallID string
 	// Rejected is what the caller is told when the control plane refuses the credential. It exists
 	// because a bare 401 is the least useful thing a signed-in person can be shown: the credential
 	// was accepted an hour ago, so what changed is worth naming — it was revoked from the console, or
@@ -71,6 +79,7 @@ func (t BearerTransport) Connect(_ context.Context) (*Client, error) {
 			token:         t.Token,
 			clientName:    t.Name,
 			clientVersion: t.Version,
+			installID:     t.InstallID,
 			rejected:      t.Rejected,
 		},
 	}
@@ -112,6 +121,7 @@ type bearerRoundTripper struct {
 	token         string
 	clientName    string
 	clientVersion string
+	installID     string
 	rejected      string
 }
 
@@ -133,6 +143,9 @@ func (t *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	if t.clientVersion != "" {
 		r.Header.Set("X-Burrow-Client-Version", t.clientVersion)
+	}
+	if t.installID != "" {
+		r.Header.Set(InstallHeader, t.installID)
 	}
 
 	resp, err := http.DefaultTransport.RoundTrip(r)

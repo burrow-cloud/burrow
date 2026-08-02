@@ -42,6 +42,23 @@ type Target struct {
 	Kind     TargetKind `yaml:"kind"`
 	Context  string     `yaml:"context,omitempty"`  // Kubernetes only: the kubeconfig context name
 	Endpoint string     `yaml:"endpoint,omitempty"` // Burrow Cloud only: the host signed in to
+	// InstallID is the id of the Burrow install this target was pointed at (ADR-0084 §5). The context
+	// name says HOW TO GET THERE; the id says WHETHER YOU ARRIVED, and the two answer different
+	// questions because a context name is a label rather than an identity. It is user-controlled, it
+	// is reusable, and providers generate it deterministically — `doctl kubernetes cluster kubeconfig
+	// save` writes names like `do-nyc3-burrow`, so destroying a cluster and standing another one up
+	// produces a byte-identical context name for an entirely different cluster. With only the name
+	// recorded, the target follows it there and says nothing.
+	//
+	// It is not a secret and authorises nothing: it identifies an install so a mismatch can be named.
+	// The CLI sends it on every request and the control plane refuses a request that names an install
+	// it is not.
+	//
+	// It is optional, and validate deliberately does not require it. Every target recorded before
+	// this field existed has none, targets are written by `burrow auth login`, which contacts no
+	// cluster and so has nothing to learn an id from, and a target with no id is served exactly as it
+	// was — the check is a refinement of an existing relationship, not a new precondition on it.
+	InstallID string `yaml:"install_id,omitempty"`
 }
 
 // KubernetesTarget builds a target for a kubeconfig context, named after the context so a person
@@ -71,6 +88,11 @@ func (t Target) Describe() string {
 // validate rejects a target the CLI cannot act on. It runs on every load, so a hand-edited or
 // half-written entry produces a legible error naming the target and what is wrong with it, rather
 // than a confusing failure several commands later (ADR-0078 "Consequences").
+//
+// InstallID is not checked. It is additive (ADR-0084 §5): every target written before it existed
+// carries none, and one written by `burrow auth login` carries none either, because that command
+// contacts no cluster and so has nothing to read an id from. Requiring it here would turn every
+// config already on disk into a load error — the one outcome the whole design is arranged to avoid.
 func (t Target) validate() error {
 	if t.Name == "" {
 		return fmt.Errorf("a target is missing its name")
@@ -176,6 +198,34 @@ func (c *Config) SetTarget(t Target) error {
 	c.Targets = append(c.Targets, t)
 	c.CurrentTarget = t.Name
 	return nil
+}
+
+// SetTargetInstallID records the id of the Burrow install reachable through a kubeconfig context on
+// every Kubernetes target that names that context, and reports whether any target was updated. The
+// caller Saves.
+//
+// It is addressed by CONTEXT rather than by target name because that is what the writer knows.
+// `burrow cluster install <context>` and its join path are told a context and learn an id from the
+// cluster they just reached; which target — if any — a person happens to have pointed at that
+// context is this file's business, not theirs. Nothing registered for the context is an ordinary
+// outcome, not an error: installing does not require having run `burrow auth login` first, and an
+// id with nowhere to be recorded is simply not recorded (ADR-0084 §5).
+//
+// More than one target may name the same context. All of them are updated, because they all reach
+// the same install, and leaving one behind would make the mismatch check fire on the target that
+// happens to be selected rather than on the cluster having actually changed.
+func (c *Config) SetTargetInstallID(context, installID string) bool {
+	if context == "" || installID == "" {
+		return false
+	}
+	updated := false
+	for i := range c.Targets {
+		if c.Targets[i].Kind == TargetKindKubernetes && c.Targets[i].Context == context {
+			c.Targets[i].InstallID = installID
+			updated = true
+		}
+	}
+	return updated
 }
 
 // SwitchTarget makes an already-recorded target active without re-authenticating (ADR-0078 §4). It

@@ -30,6 +30,20 @@ func newAPI(t *testing.T) (http.Handler, *fake.Kubernetes, *fake.Database) {
 // (ADR-0039). An empty version keeps the handshake permissive, which is what every other test wants.
 func newAPIVersion(t *testing.T, version string) (http.Handler, *fake.Kubernetes, *fake.Database) {
 	t.Helper()
+	return newAPIConfig(t, version, "")
+}
+
+// newAPIInstall is newAPI with an explicit install id for the install-check tests (ADR-0084 §5). An
+// empty id models a control plane installed before ids existed, which cannot refuse anything.
+func newAPIInstall(t *testing.T, installID string) (http.Handler, *fake.Kubernetes, *fake.Database) {
+	t.Helper()
+	return newAPIConfig(t, "", installID)
+}
+
+// newAPIConfig builds the handler with the two identity-of-the-server fields the gates read. Both
+// are empty for every other test, which is the permissive configuration.
+func newAPIConfig(t *testing.T, version, installID string) (http.Handler, *fake.Kubernetes, *fake.Database) {
+	t.Helper()
 	k, d := fake.NewKubernetes(), fake.NewDatabase()
 	// A restrictive baseline (empty dispositions → deny) so guardrail tests opt in explicitly,
 	// but rollback and deploy have a product default of allow, so seed those to match production
@@ -51,7 +65,7 @@ func newAPIVersion(t *testing.T, version string) (http.Handler, *fake.Kubernetes
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
-	h, err := api.New(api.Config{Engine: e, Token: token, Version: version})
+	h, err := api.New(api.Config{Engine: e, Token: token, Version: version, InstallID: installID})
 	if err != nil {
 		t.Fatalf("api.New: %v", err)
 	}
@@ -606,6 +620,7 @@ type errBody struct {
 	Requested         *int32 `json:"requested"`
 	Limit             *int32 `json:"limit"`
 	NeedsConfirmation bool   `json:"needs_confirmation"`
+	ServerInstallID   string `json:"server_install_id"`
 }
 
 func TestHealthNoAuth(t *testing.T) {

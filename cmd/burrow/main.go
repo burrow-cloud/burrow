@@ -159,18 +159,23 @@ func newRootCmd() *cobra.Command {
 // commonOpts holds the configuration the control-plane operations share.
 //
 // acted is the target this invocation reached, recorded when the connection is resolved and read
-// back by emitChange so a changing command names it (ADR-0078 §4). It is per-invocation state on a
+// back by emitChange so a changing command names it (ADR-0078 §4). kubeContext/installID/
+// contextResolved memoise what the privileged path resolved (clustercontext.go), so a command that
+// resolves the cluster more than once gets one answer. All of them are per-invocation state on a
 // per-command struct, not global state: newRootCmd builds a fresh commonOpts for every command on
 // every run, which is what keeps two commands in one process from seeing each other's target.
 type commonOpts struct {
-	controlPlane string
-	token        string
-	kubeconfig   string
-	context      string
-	namespace    string
-	env          string
-	json         bool
-	acted        targetname.Named
+	controlPlane    string
+	token           string
+	kubeconfig      string
+	context         string
+	namespace       string
+	env             string
+	json            bool
+	acted           targetname.Named
+	kubeContext     string
+	installID       string
+	contextResolved bool
 }
 
 // bindCommon registers the shared flags on the flag set, defaulting from the environment.
@@ -194,23 +199,27 @@ func bindClientFlags(flags *pflag.FlagSet, o *commonOpts) {
 	flags.StringVar(&o.controlPlane, "control-plane", os.Getenv("BURROW_CONTROL_PLANE_URL"), "control-plane API base URL (default: auto-connect via kubeconfig)")
 	flags.StringVar(&o.token, "token", os.Getenv("BURROW_API_TOKEN"), "control-plane API token (default: read from the install Secret)")
 	flags.StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig for auto-connect (default: ambient)")
-	flags.StringVar(&o.context, "context", "", "kubeconfig context to target (default: current context); selects which cluster's burrowd to operate")
+	flags.StringVar(&o.context, "context", "", "kubeconfig context to target (default: the active target, else the current context); selects which cluster's burrowd to operate")
 	flags.BoolVar(&o.json, "json", false, "print the raw JSON result")
 }
 
-// client returns a control-plane client for the raw connection flags (--context, --namespace),
-// without resolving the active environment handle. Commands that do not target an app
-// (install, env add, guard, audit, addon) use it so a pinned handle never silently redirects a
-// cluster-setup or policy command. Per-app commands use resolveAndConnect instead (ADR-0036).
+// client returns a control-plane client for a command that does not target an app — guard, cluster
+// config, add-ons, credentials, audit, failures. It resolves the CLUSTER through the selected target
+// (clustercontext.go) and deliberately does not resolve the active environment handle, so a pinned
+// handle never silently redirects a cluster-setup or policy command (ADR-0036). Per-app commands use
+// resolveAndConnect instead.
 //
-// Because this path reaches a cluster and never consults the selected target, it refuses outright
-// while the managed product is selected rather than acting on whatever the kubeconfig points at
-// (clusteronly.go).
-func (o *commonOpts) client(ctx context.Context) (*client.Client, error) {
+// stderr is where a divergence between the cluster reached and the target selected is reported; it
+// is a parameter rather than a field so the note lands on the command's own error stream and never
+// on stdout, where it would corrupt a --json result.
+//
+// The managed product is refused outright rather than resolved, because these commands act on a
+// cluster and a managed tenant has none (clusteronly.go).
+func (o *commonOpts) client(ctx context.Context, stderr io.Writer) (*client.Client, error) {
 	if err := o.requireCluster(); err != nil {
 		return nil, err
 	}
-	return o.clusterClient(ctx)
+	return o.clusterClient(ctx, stderr)
 }
 
 // requireCluster refuses this invocation when it needs a cluster and the active target is the
@@ -227,9 +236,17 @@ func (o *commonOpts) requireCluster() error {
 // clusterClient is client without the cluster-only check, for the one caller that has already
 // established it is acting on a cluster: `burrow cluster registry install`, whose DNS follow-on step
 // talks to the burrowd it just installed alongside. Nothing else should use it.
-func (o *commonOpts) clusterClient(ctx context.Context) (*client.Client, error) {
-	o.acted = o.namePrivilegedTarget()
-	return o.connect(ctx, target{context: o.context, controlPlaneNamespace: o.namespace})
+func (o *commonOpts) clusterClient(ctx context.Context, stderr io.Writer) (*client.Client, error) {
+	kubeContext, err := o.clusterContext(stderr)
+	if err != nil {
+		return nil, err
+	}
+	o.acted = o.namePrivilegedTarget(kubeContext)
+	// The install id rides along now that the target decides this path too (ADR-0084 §5). Before, a
+	// privileged command consulted no target and so had no id to send; sending none against a cluster
+	// rebuilt under a reused context name is the bare 401 from an unexpected cluster that §5 exists to
+	// turn into a message naming the cause.
+	return o.connect(ctx, target{context: kubeContext, controlPlaneNamespace: o.namespace, installID: o.installID})
 }
 
 // target is the resolved target a per-app command acts against (ADR-0036 slice 5a): the kube

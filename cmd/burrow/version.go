@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 // latestReleaseURL is the unauthenticated GitHub API endpoint that returns this repository's
@@ -149,7 +150,7 @@ func agentSkewHint(cliVer, agentVer string) string {
 // of the control plane installed in the cluster — read from the burrowd Deployment's image, so it
 // works even if burrowd is unhealthy and needs no API token.
 func newVersionCmd() *cobra.Command {
-	var kubeconfig, kubeContext, namespace string
+	var kubeconfig, kubeContextFlag, namespace string
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the CLI version and the installed control-plane version",
@@ -166,6 +167,12 @@ func newVersionCmd() *cobra.Command {
 			// its own line rather than being inferred from a failing agent session (issue #308).
 			agentPath, agentVer, agentErr := probeAgentVersion(cmd.Context())
 			fmt.Fprintf(tw, "burrow-agent:\t%s\n", agentValue(agentPath, agentVer, agentErr))
+
+			// The cluster read is the one the active target names, like every other command that
+			// reaches a cluster (ADR-0084 §4); an explicit --context still wins. Best effort in both
+			// halves: `burrow version` is what a person runs when something is wrong, so a config it
+			// cannot read falls back to the kubeconfig rather than refusing to print anything.
+			kubeContext := versionContext(kubeconfig, kubeContextFlag)
 
 			// Name the targeted context so the control-plane line is legible in both the success and
 			// failure cases. Best effort: a missing or unreadable kubeconfig leaves it empty, which
@@ -212,9 +219,31 @@ func newVersionCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
-	cmd.Flags().StringVar(&kubeContext, "context", "", "kubeconfig context to target (default: current context)")
+	cmd.Flags().StringVar(&kubeContextFlag, "context", "", "kubeconfig context to target (default: the active target, else the current context)")
 	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace the control plane is installed in")
 	return cmd
+}
+
+// versionContext decides which kube context `burrow version` reads the control plane from: the
+// explicit flag, else the cluster the active target names, else the kubeconfig's current context.
+//
+// Every failure falls back rather than propagating. This command exists to be run when something is
+// already wrong — an unreadable ~/.burrow/config or a target whose context has been renamed away are
+// exactly the conditions under which a person runs it — so it degrades to the kubeconfig and prints
+// what it can, naming the context it used either way.
+func versionContext(kubeconfig, flag string) string {
+	if flag != "" {
+		return flag
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		return ""
+	}
+	cluster, err := localconfig.ResolveCluster(cfg, kubeconfig)
+	if err != nil {
+		return ""
+	}
+	return cluster.Context
 }
 
 // controlPlaneValue renders the value cell of the "control plane" line from a probe result: the

@@ -469,18 +469,28 @@ func runEnvAdd(ctx context.Context, o *commonOpts, name, envNamespace string, ve
 		return fmt.Errorf("environment name %q is reserved and cannot be added: Burrow already gives that name to a resource of its own.\nAdd a different one, e.g. `burrow env add staging`", name)
 	}
 
+	// All three steps below act on ONE cluster, and it is the one the selected target names
+	// (clustercontext.go). Resolving it once, up front, is what keeps them together: step (a) writes
+	// RBAC with the kubeconfig, step (b) calls burrowd's API, and step (c) records a handle naming
+	// the context — three chances for an environment to be created on one cluster, registered on a
+	// second and recorded as a third.
+	kubeContext, err := o.clusterContext(stderr)
+	if err != nil {
+		return err
+	}
+
 	// (a) Privileged kubeconfig-side setup: create the environment's namespace and grant burrowd a
 	// Role there. o.namespace is the control-plane namespace where burrowd's ServiceAccount lives.
 	manifests, err := renderEnvManifests(envOptions{Namespace: o.namespace, AppNamespace: envNamespace})
 	if err != nil {
 		return err
 	}
-	if err := applyFn(ctx, o.kubeconfig, o.context, manifests, verbose, stdout, stderr); err != nil {
+	if err := applyFn(ctx, o.kubeconfig, kubeContext, manifests, verbose, stdout, stderr); err != nil {
 		return err
 	}
 
 	// (b) Register the environment with burrowd over its authenticated control-plane API.
-	c, err := o.client(ctx)
+	c, err := o.client(ctx, stderr)
 	if err != nil {
 		return err
 	}
@@ -490,8 +500,8 @@ func runEnvAdd(ctx context.Context, o *commonOpts, name, envNamespace string, ve
 	fmt.Fprintf(stdout, "Environment %q created (namespace %q).\n", name, envNamespace)
 
 	// (c) Record a local handle so the env joins `burrow env list` (ADR-0036). The handle's context
-	// is the context this command targeted (the --context override, else the current context).
-	ctxName, err := connect.TargetContextName(o.kubeconfig, o.context)
+	// is the context this command targeted, which is the one steps (a) and (b) used.
+	ctxName, err := connect.TargetContextName(o.kubeconfig, kubeContext)
 	if err != nil {
 		return err
 	}

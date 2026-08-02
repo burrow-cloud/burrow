@@ -102,20 +102,24 @@ func emitJSONWithTarget(w io.Writer, v any, n targetname.Named) error {
 	return err
 }
 
-// namePrivilegedTarget names the target for the privileged path — the commands that connect with the
-// raw --context/--namespace rather than resolving an environment handle (guard, cluster config,
-// add-ons, credentials). That path reads the kubeconfig's current context when --context is absent,
-// so the context it reaches is what is named, and a recorded target is named only when it is the one
-// that context belongs to.
-func (o *commonOpts) namePrivilegedTarget() targetname.Named {
+// namePrivilegedTarget names the target for the privileged path — the commands that act on a cluster
+// without being scoped to an app (guard, cluster config, add-ons, credentials, audit, failures).
+// resolved is the context clusterContext decided for this invocation: the selected target's, the
+// --context override, or empty when no target is selected and the kubeconfig's current context
+// applies. An empty value is resolved to that current context here, so the name is a context a
+// reader recognises rather than a blank.
+//
+// A recorded target is named only when it is the one that context belongs to; targetname.For is what
+// enforces that, so a command can never claim a target it did not reach.
+func (o *commonOpts) namePrivilegedTarget(resolved string) targetname.Named {
 	if o.controlPlane != "" {
 		return targetname.ForControlPlane(o.controlPlane)
 	}
 	// A kubeconfig that cannot be read is not worth failing a command over here: the connection
 	// itself is about to fail on it and will say so far better than a naming helper can.
-	kubeContext, err := connect.TargetContextName(o.kubeconfig, o.context)
+	kubeContext, err := connect.TargetContextName(o.kubeconfig, resolved)
 	if err != nil {
-		kubeContext = o.context
+		kubeContext = resolved
 	}
 	cfg, err := localconfig.Load()
 	if err != nil {

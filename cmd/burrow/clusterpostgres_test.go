@@ -26,7 +26,7 @@ import (
 func stubClusterPostgresClientset(t *testing.T, cs kubernetes.Interface) {
 	t.Helper()
 	orig := clusterPostgresClientset
-	clusterPostgresClientset = func(string) (kubernetes.Interface, error) { return cs, nil }
+	clusterPostgresClientset = func(string, string) (kubernetes.Interface, error) { return cs, nil }
 	t.Cleanup(func() { clusterPostgresClientset = orig })
 }
 
@@ -36,7 +36,7 @@ func recordAppliedURL(t *testing.T) *string {
 	t.Helper()
 	var applied string
 	orig := applyURLFn
-	applyURLFn = func(_ context.Context, _, url string, _ bool, stdout, _ io.Writer) error {
+	applyURLFn = func(_ context.Context, _, _, url string, _ bool, stdout, _ io.Writer) error {
 		applied = url
 		_, _ = io.WriteString(stdout, "✓ Applied 240 resource(s): 240 created.\n")
 		return nil

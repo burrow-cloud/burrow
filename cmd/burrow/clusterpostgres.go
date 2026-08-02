@@ -24,8 +24,8 @@ const cnpgWaitTimeout = 3 * time.Minute
 // clusterPostgresClientset builds the Kubernetes clientset the cluster-postgres subcommands act
 // with. It is a package var so tests can substitute a fake; it defaults to the kubeconfig-driven
 // clientset.
-var clusterPostgresClientset = func(kubeconfig string) (kubernetes.Interface, error) {
-	return clientset(kubeconfig)
+var clusterPostgresClientset = func(kubeconfig, kubeContext string) (kubernetes.Interface, error) {
+	return clientsetForContext(kubeconfig, kubeContext)
 }
 
 // detectCloudNativePGFn is the detection seam this command reads the cluster through. It is the
@@ -42,10 +42,11 @@ var (
 
 // clusterPostgresOptions are the inputs to `burrow cluster postgres install`.
 type clusterPostgresOptions struct {
-	kubeconfig string
-	dryRun     bool
-	wait       bool
-	verbose    bool
+	kubeconfig  string
+	kubeContext string
+	dryRun      bool
+	wait        bool
+	verbose     bool
 }
 
 // newClusterPostgresCmd is `burrow cluster postgres install`: the operator-CLI setup step that puts
@@ -76,10 +77,15 @@ func newClusterPostgresCmd() *cobra.Command {
 		Short: "Install the CloudNativePG operator and pgBackRest plugin (each skipped when already running)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A cluster-lifecycle command acts on a kubeconfig context rather than the active
+			// target (ADR-0078 §3), so say which context that is whenever the target names another
+			// one — the choice is deliberate, and the person reading it should not have to infer it.
+			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runClusterPostgresInstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	install.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
+	bindLifecycleContext(install.Flags(), &o.kubeContext)
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the plan instead of applying it")
 	install.Flags().BoolVar(&o.wait, "wait", true, "wait for the operator's controller to become ready")
 	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
@@ -107,7 +113,7 @@ func runClusterPostgresInstall(ctx context.Context, o clusterPostgresOptions, st
 		return nil
 	}
 
-	cs, err := clusterPostgresClientset(o.kubeconfig)
+	cs, err := clusterPostgresClientset(o.kubeconfig, o.kubeContext)
 	if err != nil {
 		return err
 	}
@@ -127,7 +133,7 @@ func runClusterPostgresInstall(ctx context.Context, o clusterPostgresOptions, st
 	}
 
 	r.working("CloudNativePG", "installing")
-	detail, err := applyURLDetail(ctx, o.kubeconfig, manifest, o.verbose, stdout, stderr)
+	detail, err := applyURLDetail(ctx, o.kubeconfig, o.kubeContext, manifest, o.verbose, stdout, stderr)
 	if err != nil {
 		return err
 	}
@@ -181,7 +187,7 @@ func installPgBackRest(ctx context.Context, o clusterPostgresOptions, r installR
 
 	r.working("pgBackRest plugin", "installing")
 	manifest := kube.PgBackRestManifestURL(kube.PgBackRestVersion)
-	detail, err := applyURLDetail(ctx, o.kubeconfig, manifest, o.verbose, stdout, stderr)
+	detail, err := applyURLDetail(ctx, o.kubeconfig, o.kubeContext, manifest, o.verbose, stdout, stderr)
 	if err != nil {
 		return err
 	}

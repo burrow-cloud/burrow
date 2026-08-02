@@ -33,8 +33,8 @@ const registrySecretName = "burrow-registry"
 // registryClientset builds the Kubernetes clientset the registry subcommands act with. It is a
 // package var so tests can substitute a fake, mirroring clientsetFn in install.go; it defaults to
 // the real kubeconfig-driven clientset.
-var registryClientset = func(kubeconfig string) (kubernetes.Interface, error) {
-	return clientset(kubeconfig)
+var registryClientset = func(kubeconfig, kubeContext string) (kubernetes.Interface, error) {
+	return clientsetForContext(kubeconfig, kubeContext)
 }
 
 // dockerConfig is the on-disk/in-Secret shape of a dockerconfigjson credential file.
@@ -54,7 +54,8 @@ type dockerAuth struct {
 // travels over the agent control channel and burrowd never handles it. The login/logout/list subcommands share the
 // namespace flags and resolve the app namespace from the install.
 func newRegistryCmd() *cobra.Command {
-	var namespace, appNamespace, kubeconfig string
+	o := &commonOpts{}
+	var appNamespace string
 	parent := &cobra.Command{
 		Use:   "registry",
 		Short: "Configure credentials for a private image registry (login/logout/list)",
@@ -64,26 +65,36 @@ func newRegistryCmd() *cobra.Command {
 			"registry that runs IN your cluster (the zero-config push target for the in-cluster build),\n" +
 			"use `burrow cluster registry` instead.",
 	}
-	parent.PersistentFlags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "control-plane namespace Burrow is installed in")
+	parent.PersistentFlags().StringVar(&o.namespace, "namespace", connect.DefaultNamespace, "control-plane namespace Burrow is installed in")
 	parent.PersistentFlags().StringVar(&appNamespace, "app-namespace", "", "namespace apps deploy into (default: discovered from the install)")
-	parent.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
+	parent.PersistentFlags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
+	parent.PersistentFlags().StringVar(&o.context, "context", "", "kubeconfig context to act on (default: the active target, else the current context)")
 
-	// resolve builds a clientset and determines the app namespace (from the flag or the
-	// install) for whichever subcommand runs. It refuses first while the managed product is selected:
-	// these subcommands write a pull Secret into a cluster with the ambient kubeconfig and consult no
-	// target, so with no cluster to write to they would otherwise land the credential on whatever
-	// context happened to be current (clusteronly.go).
-	resolve := func(ctx context.Context) (kubernetes.Interface, string, error) {
-		if err := refuseCloudTarget(); err != nil {
+	// resolve builds a clientset and determines the app namespace (from the flag or the install) for
+	// whichever subcommand runs.
+	//
+	// The cluster it writes to is the one the active target names (clustercontext.go). These
+	// subcommands configure an existing Burrow install rather than standing one up, so they belong
+	// with `guard` and `cluster config` and not with the cluster-lifecycle commands: a pull
+	// credential is part of the install a person selected, and landing it on whatever context
+	// happened to be current is the mistake, not the feature. The managed product is refused first,
+	// since it has no cluster to hold a Secret at all (clusteronly.go).
+	resolve := func(ctx context.Context, stderr io.Writer) (kubernetes.Interface, string, error) {
+		if err := o.requireCluster(); err != nil {
 			return nil, "", err
 		}
-		cs, err := registryClientset(kubeconfig)
+		kubeContext, err := o.clusterContext(stderr)
+		if err != nil {
+			return nil, "", err
+		}
+		o.acted = o.namePrivilegedTarget(kubeContext)
+		cs, err := registryClientset(o.kubeconfig, kubeContext)
 		if err != nil {
 			return nil, "", err
 		}
 		appNS := appNamespace
 		if appNS == "" {
-			appNS, err = appNamespaceOf(ctx, cs, namespace)
+			appNS, err = appNamespaceOf(ctx, cs, o.namespace)
 			if err != nil {
 				return nil, "", err
 			}
@@ -115,14 +126,16 @@ func newRegistryCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cs, appNS, err := resolve(ctx)
+			cs, appNS, err := resolve(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			if err := registryLogin(ctx, cs, appNS, host, username, password); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "configured registry %q for your apps\n", host)
+			// A credential lands in one cluster, so the line that says it landed names which
+			// (ADR-0078 §4). No token is ever rendered — only the host it was stored for.
+			fmt.Fprintln(cmd.OutOrStdout(), withTargetClause(fmt.Sprintf("configured registry %q for your apps", host), o.acted))
 			return nil
 		},
 	}
@@ -136,14 +149,14 @@ func newRegistryCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			cs, appNS, err := resolve(ctx)
+			cs, appNS, err := resolve(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			if err := registryLogout(ctx, cs, appNS, args[0]); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "removed registry %q\n", args[0])
+			fmt.Fprintln(cmd.OutOrStdout(), withTargetClause(fmt.Sprintf("removed registry %q", args[0]), o.acted))
 			return nil
 		},
 	}
@@ -154,7 +167,7 @@ func newRegistryCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			cs, appNS, err := resolve(ctx)
+			cs, appNS, err := resolve(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

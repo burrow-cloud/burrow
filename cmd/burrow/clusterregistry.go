@@ -121,8 +121,8 @@ func renderRegistryManifest(namespace, host string) (string, error) {
 
 // clusterRegistryClientset builds the Kubernetes clientset the cluster-registry subcommands act with.
 // It is a package var so tests can substitute a fake; it defaults to the kubeconfig-driven clientset.
-var clusterRegistryClientset = func(kubeconfig string) (kubernetes.Interface, error) {
-	return clientset(kubeconfig)
+var clusterRegistryClientset = func(kubeconfig, kubeContext string) (kubernetes.Interface, error) {
+	return clientsetForContext(kubeconfig, kubeContext)
 }
 
 // clusterIssuerPresentFn reports whether the named cert-manager ClusterIssuer exists. It is a package
@@ -131,8 +131,8 @@ var clusterRegistryClientset = func(kubeconfig string) (kubernetes.Interface, er
 var clusterIssuerPresentFn = clusterIssuerPresent
 
 // clusterIssuerPresent reports whether the named ClusterIssuer exists, via the dynamic client.
-func clusterIssuerPresent(ctx context.Context, kubeconfig, name string) (bool, error) {
-	cfg, err := connect.RESTConfig(kubeconfig, "")
+func clusterIssuerPresent(ctx context.Context, kubeconfig, kubeContext, name string) (bool, error) {
+	cfg, err := connect.RESTConfig(kubeconfig, kubeContext)
 	if err != nil {
 		return false, err
 	}
@@ -155,6 +155,7 @@ type clusterRegistryOptions struct {
 	namespace    string
 	appNamespace string
 	kubeconfig   string
+	kubeContext  string
 	host         string
 	verbose      bool
 	confirm      bool
@@ -199,6 +200,7 @@ func newClusterRegistryCmd() *cobra.Command {
 	parent.PersistentFlags().StringVar(&o.namespace, "namespace", connect.DefaultNamespace, "control-plane namespace Burrow is installed in")
 	parent.PersistentFlags().StringVar(&o.appNamespace, "app-namespace", "", "namespace apps deploy into (default: discovered from the install)")
 	parent.PersistentFlags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
+	bindLifecycleContext(parent.PersistentFlags(), &o.kubeContext)
 
 	install := &cobra.Command{
 		Use:   "install",
@@ -217,6 +219,10 @@ func newClusterRegistryCmd() *cobra.Command {
 			"a Dockerfile, or push the buildpacks image to an external registry).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A cluster-lifecycle command acts on a kubeconfig context rather than the active
+			// target (ADR-0078 §3), so say which context that is whenever the target names another
+			// one — the choice is deliberate, and the person reading it should not have to infer it.
+			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runClusterRegistryInstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -237,6 +243,7 @@ func newClusterRegistryCmd() *cobra.Command {
 			"reinstall it or point the build at an external registry.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runClusterRegistryUninstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -263,7 +270,7 @@ func inClusterRegistryPresent(ctx context.Context, cs kubernetes.Interface, name
 // whether the pull credential is present in the app namespace. When it is not, it prints the one-line
 // hint to install it.
 func runClusterRegistryStatus(ctx context.Context, o clusterRegistryOptions, stdout io.Writer) error {
-	cs, err := clusterRegistryClientset(o.kubeconfig)
+	cs, err := clusterRegistryClientset(o.kubeconfig, o.kubeContext)
 	if err != nil {
 		return err
 	}
@@ -327,7 +334,7 @@ func runClusterRegistryInstall(ctx context.Context, o clusterRegistryOptions, st
 	if strings.TrimSpace(o.host) == "" {
 		return fmt.Errorf("the in-cluster registry needs a public hostname for node pulls; pass --host <registry.example.com>")
 	}
-	cs, err := clusterRegistryClientset(o.kubeconfig)
+	cs, err := clusterRegistryClientset(o.kubeconfig, o.kubeContext)
 	if err != nil {
 		return err
 	}
@@ -335,7 +342,7 @@ func runClusterRegistryInstall(ctx context.Context, o clusterRegistryOptions, st
 	// The registry depends on the ingress stack for its public TLS endpoint (ADR-0054): verify it is
 	// present and point at `burrow cluster ingress install` if not, rather than deploying a registry
 	// whose pull endpoint never gets a certificate.
-	if err := verifyIngressStack(ctx, cs, o.kubeconfig); err != nil {
+	if err := verifyIngressStack(ctx, cs, o.kubeconfig, o.kubeContext); err != nil {
 		return err
 	}
 
@@ -357,7 +364,7 @@ func runClusterRegistryInstall(ctx context.Context, o clusterRegistryOptions, st
 		fmt.Fprintln(stdout, "Installing the in-cluster registry:")
 		applyOut = stdout
 	}
-	if err := applyFn(ctx, o.kubeconfig, "", manifests, o.verbose, applyOut, stderr); err != nil {
+	if err := applyFn(ctx, o.kubeconfig, o.kubeContext, manifests, o.verbose, applyOut, stderr); err != nil {
 		return err
 	}
 
@@ -426,9 +433,19 @@ type registryDNSClient interface {
 // clusterClient rather than client: installing is a cluster-lifecycle act that names its own cluster
 // and is exempt from the cluster-only refusal (ADR-0078 §3), so this follow-on step must reach the
 // burrowd that was just installed even with the managed product selected.
+//
+// The context this install acted on is passed as an explicit --context, which is what makes the
+// follow-on reach the burrowd that was just installed rather than re-resolving through the active
+// target and calling a different cluster's control plane about a registry it does not have.
 var registryDNSClientFn = func(ctx context.Context, o clusterRegistryOptions) (registryDNSClient, error) {
-	co := &commonOpts{kubeconfig: o.kubeconfig, namespace: o.namespace}
-	return co.clusterClient(ctx)
+	kubeContext, err := connect.TargetContextName(o.kubeconfig, o.kubeContext)
+	if err != nil {
+		return nil, err
+	}
+	co := &commonOpts{kubeconfig: o.kubeconfig, namespace: o.namespace, context: kubeContext}
+	// io.Discard for the divergence note: the install already announced the context it is acting on,
+	// and repeating it in the middle of the run would only be noise.
+	return co.clusterClient(ctx, io.Discard)
 }
 
 // provisionRegistryDNS points the registry's public host at the cluster ingress. When a DNS provider is
@@ -522,7 +539,7 @@ func ingressLoadBalancerAddress(ctx context.Context, cs kubernetes.Interface) (s
 // push target and public pull host. Every step tolerates already-absent pieces so uninstall is
 // idempotent.
 func runClusterRegistryUninstall(ctx context.Context, o clusterRegistryOptions, stdout, stderr io.Writer) error {
-	cs, err := clusterRegistryClientset(o.kubeconfig)
+	cs, err := clusterRegistryClientset(o.kubeconfig, o.kubeContext)
 	if err != nil {
 		return err
 	}
@@ -563,7 +580,7 @@ func runClusterRegistryUninstall(ctx context.Context, o clusterRegistryOptions, 
 // the ingress-nginx controller, cert-manager, and the letsencrypt ClusterIssuer `burrow cluster
 // ingress install` creates. It returns a helpful error pointing at that command when a piece is
 // missing, so the registry is never deployed with a pull endpoint that can never get a certificate.
-func verifyIngressStack(ctx context.Context, cs kubernetes.Interface, kubeconfig string) error {
+func verifyIngressStack(ctx context.Context, cs kubernetes.Interface, kubeconfig, kubeContext string) error {
 	hasNginx, err := ingressControllerPresent(ctx, cs)
 	if err != nil {
 		return err
@@ -578,7 +595,7 @@ func verifyIngressStack(ctx context.Context, cs kubernetes.Interface, kubeconfig
 	if !hasCertManager {
 		return ingressStackMissingErr("cert-manager")
 	}
-	hasIssuer, err := clusterIssuerPresentFn(ctx, kubeconfig, defaultIssuerName)
+	hasIssuer, err := clusterIssuerPresentFn(ctx, kubeconfig, kubeContext, defaultIssuerName)
 	if err != nil {
 		return err
 	}

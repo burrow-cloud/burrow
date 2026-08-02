@@ -39,7 +39,7 @@ func newDomainAddCmd() *cobra.Command {
 			if address == "" && app == "" {
 				return errors.New("give --address (the cluster's external address) or --app (an exposed app to read it from)")
 			}
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -69,7 +69,7 @@ func newDomainRemoveCmd() *cobra.Command {
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

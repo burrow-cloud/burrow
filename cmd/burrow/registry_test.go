@@ -175,7 +175,7 @@ func execRegistry(t *testing.T, cs *fake.Clientset, stdin string, terminal bool,
 	// otherwise the result depends on what the developer running the tests last signed in to.
 	isolateConfig(t)
 	orig := registryClientset
-	registryClientset = func(string) (kubernetes.Interface, error) { return cs, nil }
+	registryClientset = func(string, string) (kubernetes.Interface, error) { return cs, nil }
 	t.Cleanup(func() { registryClientset = orig })
 
 	origTerm := stdinIsTerminal
@@ -195,6 +195,10 @@ func execRegistry(t *testing.T, cs *fake.Clientset, stdin string, terminal bool,
 // TestRegistryOutputHasNoNamespaceJargon locks the developer-facing result messages to plain,
 // non-Kubernetes language: Burrow's users are not cluster experts, so the raw term "namespace"
 // must not leak into login, logout, or empty-list output.
+//
+// The login and logout lines are matched by PREFIX rather than in full because a credential write
+// now names the cluster it landed on, appended to the same sentence (ADR-0078 §4) — a registry
+// credential is a change to one cluster, and which one is exactly what the naming exists to say.
 func TestRegistryOutputHasNoNamespaceJargon(t *testing.T) {
 	// Empty-list state.
 	if got := runRegistry(t, nsWithDefaultSA("apps"), "list"); got != "no image registries configured\n" {
@@ -203,13 +207,13 @@ func TestRegistryOutputHasNoNamespaceJargon(t *testing.T) {
 
 	// Login success.
 	cs := nsWithDefaultSA("apps")
-	if got := runRegistry(t, cs, "login", "ghcr.io", "-u", "alice", "-p", "tok123"); got != "configured registry \"ghcr.io\" for your apps\n" {
-		t.Errorf("login output = %q, want %q", got, "configured registry \"ghcr.io\" for your apps\n")
+	if got := runRegistry(t, cs, "login", "ghcr.io", "-u", "alice", "-p", "tok123"); !strings.HasPrefix(got, "configured registry \"ghcr.io\" for your apps ") {
+		t.Errorf("login output = %q, want it to lead with the plain-language result", got)
 	}
 
 	// Logout.
-	if got := runRegistry(t, cs, "logout", "ghcr.io"); got != "removed registry \"ghcr.io\"\n" {
-		t.Errorf("logout output = %q, want %q", got, "removed registry \"ghcr.io\"\n")
+	if got := runRegistry(t, cs, "logout", "ghcr.io"); !strings.HasPrefix(got, "removed registry \"ghcr.io\" ") {
+		t.Errorf("logout output = %q, want it to lead with the plain-language result", got)
 	}
 
 	// Belt and braces: none of the result messages may contain the jargon term.
@@ -231,7 +235,7 @@ func TestRegistryLoginPasswordStdin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("login --password-stdin: %v (stderr: %s)", err, errb)
 	}
-	if out != "configured registry \"ghcr.io\" for your apps\n" {
+	if !strings.HasPrefix(out, "configured registry \"ghcr.io\" for your apps ") {
 		t.Errorf("login output = %q", out)
 	}
 	cfg := registrySecretConfig(t, cs, "apps")
@@ -247,7 +251,7 @@ func TestRegistryLoginFlagPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("login -u/-p: %v (stderr: %s)", err, errb)
 	}
-	if out != "configured registry \"ghcr.io\" for your apps\n" {
+	if !strings.HasPrefix(out, "configured registry \"ghcr.io\" for your apps ") {
 		t.Errorf("login output = %q", out)
 	}
 	cfg := registrySecretConfig(t, cs, "apps")
@@ -306,7 +310,7 @@ func TestRegistryLoginFlagPasswordWarnsOnTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("login -u/-p on terminal: %v (stderr: %s)", err, errb)
 	}
-	if out != "configured registry \"ghcr.io\" for your apps\n" {
+	if !strings.HasPrefix(out, "configured registry \"ghcr.io\" for your apps ") {
 		t.Errorf("login output = %q", out)
 	}
 	if !strings.Contains(errb, "insecure") {

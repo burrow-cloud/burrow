@@ -147,7 +147,7 @@ func TestUpgradeBackfillsAgentCredential(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	backfillAgentCredential(context.Background(), kc, "burrow", &out)
+	backfillAgentCredential(context.Background(), kc, "", "burrow", &out)
 
 	got, err := localconfig.Load()
 	if err != nil {
@@ -186,7 +186,7 @@ func TestUpgradeBackfillSilentWhenCredentialPresent(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	backfillAgentCredential(context.Background(), kc, "burrow", &out)
+	backfillAgentCredential(context.Background(), kc, "", "burrow", &out)
 
 	if len(*calls) != 0 {
 		t.Errorf("a handle with a credential must not re-join, got %d join call(s)", len(*calls))
@@ -210,7 +210,7 @@ func TestUpgradeBackfillBestEffort(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	backfillAgentCredential(context.Background(), kc, "burrow", &out) // must not panic or fail
+	backfillAgentCredential(context.Background(), kc, "", "burrow", &out) // must not panic or fail
 
 	got, err := localconfig.Load()
 	if err != nil {

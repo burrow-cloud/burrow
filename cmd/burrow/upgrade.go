@@ -40,33 +40,39 @@ func newUpgradeAliasCmd() *cobra.Command {
 }
 
 func newUpgradeCmd() *cobra.Command {
-	var namespace, image, kubeconfig string
+	var namespace, image, kubeconfig, kubeContext string
 	var dryRun, wait, verbose bool
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Upgrade the in-cluster control plane in place (preserves state)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpgrade(cmd.Context(), namespace, image, kubeconfig, dryRun, wait, verbose, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			// Upgrade acts on a kubeconfig context rather than the active target (ADR-0078 §3), so
+			// say which context that is whenever the target names another one. This is the sharpest
+			// case of the four: without the note, an upgrade rolls whatever the kubeconfig last
+			// pointed at forward and says only which NAMESPACE it touched.
+			noteLifecycleContext(kubeconfig, kubeContext, cmd.ErrOrStderr())
+			return runUpgrade(cmd.Context(), namespace, image, kubeconfig, kubeContext, dryRun, wait, verbose, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace the control plane is installed in")
 	cmd.Flags().StringVar(&image, "burrowd-image", defaultBurrowdImage(), "burrowd image to upgrade to (default: this CLI's pinned release)")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
+	bindLifecycleContext(cmd.Flags(), &kubeContext)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the manifests instead of applying them")
 	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the control plane to become ready")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show every resource burrow applies instead of a summary")
 	return cmd
 }
 
-func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun, wait, verbose bool, stdout, stderr io.Writer) error {
+func runUpgrade(ctx context.Context, namespace, image, kubeconfig, kubeContext string, dryRun, wait, verbose bool, stdout, stderr io.Writer) error {
 	if image == "" {
 		return errNoBurrowdImage()
 	}
-	// clientsetFn with an empty context is exactly clientset(kubeconfig) — both resolve the
-	// kubeconfig's current context — and going through the seam install already owns lets an upgrade
-	// be driven end to end against a fake cluster.
-	cs, err := clientsetFn(kubeconfig, "")
+	// Through the seam install already owns, so an upgrade can be driven end to end against a fake
+	// cluster. An empty kubeContext resolves the kubeconfig's current context, which is what an
+	// upgrade with no --context acts on.
+	cs, err := clientsetFn(kubeconfig, kubeContext)
 	if err != nil {
 		return err
 	}
@@ -85,21 +91,21 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	}
 
 	fmt.Fprintf(stdout, "Upgrading Burrow in namespace %q to image %q...\n", namespace, image)
-	if err := applyFn(ctx, kubeconfig, "", manifests, verbose, stdout, stderr); err != nil {
+	if err := applyFn(ctx, kubeconfig, kubeContext, manifests, verbose, stdout, stderr); err != nil {
 		return err
 	}
 	if !wait {
 		fmt.Fprintf(stdout, "\nBurrow upgrade applied in namespace %q (not waiting for readiness).\n", namespace)
-		backfillAgentCredential(ctx, kubeconfig, namespace, stdout)
-		recordUpgradedInstallID(kubeconfig, opts.InstallID, stdout)
+		backfillAgentCredential(ctx, kubeconfig, kubeContext, namespace, stdout)
+		recordUpgradedInstallID(kubeconfig, kubeContext, opts.InstallID, stdout)
 		return nil
 	}
-	if err := waitForReady(ctx, kubeconfig, "", namespace, stdout); err != nil {
+	if err := waitForReady(ctx, kubeconfig, kubeContext, namespace, stdout); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "\n%s Burrow is upgraded and ready in namespace %q.\n", okMark(stdout), namespace)
-	backfillAgentCredential(ctx, kubeconfig, namespace, stdout)
-	recordUpgradedInstallID(kubeconfig, opts.InstallID, stdout)
+	backfillAgentCredential(ctx, kubeconfig, kubeContext, namespace, stdout)
+	recordUpgradedInstallID(kubeconfig, kubeContext, opts.InstallID, stdout)
 	return nil
 }
 
@@ -114,8 +120,8 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 // immediately before it, on the same context, for the same reason — has already said so. Beyond
 // that it is exactly as best-effort as the backfill: the control plane is upgraded and running, and
 // a local bookkeeping problem must not turn that into a failure.
-func recordUpgradedInstallID(kubeconfig, installID string, stdout io.Writer) {
-	ctxName, err := connect.TargetContextName(kubeconfig, "")
+func recordUpgradedInstallID(kubeconfig, kubeContext, installID string, stdout io.Writer) {
+	ctxName, err := connect.TargetContextName(kubeconfig, kubeContext)
 	if err != nil {
 		return
 	}
@@ -132,10 +138,10 @@ func recordUpgradedInstallID(kubeconfig, installID string, stdout io.Writer) {
 // install` to register and join). A handle that already carries the scoped credential is left
 // untouched — an upgrade preserves the credential, so the backfill runs (and reports) exactly
 // once, on the upgrade that first adds it, and stays silent on every routine upgrade after.
-func backfillAgentCredential(ctx context.Context, kubeconfig, namespace string, stdout io.Writer) {
-	ctxName, err := connect.TargetContextName(kubeconfig, "")
+func backfillAgentCredential(ctx context.Context, kubeconfig, kubeContext, namespace string, stdout io.Writer) {
+	ctxName, err := connect.TargetContextName(kubeconfig, kubeContext)
 	if err != nil {
-		fmt.Fprintf(stdout, "\n%scould not resolve the current kube context to backfill the agent credential: %v\n", warning(stdout), err)
+		fmt.Fprintf(stdout, "\n%scould not resolve the kube context to backfill the agent credential: %v\n", warning(stdout), err)
 		return
 	}
 	cfg, err := localconfig.Load()

@@ -9,25 +9,27 @@ import (
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
-// Some commands can only reach a cluster. They connect with the raw --context/--namespace, or with a
-// kubeconfig clientset, and never consult the selected target (ADR-0078 §4 leaves open whether they
-// should follow one; issue #429 decides that separately). While a cluster was the only kind of
-// target, that cost nothing. Now that a Burrow Cloud target can be operated through, it is a trap: someone
-// signs in to the managed product, deploys through it, then runs `burrow guard set app.delete deny`
-// and it lands on whatever `kubectl config current-context` happens to be — a cluster they may not
-// have thought about in a week, with no error and no clue.
+// Some commands can only reach a cluster: they connect through a kubeconfig, so a Burrow Cloud
+// target — which has no cluster of its own — is not something they can act through. While a cluster
+// was the only kind of target, that cost nothing. Once a Burrow Cloud target could be operated
+// through, it became a trap: someone signs in to the managed product, deploys through it, then runs
+// `burrow guard set app.delete deny` and it lands on whatever `kubectl config current-context`
+// happens to be — a cluster they may not have thought about in a week, with no error and no clue.
 //
-// So those commands refuse while the managed product is selected. Refusing is not the answer to
-// "which cluster should they use" — that question is still open — but it is the answer to "may they
-// silently use one nobody chose", and that one is not.
+// So those commands refuse while the managed product is selected.
+//
+// WHICH cluster they use when a CLUSTER target is selected is a separate question, and it is now
+// answered: the target decides, for every one of them (ADR-0084 §4, clustercontext.go). This file
+// covers only the target kind that names no cluster at all.
 //
 // Deliberately NOT refused:
 //
 //   - Installing and the rest of the cluster-lifecycle surface (`cluster install`, `cluster upgrade`,
 //     `cluster bootstrap`, `join`, `cluster ingress/registry/postgres install`). ADR-0078 §3: install
 //     continues to act on a kubeconfig context, since installing into Burrow Cloud is not a thing
-//     that can be asked for. They name the cluster they act on rather than inheriting one, and none
-//     of them routes through the paths guarded here.
+//     that can be asked for. They each take a `--context` naming the cluster they act on rather than
+//     inheriting one, they say which context that is whenever the active target names another, and
+//     none of them routes through the paths guarded here.
 //   - `burrow auth ...`. It is how a person sees which target is active and changes it, so a refusal
 //     there would leave someone with the managed product selected and no way to read or leave that
 //     state. It reads and writes the local config only and touches no cluster.

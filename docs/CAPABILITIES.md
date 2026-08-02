@@ -942,9 +942,16 @@ The **cluster-lifecycle commands are the exception, deliberately**. `cluster ins
 `cluster postgres` provisioners act on a kubeconfig context and not on the target, because installing
 *into* the managed product is not a thing that can be asked for and an installer that redirected
 itself to whatever was last selected would be the more dangerous of the two behaviours
-([ADR-0078](adr/0078-the-cli-points-at-a-target.md) §3). Each takes a `--context` to name one, and
-each says which context it is acting on whenever the active target names a different cluster — so the
-choice is visible rather than inferred.
+([ADR-0078](adr/0078-the-cli-points-at-a-target.md) §3).
+
+How each one names its cluster depends on what it does:
+
+| | How it picks a cluster |
+| --- | --- |
+| `burrow cluster install <context>` | The context you name as an argument. |
+| `burrow cluster bootstrap` | The single-node cluster it just created, through the k3s kubeconfig it wrote. |
+| `burrow join` | The kubeconfig it is recording admin access into. |
+| `burrow cluster upgrade`, `cluster ingress install`, `cluster registry install/uninstall`, `cluster postgres install` | `--context`, defaulting to the kubeconfig's current context. Each says which context it is acting on whenever the active target names a different cluster, so the choice is visible rather than inferred. |
 
 ---
 

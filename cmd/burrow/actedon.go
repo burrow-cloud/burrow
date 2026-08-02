@@ -59,6 +59,22 @@ func withTargetClause(human string, n targetname.Named) string {
 	return head + "\n" + rest
 }
 
+// withTargetClauseWhenDecided is withTargetClause for a result line that did NOT carry a target
+// before, and it appends one only when something actually decided where the command went: a
+// configured target, a --context override, or a --control-plane URL.
+//
+// The commands that have always printed the clause keep printing it unconditionally, including the
+// "no target selected" form — that form is informative there precisely because its neighbours name a
+// target. Adding it to a line that never had one is different: for somebody who has never run
+// `burrow auth login` it would change familiar output, and break anything matching it, to say only
+// that they have not done a thing they were never asked to do.
+func withTargetClauseWhenDecided(human string, n targetname.Named) string {
+	if n.Name == "" && !n.Override && n.Endpoint == "" {
+		return human
+	}
+	return withTargetClause(human, n)
+}
+
 // emitJSONWithTarget prints v as indented JSON with a `target` member added. The result's own fields
 // are spliced through unchanged and in their original order rather than round-tripped through a map,
 // so adding the target neither reorders nor reshapes what a caller already parses. A result that is

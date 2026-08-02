@@ -135,7 +135,7 @@ func newRegistryCmd() *cobra.Command {
 			}
 			// A credential lands in one cluster, so the line that says it landed names which
 			// (ADR-0078 §4). No token is ever rendered — only the host it was stored for.
-			fmt.Fprintln(cmd.OutOrStdout(), withTargetClause(fmt.Sprintf("configured registry %q for your apps", host), o.acted))
+			fmt.Fprintln(cmd.OutOrStdout(), withTargetClauseWhenDecided(fmt.Sprintf("configured registry %q for your apps", host), o.acted))
 			return nil
 		},
 	}
@@ -156,7 +156,7 @@ func newRegistryCmd() *cobra.Command {
 			if err := registryLogout(ctx, cs, appNS, args[0]); err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), withTargetClause(fmt.Sprintf("removed registry %q", args[0]), o.acted))
+			fmt.Fprintln(cmd.OutOrStdout(), withTargetClauseWhenDecided(fmt.Sprintf("removed registry %q", args[0]), o.acted))
 			return nil
 		},
 	}

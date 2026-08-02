@@ -320,15 +320,10 @@ func alreadyInstalled(ctx context.Context, cs kubernetes.Interface, namespace st
 	return true, nil
 }
 
-// clientset builds a Kubernetes clientset from the kubeconfig (or in-cluster config), using
-// the same config resolution as connect, targeting the kubeconfig's current context.
-func clientset(kubeconfig string) (*kubernetes.Clientset, error) {
-	return clientsetForContext(kubeconfig, "")
-}
-
-// clientsetForContext is clientset with an explicit kubeconfig context override: when kubeContext
-// is non-empty it selects that context's cluster instead of the current one (ADR-0035), so a
-// command can probe a specific environment's control plane.
+// clientsetForContext builds a Kubernetes clientset from the kubeconfig (or in-cluster config),
+// using the same config resolution as connect. When kubeContext is non-empty it selects that
+// context's cluster; empty means the kubeconfig's current context (ADR-0035), so a command can
+// probe a specific environment's control plane.
 func clientsetForContext(kubeconfig, kubeContext string) (*kubernetes.Clientset, error) {
 	cfg, err := connect.RESTConfig(kubeconfig, kubeContext)
 	if err != nil {

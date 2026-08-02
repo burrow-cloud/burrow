@@ -194,6 +194,9 @@ func newClusterRegistryCmd() *cobra.Command {
 			"runs in your cluster.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Read-only, but it takes the same --context as its siblings and reads whichever cluster
+			// that names, so it says which one for the same reason they do.
+			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runClusterRegistryStatus(cmd.Context(), o, cmd.OutOrStdout())
 		},
 	}

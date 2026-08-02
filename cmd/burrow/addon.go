@@ -1020,8 +1020,13 @@ func listInstallableAddons(ctx context.Context, o *commonOpts, out, stderr io.Wr
 // how an add-on install came to write a Role to one cluster and register the add-on on a second.
 // An empty context means the kubeconfig's current context, which is how connect reads it too.
 //
-// The namespaces still come from the environment resolution, because that is what they are: a
-// handle's control-plane and app namespaces, not a cluster.
+// The namespaces come from the environment resolution, because that is what they are: a handle's
+// control-plane and app namespaces, not a cluster. They are taken ONLY when that resolution landed
+// on the same cluster the grant is going to. A handle describing a different cluster describes
+// different namespaces, and borrowing them would be the two-cluster bug again in a quieter form —
+// the right context with somebody else's namespaces. That check is ADR-0036's own rule, that a pin
+// for another cluster is not a narrowing of this one, applied on the path where no target is
+// selected as well as the one where a target settles it.
 func (o *commonOpts) resolveAddonNamespaces(stderr io.Writer) (kubeContext, controlPlaneNamespace, appNamespace string, err error) {
 	kubeContext, err = o.clusterContext(stderr)
 	if err != nil {
@@ -1029,12 +1034,18 @@ func (o *commonOpts) resolveAddonNamespaces(stderr io.Writer) (kubeContext, cont
 	}
 	controlPlaneNamespace = o.namespace
 	appNamespace = connect.DefaultAppNamespace
+
+	// Best effort from here: the namespaces have working defaults, and a config problem is not worth
+	// failing an install over when the connection is about to report it far better.
 	cfg, cfgErr := localconfig.Load()
 	if cfgErr != nil {
 		return kubeContext, controlPlaneNamespace, appNamespace, nil
 	}
 	resolved, resolveErr := localconfig.Resolve(cfg, o.kubeconfig)
 	if resolveErr != nil {
+		return kubeContext, controlPlaneNamespace, appNamespace, nil
+	}
+	if !sameContext(o.kubeconfig, kubeContext, resolved.Context) {
 		return kubeContext, controlPlaneNamespace, appNamespace, nil
 	}
 	if o.namespace == "" || o.namespace == connect.DefaultNamespace {
@@ -1044,6 +1055,26 @@ func (o *commonOpts) resolveAddonNamespaces(stderr io.Writer) (kubeContext, cont
 		appNamespace = resolved.Namespace
 	}
 	return kubeContext, controlPlaneNamespace, appNamespace, nil
+}
+
+// sameContext reports whether two kube context names denote the same context, resolving either
+// empty value to the kubeconfig's current context first — "" and "do-nyc3-dev" are the same cluster
+// when the latter is what is current, and comparing the raw strings would call them different.
+// A kubeconfig that cannot be read answers false, which costs a defaulted namespace rather than a
+// grant applied somewhere unintended.
+func sameContext(kubeconfig, a, b string) bool {
+	if a == b {
+		return true
+	}
+	resolvedA, err := connect.TargetContextName(kubeconfig, a)
+	if err != nil {
+		return false
+	}
+	resolvedB, err := connect.TargetContextName(kubeconfig, b)
+	if err != nil {
+		return false
+	}
+	return resolvedA == resolvedB
 }
 
 // ensureAddonRBAC stages an add-on's per-add-on RBAC kubeconfig-side before the install API call.

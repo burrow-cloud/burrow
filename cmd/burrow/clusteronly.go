@@ -27,9 +27,15 @@ import (
 //   - Installing and the rest of the cluster-lifecycle surface (`cluster install`, `cluster upgrade`,
 //     `cluster bootstrap`, `join`, `cluster ingress/registry/postgres install`). ADR-0078 §3: install
 //     continues to act on a kubeconfig context, since installing into Burrow Cloud is not a thing
-//     that can be asked for. They each take a `--context` naming the cluster they act on rather than
-//     inheriting one, they say which context that is whenever the active target names another, and
-//     none of them routes through the paths guarded here.
+//     that can be asked for. None of them routes through the paths guarded here, and none of them
+//     follows the target.
+//
+//     How each names its cluster differs, and the difference is not tidy: `cluster install` takes a
+//     positional `<context>`, `cluster bootstrap` acts on the k3s kubeconfig it just wrote, and
+//     `join` acts on the kubeconfig it is recording access into. `cluster upgrade` and the three
+//     provisioners take a `--context` flag and say which context they are acting on whenever the
+//     active target names another (clustercontext.go). The first three are left alone because each
+//     already names its cluster in the only way that makes sense for what it does.
 //   - `burrow auth ...`. It is how a person sees which target is active and changes it, so a refusal
 //     there would leave someone with the managed product selected and no way to read or leave that
 //     state. It reads and writes the local config only and touches no cluster.

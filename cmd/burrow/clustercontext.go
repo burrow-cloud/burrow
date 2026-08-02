@@ -27,15 +27,18 @@ import (
 //
 // The precedence is the whole design, and it is this, highest first:
 //
-//  1. `--control-plane` names a control plane outright, so no target is consulted for it. Handled
-//     by the callers, which return before reaching here.
-//  2. `--context` — a person naming a cluster for this one invocation. An EXPLICIT choice keeps
+//  1. `--context` — a person naming a cluster for this one invocation. An EXPLICIT choice keeps
 //     winning over the selected target; that is somebody being deliberate, which is the opposite of
 //     the problem. ADR-0078 §4 keeps the flag working as a per-invocation override and this is it.
+//  2. `--control-plane` names a control plane outright, so no target is consulted for it.
 //  3. The selected ADR-0078 target, when it is a Kubernetes target. This is the arm that was
 //     missing.
 //  4. The kubeconfig's current context — reached only when NO target is selected. That is the
 //     pre-target world, it is still the default, and nothing about it changes.
+//
+// (1) and (2) never both decide anything, since --control-plane needs no kube context and reads
+// none: they are ordered this way only so that a --context passed alongside it still reaches the
+// kubeconfig-side work a few commands do before they connect.
 //
 // What stops is the IMPLICIT fall-through: (4) is no longer reachable while a target is selected.
 // And when an explicit flag does send a command somewhere the selected target does not name, that is
@@ -81,9 +84,23 @@ func (o *commonOpts) clusterContext(stderr io.Writer) (string, error) {
 		o.contextResolved = true
 		return "", nil
 	}
+	// A config that will not load leaves the kubeconfig deciding, and says so once.
+	//
+	// Failing here would be a regression for somebody who has never selected a target: this path
+	// did not read ~/.burrow/config at all before, so a malformed one broke nothing, and refusing
+	// `guard list` over a file the command has no use for is not an improvement. It is also the same
+	// tolerance refuseCloudTarget already applies — with an unreadable config nothing can tell there
+	// is a target at all, so the whole target model is inert either way, and pretending otherwise
+	// here would only produce a worse message than the one `burrow auth status` gives.
+	//
+	// The note is the difference between falling back and falling back SILENTLY, which is the thing
+	// this file exists to stop. It fires only on a file that exists and will not parse: a missing
+	// config is the ordinary first-run state and loads as empty.
 	cfg, err := localconfig.Load()
 	if err != nil {
-		return "", err
+		fmt.Fprintf(stderr, "burrow: %v\nburrow: following the kubeconfig instead; run \"burrow auth status\" to see the targeting state.\n", err)
+		o.contextResolved = true
+		return "", nil
 	}
 	cluster, err := localconfig.ResolveCluster(cfg, o.kubeconfig)
 	if err != nil {
@@ -124,9 +141,14 @@ func noteContextOverride(cfg *localconfig.Config, kubeContext string, stderr io.
 // several of them had no `--context` flag at all, so there was no per-invocation way to point them
 // anywhere, and they never said which cluster they had picked.
 //
-// So they gained the flag, and they say so here when the cluster they are acting on is not the one
-// the target names. Silent when no target is selected (the pre-target world, unchanged) and when the
-// target names this very context.
+// This is called by exactly those several: `cluster upgrade` and the `cluster ingress` /
+// `cluster registry` / `cluster postgres` provisioners, which gained the flag. The other three name
+// their cluster in the only way that makes sense for what they do — `cluster install` takes a
+// positional `<context>`, `cluster bootstrap` acts on the k3s kubeconfig it just wrote, and `join`
+// on the kubeconfig it is recording access into — so there is nothing here for them to say.
+//
+// Silent when no target is selected (the pre-target world, unchanged) and when the target names this
+// very context.
 func noteLifecycleContext(kubeconfig, kubeContext string, stderr io.Writer) {
 	cfg, err := localconfig.Load()
 	if err != nil {

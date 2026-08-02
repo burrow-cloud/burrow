@@ -132,53 +132,99 @@ type GuardrailInfo struct {
 	Code        GuardrailCode `json:"code"`
 	Disposition Disposition   `json:"disposition"`
 	Description string        `json:"description"`
-	// Source reports where the effective disposition came from when the guardrail is inspected for a
-	// named environment (ADR-0035 phase 2c): "env" for an environment-specific override, "global" for
-	// the global policy, or "default" for the built-in default. It is empty for the global listing.
+	// Source reports which tier the effective disposition came from when the guardrail is inspected
+	// for something narrower than the whole cluster (ADR-0035 phase 2c, ADR-0085 §2): "name" for the
+	// override on the one app or add-on instance asked about, "env" for an environment-specific one,
+	// "global" for the global policy, or "default" for the built-in default. It is empty for the
+	// global listing.
 	Source string `json:"source,omitempty"`
 }
 
-// guardrailDef declares one guardrail: its code, what it gates, and whether it can be scoped to a
-// named environment.
+// GuardrailScope names what one operation targets, so its disposition can be resolved for exactly
+// that thing rather than for everything in an environment (ADR-0085 §1). The zero value is the
+// global policy.
+type GuardrailScope struct {
+	// Env is the environment the operation runs in. Empty means the default environment.
+	Env string
+	// Name is the ONE thing the operation acts on, for a guardrail that declares itself scopable to
+	// one thing: an application for the app.* codes, an add-on instance for the addon.* ones, under
+	// the name AddonInstanceName produces (burrow-postgres, burrow-postgres-staging). There is one
+	// field because the code already says which kind it is, so a caller never has to choose between
+	// two that mean the same thing in different circumstances.
+	Name string
+}
+
+// guardrailDef declares one guardrail: its code, what it gates, and what it can be narrowed to.
 //
-// envScoped is a DECLARATION rather than an inference from the code's name (ADR-0068 §5).
-// EnvScopable used to key on the `app.` prefix, which was a reasonable shorthand when app-lifecycle
-// codes were the only ones anyone wanted to scope and became a trap once they were not: a
-// correctly-named code silently was not scopable, and inferring capability from a string prefix is
-// the kind of shortcut that is invisible until it is wrong.
+// Each scope flag is a DECLARATION rather than an inference from the code's name (ADR-0068 §5,
+// ADR-0085 §3). EnvScopable used to key on the `app.` prefix, which was a reasonable shorthand when
+// app-lifecycle codes were the only ones anyone wanted to scope and became a trap once they were
+// not: a correctly-named code silently was not scopable, and inferring capability from a string
+// prefix is the kind of shortcut that is invisible until it is wrong. The same shortcut is wrong
+// again one axis over — `addon.restore_instance` starts with `addon.` and takes every app on the
+// instance back together, so a rule reading "addon.* is per-app" would describe its blast radius
+// falsely.
 //
-// What the flag asserts is that the guarded operation CARRIES an environment to scope the lookup
-// to. The app-level guardrails gate per-app operations that always name one, so they can be locked
-// down per environment — strict prod, permissive staging. dns.* and addon.* are evaluated with an
-// empty environment today (the DNS request has no environment at all; an add-on operation names one
-// but looks its disposition up globally), so declaring them scopable would promise an override that
-// is never read. Widening one is now a change to this line plus the lookup at its call site, rather
-// than a rename.
+// envScoped asserts that the guarded operation CARRIES an environment to scope the lookup to. The
+// app-level guardrails gate per-app operations that always name one, so they can be locked down per
+// environment — strict prod, permissive staging. dns.* and addon.* are evaluated with an empty
+// environment (the DNS request has no environment at all; an add-on operation names one but its
+// instance name already carries it), so declaring them env-scopable would promise an override that
+// is never read.
+//
+// names asserts that the operation acts on exactly ONE thing whose name bounds its effect, and says
+// which kind of thing that is — an application or an add-on instance. It is what `--name` refers
+// to, which is why one flag suffices: the code decides the kind.
+//
+// Where an operation names two things — `addon detach <addon> <app>` drops one app's database on
+// one instance — the name is the INSTANCE, because that is where the data lives and where the reach
+// stops. Scoping such an operation by app would let an operator protect `web` while the identical
+// verb wipes `api` on the same instance, which reads as protection and is not.
+//
+// reach is the fragment a refusal prints when somebody tries to narrow a guardrail further than its
+// effect goes ("dns.write cannot be scoped to one thing: <reach>"). It is required of every
+// guardrail that names nothing, because "unsupported flag" does not tell an operator anything they
+// can act on.
 type guardrailDef struct {
 	code        GuardrailCode
 	description string
 	envScoped   bool
+	names       guardrailTarget
+	reach       string
 }
+
+// guardrailTarget is the kind of thing a guardrail's `--name` refers to. The empty value means the
+// guardrail cannot be narrowed to one thing at all.
+type guardrailTarget string
+
+const (
+	targetNothing guardrailTarget = ""
+	targetApp     guardrailTarget = "app"
+	targetAddon   guardrailTarget = "add-on instance"
+)
 
 // knownGuardrails enumerates every configurable guardrail in a stable order with a human
 // description, so inspection shows the full set — including unset ones, which read as their
 // default disposition.
 var knownGuardrails = []guardrailDef{
-	{code: GuardrailAppDeploy, description: "deploy a new release of an application", envScoped: true},
-	{code: GuardrailScaleToZero, description: "scale an application to zero replicas", envScoped: true},
-	{code: GuardrailExposePublic, description: "expose an application to the public internet at a hostname", envScoped: true},
-	{code: GuardrailDNSWrite, description: "create or update a public DNS record at a configured provider"},
-	{code: GuardrailDNSDelete, description: "delete a public DNS record at a configured provider"},
-	{code: GuardrailAddonInstall, description: "install a building-block add-on (backing service) onto the cluster"},
-	{code: GuardrailAddonRemove, description: "remove an installed add-on from the cluster"},
-	{code: GuardrailAddonDetach, description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)"},
-	{code: GuardrailAddonRestore, description: "restore an app's database from a backup, overwriting its live contents"},
-	{code: GuardrailAddonRestoreInstance, description: "rewind a whole Postgres instance to a point in its object-storage repository, taking every app's database on it back together"},
-	{code: GuardrailAppDelete, description: "delete an app entirely (its workload, routing, and release history)", envScoped: true},
-	{code: GuardrailRollback, description: "roll an application back to its previous release", envScoped: true},
-	{code: GuardrailAutoscale, description: "configure autoscaling for an application", envScoped: true},
-	{code: GuardrailAppRun, description: "run a one-off command inside an application's own image and environment", envScoped: true},
-	{code: GuardrailBucketCreate, description: "create a bucket at an object-storage provider (deleting one is not a Burrow operation at all)"},
+	{code: GuardrailAppDeploy, description: "deploy a new release of an application", envScoped: true, names: targetApp},
+	{code: GuardrailScaleToZero, description: "scale an application to zero replicas", envScoped: true, names: targetApp},
+	{code: GuardrailExposePublic, description: "expose an application to the public internet at a hostname", envScoped: true, names: targetApp},
+	{code: GuardrailDNSWrite, description: "create or update a public DNS record at a configured provider",
+		reach: "a DNS record is a name at a provider outside the cluster, which no single app or add-on owns"},
+	{code: GuardrailDNSDelete, description: "delete a public DNS record at a configured provider",
+		reach: "a DNS record is a name at a provider outside the cluster, which no single app or add-on owns, and the record may not be one Burrow created"},
+	{code: GuardrailAddonInstall, description: "install a building-block add-on (backing service) onto the cluster", names: targetAddon},
+	{code: GuardrailAddonRemove, description: "remove an installed add-on from the cluster", names: targetAddon},
+	{code: GuardrailAddonDetach, description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)", names: targetAddon},
+	{code: GuardrailAddonRestore, description: "restore an app's database from a backup, overwriting its live contents", names: targetAddon},
+	{code: GuardrailAddonRestoreInstance, description: "rewind a whole Postgres instance to a point in its object-storage repository, taking every app's database on it back together", names: targetAddon},
+	{code: GuardrailAppDelete, description: "delete an app entirely (its workload, routing, and release history)", envScoped: true, names: targetApp},
+	{code: GuardrailRollback, description: "roll an application back to its previous release", envScoped: true, names: targetApp},
+	{code: GuardrailAutoscale, description: "configure autoscaling for an application", envScoped: true, names: targetApp},
+	{code: GuardrailAppRun, description: "run a one-off command inside an application's own image and environment", envScoped: true, names: targetApp},
+	{code: GuardrailBucketCreate, description: "create a bucket at an object-storage provider (deleting one is not a Burrow operation at all)",
+		reach: "a bucket is storage at a provider outside the cluster, in a global namespace no single app or add-on owns"},
 }
 
 // KnownGuardrail reports whether code names a configurable guardrail.
@@ -194,6 +240,36 @@ func EnvScopable(code GuardrailCode) bool {
 	return ok && g.envScoped
 }
 
+// NameScopable reports whether a guardrail can be scoped to one named thing — `guard set … --name`
+// (ADR-0085 §3), which is a property the guardrail declares rather than one read off its code. An
+// unknown code is not scopable.
+func NameScopable(code GuardrailCode) bool {
+	g, ok := lookupGuardrail(code)
+	return ok && g.names != targetNothing
+}
+
+// GuardrailTarget names the kind of thing a guardrail's `--name` refers to — "app" or "add-on
+// instance" — so a message can say what a caller should have named. It is empty for a guardrail
+// that cannot be scoped to one thing.
+func GuardrailTarget(code GuardrailCode) string {
+	g, ok := lookupGuardrail(code)
+	if !ok {
+		return ""
+	}
+	return string(g.names)
+}
+
+// GuardrailReach describes how far a guarded operation's effect extends, for a refusal that has to
+// say why a guardrail cannot be narrowed the way somebody asked. It is empty for a guardrail whose
+// effect stops at one named thing.
+func GuardrailReach(code GuardrailCode) string {
+	g, ok := lookupGuardrail(code)
+	if !ok {
+		return ""
+	}
+	return g.reach
+}
+
 func lookupGuardrail(code GuardrailCode) (guardrailDef, bool) {
 	for _, g := range knownGuardrails {
 		if g.code == code {
@@ -204,29 +280,40 @@ func lookupGuardrail(code GuardrailCode) (guardrailDef, bool) {
 }
 
 // Guardrails returns each known guardrail with its effective disposition under the global policy
-// (ADR-0020). Use GuardrailsFor to inspect a named environment's effective policy.
+// (ADR-0020). Use GuardrailsFor to inspect the effective policy for an environment, or for one app
+// or add-on instance in it.
 func (p Policy) Guardrails() []GuardrailInfo {
-	return p.guardrails("")
+	return p.guardrails(GuardrailScope{})
 }
 
-// GuardrailsFor returns each known guardrail with its effective disposition for the named
-// environment (ADR-0035 phase 2c): the disposition under the env-prefixed override, falling back to
-// the global override, then the built-in default. Each entry's Source records where the effective
-// disposition came from ("env", "global", or "default") so `guard list --env` can show which
-// guardrails are env-specific and which are inherited. An empty env, or `prod` — the environment
-// install created (ADR-0067 §2) — reproduces the global policy exactly and leaves Source unset, as
-// for Guardrails: with one environment there is nothing for a per-environment override to differ
-// FROM, so the default environment's policy IS the global policy rather than a second layer over
-// it. `guard set --env staging …` then reads as the deliberate divergence it is.
-func (p Policy) GuardrailsFor(env string) []GuardrailInfo {
-	return p.guardrails(env)
+// GuardrailsFor returns each known guardrail with its effective disposition for the named scope
+// (ADR-0035 phase 2c, ADR-0085 §4): the disposition set for the named app or add-on instance,
+// falling back to the environment's, then the global one, then the built-in default. Each entry's
+// Source records which tier answered ("name", "env", "global", or "default"), so
+// `guard list --env prod --name website` can show why a guardrail reads the way it does without
+// anyone reconstructing the fallback chain by hand.
+//
+// A scope that names nothing — no name, and either an empty env or `prod`, the environment install
+// created (ADR-0067 §2) — reproduces the global policy exactly and leaves Source unset, as for
+// Guardrails: with one environment there is nothing for a per-environment override to differ FROM,
+// so the default environment's policy IS the global policy rather than a second layer over it.
+// `guard set --env staging …` then reads as the deliberate divergence it is.
+//
+// That reasoning stops at the environment tier and deliberately does NOT extend to the name tier.
+// There is no baseline app or instance whose policy is the global one, so a name-scoped row is
+// never "the same policy seen from closer up" — it exists only to differ from its environment's,
+// and it does so in `prod` exactly as much as in `staging`. `prod` therefore appears in the key
+// (prod.website.app.run) where it is elided from the environment tier, and naming a thing always
+// consults its tier and always reports a Source.
+func (p Policy) GuardrailsFor(scope GuardrailScope) []GuardrailInfo {
+	return p.guardrails(scope)
 }
 
-func (p Policy) guardrails(env string) []GuardrailInfo {
-	named := env != "" && env != DefaultEnvironment
+func (p Policy) guardrails(scope GuardrailScope) []GuardrailInfo {
+	named := scope.Name != "" || (scope.Env != "" && scope.Env != DefaultEnvironment)
 	out := make([]GuardrailInfo, len(knownGuardrails))
 	for i, g := range knownGuardrails {
-		disp, source := p.dispositionSource(env, g.code)
+		disp, source := p.dispositionSource(scope, g.code)
 		info := GuardrailInfo{Code: g.code, Disposition: disp, Description: g.description}
 		if named {
 			info.Source = source
@@ -277,12 +364,12 @@ func AsGuardrail(err error) (*GuardrailError, bool) {
 //
 // The replica CEILING is not evaluated here and is not a guardrail: it is an operational limit
 // whose breach is a validation failure, checked before any guardrail runs (ADR-0068 §2).
-func (p Policy) evaluateDeploy(env string, replicas int32, confirmed bool) error {
-	if err := p.evaluateGuardrail(env, "deploy", GuardrailAppDeploy, confirmed,
-		fmt.Sprintf("deploying a new release to %s", envName(env))); err != nil {
+func (p Policy) evaluateDeploy(scope GuardrailScope, replicas int32, confirmed bool) error {
+	if err := p.evaluateGuardrail(scope, "deploy", GuardrailAppDeploy, confirmed,
+		fmt.Sprintf("deploying a new release to %s", envName(scope.Env))); err != nil {
 		return err
 	}
-	return p.evaluateReplicas(env, "deploy", replicas, confirmed)
+	return p.evaluateReplicas(scope, "deploy", replicas, confirmed)
 }
 
 // evaluateReplicas evaluates a requested replica count for op against the policy, given
@@ -294,9 +381,9 @@ func (p Policy) evaluateDeploy(env string, replicas int32, confirmed bool) error
 //
 // Zero is the only count a guardrail has an opinion about: scaling to zero takes an app offline,
 // which is a question of what may happen rather than of where a line is drawn.
-func (p Policy) evaluateReplicas(env, op string, replicas int32, confirmed bool) error {
+func (p Policy) evaluateReplicas(scope GuardrailScope, op string, replicas int32, confirmed bool) error {
 	if replicas == 0 {
-		return p.enforce(env, op, GuardrailScaleToZero, confirmed, "scaling to zero replicas", 0, 0)
+		return p.enforce(scope, op, GuardrailScaleToZero, confirmed, "scaling to zero replicas", 0, 0)
 	}
 	return nil
 }
@@ -309,16 +396,22 @@ func (p Policy) evaluateReplicas(env, op string, replicas int32, confirmed bool)
 // The autoscaler's MAXIMUM is bounded by the replica ceiling exactly as a manual scale is, and for
 // the same reason it is checked before this runs rather than here: the ceiling is an operational
 // limit, not a guardrail (ADR-0068 §2).
-func (p Policy) evaluateAutoscale(env string, confirmed bool) error {
-	return p.evaluateGuardrail(env, "autoscale", GuardrailAutoscale, confirmed, "configuring autoscaling")
+func (p Policy) evaluateAutoscale(scope GuardrailScope, confirmed bool) error {
+	return p.evaluateGuardrail(scope, "autoscale", GuardrailAutoscale, confirmed, "configuring autoscaling")
 }
 
 // enforce applies the configured disposition for a tripped guardrail, producing the right
-// structured outcome: proceed (nil), confirmation required, or denied. The env scopes the
-// disposition lookup (ADR-0035 phase 2c): an added environment's override wins, falling back to the
-// global policy; an empty env, or `prod`, consults the global policy only.
-func (p Policy) enforce(env, op string, code GuardrailCode, confirmed bool, what string, requested, limit int32) error {
-	switch p.disposition(env, code) {
+// structured outcome: proceed (nil), confirmation required, or denied. The scope narrows the
+// disposition lookup (ADR-0035 phase 2c, ADR-0085 §2): the named app's or add-on instance's
+// override wins, then an added environment's, then the global policy; a scope naming nothing but an
+// empty env, or `prod`, consults the global policy only.
+//
+// A refusal NAMES the thing the disposition was set for. "app.deploy is denied for burrowd-cloud"
+// is a sentence an operator can act on; a bare "app.deploy is denied", on an install where it is
+// allowed for everything else, reads like a bug.
+func (p Policy) enforce(scope GuardrailScope, op string, code GuardrailCode, confirmed bool, what string, requested, limit int32) error {
+	disp, source := p.dispositionSource(scope, code)
+	switch disp {
 	case DispositionAllow:
 		return nil
 	case DispositionConfirm:
@@ -331,7 +424,7 @@ func (p Policy) enforce(env, op string, code GuardrailCode, confirmed bool, what
 			Requested:         requested,
 			Limit:             limit,
 			NeedsConfirmation: true,
-			Message:           what + " requires confirmation to proceed",
+			Message:           what + " requires confirmation to proceed" + setFor(scope, source, code),
 		}
 	default: // DispositionDeny, and any unconfigured/unknown disposition → deny (safe default)
 		return &GuardrailError{
@@ -339,9 +432,23 @@ func (p Policy) enforce(env, op string, code GuardrailCode, confirmed bool, what
 			Code:      code,
 			Requested: requested,
 			Limit:     limit,
-			Message:   what + " is denied by the current guardrail policy" + relaxHint(env, code),
+			Message:   what + " is denied by the current guardrail policy" + setFor(scope, source, code) + relaxHint(scope, source, code),
 		}
 	}
+}
+
+// setFor names the app or add-on instance a disposition was set for, when that is the tier that
+// answered. It is empty for an environment-wide, global or default disposition, which is not about
+// any one thing and should not read as though it were.
+func setFor(scope GuardrailScope, source string, code GuardrailCode) string {
+	if source != sourceName {
+		return ""
+	}
+	target := GuardrailTarget(code)
+	if target == "" {
+		target = "thing"
+	}
+	return fmt.Sprintf(" for the %s %q", target, scope.Name)
 }
 
 // relaxHint names the operator command that would relax a denied guardrail, appended to every
@@ -353,52 +460,112 @@ func (p Policy) enforce(env, op string, code GuardrailCode, confirmed bool, what
 // exists to prevent is an operator meeting one refusal and reaching for a global `guard set
 // app.delete allow`, relaxing production to unblock a sandbox.
 //
-// A cluster-level code gets the global form instead, and says so, because dns.*, addon.* and the
-// rest declare themselves un-scopable: the operations they gate are evaluated with no environment,
-// so an override for one would never be read. ADR-0065 §3 records that as a real limitation of the
-// decision; naming the reach honestly beats printing a `--env` flag the caller cannot use.
-func relaxHint(env string, code GuardrailCode) string {
+// Where the disposition came from one named app or add-on instance, the hint names that thing, so
+// an operator relaxing a refusal reaches for the narrow lever they already used rather than the
+// wide one (ADR-0085 §1).
+//
+// A cluster-level code gets the global form instead, and says so, because dns.* and bucket.* declare
+// themselves un-scopable: the operations they gate act on things outside the cluster that no app or
+// add-on owns. ADR-0065 §3 records that as a real limitation of the decision; naming the reach
+// honestly beats printing a flag the caller cannot use.
+func relaxHint(scope GuardrailScope, source string, code GuardrailCode) string {
+	if source == sourceName {
+		return fmt.Sprintf(" — a guardrail is a floor, not a fixed setting: this disposition is set for one %s, and an operator can move it with `burrow guard set --env %s --name %s %s confirm`, which touches nothing else",
+			GuardrailTarget(code), envName(scope.Env), scope.Name, code)
+	}
 	if !EnvScopable(code) {
+		// An add-on instance is the narrower lever where the code has one, so the operator is
+		// steered there rather than at a --env flag this code cannot use on its own.
+		if NameScopable(code) && scope.Name != "" {
+			return fmt.Sprintf(" — a guardrail is a floor, not a fixed setting: an operator can relax it for this %s with `burrow guard set --env %s --name %s %s confirm`, which is preferable to `burrow guard set %s confirm` — that applies to every add-on in the cluster",
+				GuardrailTarget(code), envName(scope.Env), scope.Name, code, code)
+		}
 		return fmt.Sprintf(" — an operator can relax it with `burrow guard set %s confirm`, which applies to the whole cluster: %s cannot be scoped to one environment", code, code)
 	}
 	target := "<env>"
 	// `prod` takes the placeholder rather than its own name: its disposition IS the global one
 	// (ADR-0067 §2), so pointing the operator at `--env prod` would suggest an override that does
 	// not exist as a separate row.
-	if env != "" && env != DefaultEnvironment {
-		target = env
+	if scope.Env != "" && scope.Env != DefaultEnvironment {
+		target = scope.Env
 	}
 	return fmt.Sprintf(" — a guardrail is a floor, not a fixed setting: an operator can relax it for one environment with `burrow guard set --env %s %s confirm`, which is preferable to relaxing it everywhere", target, code)
 }
 
 // evaluateGuardrail applies a categorical guardrail — one that always trips when its
-// operation is attempted, like public exposure — using the configured disposition for env.
-func (p Policy) evaluateGuardrail(env, op string, code GuardrailCode, confirmed bool, what string) error {
-	return p.enforce(env, op, code, confirmed, what, 0, 0)
+// operation is attempted, like public exposure — using the configured disposition for the scope.
+func (p Policy) evaluateGuardrail(scope GuardrailScope, op string, code GuardrailCode, confirmed bool, what string) error {
+	return p.enforce(scope, op, code, confirmed, what, 0, 0)
 }
 
-// disposition returns the configured disposition for a guardrail in the named environment,
-// defaulting to deny when it is unset or invalid — the safe default (ADR-0020, ADR-0035 phase 2c).
-func (p Policy) disposition(env string, code GuardrailCode) Disposition {
-	d, _ := p.dispositionSource(env, code)
+// disposition returns the configured disposition for a guardrail in the named scope, defaulting to
+// deny when it is unset or invalid — the safe default (ADR-0020, ADR-0035 phase 2c).
+func (p Policy) disposition(scope GuardrailScope, code GuardrailCode) Disposition {
+	d, _ := p.dispositionSource(scope, code)
 	return d
 }
 
-// dispositionSource resolves a guardrail's effective disposition for env and reports where it came
-// from (ADR-0035 phase 2c). For a named environment it first consults the env-prefixed code
-// (e.g. staging.app.delete), so an environment can lock down or relax an operation independently;
-// absent that, it falls back to the global code, then to the deny-when-unset default. An empty env,
-// or `prod`, skips the env-prefixed lookup and reads the global policy: the default environment's
-// policy is the baseline the others diverge from, so a deny that protects production is a deny
-// everywhere until an environment opts out of it by name (ADR-0067 §2, ADR-0065 §3).
-func (p Policy) dispositionSource(env string, code GuardrailCode) (Disposition, string) {
-	if env != "" && env != DefaultEnvironment {
-		if d, ok := p.Dispositions[GuardrailCode(env+"."+string(code))]; ok && d.Valid() {
-			return d, "env"
+// The tiers a disposition can be answered by, most specific first. They are the values GuardrailInfo
+// reports as Source, so `guard list` can say which one answered.
+const (
+	sourceName    = "name"
+	sourceEnv     = "env"
+	sourceGlobal  = "global"
+	sourceDefault = "default"
+)
+
+// dispositionSource resolves a guardrail's effective disposition for a scope and reports which tier
+// it came from (ADR-0035 phase 2c, ADR-0085 §2). Most specific wins: the named app or add-on
+// instance's key, then the env-prefixed code (e.g. staging.app.delete), then the global code, then
+// the deny-when-unset default.
+//
+// The name tier is consulted only where the guardrail DECLARES that one name bounds its effect
+// (ADR-0085 §3), so naming a thing on an operation that reaches further cannot quietly produce a
+// narrower answer than the truth. The environment tier is likewise consulted only for a code that
+// declares itself env-scopable, so an addon.* operation that carries an environment for its message
+// does not acquire an environment tier it never had.
+//
+// An empty env, or `prod`, skips the env-prefixed lookup and reads the global policy: the default
+// environment's policy is the baseline the others diverge from, so a deny that protects production
+// is a deny everywhere until an environment opts out of it by name (ADR-0067 §2, ADR-0065 §3). The
+// name tier has no such baseline and is therefore consulted in `prod` too — see GuardrailsFor.
+func (p Policy) dispositionSource(scope GuardrailScope, code GuardrailCode) (Disposition, string) {
+	def, known := lookupGuardrail(code)
+	if known && def.names != targetNothing && scope.Name != "" {
+		if d, ok := p.Dispositions[namePolicyKey(scope.Env, scope.Name, code)]; ok && d.Valid() {
+			return d, sourceName
+		}
+	}
+	if (!known || def.envScoped) && scope.Env != "" && scope.Env != DefaultEnvironment {
+		if d, ok := p.Dispositions[envPolicyKey(scope.Env, code)]; ok && d.Valid() {
+			return d, sourceEnv
 		}
 	}
 	if d, ok := p.Dispositions[code]; ok && d.Valid() {
-		return d, "global"
+		return d, sourceGlobal
 	}
-	return DispositionDeny, "default"
+	return DispositionDeny, sourceDefault
+}
+
+// namePolicyKey composes the key a disposition for one app or one add-on instance is stored under:
+// the environment, the name, then the code.
+//
+// The policy key is a composed STRING and nothing ever parses one — every path constructs the key
+// it wants and looks it up, which is why a third tier needs no migration of a table whose key
+// column is a TEXT PRIMARY KEY (ADR-0085 §2).
+//
+// The composition still has to be unambiguous, and it is, for two reasons. App, environment and
+// add-on instance names are all DNS-1123 labels, so no name contributes a dot of its own. And this
+// key ALWAYS carries an environment segment ahead of the name, so `staging.web.app.deploy` could
+// only collide with the environment key of an environment called `staging.web`, which cannot exist.
+// That is why `prod` is spelled out here rather than elided the way the environment tier elides it:
+// eliding it would put app names and environment names in one flat namespace, where an app called
+// `staging` would silently share a key with the `staging` environment. It is also why `guard set
+// --name` refuses to run without `--env` — there would be no segment to put the name after.
+func namePolicyKey(env, name string, code GuardrailCode) GuardrailCode {
+	return GuardrailCode(envName(env) + "." + name + "." + string(code))
+}
+
+func envPolicyKey(env string, code GuardrailCode) GuardrailCode {
+	return GuardrailCode(env + "." + string(code))
 }

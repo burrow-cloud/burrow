@@ -79,6 +79,40 @@ func TestGuardEndpoints(t *testing.T) {
 	}
 }
 
+// TestGuardEndpointsCarryTheName confirms the scope travels over HTTP as query parameters and that
+// the control plane, not the client, is what refuses an illegal combination (ADR-0085 §1). A rule
+// enforced only in the CLI would be a rule a second client does not have.
+func TestGuardEndpointsCarryTheName(t *testing.T) {
+	h, _, d := newAPI(t)
+
+	rr := do(h, "PUT", "/v1/guard/app.deploy?env=prod&name=website", token, `{"disposition":"deny"}`)
+	if rr.Code != 200 {
+		t.Fatalf("guard set for one app = %d %s", rr.Code, rr.Body.String())
+	}
+	if got := storedPolicy(t, d).Dispositions[cp.GuardrailCode("prod.website.app.deploy")]; got != cp.DispositionDeny {
+		t.Errorf("stored policy = %+v, want a deny under prod.website.app.deploy", storedPolicy(t, d).Dispositions)
+	}
+
+	// The listing for that app reports which tier answered, and the app's neighbours are untouched.
+	rr = do(h, "GET", "/v1/guard?env=prod&name=website", token, "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"source":"name"`) {
+		t.Errorf("guard list for one app = %d %s", rr.Code, rr.Body.String())
+	}
+	rr = do(h, "GET", "/v1/guard?env=prod&name=other", token, "")
+	if rr.Code != 200 || strings.Contains(rr.Body.String(), `"source":"name"`) {
+		t.Errorf("another app's listing = %d %s, want nothing set for it", rr.Code, rr.Body.String())
+	}
+
+	// A name with no environment is refused at the server, as ErrInvalid -> 400.
+	if rr := do(h, "PUT", "/v1/guard/app.deploy?name=website", token, `{"disposition":"deny"}`); rr.Code != 400 {
+		t.Errorf("name without env = %d, want 400", rr.Code)
+	}
+	// So is a name on a guardrail whose effect is wider than one thing.
+	if rr := do(h, "PUT", "/v1/guard/dns.write?env=prod&name=website", token, `{"disposition":"allow"}`); rr.Code != 400 {
+		t.Errorf("name on dns.write = %d, want 400", rr.Code)
+	}
+}
+
 // TestGuardEndpointsEnvScoped confirms the guard endpoints carry the optional env query through to the
 // engine: a registered env scopes the set, an unknown env is 404, and a cluster-level guardrail
 // cannot be env-scoped (400) (ADR-0035 phase 2c).
@@ -1444,4 +1478,15 @@ func TestChecksEndpoints(t *testing.T) {
 			t.Errorf("%s unknown env code = %d, want 404", m, rr.Code)
 		}
 	}
+}
+
+// storedPolicy reads the policy the fake database holds, so a test can assert the KEY a set landed
+// under rather than only the answer it produces (ADR-0085 §2: the key is a persistence format).
+func storedPolicy(t *testing.T, d *fake.Database) cp.Policy {
+	t.Helper()
+	p, err := d.Policy(context.Background())
+	if err != nil {
+		t.Fatalf("Policy: %v", err)
+	}
+	return p
 }

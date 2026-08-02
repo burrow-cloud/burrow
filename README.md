@@ -59,7 +59,11 @@ Guardrails are how you decide what your agent can and cannot do. Every risky act
     burrow guard set --env staging app.delete confirm # ask you first in staging — prod stays denied
     burrow guard set dns.write allow                  # let it add DNS records
 
-App-level rules can be scoped per environment, so the agent moves fast in staging while prod stays locked down.
+Rules can be scoped per environment, so the agent moves fast in staging while prod stays locked down — and per app, for the one thing in an environment that has to be off limits:
+
+    burrow guard set --env prod --name payments app.deploy deny   # everything else in prod still deploys
+
+`burrow guard list --env prod --name payments` then shows, guardrail by guardrail, whether the answer was set for that app, for the environment, or inherited.
 
 ## Addons
 

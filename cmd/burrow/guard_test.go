@@ -68,3 +68,46 @@ func TestGuardListJSONSeparatesTheTwoGroups(t *testing.T) {
 		t.Errorf("absent_capabilities does not name `addon remove`: %s", out)
 	}
 }
+
+// TestGuardSetCarriesTheScope confirms `guard set` sends the environment and the name it was given,
+// and says in plain words what it changed. The control plane decides which combinations are legal —
+// this only has to carry them faithfully (ADR-0085 §1).
+func TestGuardSetCarriesTheScope(t *testing.T) {
+	var gotQuery string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		cannedGuardrails(w, r)
+	}, "guard", "set", "app.deploy", "deny", "--env", "prod", "--name", "website")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(gotQuery, "env=prod") || !strings.Contains(gotQuery, "name=website") {
+		t.Errorf("query = %q, want both the environment and the name", gotQuery)
+	}
+	for _, want := range []string{`"app.deploy"`, `"deny"`, `"website"`, `"prod"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("confirmation %q is missing %s", out, want)
+		}
+	}
+}
+
+// TestGuardListForOneAppShowsWhichTierAnswered is ADR-0085 §4 at the surface an operator reads: the
+// listing for one app carries a SOURCE column naming that app where the disposition was set for it,
+// so "why is this denied here and nowhere else" needs no reconstruction of the fallback chain.
+func TestGuardListForOneAppShowsWhichTierAnswered(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"guardrails": []map[string]any{
+			{"code": "app.deploy", "disposition": "deny", "description": "deploy a new release of an application", "source": "name"},
+			{"code": "app.delete", "disposition": "allow", "description": "delete an app entirely", "source": "env"},
+			{"code": "app.rollback", "disposition": "allow", "description": "roll an application back", "source": "global"},
+		}})
+	}, "guard", "list", "--env", "prod", "--name", "website")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, want := range []string{"SOURCE", "website", "environment", "inherited (global)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("guard list output is missing %q:\n%s", want, out)
+		}
+	}
+}

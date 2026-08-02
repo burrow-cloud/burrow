@@ -450,7 +450,7 @@ func newGuardCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
-				gs, err := c.Guardrails(ctx, env)
+				gs, err := c.Guardrails(ctx, client.GuardScope{Env: env})
 				if err != nil {
 					return nil, err
 				}

@@ -991,31 +991,51 @@ Guardrails are policy evaluated in the control plane, between the agent and the 
 - **`deny`** — refused; `--confirm` cannot bypass it. An unset or invalid disposition also
   reads as deny.
 
-These are all fourteen, in listing order, with their defaults:
+These are all fifteen, in listing order, with their defaults. **Env-scopable** says whether a
+guardrail can be set for one environment; **`--name`** says what one name of it refers to — the one
+app or the one add-on instance its effect stops at, or nothing where the effect is wider than either:
 
-| Code | Gates | Default | Env-scopable |
-| --- | --- | --- | --- |
-| `app.deploy` | deploying a new release | `allow` | yes |
-| `app.scale_to_zero` | scaling an app to zero | `confirm` | yes |
-| `app.expose_public` | exposing an app at a public hostname | `confirm` | yes |
-| `dns.write` | creating or updating a public DNS record | `confirm` | no |
-| `dns.delete` | deleting a public DNS record | `deny` | no |
-| `addon.install` | installing an add-on | `confirm` | no |
-| `addon.remove` | removing an add-on | `confirm` | no |
-| `addon.detach` | detaching an app from an add-on, destroying its data | `confirm` | no |
-| `addon.restore` | restoring a database over its live contents | `confirm` | no |
-| `addon.restore_instance` | rewinding a whole Postgres instance, taking every app's database on it back together | `confirm` | no |
-| `app.delete` | deleting an app entirely | `deny` | yes |
-| `app.rollback` | rolling back to the previous release | `allow` | yes |
-| `app.autoscale` | configuring autoscaling | `allow` | yes |
-| `app.run` | running a one-off command in the app's image | `confirm` | yes |
-| `bucket.create` | creating a bucket at an object-storage provider | `confirm` | no |
+| Code | Gates | Default | Env-scopable | `--name` |
+| --- | --- | --- | --- | --- |
+| `app.deploy` | deploying a new release | `allow` | yes | app |
+| `app.scale_to_zero` | scaling an app to zero | `confirm` | yes | app |
+| `app.expose_public` | exposing an app at a public hostname | `confirm` | yes | app |
+| `dns.write` | creating or updating a public DNS record | `confirm` | no | — |
+| `dns.delete` | deleting a public DNS record | `deny` | no | — |
+| `addon.install` | installing an add-on | `confirm` | no | add-on instance |
+| `addon.remove` | removing an add-on | `confirm` | no | add-on instance |
+| `addon.detach` | detaching an app from an add-on, destroying its data | `confirm` | no | add-on instance |
+| `addon.restore` | restoring a database over its live contents | `confirm` | no | add-on instance |
+| `addon.restore_instance` | rewinding a whole Postgres instance, taking every app's database on it back together | `confirm` | no | add-on instance |
+| `app.delete` | deleting an app entirely | `deny` | yes | app |
+| `app.rollback` | rolling back to the previous release | `allow` | yes | app |
+| `app.autoscale` | configuring autoscaling | `allow` | yes | app |
+| `app.run` | running a one-off command in the app's image | `confirm` | yes | app |
+| `bucket.create` | creating a bucket at an object-storage provider | `confirm` | no | — |
 
-`burrow guard list [--env <name>]` shows the effective disposition and, for a named
-environment, whether it came from the environment, the global policy, or the built-in default.
-`burrow guard set [--env <name>] <code> <allow\|confirm\|deny>` persists an override in the
-control-plane database. `burrow-agent guard` can **read** the policy and cannot set it —
-structurally, the verb does not exist on that binary.
+The three with no `--name` act on things outside the cluster that no app or add-on owns. Where a
+guardrail names two things — `addon detach <addon> <app>` drops one app's database on one instance —
+`--name` means the **instance**, because that is where the data lives and where the effect stops
+([ADR-0085](adr/0085-a-guardrail-can-name-the-app-it-guards.md) §3). Setting a guardrail for
+something it does not name is refused with a sentence saying how far it does reach.
+
+`burrow guard list [--env <name>] [--name <thing>]` shows the effective disposition and, for
+anything narrower than the whole cluster, which tier it came from: set for the named app or add-on
+instance, set for the environment, or inherited from the global policy or the built-in default.
+`burrow guard set [--env <name>] [--name <thing>] <code> <allow\|confirm\|deny>` persists an
+override in the control-plane database. `burrow-agent guard` can **read** the policy and cannot set
+it — structurally, the verb does not exist on that binary.
+
+Three tiers resolve, most specific first ([ADR-0085](adr/0085-a-guardrail-can-name-the-app-it-guards.md) §2):
+
+```
+burrow guard set app.deploy confirm                          # every app, everywhere
+burrow guard set --env staging app.deploy allow              # every app in staging
+burrow guard set --env prod --name website app.deploy deny   # one app
+```
+
+`--name` requires `--env`: on its own a name cannot be told apart from an environment of the same
+name, since both are DNS labels, so it is refused rather than guessed at.
 
 Both `guard` surfaces report a **second kind of limit** alongside the dispositions: the
 capabilities absent from the `burrow-agent` binary, each with what it is, why it is held back,

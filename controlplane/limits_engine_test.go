@@ -117,7 +117,7 @@ func TestSetGuardrailRejectsALimitCode(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newEngine(t, permissive())
 
-	err := e.SetGuardrail(ctx, "", cp.GuardrailCode(cp.LimitReplicaCeiling), cp.DispositionAllow)
+	err := e.SetGuardrail(ctx, cp.GuardrailScope{}, cp.GuardrailCode(cp.LimitReplicaCeiling), cp.DispositionAllow)
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("guard set on a limit code = %v, want ErrInvalid", err)
 	}
@@ -126,7 +126,7 @@ func TestSetGuardrailRejectsALimitCode(t *testing.T) {
 	}
 	// And the guardrail listing no longer offers it at all, so an operator reading `guard list`
 	// never learns a disposition they cannot set.
-	gs, err := e.Guardrails(ctx, "")
+	gs, err := e.Guardrails(ctx, cp.GuardrailScope{})
 	if err != nil {
 		t.Fatalf("Guardrails: %v", err)
 	}

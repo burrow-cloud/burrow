@@ -324,9 +324,10 @@ type Guardrail struct {
 	Code        string `json:"code"`
 	Disposition string `json:"disposition"`
 	Description string `json:"description"`
-	// Source reports where a guardrail's effective disposition came from when listed for a named
-	// environment (ADR-0035 phase 2c): "env" (an environment-specific override), "global" (the global
-	// policy), or "default" (the built-in default). It is empty in the global listing.
+	// Source reports where a guardrail's effective disposition came from when listed for something
+	// narrower than the whole cluster (ADR-0035 phase 2c, ADR-0085 §2): "name" (set for the one app
+	// or add-on instance asked about), "env" (an environment-specific override), "global" (the
+	// global policy), or "default" (the built-in default). It is empty in the global listing.
 	Source string `json:"source,omitempty"`
 }
 
@@ -1397,28 +1398,51 @@ func withEnv(path, env string) string {
 	return path + sep + "env=" + url.QueryEscape(env)
 }
 
-// Guardrails lists the control-plane guardrails and their current dispositions. An empty env lists
+// GuardScope selects whose guardrail policy is read or written: an environment, or one app or
+// add-on instance within it (ADR-0085 §1). The zero value is the global policy. Which combinations
+// are legal is the control plane's decision, not this client's — a name without an environment is
+// refused there, so every client hears the same reason.
+type GuardScope struct {
+	Env  string
+	Name string
+}
+
+// Guardrails lists the control-plane guardrails and their current dispositions. An empty scope lists
 // the global policy; a named environment lists its effective policy under the env to global to
-// default fallback, each entry marking whether its disposition is env-specific or inherited
-// (ADR-0035 phase 2c).
-func (c *Client) Guardrails(ctx context.Context, env string) ([]Guardrail, error) {
+// default fallback, and a name narrows that to one app or add-on instance, each entry marking which
+// tier its disposition came from (ADR-0035 phase 2c, ADR-0085 §4).
+func (c *Client) Guardrails(ctx context.Context, scope GuardScope) ([]Guardrail, error) {
 	var out struct {
 		Guardrails []Guardrail `json:"guardrails"`
 	}
-	err := c.do(ctx, http.MethodGet, withEnv("/v1/guard", env), nil, &out)
+	err := c.do(ctx, http.MethodGet, withGuardScope("/v1/guard", scope), nil, &out)
 	return out.Guardrails, err
 }
 
-// SetGuardrail sets a guardrail's disposition and returns the updated policy. An empty env sets the
-// global disposition; a named environment scopes it to that environment, storing the env-prefixed
-// code (ADR-0035 phase 2c).
-func (c *Client) SetGuardrail(ctx context.Context, env, code, disposition string) ([]Guardrail, error) {
+// SetGuardrail sets a guardrail's disposition and returns the updated policy. An empty scope sets
+// the global disposition; a named environment scopes it to that environment, storing the
+// env-prefixed code (ADR-0035 phase 2c); a name scopes it to one app or add-on instance in that
+// environment, storing env.name.code (ADR-0085 §1).
+func (c *Client) SetGuardrail(ctx context.Context, scope GuardScope, code, disposition string) ([]Guardrail, error) {
 	var out struct {
 		Guardrails []Guardrail `json:"guardrails"`
 	}
 	body := map[string]string{"disposition": disposition}
-	err := c.do(ctx, http.MethodPut, withEnv("/v1/guard/"+url.PathEscape(code), env), body, &out)
+	err := c.do(ctx, http.MethodPut, withGuardScope("/v1/guard/"+url.PathEscape(code), scope), body, &out)
 	return out.Guardrails, err
+}
+
+// withGuardScope appends the scope's non-empty parts to path as query parameters.
+func withGuardScope(path string, scope GuardScope) string {
+	path = withEnv(path, scope.Env)
+	if scope.Name == "" {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "name=" + url.QueryEscape(scope.Name)
 }
 
 // Limit is one operational limit and its effective value (ADR-0068): a bound a human sets, which is

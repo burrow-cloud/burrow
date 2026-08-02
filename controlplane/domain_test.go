@@ -85,7 +85,7 @@ func TestDefaultPolicyIsValid(t *testing.T) {
 	if err := p.Validate(); err != nil {
 		t.Fatalf("DefaultPolicy() is invalid: %v", err)
 	}
-	if p.disposition("", GuardrailScaleToZero) != DispositionConfirm {
+	if p.disposition(GuardrailScope{}, GuardrailScaleToZero) != DispositionConfirm {
 		t.Errorf("DefaultPolicy() should hold scale-to-zero for confirmation by default")
 	}
 }
@@ -97,7 +97,7 @@ func TestDefaultPolicyIsValid(t *testing.T) {
 func TestDefaultPolicyDeniesIrreversibleDeletes(t *testing.T) {
 	p := DefaultPolicy()
 	for _, code := range []GuardrailCode{GuardrailAppDelete, GuardrailDNSDelete} {
-		if got := p.disposition("", code); got != DispositionDeny {
+		if got := p.disposition(GuardrailScope{}, code); got != DispositionDeny {
 			t.Errorf("DefaultPolicy() %s = %q, want %q (ADR-0065 §3)", code, got, DispositionDeny)
 		}
 	}
@@ -105,10 +105,10 @@ func TestDefaultPolicyDeniesIrreversibleDeletes(t *testing.T) {
 	// The default is a floor: an explicit disposition in the policy table still wins, so an
 	// operator who deliberately chose confirm is not moved by the changed default.
 	relaxed := p.With(GuardrailAppDelete, DispositionConfirm).With(GuardrailDNSDelete, DispositionAllow)
-	if got := relaxed.disposition("", GuardrailAppDelete); got != DispositionConfirm {
+	if got := relaxed.disposition(GuardrailScope{}, GuardrailAppDelete); got != DispositionConfirm {
 		t.Errorf("stored app.delete = %q, want the operator's confirm to win over the default", got)
 	}
-	if got := relaxed.disposition("", GuardrailDNSDelete); got != DispositionAllow {
+	if got := relaxed.disposition(GuardrailScope{}, GuardrailDNSDelete); got != DispositionAllow {
 		t.Errorf("stored dns.delete = %q, want the operator's allow to win over the default", got)
 	}
 

@@ -103,8 +103,27 @@ func TestSignedInCloudTargetCanBeOperatedThrough(t *testing.T) {
 	if !strings.Contains(out.String(), "web") {
 		t.Errorf("stdout = %q, want the tenant's app listing", out.String())
 	}
-	// The target is named before the operation, so acting on the managed product is never silent.
-	if !strings.Contains(errb.String(), localconfig.CloudEndpoint) {
+	assertNoToken(t, out.String(), errb.String())
+}
+
+// TestAChangingCommandNamesTheCloudTarget: acting on the managed product is never silent
+// (ADR-0036). The target line is printed by the commands that CHANGE something, so this is asserted
+// on one of those — `app list` above reads, and a read names nothing (ADR-0078 §1).
+func TestAChangingCommandNamesTheCloudTarget(t *testing.T) {
+	signedInToCloud(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"app":"web","previous_replicas":1,"replicas":2}`))
+	}))
+	defer srv.Close()
+	pointCloudAt(t, srv.URL)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"app", "scale", "web", "2"}, &out, &errb); err != nil {
+		t.Fatalf("burrow app scale against a cloud target: %v\nstderr: %s", err, errb.String())
+	}
+	if !strings.Contains(errb.String(), "targeting") || !strings.Contains(errb.String(), localconfig.CloudEndpoint) {
 		t.Errorf("stderr = %q, want it to name the target the command went to", errb.String())
 	}
 	assertNoToken(t, out.String(), errb.String())

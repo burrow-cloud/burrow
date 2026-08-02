@@ -478,18 +478,23 @@ func TestLogs(t *testing.T) {
 	if strings.Contains(out, "Source:") || strings.Contains(out, "targeting") || strings.Contains(out, "───") {
 		t.Errorf("stdout = %q, want no metadata (source/targeting/divider) on stdout", out)
 	}
-	// The metadata leads on stderr: targeting, then the source note, then a divider — all before
-	// the logs so it is never missed and would still appear ahead of a stream.
+	// The metadata leads on stderr: the source note, then a divider, both before the logs so the
+	// note is never missed and would still appear ahead of a stream.
+	//
+	// There is no target line. `app logs` reads and changes nothing, so it does not name its target
+	// (ADR-0078 §1); this test used to require one ahead of the note, and that requirement is what
+	// changed, not the ordering it was asserting.
 	divider := strings.Repeat("─", 60)
-	targetIdx := strings.Index(errOut, "targeting")
 	sourceIdx := strings.Index(errOut, "Source: live Kubernetes pod logs")
 	dividerIdx := strings.Index(errOut, divider)
-	if targetIdx < 0 || sourceIdx < 0 || dividerIdx < 0 {
-		t.Fatalf("stderr = %q, want targeting, source note, and divider", errOut)
+	if sourceIdx < 0 || dividerIdx < 0 {
+		t.Fatalf("stderr = %q, want the source note and divider", errOut)
 	}
-	if !(targetIdx < sourceIdx && sourceIdx < dividerIdx) {
-		t.Errorf("stderr order = targeting@%d source@%d divider@%d, want targeting < source < divider in %q",
-			targetIdx, sourceIdx, dividerIdx, errOut)
+	if sourceIdx > dividerIdx {
+		t.Errorf("stderr order = source@%d divider@%d, want source < divider in %q", sourceIdx, dividerIdx, errOut)
+	}
+	if strings.Contains(errOut, "targeting") {
+		t.Errorf("stderr = %q, want no target line: a read names no target", errOut)
 	}
 }
 
@@ -668,6 +673,60 @@ func TestConfigList(t *testing.T) {
 	// Keys are printed sorted, one KEY=VALUE per line.
 	if out != "A=1\nB=2\n" {
 		t.Errorf("output = %q, want sorted A=1\\nB=2\\n", out)
+	}
+}
+
+// TestConfigListEmptySaysSo: an app with no config vars gets an answer, not silence. Printing
+// nothing leaves the reader unable to tell "this app has no config" from "the command failed and
+// said nothing", and the two want completely different next moves.
+func TestConfigListEmptySaysSo(t *testing.T) {
+	out, errOut, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"config": map[string]string{}})
+	}, "app", "config", "list", "web")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "No config vars set for web") {
+		t.Errorf("stdout = %q, want it to say the app has no config vars", out)
+	}
+	if !strings.Contains(out, "burrow app config set web KEY=VALUE") {
+		t.Errorf("stdout = %q, want the command that sets one", out)
+	}
+	if strings.Contains(errOut, "targeting") {
+		t.Errorf("stderr = %q, want no target line: a listing names no target", errOut)
+	}
+}
+
+// TestAReadNamesAnEnvOverride: a read prints no target line, with one exception. An explicit --env
+// asked for an environment other than the one the command would otherwise use, and swallowing that
+// would leave the person unable to tell whether the flag took.
+func TestAReadNamesAnEnvOverride(t *testing.T) {
+	_, errOut, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"config": map[string]string{"A": "1"}})
+	}, "app", "config", "list", "web", "--env", "staging")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(errOut, `env "staging"`) {
+		t.Errorf("stderr = %q, want it to name the environment the flag asked for", errOut)
+	}
+}
+
+// TestConfigListEmptyJSONIsUnchanged: the empty-state line is for a person reading a terminal. The
+// --json shape is a contract, and an empty result stays an empty result.
+func TestConfigListEmptyJSONIsUnchanged(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"config": map[string]string{}})
+	}, "app", "config", "list", "web", "--json")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("--json stdout is not clean JSON: %v\n%s", err, out)
+	}
+	if len(got) != 0 {
+		t.Errorf("--json = %q, want an empty object", out)
 	}
 }
 

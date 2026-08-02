@@ -133,6 +133,11 @@ func TestResolvePinnedMissing(t *testing.T) {
 }
 
 // TestRender covers the display strings for each shape.
+//
+// The through-line: where a resolution has an environment NAME, that name is the whole answer. The
+// kube context and namespace are how Burrow found the environment, not what it is, and they belong
+// to `burrow auth status` rather than to every command's target line. Where there is no environment
+// name, the resolution says what it did resolve through and that nothing is registered for it.
 func TestRender(t *testing.T) {
 	cases := []struct {
 		name string
@@ -140,24 +145,29 @@ func TestRender(t *testing.T) {
 		want string
 	}{
 		{
-			name: "pinned registered with namespace",
+			name: "pinned registered names the environment, not the cluster coordinates",
 			r:    Resolved{Name: "nonprod", Context: "do-nyc1-nonprod", Namespace: "team-x", Mode: ModePinned},
-			want: `nonprod (context "do-nyc1-nonprod", namespace "team-x")`,
+			want: "nonprod",
 		},
 		{
-			name: "pinned with no namespace omits it",
-			r:    Resolved{Name: "prod", Context: "do-nyc1-prod", Mode: ModePinned},
-			want: `prod (context "do-nyc1-prod")`,
-		},
-		{
-			name: "following unregistered",
-			r:    Resolved{Context: "do-nyc1-dev", Mode: ModeFollowing},
-			want: "following kubectl: do-nyc1-dev (unregistered)",
-		},
-		{
-			name: "following registered",
+			name: "following registered names the environment too",
 			r:    Resolved{Name: "dev", Context: "do-nyc1-dev", Namespace: "team-x", Mode: ModeFollowing},
-			want: `dev (context "do-nyc1-dev", namespace "team-x") (following kubectl)`,
+			want: "dev",
+		},
+		{
+			name: "targeted with a handle inside it names the environment",
+			r:    Resolved{Name: "prod", Context: "do-nyc1", Target: "do-nyc1", Mode: ModeTargeted},
+			want: "prod",
+		},
+		{
+			name: "following unregistered has only the context to name",
+			r:    Resolved{Context: "do-nyc1-dev", Mode: ModeFollowing},
+			want: `kube context "do-nyc1-dev" (no environment registered)`,
+		},
+		{
+			name: "targeted with no environment names the target",
+			r:    Resolved{Context: "do-nyc1", Target: "do-nyc1", Mode: ModeTargeted},
+			want: `"do-nyc1" (no environment registered)`,
 		},
 		{
 			name: "following with no current context",

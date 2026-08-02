@@ -284,7 +284,7 @@ func newEnvFollowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Now following the current kube context: %s\n", resolved.Render())
+			fmt.Fprintf(cmd.OutOrStdout(), "Now following the current kube context. Commands target %s.\n", resolved.Render())
 			return nil
 		},
 	}

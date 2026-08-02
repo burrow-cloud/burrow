@@ -866,9 +866,28 @@ configuration file; declining leaves a working setup, and `burrow agent claude i
 Detection is by the tool's own config directory (`~/.claude/`), not by a name on `$PATH`. A
 non-interactive run prints the pointer and asks nothing.
 
-Limits: **signing in to `burrow-cloud.dev` is not built in this open-source CLI.** Selecting it says
-so and records nothing — the sign-in is part of the managed product, and this repository carries the
-target model, the picker, and the local state. Only Claude Code has built-in agent wiring, so the
+**Signing in to `burrow-cloud.dev`** is an RFC 8628 device authorization with PKCE, and it is in this
+open-source CLI: one binary, two targets. Selecting the managed product prints a short code, opens
+your browser on the approval page with the code already filled in, and waits. **Check the code in the
+browser matches the one in your terminal before approving** — that comparison is the point of showing
+it. With no browser to open, the URL is printed for you to visit yourself.
+
+Approving issues **two** credentials, yours and `burrow-agent`'s, each revocable on its own from the
+console's credential list. Both are written to files readable only by you and **neither token is ever
+displayed**; `burrow auth login` names both paths so you can inspect or delete them:
+
+| | |
+| --- | --- |
+| Yours | `~/.burrow/credentials/burrow-cloud.dev.json` |
+| `burrow-agent`'s | `~/.burrow/agents/burrow-cloud.dev.json` |
+
+They do not expire and there is no refresh: these credentials are **revoked**, not renewed. Nothing
+about this runs for a Kubernetes target — choosing `Other` needs no account and makes no request to
+the managed product.
+
+Limits: a Burrow Cloud target is one you can sign in to, but **commands cannot yet act through one** —
+every command reaches its control plane through a kubeconfig, so with the managed product active they
+say which target is selected and stop. Only Claude Code has built-in agent wiring, so the
 detection table's other rows (`~/.codex/`, `~/.cursor/`, `~/.codeium/windsurf/`) are recorded but not
 actionable. And §4 of the ADR — every mutating command naming the target it changed — is **not
 built**; per-app commands print the resolved target today, other mutating commands do not
@@ -1327,7 +1346,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Audit-log retention | [0027](adr/0027-audit-log.md) | Not built; deferred in the ADR. |
 | The environment forcing function on the local-handle axis | [0047](adr/0047-agent-environment-safety.md) | Not built (specified for the since-removed MCP layer); the burrowd-registry axis is built. |
 | Registry onboarding via the developer's code-provider registry | [0046](adr/0046-registry-onboarding.md) | Proposed, held deliberately; only the in-cluster registry shipped, via ADR-0054. |
-| Authenticating to the Burrow Cloud target | [0078](adr/0078-the-cli-points-at-a-target.md) §1 | Not built here, and will not be. The picker offers `burrow-cloud.dev` and selecting it says plainly that sign-in is not available in this build, recording nothing; the device flow is cloud ADR-0028 and lives with the managed product. The open-source CLI carries the target kind and the seam. |
+| Acting on a Burrow Cloud target | [0078](adr/0078-the-cli-points-at-a-target.md) §1 | Partly built. Signing in **is** built: `burrow auth login` runs cloud ADR-0028's RFC 8628 device flow with PKCE, opens the browser on the approval page, and stores the credential pair it issues. What is not built is operating through one — every command reaches its control plane through a kubeconfig, so a selected Burrow Cloud target is reported and refused rather than acted on. |
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
 | Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Partly built. The destination registration is built: the `s3` provider type and object-storage capability, the credential pair as two keys in `burrow-credentials`, the configuration-time probe write/delete, the recorded globally-unique bucket, lifecycle-versus-retention reconciliation, and `bucket.create` at `confirm` with bucket deletion absent from both CLIs. The backup WRITE path is built too: the dump is shipped to the store and read back before the row says `completed`, retries are for a store that will not answer and never for one that answered and refused, and `burrow addon backup-health postgres` reports destination reachability, the age of the last successful backup, the age of the last one that left the cluster, and the last failure. What is left of §7 is the ALERT: physical backups are now scheduled (ADR-0066 §2), but an instance with no destination and every logical dump still are not, so there is no threshold that would be right for all of them and none is asserted. [#331](https://github.com/burrow-cloud/burrow/issues/331) |

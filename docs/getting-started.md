@@ -67,8 +67,13 @@ burrow auth switch <name>              # change the active one
 
 Only the context **name** is stored, in `~/.burrow/config` — your credential stays in the kubeconfig,
 so rotating it keeps working. This is also how a **second person** starts using a cluster that is
-already set up: they select the context they already have and install nothing. Signing in to the
-managed product is not part of this open-source CLI.
+already set up: they select the context they already have and install nothing.
+
+The first entry in the picker is `burrow-cloud.dev`, the managed product. Selecting it prints a short
+code and opens your browser on an approval page; check the code there matches the one in your
+terminal, approve, and you are signed in. Two credentials are issued, yours and `burrow-agent`'s,
+written to files only you can read (`~/.burrow/credentials/` and `~/.burrow/agents/`) and never
+displayed. Everything below needs none of that — the self-hosted path needs no account.
 
 ## Part 2 - Connect your agent
 

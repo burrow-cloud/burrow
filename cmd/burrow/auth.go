@@ -28,27 +28,14 @@ import (
 //
 // Authenticating is NOT installing (ADR-0078 §3). Install is a one-time, cluster-admin act on a
 // cluster; auth is per-person and repeatable. The second person to use a cluster brings their own
-// kubeconfig context and installs nothing, so nothing in this file applies a manifest, mints a
-// credential, or contacts a cluster's control plane.
+// kubeconfig context and installs nothing, so nothing here applies a manifest or contacts a
+// cluster's control plane. Signing in to the managed product does obtain a credential for the
+// person, from the managed product, over cloud ADR-0028's device flow — that is authentication, not
+// installation, and it touches no cluster either.
 
-// errCloudSignInUnavailable is what selecting the managed product yields in this build. Signing in
-// to Burrow Cloud is a device flow decided by cloud ADR-0028 and built in the managed product's own
-// repository; the open-source CLI carries the target model, the picker and the local state, and
-// deliberately does not carry a stub that pretends to sign in (ADR-0009).
-var errCloudSignInUnavailable = errors.New(
-	"signing in to " + localconfig.CloudEndpoint + " is not available in this build.\n" +
-		"Burrow Cloud is the managed product and its sign-in ships with it; this open-source CLI\n" +
-		"knows the target but has no way to authenticate to it yet, so nothing was recorded.\n\n" +
-		"To run Burrow on your own Kubernetes cluster instead, choose \"Other\" at the prompt, or:\n" +
-		"  burrow auth login --context <kube-context>")
-
-// cloudSignInFn signs in to the managed product and returns the target to record. It is the seam
-// the managed product's own build replaces with cloud ADR-0028's device flow; the open-source
-// default authenticates nothing, makes no network call, and says so. A target is recorded only if
-// this returns successfully, so a failed sign-in never leaves a target nothing can reach.
-var cloudSignInFn = func(ctx context.Context, out io.Writer) (localconfig.Target, error) {
-	return localconfig.Target{}, errCloudSignInUnavailable
-}
+// Selecting burrow-cloud.dev runs cloud ADR-0028's device flow, in cloudlogin.go. It is a real
+// client in this binary and not a seam a managed build fills: one binary, two targets, which is
+// ADR-0078's whole premise.
 
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -86,10 +73,13 @@ func newAuthLoginCmd() *cobra.Command {
 		Use:   "login",
 		Short: "Choose where you use Burrow and make it the active target",
 		Long: "login asks where you use Burrow and records the answer as your active target.\n\n" +
-			"Pressing return selects " + localconfig.CloudEndpoint + ", the managed product. Choosing \"Other\"\n" +
-			"lists the contexts already in your kubeconfig, so you pick a cluster by a name you recognise\n" +
-			"rather than typing a server URL. Only the context NAME is stored; your credential stays in the\n" +
-			"kubeconfig.\n\n" +
+			"Pressing return selects " + localconfig.CloudEndpoint + ", the managed product: your browser opens\n" +
+			"on an approval page, you check the code there matches the one printed here, and you approve. Two\n" +
+			"credentials are issued — yours and burrow-agent's — and both are written to files only you can\n" +
+			"read. Neither is displayed. With no browser to open, the URL is printed to visit yourself.\n\n" +
+			"Choosing \"Other\" lists the contexts already in your kubeconfig, so you pick a cluster by a name\n" +
+			"you recognise rather than typing a server URL. Only the context NAME is stored; your credential\n" +
+			"stays in the kubeconfig, and nothing about that path needs an account.\n\n" +
 			"It installs nothing and contacts no cluster. Pass --cloud or --context to select without a\n" +
 			"prompt.\n\n" +
 			"Afterwards it offers to restrict an installed coding agent to burrow-agent, Burrow's scoped\n" +
@@ -147,7 +137,7 @@ func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Wri
 func chooseTarget(ctx context.Context, o authLoginOpts, p *prompter, out io.Writer, interactive bool) (localconfig.Target, error) {
 	switch {
 	case o.cloud:
-		return cloudSignInFn(ctx, out)
+		return cloudSignIn(ctx, out, interactive)
 	case o.kubeContext != "":
 		return kubernetesTarget(o.kubeconfig, o.kubeContext)
 	case !interactive:
@@ -162,7 +152,7 @@ func chooseTarget(ctx context.Context, o authLoginOpts, p *prompter, out io.Writ
 		return localconfig.Target{}, err
 	}
 	if choice == whereCloud {
-		return cloudSignInFn(ctx, out)
+		return cloudSignIn(ctx, out, interactive)
 	}
 	return pickKubeContext(o.kubeconfig, p)
 }

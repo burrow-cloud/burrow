@@ -243,3 +243,72 @@ func TestNewFactoryControlPlaneURLRequiresToken(t *testing.T) {
 		t.Errorf("error = %q, want it to name the missing token", err)
 	}
 }
+
+// installIDConfig points $BURROW_CONFIG at a temp file holding a handle for kube context "prod" that
+// records an install id, so the agent's resolution can be checked for it.
+func installIDConfig(t *testing.T, installID string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config")
+	t.Setenv("BURROW_CONFIG", path)
+	cfg := &localconfig.Config{
+		Environments: []localconfig.Environment{{
+			Name:      "prod",
+			Context:   "prod",
+			InstallID: installID,
+		}},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+}
+
+// TestConnectOptionsCarriesTheInstallID confirms the agent sends the install its handle was
+// registered against (ADR-0084 §5). The agent is the primary caller — it is what deploys — so a
+// check that covered only the CLI would leave the failure the record is actually about, a deploy
+// landing on a cluster rebuilt under a reused context name, unprotected.
+func TestConnectOptionsCarriesTheInstallID(t *testing.T) {
+	installIDConfig(t, "install-abc")
+
+	var errb bytes.Buffer
+	opts, err := ConnectOptions("prod", "", "burrow", false, &errb)
+	if err != nil {
+		t.Fatalf("ConnectOptions: %v", err)
+	}
+	if opts.InstallID != "install-abc" {
+		t.Errorf("InstallID = %q, want install-abc from the registered handle", opts.InstallID)
+	}
+}
+
+// TestConnectOptionsWithoutAnInstallIDSendsNone confirms both ways an agent legitimately has no id —
+// a handle registered before ids existed, and a context registered to no handle at all — resolve to
+// an empty id, which sends no header and is served.
+func TestConnectOptionsWithoutAnInstallIDSendsNone(t *testing.T) {
+	installIDConfig(t, "")
+
+	var errb bytes.Buffer
+	for _, kubeContext := range []string{"prod", "staging"} {
+		opts, err := ConnectOptions(kubeContext, "", "burrow", false, &errb)
+		if err != nil {
+			t.Fatalf("ConnectOptions(%q): %v", kubeContext, err)
+		}
+		if opts.InstallID != "" {
+			t.Errorf("context %q: InstallID = %q, want empty", kubeContext, opts.InstallID)
+		}
+	}
+}
+
+// TestConnectOptionsExplicitKubeconfigSendsNoInstallID confirms the operator's escape hatch stays an
+// escape hatch: naming a kubeconfig by hand chooses the route directly, so an id recorded for that
+// context no longer describes what is on the other end and is not asserted.
+func TestConnectOptionsExplicitKubeconfigSendsNoInstallID(t *testing.T) {
+	installIDConfig(t, "install-abc")
+
+	var errb bytes.Buffer
+	opts, err := ConnectOptions("prod", "/explicit/kubeconfig", "burrow", false, &errb)
+	if err != nil {
+		t.Fatalf("ConnectOptions: %v", err)
+	}
+	if opts.InstallID != "" {
+		t.Errorf("InstallID = %q, want none under an explicit kubeconfig", opts.InstallID)
+	}
+}

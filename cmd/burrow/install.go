@@ -20,6 +20,7 @@ import (
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -530,8 +531,14 @@ func joinExistingInstall(ctx context.Context, a installArgs, cs kubernetes.Inter
 
 	// The joining person learns which install this is from the cluster itself, which is why the id
 	// lives in a ConfigMap rather than a Secret (ADR-0084 §5): reading it needs no privileged access,
-	// because it grants none. An install that predates ids has no ConfigMap and records nothing.
-	if id, err := readInstallID(ctx, cs, a.namespace); err == nil {
+	// because it grants none. An install that predates ids has no ConfigMap, and records nothing
+	// quietly; a read that actually FAILED is said out loud, because the join otherwise succeeds and
+	// the person would have no way to know their target was left unchecked. Neither fails the join —
+	// the local config is written either way.
+	if id, err := readInstallID(ctx, cs, a.namespace); err != nil {
+		fmt.Fprintf(stdout, "\n%scould not read which install this is, so your target will not be checked against it: %v\n"+
+			"Re-run `burrow cluster install %s` once that is resolved.\n", warning(stdout), err, a.kubeContext)
+	} else {
 		recordInstallID(a.kubeContext, id, stdout)
 	}
 
@@ -542,16 +549,17 @@ func joinExistingInstall(ctx context.Context, a installArgs, cs kubernetes.Inter
 	return nil
 }
 
-// recordInstallID writes the id of the install now running behind a kube context onto the target
-// pointed at that context (ADR-0084 §5). The context name is how a command gets to a cluster; the id
-// is how it knows it arrived at this Burrow rather than at another one standing behind a name that
-// was reused.
+// recordInstallID writes the id of the install now running behind a kube context onto every local
+// record that names that context — the target the `burrow` CLI resolves through and the environment
+// handle `burrow-agent` resolves through (ADR-0084 §5). The context name is how a command gets to a
+// cluster; the id is how it knows it arrived at this Burrow rather than at another one standing
+// behind a name that was reused.
 //
 // It is best-effort and quiet on both of the ways it can do nothing:
 //
-//   - There is no target for this context. Installing does not require having run `burrow auth
+//   - Nothing is registered for this context. Installing does not require having run `burrow auth
 //     login` first, so this is an ordinary state, not a failure. The id is recorded on the cluster
-//     regardless, and the target picks it up whenever one is pointed here.
+//     regardless, and a target or handle pointed here later picks it up.
 //   - The local config cannot be loaded or saved. The control plane is installed and working at this
 //     point; a bookkeeping problem is worth saying out loud but must not fail the install behind it.
 //
@@ -565,28 +573,32 @@ func recordInstallID(kubeContext, installID string, stdout io.Writer) {
 		fmt.Fprintf(stdout, "\n%scould not load the local config to record which install this is: %v\n", warning(stdout), err)
 		return
 	}
-	if !cfg.SetTargetInstallID(kubeContext, installID) {
+	if !cfg.SetInstallID(kubeContext, installID) {
 		return
 	}
 	if err := cfg.Save(); err != nil {
-		fmt.Fprintf(stdout, "\n%scould not record which install this is on your target: %v\n", warning(stdout), err)
+		fmt.Fprintf(stdout, "\n%scould not record which install this is locally: %v\n", warning(stdout), err)
 	}
 }
 
-// readInstallID reads an install's own id out of the ConfigMap it records it in (ADR-0084 §5). A
-// missing ConfigMap, or one with no id in it, is reported as an error the caller decides about: for
-// the join path it means the install predates install ids, which is not a problem to report to
-// anybody — there is simply no id to record yet, and the next upgrade mints one.
+// readInstallID reads an install's own id out of the ConfigMap it records it in (ADR-0084 §5). It
+// separates "this install has no id" from "the id could not be read", because the two look identical
+// at the call site and mean opposite things.
+//
+// An absent ConfigMap, or one carrying no id, returns "" and no error: the control plane predates
+// install ids, which is an ordinary state needing no comment — the next upgrade mints one. Anything
+// else is a real failure and is returned: an RBAC denial or an API-server outage means the id is
+// unknown rather than absent, and silently recording nothing there would leave somebody wondering
+// why their target is never checked.
 func readInstallID(ctx context.Context, cs kubernetes.Interface, namespace string) (string, error) {
 	cm, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, connect.DefaultInstallConfigMap, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("reading configmap %s/%s: %w", namespace, connect.DefaultInstallConfigMap, err)
 	}
-	id := cm.Data[connect.DefaultInstallIDKey]
-	if id == "" {
-		return "", fmt.Errorf("configmap %s/%s has no %q", namespace, connect.DefaultInstallConfigMap, connect.DefaultInstallIDKey)
-	}
-	return id, nil
+	return cm.Data[connect.DefaultInstallIDKey], nil
 }
 
 // errNoCluster is the clear stop when there is no kubeconfig (or it holds no contexts): Burrow

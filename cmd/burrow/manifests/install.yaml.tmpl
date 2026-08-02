@@ -480,8 +480,15 @@ spec:
             # install that it has reached the wrong Burrow. It is read from the ConfigMap above
             # rather than restated here, so the value a client compares against and the value the
             # cluster records can never drift apart.
+            #
+            # optional: true because the design's answer to "this install has no id" is to serve
+            # every caller, and a container that will not start cannot serve anybody. Without it, a
+            # ConfigMap that was deleted, or not yet applied, wedges burrowd in
+            # CreateContainerConfigError — turning a check that is meant to degrade into permissive
+            # into a control plane that is down. The id is a refinement of an existing relationship;
+            # it must never be a precondition for burrowd running at all.
             - name: BURROW_INSTALL_ID
-              valueFrom: { configMapKeyRef: { name: burrow-install, key: id } }
+              valueFrom: { configMapKeyRef: { name: burrow-install, key: id, optional: true } }
             - name: BURROW_API_TOKEN
               valueFrom: { secretKeyRef: { name: burrowd-api-token, key: token } }
             - name: BURROW_DATABASE_URL

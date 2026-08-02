@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -14,7 +16,9 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/localconfig"
@@ -314,5 +318,138 @@ func TestUpgradeOptionsMintsAnInstallIDWhenTheKeyIsEmpty(t *testing.T) {
 	}
 	if opts.InstallID == "" {
 		t.Error("an empty id in the ConfigMap must be replaced with a minted one")
+	}
+}
+
+// stubUpgrade replaces the cluster-touching seams for a full `burrow cluster upgrade` run against a
+// fake cluster, and points $BURROW_CONFIG at a temp file. cs is the fake cluster the upgrade reads
+// and re-renders from. It returns a pointer to everything the upgrade applied, so the id recorded
+// locally can be checked against the id the cluster was actually given. All seams are restored on
+// cleanup.
+func stubUpgrade(t *testing.T, cs kubernetes.Interface) *strings.Builder {
+	t.Helper()
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+
+	origCS := clientsetFn
+	clientsetFn = func(string, string) (kubernetes.Interface, error) { return cs, nil }
+
+	var applied strings.Builder
+	origApply := applyFn
+	applyFn = func(_ context.Context, _, _ string, manifests string, _ bool, _, _ io.Writer) error {
+		applied.WriteString(manifests)
+		return nil
+	}
+
+	// The scoped-credential backfill needs a real token Secret and REST config; it is exercised in
+	// its own tests. Here it records a fixed path so the upgrade completes.
+	origJoin := joinAgentCredentialFn
+	joinAgentCredentialFn = func(_ context.Context, _, _, _, envName string) (string, string, error) {
+		return filepath.Join(t.TempDir(), "agents", envName), agentKubeContextName, nil
+	}
+
+	t.Cleanup(func() {
+		clientsetFn = origCS
+		applyFn = origApply
+		joinAgentCredentialFn = origJoin
+	})
+	return &applied
+}
+
+// upgradeKubeconfig writes a kubeconfig whose current context is named ctxName, so an upgrade — which
+// acts on the ambient current context — resolves to a context the test has registered locally.
+func upgradeKubeconfig(t *testing.T, ctxName string) string {
+	t.Helper()
+	cfg := api.NewConfig()
+	cfg.Clusters["c"] = &api.Cluster{Server: "https://cluster.example:6443", InsecureSkipTLSVerify: true}
+	cfg.AuthInfos["user"] = &api.AuthInfo{Token: "t"}
+	cfg.Contexts[ctxName] = &api.Context{Cluster: "c", AuthInfo: "user"}
+	cfg.CurrentContext = ctxName
+	return writeKubeconfig(t, cfg)
+}
+
+// TestUpgradeRecordsAMintedInstallIDLocally is the end-to-end claim recordUpgradedInstallID makes:
+// upgrading a control plane that predates install ids both mints one cluster-side AND records it on
+// the local records pointed at that cluster. Without the local half the id would exist only on the
+// cluster, and the check would protect nothing on an install that predates it (ADR-0084 §5).
+func TestUpgradeRecordsAMintedInstallIDLocally(t *testing.T) {
+	applied := stubUpgrade(t, existingInstall("burrow", "apps"))
+	kubeconfig := upgradeKubeconfig(t, "do-nyc3-burrow")
+
+	// A target and a handle both pointed at the upgraded cluster: the CLI resolves through one and
+	// burrow-agent through the other, so both have to learn the id.
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.KubernetesTarget("do-nyc3-burrow")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Add(localconfig.Environment{Name: "prod", Context: "do-nyc3-burrow", AppNamespace: "apps"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "upgrade", "--kubeconfig", kubeconfig, "--burrowd-image", "img:2", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("cluster upgrade: %v\n%s", err, errb.String())
+	}
+
+	cfg, err = localconfig.Load()
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	tgt, ok := cfg.LookupTarget("do-nyc3-burrow")
+	if !ok {
+		t.Fatalf("the target went missing: %+v", cfg.Targets)
+	}
+	if tgt.InstallID == "" {
+		t.Fatal("upgrading an install that predates ids recorded none on the target")
+	}
+	env, ok := cfg.Lookup("prod")
+	if !ok {
+		t.Fatalf("the handle went missing: %+v", cfg.Environments)
+	}
+	if env.InstallID != tgt.InstallID {
+		t.Errorf("handle InstallID = %q, target = %q; both point at the same cluster and must agree", env.InstallID, tgt.InstallID)
+	}
+	if !strings.Contains(applied.String(), `id: "`+tgt.InstallID+`"`) {
+		t.Errorf("the id recorded locally (%q) is not the one applied to the cluster", tgt.InstallID)
+	}
+}
+
+// TestUpgradePreservesTheRecordedInstallIDLocally covers the routine case: the cluster already has an
+// id, so the upgrade re-records the same value and nothing a target was checking against changes.
+func TestUpgradePreservesTheRecordedInstallIDLocally(t *testing.T) {
+	cs := existingInstall("burrow", "apps")
+	if _, err := cs.CoreV1().ConfigMaps("burrow").Create(context.Background(), installConfigMap("burrow", "install-abc"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding the install ConfigMap: %v", err)
+	}
+	stubUpgrade(t, cs)
+	kubeconfig := upgradeKubeconfig(t, "do-nyc3-burrow")
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.KubernetesTarget("do-nyc3-burrow")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "upgrade", "--kubeconfig", kubeconfig, "--burrowd-image", "img:2", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("cluster upgrade: %v\n%s", err, errb.String())
+	}
+
+	cfg, err = localconfig.Load()
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	if tgt, _ := cfg.LookupTarget("do-nyc3-burrow"); tgt.InstallID != "install-abc" {
+		t.Errorf("target InstallID = %q, want the preserved install-abc", tgt.InstallID)
 	}
 }

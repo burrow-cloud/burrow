@@ -56,6 +56,16 @@ func TestInstallGateRefusesAnotherInstall(t *testing.T) {
 			t.Errorf("error %q, want substring %q", e.Error, want)
 		}
 	}
+	// The remedy has to be one that actually re-points the target. `burrow cluster install` against an
+	// already-installed cluster joins it and records this install's id; `burrow auth login` records a
+	// context name, contacts no cluster, and would leave the target unchecked. This is the one message
+	// the whole check exists to print, so naming the wrong command would be worse than naming none.
+	if !strings.Contains(e.Error, "burrow cluster install") {
+		t.Errorf("error %q, want it to name `burrow cluster install`, the command that records the id", e.Error)
+	}
+	if strings.Contains(e.Error, "burrow auth login") {
+		t.Errorf("error %q must not send the reader to `burrow auth login`: it learns no id and leaves the target unchecked", e.Error)
+	}
 }
 
 // TestInstallGateServesTheInstallItIs confirms the ordinary case: a caller naming this install is

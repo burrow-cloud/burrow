@@ -174,11 +174,19 @@ const installMismatchCode = "install_mismatch"
 // It says "the cluster at this context" rather than naming the context, because the control plane
 // does not know what the caller's kubeconfig calls it: the name is local to the machine that made
 // the call, and inventing one here would print something the reader cannot find.
+//
+// The remedy names `burrow cluster install` and deliberately NOT `burrow auth login`. Login records
+// a context name and contacts no cluster, so it has no id to learn and leaves the target unchecked;
+// `burrow cluster install` against an already-installed cluster performs the local join, which reads
+// this install's id out of its ConfigMap and records it. Only one of those two leaves the target
+// pointed at the install that is actually there, and this is the one message the whole check exists
+// to print — a remedy that does not fix it would be worse than no remedy.
 func installMismatchMessage(want, have string) string {
 	return fmt.Sprintf("this is not the Burrow install you are pointed at: your target expects the Burrow installed as %s, "+
 		"and the cluster at this context is running install %s. A cluster rebuilt under the same kube context name is the "+
-		"usual cause — the name still resolves, the Burrow behind it is a different one. Point at it again with "+
-		"`burrow auth login`, or select another target with `burrow auth switch <name>`.", want, have)
+		"usual cause — the name still resolves, the Burrow behind it is a different one. If this cluster is the one you "+
+		"want, re-point your target at it with `burrow cluster install <your kube context>`, which joins the install "+
+		"already there and records its id; otherwise select a different target with `burrow auth switch <name>`.", want, have)
 }
 
 // installGate refuses a request whose X-Burrow-Install names an install this control plane is not,

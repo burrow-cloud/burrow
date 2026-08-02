@@ -234,9 +234,11 @@ func TestInstallRoundTripperSendsInstallHeader(t *testing.T) {
 	}
 }
 
-// TestDirectTransportSendsInstallID confirms the direct-URL transport carries the install id
-// alongside the credential, so a control-plane URL is subject to the same check as the kubeconfig
-// proxy path rather than being a way around it.
+// TestDirectTransportSendsInstallID confirms the direct-URL transport carries an install id it is
+// given alongside the credential, so the check is a property of every transport in this package
+// rather than of one route. It asserts what THIS transport does with a configured id; whether a
+// given caller has one to configure is that caller's business (the `burrow` CLI's --control-plane
+// path resolves no target, so it has none).
 func TestDirectTransportSendsInstallID(t *testing.T) {
 	var gotInstall string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

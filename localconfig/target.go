@@ -184,6 +184,13 @@ func (c *Config) ActiveTarget() (Target, bool, error) {
 // SetTarget records a target and makes it active, replacing any existing entry with the same name
 // (re-authenticating against a target you already have is an ordinary thing to do). The caller
 // Saves.
+//
+// Replacing the entry wholesale CLEARS any install id it carried, and that is correct rather than an
+// oversight. Re-pointing at a context is exactly what somebody does after rebuilding the cluster
+// behind it, so carrying the old id forward would preserve a mismatch through the act meant to
+// resolve it. This command contacts no cluster and cannot learn the new id, so it leaves the target
+// unchecked until an install or a join records one — unchecked is the state every target was in
+// before ids existed, and it is served.
 func (c *Config) SetTarget(t Target) error {
 	if err := t.validate(); err != nil {
 		return fmt.Errorf("localconfig: %w", err)
@@ -200,21 +207,25 @@ func (c *Config) SetTarget(t Target) error {
 	return nil
 }
 
-// SetTargetInstallID records the id of the Burrow install reachable through a kubeconfig context on
-// every Kubernetes target that names that context, and reports whether any target was updated. The
-// caller Saves.
+// SetInstallID records the id of the Burrow install reachable through a kubeconfig context on every
+// local record that names that context — Kubernetes targets and environment handles alike — and
+// reports whether anything was updated. The caller Saves.
 //
-// It is addressed by CONTEXT rather than by target name because that is what the writer knows.
-// `burrow cluster install <context>` and its join path are told a context and learn an id from the
-// cluster they just reached; which target — if any — a person happens to have pointed at that
+// Both, because the two are read by different callers and each one alone leaves a hole: the `burrow`
+// CLI resolves through a target, and `burrow-agent` resolves through a handle. Recording only on the
+// target would check the operator and exempt the agent, which is the thing actually deploying.
+//
+// It is addressed by CONTEXT rather than by name because that is what the writer knows. `burrow
+// cluster install <context>`, its join path, and `burrow cluster upgrade` are told a context and
+// learn an id from the cluster they just reached; which target or handle happens to point at that
 // context is this file's business, not theirs. Nothing registered for the context is an ordinary
-// outcome, not an error: installing does not require having run `burrow auth login` first, and an
-// id with nowhere to be recorded is simply not recorded (ADR-0084 §5).
+// outcome, not an error: installing does not require having run `burrow auth login` first, and an id
+// with nowhere to be recorded is simply not recorded (ADR-0084 §5).
 //
-// More than one target may name the same context. All of them are updated, because they all reach
-// the same install, and leaving one behind would make the mismatch check fire on the target that
-// happens to be selected rather than on the cluster having actually changed.
-func (c *Config) SetTargetInstallID(context, installID string) bool {
+// More than one record may name the same context. All of them are updated, because they all reach
+// the same install, and leaving one behind would make the mismatch fire on which record happened to
+// be selected rather than on the cluster having actually changed.
+func (c *Config) SetInstallID(context, installID string) bool {
 	if context == "" || installID == "" {
 		return false
 	}
@@ -222,6 +233,12 @@ func (c *Config) SetTargetInstallID(context, installID string) bool {
 	for i := range c.Targets {
 		if c.Targets[i].Kind == TargetKindKubernetes && c.Targets[i].Context == context {
 			c.Targets[i].InstallID = installID
+			updated = true
+		}
+	}
+	for i := range c.Environments {
+		if c.Environments[i].Context == context {
+			c.Environments[i].InstallID = installID
 			updated = true
 		}
 	}

@@ -443,12 +443,17 @@ func (o *commonOpts) connect(ctx context.Context, tgt target) (*client.Client, e
 // proxy transport, carrying the scoped-credential and namespace choices connectOptions resolves. The
 // direct-vs-kubeconfig branch stays here so command files stay unchanged; a private module can plug a
 // different Transport in without touching them.
+//
+// Each arm forwards the target's install id (ADR-0084 §5). On the --control-plane arm that is
+// always empty today, and honestly so: naming a URL and a token bypasses target resolution
+// entirely, so there is no recorded id to forward. The field is passed rather than omitted so the
+// id travels the moment that path resolves a target, instead of the omission having to be noticed.
 func (o *commonOpts) transport(tgt target) (client.Transport, error) {
 	if o.controlPlane != "" {
 		if o.token == "" {
 			return nil, errors.New("--token (or BURROW_API_TOKEN) is required with --control-plane")
 		}
-		return client.DirectTransport{BaseURL: o.controlPlane, Token: o.token, Name: client.ClientNameCLI, Version: cliVersion()}, nil
+		return client.DirectTransport{BaseURL: o.controlPlane, Token: o.token, Name: client.ClientNameCLI, Version: cliVersion(), InstallID: tgt.installID}, nil
 	}
 	if tgt.cloudEndpoint != "" {
 		return cloudcred.Transport(cloudBaseURLFor(tgt.cloudEndpoint), cloudcred.KindCLI, client.ClientNameCLI, cliVersion())

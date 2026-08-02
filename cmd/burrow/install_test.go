@@ -16,9 +16,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/localconfig"
@@ -931,7 +935,10 @@ func TestRenderManifestsRecordsTheInstallID(t *testing.T) {
 		"name: " + connect.DefaultInstallConfigMap,
 		`id: "install-abc"`,
 		"- name: BURROW_INSTALL_ID",
-		"configMapKeyRef: { name: " + connect.DefaultInstallConfigMap + ", key: " + connect.DefaultInstallIDKey + " }",
+		// optional: true is load-bearing, not tidiness. Without it a ConfigMap that is missing or not
+		// yet applied wedges burrowd in CreateContainerConfigError, so a check designed to degrade
+		// into permissive would take the control plane down instead.
+		"configMapKeyRef: { name: " + connect.DefaultInstallConfigMap + ", key: " + connect.DefaultInstallIDKey + ", optional: true }",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered manifests missing %q:\n%s", want, out)
@@ -1098,5 +1105,82 @@ func TestInstallJoinTolerantOfAnInstallWithoutAnID(t *testing.T) {
 	}
 	if tgt, _ := cfg.LookupTarget("prod"); tgt.InstallID != "" {
 		t.Errorf("an install with no id recorded %q on the target", tgt.InstallID)
+	}
+}
+
+// TestInstallJoinSurfacesAnUnreadableInstallID covers the case that used to be silent: reading the
+// install-id ConfigMap fails for a reason that is NOT "it does not exist" — an RBAC denial, an API
+// outage — so the id is unknown rather than absent. The join still completes (the local config is
+// written either way), and it says so, because otherwise the person is left with a target that is
+// never checked and no way to know why (ADR-0084 §5).
+func TestInstallJoinSurfacesAnUnreadableInstallID(t *testing.T) {
+	stubInstallJoin(t, nil)
+
+	origCS := clientsetFn
+	clientsetFn = func(string, string) (kubernetes.Interface, error) {
+		cs := fake.NewSimpleClientset(&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: connect.DefaultTokenSecret, Namespace: connect.DefaultNamespace},
+			Data:       map[string][]byte{connect.DefaultTokenKey: []byte("existing-token")},
+		})
+		cs.PrependReactor("get", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, connect.DefaultInstallConfigMap, errors.New("no access"))
+		})
+		return cs, nil
+	}
+	t.Cleanup(func() { clientsetFn = origCS })
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.KubernetesTarget("prod")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"install", "prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("install join: %v\n%s", err, errb.String())
+	}
+
+	if !strings.Contains(out.String(), "could not read which install this is") {
+		t.Errorf("an unreadable install id was swallowed; it must be reported:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Joined the existing Burrow install") {
+		t.Errorf("the join must still complete:\n%s", out.String())
+	}
+	cfg, err = localconfig.Load()
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	if tgt, _ := cfg.LookupTarget("prod"); tgt.InstallID != "" {
+		t.Errorf("an unread id must not be guessed at, got %q", tgt.InstallID)
+	}
+}
+
+// TestInstallRecordsTheInstallIDOnTheHandle confirms the id lands on the environment handle as well
+// as the target (ADR-0084 §5). The two are read by different callers — the `burrow` CLI resolves
+// through a target, `burrow-agent` through a handle — so recording only one would check the operator
+// and exempt the agent, which is the thing actually deploying.
+func TestInstallRecordsTheInstallIDOnTheHandle(t *testing.T) {
+	stubInstall(t, twoContexts(), nil)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"install", "prod", "--environment", "my-prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("install prod: %v\n%s", err, errb.String())
+	}
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	env, ok := cfg.Lookup("my-prod")
+	if !ok {
+		t.Fatalf("environment my-prod was not recorded: %+v", cfg.Environments)
+	}
+	if env.InstallID == "" {
+		t.Error("install recorded no install id on the environment handle, so burrow-agent would go unchecked")
 	}
 }

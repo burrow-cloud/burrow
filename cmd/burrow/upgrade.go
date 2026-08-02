@@ -63,7 +63,10 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig string, dryRun
 	if image == "" {
 		return errNoBurrowdImage()
 	}
-	cs, err := clientset(kubeconfig)
+	// clientsetFn with an empty context is exactly clientset(kubeconfig) — both resolve the
+	// kubeconfig's current context — and going through the seam install already owns lets an upgrade
+	// be driven end to end against a fake cluster.
+	cs, err := clientsetFn(kubeconfig, "")
 	if err != nil {
 		return err
 	}

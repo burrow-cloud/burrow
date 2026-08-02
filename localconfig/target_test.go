@@ -182,10 +182,10 @@ func TestTargetWithoutInstallIDLoads(t *testing.T) {
 	}
 }
 
-// TestSetTargetInstallIDRecordsByContext confirms the id `burrow install` learns is recorded on every
+// TestSetInstallIDRecordsByContext confirms the id `burrow install` learns is recorded on every
 // target that names the context it installed into, and on no other (ADR-0084 §5). The writer knows a
 // context; which targets point at it is this package's business.
-func TestSetTargetInstallIDRecordsByContext(t *testing.T) {
+func TestSetInstallIDRecordsByContext(t *testing.T) {
 	cfg := &Config{Targets: []Target{
 		{Name: "prod", Kind: TargetKindKubernetes, Context: "do-nyc3-burrow"},
 		{Name: "prod-alias", Kind: TargetKindKubernetes, Context: "do-nyc3-burrow"},
@@ -193,8 +193,8 @@ func TestSetTargetInstallIDRecordsByContext(t *testing.T) {
 		CloudTarget(),
 	}}
 
-	if !cfg.SetTargetInstallID("do-nyc3-burrow", "install-1") {
-		t.Fatal("SetTargetInstallID reported nothing updated, want the two targets on that context")
+	if !cfg.SetInstallID("do-nyc3-burrow", "install-1") {
+		t.Fatal("SetInstallID reported nothing updated, want the two targets on that context")
 	}
 	for _, name := range []string{"prod", "prod-alias"} {
 		tgt, _ := cfg.LookupTarget(name)
@@ -210,13 +210,13 @@ func TestSetTargetInstallIDRecordsByContext(t *testing.T) {
 	}
 }
 
-// TestSetTargetInstallIDWithNoTargetIsNotAnError confirms installing without having run `burrow auth
+// TestSetInstallIDWithNoTargetIsNotAnError confirms installing without having run `burrow auth
 // login` first is an ordinary state: there is nowhere to record the id, nothing is changed, and the
 // caller is told so rather than failing.
-func TestSetTargetInstallIDWithNoTargetIsNotAnError(t *testing.T) {
+func TestSetInstallIDWithNoTargetIsNotAnError(t *testing.T) {
 	cfg := &Config{}
-	if cfg.SetTargetInstallID("do-nyc3-burrow", "install-1") {
-		t.Error("SetTargetInstallID reported an update against a config with no targets")
+	if cfg.SetInstallID("do-nyc3-burrow", "install-1") {
+		t.Error("SetInstallID reported an update against a config with no targets")
 	}
 }
 
@@ -255,5 +255,63 @@ func TestResolveCarriesTheInstallIDThroughAPinnedHandle(t *testing.T) {
 	}
 	if resolved.InstallID != "install-1" {
 		t.Errorf("resolved InstallID = %q, want install-1", resolved.InstallID)
+	}
+}
+
+// TestSetTargetClearsAStaleInstallID pins the behaviour the mismatch message depends on. Re-pointing
+// at a context is exactly what somebody does after rebuilding the cluster behind it, so carrying the
+// old id forward would preserve a mismatch through the act meant to resolve it. Login cannot learn
+// the new id (it contacts no cluster), so it leaves the target unchecked — the state every target
+// was in before ids existed, and one that is served.
+func TestSetTargetClearsAStaleInstallID(t *testing.T) {
+	cfg := &Config{Targets: []Target{
+		{Name: "prod", Kind: TargetKindKubernetes, Context: "do-nyc3-burrow", InstallID: "install-old"},
+	}}
+	if err := cfg.SetTarget(KubernetesTarget("do-nyc3-burrow")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	tgt, _ := cfg.LookupTarget("do-nyc3-burrow")
+	if tgt.InstallID != "" {
+		t.Errorf("InstallID = %q, want it cleared: a re-login must not preserve an id for a cluster that may have been rebuilt", tgt.InstallID)
+	}
+}
+
+// TestSetInstallIDRecordsOnHandlesToo confirms the id lands on environment handles as well as
+// targets (ADR-0084 §5). The CLI resolves through a target and burrow-agent through a handle, so
+// recording only one checks the operator and exempts the agent.
+func TestSetInstallIDRecordsOnHandlesToo(t *testing.T) {
+	cfg := &Config{
+		Environments: []Environment{
+			{Name: "prod", Context: "do-nyc3-burrow"},
+			{Name: "staging", Context: "do-lon1-burrow"},
+		},
+	}
+	if !cfg.SetInstallID("do-nyc3-burrow", "install-1") {
+		t.Fatal("SetInstallID reported nothing updated, want the handle on that context")
+	}
+	env, _ := cfg.Lookup("prod")
+	if env.InstallID != "install-1" {
+		t.Errorf("handle InstallID = %q, want install-1", env.InstallID)
+	}
+	if other, _ := cfg.Lookup("staging"); other.InstallID != "" {
+		t.Errorf("a handle on another context was given the id: %q", other.InstallID)
+	}
+}
+
+// TestResolveFallsBackToTheHandleInstallID confirms a target written by `burrow auth login` — which
+// carries no id — still resolves to the id its cluster's handle knows. Without the fallback the CLI
+// would go unchecked on a cluster the local config can describe perfectly well.
+func TestResolveFallsBackToTheHandleInstallID(t *testing.T) {
+	cfg := &Config{
+		CurrentTarget: "prod",
+		Environments:  []Environment{{Name: "nonprod", Context: "do-nyc1-nonprod", InstallID: "install-1"}},
+		Targets:       []Target{{Name: "prod", Kind: TargetKindKubernetes, Context: "do-nyc1-nonprod"}},
+	}
+	resolved, err := ResolveOperate(cfg, writeKubeconfig(t))
+	if err != nil {
+		t.Fatalf("ResolveOperate: %v", err)
+	}
+	if resolved.InstallID != "install-1" {
+		t.Errorf("resolved InstallID = %q, want install-1 from the handle", resolved.InstallID)
 	}
 }

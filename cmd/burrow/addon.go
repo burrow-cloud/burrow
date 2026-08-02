@@ -90,7 +90,7 @@ func newAddonBackupCmd() *cobra.Command {
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -138,7 +138,7 @@ func newAddonBackupInstanceCmd() *cobra.Command {
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -184,7 +184,7 @@ func newAddonBackupsCmd() *cobra.Command {
 			if len(args) == 2 {
 				app = args[1]
 			}
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -253,7 +253,7 @@ func newAddonBackupHealthCmd() *cobra.Command {
 			if len(args) == 2 {
 				app = args[1]
 			}
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -349,7 +349,7 @@ func newAddonRestoreCmd() *cobra.Command {
 			if backup == "" {
 				return errors.New("a backup id is required (--backup <id>)")
 			}
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -438,7 +438,7 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 			if !ackDataLoss && !stdinIsTerminal(cmd.InOrStdin()) {
 				return errRestoreInstanceNeedsTerminal(instance)
 			}
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -668,7 +668,7 @@ func newAddonAttachCmd() *cobra.Command {
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -698,7 +698,7 @@ func newAddonDetachCmd() *cobra.Command {
 		Args:  exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -736,7 +736,7 @@ func newAddonConnectCmd() *cobra.Command {
 
 			// Without --auth the backend is unauthenticated: no token and no key cross the API.
 			if !auth {
-				c, err := o.client(ctx)
+				c, err := o.client(ctx, cmd.ErrOrStderr())
 				if err != nil {
 					return err
 				}
@@ -760,7 +760,7 @@ func newAddonConnectCmd() *cobra.Command {
 			}
 			key := "addon-" + backend
 
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -803,7 +803,7 @@ func newAddonLogsCmd() *cobra.Command {
 			if len(args) == 1 {
 				query = args[0]
 			}
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -847,7 +847,7 @@ func newAddonMetricsCmd() *cobra.Command {
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -920,7 +920,7 @@ func newAddonInstallCmd() *cobra.Command {
 				return err
 			}
 			if len(args) == 0 {
-				return listInstallableAddons(ctx, o, out)
+				return listInstallableAddons(ctx, o, out, cmd.ErrOrStderr())
 			}
 			name := args[0]
 
@@ -928,12 +928,20 @@ func newAddonInstallCmd() *cobra.Command {
 			// BEFORE the install API call: burrowd is forbidden from creating RBAC (least privilege),
 			// so the grant the add-on needs cannot be minted server-side. Most add-ons need none and
 			// this is a no-op.
-			kubeContext, controlPlaneNamespace, appNamespace := o.resolveAddonNamespaces()
+			//
+			// The RBAC and the API call resolve the cluster the same way, through clusterContext, and
+			// that is the point rather than an implementation detail: they used to resolve it
+			// differently, so on a machine where the two answers differed one add-on install wrote a
+			// grant to one cluster and registered the add-on on another.
+			kubeContext, controlPlaneNamespace, appNamespace, err := o.resolveAddonNamespaces(cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
 			if err := ensureAddonRBAC(ctx, name, o.kubeconfig, kubeContext, controlPlaneNamespace, appNamespace, out); err != nil {
 				return err
 			}
 
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -967,10 +975,10 @@ func newAddonInstallCmd() *cobra.Command {
 // reachable, which are already installed. It never fails the listing when Burrow is not installed or
 // unreachable: the installable set is compiled in, so it stays useful offline (the INSTALLED column
 // blanks to "-" and a hint points at `burrow install`).
-func listInstallableAddons(ctx context.Context, o *commonOpts, out io.Writer) error {
+func listInstallableAddons(ctx context.Context, o *commonOpts, out, stderr io.Writer) error {
 	installed := map[string]bool{}
 	connected := false
-	if c, err := o.client(ctx); err == nil {
+	if c, err := o.client(ctx, stderr); err == nil {
 		if addons, err := c.Addons(ctx); err == nil {
 			connected = true
 			for _, a := range addons {
@@ -1002,25 +1010,43 @@ func listInstallableAddons(ctx context.Context, o *commonOpts, out io.Writer) er
 	return nil
 }
 
-// resolveAddonNamespaces resolves the namespaces the per-add-on RBAC targets, reusing the same
-// active-environment resolution the API connection uses (localconfig plus the --context/--namespace
-// overrides). It returns the kube context to apply against (empty means the kubeconfig's current
-// context, exactly as the API connection resolves it), the control-plane namespace, and the app
-// namespace where an add-on's app-namespace RBAC (the metrics vmagent's pod-discovery Role) belongs.
-func (o *commonOpts) resolveAddonNamespaces() (kubeContext, controlPlaneNamespace, appNamespace string) {
-	kubeContext = o.context
+// resolveAddonNamespaces resolves what the per-add-on RBAC is applied against: the kube context, the
+// control-plane namespace, and the app namespace where an add-on's app-namespace RBAC (the metrics
+// vmagent's pod-discovery Role) belongs.
+//
+// The context comes from clusterContext, which is the SAME resolution the API connection uses, so
+// the grant and the registration land on one cluster. It used to come from the environment
+// resolution instead, which folds in a pinned handle — and a pin naming another cluster is exactly
+// how an add-on install came to write a Role to one cluster and register the add-on on a second.
+// An empty context means the kubeconfig's current context, which is how connect reads it too.
+//
+// The namespaces come from the environment resolution, because that is what they are: a handle's
+// control-plane and app namespaces, not a cluster. They are taken ONLY when that resolution landed
+// on the same cluster the grant is going to. A handle describing a different cluster describes
+// different namespaces, and borrowing them would be the two-cluster bug again in a quieter form —
+// the right context with somebody else's namespaces. That check is ADR-0036's own rule, that a pin
+// for another cluster is not a narrowing of this one, applied on the path where no target is
+// selected as well as the one where a target settles it.
+func (o *commonOpts) resolveAddonNamespaces(stderr io.Writer) (kubeContext, controlPlaneNamespace, appNamespace string, err error) {
+	kubeContext, err = o.clusterContext(stderr)
+	if err != nil {
+		return "", "", "", err
+	}
 	controlPlaneNamespace = o.namespace
 	appNamespace = connect.DefaultAppNamespace
-	cfg, err := localconfig.Load()
-	if err != nil {
-		return
+
+	// Best effort from here: the namespaces have working defaults, and a config problem is not worth
+	// failing an install over when the connection is about to report it far better.
+	cfg, cfgErr := localconfig.Load()
+	if cfgErr != nil {
+		return kubeContext, controlPlaneNamespace, appNamespace, nil
 	}
-	resolved, err := localconfig.Resolve(cfg, o.kubeconfig)
-	if err != nil {
-		return
+	resolved, resolveErr := localconfig.Resolve(cfg, o.kubeconfig)
+	if resolveErr != nil {
+		return kubeContext, controlPlaneNamespace, appNamespace, nil
 	}
-	if kubeContext == "" {
-		kubeContext = resolved.Context
+	if !sameContext(o.kubeconfig, kubeContext, resolved.Context) {
+		return kubeContext, controlPlaneNamespace, appNamespace, nil
 	}
 	if o.namespace == "" || o.namespace == connect.DefaultNamespace {
 		controlPlaneNamespace = resolved.ControlPlaneNamespace
@@ -1028,7 +1054,27 @@ func (o *commonOpts) resolveAddonNamespaces() (kubeContext, controlPlaneNamespac
 	if resolved.Namespace != "" {
 		appNamespace = resolved.Namespace
 	}
-	return
+	return kubeContext, controlPlaneNamespace, appNamespace, nil
+}
+
+// sameContext reports whether two kube context names denote the same context, resolving either
+// empty value to the kubeconfig's current context first — "" and "do-nyc3-dev" are the same cluster
+// when the latter is what is current, and comparing the raw strings would call them different.
+// A kubeconfig that cannot be read answers false, which costs a defaulted namespace rather than a
+// grant applied somewhere unintended.
+func sameContext(kubeconfig, a, b string) bool {
+	if a == b {
+		return true
+	}
+	resolvedA, err := connect.TargetContextName(kubeconfig, a)
+	if err != nil {
+		return false
+	}
+	resolvedB, err := connect.TargetContextName(kubeconfig, b)
+	if err != nil {
+		return false
+	}
+	return resolvedA == resolvedB
 }
 
 // ensureAddonRBAC stages an add-on's per-add-on RBAC kubeconfig-side before the install API call.
@@ -1069,7 +1115,7 @@ func newAddonListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -1198,7 +1244,7 @@ func newAddonRemoveCmd() *cobra.Command {
 			if deleteData && !ackDataLoss && !stdinIsTerminal(cmd.InOrStdin()) {
 				return errDeleteDataNeedsTerminal(name)
 			}
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

@@ -161,7 +161,7 @@ func newProviderAddCmd() *cobra.Command {
 			// records the registry entry — a rejected token writes nothing (ADR-0030). The token
 			// travels only in the request body; it never crosses the agent control channel and is
 			// never logged.
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -225,7 +225,7 @@ func addObjectStorageProvider(cmd *cobra.Command, o *commonOpts, opts objectStor
 	if providerName == "" {
 		providerName = objectStorageType
 	}
-	c, err := o.client(ctx)
+	c, err := o.client(ctx, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -288,7 +288,7 @@ func newProviderListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx)
+			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

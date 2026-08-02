@@ -54,13 +54,14 @@ func serverSideApply(ctx context.Context, kubeconfig, kubeContext, manifests str
 
 // serverSideApplyURL fetches a remote manifest over HTTP and feeds it through the same server-side
 // applier, so applying an upstream manifest by URL (the ingress/cert-manager stacks) also needs no
-// kubectl. It routes through applyFn so a test can fake the apply.
-func serverSideApplyURL(ctx context.Context, kubeconfig, url string, verbose bool, stdout, stderr io.Writer) error {
+// kubectl. It routes through applyFn so a test can fake the apply. kubeContext names the context to
+// apply against; empty means the kubeconfig's current context, as everywhere else.
+func serverSideApplyURL(ctx context.Context, kubeconfig, kubeContext, url string, verbose bool, stdout, stderr io.Writer) error {
 	manifests, err := fetchManifest(ctx, url)
 	if err != nil {
 		return err
 	}
-	return applyFn(ctx, kubeconfig, "", manifests, verbose, stdout, stderr)
+	return applyFn(ctx, kubeconfig, kubeContext, manifests, verbose, stdout, stderr)
 }
 
 // fetchManifest GETs a manifest URL and returns its body. The standard client follows the

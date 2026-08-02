@@ -149,7 +149,7 @@ func agentSkewHint(cliVer, agentVer string) string {
 // of the control plane installed in the cluster — read from the burrowd Deployment's image, so it
 // works even if burrowd is unhealthy and needs no API token.
 func newVersionCmd() *cobra.Command {
-	var kubeconfig, kubeContext, namespace string
+	var kubeconfig, kubeContextFlag, namespace string
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the CLI version and the installed control-plane version",
@@ -166,6 +166,20 @@ func newVersionCmd() *cobra.Command {
 			// its own line rather than being inferred from a failing agent session (issue #308).
 			agentPath, agentVer, agentErr := probeAgentVersion(cmd.Context())
 			fmt.Fprintf(tw, "burrow-agent:\t%s\n", agentValue(agentPath, agentVer, agentErr))
+
+			// The cluster read is the one the active target names, like every other command that
+			// reaches a cluster (ADR-0084 §4), resolved by the same function they use so the
+			// precedence cannot drift into a second version of itself here.
+			//
+			// Its errors are swallowed rather than returned, which is the one thing this command does
+			// differently and is deliberate: `burrow version` is what a person runs when something is
+			// already wrong, and a target whose context has been renamed away is exactly such a
+			// moment. Refusing to print the CLI's own version over it would be useless. It degrades
+			// to the kubeconfig and names the context it used either way.
+			kubeContext, ctxErr := (&commonOpts{kubeconfig: kubeconfig, context: kubeContextFlag}).clusterContext(cmd.ErrOrStderr())
+			if ctxErr != nil {
+				kubeContext = kubeContextFlag
+			}
 
 			// Name the targeted context so the control-plane line is legible in both the success and
 			// failure cases. Best effort: a missing or unreadable kubeconfig leaves it empty, which
@@ -212,7 +226,7 @@ func newVersionCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
-	cmd.Flags().StringVar(&kubeContext, "context", "", "kubeconfig context to target (default: current context)")
+	cmd.Flags().StringVar(&kubeContextFlag, "context", "", "kubeconfig context to target (default: the active target, else the current context)")
 	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace the control plane is installed in")
 	return cmd
 }

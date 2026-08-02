@@ -189,7 +189,7 @@ func pullSecretFixture(t *testing.T, ns, host string) *corev1.Secret {
 func stubClusterRegistryClientset(t *testing.T, cs kubernetes.Interface) {
 	t.Helper()
 	orig := clusterRegistryClientset
-	clusterRegistryClientset = func(string) (kubernetes.Interface, error) { return cs, nil }
+	clusterRegistryClientset = func(string, string) (kubernetes.Interface, error) { return cs, nil }
 	t.Cleanup(func() { clusterRegistryClientset = orig })
 }
 
@@ -198,7 +198,7 @@ func stubClusterRegistryClientset(t *testing.T, cs kubernetes.Interface) {
 func stubClusterIssuerPresent(t *testing.T, present bool) {
 	t.Helper()
 	orig := clusterIssuerPresentFn
-	clusterIssuerPresentFn = func(context.Context, string, string) (bool, error) { return present, nil }
+	clusterIssuerPresentFn = func(context.Context, string, string, string) (bool, error) { return present, nil }
 	t.Cleanup(func() { clusterIssuerPresentFn = orig })
 }
 

@@ -858,7 +858,8 @@ handle still narrows it when the handle belongs to that same cluster, and a pin 
 different cluster is ignored rather than silently redirecting you. **With no target selected nothing
 changes** — the CLI follows your kube context exactly as it did before. A target naming a context the
 kubeconfig no longer holds is an error that says so and names the way out, rather than a confusing
-failure at connect time.
+failure at connect time. "Which cluster a command acts on" below has the full order of precedence
+and the one deliberate exception.
 
 `burrow auth login` also **offers** to restrict a detected coding agent to `burrow-agent`, defaulting
 to yes on an interactive run. It asks rather than assumes, because it writes to a third-party tool's
@@ -897,8 +898,7 @@ revoked, names the credential's id so you can find the right row in the console,
 rather than quietly ignored.
 
 The **cluster and policy commands refuse** while the managed product is selected, naming the target
-and pointing at `burrow auth switch <name>`. They reach a cluster and consult no target, so with no
-cluster to reach they would otherwise act on whatever your current kube context happened to be. The
+and pointing at `burrow auth switch <name>`. They reach a cluster, and a managed tenant has none. The
 refused set is `guard`, `cluster` (its capability view, `capacity`, and `config`), `addon ...`,
 `audit`, `failures`, `app domain ...`, `config provider ...`, `config registry ...` and `env add`.
 
@@ -910,13 +910,48 @@ installing *into* Burrow Cloud is not a thing that can be asked for
 active target, so refusing there would strand you. And `--control-plane` names a control plane
 outright, so no target is consulted for it.
 
-What is still open is which cluster those commands should use when a **cluster** target is selected:
-today they follow your kube context and ignore the target, exactly as they always have
-([#429](https://github.com/burrow-cloud/burrow/issues/429)). Only Claude Code has built-in agent wiring, so the
-detection table's other rows (`~/.codex/`, `~/.cursor/`, `~/.codeium/windsurf/`) are recorded but not
-actionable. And §4 of the ADR — every mutating command naming the target it changed — is **not
-built**; per-app commands print the resolved target today, other mutating commands do not
+Only Claude Code has built-in agent wiring, so the detection table's other rows (`~/.codex/`,
+`~/.cursor/`, `~/.codeium/windsurf/`) are recorded but not actionable. And §4 of the ADR — every
+mutating command naming the target it changed — is **not** built for every command; per-app commands
+and the privileged mutating ones print the resolved target today
 ([#414](https://github.com/burrow-cloud/burrow/issues/414)).
+
+### Which cluster a command acts on
+
+With a **cluster** target selected, it decides the cluster for every command that reaches one — the
+per-app commands, and `guard`, `cluster config`, `addon ...`, `env add`, `audit`, `failures`,
+`app domain ...`, `config provider ...` and `config registry ...` alike
+([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §4). Nothing on that path
+reads `kubectl`'s current context any more, so `kubectx` and `burrow auth switch` no longer have to
+be kept in agreement by hand.
+
+The order of precedence, highest first:
+
+| | What decides the cluster |
+| --- | --- |
+| `--control-plane <url>` | That URL, outright. No target is consulted. |
+| `--context <name>` | That kube context, for this one invocation. An explicit choice keeps winning, and the command says so when the active target names a different cluster. |
+| The active target | Its kube context. |
+| Nothing selected | The kubeconfig's current context, exactly as before targets existed. |
+
+A target naming a context your kubeconfig no longer holds is an error that says so and names the way
+out, rather than quietly falling back to the current context.
+
+The **cluster-lifecycle commands are the exception, deliberately**. `cluster install`,
+`cluster upgrade`, `cluster bootstrap`, `join`, and the `cluster ingress` / `cluster registry` /
+`cluster postgres` provisioners act on a kubeconfig context and not on the target, because installing
+*into* the managed product is not a thing that can be asked for and an installer that redirected
+itself to whatever was last selected would be the more dangerous of the two behaviours
+([ADR-0078](adr/0078-the-cli-points-at-a-target.md) §3).
+
+How each one names its cluster depends on what it does:
+
+| | How it picks a cluster |
+| --- | --- |
+| `burrow cluster install <context>` | The context you name as an argument. |
+| `burrow cluster bootstrap` | The single-node cluster it just created, through the k3s kubeconfig it wrote. |
+| `burrow join` | The kubeconfig it is recording admin access into. |
+| `burrow cluster upgrade`, `cluster ingress install`, `cluster registry install/uninstall`, `cluster postgres install` | `--context`, defaulting to the kubeconfig's current context. Each says which context it is acting on whenever the active target names a different cluster, so the choice is visible rather than inferred. |
 
 ---
 

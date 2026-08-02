@@ -175,7 +175,7 @@ func execRegistry(t *testing.T, cs *fake.Clientset, stdin string, terminal bool,
 	// otherwise the result depends on what the developer running the tests last signed in to.
 	isolateConfig(t)
 	orig := registryClientset
-	registryClientset = func(string) (kubernetes.Interface, error) { return cs, nil }
+	registryClientset = func(string, string) (kubernetes.Interface, error) { return cs, nil }
 	t.Cleanup(func() { registryClientset = orig })
 
 	origTerm := stdinIsTerminal

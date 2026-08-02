@@ -59,6 +59,22 @@ func withTargetClause(human string, n targetname.Named) string {
 	return head + "\n" + rest
 }
 
+// withTargetClauseWhenDecided is withTargetClause for a result line that did NOT carry a target
+// before, and it appends one only when something actually decided where the command went: a
+// configured target, a --context override, or a --control-plane URL.
+//
+// The commands that have always printed the clause keep printing it unconditionally, including the
+// "no target selected" form — that form is informative there precisely because its neighbours name a
+// target. Adding it to a line that never had one is different: for somebody who has never run
+// `burrow auth login` it would change familiar output, and break anything matching it, to say only
+// that they have not done a thing they were never asked to do.
+func withTargetClauseWhenDecided(human string, n targetname.Named) string {
+	if n.Name == "" && !n.Override && n.Endpoint == "" {
+		return human
+	}
+	return withTargetClause(human, n)
+}
+
 // emitJSONWithTarget prints v as indented JSON with a `target` member added. The result's own fields
 // are spliced through unchanged and in their original order rather than round-tripped through a map,
 // so adding the target neither reorders nor reshapes what a caller already parses. A result that is
@@ -102,20 +118,24 @@ func emitJSONWithTarget(w io.Writer, v any, n targetname.Named) error {
 	return err
 }
 
-// namePrivilegedTarget names the target for the privileged path — the commands that connect with the
-// raw --context/--namespace rather than resolving an environment handle (guard, cluster config,
-// add-ons, credentials). That path reads the kubeconfig's current context when --context is absent,
-// so the context it reaches is what is named, and a recorded target is named only when it is the one
-// that context belongs to.
-func (o *commonOpts) namePrivilegedTarget() targetname.Named {
+// namePrivilegedTarget names the target for the privileged path — the commands that act on a cluster
+// without being scoped to an app (guard, cluster config, add-ons, credentials, audit, failures).
+// resolved is the context clusterContext decided for this invocation: the selected target's, the
+// --context override, or empty when no target is selected and the kubeconfig's current context
+// applies. An empty value is resolved to that current context here, so the name is a context a
+// reader recognises rather than a blank.
+//
+// A recorded target is named only when it is the one that context belongs to; targetname.For is what
+// enforces that, so a command can never claim a target it did not reach.
+func (o *commonOpts) namePrivilegedTarget(resolved string) targetname.Named {
 	if o.controlPlane != "" {
 		return targetname.ForControlPlane(o.controlPlane)
 	}
 	// A kubeconfig that cannot be read is not worth failing a command over here: the connection
 	// itself is about to fail on it and will say so far better than a naming helper can.
-	kubeContext, err := connect.TargetContextName(o.kubeconfig, o.context)
+	kubeContext, err := connect.TargetContextName(o.kubeconfig, resolved)
 	if err != nil {
-		kubeContext = o.context
+		kubeContext = resolved
 	}
 	cfg, err := localconfig.Load()
 	if err != nil {

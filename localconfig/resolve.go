@@ -138,9 +138,7 @@ func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resol
 		return Resolved{}, err
 	}
 	if !found {
-		return Resolved{}, fmt.Errorf(
-			"localconfig: the active target %q names kube context %q, which is not in your kubeconfig; the kubeconfig may have moved or the context may have been renamed. Point at it again with \"burrow auth login\", or pick another target with \"burrow auth switch <name>\"",
-			target.Name, target.Context)
+		return Resolved{}, errTargetContextMissing(target.Name, target.Context)
 	}
 
 	resolved := Resolved{
@@ -238,6 +236,16 @@ func fromHandle(env Environment, mode Mode, target string) Resolved {
 		AgentContext:          env.AgentContext,
 		InstallID:             env.InstallID,
 	}
+}
+
+// errTargetContextMissing is what a selected Kubernetes target says when the kube context it names
+// is not in the kubeconfig. It names both, says the two things that usually cause it, and gives the
+// two commands that fix it. Every resolution path shares it, so a stale target reads the same way
+// whether an app command or a privileged one tripped over it.
+func errTargetContextMissing(name, kubeContext string) error {
+	return fmt.Errorf(
+		"localconfig: the active target %q names kube context %q, which is not in your kubeconfig; the kubeconfig may have moved or the context may have been renamed. Point at it again with \"burrow auth login\", or pick another target with \"burrow auth switch <name>\"",
+		name, kubeContext)
 }
 
 // errUnknownPin is the message for a pinned handle name that is not registered.

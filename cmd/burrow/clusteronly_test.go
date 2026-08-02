@@ -49,10 +49,11 @@ func unreachableCluster(t *testing.T) string {
 	return writeKubeconfig(t, twoContextConfig(srv.URL, srv.URL))
 }
 
-// clusterOnlyCommands is every command that reaches a cluster without consulting the selected
-// target. It is derived from the code, not from prose: they are the callers of commonOpts.client —
-// the privileged connection path, which connects with the raw --context/--namespace — plus
-// `config registry`, which writes a pull Secret with a kubeconfig clientset of its own.
+// clusterOnlyCommands is every command that reaches a cluster and therefore cannot run against the
+// managed product. It is derived from the code, not from prose: they are the callers of
+// commonOpts.client — the privileged connection path — plus `config registry`, which writes a pull
+// Secret with a kubeconfig clientset of its own. All of them now resolve WHICH cluster through the
+// selected target (clustercontext.go); this list is about the target kind that has no cluster at all.
 //
 // `cluster install`, `cluster upgrade`, `cluster bootstrap`, `join` and the whole `cluster
 // ingress` / `cluster registry` / `cluster postgres` provisioner surface are deliberately absent:
@@ -125,61 +126,125 @@ func TestCloudTargetRefusalNamesWhatItIs(t *testing.T) {
 	}
 }
 
-// TestClusterTargetLeavesTheClusterOnlyPathUntouched is the other half, and the more important one.
-// Which cluster these commands SHOULD use when a cluster target is selected is an open question
-// (ADR-0078 §4); this change does not answer it. Today they use the ambient kubeconfig and ignore
-// the target, and they must keep doing exactly that — so this fails if the refusal grew into a
-// redirect.
-func TestClusterTargetLeavesTheClusterOnlyPathUntouched(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		target string // the ADR-0078 target to select, or "" for none
-	}{
-		{"a cluster target is selected", "prod"},
-		{"no target is selected", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tempConfig(t)
-			t.Setenv("BURROW_CONTROL_PLANE_URL", "")
-			t.Setenv("BURROW_API_TOKEN", "")
-			forbidCloud(t)
+// twoGuardClusters stands up a fake cluster per context and returns the kubeconfig naming both,
+// with `staging` as the CURRENT context and `prod` as the other one. The two booleans record which
+// was reached, which is the only thing these tests assert.
+func twoGuardClusters(t *testing.T) (kubeconfig string, stagingHit, prodHit *bool) {
+	t.Helper()
+	stagingHit, prodHit = new(bool), new(bool)
+	staging := fakeGuardCluster(stagingHit)
+	prod := fakeGuardCluster(prodHit)
+	t.Cleanup(staging.Close)
+	t.Cleanup(prod.Close)
+	return writeKubeconfig(t, twoContextConfig(staging.URL, prod.URL)), stagingHit, prodHit
+}
 
-			// The kubeconfig's CURRENT context is staging, and the selected target is prod. The
-			// privileged path follows the kubeconfig, so staging is what must be reached in both cases.
-			var stagingHit, prodHit bool
-			staging := fakeGuardCluster(&stagingHit)
-			prod := fakeGuardCluster(&prodHit)
-			defer staging.Close()
-			defer prod.Close()
-			kubeconfig := writeKubeconfig(t, twoContextConfig(staging.URL, prod.URL))
+// TestTheSelectedTargetDecidesTheClusterOnThePrivilegedPath is the change (ADR-0084 §4). The
+// kubeconfig's current context is `staging` and the selected target names `prod`, so `prod` is what
+// must be reached. Before this, the privileged path built its connection from the raw --context
+// flag, which is empty unless typed, and fell through to `staging` — the person configuring a
+// guardrail on the target they had selected was writing it to whatever `kubectx` had last set.
+func TestTheSelectedTargetDecidesTheClusterOnThePrivilegedPath(t *testing.T) {
+	tempConfig(t)
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	forbidCloud(t)
+	kubeconfig, stagingHit, prodHit := twoGuardClusters(t)
+	selectTarget(t, "prod")
 
-			if tc.target != "" {
-				cfg, err := localconfig.Load()
-				if err != nil {
-					t.Fatalf("load config: %v", err)
-				}
-				if err := cfg.SetTarget(localconfig.KubernetesTarget(tc.target)); err != nil {
-					t.Fatalf("SetTarget: %v", err)
-				}
-				if err := cfg.Save(); err != nil {
-					t.Fatalf("save config: %v", err)
-				}
-			}
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"guard", "list", "--kubeconfig", kubeconfig}, &out, &errb); err != nil {
+		t.Fatalf("burrow guard list: %v\nstderr: %s", err, errb.String())
+	}
+	if !*prodHit {
+		t.Error("guard list did not reach the cluster the selected target names")
+	}
+	if *stagingHit {
+		t.Error("guard list reached the kubeconfig's current context while a target was selected")
+	}
+	if !strings.Contains(out.String(), "app.deploy") {
+		t.Errorf("stdout = %q, want the guardrail listing", out.String())
+	}
+}
 
-			var out, errb bytes.Buffer
-			if err := run(context.Background(), []string{"guard", "list", "--kubeconfig", kubeconfig}, &out, &errb); err != nil {
-				t.Fatalf("burrow guard list: %v\nstderr: %s", err, errb.String())
-			}
-			if !stagingHit {
-				t.Error("guard list did not reach the kubeconfig's current context, which is where it has always gone")
-			}
-			if prodHit {
-				t.Error("guard list followed the selected target; deciding whether it should is issue #429's remaining half, not this change")
-			}
-			if !strings.Contains(out.String(), "app.deploy") {
-				t.Errorf("stdout = %q, want the guardrail listing", out.String())
-			}
-		})
+// TestNoTargetSelectedStillFollowsTheKubeconfig is the compatibility half. A person who never runs
+// `burrow auth login` is in the pre-ADR-0078 world, it is still the default, and nothing about it
+// changes: the current kube context decides, exactly as it always did.
+func TestNoTargetSelectedStillFollowsTheKubeconfig(t *testing.T) {
+	tempConfig(t)
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	forbidCloud(t)
+	kubeconfig, stagingHit, prodHit := twoGuardClusters(t)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"guard", "list", "--kubeconfig", kubeconfig}, &out, &errb); err != nil {
+		t.Fatalf("burrow guard list: %v\nstderr: %s", err, errb.String())
+	}
+	if !*stagingHit {
+		t.Error("guard list did not follow the kubeconfig's current context with no target selected")
+	}
+	if *prodHit {
+		t.Error("guard list reached a cluster nothing had selected")
+	}
+	if !strings.Contains(out.String(), "app.deploy") {
+		t.Errorf("stdout = %q, want the guardrail listing", out.String())
+	}
+}
+
+// TestExplicitContextStillBeatsTheSelectedTarget. An explicit --context is a person being
+// deliberate about one invocation, which is the opposite of the silent ambient fall-through this
+// record removes, so it keeps winning (ADR-0078 §4). What it does NOT get to be is quiet: acting on
+// a cluster the selected target does not name is said out loud, in the same breath.
+func TestExplicitContextStillBeatsTheSelectedTarget(t *testing.T) {
+	tempConfig(t)
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	forbidCloud(t)
+	kubeconfig, stagingHit, prodHit := twoGuardClusters(t)
+	selectTarget(t, "prod")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"guard", "list", "--kubeconfig", kubeconfig, "--context", "staging"}, &out, &errb); err != nil {
+		t.Fatalf("burrow guard list --context staging: %v\nstderr: %s", err, errb.String())
+	}
+	if !*stagingHit {
+		t.Error("--context did not override the selected target")
+	}
+	if *prodHit {
+		t.Error("guard list reached the selected target despite an explicit --context")
+	}
+	for _, want := range []string{`"staging"`, `"prod"`, "--context overrides it"} {
+		if !strings.Contains(errb.String(), want) {
+			t.Errorf("stderr = %q, want it to mention %q", errb.String(), want)
+		}
+	}
+}
+
+// TestAStaleTargetIsReportedRatherThanSilentlyIgnored. A target naming a context the kubeconfig no
+// longer holds used to be invisible on this path — the command simply used the current context
+// instead. Now it is the error the app commands already give, naming the target, the context, and
+// the two commands that fix it.
+func TestAStaleTargetIsReportedRatherThanSilentlyIgnored(t *testing.T) {
+	tempConfig(t)
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	forbidCloud(t)
+	kubeconfig, stagingHit, prodHit := twoGuardClusters(t)
+	selectTarget(t, "renamed-away")
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"guard", "list", "--kubeconfig", kubeconfig}, &out, &errb)
+	if err == nil {
+		t.Fatalf("guard list ran with a stale target\nstdout: %s", out.String())
+	}
+	if *stagingHit || *prodHit {
+		t.Error("a stale target fell through to a cluster instead of being reported")
+	}
+	for _, want := range []string{"renamed-away", "not in your kubeconfig", "burrow auth login"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
 	}
 }
 

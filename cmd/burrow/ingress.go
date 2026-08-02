@@ -83,15 +83,16 @@ spec:
 
 // ingressOptions are the inputs to `burrow cluster ingress install`.
 type ingressOptions struct {
-	email      string
-	issuerName string
-	staging    bool
-	kubeconfig string
-	expose     string
-	approve    bool
-	dryRun     bool
-	wait       bool
-	verbose    bool
+	email       string
+	issuerName  string
+	staging     bool
+	kubeconfig  string
+	kubeContext string
+	expose      string
+	approve     bool
+	dryRun      bool
+	wait        bool
+	verbose     bool
 }
 
 // validateExpose checks the --expose value, treating an empty value as auto.
@@ -133,6 +134,10 @@ func newIngressCmd() *cobra.Command {
 		Short: "Install ingress-nginx, cert-manager, and a Let's Encrypt issuer (whichever are missing)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A cluster-lifecycle command acts on a kubeconfig context rather than the active
+			// target (ADR-0078 §3), so say which context that is whenever the target names another
+			// one — the choice is deliberate, and the person reading it should not have to infer it.
+			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runIngressInstall(cmd.Context(), o, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -140,6 +145,7 @@ func newIngressCmd() *cobra.Command {
 	install.Flags().StringVar(&o.issuerName, "issuer-name", defaultIssuerName, "name of the ClusterIssuer to create")
 	install.Flags().BoolVar(&o.staging, "staging", false, "use the Let's Encrypt staging environment (untrusted certs, high rate limits) to test the flow")
 	install.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
+	bindLifecycleContext(install.Flags(), &o.kubeContext)
 	install.Flags().StringVar(&o.expose, "expose", exposeAuto, "how to expose the controller with a LoadBalancer Service: loadbalancer (install it directly) or auto (detect the LoadBalancer provider, and guide to MetalLB if none)")
 	install.Flags().BoolVar(&o.approve, "approve", false, "approve installing a billable cloud LoadBalancer (required to install it non-interactively); a free servicelb / MetalLB LoadBalancer needs no approval. The plan and its notice always print. No shorthand: a cost approval should not be a single keystroke.")
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the plan (including the cost notice) instead of applying it")
@@ -171,7 +177,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 		return nil
 	}
 
-	cs, err := clientset(o.kubeconfig)
+	cs, err := clientsetForContext(o.kubeconfig, o.kubeContext)
 	if err != nil {
 		return err
 	}
@@ -232,7 +238,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 		r.done("ingress-nginx", "already present")
 	} else {
 		r.working("ingress-nginx", "installing")
-		detail, err := applyURLDetail(ctx, o.kubeconfig, manifest, o.verbose, stdout, stderr)
+		detail, err := applyURLDetail(ctx, o.kubeconfig, o.kubeContext, manifest, o.verbose, stdout, stderr)
 		if err != nil {
 			return err
 		}
@@ -253,7 +259,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 	var certDetail string
 	if !hasCertManager {
 		r.working("cert-manager", "installing")
-		d, err := applyURLDetail(ctx, o.kubeconfig, certManagerManifest, o.verbose, stdout, stderr)
+		d, err := applyURLDetail(ctx, o.kubeconfig, o.kubeContext, certManagerManifest, o.verbose, stdout, stderr)
 		if err != nil {
 			return err
 		}
@@ -282,7 +288,7 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 	if !o.verbose {
 		issuerOut = &issuerBuf
 	}
-	if err := applyIssuer(ctx, o.kubeconfig, issuer, o.verbose, issuerOut, stderr); err != nil {
+	if err := applyIssuer(ctx, o.kubeconfig, o.kubeContext, issuer, o.verbose, issuerOut, stderr); err != nil {
 		return err
 	}
 	r.done("ClusterIssuer", fmt.Sprintf("%q applied (%s)", o.issuerName, acmeEnvLabel(o)))
@@ -566,7 +572,7 @@ func certManagerPresent(ctx context.Context, cs kubernetes.Interface) (bool, err
 // ready its validating webhook can still reject the call ("failed calling webhook") for a few
 // seconds, and the CRD may take a moment to register. Those rejections are expected, so each
 // attempt's stderr is buffered and surfaced only if verbose or if every attempt fails.
-func applyIssuer(ctx context.Context, kubeconfig, issuer string, verbose bool, stdout, stderr io.Writer) error {
+func applyIssuer(ctx context.Context, kubeconfig, kubeContext, issuer string, verbose bool, stdout, stderr io.Writer) error {
 	var lastErr error
 	var lastStderr bytes.Buffer
 	for attempt := 1; attempt <= 6; attempt++ {
@@ -575,7 +581,7 @@ func applyIssuer(ctx context.Context, kubeconfig, issuer string, verbose bool, s
 			lastStderr.Reset()
 			attemptStderr = &lastStderr
 		}
-		if err := applyFn(ctx, kubeconfig, "", issuer, verbose, stdout, attemptStderr); err == nil {
+		if err := applyFn(ctx, kubeconfig, kubeContext, issuer, verbose, stdout, attemptStderr); err == nil {
 			return nil
 		} else {
 			lastErr = err

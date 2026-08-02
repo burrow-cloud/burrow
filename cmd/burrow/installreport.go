@@ -75,12 +75,12 @@ var applyURLFn = serverSideApplyURL
 // "N created, M configured" detail for its status line. Verbose lists every applied resource to stdout
 // and returns an empty detail (the listing is the detail); non-verbose captures the apply's one-line
 // summary and condenses it, so the interleaved apply counter never reaches the terminal.
-func applyURLDetail(ctx context.Context, kubeconfig, url string, verbose bool, stdout, stderr io.Writer) (string, error) {
+func applyURLDetail(ctx context.Context, kubeconfig, kubeContext, url string, verbose bool, stdout, stderr io.Writer) (string, error) {
 	if verbose {
-		return "", applyURLFn(ctx, kubeconfig, url, true, stdout, stderr)
+		return "", applyURLFn(ctx, kubeconfig, kubeContext, url, true, stdout, stderr)
 	}
 	var buf bytes.Buffer
-	if err := applyURLFn(ctx, kubeconfig, url, false, &buf, stderr); err != nil {
+	if err := applyURLFn(ctx, kubeconfig, kubeContext, url, false, &buf, stderr); err != nil {
 		return "", err
 	}
 	return applyDetail(buf.String()), nil

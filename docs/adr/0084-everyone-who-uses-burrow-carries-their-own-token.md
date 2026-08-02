@@ -12,9 +12,10 @@ revoke one of them, record which one acted, or refuse one of them anything.
 
 - **`burrow auth login` mints a credential for you**, using your kubeconfig once to prove you are an
   operator of that cluster. After that, your kubeconfig is not how you talk to Burrow.
-- **It is a ServiceAccount token, minted by burrowd**, in a self-contained kubeconfig holding the
-  API server URL, the CA and the token — the same shape [ADR-0038](0038-scoped-agent-credential.md)
-  already mints for the agent.
+- **It is a token Burrow issues and stores only the hash of.** No ServiceAccount is created, so
+  burrowd needs nothing from the cluster and this survives a locked-down enterprise cluster.
+- **Your existing kubeconfig is still the route.** Identity and route are separate, and both are
+  required.
 - **The agent gets its own**, separate from yours and revocable on its own.
 - **The target decides which cluster, for every command.** No command reads the ambient kube
   context, so `kubectl config use-context` and `kubectx` drop out of Burrow work entirely.
@@ -101,59 +102,66 @@ This mirrors what a Burrow Cloud sign-in already does — a device flow proves w
 managed control plane, which issues a tenant-scoped token. Same shape, different proof of identity,
 because a cluster has no browser and a kubeconfig is the operator credential that already exists.
 
-### 2. The credential is a ServiceAccount token, and burrowd mints it
+### 2. The credential is a token Burrow issues, and burrowd stores only its hash
 
-Not a token format Burrow invents. A Kubernetes ServiceAccount token, written into a self-contained
-kubeconfig carrying the API server URL, the cluster CA and the token —
-[ADR-0038](0038-scoped-agent-credential.md) §3's mechanism, which already runs for the agent.
+Not a Kubernetes ServiceAccount token. A random string burrowd generates, returns once, and never
+sees again — it stores a hash, the principal it belongs to, what kind of credential it is, and when
+it expires.
 
-**The grant is the proxy subresource and nothing else.** The RBAC
-`cmd/burrow/manifests/install.yaml.tmpl` already writes for the agent is the whole pattern:
+**burrowd needs nothing from the cluster to do this.** No ServiceAccount creation, no RoleBinding
+creation, no `bind` to satisfy escalation prevention, no `tokenreviews`. A table in the database it
+already owns.
 
-```yaml
-- apiGroups: [""]
-  resources: ["services/proxy"]
-  resourceNames: ["burrowd", "burrowd:{{.Port}}", "http:burrowd:", "https:burrowd:"]
-  verbs: ["get", "create", "update", "patch", "delete"]
-```
+That matters most in the environment this has to survive: an enterprise cluster where a platform team
+grants a workload one identity and no authority to create more. A design that mints a Kubernetes
+object per person needs permissions that get harder to obtain as the organisation gets larger — the
+opposite of how it should scale.
 
-`resourceNames` pins it to the burrowd Service, and the verbs cover the HTTP methods burrowd's API
-uses. Nothing else: no pods, no other services, no other namespace.
+**This is the mechanism the managed product already runs.** `burrowd-cloud` stores tenant credentials
+and looks them up per request. Converging on it gives Burrow **one** way to authenticate a caller
+rather than two that must be kept in agreement — which is the reverse of what this record's first
+draft claimed when it rejected a token table for "leaving two identity systems".
 
-**burrowd mints, not the CLI.** Creating a ServiceAccount and a RoleBinding is an RBAC write, so a
-CLI doing it itself would require every person who signs in to hold cluster-admin — which defeats
-ADR-0078 §3's *"the second person to use a cluster installs nothing"*. burrowd already holds the
-permissions, so it issues the credential and hands back the kubeconfig.
+**Route and identity are separate concerns, and both are required.**
 
-**Who may ask is the open question this creates**, and it is named rather than answered here: without
-it, anyone who can reach burrowd can mint themselves a credential. The bootstrap is the operator's
-own kubeconfig; what follows needs deciding before this ships.
+| | What proves it | What it gets you |
+| --- | --- | --- |
+| **Route** | the kubeconfig you already have | reaching burrowd through the API-server proxy |
+| **Identity** | the Burrow token, in `X-Burrow-Token` | being someone in particular |
 
-**The Role stays in `install`; the ServiceAccount and binding move to sign-in.** The Role defines the
-shape of access, is created once, and needs an RBAC write. The per-principal objects are made when a
-principal appears.
+Burrow mints nothing for the route. A person who can already reach the cluster — through whatever
+their platform team runs, Google, IAM, Entra, a client certificate — uses that. Burrow adds its own
+token on top.
 
-### 3. Long-lived is accepted, as ADR-0038 accepted it
+Neither alone is enough. Cluster access without a Burrow token does nothing; a Burrow token without
+cluster access cannot reach burrowd. Reaching burrowd's pod address directly still gets nothing,
+exactly as today, so **no NetworkPolicy is load-bearing** in this design.
 
-A `kubernetes.io/service-account-token` Secret, not a bound token from the TokenRequest API. Bound
-tokens expire and need refreshing, and the thing that would refresh them is the credential itself.
+`X-Burrow-Token` is the header because the API server consumes `Authorization` on the proxy path
+([ADR-0015](0015-token-header-only-x-burrow-token.md)) — the same reason it exists now.
 
-ADR-0038 §3 made this call already and gave the reason: **the RBAC narrowness is the real control**,
-and the credential is revoked by deleting the ServiceAccount or its Secret. A token that reaches
-exactly one Service by name, with no other grant anywhere in the cluster, is a small thing to hold
-for a long time.
+### 3. A principal has more than one kind of credential
 
-### 2. Every principal is separate
+One person, several credentials, each revocable on its own and each recorded as what it is:
 
-| Principal | Where its token lives | Revoked by |
-|---|---|---|
-| A person | `~/.burrow/credentials/` | that person's row |
-| The agent | `~/.burrow/agents/` | its own row, without touching the human's |
-| A CI job | wherever the job keeps secrets | its own row |
+| Kind | Held by | Why it is separate |
+| --- | --- | --- |
+| `user` | a person at a terminal | guardrails may bind the agent and leave this alone |
+| `agent` | `burrow-agent` on that person's machine | compromised or over-eager, it is revoked without logging the person out |
+| `machine` | CI, a script, an automation | no browser, no person, and it should expire on a schedule nobody has to remember |
 
-The second person to use a cluster runs `burrow auth login` and gets their own, installing nothing —
-which is [ADR-0078](0078-the-cli-points-at-a-target.md) §3's rule, now with two identities behind it
-instead of two copies of one string.
+The kind is a column, set when the token is issued and read on every request. **It is not something
+the caller declares** — that is what makes a `deny` that binds the agent hold against an agent that
+would rather it did not.
+
+`machine` is not needed for anything today and is named because the table makes it nearly free, and
+because leaving it out invites a second mechanism later for the first automation that asks.
+
+**Expiry and rotation come with the table.** A timestamp column, checked on lookup. Kubernetes
+ServiceAccount tokens do not offer this in the form Burrow would have used — ADR-0038 §3 takes a
+long-lived Secret precisely because bound tokens need refreshing and the thing that would refresh
+them is the credential itself. A table has no such circularity.
+
 
 ### 4. The target decides the cluster, and nothing reads the ambient context
 
@@ -308,6 +316,11 @@ burrowd-only, one principal, revocable without touching anyone else. The new exp
 stolen token reaches burrowd without appearing in the cluster's own audit trail, which is what
 expiry and a revocation list are for. Both are part of building this, not follow-ups.
 
+**Automation gets a first-class answer.** A `machine` credential is a row like any other — issued
+deliberately, expiring on a schedule, revocable without touching a person's own access. Nothing needs
+it today, and having somewhere obvious for it to go is what stops the first CI job that asks from
+producing a second mechanism.
+
 **burrowd gains state it did not have**: issued tokens, their principals, their revocations. It has a
 database, so there is somewhere to put it, and it is small. It is still a new thing that must be
 backed up and must survive an upgrade.
@@ -333,20 +346,29 @@ able to satisfy any of that, and ADR-0014 chose the proxy precisely so connectiv
 Separating identity from route means this can still happen later, for clusters that want it, without
 being a precondition.
 
-**A token format Burrow invents, checked against a table burrowd keeps.** The first draft of this
-record proposed exactly that, and rejected per-principal Kubernetes ServiceAccounts on the grounds
-that they make every Burrow user a cluster object and leave two identity systems.
+**A Kubernetes ServiceAccount per principal, authenticated by `TokenReview`.** Drafted twice and
+rejected twice, for different reasons each time — the second is the one that holds.
 
-It is the wrong trade, and §2 takes the ServiceAccount instead. Kubernetes already has issuance,
-revocation and expiry; a Burrow-owned token table means building all three, and burrowd would then
-hold long-lived credential material it currently does not. The "two identity systems" objection is
-also weaker than it read: the managed product authenticates a tenant, a self-hosted cluster
-authenticates an operator, and those are different questions that happen to both end in a bearer
-token. What is shared is the *shape* — a stored credential, no ambient kubeconfig — which is what
-makes the migration ADR-0078 exists for a target switch.
+It requires burrowd to create ServiceAccounts, create RoleBindings, hold `bind` on the Role to
+satisfy escalation prevention, and create Secrets namespace-wide (`resourceNames` does not constrain
+`create`). burrowd holds **none** of these today; `cmd/burrow/manifests/install.yaml.tmpl` says
+"Get ONLY — no create/update/delete on serviceaccounts" in as many words. Those are permissions that
+get *harder* to obtain as an organisation grows, which is backwards: the environment most likely to
+refuse them is the enterprise cluster where per-person access matters most.
 
-The decisive practical point is that **the mechanism already exists and is running**: ADR-0038 mints
-precisely this for the agent today.
+It also needs a `tokenreviews` grant and an API-server round trip per request, which makes
+authenticating to Burrow depend on the API server being reachable.
+
+**A second Service and a second port, so the port distinguishes agent from human.** Considered
+seriously because it needs no round trip: the API server's RBAC on `services/proxy` would refuse the
+agent's credential at the human port, and burrowd would learn which by which listener answered.
+
+Rejected because it makes a **NetworkPolicy load-bearing**. If the port is the authorization signal,
+anyone who can reach burrowd's pod address chooses their own — so the design would depend on a policy
+that cannot portably name the API server as a peer (it is outside the cluster on a managed control
+plane), that some CNIs do not enforce at all, and that locks out burrowd if it is wrong. §2 keeps the
+token as the gate, so reaching the pod address directly gets nothing and no network policy is
+carrying the design.
 
 **Drop the kubeconfig entirely, including break-glass.** Purest, and it means an unreachable burrowd
 is an unrecoverable install. Reliability is the argument for the whole product; removing the

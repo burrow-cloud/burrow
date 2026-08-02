@@ -94,6 +94,10 @@ the add-on**, because that is where the data lives and where the blast radius is
 app would let an operator protect `web` while the identical verb wipes `api` on the same instance —
 which reads as protection and is not.
 
+`addon.restore` has the same two-target shape and resolves the same way, for the same reason: every
+database either verb can reach lives on one instance. `addon.attach` is not a guardrail at all —
+attaching provisions and destroys nothing.
+
 ### 2. Resolution is three tiers, most specific first
 
 | Key tried | Meaning |
@@ -116,11 +120,16 @@ composed key is unambiguous without anything having to split it.
 name ([ADR-0068](0068-operational-limits-are-configuration.md) §5). App scoping is declared the same
 way.
 
-Not everything should be. `dns.write` and `bucket.create` act on things outside the cluster that no
-single app owns; `addon.restore_instance` takes **every** app on a Postgres instance back together,
-which is exactly why it is dangerous, and scoping it to one app would describe its blast radius
-falsely. A guardrail whose effect is wider than one app must not be settable as though it were
-narrower.
+Not everything should be. `dns.write`, `dns.delete` and `bucket.create` act on things outside the
+cluster that no app or add-on owns, so there is no name to give them. A guardrail whose effect is
+wider than the thing named must not be settable as though it were narrower.
+
+**Correction, 2026-08-02.** This section originally named `addon.restore_instance` as the example of
+something unscopable, because it takes every app on a Postgres instance back together. That argument
+is against scoping it to an **app**, and it holds. It does not survive `--name` meaning the *add-on
+instance* for `addon.*` codes: the instance is precisely that verb's blast radius, so naming it
+describes the reach honestly rather than falsely. `addon.restore_instance` is scopable, by instance.
+The three genuinely unscopable guardrails are the ones above.
 
 ### 4. `guard list` shows which tier answered
 

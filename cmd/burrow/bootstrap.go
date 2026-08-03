@@ -114,6 +114,11 @@ type bootstrapArgs struct {
 	// bootstrap ensures alongside the control plane (ADR-0054 §1), threaded into the reused install.
 	minimal         bool
 	noMetricsServer bool
+	// database is which shape the control plane's own database is installed in (ADR-0086 §2),
+	// threaded straight through to install. A VPS is where the trade is sharpest — the operator is
+	// another always-on pod on a small box — so the choice is offered here rather than being one an
+	// operator has to leave the bootstrap to make.
+	database string
 	// apiReadyBudget is how long to poll the freshly installed k3s API for readiness before failing.
 	apiReadyBudget time.Duration
 }
@@ -360,6 +365,8 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&a.yes, "yes", false, "skip the confirmation prompt (for intentional automation)")
 	cmd.Flags().BoolVar(&a.minimal, "minimal", false, "install only the control plane, skipping the detected lightweight baseline (metrics-server)")
 	cmd.Flags().BoolVar(&a.noMetricsServer, "no-metrics-server", false, "do not auto-ensure the metrics-server baseline (needed for HPA autoscaling and `kubectl top`)")
+	cmd.Flags().StringVar(&a.database, "database", databaseCNPG,
+		"how the control plane's own database runs: cnpg (a CloudNativePG cluster, with failover and backups) or plain (a single Deployment, with neither)")
 	cmd.Flags().DurationVar(&a.apiReadyBudget, "k3s-api-timeout", defaultK3sAPIReadyBudget, "how long to wait for the k3s API to answer after install (a slow first-start on a small VPS needs a generous budget)")
 	return cmd
 }
@@ -539,6 +546,7 @@ func installBurrowdOnK3s(ctx context.Context, a bootstrapArgs, stdout, stderr io
 		wait:            a.wait,
 		minimal:         a.minimal,
 		noMetricsServer: a.noMetricsServer,
+		database:        a.database,
 		// Deploy burrowd and mint the scoped agent credential without the laptop-oriented local
 		// bookkeeping: no ~/.burrow handle, no "connect your agent" guidance. bootstrap prints the
 		// join-token block for the laptop instead (ADR-0044).

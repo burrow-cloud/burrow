@@ -387,3 +387,17 @@ func stubCloudNativePGInstalled(t *testing.T) {
 	}
 	t.Cleanup(func() { detectCloudNativePGFn = orig })
 }
+
+// TestBootstrapCarriesTheDatabaseChoice: `burrow cluster bootstrap` installs the control plane
+// through the same path, so the choice has to be reachable there too. A single VPS is where the
+// trade is sharpest — the operator is another always-on pod on a small box — and an operator who
+// wants the plain database there should not have to skip the bootstrap to get it.
+func TestBootstrapCarriesTheDatabaseChoice(t *testing.T) {
+	f := newBootstrapCmd().Flags().Lookup("database")
+	if f == nil {
+		t.Fatal("cluster bootstrap should carry a --database flag")
+	}
+	if f.DefValue != databaseCNPG {
+		t.Errorf("--database defaults to %q, want %q", f.DefValue, databaseCNPG)
+	}
+}

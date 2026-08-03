@@ -217,11 +217,11 @@ func errCloudNativePGRequired(kubeContext string, err error) error {
 // number with one meaning.
 func waitForControlPlaneCluster(ctx context.Context, ri dynamic.ResourceInterface, namespace string, out io.Writer, w clusterWait) error {
 	fmt.Fprintf(out, "  database ...")
-	start := time.Now()
-	deadline := start.Add(w.timeout)
+	deadline := time.Now().Add(w.timeout)
 	var (
 		lastErr        error
 		seen           bool
+		firstSeen      time.Time
 		statusObserved bool
 		phase          string
 		condition      string
@@ -230,7 +230,9 @@ func waitForControlPlaneCluster(ctx context.Context, ri dynamic.ResourceInterfac
 		u, err := ri.Get(ctx, controlPlaneClusterName, metav1.GetOptions{})
 		switch {
 		case err == nil:
-			seen = true
+			if !seen {
+				seen, firstSeen = true, time.Now()
+			}
 			lastErr = nil
 			if p, ok := clusterStatusSummary(u); ok {
 				statusObserved = true
@@ -248,8 +250,10 @@ func waitForControlPlaneCluster(ctx context.Context, ri dynamic.ResourceInterfac
 
 		// A `Cluster` that is present but has no status after the grace period is not a slow
 		// database — it is an object nothing is reconciling, and waiting out the full timeout would
-		// only delay saying so.
-		if seen && !statusObserved && time.Since(start) > w.grace {
+		// only delay saying so. The grace runs from when the object was FIRST SEEN rather than from
+		// the start of the wait, so an object that appears late is given its own reconcile window
+		// instead of being judged on time somebody else spent.
+		if seen && !statusObserved && time.Since(firstSeen) > w.grace {
 			fmt.Fprintln(out, " "+failMark(out))
 			return errClusterNotReconciling(namespace, w.grace)
 		}

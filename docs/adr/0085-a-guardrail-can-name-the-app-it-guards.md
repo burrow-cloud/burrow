@@ -9,8 +9,10 @@
 Guardrails scope to an environment, not to an app. So "the agent must not redeploy *this one thing*"
 has no way to be said, and the only way to say it is to put that thing in an environment of its own.
 
-- **`guard set --app <name>`** or **`--addon <name>`** — a disposition for one app, or one add-on
-  instance.
+- **`guard set <code> --env <env> --name <thing>`** — one flag for both, because the guardrail code
+  already says whether it means an app or an add-on instance.
+- **`--name` requires `--env`.** Without it the key is indistinguishable from an environment of the
+  same name.
 - **Three tiers, most specific wins**: app, then environment, then the built-in default.
 - **No migration.** The policy key is a string and lookup never parses it.
 - **Each guardrail declares whether it is app-scopable**, the same way `envScoped` already works.
@@ -67,20 +69,29 @@ production"*, which is a real question and a different one.
 
 ## Decision
 
-### 1. A disposition can name an app, or an add-on instance
+### 1. A disposition can name one app or one add-on instance
 
 ```
-burrow guard set --app burrowd-cloud app.deploy deny
-burrow guard set --env prod --app burrowd-cloud app.deploy deny
-burrow guard set --env prod --addon postgres-prod addon.restore_instance deny
+burrow guard set app.run --env prod --name website deny
+burrow guard set addon.restore_instance --env prod --name postgres-prod deny
 ```
 
-`--app` and `--addon` are separate and mutually exclusive. Each is refused on a code of the other
-kind, with a message naming what that guardrail actually targets rather than reporting an unknown
-flag.
+**One flag, `--name`.** Not `--app` and `--addon`. The guardrail code already says what kind of thing
+it targets, so a second flag repeating it produces `guard set app.run --app website`, where the
+reader has to ask why `app.run` needs telling that it concerns an app. `--name` also matches
+`burrow addon config postgres --name <instance>`
+([ADR-0082](0082-an-addon-instance-is-configured-after-it-exists.md)).
 
-**One flag meaning both would have been shorter and worse.** "`--app` names an application, or an
-add-on when the code begins with `addon.`" is a rule the reader has to hold, to save one flag.
+The code resolves what `--name` refers to: an app for `app.*`, an add-on instance for `addon.*`. A
+guardrail that names nothing refuses `--name` with a message saying why its effect is wider than one
+thing.
+
+**`--name` requires `--env`, and this is a refusal rather than a default.** The key is
+`<env>.<name>.<code>`. Without the environment there is no slot for the name, and the obvious
+fallback `<name>.<code>` is byte-identical to the key an *environment* of that name produces. App
+names and environment names are both DNS labels, so nothing tells them apart: `website.app.run` would
+mean "the `website` app" or "everything in the `website` environment" depending on facts the lookup
+cannot see.
 
 **Add-ons need no new identity for this.** They are already addressed by name — `addon remove
 <name>`, `restore-instance <addon>`, `attach`/`detach <addon> <app>` — and
@@ -171,6 +182,15 @@ prefix scheme extends to a third tier by constructing one more candidate key.
 not. Reads as a tidy rule and is wrong in the case that matters: `addon.restore_instance` starts with
 `addon.` and takes every app on the instance down together. ADR-0068 §5 already decided this axis
 should be declared rather than inferred, for this reason.
+
+**Two flags, `--app` and `--addon`.** Explicit, and it makes every command state twice what kind of
+thing it concerns. `guard set addon.remove --addon postgres-prod` is not clearer than
+`--name postgres-prod`; it is longer.
+
+**Let `--name` stand alone, meaning "this app in every environment".** A legitimate want — *never let
+the agent delete the control plane, wherever it lives*. It needs a key shape of its own to avoid the
+collision above, which is machinery bought for a case that does not exist while there is one
+environment. An error now is cheaper to relax later than a shape is to unpick.
 
 **Scope add-on guardrails by the app rather than the add-on.** For the two-target verbs it is the
 more natural reading — `detach <addon> <app>` is something done *to* an app. Rejected because the

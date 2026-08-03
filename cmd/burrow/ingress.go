@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -150,7 +151,7 @@ func newIngressCmd() *cobra.Command {
 	install.Flags().BoolVar(&o.approve, "approve", false, "approve installing a billable cloud LoadBalancer (required to install it non-interactively); a free servicelb / MetalLB LoadBalancer needs no approval. The plan and its notice always print. No shorthand: a cost approval should not be a single keystroke.")
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the plan (including the cost notice) instead of applying it")
 	install.Flags().BoolVar(&o.wait, "wait", true, "wait for cert-manager to become ready before creating the issuer")
-	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
+	install.Flags().BoolVar(&o.verbose, "verbose", false, "show the manifest URLs in the plan, and every resource burrow applies instead of a summary")
 
 	parent.AddCommand(install)
 	return parent
@@ -424,18 +425,30 @@ func dryRunLoadBalancerNotice(w io.Writer) string {
 // present this run provisions no new LoadBalancer Service, so no LoadBalancer notice is printed: a cost
 // note there would be misleading, implying a charge that will not be incurred (issue #268).
 func writeIngressPlan(w io.Writer, o ingressOptions, expose, provider, manifest string, hasNginx, hasCertManager bool) {
-	fmt.Fprintf(w, "Plan (expose: %s). Against your current cluster, ingress install will:\n", expose)
+	fmt.Fprintf(w, "This will install, on your current kube context (expose: %s):\n", expose)
+	rows := make([]planRow, 0, 3)
 	if hasNginx {
-		fmt.Fprintln(w, "  - ingress-nginx: already present, skip.")
+		rows = append(rows, planRow{name: "ingress-nginx", detail: "already present; skipped"})
 	} else {
-		fmt.Fprintf(w, "  - install ingress-nginx (%s): apply %s\n", manifestVariantLabel(provider), manifest)
+		rows = append(rows, planRow{name: "ingress-nginx", url: manifest,
+			detail: "routes outside traffic to your apps (" + manifestVariantLabel(provider) + ")"})
 	}
 	if hasCertManager {
-		fmt.Fprintln(w, "  - cert-manager: already present, skip.")
+		rows = append(rows, planRow{name: "cert-manager", detail: "already present; skipped"})
 	} else {
-		fmt.Fprintf(w, "  - install cert-manager: apply %s\n", certManagerManifest)
+		rows = append(rows, planRow{name: "cert-manager", url: certManagerManifest,
+			detail: "issues and renews the TLS certificates"})
 	}
-	fmt.Fprintf(w, "  - apply a Let's Encrypt ClusterIssuer %q (%s).\n\n", o.issuerName, o.acmeServer())
+	rows = append(rows, planRow{name: "ClusterIssuer " + strconv.Quote(o.issuerName),
+		detail: "where certificates are requested from (" + o.acmeServer() + ")"})
+	writePlanRows(w, o.verbose, rows)
+	// The provenance pointer only prints when this run actually applies a remote manifest: on a cluster
+	// that already has both components there is nothing to fetch, and offering to show it would send a
+	// reader looking for output that will not appear.
+	if !o.verbose && (!hasNginx || !hasCertManager) {
+		fmt.Fprintln(w, "\nRe-run with --verbose to see the manifests it applies.")
+	}
+	fmt.Fprintln(w)
 	switch {
 	case hasNginx:
 		// No new LoadBalancer Service is provisioned, so print no LoadBalancer notice (issue #268).
@@ -458,15 +471,20 @@ func writeIngressDryRunPlan(o ingressOptions, issuer string, w io.Writer) {
 	if expose == "" {
 		expose = exposeAuto
 	}
-	fmt.Fprintf(w, "Plan (expose: %s, dry run). Against your current cluster, ingress install would:\n", expose)
-	switch expose {
-	case exposeLoadBalancer:
-		fmt.Fprintf(w, "  - install ingress-nginx if absent (LoadBalancer Service; billable on a cloud, free on k3s servicelb / MetalLB): apply %s\n", ingressNginxManifest)
-	default: // auto
-		fmt.Fprintf(w, "  - install ingress-nginx if absent (auto: LoadBalancer via the cluster's provider — a billable cloud LB, or a free servicelb / MetalLB one; if none, install MetalLB): apply %s\n", ingressNginxManifest)
+	fmt.Fprintf(w, "This would install, on your current kube context (expose: %s, dry run):\n", expose)
+	nginxDetail := "LoadBalancer Service; billable on a cloud, free on k3s servicelb / MetalLB"
+	if expose != exposeLoadBalancer { // auto
+		nginxDetail = "auto: a LoadBalancer via the cluster's provider — a billable cloud LB, or a free " +
+			"servicelb / MetalLB one; if none, install MetalLB"
 	}
-	fmt.Fprintf(w, "  - install cert-manager if absent: apply %s\n", certManagerManifest)
-	fmt.Fprintf(w, "  - apply this ClusterIssuer (%s):\n\n%s\n\n", o.acmeServer(), indent(issuer))
+	// A dry run shows both manifest URLs unconditionally, where the live plan puts them behind
+	// --verbose: reviewing what would be applied before applying it is the whole point of the mode.
+	writePlanRows(w, true, []planRow{
+		{name: "ingress-nginx", url: ingressNginxManifest, detail: nginxDetail},
+		{name: "cert-manager", url: certManagerManifest, detail: "issues and renews the TLS certificates"},
+	})
+	fmt.Fprintln(w, "\nEach is skipped if it is already present.")
+	fmt.Fprintf(w, "\nAnd apply this ClusterIssuer (%s):\n\n%s\n\n", o.acmeServer(), indent(issuer))
 	fmt.Fprintln(w, dryRunLoadBalancerNotice(w))
 }
 

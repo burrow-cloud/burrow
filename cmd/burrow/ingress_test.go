@@ -280,7 +280,7 @@ func TestWriteIngressPlanNotices(t *testing.T) {
 	// manifest-variant line reads "cloud".
 	var lb bytes.Buffer
 	writeIngressPlan(&lb, o, exposeLoadBalancer, "digitalocean", ingressNginxManifest, false, false)
-	if !strings.Contains(lb.String(), "Plan (expose: loadbalancer)") {
+	if !strings.Contains(lb.String(), "expose: loadbalancer") {
 		t.Errorf("loadbalancer plan should be printed:\n%s", lb.String())
 	}
 	if !strings.Contains(lb.String(), costNoticeMarker) {
@@ -326,8 +326,13 @@ func TestWriteIngressPlanNotices(t *testing.T) {
 	if strings.Contains(present.String(), costNoticeMarker) {
 		t.Errorf("no cost note should print when ingress-nginx is already present (no LoadBalancer created):\n%s", present.String())
 	}
-	if !strings.Contains(present.String(), "ingress-nginx: already present, skip.") {
+	if !strings.Contains(present.String(), "ingress-nginx") || !strings.Contains(present.String(), "already present; skipped") {
 		t.Errorf("plan should record ingress-nginx as already present:\n%s", present.String())
+	}
+	// With both components already present nothing remote is fetched, so the plan does not offer to
+	// show manifests that this run will not apply.
+	if strings.Contains(present.String(), "--verbose") {
+		t.Errorf("no --verbose pointer should print when nothing is applied:\n%s", present.String())
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/burrow-cloud/burrow/client"
+	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
 )
 
@@ -201,5 +202,193 @@ func TestCloudNativePGLine(t *testing.T) {
 				t.Errorf("cloudNativePGLine(%+v) = %q, want it to contain %q", c.cap, got, c.want)
 			}
 		})
+	}
+}
+
+// stubPostgresPrerequisites substitutes the backup plugin's two detection seams, so a test can put
+// the cluster in any of the plugin's three states without building discovery fixtures for two API
+// groups.
+func stubPostgresPrerequisites(t *testing.T, pluginReady, certManagerPresent bool) {
+	t.Helper()
+	origPlugin, origCerts := detectPgBackRestFn, detectCertManagerFn
+	detectPgBackRestFn = func(context.Context, kubernetes.Interface) (controlplane.PgBackRestCapability, error) {
+		return controlplane.PgBackRestCapability{Present: pluginReady, Ready: pluginReady, Pinned: kube.PgBackRestVersion}, nil
+	}
+	detectCertManagerFn = func(kubernetes.Interface) (controlplane.CertManagerCapability, error) {
+		return controlplane.CertManagerCapability{Present: certManagerPresent}, nil
+	}
+	t.Cleanup(func() { detectPgBackRestFn, detectCertManagerFn = origPlugin, origCerts })
+}
+
+// TestClusterPostgresPlanLeadsWithComponents asserts the plan's first lines say WHAT is installed and
+// what each component is for, and that neither manifest URL appears by default. A URL is the longest
+// thing on the line, and led with, it pushes the version — the value a reader scans for — off the end
+// of the terminal (issue #461).
+func TestClusterPostgresPlanLeadsWithComponents(t *testing.T) {
+	stubClusterPostgresClientset(t, cnpgFakeClientset(false))
+	stubPostgresPrerequisites(t, false, true)
+	recordAppliedURL(t)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	plan, _, _ := strings.Cut(s, "\nInstalling:")
+	for _, want := range []string{
+		"CloudNativePG " + kube.CNPGVersion,
+		"runs and manages Postgres instances",
+		"archives write-ahead logs to object storage",
+	} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("plan missing %q:\n%s", want, plan)
+		}
+	}
+	for _, url := range []string{kube.CNPGManifestURL(kube.CNPGVersion), kube.PgBackRestManifestURL(kube.PgBackRestVersion)} {
+		if strings.Contains(plan, url) {
+			t.Errorf("plan leads with the manifest URL %q, which is what --verbose is for:\n%s", url, plan)
+		}
+	}
+	if !strings.Contains(plan, "--verbose") {
+		t.Errorf("the cluster-admin note must say where the manifests can be read, or the provenance is unreachable:\n%s", plan)
+	}
+}
+
+// TestClusterPostgresPlanVerboseShowsManifests asserts --verbose puts each manifest URL on its own
+// indented line beneath its component. Applying a remote manifest with cluster-admin is a trust
+// decision and the artifact has to stay reachable; it just does not belong on the component's line.
+func TestClusterPostgresPlanVerboseShowsManifests(t *testing.T) {
+	stubClusterPostgresClientset(t, cnpgFakeClientset(false))
+	stubPostgresPrerequisites(t, false, true)
+	recordAppliedURL(t)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--verbose"}, &out, &errb); err != nil {
+		t.Fatalf("cluster postgres install --verbose: %v\n%s", err, errb.String())
+	}
+	plan, _, _ := strings.Cut(out.String(), "\nInstalling:")
+	for _, want := range []string{
+		"\n      " + kube.CNPGManifestURL(kube.CNPGVersion) + "\n",
+		"\n      " + kube.PgBackRestManifestURL(kube.PgBackRestVersion) + "\n",
+	} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("verbose plan missing the indented manifest line %q:\n%s", want, plan)
+		}
+	}
+}
+
+// TestClusterPostgresNamesTheBackupPluginBothWays asserts the backup component is described by what it
+// DOES and still carries its product name. Dropping the name would hide a second component installed
+// with cluster-admin from anyone auditing what landed on their cluster.
+func TestClusterPostgresNamesTheBackupPluginBothWays(t *testing.T) {
+	stubClusterPostgresClientset(t, cnpgFakeClientset(false))
+	stubPostgresPrerequisites(t, false, true)
+	recordAppliedURL(t)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
+	}
+	plan, _, _ := strings.Cut(out.String(), "\nInstalling:")
+	for _, want := range []string{"Backup support", "archives write-ahead logs to object storage", "pgBackRest"} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("plan must name the backup component by what it does AND by product (%q):\n%s", want, plan)
+		}
+	}
+}
+
+// TestClusterPostgresProgressTicksUnchanged pins the install-phase status lines. They were the one
+// part of this output that already worked, and the reshaping around them must leave them alone.
+func TestClusterPostgresProgressTicksUnchanged(t *testing.T) {
+	stubClusterPostgresClientset(t, cnpgFakeClientset(false))
+	stubPostgresPrerequisites(t, false, true)
+	recordAppliedURL(t)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
+	}
+	for _, want := range []string{
+		"  " + okGlyph + " CloudNativePG  installed " + kube.CNPGVersion + " (240 created)\n",
+		"  " + okGlyph + " pgBackRest plugin  installed " + kube.PgBackRestVersion + " (240 created)\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("progress tick %q changed:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestClusterPostgresOrderingReasonSitsWithTheCommands asserts the reason the two next commands are in
+// that order is inside the next-steps block, not below it as a separate note. Printed apart it reads as
+// an unrelated caveat, and somebody who skims the commands and stops has missed the only thing that
+// makes their order matter.
+func TestClusterPostgresOrderingReasonSitsWithTheCommands(t *testing.T) {
+	stubClusterPostgresClientset(t, cnpgFakeClientset(false))
+	stubPostgresPrerequisites(t, false, true)
+	recordAppliedURL(t)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	_, next, ok := strings.Cut(s, "Next, in this order:")
+	if !ok {
+		t.Fatalf("the closing block must name the next steps as an ordered sequence:\n%s", s)
+	}
+	reason, _, ok := strings.Cut(next, "restoring a whole instance")
+	if !ok {
+		t.Fatalf("the unbuilt whole-instance restore must still be stated:\n%s", s)
+	}
+	if !strings.Contains(reason, "The order matters") || !strings.Contains(reason, "BEFORE it is installed") {
+		t.Errorf("the ordering reason must sit inside the next-steps block:\n%s", next)
+	}
+	// The ordering reason is an explanation of the step above it, not a third warning competing with
+	// the one fact a reader most needs to have read.
+	if n := strings.Count(s, "Note:"); n > 2 {
+		t.Errorf("the output carries %d advisory notes; they flatten each other:\n%s", n, s)
+	}
+}
+
+// TestClusterPostgresInstallsTheBackupPluginOverARunningOperator asserts a cluster that ALREADY runs
+// CloudNativePG still gets the backup plugin. The command used to return as soon as it found a running
+// operator, so on such a cluster it reported success having installed nothing, and every instance made
+// afterwards archived nowhere.
+func TestClusterPostgresInstallsTheBackupPluginOverARunningOperator(t *testing.T) {
+	cs := cnpgFakeClientset(true, cnpgOperatorFixture("ghcr.io/cloudnative-pg/cloudnative-pg:"+kube.CNPGVersion, 1))
+	stubClusterPostgresClientset(t, cs)
+	stubPostgresPrerequisites(t, false, true)
+	applied := recordAppliedURL(t)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
+	}
+	if want := kube.PgBackRestManifestURL(kube.PgBackRestVersion); *applied != want {
+		t.Errorf("applied %q, want the backup plugin %q to be installed over a running operator", *applied, want)
+	}
+	if !strings.Contains(out.String(), "already running "+kube.CNPGVersion) {
+		t.Errorf("the running operator must still be left alone and named:\n%s", out.String())
+	}
+}
+
+// TestClusterPostgresPlanReportsASkippedBackupPlugin asserts the plan says up front that the plugin
+// will be skipped for a missing cert-manager. Announcing an install and then skipping it further down
+// describes a run that did not happen.
+func TestClusterPostgresPlanReportsASkippedBackupPlugin(t *testing.T) {
+	stubClusterPostgresClientset(t, cnpgFakeClientset(false))
+	stubPostgresPrerequisites(t, false, false)
+	recordAppliedURL(t)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
+	}
+	plan, _, _ := strings.Cut(out.String(), "\nInstalling:")
+	if !strings.Contains(plan, "skipped: needs cert-manager") {
+		t.Errorf("the plan must say the backup plugin is skipped, and why:\n%s", plan)
+	}
+	if !strings.Contains(plan, "burrow cluster ingress install") {
+		t.Errorf("the plan must name the command that fixes it:\n%s", plan)
 	}
 }

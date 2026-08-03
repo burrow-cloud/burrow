@@ -79,7 +79,7 @@ Postgres always exports its own metrics, so once you install the metrics addon y
 
 By default the agent asks before standing anything up: it proposes, you approve. Make it hands-off with `burrow guard set addon.install allow`, or install it yourself with `burrow addon install postgres`.
 
-Postgres runs on [CloudNativePG](https://cloudnative-pg.io), so it needs a one-time setup step on the cluster before the first database: `burrow cluster postgres install`. It asks for cluster-admin, which is why it is yours to run and not your agent's.
+Postgres runs on [CloudNativePG](https://cloudnative-pg.io) — including Burrow's own control-plane database, so installing Burrow puts the operator on the cluster. One more setup step adds off-cluster backups before the first database: `burrow cluster postgres install`. It asks for cluster-admin, which is why it is yours to run and not your agent's.
 
 Want an addon we do not have yet? [Request one](https://github.com/burrow-cloud/burrow/issues/new?labels=addon).
 
@@ -186,6 +186,7 @@ reserves at rest; most sit well under their limits until they are worked.
 | Component | CPU | Memory | Storage | Notes |
 | --- | --- | --- | --- | --- |
 | Control plane (burrowd + Postgres) | ~a tenth of a CPU | ~160 MB | ~1 GB database volume | always on; the two pods together |
+| CloudNativePG operator | small, a fraction of a CPU | ~100 MB | none | always on; runs the control-plane database and every Postgres addon |
 | Ingress + cert-manager | ~a tenth of a CPU | ~90 MB | none | upstream defaults; **+ a LoadBalancer** on managed clusters (billable) |
 | In-cluster registry (Zot) | small, a fraction of a CPU | ~64 MB | ~5 GB PersistentVolume for image layers | optional |
 | In-cluster build (per build) | ¼ of a CPU, bursting to 2 CPUs | 512 MB, up to 2 GB | transient scratch while the build runs | **transient**; optional, and needs schedulable headroom to run ([#274](https://github.com/burrow-cloud/burrow/issues/274)) |

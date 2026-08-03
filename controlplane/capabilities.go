@@ -41,6 +41,10 @@ type ClusterCapabilities struct {
 	// databases that cannot be backed up off-cluster — and installed by the same operator-CLI step,
 	// for the same reason: its CRDs need cluster-admin.
 	PgBackRest PgBackRestCapability `json:"pgbackrest"`
+	// ControlPlaneDatabase is which shape the control plane's own database runs in — a
+	// CloudNativePG cluster or a plain Deployment (ADR-0086 §2) — and whether it is backed up. It is
+	// reported here so the answer outlives the install output that stated it.
+	ControlPlaneDatabase ControlPlaneDatabaseCapability `json:"control_plane_database"`
 	// Provider is the detected cloud provider, inferred from node labels / providerID.
 	Provider ProviderCapability `json:"provider"`
 	// DNS is whether a DNS provider is configured in the registry (ADR-0023) — a control-plane
@@ -137,6 +141,34 @@ type PgBackRestCapability struct {
 	Ready   bool   `json:"ready"`
 	Pinned  string `json:"pinned,omitempty"`
 }
+
+// ControlPlaneDatabaseCapability reports which of the two shapes the control plane's OWN database
+// is running in (ADR-0086 §2), read live from the control-plane namespace.
+//
+// It exists because the answer must survive the install output scrolling away. Both shapes work,
+// they are not equally protected, and from the outside they are indistinguishable: an install whose
+// state has no backup looks exactly like one whose state is archived to object storage. The choice
+// is made once, at install, and this is where it is readable afterwards.
+//
+//   - Kind is "cloudnativepg" or "plain", empty when the read was not available (an older burrowd,
+//     or a build with no control-plane namespace wired).
+//   - Ready is whether an instance is actually serving. It is meaningful only for "cloudnativepg";
+//     a "plain" database's readiness is its Deployment's, which the control plane answering this
+//     call at all already demonstrates.
+//   - BackedUp is whether the database archives off-cluster. It is false for every "plain" install,
+//     which cannot, and for a "cloudnativepg" one with no object-storage provider registered, which
+//     is what an install is on the day it is created (ADR-0086 §4).
+type ControlPlaneDatabaseCapability struct {
+	Kind     string `json:"kind,omitempty"`
+	Ready    bool   `json:"ready"`
+	BackedUp bool   `json:"backed_up"`
+}
+
+// The values ControlPlaneDatabaseCapability.Kind takes.
+const (
+	ControlPlaneDatabaseCloudNativePG = "cloudnativepg"
+	ControlPlaneDatabasePlain         = "plain"
+)
 
 // ProviderCapability reports the detected cloud provider. Cloud is the provider id (e.g.
 // "digitalocean", "aws"), empty when unknown or bare-metal; Name is a human label (e.g.

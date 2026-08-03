@@ -26,7 +26,13 @@ dump_diagnostics() {
   kubectl get pods -A -o wide || true
   echo "--- burrow namespace events ---"
   kubectl -n burrow get events --sort-by=.lastTimestamp | tail -n 30 || true
-  echo "--- postgres logs ---"
+  echo "--- control-plane database ---"
+  # The default install runs it as a CloudNativePG Cluster (ADR-0086 §1); --database plain runs it
+  # as a Deployment. Ask for both: whichever is not there prints nothing and the other is the one
+  # that matters.
+  kubectl -n burrow get cluster postgres -o wide || true
+  kubectl -n burrow describe cluster postgres | tail -n 40 || true
+  kubectl -n burrow logs -l cnpg.io/cluster=postgres --tail=40 || true
   kubectl -n burrow logs deploy/postgres --tail=40 || true
   echo "--- burrowd describe ---"
   kubectl -n burrow describe deploy/burrowd || true

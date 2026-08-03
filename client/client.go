@@ -498,8 +498,10 @@ type ClusterCapabilities struct {
 	MetricsServer MetricsServerCapability `json:"metrics_server"`
 	CloudNativePG CloudNativePGCapability `json:"cloudnative_pg"`
 	PgBackRest    PgBackRestCapability    `json:"pgbackrest"`
-	Provider      ProviderCapability      `json:"provider"`
-	DNS           DNSCapability           `json:"dns"`
+	// ControlPlaneDatabase is which shape the control plane's own database runs in (ADR-0086 §2).
+	ControlPlaneDatabase ControlPlaneDatabaseCapability `json:"control_plane_database"`
+	Provider             ProviderCapability             `json:"provider"`
+	DNS                  DNSCapability                  `json:"dns"`
 }
 
 // IngressCapability reports the ingress-controller situation. Present is true only when an ingress
@@ -559,6 +561,23 @@ type PgBackRestCapability struct {
 	Ready   bool   `json:"ready"`
 	Pinned  string `json:"pinned,omitempty"`
 }
+
+// ControlPlaneDatabaseCapability reports which of the two shapes the control plane's own database
+// runs in (ADR-0086 §2). Kind is "cloudnativepg" or "plain", empty when the control plane could not
+// read it; Ready is whether an instance is serving; BackedUp is whether it archives off-cluster,
+// which a "plain" database never does and a "cloudnativepg" one does once an object-storage
+// provider is registered.
+type ControlPlaneDatabaseCapability struct {
+	Kind     string `json:"kind,omitempty"`
+	Ready    bool   `json:"ready"`
+	BackedUp bool   `json:"backed_up"`
+}
+
+// The values ControlPlaneDatabaseCapability.Kind takes.
+const (
+	ControlPlaneDatabaseCloudNativePG = "cloudnativepg"
+	ControlPlaneDatabasePlain         = "plain"
+)
 
 // ProviderCapability reports the detected cloud provider.
 type ProviderCapability struct {

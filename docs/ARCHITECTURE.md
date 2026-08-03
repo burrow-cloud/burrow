@@ -175,7 +175,11 @@ faked in tests. See [CLAUDE.md](../CLAUDE.md) for the package conventions and
 The control plane keeps its own state — deploy records, rollout history, and operational
 metadata — in **Postgres running in the cluster** (ADR-0012), behind a database interface
 so it can be faked in unit tests. Burrow's own state lives in the user's cluster, not an
-external managed service. This state is independent of Kubernetes cluster state; the
+external managed service. That Postgres runs on **CloudNativePG**, the same operator every
+Postgres add-on runs on, so there is one stack to operate, one repair path, and one way to
+back a database up ([ADR-0086](adr/0086-burrow-installs-one-kind-of-postgres.md));
+`burrow cluster install --database plain` runs it as a single Deployment instead, for a
+cluster that will not accept the operator's cluster-scoped CustomResourceDefinitions. This state is independent of Kubernetes cluster state; the
 cluster is the source of truth for what is running, and the control plane's database is
 the source of truth for the deploy history and the rollback handles.
 

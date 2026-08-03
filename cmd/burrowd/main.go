@@ -187,7 +187,7 @@ func serverHandler(ready *atomic.Bool, apiHandler *atomic.Pointer[http.Handler])
 // briefly unreachable leaves burrowd not-ready rather than blocking startup or exiting, so
 // it does not crash-loop while Postgres is coming up.
 func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomic.Pointer[http.Handler], storeOut *atomic.Pointer[postgres.Store], ready *atomic.Bool) error {
-	store, err := openWithRetry(ctx, dsn, 4*time.Minute)
+	store, err := openWithRetry(ctx, dsn, dbConnectBudget)
 	if err != nil {
 		return err
 	}
@@ -250,6 +250,10 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	if err != nil {
 		return err
 	}
+	// Which shape burrowd's OWN database runs in is part of that report (ADR-0086 §2), so the answer
+	// outlives the install output that stated it. It is read from the control-plane namespace, which
+	// is why the prober is told which one that is.
+	prober.WithControlPlaneNamespace(controlPlaneNamespace())
 
 	// The in-cluster builder runs a build as a Kubernetes Job in the dedicated burrow-builds namespace,
 	// isolated from both the app and control-plane namespaces (issue #278), cloning the git ref inside
@@ -496,6 +500,17 @@ const (
 	dbAttemptTimeout  = 5 * time.Second
 	dbWaitBackoff     = 2 * time.Second
 	dbWaitLogInterval = 15 * time.Second
+	// dbConnectBudget is how long burrowd waits for its database to accept connections before it
+	// gives up and stays not-ready. It covers a database that is still coming up beside it, which is
+	// the ordinary case on a fresh install: burrowd and the database are applied in one manifest.
+	//
+	// It is fifteen minutes rather than the four it used to be because the default database now
+	// bootstraps under an operator (ADR-0086 §1): the operator has to notice the object, provision a
+	// volume, pull the PostgreSQL operand image and run initdb before anything listens. On a small
+	// node with a cold image cache that is minutes, not seconds, and the cost of a budget that is too
+	// short is not a retry — the wait is what makes burrowd ready at all, so exhausting it leaves a
+	// control plane serving 503 until somebody restarts the pod.
+	dbConnectBudget = 15 * time.Minute
 )
 
 // pinger performs one bounded attempt to connect to (and ping) the database. The retry loop

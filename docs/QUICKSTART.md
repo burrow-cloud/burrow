@@ -56,9 +56,29 @@ burrow cluster install k3d-burrow-quickstart
 ```
 
 Burrow deploys its control plane (the published `burrowd` image plus an in-cluster Postgres),
-waits for it to become ready, and records this cluster as your current environment. You will see:
+waits for it to become ready, and records this cluster as your current environment.
+
+The control plane's own database runs on CloudNativePG, the same operator every Postgres add-on
+uses, so install puts that operator on the cluster first. That needs cluster-admin, because it
+creates cluster-scoped CustomResourceDefinitions, and it makes the install a couple of minutes
+longer. A cluster whose administrators will not accept those definitions can install with
+`--database plain`, which runs the database as a single Deployment with no backups and no failover
+([ADR-0086](adr/0086-burrow-installs-one-kind-of-postgres.md)). You will see:
 
 ```
+The control plane's database will be a CloudNativePG cluster:
+  - CloudNativePG 1.30.0   installed first; runs and manages the database
+  - Database               a CloudNativePG Cluster: failover, and backups once an object-storage provider is registered
+
+Note: CloudNativePG installs cluster-scoped CustomResourceDefinitions and cluster RBAC, so
+  this install needs cluster-admin on this kube context, and it takes a few minutes longer
+  than a plain one. A cluster that will not accept those definitions installs with
+  --database plain, which runs the database as a single Deployment with no backups.
+
+Installing:
+  ✓ CloudNativePG  installed 1.30.0 (26 created), controller ready
+✓ Applied 29 resource(s): 29 created.
+
 Waiting for Burrow to become ready...
   database ... ✓
   control plane ... ✓

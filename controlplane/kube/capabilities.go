@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -55,6 +56,13 @@ var cloudProviders = map[string]string{
 // (no RBAC). It never writes.
 type Prober struct {
 	client kubernetes.Interface
+	// dynamic and controlPlaneNamespace are what the control-plane database read needs, and they
+	// are OPTIONAL. A Prober built by NewProber — every unit test, and the kubeconfig-side probe
+	// `burrow cluster install` runs — has neither, and reports every other capability exactly as it
+	// did before: the database it would report on belongs to a control plane that probe is standing
+	// outside of. burrowd wires both, because it is that control plane.
+	dynamic               dynamic.Interface
+	controlPlaneNamespace string
 }
 
 // NewProber returns a Prober over the given clientset.
@@ -69,12 +77,47 @@ func NewProberFromConfig(cfg *rest.Config) (*Prober, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kube: building clientset: %w", err)
 	}
-	return NewProber(client), nil
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("kube: building dynamic client: %w", err)
+	}
+	return NewProber(client).WithDynamicClient(dyn), nil
 }
 
-// DetectCapabilities reads the cluster's capabilities read-only.
+// WithDynamicClient wires the client the control-plane database's `Cluster` is read through. It is
+// separate from the clientset because it is separately optional, exactly as it is on the Adapter:
+// a Prober without one reads the plain Deployment and reports nothing about a CloudNativePG
+// database, which is the right answer for a build that cannot address custom resources at all.
+//
+// Returns the Prober for chaining.
+func (p *Prober) WithDynamicClient(d dynamic.Interface) *Prober {
+	p.dynamic = d
+	return p
+}
+
+// WithControlPlaneNamespace tells the Prober where the control plane's own database lives, so it
+// can report which of the two shapes is running (ADR-0086 §2). Only burrowd sets it: the namespace
+// is its own, and without it that one capability is reported empty rather than guessed.
+//
+// Returns the Prober for chaining.
+func (p *Prober) WithControlPlaneNamespace(namespace string) *Prober {
+	p.controlPlaneNamespace = namespace
+	return p
+}
+
+// DetectCapabilities reads the cluster's capabilities read-only, and — when this Prober knows the
+// control-plane namespace — which shape the control plane's own database runs in.
 func (p *Prober) DetectCapabilities(ctx context.Context) (controlplane.ClusterCapabilities, error) {
-	return DetectCapabilities(ctx, p.client)
+	caps, err := DetectCapabilities(ctx, p.client)
+	if err != nil {
+		return controlplane.ClusterCapabilities{}, err
+	}
+	db, err := p.detectControlPlaneDatabase(ctx)
+	if err != nil {
+		return controlplane.ClusterCapabilities{}, err
+	}
+	caps.ControlPlaneDatabase = db
+	return caps, nil
 }
 
 // DetectCapabilities reads a cluster's capabilities read-only over the given clientset (ADR-0034):

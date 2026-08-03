@@ -50,6 +50,11 @@ func stubInstall(t *testing.T, contexts []connect.Context, contextsErr error) *s
 		return nil
 	}
 
+	// Installing puts CloudNativePG on the cluster first, because the control plane's database runs
+	// on it (ADR-0086 §1). Reported as already running here, so these tests exercise install's own
+	// flow rather than an operator apply against a fake that serves no CustomResourceDefinitions.
+	stubCloudNativePGInstalled(t)
+
 	// The scoped-agent mint (ADR-0038) is faked here: it needs a real REST config and a
 	// token-controller-populated Secret, which the fake clientset has not got. mintAgentKubeconfig /
 	// writeAgentKubeconfig are exercised directly in their own tests; here we only record a fixed path.
@@ -368,10 +373,14 @@ func TestClusterIngressReplacesSystem(t *testing.T) {
 	}
 }
 
+// TestRenderManifests covers the install manifests around the control-plane database, rendered with
+// --database plain so the database-shaped assertions below (the postgres image, its server settings)
+// describe the Deployment. The two shapes are covered against each other in
+// TestRenderManifestsDatabaseShapes.
 func TestRenderManifests(t *testing.T) {
 	out, err := renderManifests(installOptions{
 		Namespace: "burrow", AppNamespace: "apps", Image: "registry.example.com/burrowd:1",
-		Token: "tok-123", DBPassword: "pw-456", Port: 8080,
+		Token: "tok-123", DBPassword: "pw-456", Port: 8080, Database: databasePlain,
 	})
 	if err != nil {
 		t.Fatalf("renderManifests: %v", err)

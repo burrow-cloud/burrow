@@ -100,7 +100,7 @@ func runUpgrade(ctx context.Context, namespace, image, kubeconfig, kubeContext s
 		recordUpgradedInstallID(kubeconfig, kubeContext, opts.InstallID, stdout)
 		return nil
 	}
-	if err := waitForReady(ctx, kubeconfig, kubeContext, namespace, stdout); err != nil {
+	if err := waitForReady(ctx, kubeconfig, kubeContext, namespace, opts.Database, stdout); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "\n%s Burrow is upgraded and ready in namespace %q.\n", okMark(stdout), namespace)
@@ -204,6 +204,10 @@ func upgradeOptions(ctx context.Context, cs kubernetes.Interface, namespace, ima
 	if err != nil {
 		return installOptions{}, err
 	}
+	database, err := databaseOf(ctx, cs, namespace)
+	if err != nil {
+		return installOptions{}, err
+	}
 	return installOptions{
 		Namespace:      namespace,
 		AppNamespace:   appNamespace,
@@ -214,7 +218,32 @@ func upgradeOptions(ctx context.Context, cs kubernetes.Interface, namespace, ima
 		DBPassword:     dbPassword,
 		InstallID:      installID,
 		Port:           connect.DefaultPort,
+		Database:       database,
 	}, nil
+}
+
+// databaseOf reports which shape this install's database is running in, so an upgrade re-renders
+// the one that is there (ADR-0086 §2).
+//
+// AN UPGRADE MUST NOT CHANGE THE DATABASE UNDERNEATH AN INSTALL. Rendering the default here would
+// write a CloudNativePG `Cluster` beside a running Deployment that still holds every row: two
+// databases, an empty one in front, and the install's history stranded on a volume nothing reads.
+// Moving an existing install from one to the other is a dump and a restore with burrowd stopped;
+// ADR-0086 leaves it to its own design and this deliberately does not attempt it.
+//
+// The read is the plain database's Deployment, and its ABSENCE is what says CloudNativePG: the
+// object a `plain` install cannot be without is the one to look for, and it needs no access to a
+// CustomResourceDefinition that a `plain` cluster may well not serve.
+func databaseOf(ctx context.Context, cs kubernetes.Interface, namespace string) (string, error) {
+	_, err := cs.AppsV1().Deployments(namespace).Get(ctx, controlPlaneClusterName, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return databasePlain, nil
+	case apierrors.IsNotFound(err):
+		return databaseCNPG, nil
+	default:
+		return "", fmt.Errorf("reading the control plane's database in namespace %q: %w", namespace, err)
+	}
 }
 
 // installIDOf returns the id this install already carries, or a freshly minted one when it has none

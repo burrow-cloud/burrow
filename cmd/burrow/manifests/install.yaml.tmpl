@@ -378,6 +378,12 @@ subjects:
     name: burrowd
     namespace: {{.Namespace}}
 ---
+{{if eq .Database "plain" -}}
+# The control-plane database as a plain Deployment: the shape `--database plain` selects
+# (ADR-0086 §2). It is chosen, never fallen back to, and what it costs is stated at install time
+# rather than discovered later: one replica on one volume, with no backup, no point-in-time
+# recovery, no failover and no standby. It exists for a cluster whose platform team will not accept
+# the cluster-scoped CustomResourceDefinitions the CloudNativePG default needs.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -451,6 +457,119 @@ metadata:
 spec:
   selector: { app: postgres }
   ports: [ { port: 5432, targetPort: 5432 } ]
+{{- else -}}
+# The control-plane database as a CloudNativePG `Cluster`, the default (ADR-0086 §1). It is the same
+# stack every Postgres add-on instance runs on, so there is one set of failure modes to learn, one
+# repair path, and one component that knows how to take a backup. `burrow cluster install` applies
+# the CloudNativePG operator and waits for its controller before this object is written.
+#
+# The credential the owner role is created with. CloudNativePG's `bootstrap.initdb.secret` reference
+# requires the `kubernetes.io/basic-auth` shape (a `username` and a `password`), which is why this
+# is a second Secret rather than the `burrowd-db` one below: that one carries the connection URL
+# burrowd reads, and a Secret's type cannot be changed after it is created.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: burrowd-db-owner
+  namespace: {{.Namespace}}
+type: kubernetes.io/basic-auth
+stringData:
+  username: burrow
+  password: "{{.DBPassword}}"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+  namespace: {{.Namespace}}
+spec:
+  # One instance, matching what the plain Deployment ran. Under an operator this is a number rather
+  # than a constant of the design: raising it is configuration, not a rewrite.
+  instances: 1
+  # The `postgres` superuser stays disabled (CloudNativePG's own default). burrowd connects as the
+  # `burrow` owner role declared below, so there is no second credential in the cluster that nothing
+  # uses and nothing rotates.
+  enableSuperuserAccess: false
+  storage:
+    size: 1Gi
+  # The same footprint the plain Deployment declares. The pod runs CloudNativePG's instance manager
+  # as well as PostgreSQL — a few tens of megabytes — which the 320Mi limit absorbs because the lean
+  # settings below keep PostgreSQL itself around 150MB.
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { memory: 320Mi }
+  postgresql:
+    # The same lean tuning the plain Deployment takes as `-c` args, in the field CloudNativePG
+    # reconciles them from. Keep these in step with LeanPostgresSettings in
+    # controlplane/kube/addons.go, which tunes the Postgres add-on identically.
+    parameters:
+      shared_buffers: "64MB"
+      max_connections: "30"
+      work_mem: "4MB"
+      maintenance_work_mem: "32MB"
+      effective_cache_size: "256MB"
+  bootstrap:
+    initdb:
+      # The database, the owner role, and the credential the URL below is built from — the same
+      # names the plain Deployment's entrypoint creates from POSTGRES_DB/POSTGRES_USER, so what
+      # burrowd connects to is identical either way.
+      database: burrow
+      owner: burrow
+      secret:
+        name: burrowd-db-owner
+  managed:
+    services:
+      additional:
+        # THE SERVICE NAME IS THE COMPATIBILITY SEAM. burrowd resolves `postgres:5432` from the URL
+        # in the `burrowd-db` Secret, and CloudNativePG's own services are `postgres-rw`/`-ro`/`-r`,
+        # so an additional managed service carries that name onto the primary. It is declared to the
+        # operator rather than written beside the Cluster because the selector that finds the primary
+        # is CloudNativePG's and changes between releases; asking for `rw` states the intent and lets
+        # the controller spell it. It is also torn down with the Cluster rather than left behind.
+        - selectorType: rw
+          updateStrategy: patch
+          serviceTemplate:
+            metadata:
+              name: postgres
+            spec:
+              ports:
+                - name: postgres
+                  port: 5432
+                  targetPort: 5432
+                  protocol: TCP
+{{- end}}
+---
+# What burrowd may read about its own database, so `burrow cluster` can report which of the two
+# shapes is running (ADR-0086 §2) instead of the answer living only in install output that has
+# scrolled away. Get on exactly that one object: not list, not watch, and nothing that writes.
+#
+# It is rendered for BOTH shapes. A Role naming an API group the cluster does not serve is accepted
+# and grants nothing, and rendering it unconditionally keeps a `plain` install one manifest away
+# from the report rather than one manifest and an RBAC change.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burrowd-controlplane-db
+  namespace: {{.Namespace}}
+rules:
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    resourceNames: ["postgres"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burrowd-controlplane-db
+  namespace: {{.Namespace}}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: burrowd-controlplane-db
+subjects:
+  - kind: ServiceAccount
+    name: burrowd
+    namespace: {{.Namespace}}
 ---
 apiVersion: apps/v1
 kind: Deployment

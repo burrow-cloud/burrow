@@ -137,6 +137,11 @@ type installOptions struct {
 	Token               string
 	DBPassword          string
 	Port                int
+	// Database is which shape the control plane's own database is installed in (ADR-0086 §2):
+	// "cnpg", a CloudNativePG `Cluster`, or "plain", a single Deployment. It is chosen once, at
+	// install; an upgrade reads back the shape already running rather than re-deciding, so a routine
+	// upgrade never changes the database underneath an install.
+	Database string
 	// InstallID identifies this install (ADR-0084 §5). It is rendered into a ConfigMap in the
 	// control-plane namespace and into burrowd's environment, and it is the one rendered value that
 	// is NOT a secret: it authorises nothing, and a second person joining the install reads it. A
@@ -163,6 +168,9 @@ type installArgs struct {
 	// two currently coincide; minimal is the forward-looking "control plane only" switch.
 	minimal         bool
 	noMetricsServer bool
+	// database is the --database value: which shape the control plane's own database is installed
+	// in (ADR-0086 §2). Empty means the default, CloudNativePG.
+	database string
 	// clusterOnly runs the install for its cluster-side effects only (deploy burrowd, and mint the
 	// scoped burrow-agent credential via the manifests), skipping the laptop-oriented local
 	// bookkeeping: it records no ~/.burrow environment handle and prints no "connect your agent"
@@ -215,6 +223,11 @@ func newInstallCmd() *cobra.Command {
 			"The context is required: install targets exactly that cluster and never the ambient\n" +
 			"current context implicitly, so it cannot install into prod by accident. Run\n" +
 			"`burrow cluster install` with no argument to list your contexts.\n\n" +
+			"The control plane's own database runs on CloudNativePG, the same way every Postgres add-on\n" +
+			"does, so it can fail over and be backed up. Install applies the operator and waits for it,\n" +
+			"which creates cluster-scoped CustomResourceDefinitions and needs cluster-admin. A cluster\n" +
+			"that will not accept those installs with --database plain, which runs the database as a\n" +
+			"single Deployment with no backups and no failover. The choice is made here and only here.\n\n" +
 			"On success it names the environment (a generated name, or --environment) and records it\n" +
 			"as your current environment.",
 		Example: installExamples,
@@ -234,6 +247,8 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&a.dryRun, "dry-run", false, "print the manifests instead of applying them")
 	cmd.Flags().BoolVar(&a.wait, "wait", true, "wait for the control plane to become ready")
 	cmd.Flags().BoolVar(&a.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
+	cmd.Flags().StringVar(&a.database, "database", databaseCNPG,
+		"how the control plane's own database runs: cnpg (a CloudNativePG cluster, with failover and backups) or plain (a single Deployment, with neither)")
 	cmd.Flags().BoolVar(&a.minimal, "minimal", false, "install only the control plane, skipping the detected lightweight baseline (metrics-server)")
 	cmd.Flags().BoolVar(&a.noMetricsServer, "no-metrics-server", false, "do not auto-ensure the metrics-server baseline (needed for HPA autoscaling and `kubectl top`)")
 	return cmd
@@ -242,6 +257,10 @@ func newInstallCmd() *cobra.Command {
 func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) error {
 	if a.image == "" {
 		return errNoBurrowdImage()
+	}
+	database, err := validateDatabase(a.database)
+	if err != nil {
+		return err
 	}
 
 	// render builds the manifests (minting fresh secrets and a fresh install id) on demand: dry-run
@@ -275,6 +294,7 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 			DBPassword:     dbPassword,
 			InstallID:      installID,
 			Port:           connect.DefaultPort,
+			Database:       database,
 		})
 		if err != nil {
 			return "", "", err
@@ -334,12 +354,20 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 		return joinExistingInstall(ctx, a, cs, stdout)
 	}
 
+	// What this install will do about its database, said before anything is applied (ADR-0086 §5) —
+	// including, for the default, that it creates cluster-scoped CustomResourceDefinitions and takes
+	// longer. The operator is installed straight afterwards, from the SAME read the plan was printed
+	// from, so the plan cannot announce one thing and the install do another.
+	if err := installControlPlaneDatabaseOperator(ctx, a, database, cs, stdout, stderr); err != nil {
+		return err
+	}
+
 	if err := applyFn(ctx, a.kubeconfig, a.kubeContext, manifests, a.verbose, stdout, stderr); err != nil {
 		return err
 	}
 
 	if a.wait {
-		if err := waitForReady(ctx, a.kubeconfig, a.kubeContext, a.namespace, stdout); err != nil {
+		if err := waitForReady(ctx, a.kubeconfig, a.kubeContext, a.namespace, database, stdout); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "\nBurrow is installed and ready in namespace %q.\n", a.namespace)
@@ -681,17 +709,71 @@ func printCapabilitySummary(ctx context.Context, cs kubernetes.Interface, stdout
 	fmt.Fprintf(stdout, "Detected: %s\n", capabilitySummary(toClientCaps(caps)))
 }
 
-// waitForReady blocks until the in-cluster Postgres and burrowd are ready, printing
-// progress. burrowd only becomes ready after it has reached Postgres and applied its
+// installControlPlaneDatabaseOperator prints the database plan and, for the CloudNativePG default,
+// puts the operator on the cluster before the manifests that name its `Cluster` are applied
+// (ADR-0086 §1). It shares the operator install with `burrow cluster postgres install`
+// (ensureCloudNativePG), so there is one set of skip rules and one wait rather than two.
+//
+// A `plain` install prints its plan and installs no operator: the flag exists for a cluster that
+// will not have one, so reaching for it there would defeat the choice.
+func installControlPlaneDatabaseOperator(ctx context.Context, a installArgs, database string,
+	cs kubernetes.Interface, stdout, stderr io.Writer) error {
+	if database == databasePlain {
+		writeInstallDatabasePlan(stdout, a.verbose, database, cloudNativePGState{})
+		return nil
+	}
+
+	found, err := detectCloudNativePGFn(ctx, cs)
+	if err != nil {
+		return err
+	}
+	state := cloudNativePGState{ready: found.Ready, version: found.Version}
+	writeInstallDatabasePlan(stdout, a.verbose, database, state)
+
+	fmt.Fprintln(stdout, "\nInstalling:")
+	r := installReporter{w: stdout, verbose: a.verbose}
+	if err := ensureCloudNativePG(ctx, a.kubeconfig, a.kubeContext, cs, found, r, a.wait, a.verbose, stdout, stderr); err != nil {
+		return errCloudNativePGRequired(a.kubeContext, err)
+	}
+
+	// The `Cluster` in the manifests below cannot be applied until the API server is serving the
+	// definition that describes it, and a CustomResourceDefinition is established a moment after it
+	// is created rather than the instant the apply returns. This wait is NOT the readiness wait
+	// --wait governs: it is a precondition of the next apply, so it runs either way. Without it a
+	// `--wait=false` install fails on "no matches for kind Cluster" a second after installing the
+	// very thing that provides it.
+	if err := waitForCloudNativePGAPI(ctx, cs, cnpgAPIWait); err != nil {
+		return errCloudNativePGRequired(a.kubeContext, err)
+	}
+	return nil
+}
+
+// waitForReady blocks until the control plane's database and burrowd are ready, printing
+// progress. burrowd only becomes ready after it has reached the database and applied its
 // migrations, so this confirms the whole control plane is up.
-func waitForReady(ctx context.Context, kubeconfig, kubeContext, namespace string, out io.Writer) error {
+//
+// The database is waited for in whichever shape it was installed (ADR-0086 §2). The two are not
+// interchangeable readiness checks: a `plain` database is a Deployment that has rolled out, and a
+// CloudNativePG one is a `Cluster` with an instance serving — a Deployment wait against a CNPG
+// install would sit until it timed out on an object that will never exist.
+func waitForReady(ctx context.Context, kubeconfig, kubeContext, namespace, database string, out io.Writer) error {
 	cs, err := clientsetFn(kubeconfig, kubeContext)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "\nWaiting for Burrow to become ready...")
-	if err := waitForDeployment(ctx, cs, namespace, "postgres", "database", out, 3*time.Minute); err != nil {
-		return err
+	if database == databasePlain {
+		if err := waitForDeployment(ctx, cs, namespace, controlPlaneClusterName, "database", out, 3*time.Minute); err != nil {
+			return err
+		}
+	} else {
+		ri, err := controlPlaneClusterFn(kubeconfig, kubeContext, namespace)
+		if err != nil {
+			return err
+		}
+		if err := waitForControlPlaneCluster(ctx, ri, namespace, out, controlPlaneClusterWait); err != nil {
+			return err
+		}
 	}
 	return waitForDeployment(ctx, cs, namespace, "burrowd", "control plane", out, 3*time.Minute)
 }
@@ -770,6 +852,9 @@ func mintAgentCredential(ctx context.Context, a installArgs, envName string, cs 
 func renderManifests(o installOptions) (string, error) {
 	if o.ServiceAccount == "" {
 		o.ServiceAccount = "burrowd"
+	}
+	if o.Database == "" {
+		o.Database = databaseCNPG
 	}
 	if o.AgentServiceAccount == "" {
 		o.AgentServiceAccount = agentServiceAccountFn(defaultPrincipal)

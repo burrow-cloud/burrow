@@ -28,8 +28,11 @@ func toClientCaps(c controlplane.ClusterCapabilities) client.ClusterCapabilities
 		MetricsServer: client.MetricsServerCapability{Present: c.MetricsServer.Present},
 		CloudNativePG: client.CloudNativePGCapability{Present: c.CloudNativePG.Present, Ready: c.CloudNativePG.Ready, Version: c.CloudNativePG.Version, Pinned: c.CloudNativePG.Pinned},
 		PgBackRest:    client.PgBackRestCapability{Present: c.PgBackRest.Present, Ready: c.PgBackRest.Ready, Pinned: c.PgBackRest.Pinned},
-		Provider:      client.ProviderCapability{Cloud: c.Provider.Cloud, Name: c.Provider.Name},
-		DNS:           client.DNSCapability{Configured: c.DNS.Configured, Providers: c.DNS.Providers},
+		ControlPlaneDatabase: client.ControlPlaneDatabaseCapability{
+			Kind: c.ControlPlaneDatabase.Kind, Ready: c.ControlPlaneDatabase.Ready, BackedUp: c.ControlPlaneDatabase.BackedUp,
+		},
+		Provider: client.ProviderCapability{Cloud: c.Provider.Cloud, Name: c.Provider.Name},
+		DNS:      client.DNSCapability{Configured: c.DNS.Configured, Providers: c.DNS.Providers},
 	}
 }
 
@@ -199,6 +202,9 @@ func writeClusterReport(w io.Writer, caps client.ClusterCapabilities) {
 	fmt.Fprintf(tw, "metrics-server\t%s\n", metricsServerLine(caps.MetricsServer))
 	fmt.Fprintf(tw, "CloudNativePG\t%s\n", cloudNativePGLine(caps.CloudNativePG))
 	fmt.Fprintf(tw, "pgBackRest plugin\t%s\n", pgBackRestLine(caps.PgBackRest))
+	if line := controlPlaneDatabaseLine(caps.ControlPlaneDatabase); line != "" {
+		fmt.Fprintf(tw, "Control-plane database\t%s\n", line)
+	}
 	fmt.Fprintf(tw, "Provider\t%s\n", providerLine(caps.Provider))
 	fmt.Fprintf(tw, "DNS\t%s\n", dnsLine(caps.DNS))
 	_ = tw.Flush()
@@ -292,6 +298,36 @@ func pgBackRestLine(c client.PgBackRestCapability) string {
 		return "running (Burrow targets " + c.Pinned + ")"
 	default:
 		return "running"
+	}
+}
+
+// controlPlaneDatabaseLine reports which of the two shapes the control plane's own database runs in
+// (ADR-0086 §2), and says in the same breath whether it is protected.
+//
+// Both shapes work and they are not equally protected, which is exactly why the line leads with
+// what is TRUE OF THE DATA rather than with the product name: an install that is one lost volume
+// away from losing its whole history should not have to be inferred from the word "Deployment". A
+// CloudNativePG database with no object-storage provider registered is in the same position and is
+// said so too — the operator is what makes a backup possible, not what makes one happen
+// (ADR-0086 §4).
+//
+// An empty Kind prints nothing: a control plane that predates this reports no answer, and inventing
+// one would be a guess about the fact this line exists to state.
+func controlPlaneDatabaseLine(d client.ControlPlaneDatabaseCapability) string {
+	switch d.Kind {
+	case client.ControlPlaneDatabasePlain:
+		return "a plain Deployment (no backups, no point-in-time recovery, no failover)"
+	case client.ControlPlaneDatabaseCloudNativePG:
+		switch {
+		case !d.Ready:
+			return "a CloudNativePG cluster, no instance serving yet"
+		case d.BackedUp:
+			return "a CloudNativePG cluster, archiving to object storage"
+		default:
+			return "a CloudNativePG cluster, not archiving anywhere (no object-storage provider registered)"
+		}
+	default:
+		return ""
 	}
 }
 

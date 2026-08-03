@@ -301,6 +301,7 @@ func TestBootstrapDeploysClusterOnly(t *testing.T) {
 	clientsetFn = func(string, string) (kubernetes.Interface, error) { return fake.NewSimpleClientset(), nil }
 	origApply := applyFn
 	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+	stubCloudNativePGInstalled(t)
 
 	t.Cleanup(func() {
 		newIPDetector = origIP
@@ -391,6 +392,7 @@ func stubBootstrapFullFlow(t *testing.T, inst k3sInstaller) string {
 	clientsetFn = func(string, string) (kubernetes.Interface, error) { return fake.NewSimpleClientset(), nil }
 	origApply := applyFn
 	applyFn = func(context.Context, string, string, string, bool, io.Writer, io.Writer) error { return nil }
+	stubCloudNativePGInstalled(t)
 	// A comfortable RAM reading by default so the RAM preflight is silent and the flow reaches install;
 	// the RAM-preflight tests override this after calling the helper.
 	origMem := readTotalMemory

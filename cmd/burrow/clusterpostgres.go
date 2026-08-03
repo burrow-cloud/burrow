@@ -146,30 +146,52 @@ func runClusterPostgresInstall(ctx context.Context, o clusterPostgresOptions, st
 	// all — `cluster postgres install` on it reported success having done nothing, and the instances
 	// that followed archived nowhere. The two components are installed independently for the same
 	// reason each is detected independently: one being present says nothing about the other.
-	if cnpg.Ready {
-		r.done("CloudNativePG", cloudNativePGPresentStatus(cnpg)+", leaving it as is")
-	} else {
-		r.working("CloudNativePG", "installing")
-		detail, err := applyURLDetail(ctx, o.kubeconfig, o.kubeContext, manifest, o.verbose, stdout, stderr)
-		if err != nil {
-			return err
-		}
-		status := "installed " + kube.CNPGVersion + parenthesize(detail)
-		if o.wait {
-			r.working("CloudNativePG", "waiting for the controller")
-			if err := waitForDeployment(ctx, cs, kube.CNPGNamespace, kube.CNPGControllerDeployment,
-				"CloudNativePG operator", io.Discard, cnpgWaitTimeout); err != nil {
-				return err
-			}
-			status += ", controller ready"
-		}
-		r.done("CloudNativePG", status)
+	if err := ensureCloudNativePG(ctx, o.kubeconfig, o.kubeContext, cs, cnpg, r, o.wait, o.verbose, stdout, stderr); err != nil {
+		return err
 	}
 
 	if err := installPgBackRest(ctx, o, r, cs, plugin, certs, stdout, stderr); err != nil {
 		return err
 	}
 	writeClusterPostgresDone(stdout)
+	return nil
+}
+
+// ensureCloudNativePG applies the pinned CloudNativePG release unless a controller is already
+// running, and (with wait) confirms the controller rolled out. It reports each outcome on the
+// shared install-phase status line.
+//
+// It is shared by `burrow cluster postgres install` and `burrow cluster install`, which both need
+// the operator on the cluster: the first because the Postgres add-on is a `Cluster` (ADR-0066 §1),
+// the second because the control plane's OWN database is one too (ADR-0086 §1). Two installers
+// would be two sets of skip rules, two wait timeouts and two ways of describing the same apply, and
+// the one that drifted would be the one nobody ran that week.
+//
+// The failure is deliberately not caught here. An apply that cannot create the cluster-scoped
+// CustomResourceDefinitions is a stop, and each caller says what to do about it in its own terms —
+// install names `--database plain`, which is the choice that exists for exactly that cluster
+// (ADR-0086 §2).
+func ensureCloudNativePG(ctx context.Context, kubeconfig, kubeContext string, cs kubernetes.Interface,
+	cnpg controlplane.CloudNativePGCapability, r installReporter, wait, verbose bool, stdout, stderr io.Writer) error {
+	if cnpg.Ready {
+		r.done("CloudNativePG", cloudNativePGPresentStatus(cnpg)+", leaving it as is")
+		return nil
+	}
+	r.working("CloudNativePG", "installing")
+	detail, err := applyURLDetail(ctx, kubeconfig, kubeContext, kube.CNPGManifestURL(kube.CNPGVersion), verbose, stdout, stderr)
+	if err != nil {
+		return err
+	}
+	status := "installed " + kube.CNPGVersion + parenthesize(detail)
+	if wait {
+		r.working("CloudNativePG", "waiting for the controller")
+		if err := waitForDeployment(ctx, cs, kube.CNPGNamespace, kube.CNPGControllerDeployment,
+			"CloudNativePG operator", io.Discard, cnpgWaitTimeout); err != nil {
+			return err
+		}
+		status += ", controller ready"
+	}
+	r.done("CloudNativePG", status)
 	return nil
 }
 

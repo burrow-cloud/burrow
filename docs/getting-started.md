@@ -36,6 +36,15 @@ install creates the control plane in the `burrow` namespace and deploys your app
 `burrow-apps` namespace. On success it names and records the environment as your current one, and
 tells you it is ready.
 
+The control plane's own database runs on CloudNativePG, the same operator every Postgres add-on uses,
+so it can fail over and be backed up. Install puts that operator on the cluster first, which creates
+cluster-scoped CustomResourceDefinitions and needs cluster-admin, and states both before it applies
+anything. If your cluster's administrators will not accept those definitions, install with
+`--database plain`: the database runs as a single Deployment with no backups and no failover, and
+Postgres add-ons still work once you run `burrow cluster postgres install`. The choice is made at
+install and only there ([ADR-0086](adr/0086-burrow-installs-one-kind-of-postgres.md)); `burrow cluster`
+reports which one you have.
+
 `burrow cluster install` provisions only the control plane. Additive cluster components are separate,
 opt-in commands you run when you want them, each with its own status, install, and uninstall:
 

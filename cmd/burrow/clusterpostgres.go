@@ -88,7 +88,7 @@ func newClusterPostgresCmd() *cobra.Command {
 	bindLifecycleContext(install.Flags(), &o.kubeContext)
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the plan instead of applying it")
 	install.Flags().BoolVar(&o.wait, "wait", true, "wait for the operator's controller to become ready")
-	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
+	install.Flags().BoolVar(&o.verbose, "verbose", false, "show the manifest URLs in the plan, and every resource burrow applies instead of a summary")
 
 	parent.AddCommand(install)
 	return parent
@@ -121,34 +121,52 @@ func runClusterPostgresInstall(ctx context.Context, o clusterPostgresOptions, st
 	if err != nil {
 		return err
 	}
-
-	writeClusterPostgresPlan(stdout, manifest, cnpg)
-
-	fmt.Fprintln(stdout, "\nInstalling:")
-	r := installReporter{w: stdout, verbose: o.verbose}
-	if cnpg.Ready {
-		r.done("CloudNativePG", cloudNativePGPresentStatus(cnpg)+", leaving it as is")
-		writeClusterPostgresDone(stdout)
-		return nil
-	}
-
-	r.working("CloudNativePG", "installing")
-	detail, err := applyURLDetail(ctx, o.kubeconfig, o.kubeContext, manifest, o.verbose, stdout, stderr)
+	// The backup plugin's two reads happen HERE, before the plan is printed, rather than inside
+	// installPgBackRest where they used to. A plan that announced the plugin and then skipped it
+	// further down — because its controller was already running, or because cert-manager is absent —
+	// described a run that did not happen, and the reader had to notice the difference themselves. All
+	// three reads are read-only discovery, so resolving them up front buys a plan that is accurate
+	// about both components rather than one.
+	plugin, err := detectPgBackRestFn(ctx, cs)
 	if err != nil {
 		return err
 	}
-	status := "installed " + kube.CNPGVersion + parenthesize(detail)
-	if o.wait {
-		r.working("CloudNativePG", "waiting for the controller")
-		if err := waitForDeployment(ctx, cs, kube.CNPGNamespace, kube.CNPGControllerDeployment,
-			"CloudNativePG operator", io.Discard, cnpgWaitTimeout); err != nil {
+	certs, err := detectCertManagerFn(cs)
+	if err != nil {
+		return err
+	}
+
+	writeClusterPostgresPlan(stdout, o.verbose, manifest, cnpg, plugin, certs)
+
+	fmt.Fprintln(stdout, "\nInstalling:")
+	r := installReporter{w: stdout, verbose: o.verbose}
+
+	// A running operator is left alone, but the run CONTINUES to the backup plugin. It used to return
+	// here, which meant a cluster that already had CloudNativePG never got the plugin installed at
+	// all — `cluster postgres install` on it reported success having done nothing, and the instances
+	// that followed archived nowhere. The two components are installed independently for the same
+	// reason each is detected independently: one being present says nothing about the other.
+	if cnpg.Ready {
+		r.done("CloudNativePG", cloudNativePGPresentStatus(cnpg)+", leaving it as is")
+	} else {
+		r.working("CloudNativePG", "installing")
+		detail, err := applyURLDetail(ctx, o.kubeconfig, o.kubeContext, manifest, o.verbose, stdout, stderr)
+		if err != nil {
 			return err
 		}
-		status += ", controller ready"
+		status := "installed " + kube.CNPGVersion + parenthesize(detail)
+		if o.wait {
+			r.working("CloudNativePG", "waiting for the controller")
+			if err := waitForDeployment(ctx, cs, kube.CNPGNamespace, kube.CNPGControllerDeployment,
+				"CloudNativePG operator", io.Discard, cnpgWaitTimeout); err != nil {
+				return err
+			}
+			status += ", controller ready"
+		}
+		r.done("CloudNativePG", status)
 	}
-	r.done("CloudNativePG", status)
 
-	if err := installPgBackRest(ctx, o, r, cs, stdout, stderr); err != nil {
+	if err := installPgBackRest(ctx, o, r, cs, plugin, certs, stdout, stderr); err != nil {
 		return err
 	}
 	writeClusterPostgresDone(stdout)
@@ -166,18 +184,15 @@ func runClusterPostgresInstall(ctx context.Context, o clusterPostgresOptions, st
 // half-installed state this command exists to avoid. An operator who has not set up ingress yet has
 // no cert-manager and did not ask for one here; they get the operator, a plain instance, and a line
 // saying what is missing and which command installs it.
-func installPgBackRest(ctx context.Context, o clusterPostgresOptions, r installReporter, cs kubernetes.Interface, stdout, stderr io.Writer) error {
-	plugin, err := detectPgBackRestFn(ctx, cs)
-	if err != nil {
-		return err
-	}
+//
+// The two reads it branches on are made by the caller, before the plan is printed, and passed in: the
+// plan states which of these three outcomes this run will take, so it cannot promise one and deliver
+// another.
+func installPgBackRest(ctx context.Context, o clusterPostgresOptions, r installReporter, cs kubernetes.Interface,
+	plugin controlplane.PgBackRestCapability, certs controlplane.CertManagerCapability, stdout, stderr io.Writer) error {
 	if plugin.Ready {
 		r.done("pgBackRest plugin", "already running, leaving it as is")
 		return nil
-	}
-	certs, err := detectCertManagerFn(cs)
-	if err != nil {
-		return err
 	}
 	if !certs.Present {
 		r.skipped("pgBackRest plugin", "cert-manager is not installed and the plugin's manifest needs it; "+
@@ -218,53 +233,128 @@ func cloudNativePGPresentStatus(c controlplane.CloudNativePGCapability) string {
 	}
 }
 
-// writeClusterPostgresPlan prints the live plan: what this run will apply, or that it will skip,
-// and the cluster-admin requirement. The requirement is printed on every run, not only on failure —
-// a permission error from a partial CRD apply is a poor way to learn what the command needed.
-func writeClusterPostgresPlan(w io.Writer, manifest string, c controlplane.CloudNativePGCapability) {
-	fmt.Fprintln(w, "Plan. Against your current cluster, postgres install will:")
-	switch {
-	case c.Ready:
-		fmt.Fprintf(w, "  - CloudNativePG: %s, skip.\n", cloudNativePGPresentStatus(c))
-	case c.Present:
-		fmt.Fprintf(w, "  - re-apply CloudNativePG %s: its CRDs are installed but no controller is running, so apply %s\n", kube.CNPGVersion, manifest)
-	default:
-		fmt.Fprintf(w, "  - install CloudNativePG %s: apply %s\n", kube.CNPGVersion, manifest)
-	}
-	fmt.Fprintf(w, "  - install the pgBackRest plugin %s if no controller is running: apply %s\n",
-		kube.PgBackRestVersion, kube.PgBackRestManifestURL(kube.PgBackRestVersion))
+// writeClusterPostgresPlan prints the live plan: the two components this run will apply, what each one
+// is for, and the cluster-admin requirement. The requirement is printed on every run, not only on
+// failure — a permission error from a partial CRD apply is a poor way to learn what the command
+// needed.
+//
+// The plan leads with the components rather than with the manifest URLs it applies them from
+// (issue #461). The URLs are the longest thing on the line, and putting them there pushed the
+// version — the value a reader is actually scanning for — past the edge of the terminal. They move
+// under --verbose, indented beneath the component they belong to, and the cluster-admin note says so:
+// the operator deciding whether to trust this is the one who needs them, and they need to know where
+// to look.
+func writeClusterPostgresPlan(w io.Writer, verbose bool, manifest string, c controlplane.CloudNativePGCapability,
+	plugin controlplane.PgBackRestCapability, certs controlplane.CertManagerCapability) {
+	fmt.Fprintln(w, "This will install, on your current kube context:")
+	writePlanRows(w, verbose, []planRow{
+		cloudNativePGPlanRow(manifest, c),
+		pgBackRestPlanRow(plugin, certs),
+	})
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, clusterAdminNotice(w))
+	writeClusterAdminNotice(w, verbose)
+}
+
+// cloudNativePGPlanRow describes the operator's line in the live plan, across the three states the
+// detection distinguishes: running (nothing to do, and the release named, since a cluster on an older
+// operator validates a different schema), CRDs served with no controller behind them (the repair), and
+// absent (the install).
+func cloudNativePGPlanRow(manifest string, c controlplane.CloudNativePGCapability) planRow {
+	switch {
+	case c.Ready && c.Version == "":
+		return planRow{name: "CloudNativePG", detail: "already running, version unknown; skipped"}
+	case c.Ready && c.Version != kube.CNPGVersion:
+		return planRow{name: "CloudNativePG", version: c.Version,
+			detail: "already running; skipped (Burrow targets " + kube.CNPGVersion + ")"}
+	case c.Ready:
+		return planRow{name: "CloudNativePG", version: c.Version, detail: "already running; skipped"}
+	case c.Present:
+		return planRow{name: "CloudNativePG", version: kube.CNPGVersion, url: manifest,
+			detail: "re-applied: its CustomResourceDefinitions are installed but no controller is running"}
+	default:
+		return planRow{name: "CloudNativePG", version: kube.CNPGVersion, url: manifest,
+			detail: "runs and manages Postgres instances"}
+	}
+}
+
+// pgBackRestPlanRow describes the backup plugin's line in the live plan. It leads with what the
+// component DOES, because that is what a reader is deciding about, and keeps the product name in
+// parentheses, because a second component installed with cluster-admin has to be auditable by the
+// name it lands under — the install-phase status line names it the same way (issue #461).
+func pgBackRestPlanRow(plugin controlplane.PgBackRestCapability, certs controlplane.CertManagerCapability) planRow {
+	switch {
+	case plugin.Ready:
+		// The plugin's release artifact carries no version Burrow can read back, so a running one is
+		// reported as running and nothing more (controlplane.PgBackRestCapability).
+		return planRow{name: "Backup support", detail: "already running; skipped"}
+	case !certs.Present:
+		// The status line below states the whole reason; the plan says which way this run goes and
+		// which command changes it, and leaves the paragraph to the component it belongs to.
+		return planRow{name: "Backup support",
+			detail: "skipped: needs cert-manager, which `burrow cluster ingress install` installs"}
+	default:
+		return planRow{name: "Backup support", version: kube.PgBackRestVersion,
+			url:    kube.PgBackRestManifestURL(kube.PgBackRestVersion),
+			detail: "archives write-ahead logs to object storage (pgBackRest plugin)"}
+	}
 }
 
 // writeClusterPostgresDryRunPlan prints the plan without contacting the cluster, so the install stays
-// conditional ("if absent") — there has been no live read to resolve it.
+// conditional — there has been no live read to resolve it.
+//
+// It shows both manifest URLs unconditionally, where the live plan puts them behind --verbose. A dry
+// run's whole purpose is reviewing what would be applied before applying it, so the artifacts are the
+// point of the output rather than detail underneath it.
 func writeClusterPostgresDryRunPlan(w io.Writer, manifest string) {
-	fmt.Fprintln(w, "Plan (dry run). Against your current cluster, postgres install would:")
-	fmt.Fprintf(w, "  - install CloudNativePG %s if no controller is running: apply %s\n", kube.CNPGVersion, manifest)
-	fmt.Fprintf(w, "  - install the pgBackRest plugin %s if no controller is running: apply %s\n",
-		kube.PgBackRestVersion, kube.PgBackRestManifestURL(kube.PgBackRestVersion))
+	fmt.Fprintln(w, "This would install, on your current kube context (dry run):")
+	writePlanRows(w, true, []planRow{
+		{name: "CloudNativePG", version: kube.CNPGVersion, url: manifest,
+			detail: "runs and manages Postgres instances"},
+		{name: "Backup support", version: kube.PgBackRestVersion,
+			url:    kube.PgBackRestManifestURL(kube.PgBackRestVersion),
+			detail: "archives write-ahead logs to object storage (pgBackRest plugin)"},
+	})
+	fmt.Fprintln(w, "\nEach is skipped if its controller is already running. Backup support also needs")
+	fmt.Fprintln(w, "cert-manager, which `burrow cluster ingress install` provides.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, clusterAdminNotice(w))
+	writeClusterAdminNotice(w, true)
 }
 
 // clusterAdminNotice states the privilege this command needs and why the agent cannot run it
 // (ADR-0066 Consequences). This string surfaces to users, so it stays plain (no em-dashes).
-func clusterAdminNotice(w io.Writer) string {
-	return note(w) + "this installs cluster-scoped CustomResourceDefinitions and cluster RBAC, so it " +
-		"needs cluster-admin on this kube context. It is an operator step: the agent has no such access " +
-		"and cannot run it."
+//
+// It is where the manifest URLs are pointed at, because it is the one place in this output a reader is
+// making a trust decision: applying a remote manifest with cluster-admin. Somebody who wants to read
+// what will be fetched should not have to guess that a flag exists.
+func writeClusterAdminNotice(w io.Writer, verbose bool) {
+	fmt.Fprintln(w, note(w)+"this installs cluster-scoped CustomResourceDefinitions and cluster RBAC, so it needs")
+	fmt.Fprintln(w, "  cluster-admin on this kube context. It is an operator step: the agent has no such access")
+	if verbose {
+		fmt.Fprintln(w, "  and cannot run it.")
+		return
+	}
+	fmt.Fprintln(w, "  and cannot run it. Re-run with --verbose to see the manifests it applies.")
 }
 
-// writeClusterPostgresDone prints the closing block: what is ready, what to do next, and the honest
-// limit that the operator is not yet doing the backups it was chosen for (ADR-0009).
+// writeClusterPostgresDone prints the closing block: what is ready, what to do next in the order it
+// has to be done in, and the honest limit that a whole instance cannot yet be restored from the
+// backups this sets up (ADR-0009).
+//
+// The ordering constraint sits INSIDE the next-steps block rather than below it as a separate note
+// (issue #461). It is the reason the two commands are in that order, and printed as a note of its own
+// it read as an unrelated caveat that somebody skimming the commands would never connect to them.
+// That leaves one advisory here, on the one fact a reader most needs to have read.
 func writeClusterPostgresDone(w io.Writer) {
-	fmt.Fprintln(w, "\nDone. The CloudNativePG operator is on the cluster.")
-	fmt.Fprintln(w, "Check it anytime: burrow cluster")
-	fmt.Fprintln(w, "Next: burrow config provider add --type s3 ..., then burrow addon install postgres [--env <environment>]")
-	fmt.Fprintln(w, note(w)+"an instance archives its write-ahead log and takes its base backups only when an")
-	fmt.Fprintln(w, "  object-storage provider is registered BEFORE it is installed. Register one first, or")
-	fmt.Fprintln(w, "  re-run addon install afterwards to wire an instance you already have.")
-	fmt.Fprintln(w, note(w)+"restoring a whole instance from those backups is not built yet. Per-app dumps and")
-	fmt.Fprintln(w, "  their restore (burrow addon backup / restore) work as they always have.")
+	fmt.Fprintln(w, "\nDone. This cluster can now run Postgres instances.")
+	fmt.Fprintln(w, "\nNext, in this order:")
+	fmt.Fprintln(w, "  1. burrow config provider add --type s3 ...")
+	fmt.Fprintln(w, "  2. burrow addon install postgres [--env <environment>]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  The order matters: an instance archives its write-ahead log and takes its base backups")
+	fmt.Fprintln(w, "  only when an object-storage provider is registered BEFORE it is installed. Register one")
+	fmt.Fprintln(w, "  first, or re-run addon install afterwards to wire an instance you already have.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, note(w)+"restoring a whole instance from these backups is not built yet. Per-app backup")
+	fmt.Fprintln(w, "  and restore (burrow addon backup / restore) work today.")
+	fmt.Fprintln(w, "\nCheck it anytime: burrow cluster")
 }

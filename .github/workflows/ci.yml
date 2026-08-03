@@ -117,13 +117,40 @@ jobs:
       - name: test
         run: go test ./...
 
+  # Provenance checks: cheap, need no toolchain, and run on every event — including docs-only
+  # changes, which is the point. Both rules they enforce (a licence header on every Go file, a
+  # sign-off on every commit) are about who may use and who contributed the tree, so neither can
+  # be gated on whether the change touched code.
   license:
-    name: SPDX license headers
+    name: SPDX headers and DCO sign-off
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The DCO check reads the commits the branch adds, and the default depth-1 checkout
+          # contains none of them.
+          fetch-depth: 0
       - name: check SPDX headers
         run: bash scripts/check-spdx.sh
+      # Only on a pull request, because that is the only event where the check can be acted on.
+      # A sign-off cannot be added to a commit already on main without rewriting main, so failing
+      # a push build would report a problem with no fix and go on reporting it on every later
+      # push. The pull request is where it is still one `--amend` away, and GitHub's squash merge
+      # carries the branch's trailer into the commit that lands, so gating there is what keeps
+      # main signed off.
+      #
+      # The base and head are taken from the event rather than from the checkout, following the
+      # same event-conditional shape as the concurrency group above. What CI checks out for a
+      # pull request is a merge commit GitHub synthesises from the branch and the base branch, so
+      # HEAD is not the branch tip and `origin/main..HEAD` would describe a range nobody wrote.
+      # The event carries the two real endpoints, and fetch-depth: 0 is what makes both of them
+      # (and everything between) present in the clone.
+      - name: check DCO sign-off
+        if: github.event_name == 'pull_request'
+        env:
+          DCO_BASE: ${{ github.event.pull_request.base.sha }}
+          DCO_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check-dco.sh
 
   kube-integration:
     name: kubernetes integration (k3d)

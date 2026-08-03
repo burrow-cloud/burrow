@@ -46,6 +46,13 @@ tasks:
     cmds:
       - bash scripts/check-spdx.sh
 
+  dco:
+    desc: Check that the commits this branch adds carry a DCO sign-off
+    cmds:
+      # No pull request exists locally, so the script takes the merge base with origin/main as
+      # the base and skips (passing) when it cannot work one out.
+      - bash scripts/check-dco.sh
+
   test:
     desc: Run unit tests (integration tests skip unless their env vars are set)
     cmds:
@@ -57,13 +64,14 @@ tasks:
       - go test -race ./...
 
   check:
-    desc: Pre-commit gate — fmt, vet, build, unit tests, SPDX (all light, no Docker)
+    desc: Pre-commit gate — fmt, vet, build, unit tests, SPDX, DCO (all light, no Docker)
     cmds:
       - task: fmt:check
       - task: vet
       - task: build
       - task: test
       - task: spdx
+      - task: dco
 
   # --- dev-cluster builds (stamp a version the upgrade + skew gates accept) ---
 

@@ -199,7 +199,9 @@ the v0.1 slice ([docs/PLAN.md](docs/PLAN.md)).
   fixes. This keeps the main context lean and review deliberate.
 - **Semver from v0.1 toward v1.0.**
 - **Sign every commit with `git commit -s`** (Developer Certificate of Origin, required on
-  all commits for provenance — [ADR-0001](docs/adr/0001-license-and-dco.md)).
+  all commits for provenance — [ADR-0001](docs/adr/0001-license-and-dco.md)). The check
+  (`scripts/check-dco.sh`, run by `task check` and by CI on every pull request) enforces it on
+  the commits a branch adds.
 - **Do not add AI/agent attribution to commits or PRs.** No `Co-Authored-By: Claude`
   trailer, no "Generated with Claude Code" line, no `Claude-Session` trailer — commit
   messages and PR descriptions carry only their own content and the DCO sign-off.

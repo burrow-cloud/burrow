@@ -266,6 +266,11 @@ jobs:
           # a target.
           go test ./controlplane/e2e/ -v -timeout 900s
           go test ./connect/ -run TestProxyForwardsCustomHeader -v -timeout 300s
+          # The control plane's own database is a CloudNativePG `Cluster` (ADR-0086 §1). This applies
+          # the real install manifests and then opens the database with the connection string the
+          # install wrote, which is the one claim a rendered manifest cannot make: the CRD prunes
+          # fields it does not describe, silently and with a 201.
+          go test ./cmd/burrow/ -run TestControlPlaneDatabaseIntegration -v -timeout 600s
       - name: capstone e2e (install + deploy through the CLI)
         run: bash test/e2e/install-and-deploy.sh
         env:

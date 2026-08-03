@@ -108,6 +108,7 @@ tasks:
     desc: "HEAVY (Docker): Kubernetes integration test against a disposable k3d cluster"
     cmds:
       - bash scripts/with-k3d.sh go test ./controlplane/kube/ -run TestIntegration -v -timeout 300s
+      - bash scripts/with-k3d.sh go test ./cmd/burrow/ -run TestControlPlaneDatabaseIntegration -v -timeout 600s
 
   test:quickstart:
     desc: "HEAVY (Docker): pin docs/QUICKSTART.md's fast path against a disposable k3d cluster"

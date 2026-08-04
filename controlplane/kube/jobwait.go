@@ -100,6 +100,8 @@ func jobStartupIssue(ctx context.Context, client kubernetes.Interface, namespace
 //     did belongs to the Job's counters and to the caller: `burrow app run` reports a non-zero exit
 //     as a result rather than an error (ADR-0048 §3), and an OOM kill fails the Job through
 //     Status.Failed. Reading terminated state here would turn a completed run into a wait failure.
+//     The one exception is a container that terminated WITHOUT EXECUTING — StartError — which is not
+//     a run at all and leaves no result for the counters to carry (startErrorEvidence, issue #478).
 //   - INIT containers are read too. Every Burrow Job that has one puts real work there — the build
 //     Job clones the source in an init container mounting the credential Secret (ADR-0053 §4,
 //     ADR-0057 §4) — so an init container that cannot start is precisely the case this exists for,
@@ -116,6 +118,12 @@ func jobPodStartupEvidence(pod *corev1.Pod, grace time.Duration) (controlplane.I
 	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
 		for _, cs := range statuses {
 			ev, ok := waitingContainerIssueEvidence(pod, cs)
+			if !ok {
+				// A container the kubelet created but could not EXECUTE is the one exception to "only
+				// waiting states count" — it terminated without running, so there is no result the
+				// Job's counters could be carrying (issue #478). Everything else terminated is a run.
+				ev, ok = startErrorEvidence(cs)
+			}
 			if !ok {
 				continue
 			}

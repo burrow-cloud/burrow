@@ -56,6 +56,16 @@ const (
 	// ReasonProgressDeadlineExceeded is the Deployment Progressing-condition reason when a rollout
 	// has not made progress within .spec.progressDeadlineSeconds.
 	ReasonProgressDeadlineExceeded = "ProgressDeadlineExceeded"
+	// ReasonStartError is the terminated-state reason the kubelet records when a container was
+	// created but its command never executed — a missing binary, a path that is not the image's
+	// entrypoint, a file that is not executable. It is the one blocking condition that arrives as a
+	// TERMINATED state rather than a waiting one, which is exactly why it went unreported for so
+	// long: every Job waiter reads waiting states, a pod in Init:StartError has none, and the Job's
+	// own counters say only that it failed (issue #478).
+	//
+	// It earns its place by the same criterion as the rest: blocking, human-fixable, and never
+	// self-resolving — a container whose command does not exist will not find one on a retry.
+	ReasonStartError = "StartError"
 	// ReasonDeadlineExceeded is the reason a Job ran out of time — the Job Failed-condition reason
 	// when Kubernetes enforces activeDeadlineSeconds, and the reason Burrow's own Job waiters carry
 	// when their client-side deadline expires (issue #352). It is the BACKSTOP member: a waiter
@@ -76,6 +86,7 @@ func IssueReasons() []string {
 		ReasonCreateContainerConfigError,
 		ReasonOOMKilled,
 		ReasonProgressDeadlineExceeded,
+		ReasonStartError,
 		ReasonDeadlineExceeded,
 	}
 }
@@ -188,6 +199,13 @@ func (e IssueEvidence) Message() string {
 	case ReasonOOMKilled:
 		return fmt.Sprintf("container %s was killed for exceeding its memory limit (%s)%s. Raise the limit or reduce what the app allocates — restarting it alone reproduces the kill",
 			e.container(), e.Reason, e.limit())
+	case ReasonStartError:
+		// Says the command NEVER RAN, because that is the distinction the reader needs and the one
+		// an exit code alone destroys: a container that starts and exits non-zero is the workload
+		// reporting a result, and this is the workload never having been reached. The kubelet's
+		// message names the executable it could not run, which is the whole diagnosis.
+		return fmt.Sprintf("container %s was created but its command never ran (%s)%s. Nothing this container was asked to do has happened — the image does not carry the command it was given, so retrying it will fail the same way",
+			e.container(), e.Reason, e.suffixDetail())
 	case ReasonProgressDeadlineExceeded:
 		return fmt.Sprintf("the current release did not finish rolling out within the Deployment's progress deadline (%s), and no blocking pod condition was reported. Check the app's logs for what the new pods are doing",
 			e.Reason)

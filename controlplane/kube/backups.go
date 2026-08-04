@@ -416,24 +416,24 @@ func (a *Adapter) jobTerminationSize(ctx context.Context, jobName string) int64 
 // The PVC is mounted READ-ONLY here. The shipper's job is to read the dump and put it somewhere
 // else; it has no business writing to the volume holding every other backup, and saying so in the
 // mount is cheaper than trusting it not to.
+//
+// It runs the image's own entrypoint with arguments rather than naming a path to the binary — see
+// burrowdcontainer.go for why, and for how long this container failed to start for want of it.
 func (a *Adapter) shipContainer(dest *controlplane.BackupDestination, dumpPath string) corev1.Container {
-	return corev1.Container{
-		Name:    backupShipContainer,
-		Image:   a.shipImage(),
-		Command: []string{"/burrowd", "ship-backup"},
-		Env: []corev1.EnvVar{
-			{Name: "BURROW_SHIP_ENDPOINT", Value: dest.Config.Endpoint},
-			{Name: "BURROW_SHIP_REGION", Value: dest.Config.Region},
-			{Name: "BURROW_SHIP_BUCKET", Value: dest.Config.Bucket},
-			{Name: "BURROW_SHIP_KEY", Value: dest.Key},
-			{Name: "BURROW_SHIP_FILE", Value: dumpPath},
-			{Name: "BURROW_SHIP_CREDENTIALS_DIR", Value: objectStoreCredsPath},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "backups", MountPath: backupMountPath, ReadOnly: true},
-			{Name: "objectstore-creds", MountPath: objectStoreCredsPath, ReadOnly: true},
-		},
+	c := a.burrowdContainer(backupShipContainer, controlplane.ShipBackupCommand)
+	c.Env = []corev1.EnvVar{
+		{Name: "BURROW_SHIP_ENDPOINT", Value: dest.Config.Endpoint},
+		{Name: "BURROW_SHIP_REGION", Value: dest.Config.Region},
+		{Name: "BURROW_SHIP_BUCKET", Value: dest.Config.Bucket},
+		{Name: "BURROW_SHIP_KEY", Value: dest.Key},
+		{Name: "BURROW_SHIP_FILE", Value: dumpPath},
+		{Name: "BURROW_SHIP_CREDENTIALS_DIR", Value: objectStoreCredsPath},
 	}
+	c.VolumeMounts = []corev1.VolumeMount{
+		{Name: "backups", MountPath: backupMountPath, ReadOnly: true},
+		{Name: "objectstore-creds", MountPath: objectStoreCredsPath, ReadOnly: true},
+	}
+	return c
 }
 
 // shipImage is the image the shipping container runs: the override wired at install, else the
@@ -554,6 +554,16 @@ func (a *Adapter) runBackupJobAwait(ctx context.Context, job *batchv1.Job, name 
 		// Leave the Job (and its pod logs) for diagnosis; do not reap a failure.
 		outcome := controlplane.BackupJobOutcome{Reason: record.reason, Detail: record.detail}
 		if outcome.Reason == "" {
+			// Before falling back, ask whether a container was CREATED BUT NEVER EXECUTED. That is not
+			// a step that ran and failed, so it writes no termination message and would otherwise be
+			// read as the dump failing — a wrong diagnosis pointing at pg_dump, which had succeeded.
+			// It is how the shipping container's own breakage stayed invisible for every release it
+			// was broken in (issue #478).
+			if ev, ok := a.backupStartFailure(ctx, name); ok {
+				outcome.Reason, outcome.Detail = ev.Reason, ev.Message()
+			}
+		}
+		if outcome.Reason == "" {
 			// No container said why. With a destination the dump runs first, so the step that has not
 			// reported is the one that did not get to run — pg_dump — and that is the honest reading.
 			outcome.Reason = controlplane.BackupReasonDumpFailed
@@ -565,6 +575,26 @@ func (a *Adapter) runBackupJobAwait(ctx context.Context, job *batchv1.Job, name 
 	policy := metav1.DeletePropagationBackground
 	_ = jobs.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy})
 	return controlplane.BackupJobOutcome{SizeBytes: record.size}, nil
+}
+
+// backupStartFailure reports a container of the backup Job that the kubelet created but could not
+// execute. It reads the same evidence the Job waiter and the status surface read, so a backup Job
+// blocked this way is described in the same words as any other pod blocked this way.
+//
+// Best-effort, like every other read here: an unreadable pod list means no evidence, and the caller
+// falls back to what it did before.
+func (a *Adapter) backupStartFailure(ctx context.Context, jobName string) (controlplane.IssueEvidence, bool) {
+	ev, _, ok := selectPodIssue(ctx, a.client, a.addonNamespace, nameLabel+"="+jobName, func(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
+		for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+			for _, cs := range statuses {
+				if e, found := startErrorEvidence(cs); found {
+					return e, true
+				}
+			}
+		}
+		return controlplane.IssueEvidence{}, false
+	})
+	return ev, ok
 }
 
 // terminationRecord is what a backup Job's containers wrote to /dev/termination-log: the dump's byte

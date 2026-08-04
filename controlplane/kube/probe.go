@@ -57,13 +57,13 @@ func probeMount(readOnly bool) corev1.VolumeMount {
 // container runs Burrow's binary with Burrow's image, and the credential belongs to the container
 // that is meant to use it. Only the check container — the app's own image — is given the app's
 // environment.
+//
+// It runs the image's own entrypoint with arguments rather than naming a path to the binary — see
+// burrowdcontainer.go for why, and for the release this cost.
 func (a *Adapter) probeInitContainer() corev1.Container {
-	return corev1.Container{
-		Name:         probeInstallContainer,
-		Image:        a.shipImage(),
-		Command:      []string{"/burrowd", controlplane.ProbeInstallCommand, controlplane.ProbeMountPath},
-		VolumeMounts: []corev1.VolumeMount{probeMount(false)},
-	}
+	c := a.burrowdContainer(probeInstallContainer, controlplane.ProbeInstallCommand, controlplane.ProbeMountPath)
+	c.VolumeMounts = []corev1.VolumeMount{probeMount(false)}
+	return c
 }
 
 // withProbe attaches the probe machinery to a one-off Job's pod: the emptyDir, the init container

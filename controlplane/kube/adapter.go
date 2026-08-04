@@ -408,6 +408,11 @@ func selectPodIssue(ctx context.Context, client kubernetes.Interface, namespace,
 // outside the closed set ranks 0 and is not an Issue at all.
 func issueRank(reason string) int {
 	switch reason {
+	case controlplane.ReasonStartError:
+		// Ranked above the pull family because it is strictly more concrete: the image was pulled,
+		// the container was created, and the command it was given is not in it. There is no more
+		// direct statement of the fix available from a pod.
+		return 7
 	case controlplane.ReasonImagePullBackOff, controlplane.ReasonErrImagePull:
 		return 6
 	case controlplane.ReasonCreateContainerConfigError:
@@ -492,6 +497,36 @@ func waitingContainerIssueEvidence(pod *corev1.Pod, cs corev1.ContainerStatus) (
 			return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name, ExitCode: t.ExitCode}, true
 		}
 		return controlplane.IssueEvidence{Reason: w.Reason, Container: cs.Name}, true
+	}
+	return controlplane.IssueEvidence{}, false
+}
+
+// startErrorEvidence reads a container status for the one blocking condition that arrives as a
+// TERMINATED state: a container the kubelet created but could not execute (issue #478).
+//
+// It is deliberately separate from waitingContainerIssueEvidence rather than folded into it, because
+// the Job waiters' rule — a terminated container HAS RUN, and its outcome is the Job's, not the
+// waiter's — holds for every terminated state except this one. StartError and ContainerCannotRun are
+// the kubelet's two ways of saying the command never executed, so a container in either state has
+// produced no result for anyone to interpret; treating it as a run would report a workload's verdict
+// where there was none. The set is closed on purpose: an ordinary non-zero exit stays a result.
+//
+// The kubelet's message is the diagnosis (`exec: "/burrowd": stat /burrowd: no such file or
+// directory`), and it names paths and executables — never a secret value (ADR-0074 §9).
+func startErrorEvidence(cs corev1.ContainerStatus) (controlplane.IssueEvidence, bool) {
+	t := cs.State.Terminated
+	if t == nil {
+		return controlplane.IssueEvidence{}, false
+	}
+	switch t.Reason {
+	case controlplane.ReasonStartError, "ContainerCannotRun":
+		return controlplane.IssueEvidence{
+			Reason:    controlplane.ReasonStartError,
+			Container: cs.Name,
+			Image:     cs.Image,
+			Detail:    t.Message,
+			ExitCode:  t.ExitCode,
+		}, true
 	}
 	return controlplane.IssueEvidence{}, false
 }

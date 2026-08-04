@@ -64,20 +64,29 @@ func (a *Adapter) RunJob(ctx context.Context, spec controlplane.RunSpec) (contro
 	// Terminal (Complete or Failed): capture the pod's output and exit code before the TTL controller
 	// garbage-collects it. Both terminal states carry the same answer (ADR-0048 §3) — a non-zero exit
 	// is a result, not an error, which is why awaitJob deliberately ignores terminated containers.
-	return a.captureRun(ctx, name), nil
+	return a.captureRun(ctx, name)
 }
 
 // captureRun reads a finished run Job's pod for the container's exit code and its combined log output
 // (ADR-0048 §3, §6). Kubernetes' pod-log API returns stdout and stderr as one interleaved stream, so
-// the captured text lands in Stdout; Stderr is reserved for a future separation. Best-effort: a
-// missing pod or an unreadable log yields whatever was captured, never an error — the Job already
-// reached a terminal state, which is the answer the caller returns.
-func (a *Adapter) captureRun(ctx context.Context, jobName string) controlplane.RunResult {
+// the captured text lands in Stdout; Stderr is reserved for a future separation. Best-effort in the
+// ordinary case: a missing pod or an unreadable log yields whatever was captured, never an error —
+// the Job already reached a terminal state, which is the answer the caller returns.
+//
+// The ONE case it refuses to answer for is a pod whose run container never ran (issue #478). Before,
+// that returned the zero RunResult — exit code 0 and no output, which is indistinguishable from a
+// command that succeeded silently — so a check pod whose init container could not execute reported
+// as a clean, empty run and the caller was left to guess. When the pod names a container that was
+// created but never executed, that is returned as a JobBlockedError carrying the kubelet's own
+// message, on the same closed vocabulary every other blocked Job uses.
+func (a *Adapter) captureRun(ctx context.Context, jobName string) (controlplane.RunResult, error) {
 	var res controlplane.RunResult
 	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: nameLabel + "=" + jobName})
 	if err != nil {
-		return res
+		return res, nil
 	}
+	var blocked controlplane.IssueEvidence
+	blockedRank := 0
 	for _, pod := range pods.Items {
 		var terminated *corev1.ContainerStateTerminated
 		for _, cs := range pod.Status.ContainerStatuses {
@@ -87,7 +96,19 @@ func (a *Adapter) captureRun(ctx context.Context, jobName string) controlplane.R
 			}
 		}
 		if terminated == nil {
-			continue // a pod that never ran to a terminal state carries no exit code
+			// A pod that never ran to a terminal state carries no exit code. Ask why before moving on:
+			// an init container the kubelet could not execute is the reason the run container has no
+			// state at all, and it is the whole diagnosis.
+			for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+				for _, cs := range statuses {
+					if ev, ok := startErrorEvidence(cs); ok {
+						if r := issueRank(ev.Reason); r > blockedRank {
+							blocked, blockedRank = ev, r
+						}
+					}
+				}
+			}
+			continue
 		}
 		res.ExitCode = int(terminated.ExitCode)
 		if stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(ctx); err == nil {
@@ -95,9 +116,13 @@ func (a *Adapter) captureRun(ctx context.Context, jobName string) controlplane.R
 			stream.Close()
 			res.Stdout = string(data)
 		}
-		return res
+		return res, nil
 	}
-	return res
+	if blockedRank > 0 {
+		return controlplane.RunResult{}, fmt.Errorf("kube: %w",
+			&controlplane.JobBlockedError{Job: jobName, Reason: blocked.Reason, Issue: blocked.Message()})
+	}
+	return res, nil
 }
 
 // runJob builds the one-shot Job for a run: the app's own current image and command, its config env,

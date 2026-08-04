@@ -59,14 +59,21 @@ func TestProbeRunsInTheAppsImageWithBurrowsBinary(t *testing.T) {
 	if !strings.Contains(init.Image, "burrowd") {
 		t.Errorf("init container image = %q, want Burrow's own image", init.Image)
 	}
-	if len(init.Command) < 2 || init.Command[1] != controlplane.ProbeInstallCommand {
-		t.Errorf("init command = %v, want the %s subcommand", init.Command, controlplane.ProbeInstallCommand)
+	// ARGS, never command: the image's entrypoint runs the binary wherever the build put it, and this
+	// container names only the subcommand and its argument. It used to name the path too —
+	// `/burrowd`, which ko has never produced — so this init container failed to start on every
+	// release and every dependency check ever run skipped (issue #478). See burrowdcontainer.go.
+	if len(init.Command) != 0 {
+		t.Errorf("init command = %v, want none: overriding the entrypoint means naming a path the build owns", init.Command)
+	}
+	if len(init.Args) < 1 || init.Args[0] != controlplane.ProbeInstallCommand {
+		t.Errorf("init args = %v, want the %s subcommand first", init.Args, controlplane.ProbeInstallCommand)
 	}
 	// The init container copies its own executable, so it needs no shell and no `cp` — the same
 	// problem one layer up, since Burrow's base image is distroless too.
-	for _, arg := range init.Command {
+	for _, arg := range init.Args {
 		if arg == "sh" || arg == "/bin/sh" || arg == "cp" {
-			t.Errorf("init command = %v, want no shell or coreutils: Burrow's own base image has neither", init.Command)
+			t.Errorf("init args = %v, want no shell or coreutils: Burrow's own base image has neither", init.Args)
 		}
 	}
 	if got := pod.Containers[0].Command; len(got) != 2 || got[0] != controlplane.ProbePath {

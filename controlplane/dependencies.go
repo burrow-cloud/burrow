@@ -673,9 +673,21 @@ func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env
 	if runErr != nil {
 		// The check did not run to a readable answer. Every dependency is SKIPPED, not failed: a check
 		// pod that could not be scheduled says nothing whatever about the database.
+		//
+		// The DETAIL is where the reason lives, and it says what the cluster said wherever the cluster
+		// said anything (issue #478). "The check did not run to completion" is the status name in a
+		// sentence: it was all an operator got while a check pod sat in a terminal error state naming
+		// the exact executable it could not run, and it hid a feature that had never worked on any
+		// release. A blocked Job carries the pod's own message on ADR-0074 §2's closed vocabulary, so
+		// it is passed straight through; the generic line is the fallback for a failure with no pod
+		// behind it, such as an unparseable result from a check that did run.
 		detail := "the check did not run to completion"
-		if res.TimedOut {
+		var blocked *JobBlockedError
+		switch {
+		case res.TimedOut:
 			detail = fmt.Sprintf("the check did not finish inside its %s window", dependencyCheckDeadline)
+		case errors.As(runErr, &blocked):
+			detail = blocked.Issue
 		}
 		slog.InfoContext(ctx, "the deploy-time dependency check did not produce a result",
 			"app", app, "env", env, "error", runErr)

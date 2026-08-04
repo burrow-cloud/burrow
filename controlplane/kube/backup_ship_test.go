@@ -71,8 +71,15 @@ func TestBackupJobWithDestinationDumpsThenShips(t *testing.T) {
 	if ship.Image != "ghcr.io/burrow-cloud/burrowd:v9.9.9" {
 		t.Errorf("shipper image = %q, want the pinned burrowd image", ship.Image)
 	}
-	if got := strings.Join(ship.Command, " "); got != "/burrowd ship-backup" {
-		t.Errorf("shipper command = %q, want /burrowd ship-backup", got)
+	// ARGS, never command: the image's entrypoint runs the binary wherever the build put it, and
+	// this container names only the subcommand. It used to name the path too — `/burrowd`, which ko
+	// has never produced — so this container failed to start on every release and no backup ever
+	// reached the object store (issue #478). See burrowdcontainer.go.
+	if len(ship.Command) != 0 {
+		t.Errorf("shipper command = %v, want none: overriding the entrypoint means naming a path the build owns", ship.Command)
+	}
+	if got := strings.Join(ship.Args, " "); got != controlplane.ShipBackupCommand {
+		t.Errorf("shipper args = %q, want %q", got, controlplane.ShipBackupCommand)
 	}
 
 	// The connection details are configuration and travel as env, so a backup's destination is

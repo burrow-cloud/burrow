@@ -430,6 +430,16 @@ func validateObjectStoreRequest(name string, cfg ObjectStoreConfig, cred ObjectS
 	return nil
 }
 
+// ShipBackupCommand is the subcommand the backup Job's shipping container runs: burrowd, from
+// Burrow's own image, writing one dump to the object store and reading it back (ADR-0063 §7).
+//
+// It is named here rather than written twice because it is a contract between two packages that
+// never call each other — the Job spec in controlplane/kube passes it as an ARGUMENT to the image's
+// entrypoint, and cmd/burrowd dispatches on it before any control-plane wiring runs. The probe's
+// two subcommands are named in dependencies.go for the same reason (ProbeInstallCommand,
+// ProbeCheckCommand); this one was the odd literal out.
+const ShipBackupCommand = "ship-backup"
+
 // BackupDestination is everything the in-cluster backup Job needs to write one dump to the object
 // store: which provider it is, where the bucket is, and the credential to sign with (ADR-0063 §7).
 //

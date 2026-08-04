@@ -100,6 +100,92 @@ CTX=$(kubectl --kubeconfig "$KCFG" config current-context)
 # infra flakes that setup failures usually are. Classify accordingly (exit 1, not the rerunnable 75).
 PHASE=test
 
+# =============================================================================
+# The burrowd image runs its own entrypoint (issue #478)
+# =============================================================================
+# Two pods run burrowd itself rather than the user's image: the backup shipper (ADR-0063 §7) and the
+# dependency check's probe installer (ADR-0076 §4). Both used to set the container's `command` to
+# `/burrowd` — a path the published image has never had, because ko lays the binary at
+# /ko-app/burrowd and makes it the entrypoint. Both died before their first instruction on every
+# release, and every unit test passed, because a test written against the Job spec cannot notice
+# that the spec and the image disagree.
+#
+# This is the assertion that can: the image built by ko a few steps above, in a cluster, running the
+# subcommands as ARGUMENTS with no command override. It is cheap — the image is already built and
+# imported, and the pods are seconds — and it fails loudly if anything about the build stops putting
+# an entrypoint in the image.
+echo "=== the burrowd image runs its own entrypoint (issue #478) ==="
+IMAGE_NS=burrow-e2e-image
+kubectl --kubeconfig "$KCFG" create namespace "$IMAGE_NS" --dry-run=client -o yaml | kubectl --kubeconfig "$KCFG" apply -f -
+
+# The whole ADR-0076 §4 mechanism, end to end and against the real image: an init container running
+# BURROW's image copies its own executable into an emptyDir, and a container running a DIFFERENT
+# image — busybox, which carries no psql, no curl and nothing of Burrow's — executes the copy and
+# prints a result line. Everything here is the real thing: the real image, the real subcommands, the
+# real marker the engine parses back.
+kubectl --kubeconfig "$KCFG" apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-shape
+  namespace: $IMAGE_NS
+spec:
+  restartPolicy: Never
+  volumes:
+    - name: burrow-probe
+      emptyDir: {}
+  initContainers:
+    - name: burrow-probe-install
+      image: $BURROWD_IMAGE
+      imagePullPolicy: IfNotPresent
+      # ARGS ONLY. No \`command\`: the image's entrypoint is what knows where the binary is.
+      args: ["install-probe", "/burrow-probe"]
+      volumeMounts:
+        - name: burrow-probe
+          mountPath: /burrow-probe
+  containers:
+    - name: check
+      image: busybox:1.36
+      # The check container DOES set a command, and must: it runs the app's image, whose entrypoint
+      # is the app's own. The path it names is the one the init container just wrote, not one baked
+      # into any image.
+      command: ["/burrow-probe/burrowd", "check-dependencies"]
+      env:
+        - name: BURROW_CHECK_PLAN
+          value: '{"checks":[{"kind":"exposure","url":"http://127.0.0.1:1/"}]}'
+      volumeMounts:
+        - name: burrow-probe
+          mountPath: /burrow-probe
+          readOnly: true
+EOF
+if ! kubectl --kubeconfig "$KCFG" -n "$IMAGE_NS" wait --for=jsonpath='{.status.phase}'=Succeeded pod/probe-shape --timeout=120s; then
+  echo "FAIL: the probe pod did not run to completion against the real burrowd image"
+  kubectl --kubeconfig "$KCFG" -n "$IMAGE_NS" describe pod probe-shape || true
+  kubectl --kubeconfig "$KCFG" -n "$IMAGE_NS" logs probe-shape --all-containers --prefix || true
+  exit 1 # the ERR trap dumps diagnostics
+fi
+probe_out=$(kubectl --kubeconfig "$KCFG" -n "$IMAGE_NS" logs probe-shape -c check)
+echo "$probe_out"
+if ! grep -q "burrow-dependency-check: " <<<"$probe_out"; then
+  echo "FAIL: the probe produced no result line, so the engine would report CheckNotRun with nothing to say"
+  exit 1
+fi
+echo "--- the probe installed itself from the real image and reported from a foreign one ---"
+
+# The backup shipper's half of the same claim. It is given no destination, so it must fail — but it
+# must fail as BURROWD, having started and read its own configuration, not as a container whose
+# command was not in the image. The message is what tells those two apart.
+ship_out=$(kubectl --kubeconfig "$KCFG" -n "$IMAGE_NS" run ship-shape \
+  --image="$BURROWD_IMAGE" --image-pull-policy=IfNotPresent --restart=Never --attach --rm -q -- \
+  ship-backup 2>&1 || true)
+echo "$ship_out"
+if ! grep -q "burrowd ship-backup:" <<<"$ship_out"; then
+  echo "FAIL: 'ship-backup' did not reach burrowd's own code. If this says \"no such file or directory\", the image's entrypoint was overridden with a path the build does not produce — issue #478"
+  exit 1
+fi
+echo "--- ship-backup dispatched through the image's entrypoint ---"
+kubectl --kubeconfig "$KCFG" delete namespace "$IMAGE_NS" --wait=false
+
 echo "=== burrow app deploy (auto-connect: kubeconfig + API-server proxy, no port-forward) ==="
 "$BURROW" app deploy web --image nginx:alpine --kubeconfig "$KCFG"
 

@@ -49,7 +49,7 @@ func main() {
 	// before any flag or database wiring because it connects to nothing this process normally needs —
 	// no Postgres, no cluster, no API token — and a failure to reach any of those must not be able to
 	// fail a backup for a reason unrelated to the backup.
-	if len(os.Args) > 1 && os.Args[1] == "ship-backup" {
+	if len(os.Args) > 1 && os.Args[1] == controlplane.ShipBackupCommand {
 		if err := shipBackup(context.Background(), os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, "burrowd ship-backup:", err)
 			os.Exit(1)

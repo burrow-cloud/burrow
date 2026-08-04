@@ -23,6 +23,7 @@ func TestIssueReasonsIsAClosedSet(t *testing.T) {
 		"CreateContainerConfigError",
 		"OOMKilled",
 		"ProgressDeadlineExceeded",
+		"StartError",
 		"DeadlineExceeded",
 	}
 	got := cp.IssueReasons()

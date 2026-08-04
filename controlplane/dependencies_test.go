@@ -311,6 +311,48 @@ func TestCheckThatCouldNotRunIsSkippedNotFailed(t *testing.T) {
 	}
 }
 
+// TestSkippedCheckCarriesThePodsOwnReason is issue #478's reporting half. A check whose pod could
+// not start reported "the check did not run to completion" — the status name in a sentence — while
+// the pod sat in a terminal error state naming the exact executable it could not run. Two words hid
+// a feature that had never worked on any release.
+//
+// The OUTCOME stays skipped and the REASON stays CheckNotRun: the check genuinely did not run, and
+// an agent branching on the reason must still see that. It is the DETAIL that has to carry what the
+// cluster said, and it is passed through unaltered from the blocked Job so the operator reads the
+// same prose the status surface would show them for the same pod.
+func TestSkippedCheckCarriesThePodsOwnReason(t *testing.T) {
+	e, k, d, prov := newPostgresEngine(t)
+	ctx := context.Background()
+	installPostgresAddon(t, d, cp.DefaultEnvironment)
+	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
+	k.SetError(fake.OpRunJob, &cp.JobBlockedError{
+		Job:    "burrow-run-check-1",
+		Reason: cp.ReasonStartError,
+		Issue:  cp.IssueEvidence{Reason: cp.ReasonStartError, Container: "burrow-probe-install", Detail: `exec: "/burrowd": stat /burrowd: no such file or directory`}.Message(),
+	})
+
+	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "repo/web:1.0.0"})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(res.Dependencies) != 1 {
+		t.Fatalf("dependencies = %+v, want one", res.Dependencies)
+	}
+	got := res.Dependencies[0]
+	if got.Outcome != cp.DependencySkipped || got.Reason != cp.ReasonCheckNotRun {
+		t.Errorf("outcome/reason = %q/%q, want %q/%q: a check that never ran is not a dependency that failed",
+			got.Outcome, got.Reason, cp.DependencySkipped, cp.ReasonCheckNotRun)
+	}
+	for _, want := range []string{"burrow-probe-install", "/burrowd"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("detail = %q, does not name %q — the pod said exactly why and the operator was told only that it did not finish", got.Detail, want)
+		}
+	}
+	if got.Detail == "the check did not run to completion" {
+		t.Error("detail is the generic line, so the pod's own reason was thrown away")
+	}
+}
+
 // TestDeployRunsNoCheckWhenThereIsNothingToCheck is what keeps this free for the common case. An
 // unpublished app with no database has no derived dependency, so no pod is created, no image is
 // pulled, and no latency is added to a deploy that could not have learned anything.

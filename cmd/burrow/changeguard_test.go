@@ -251,9 +251,15 @@ func TestEveryCommandIsClassified(t *testing.T) {
 }
 
 // TestChangingCommandsNameTheirTarget runs every command classified as changing something and
-// requires the target to appear in what it printed — in the human line and, with --json, in the
-// result an agent parses. It runs the REAL command tree against a stand-in control plane, so a
+// requires the target to appear in what it printed — once in the human output and, with --json, in
+// the result an agent parses. It runs the REAL command tree against a stand-in control plane, so a
 // command that stops naming its target fails here rather than in somebody's terminal.
+//
+// ONCE is half the requirement, and the half that is easy to lose. Two paths can answer "where did
+// that go": the per-app commands print a targeting line before they work, and every changing command
+// can append a clause to its result. A command that did both said it twice, in two vocabularies, and
+// a reader comparing the two had to work out whether they disagreed (issues #465, #473). So the
+// guard counts: exactly one mention, wherever the command chose to put it.
 func TestChangingCommandsNameTheirTarget(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
@@ -272,17 +278,24 @@ func TestChangingCommandsNameTheirTarget(t *testing.T) {
 			continue
 		}
 		t.Run(path, func(t *testing.T) {
-			stdout, err := runChanging(t, srv.URL, c.args, false)
+			stdout, stderr, err := runChanging(t, srv.URL, c.args, false)
 			if err != nil {
-				t.Fatalf("%s: %v\n%s", path, err, stdout)
+				t.Fatalf("%s: %v\n%s\n%s", path, err, stdout, stderr)
 			}
-			if !strings.Contains(stdout, "on the control plane at "+srv.URL) {
-				t.Errorf("`burrow %s` printed no target.\ngot: %q\n%s", path, stdout, changeGuardRationale)
+			// Both streams, because the two ways of saying it land on different ones: the targeting
+			// line goes to stderr (it must never pollute a --json result) and the clause rides the
+			// result on stdout.
+			switch said := strings.Count(stdout, srv.URL) + strings.Count(stderr, srv.URL); {
+			case said == 0:
+				t.Errorf("`burrow %s` printed no target.\nstdout: %q\nstderr: %q\n%s", path, stdout, stderr, changeGuardRationale)
+			case said > 1:
+				t.Errorf("`burrow %s` named its target %d times; one clear statement, not two.\nstdout: %q\nstderr: %q\n%s",
+					path, said, stdout, stderr, changeGuardRationale)
 			}
 
-			stdout, err = runChanging(t, srv.URL, c.args, true)
+			stdout, stderr, err = runChanging(t, srv.URL, c.args, true)
 			if err != nil {
-				t.Fatalf("%s --json: %v\n%s", path, err, stdout)
+				t.Fatalf("%s --json: %v\n%s\n%s", path, err, stdout, stderr)
 			}
 			// Several commands print one result per key (config/secret set), so read the first
 			// document off the stream rather than the whole buffer.
@@ -306,7 +319,7 @@ func TestChangingCommandsNameTheirTarget(t *testing.T) {
 // runChanging invokes one command against the stand-in control plane. It supplies a stdin the
 // credential prompts can read, so a command that asks for a token does not block on the test
 // runner's terminal; the value is a placeholder and never leaves the fake server.
-func runChanging(t *testing.T, controlPlane string, args []string, asJSON bool) (string, error) {
+func runChanging(t *testing.T, controlPlane string, args []string, asJSON bool) (stdout, stderr string, err error) {
 	t.Helper()
 	flags := []string{"--control-plane", controlPlane, "--token", "x"}
 	if asJSON {
@@ -331,8 +344,8 @@ func runChanging(t *testing.T, controlPlane string, args []string, asJSON bool) 
 	root.SetOut(&out)
 	root.SetErr(&errb)
 	root.SetIn(strings.NewReader("placeholder\n"))
-	err := root.ExecuteContext(context.Background())
-	return out.String(), err
+	err = root.ExecuteContext(context.Background())
+	return out.String(), errb.String(), err
 }
 
 // registeredCommandPaths returns every command path the real `burrow` tree registers, so the

@@ -828,26 +828,40 @@ an environment handle says which environment inside it.
 | `burrow auth status` | Lists the configured targets, marks the active one, says what each is, and flags a target whose kube context is no longer in your kubeconfig. Local only; contacts no cluster. |
 | `burrow auth switch <name>` | Makes an already-configured target active, without re-authenticating. |
 
-**Every command that changes something names the target it acted on**, in its own output, on the line
-that says what it did:
+**Every command that changes something says where it changed it — once.** An app command names it
+before it works; a cluster-wide one names it on the line that says what it did:
 
 ```
 $ burrow app deploy web --image ghcr.io/acme/web:1.4.0
-deployed web as release rel-7f2 (image ghcr.io/acme/web:1.4.0, 2 replica(s), deployed) on target "prod-cluster"
+targeting prod-cluster
+deployed web as release rel-7f2 (image ghcr.io/acme/web:1.4.0, 2 replica(s), deployed)
+
+$ burrow guard set app.deploy allow
+guardrail app.deploy set to allow on prod-cluster
 ```
 
-The name shown is the one you chose in the picker — the same string `burrow auth status` prints. With
-no target selected, commands follow your current kube context and say so (`on kube context "dev"
-(no target selected)`) rather than inventing a name. A per-invocation `--context` override names what
-you overrode it *to*. `--json` carries the same thing as a `target` member of the result, and
-`burrow-agent`'s outcome envelope carries it too, so an agent relaying a result can say where it
-happened. Read-only commands deliberately do not print it: this is about irreversible acts, and a
-target stamped on every listing is noise.
+The name shown is the one you chose in the picker — the same string `burrow auth status` prints — or,
+with no target selected, the environment handle registered for the cluster it reached. Only when
+Burrow has no name of its own for where a command went does it fall back to naming the kube context.
+A per-invocation `--context` override names what you overrode it *to*. `--json` carries the same
+thing as a `target` member of the result, and `burrow-agent`'s outcome envelope carries it too, so an
+agent relaying a result can say where it happened. Read-only commands deliberately do not print it:
+this is about irreversible acts, and a target stamped on every listing is noise.
+
+Which of the two places it appears follows from which is the only one available. The app commands
+resolve an environment and announce it on stderr ahead of the work; the cluster-wide ones — `guard`,
+`cluster config`, add-ons, credentials, `audit`, `failures` — announce nothing, so the result line is
+where they say it. Saying it in both places is the thing that is never right: two answers to one
+question, in two vocabularies, leaves you working out whether they disagree.
 
 Targets live in `~/.burrow/config` (or `$BURROW_CONFIG`), alongside the environment handles, under
 `targets:` and `currentTarget:`. A Kubernetes target records the **context name and never a copy of
 your credential**, so rotating the kubeconfig, re-issuing a certificate, or letting a provider CLI
-manage it all keep working with nothing here going stale.
+manage it all keep working with nothing here going stale. The name itself can still go stale — a
+context you rename is a context nothing here points at any more — so a target or a pinned handle
+naming a context your kubeconfig does not have is refused, by name, rather than quietly resolved
+somewhere else. `burrow auth status` marks such a target and `burrow env list` marks such a handle,
+so it is visible before a deploy rather than after one.
 
 **Authenticating is not installing.** `burrow auth login` applies no manifests and contacts no
 cluster, so the second person to use a cluster brings their own kubeconfig context and installs
@@ -971,9 +985,9 @@ Two distinct things share the name, and conflating them is the usual source of c
 
 | Command | What it does |
 | --- | --- |
-| `burrow env` / `env list` | Lists local handles and marks the active one. `--discover` probes every kube context for an installed burrowd and registers a handle for each. |
+| `burrow env` / `env list` | Lists local handles, marks the active one, and marks any whose kube context is no longer in your kubeconfig. `--discover` probes every kube context for an installed burrowd and registers a handle for each. |
 | `burrow env add <name>` | Creates the namespace and burrowd's Role/RoleBinding in it, registers the environment with burrowd, and records a local handle. Namespace defaults to `<app-namespace>-<name>`. |
-| `burrow env use <name>` / `env follow` | Pins the active environment, or clears the pin so it follows the current kube context. |
+| `burrow env use <name>` / `env follow` | Pins the active environment, or clears the pin so it follows the current kube context. `env use --context <context>` re-points the handle first, which is what a renamed kube context needs. |
 | `burrow env rename <old> <new>` | Renames a local handle. |
 | `burrow env remove <name>` | Deletes the **local handle only** — and the minted agent kubeconfig under `~/.burrow/agents/`. It does not unregister the environment in burrowd. |
 | `burrow-agent environments` | Lists what the agent can see. Read-only, local. |

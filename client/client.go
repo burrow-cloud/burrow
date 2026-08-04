@@ -330,6 +330,9 @@ type ReachabilityResult struct {
 	Summary            string   `json:"summary"`
 }
 
+// LogLine is a single line of application log output. Timestamp is the instant the cluster
+// recorded the line, in UTC, and is zero only when no time could be read for it; Message is the
+// application's own output with that timestamp stripped off.
 type LogLine struct {
 	Pod       string    `json:"pod"`
 	Timestamp time.Time `json:"timestamp"`

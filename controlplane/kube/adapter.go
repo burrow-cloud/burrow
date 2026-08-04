@@ -688,7 +688,11 @@ func (a *Adapter) Logs(ctx context.Context, app string, opts controlplane.LogOpt
 		return nil, fmt.Errorf("kube: listing pods for %q: %w", app, err)
 	}
 
-	var podOpts corev1.PodLogOptions
+	// Timestamps asks Kubernetes to stamp every emitted line with the instant it recorded, so a
+	// consumer can order, window, and correlate entries instead of regexing whatever the
+	// application happened to print (#480). The prefix is stripped back off in parseLogStream:
+	// it is Burrow's metadata, not the application's output.
+	podOpts := corev1.PodLogOptions{Timestamps: true}
 	if opts.TailLines > 0 {
 		tl := int64(opts.TailLines)
 		podOpts.TailLines = &tl
@@ -705,14 +709,63 @@ func (a *Adapter) Logs(ctx context.Context, app string, opts controlplane.LogOpt
 		if readErr != nil {
 			return nil, fmt.Errorf("kube: reading logs for pod %q: %w", pod.Name, readErr)
 		}
-		for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
-			if line == "" {
-				continue
-			}
-			lines = append(lines, controlplane.LogLine{Pod: pod.Name, Message: line})
-		}
+		lines = append(lines, parseLogStream(pod.Name, string(data))...)
 	}
 	return lines, nil
+}
+
+// parseLogStream splits one pod's `timestamps=true` log stream into LogLines.
+//
+// Kubernetes prefixes each line it emits with an RFC3339Nano instant in UTC and a single
+// space. That prefix is parsed off: the instant becomes LogLine.Timestamp (kept in UTC, as
+// the API emits it — never shifted to the reader's local zone) and everything after the
+// space becomes LogLine.Message, so the message is exactly what the application wrote.
+//
+// A line whose prefix does not parse is treated as a **continuation** of the line before it.
+// In a stamped stream Kubernetes stamps everything it emits, so the only way an unstamped
+// line arises is a partial or malformed record — a very long line the API split, or a write
+// that was cut off. Such a line keeps its raw text as the message and inherits the last
+// timestamp seen *for this same pod*, which is the closest true instant available for it.
+//
+// LogLine.Timestamp is therefore zero only when no time could be read at all: an unparseable
+// line at the very start of a pod's stream, with nothing earlier to carry forward. A zero
+// timestamp is a genuine "no time was readable", not a field that was left unset.
+func parseLogStream(pod, data string) []controlplane.LogLine {
+	var (
+		lines []controlplane.LogLine
+		last  time.Time // most recent instant read from this pod, carried into continuations
+	)
+	for _, raw := range strings.Split(strings.TrimRight(data, "\n"), "\n") {
+		if raw == "" {
+			continue
+		}
+		ts, msg, ok := splitLogTimestamp(raw)
+		if ok {
+			last = ts
+		} else {
+			ts, msg = last, raw
+		}
+		if msg == "" {
+			continue // a blank application line carries no information
+		}
+		lines = append(lines, controlplane.LogLine{Pod: pod, Timestamp: ts, Message: msg})
+	}
+	return lines
+}
+
+// splitLogTimestamp separates the "<RFC3339Nano> " prefix Kubernetes writes when timestamps
+// are requested from the application's own text. ok is false when the line carries no
+// parseable prefix.
+func splitLogTimestamp(line string) (ts time.Time, msg string, ok bool) {
+	stamp, rest, found := strings.Cut(line, " ")
+	if !found {
+		return time.Time{}, "", false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return time.Time{}, "", false
+	}
+	return parsed.UTC(), rest, true
 }
 
 func (a *Adapter) DeleteWorkload(ctx context.Context, app string) error {

@@ -164,9 +164,13 @@ type LogOptions struct {
 
 // LogLine is a single line of application log output.
 type LogLine struct {
-	Pod       string    `json:"pod"`
+	Pod string `json:"pod"`
+	// Timestamp is the instant the cluster recorded the line, in UTC. It is zero only when no
+	// time could be read for the line at all — a malformed or partial record at the start of a
+	// pod's stream — so a zero value means "unknown", not "not provided".
 	Timestamp time.Time `json:"timestamp"`
-	Message   string    `json:"message"`
+	// Message is the application's own output, with any timestamp the cluster added stripped off.
+	Message string `json:"message"`
 }
 
 // DNSRecordType is the kind of DNS record the control plane manages (ADR-0018). A host is

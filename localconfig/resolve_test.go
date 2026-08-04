@@ -137,11 +137,184 @@ func TestResolvePinnedMissing(t *testing.T) {
 	}
 }
 
+// writeScopedCredential writes a self-contained scoped kubeconfig of the shape `burrow install`
+// mints (ADR-0038): one cluster, one user, one context, everything needed to reach burrowd without
+// consulting the ambient kubeconfig. It is what makes a stale kube context name harmless.
+func writeScopedCredential(t *testing.T) string {
+	t.Helper()
+	cfg := api.NewConfig()
+	cfg.Clusters["burrow"] = &api.Cluster{Server: "https://prod.example:6443", CertificateAuthorityData: []byte("ca")}
+	cfg.AuthInfos["burrow-agent"] = &api.AuthInfo{Token: "scoped-token"}
+	cfg.Contexts["burrow-agent"] = &api.Context{Cluster: "burrow", AuthInfo: "burrow-agent", Namespace: "burrow"}
+	cfg.CurrentContext = "burrow-agent"
+
+	path := filepath.Join(t.TempDir(), "agent-kubeconfig")
+	if err := clientcmd.WriteToFile(*cfg, path); err != nil {
+		t.Fatalf("write scoped kubeconfig: %v", err)
+	}
+	return path
+}
+
+// TestResolvePinnedContextRenamedAwayWithAScopedCredential is issue #488. The handle's scoped
+// credential (ADR-0038) holds the API server, the CA and the token, so the recorded kube context is
+// a label the connection never reads — and ADR-0084 §5 is explicit that a label can be renamed.
+// Refusing there takes working access away over a value nothing on this path uses, so the
+// resolution proceeds and hands the staleness back as data for the command to report once.
+func TestResolvePinnedContextRenamedAwayWithAScopedCredential(t *testing.T) {
+	kubeconfig := writeKubeconfig(t)
+	scoped := writeScopedCredential(t)
+	cfg := &Config{
+		Current: "prod",
+		Environments: []Environment{
+			{Name: "prod", Context: "renamed-away", Env: "prod", AppNamespace: "apps", AgentKubeconfig: scoped, AgentContext: "burrow-agent"},
+		},
+	}
+
+	got, err := Resolve(cfg, kubeconfig)
+	if err != nil {
+		t.Fatalf("Resolve should proceed on the scoped credential, got: %v", err)
+	}
+	if got.Name != "prod" || got.Env != "prod" || got.Mode != ModePinned {
+		t.Errorf("got %+v, want the pinned prod handle resolved", got)
+	}
+	if got.AgentKubeconfig != scoped || got.AgentContext != "burrow-agent" {
+		t.Errorf("scoped credential = %q/%q, want it carried through so the connection can be made with it", got.AgentKubeconfig, got.AgentContext)
+	}
+	if got.ContextStale == nil {
+		t.Fatal("ContextStale = nil, want the staleness reported as data so the command can say it once")
+	}
+	if got.ContextStale.Name != "prod" || got.ContextStale.Context != "renamed-away" || !got.ContextStale.Pinned {
+		t.Errorf("got %+v, want the pinned handle and the context it records", got.ContextStale)
+	}
+	if !strings.Contains(got.ContextStale.Error(), "burrow env use prod --context") {
+		t.Errorf("staleness = %q, want it to carry the command that re-points the handle", got.ContextStale)
+	}
+}
+
+// TestResolvePinnedContextRenamedAwayWithoutAScopedCredential holds the other half of #488 still:
+// a handle with no credential has nothing but the recorded context to dial with, so a name the
+// kubeconfig does not have is a refusal, not a note.
+func TestResolvePinnedContextRenamedAwayWithoutAScopedCredential(t *testing.T) {
+	kubeconfig := writeKubeconfig(t)
+	cfg := &Config{
+		Current:      "prod",
+		Environments: []Environment{{Name: "prod", Context: "renamed-away", AppNamespace: "apps"}},
+	}
+
+	_, err := Resolve(cfg, kubeconfig)
+	var missing *ContextMissingError
+	if !errors.As(err, &missing) || !missing.Pinned {
+		t.Fatalf("error = %v, want the pinned refusal for a handle with nothing else to dial with", err)
+	}
+}
+
+// TestResolvePinnedContextRenamedAwayWithAnUnusableCredential covers a recorded credential that
+// cannot be dialled with: a file that is not there, and one that parses but holds no context. Both
+// leave the recorded kube context as the only route to the cluster, so both refuse — a connection
+// error naming neither the handle nor its fix would be the worse of the two messages.
+func TestResolvePinnedContextRenamedAwayWithAnUnusableCredential(t *testing.T) {
+	kubeconfig := writeKubeconfig(t)
+	empty := filepath.Join(t.TempDir(), "empty-credential")
+	if err := clientcmd.WriteToFile(*api.NewConfig(), empty); err != nil {
+		t.Fatalf("write empty credential: %v", err)
+	}
+
+	for name, credential := range map[string]string{
+		"absent":  filepath.Join(t.TempDir(), "no-such-credential"),
+		"empty":   empty,
+		"unnamed": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &Config{
+				Current:      "prod",
+				Environments: []Environment{{Name: "prod", Context: "renamed-away", AgentKubeconfig: credential}},
+			}
+			_, err := Resolve(cfg, kubeconfig)
+			var missing *ContextMissingError
+			if !errors.As(err, &missing) || !missing.Pinned {
+				t.Fatalf("error = %v, want the pinned refusal when the credential cannot be used", err)
+			}
+		})
+	}
+}
+
+// TestResolvePinnedCarriesNoStalenessWhenTheContextIsThere confirms the ordinary pinned resolution
+// is unchanged: a handle whose context is in the kubeconfig reports nothing for a command to say.
+func TestResolvePinnedCarriesNoStalenessWhenTheContextIsThere(t *testing.T) {
+	kubeconfig := writeKubeconfig(t)
+	cfg := &Config{
+		Current: "prod",
+		Environments: []Environment{
+			{Name: "prod", Context: "do-nyc1-prod", AgentKubeconfig: writeScopedCredential(t), AgentContext: "burrow-agent"},
+		},
+	}
+
+	got, err := Resolve(cfg, kubeconfig)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.ContextStale != nil {
+		t.Errorf("ContextStale = %v, want nil for a handle whose context is in the kubeconfig", got.ContextStale)
+	}
+}
+
+// TestResolveFollowIgnoresARenamedHandle keeps follow mode as it is. There the kube context comes
+// FROM the kubeconfig and the handle is matched to it BY NAME, so a handle recording a name that no
+// longer exists matches nothing and the resolution is the bare context — the name is load-bearing,
+// and no scoped credential changes that.
+func TestResolveFollowIgnoresARenamedHandle(t *testing.T) {
+	kubeconfig := writeKubeconfig(t) // current context is do-nyc1-dev
+	cfg := &Config{Environments: []Environment{
+		{Name: "dev", Context: "renamed-away", Env: "dev", AgentKubeconfig: writeScopedCredential(t), AgentContext: "burrow-agent"},
+	}}
+
+	got, err := Resolve(cfg, kubeconfig)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Mode != ModeFollowing || got.Context != "do-nyc1-dev" {
+		t.Errorf("got %+v, want follow mode on the current context", got)
+	}
+	if got.Name != "" || got.Env != "" || got.AgentKubeconfig != "" {
+		t.Errorf("got %+v, want no handle surfaced: none is registered for the current context", got)
+	}
+	if got.ContextStale != nil {
+		t.Errorf("ContextStale = %v, want nil: follow mode has no recorded context to go stale", got.ContextStale)
+	}
+}
+
+// TestResolveTargetContextMissingIsUnchanged keeps the TARGET path refusing. A target's credential
+// story is ADR-0084's to settle, and a target that names a context the kubeconfig does not hold
+// still has nothing to resolve — a pinned handle's scoped credential inside the config does not
+// change that, since the target decides the cluster before any handle narrows it.
+func TestResolveTargetContextMissingIsUnchanged(t *testing.T) {
+	kubeconfig := writeKubeconfig(t)
+	cfg := &Config{
+		Current: "prod",
+		Environments: []Environment{
+			{Name: "prod", Context: "renamed-away", AgentKubeconfig: writeScopedCredential(t), AgentContext: "burrow-agent"},
+		},
+	}
+	if err := cfg.SetTarget(Target{Name: "gone", Kind: TargetKindKubernetes, Context: "renamed-away"}); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+
+	_, err := Resolve(cfg, kubeconfig)
+	var missing *ContextMissingError
+	if !errors.As(err, &missing) {
+		t.Fatalf("error = %v, want the target refusal", err)
+	}
+	if missing.Pinned {
+		t.Errorf("got %+v, want the target wording rather than the pinned one", missing)
+	}
+}
+
 // TestResolvePinnedContextRenamedAway is issue #473. A handle recorded before its kube context was
 // renamed names a cluster that does not exist, and nothing used to notice: the name flowed into the
 // display while the connection was made through the handle's scoped credential, so a command
-// succeeded and reported a cluster the reader does not have. It now refuses, and the refusal names
-// the handle, the context, and the one command that corrects it.
+// succeeded and reported a cluster the reader does not have. It refuses where the recorded
+// credential is not there to be used, and the refusal names the handle, the context, and the one
+// command that corrects it.
 func TestResolvePinnedContextRenamedAway(t *testing.T) {
 	kubeconfig := writeKubeconfig(t)
 	cfg := &Config{
@@ -188,13 +361,20 @@ func TestResolvePinnedToleratesAnUncheckableKubeconfig(t *testing.T) {
 	if got.Context != "do-nyc1-prod" {
 		t.Errorf("context = %q, want the pinned handle's", got.Context)
 	}
+	if got.ContextStale != nil {
+		t.Errorf("ContextStale = %v, want nil: an unreadable kubeconfig is not evidence of staleness", got.ContextStale)
+	}
 
 	empty := filepath.Join(t.TempDir(), "kubeconfig")
 	if err := clientcmd.WriteToFile(*api.NewConfig(), empty); err != nil {
 		t.Fatalf("write empty kubeconfig: %v", err)
 	}
-	if _, err := Resolve(cfg, empty); err != nil {
+	got, err = Resolve(cfg, empty)
+	if err != nil {
 		t.Fatalf("Resolve with a kubeconfig holding no contexts: %v", err)
+	}
+	if got.ContextStale != nil {
+		t.Errorf("ContextStale = %v, want nil: a kubeconfig with no contexts says nothing about the handle", got.ContextStale)
 	}
 }
 

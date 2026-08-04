@@ -163,9 +163,11 @@ func newRootCmd() *cobra.Command {
 // targeting line has already been printed for this invocation, so the result does not answer the
 // same question a second time (actedon.go). kubeContext/installID/contextResolved memoise what the
 // privileged path resolved (clustercontext.go), so a command that resolves the cluster more than
-// once gets one answer. All of them are per-invocation state on a per-command struct, not global
-// state: newRootCmd builds a fresh commonOpts for every command on every run, which is what keeps
-// two commands in one process from seeing each other's target.
+// once gets one answer; notedStale does the same for the stale-handle note, which describes
+// configuration that cannot change mid-invocation and so is worth saying exactly once. All of them
+// are per-invocation state on a per-command struct, not global state: newRootCmd builds a fresh
+// commonOpts for every command on every run, which is what keeps two commands in one process from
+// seeing each other's target.
 type commonOpts struct {
 	controlPlane    string
 	token           string
@@ -179,6 +181,7 @@ type commonOpts struct {
 	kubeContext     string
 	installID       string
 	contextResolved bool
+	notedStale      bool
 }
 
 // bindCommon registers the shared flags on the flag set, defaulting from the environment.
@@ -278,6 +281,12 @@ type target struct {
 	// person asked for a target other than the active one and seeing that reflected is the point of
 	// having asked.
 	flagOverride bool
+	// stale is the pinned handle whose recorded kube context is no longer in the kubeconfig, set only
+	// when this invocation is connecting with the handle's scoped credential instead (issue #488). It
+	// rides on the target so the note is printed where the command's other one-line notes are, on its
+	// own stderr, rather than from inside resolution — localconfig reports conditions and commands
+	// speak. It is nil whenever there is nothing to say.
+	stale *localconfig.ContextMissingError
 	// installID is the Burrow install the selected target was pointed at (ADR-0084 §5), sent on every
 	// request so a control plane that is a different install refuses rather than acts. It comes from
 	// the target and nowhere else: a context name is how the request gets there, and this is what
@@ -359,6 +368,27 @@ func (o *commonOpts) resolveTarget() (target, error) {
 	if o.kubeconfig == "" && o.context == "" && resolved.AgentKubeconfig != "" {
 		tgt.agentKubeconfig = resolved.AgentKubeconfig
 		tgt.agentContext = resolved.AgentContext
+	}
+	// A pinned handle whose recorded kube context has been renamed away resolved anyway, because its
+	// scoped credential reaches the cluster without one (issue #488). Which of the three things that
+	// means depends on what this invocation is actually connecting with:
+	//
+	//   - The scoped credential: the recorded name is read by nothing, so the command carries on and
+	//     says the name is stale once. It is also NOT what was acted on, so the target is named from
+	//     the handle — naming a context that no longer exists is issue #473 all over again.
+	//   - An explicit --context: the person named the cluster for this command, and that is where it
+	//     goes. The pin decided nothing, so there is nothing to say about it.
+	//   - An explicit --kubeconfig with no --context: this turns the scoped credential off and sends
+	//     the connection through the recorded context, which is precisely the name that kubeconfig
+	//     does not have. Nothing is left to dial with, so the refusal stands.
+	if resolved.ContextStale != nil {
+		switch {
+		case tgt.agentKubeconfig != "":
+			tgt.stale = resolved.ContextStale
+			o.acted = targetname.ForHandle(resolved.Name)
+		case o.context == "":
+			return target{}, resolved.ContextStale
+		}
 	}
 	return tgt, nil
 }
@@ -464,12 +494,34 @@ func (o *commonOpts) resolveConnect(ctx context.Context, stderr io.Writer, chang
 		fmt.Fprintln(stderr, tgt.display)
 		o.announced = true
 	}
+	o.noteStaleHandleContext(tgt, stderr)
 	tgt = applyScopedFallback(tgt, stderr)
 	c, err := o.connect(ctx, tgt)
 	if err != nil {
 		return nil, "", err
 	}
 	return c, tgt.env, nil
+}
+
+// noteStaleHandleContext says that the pinned handle records a kube context the kubeconfig no longer
+// holds, on an invocation that carried on regardless because the handle's scoped credential reaches
+// the cluster without one (issue #488).
+//
+// It is a note and not a refusal because nothing on this path reads the recorded name — but it is
+// said, rather than left silent, because the name is still wrong and two other things do read it:
+// follow mode matches a handle to its context BY NAME, and `burrow env list` marks the row. Somebody
+// who never sees this hears about it the first time they unpin.
+//
+// Once per invocation. A command that resolves more than once would otherwise repeat a line about a
+// piece of configuration that has not changed in between.
+func (o *commonOpts) noteStaleHandleContext(tgt target, stderr io.Writer) {
+	if tgt.stale == nil || o.notedStale {
+		return
+	}
+	o.notedStale = true
+	fmt.Fprintf(stderr,
+		"burrow: the pinned environment %q records kube context %q, which is no longer in your kubeconfig; continuing on its scoped credential, which needs none. Re-point the handle with \"burrow env use %s --context <context>\".\n",
+		tgt.stale.Name, tgt.stale.Context, tgt.stale.Name)
 }
 
 // applyScopedFallback keeps the resolved scoped agent credential only when its kubeconfig file is

@@ -5,10 +5,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/burrow-cloud/burrow/localconfig"
 )
@@ -166,6 +170,154 @@ func TestHandleWithoutScopedCredentialUsesAmbient(t *testing.T) {
 	opts := o.connectOptions(tgt)
 	if opts.Kubeconfig != "" {
 		t.Errorf("connect kubeconfig = %q, want ambient (empty)", opts.Kubeconfig)
+	}
+}
+
+// saveStaleHandle is saveScopedHandle for a handle whose recorded kube context has been renamed
+// away: the ambient kubeconfig ($KUBECONFIG, which is what resolveTarget reads with no --kubeconfig)
+// holds a different context entirely. It returns the scoped credential's path.
+func saveStaleHandle(t *testing.T, agentKubeconfig string) {
+	t.Helper()
+	tempConfig(t)
+	t.Setenv("KUBECONFIG", kubeconfigWithCurrent(t, "do-nyc1-dev", "do-nyc1-dev"))
+	cfg := &localconfig.Config{
+		Current: "prod",
+		Environments: []localconfig.Environment{{
+			Name:            "prod",
+			Context:         "renamed-away",
+			Env:             "prod",
+			AgentKubeconfig: agentKubeconfig,
+			AgentContext:    "burrow-agent",
+		}},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+}
+
+// writeScopedCredential writes a scoped kubeconfig of the shape `burrow install` mints (ADR-0038):
+// self-contained, one context, everything needed to reach burrowd with no ambient kubeconfig. It is
+// what makes a renamed kube context harmless, so it has to be a real loadable one here.
+func writeScopedCredential(t *testing.T) string {
+	t.Helper()
+	cfg := api.NewConfig()
+	cfg.Clusters["burrow"] = &api.Cluster{Server: "https://prod.example:6443", CertificateAuthorityData: []byte("ca")}
+	cfg.AuthInfos["burrow-agent"] = &api.AuthInfo{Token: "scoped-token"}
+	cfg.Contexts["burrow-agent"] = &api.Context{Cluster: "burrow", AuthInfo: "burrow-agent", Namespace: "burrow"}
+	cfg.CurrentContext = "burrow-agent"
+	return writeKubeconfig(t, cfg)
+}
+
+// TestStalePinnedContextConnectsOnTheScopedCredential is issue #488: `burrow app list` refused
+// outright after a kube context was renamed, although the handle's scoped credential reaches the
+// cluster without one. The command now resolves, connects with the credential, and — because the
+// recorded name is NOT where it went — names the environment rather than a context that no longer
+// exists (issue #473, which the refusal was protecting).
+func TestStalePinnedContextConnectsOnTheScopedCredential(t *testing.T) {
+	scoped := writeScopedCredential(t)
+	saveStaleHandle(t, scoped)
+
+	o := &commonOpts{}
+	tgt, err := o.resolveTarget()
+	if err != nil {
+		t.Fatalf("resolveTarget should proceed on the scoped credential, got: %v", err)
+	}
+	if tgt.agentKubeconfig != scoped || tgt.agentContext != "burrow-agent" {
+		t.Fatalf("target agent fields = %q/%q, want the scoped credential %q/burrow-agent", tgt.agentKubeconfig, tgt.agentContext, scoped)
+	}
+	opts := o.connectOptions(tgt)
+	if opts.Kubeconfig != scoped || opts.Context != "burrow-agent" {
+		t.Errorf("connect = %q/%q, want the scoped credential's own kubeconfig and context", opts.Kubeconfig, opts.Context)
+	}
+	if got := o.acted.Clause(); got != "on prod" {
+		t.Errorf("acted-on clause = %q, want the environment name; the recorded kube context is not where this went", got)
+	}
+	if strings.Contains(o.acted.Detail, "renamed-away") || o.acted.Context == "renamed-away" {
+		t.Errorf("acted = %+v, want no mention of the stale kube context", o.acted)
+	}
+	encoded, err := json.Marshal(o.acted)
+	if err != nil {
+		t.Fatalf("marshal target: %v", err)
+	}
+	if strings.Contains(string(encoded), "renamed-away") {
+		t.Errorf("--json target = %s, want it to name no cluster rather than one that does not exist", encoded)
+	}
+}
+
+// TestStalePinnedContextIsNotedOnce confirms the staleness is said out loud — a note on stderr
+// naming the environment, the recorded context and the command that re-points it — and said only
+// once per invocation, since nothing about the configuration changes between two resolutions.
+func TestStalePinnedContextIsNotedOnce(t *testing.T) {
+	saveStaleHandle(t, writeScopedCredential(t))
+
+	o := &commonOpts{}
+	tgt, err := o.resolveTarget()
+	if err != nil {
+		t.Fatalf("resolveTarget: %v", err)
+	}
+	var errb bytes.Buffer
+	o.noteStaleHandleContext(tgt, &errb)
+	note := errb.String()
+	for _, want := range []string{"prod", "renamed-away", `burrow env use prod --context`} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note = %q, want it to contain %q", note, want)
+		}
+	}
+	o.noteStaleHandleContext(tgt, &errb)
+	if errb.String() != note {
+		t.Errorf("note printed twice:\n%s", errb.String())
+	}
+}
+
+// TestStalePinnedContextStillRefusesWithoutAScopedCredential keeps the other half of the pinned path
+// as it was: with no credential the recorded context is the only route to the cluster, so a name the
+// kubeconfig no longer holds refuses, naming the handle and the fix.
+func TestStalePinnedContextStillRefusesWithoutAScopedCredential(t *testing.T) {
+	saveStaleHandle(t, "")
+
+	_, err := (&commonOpts{}).resolveTarget()
+	var missing *localconfig.ContextMissingError
+	if !errors.As(err, &missing) || !missing.Pinned {
+		t.Fatalf("error = %v, want the pinned refusal for a handle with nothing else to dial with", err)
+	}
+}
+
+// TestStalePinnedContextRefusesUnderAKubeconfigOverride covers the one flag that turns the credential
+// off without naming a cluster instead. An explicit --kubeconfig sends the connection through the
+// recorded context, which is the very name that kubeconfig does not have, so the refusal stands —
+// and it is the message that names the handle rather than a connection error that names neither.
+func TestStalePinnedContextRefusesUnderAKubeconfigOverride(t *testing.T) {
+	saveStaleHandle(t, writeScopedCredential(t))
+
+	o := &commonOpts{kubeconfig: kubeconfigWithCurrent(t, "do-nyc1-dev", "do-nyc1-dev")}
+	_, err := o.resolveTarget()
+	var missing *localconfig.ContextMissingError
+	if !errors.As(err, &missing) || !missing.Pinned {
+		t.Fatalf("error = %v, want the pinned refusal when --kubeconfig turns the scoped credential off", err)
+	}
+}
+
+// TestStalePinnedContextHonoursAContextOverride confirms an explicit --context still decides the
+// cluster over a stale pin. The person named where this one command goes; the pin decided nothing,
+// so there is no note to print and nothing to refuse.
+func TestStalePinnedContextHonoursAContextOverride(t *testing.T) {
+	saveStaleHandle(t, writeScopedCredential(t))
+
+	o := &commonOpts{context: "do-nyc1-dev"}
+	tgt, err := o.resolveTarget()
+	if err != nil {
+		t.Fatalf("resolveTarget with --context: %v", err)
+	}
+	if tgt.context != "do-nyc1-dev" {
+		t.Errorf("context = %q, want the --context override", tgt.context)
+	}
+	if tgt.stale != nil {
+		t.Errorf("stale = %v, want nothing said about a pin this invocation did not use", tgt.stale)
+	}
+	var errb bytes.Buffer
+	o.noteStaleHandleContext(tgt, &errb)
+	if errb.Len() != 0 {
+		t.Errorf("stderr = %q, want silence under a --context override", errb.String())
 	}
 }
 

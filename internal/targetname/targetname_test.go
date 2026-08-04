@@ -150,6 +150,30 @@ func TestForNamesTheRegisteredHandle(t *testing.T) {
 	}
 }
 
+// TestForHandleNamesTheEnvironmentAndNoContext covers the connection made with a handle's own scoped
+// credential after its recorded kube context was renamed away (issue #488). The recorded name is not
+// where the command went, so it appears nowhere: the handle is the name, and the JSON names no
+// cluster rather than one that does not exist (issue #473).
+func TestForHandleNamesTheEnvironmentAndNoContext(t *testing.T) {
+	got := ForHandle("prod")
+	if c := got.Clause(); c != "on prod" {
+		t.Errorf("Clause() = %q, want the environment's name", c)
+	}
+	if !got.Decided() {
+		t.Error("Decided() is false though the handle decided where this went")
+	}
+	if got.Context != "" || got.Name != "" {
+		t.Errorf("got %+v, want no context and no target: neither decided this connection", got)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "context") {
+		t.Errorf("a kube context reached the JSON target: %s", raw)
+	}
+}
+
 // TestForControlPlane names the URL a --control-plane invocation addressed, since that flag bypasses
 // the target model rather than selecting within it. A URL is not a credential; the token that goes
 // with it is never rendered.

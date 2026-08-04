@@ -88,6 +88,12 @@ func TestUnknownOperationStructured(t *testing.T) {
 	if e.Code != "unknown_operation" {
 		t.Errorf("code = %q, want unknown_operation", e.Code)
 	}
+	// The version rides the body structurally as well as in the sentence, so a client that
+	// recognizes the gap as one of its own features can name the version to reach without parsing
+	// prose (issue #472).
+	if e.ServerVersion != "v0.9.1" {
+		t.Errorf("server_version = %q, want v0.9.1", e.ServerVersion)
+	}
 	for _, want := range []string{"v0.9.1", "v0.10.0", "burrow upgrade"} {
 		if !strings.Contains(e.Error, want) {
 			t.Errorf("error %q, want substring %q", e.Error, want)

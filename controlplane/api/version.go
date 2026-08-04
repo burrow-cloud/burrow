@@ -264,7 +264,11 @@ func v1NotFound(serverVersion string, mux *http.ServeMux) http.Handler {
 			}
 			msg += fmt.Sprintf("; if your %s (%s) is newer, ask an operator to run `burrow upgrade` to update the control plane", name, cv)
 		}
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: msg, Code: "unknown_operation"})
+		// The version rides the response structurally as well as in the sentence, for the same
+		// reason the too-old refusal carries it: a client that recognizes the gap as one of ITS
+		// features — a scope this server cannot express, say — can name the version to reach
+		// without parsing prose.
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: msg, Code: "unknown_operation", ServerVersion: serverVersion})
 	})
 }
 

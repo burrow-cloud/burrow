@@ -989,8 +989,10 @@ func TestGuardList(t *testing.T) {
 	}
 }
 
-// TestGuardSetEnv confirms `guard set --env prod` scopes the set to the environment: the env query
-// reaches the API and the confirmation names the environment (ADR-0035 phase 2c).
+// TestGuardSetEnv confirms `guard set --env prod` carries the env query to the API and reports the
+// scope that was WRITTEN. `prod` is the default environment, whose policy is the global policy
+// (ADR-0067 §2), so the write is the global one and the line says so: "in environment \"prod\""
+// would name a narrower scope than the one that landed (issue #472).
 func TestGuardSetEnv(t *testing.T) {
 	var gotMethod, gotPath, gotEnv string
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1008,8 +1010,8 @@ func TestGuardSetEnv(t *testing.T) {
 	if gotEnv != "prod" {
 		t.Errorf("env query = %q, want prod", gotEnv)
 	}
-	if !strings.Contains(out, `set guardrail "app.delete" to "deny" in environment "prod"`) {
-		t.Errorf("output = %q, want it to name the environment", out)
+	if !strings.Contains(out, `set guardrail "app.delete" to "deny" globally (prod is the default environment, so its policy is the global policy)`) {
+		t.Errorf("output = %q, want it to say the global policy was written and why", out)
 	}
 }
 
@@ -1032,8 +1034,8 @@ func TestGuardSetEnvAppDeploy(t *testing.T) {
 	if gotEnv != "prod" {
 		t.Errorf("env query = %q, want prod", gotEnv)
 	}
-	if !strings.Contains(out, `set guardrail "app.deploy" to "confirm" in environment "prod"`) {
-		t.Errorf("output = %q, want it to name the app.deploy guardrail and the environment", out)
+	if !strings.Contains(out, `set guardrail "app.deploy" to "confirm" globally (prod is the default environment, so its policy is the global policy)`) {
+		t.Errorf("output = %q, want it to name the guardrail and the scope that was written", out)
 	}
 }
 

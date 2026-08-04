@@ -121,6 +121,17 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/{key}", s.unsetSecret)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
+	// The name tier (ADR-0085) is a ROUTE, not a query parameter, because it narrows a write. A
+	// control plane that does not have these two routes answers a name-scoped call with the
+	// structured unknown-operation refusal (ADR-0039), which is what stops a newer client's "deny
+	// this for ONE app" from landing as "deny this for EVERY app in the environment" on a server
+	// that never learned the tier and would have ignored the parameter (issue #472).
+	//
+	// The `?name=` form the routes above still accept is the shape the first clients of the tier
+	// sent. It stays served, because the compatibility anchor does not break a client that is
+	// already in the field (ADR-0039 §2–§3); nothing this repository ships sends it any more.
+	v1.HandleFunc("GET /v1/guard/name/{name}", s.guardList)
+	v1.HandleFunc("PUT /v1/guard/name/{name}/{code}", s.guardSet)
 	// The operational limits (ADR-0068). The write is reachable only from the operator CLI: the
 	// agent binary carries no `cluster config` verb at all, which is what the surface guard asserts
 	// — a bound the agent can raise is not a bound (ADR-0068 §4).
@@ -594,12 +605,21 @@ func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, guardResponse{Guardrails: gs})
 }
 
-// guardScope reads the guardrail scope off the query string. Both parts are optional here and the
+// guardScope reads the guardrail scope off the request. Both parts are optional here and the
 // engine decides which combinations are legal, so one refusal is written once, on the server, and
 // says the same thing to every client (ADR-0020).
+//
+// The name comes from the path where the route has one, and from the query otherwise. The path is
+// the form current clients send — it is what makes a control plane without the name tier refuse
+// the call instead of silently widening it (see the route table) — and the query is the form the
+// first clients of the tier sent, still honoured so they keep working.
 func guardScope(r *http.Request) controlplane.GuardrailScope {
 	q := r.URL.Query()
-	return controlplane.GuardrailScope{Env: q.Get("env"), Name: q.Get("name")}
+	name := r.PathValue("name")
+	if name == "" {
+		name = q.Get("name")
+	}
+	return controlplane.GuardrailScope{Env: q.Get("env"), Name: name}
 }
 
 // limitsList returns every operational limit with its effective value (ADR-0068 §3). The optional

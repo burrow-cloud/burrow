@@ -93,9 +93,41 @@ func TestGuardEndpoints(t *testing.T) {
 	}
 }
 
+// TestGuardEndpointsCarryTheNameInTheRoute confirms the name tier is reachable as a ROUTE, which is
+// what lets a control plane that does not have the tier refuse a name-scoped call outright instead
+// of ignoring the name and writing the environment-wide entry (issue #472, ADR-0039 §4).
+func TestGuardEndpointsCarryTheNameInTheRoute(t *testing.T) {
+	h, _, d := newAPI(t)
+
+	rr := do(h, "PUT", "/v1/guard/name/website/app.deploy?env=prod", token, `{"disposition":"deny"}`)
+	if rr.Code != 200 {
+		t.Fatalf("guard set for one app = %d %s", rr.Code, rr.Body.String())
+	}
+	if got := storedPolicy(t, d).Dispositions[cp.GuardrailCode("prod.website.app.deploy")]; got != cp.DispositionDeny {
+		t.Errorf("stored policy = %+v, want a deny under prod.website.app.deploy", storedPolicy(t, d).Dispositions)
+	}
+	if got := storedPolicy(t, d).Dispositions[cp.GuardrailCode("app.deploy")]; got == cp.DispositionDeny {
+		t.Errorf("the deny landed on the wider entry too: %+v", storedPolicy(t, d).Dispositions)
+	}
+
+	rr = do(h, "GET", "/v1/guard/name/website?env=prod", token, "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"source":"name"`) {
+		t.Errorf("guard list for one app = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// The engine's refusals are unchanged by the move: a name with no environment is still 400.
+	if rr := do(h, "PUT", "/v1/guard/name/website/app.deploy", token, `{"disposition":"deny"}`); rr.Code != 400 {
+		t.Errorf("name without env = %d, want 400", rr.Code)
+	}
+}
+
 // TestGuardEndpointsCarryTheName confirms the scope travels over HTTP as query parameters and that
 // the control plane, not the client, is what refuses an illegal combination (ADR-0085 §1). A rule
 // enforced only in the CLI would be a rule a second client does not have.
+//
+// The query form is the shape the first clients of the name tier sent. It stays served because the
+// control plane is the compatibility anchor and does not break a client already in the field
+// (ADR-0039 §2–§3); current clients send the route form above.
 func TestGuardEndpointsCarryTheName(t *testing.T) {
 	h, _, d := newAPI(t)
 
@@ -621,6 +653,7 @@ type errBody struct {
 	Limit             *int32 `json:"limit"`
 	NeedsConfirmation bool   `json:"needs_confirmation"`
 	ServerInstallID   string `json:"server_install_id"`
+	ServerVersion     string `json:"server_version"`
 }
 
 func TestHealthNoAuth(t *testing.T) {

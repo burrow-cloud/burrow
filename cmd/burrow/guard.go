@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/burrow-cloud/burrow/client"
+	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/internal/agentsurface"
 )
 
@@ -165,14 +166,7 @@ func newGuardSetCmd() *cobra.Command {
 			}
 			// The policy is written into whichever cluster this command reached, so it names that
 			// cluster like every other change does (ADR-0078 §4).
-			human := fmt.Sprintf("set guardrail %q to %q", args[0], args[1])
-			switch {
-			case name != "":
-				human = fmt.Sprintf("set guardrail %q to %q for %q in environment %q", args[0], args[1], name, envOrDefault(o.env))
-			case o.env != "" && o.env != "default":
-				human = fmt.Sprintf("set guardrail %q to %q in environment %q", args[0], args[1], o.env)
-			}
-			return o.emitChange(cmd.OutOrStdout(), gs, human)
+			return o.emitChange(cmd.OutOrStdout(), gs, guardSetResult(args[0], args[1], o.env, name))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -181,11 +175,37 @@ func newGuardSetCmd() *cobra.Command {
 	return cmd
 }
 
+// guardSetResult is the line `guard set` prints after a successful write. It reports THE SCOPE THAT
+// WAS WRITTEN, which is not always the scope that was typed.
+//
+// `--env prod` is the case that differs. `prod` is the default environment, and resolution
+// deliberately skips the environment tier for it: with one environment there is nothing a
+// per-environment override could differ from, so the default environment's policy IS the global
+// policy and `guard set --env prod` and `guard set` are the same write (ADR-0067 §2). That is the
+// right behaviour, but "in environment \"prod\"" describes a narrower scope than the one that
+// landed, and an operator who reads it believes a later environment would start from a clean sheet.
+// So the line says what was written and why, in one sentence.
+//
+// A name always keeps its environment, because there the environment is a segment of the policy key
+// rather than a synonym for the baseline (ADR-0085 §1).
+func guardSetResult(code, disposition, env, name string) string {
+	switch {
+	case name != "":
+		return fmt.Sprintf("set guardrail %q to %q for %q in environment %q", code, disposition, name, envOrDefault(env))
+	case env == controlplane.DefaultEnvironment:
+		return fmt.Sprintf("set guardrail %q to %q globally (%s is the default environment, so its policy is the global policy)", code, disposition, env)
+	case env != "":
+		return fmt.Sprintf("set guardrail %q to %q in environment %q", code, disposition, env)
+	default:
+		return fmt.Sprintf("set guardrail %q to %q globally", code, disposition)
+	}
+}
+
 // envOrDefault names the environment a message refers to. The control plane refuses a name without
 // an environment, so this only ever fills in a blank the server has already accepted.
 func envOrDefault(env string) string {
 	if env == "" {
-		return "prod"
+		return controlplane.DefaultEnvironment
 	}
 	return env
 }

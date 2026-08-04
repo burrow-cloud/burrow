@@ -290,23 +290,23 @@ func (a *Adapter) ensurePgBackRestCredentials(ctx context.Context, instance stri
 // it is. Re-running an install to wire a destination registered later is the case that matters, and
 // it is the credential — the one thing that legitimately changes — that is updated rather than
 // skipped.
-func (a *Adapter) ensurePgBackRestArchive(ctx context.Context, instance string, labels map[string]string, archive *controlplane.ArchiveDestination) (string, error) {
+func (a *Adapter) ensurePgBackRestArchive(ctx context.Context, instance string, labels map[string]string, archive *controlplane.ArchiveDestination) (string, bool, error) {
 	endpoint, err := pgBackRestArchiveEndpoint(archive.Config.Endpoint)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if warning, ok, err := a.pgBackRestAvailable(ctx); err != nil {
-		return "", err
+		return "", false, err
 	} else if !ok {
-		return warning, nil
+		return warning, false, nil
 	}
 	if err := a.ensurePgBackRestCredentials(ctx, instance, labels, archive.Credential); err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	stanzas, err := a.pgBackRestStanzas()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	stanza := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": pgBackRestStanzaAPIVersion,
@@ -320,17 +320,18 @@ func (a *Adapter) ensurePgBackRestArchive(ctx context.Context, instance string, 
 	}}
 	if _, err := stanzas.Create(ctx, stanza, metav1.CreateOptions{}); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("kube: creating the pgBackRest Stanza %q: %w", pgBackRestStanzaName(instance), err)
+			return "", false, fmt.Errorf("kube: creating the pgBackRest Stanza %q: %w", pgBackRestStanzaName(instance), err)
 		}
 		// A stanza that already exists is NOT re-pointed, and a destination that disagrees with it is
 		// refused rather than half-applied. The credential above was already updated in place, which
 		// is right for a rotated key and wrong for a different bucket — so the mismatch is caught
 		// here, before a `Cluster` is left archiving to a repository its stanza does not describe.
 		if err := a.checkStanzaMatchesDestination(ctx, stanzas, instance, endpoint, archive); err != nil {
-			return "", err
+			return "", false, err
 		}
 	}
-	return "", a.ensureScheduledBackup(ctx, instance, labels)
+	created, err := a.ensureScheduledBackup(ctx, instance, labels)
+	return "", created, err
 }
 
 // checkStanzaMatchesDestination refuses when an instance's existing repository is not the one the
@@ -377,14 +378,27 @@ func stanzaRepository(stanza *unstructured.Unstructured) (map[string]any, bool) 
 // cluster and nothing in the repository — the backups themselves are in the object store and outlive
 // the instance, which is the point of them, and Burrow's own rows remain the index either way.
 //
-// `immediate` is left false. A base backup fired at instance-creation would race the plugin's own
-// stanza initialisation, which happens when the first write-ahead-log segment is archived, and a
-// failed first backup on a brand-new database is a bad first impression of a mechanism that is
-// working.
-func (a *Adapter) ensureScheduledBackup(ctx context.Context, instance string, labels map[string]string) error {
+// `immediate` IS TRUE, and the window that closes is the reason (issue #467). An instance created
+// with it false archives write-ahead log from the moment it starts and has NOTHING TO REPLAY IT ONTO
+// until the schedule first fires — up to a day during which every artifact of a working backup
+// exists, the instance reports healthy, and a restore is impossible. The usual argument for deferring
+// a first base backup is load, and it does not apply to a database created seconds ago that holds
+// nothing: the copy is at its cheapest exactly then and gets dearer the longer it is put off.
+//
+// IT IS A REQUEST, NOT A GUARANTEE, and the reporting says so rather than claiming the backup. The
+// plugin's sidecar creates the pgBackRest stanza when the instance's FIRST write-ahead-log segment
+// reaches the repository, and a base backup that runs before that has no repository to write into
+// and fails. So an immediate `Backup` on a brand-new instance is a race whose other half is somebody
+// else's timing, which is why AddonBaseBackupRequested is a state of its own and why an instance
+// whose repository still holds nothing is told to take one.
+//
+// It returns whether it CREATED the schedule. An existing one is left exactly as it is, and `immediate`
+// on it is spent — CloudNativePG honours the field only while the schedule has never been checked —
+// so a re-run of the install cannot ask for a first backup this way and must not report that it did.
+func (a *Adapter) ensureScheduledBackup(ctx context.Context, instance string, labels map[string]string) (bool, error) {
 	scheduled, err := a.cnpgScheduledBackups()
 	if err != nil {
-		return err
+		return false, err
 	}
 	name := pgBackRestScheduledBackupName(instance)
 	obj := &unstructured.Unstructured{Object: map[string]any{
@@ -397,17 +411,142 @@ func (a *Adapter) ensureScheduledBackup(ctx context.Context, instance string, la
 		},
 		"spec": map[string]any{
 			"schedule":             pgBackRestSchedule,
-			"immediate":            false,
+			"immediate":            true,
 			"backupOwnerReference": "cluster",
 			"method":               cnpgBackupMethodPlugin,
 			"pluginConfiguration":  map[string]any{"name": PgBackRestPluginName},
 			"cluster":              map[string]any{"name": instance},
 		},
 	}}
-	if _, err := scheduled.Create(ctx, obj, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("kube: creating the ScheduledBackup %q: %w", name, err)
+	if _, err := scheduled.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return false, fmt.Errorf("kube: creating the ScheduledBackup %q: %w", name, err)
+		}
+		return false, nil
 	}
-	return nil
+	return true, nil
+}
+
+// describeInstanceBackups answers "does this instance archive, and is there anything to restore
+// onto" by READING THE INSTANCE, after everything has been written (issue #466).
+//
+// WHAT IT READS IS THE POINT. A destination being registered when the command ran and an instance
+// actually carrying the plugin are different facts, and the difference is exactly what an operator
+// needs told: a `plugins` entry the CRD did not describe is pruned on write, silently and with a 201,
+// and the first symptom of that is a base backup that never arrives. So the plugin entry comes from
+// the `Cluster` read back from the API server, and the bucket, the path and the retention come from
+// the instance's own `Stanza` rather than from the destination this install resolved — an instance
+// keeps the repository it was created against, so when the two disagree the instance is right.
+//
+// IT NEVER FAILS AN INSTALL AND NEVER OVERSTATES. Every read that does not answer produces an
+// "unknown" with a line saying so, because a report that guesses is worse than the silence it
+// replaces: the whole failure this exists to catch is a success message that was not true.
+//
+// scheduleCreated says whether THIS install created the base-backup schedule, which is the only
+// circumstance in which a first backup was actually asked for (ensureScheduledBackup). warning is the
+// install's own note about archiving being impossible on this cluster, reused as the detail rather
+// than restated in different words.
+func (a *Adapter) describeInstanceBackups(ctx context.Context, instance, env string,
+	archive *controlplane.ArchiveDestination, scheduleCreated bool, warning string) *controlplane.AddonBackups {
+	cluster, found, err := a.getCNPGCluster(ctx, instance)
+	switch {
+	case err != nil || !found:
+		return &controlplane.AddonBackups{State: controlplane.AddonBackupsUnknown,
+			Detail: "the instance's own configuration could not be read back, so Burrow cannot say whether it archives; " +
+				"check it with `burrow addon backup-health postgres`"}
+	case !cnpgClusterArchives(cluster):
+		return &controlplane.AddonBackups{State: controlplane.AddonBackupsNone, Detail: noArchivingDetail(env, warning)}
+	}
+
+	out := &controlplane.AddonBackups{State: controlplane.AddonBackupsArchiving, Schedule: pgBackRestSchedule}
+	stanzas, err := a.pgBackRestStanzas()
+	if err != nil {
+		out.BaseBackup = controlplane.AddonBaseBackupUnknown
+		out.Detail = "this build cannot read the instance's pgBackRest stanza, so the repository it archives to is not reported"
+		return out
+	}
+	stanza, err := stanzas.Get(ctx, pgBackRestStanzaName(instance), metav1.GetOptions{})
+	if err != nil {
+		out.BaseBackup = controlplane.AddonBaseBackupUnknown
+		out.Detail = "the instance carries the backup plugin, but its pgBackRest stanza could not be read, " +
+			"so the repository it archives to is not reported"
+		return out
+	}
+	if repo, ok := stanzaRepository(stanza); ok {
+		out.Bucket, _ = repo["bucket"].(string)
+		out.RepoPath, _ = repo["repoPath"].(string)
+		out.RetentionDays = stanzaRetentionDays(repo)
+	}
+	// The provider is a REGISTRY name and the stanza does not carry one, so it is reported only when
+	// the destination this install resolved is demonstrably the repository the instance holds. Naming
+	// the resolved provider unconditionally is the exact substitution — intent for wiring — this
+	// function exists to stop.
+	if archive != nil && out.Bucket == archive.Config.Bucket && out.RepoPath == archive.RepoPath {
+		out.Provider = archive.Provider
+	}
+	out.BaseBackup, out.Detail = baseBackupState(stanza, env, scheduleCreated)
+	return out
+}
+
+// noArchivingDetail is the line an instance that archives nowhere carries. It names the two commands
+// that change that, IN ORDER, at the moment the reader has just learned they need them — which is the
+// difference between this and the same advice in `cluster postgres install`'s closing notes, given
+// before anybody knows whether it applies to them.
+func noArchivingDetail(env, warning string) string {
+	if warning != "" {
+		return warning
+	}
+	return fmt.Sprintf("this instance archives nowhere: no object-storage provider was registered when it was "+
+		"created, so nothing it writes leaves the cluster. Register one with `burrow config provider add --type s3 "+
+		"...`, then re-run `burrow addon install postgres --env %s` to wire this instance to it — the data is "+
+		"untouched by that. Per-app `burrow addon backup postgres <app>` dumps work meanwhile", env)
+}
+
+// stanzaRetentionDays reads the repository's full-backup window, in days, off the stanza. A count-based
+// policy is NOT reported as a number of days: `fullType: count` and `fullType: time` mean different
+// things by the same field, and reporting one as the other would state a retention window that is not
+// the one in force.
+func stanzaRetentionDays(repo map[string]any) int {
+	policy, ok := repo["retentionPolicy"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	if kind, _ := policy["fullType"].(string); kind != "time" {
+		return 0
+	}
+	switch v := policy["full"].(type) {
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+// baseBackupState reads whether the repository holds anything the archived write-ahead log could be
+// replayed onto, from the count the plugin's own sidecar keeps on the `Stanza`'s status.
+//
+// A count of zero and an ABSENT count are different answers and are not collapsed. The sidecar writes
+// the count when it runs, so a brand-new instance legitimately has none yet; reporting that as "no
+// base backup" would send an operator to take one on every fresh install, and reporting it as
+// "present" would be the overstatement this whole surface exists to remove.
+func baseBackupState(stanza *unstructured.Unstructured, env string, scheduleCreated bool) (controlplane.AddonBaseBackupState, string) {
+	full, found, err := unstructured.NestedInt64(stanza.Object, "status", "backupsCount", "Full")
+	switch {
+	case err == nil && found && full > 0:
+		return controlplane.AddonBaseBackupPresent, ""
+	case scheduleCreated:
+		return controlplane.AddonBaseBackupRequested, "the first base backup was requested and lands once the instance's " +
+			"first write-ahead-log segment reaches the repository; `burrow addon backup-health postgres` says when one has"
+	case err == nil && found:
+		return controlplane.AddonBaseBackupNone, fmt.Sprintf("the repository holds archived write-ahead log and NO base "+
+			"backup to replay it onto, so it cannot be restored from. Take one now with `burrow addon backup-instance "+
+			"postgres --env %s`", env)
+	default:
+		return controlplane.AddonBaseBackupUnknown, "the repository's own backup count could not be read, so whether a " +
+			"base backup exists is not reported; `burrow addon backup-health postgres` reads it from Burrow's records"
+	}
 }
 
 // pgBackRestAvailable reports whether the plugin's controller is actually RUNNING, and — when it is

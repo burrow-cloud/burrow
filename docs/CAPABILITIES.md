@@ -623,8 +623,13 @@ attached to, dumped and restored exactly where the Deployment it replaced was �
 `<instance>.burrow-addons.svc:5432`, opened as `burrow_admin`. §2 and §3 are the backups: with an
 object-storage provider registered, `burrow addon install postgres` also writes a pgBackRest `Stanza`
 naming that environment's own repository and adds the plugin to the `Cluster` as its write-ahead-log
-archiver, so the archive runs continuously; a `ScheduledBackup` takes a base backup daily, and
-`burrow addon backup-instance postgres` creates a `Backup` object on demand. Burrow creates the
+archiver, so the archive runs continuously; a `ScheduledBackup` takes a base backup daily and asks
+for the first one **immediately**, so a new instance is not archiving write-ahead log with nothing to
+replay it onto; and `burrow addon backup-instance postgres` creates a `Backup` object on demand. The
+install reports what it actually wired — read back off the `Cluster` and the `Stanza`, not off the
+destination it resolved — including whether the repository holds a base backup yet. An instance
+created before immediate first backups existed reports none, and the install names
+`burrow addon backup-instance postgres` as the way to take one. Burrow creates the
 custom resources and reads `.status` — it runs no backup tool, constructs no Job, and handles no
 superuser credential on that path. Retention is **Burrow's** declared window (`--retention-days` on
 the provider), written into the repository as a number of days, so the bucket's lifecycle rules and
@@ -665,7 +670,7 @@ to the existing app namespace (§2–§3).
 
 | Capability | Command | What it does |
 | --- | --- | --- |
-| Install | `burrow addon install <type> [--env] [--archive-destination <provider>]` | As above, for one environment — each gets its own instance (ADR-0067 §1). `metrics` additionally needs RBAC the CLI stages client-side first. |
+| Install | `burrow addon install <type> [--env] [--archive-destination <provider>]` | As above, for one environment — each gets its own instance (ADR-0067 §1). `metrics` additionally needs RBAC the CLI stages client-side first. The result states what the instance does about backups, on the human output and in `--json` as a `backups` object with a closed `state` (`archiving`, `none`, `unknown`) and, for an archiving Postgres instance, a `base_backup` (`present`, `requested`, `none`, `unknown`) — read back off the instance rather than inferred from what the install resolved. Add-on types with no backup path at all say so instead of staying silent. |
 | List | `burrow addon list` / `burrow-agent addons` | Type, mode (`installed`/`connected`), backend, endpoint, capabilities. This is how an app is pointed at `cache` — read the endpoint and set it as config. `burrow addon list` additionally reports the volumes an earlier removal kept, in their own section (`retained_volumes` in `--json`). |
 | Attach an app | `burrow addon attach postgres <app> [--env]` | **Postgres only.** On the named environment's instance, creates role `app_<app>` and database `<app>` owned by it, revokes `CONNECT` from `PUBLIC`, grants it to the role, and writes the generated `DATABASE_URL` into the app's Secret in that environment's namespace, then restarts the workload there. Re-attaching rotates the password. The URL is never returned, logged, or audited. |
 | Detach | `burrow addon detach postgres <app> [--env]` | Removes `DATABASE_URL`, then `DROP DATABASE … WITH (FORCE)` and `DROP ROLE` **on that environment's instance**. Destructive; confirm-gated. |

@@ -926,3 +926,94 @@ func TestAddonBackupHealthOmitsARedundantSecondLine(t *testing.T) {
 		t.Errorf("report missing the success line:\n%s", s)
 	}
 }
+
+// TestAddonInstallSummarySaysWhereItArchives is issue #466 at the surface a person reads. The
+// backup line is the one the output used to omit entirely, and the ordering is the rest of it: the
+// endpoint above the image, because nobody chose the image and it was the longest thing on the line.
+func TestAddonInstallSummarySaysWhereItArchives(t *testing.T) {
+	a := client.Addon{
+		Name: "burrow-postgres", Type: "postgres", Endpoint: "burrow-postgres.burrow-addons.svc:5432",
+		Image: "ghcr.io/cloudnative-pg/postgresql:17.10-minimal-trixie", Capabilities: []string{"database"},
+		Backups: &client.AddonBackups{
+			State: client.AddonBackupsArchiving, Provider: "do-spaces", Bucket: "burrow-cloud",
+			RetentionDays: 60, Schedule: "0 0 2 * * *", BaseBackup: client.AddonBaseBackupPresent,
+		},
+	}
+	out := addonInstallSummary(io.Discard, a)
+	for _, want := range []string{`"do-spaces" object store`, "bucket burrow-cloud", "60-day retention", "daily at 02:00"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary does not state %q:\n%s", want, out)
+		}
+	}
+	endpoint, image := strings.Index(out, "endpoint:"), strings.Index(out, "image:")
+	if endpoint < 0 || image < 0 || endpoint > image {
+		t.Errorf("the image must sit below the endpoint, not above it:\n%s", out)
+	}
+}
+
+// TestAddonInstallSummaryWarnsWhenNothingArchives asserts the second form: silence is what the issue
+// is about, so an instance that archives nowhere says so and names the re-run that fixes it.
+func TestAddonInstallSummaryWarnsWhenNothingArchives(t *testing.T) {
+	a := client.Addon{
+		Name: "burrow-postgres", Type: "postgres", Endpoint: "burrow-postgres.burrow-addons.svc:5432",
+		Capabilities: []string{"database"},
+		Backups: &client.AddonBackups{State: client.AddonBackupsNone,
+			Detail: "this instance archives nowhere: register one with `burrow config provider add --type s3 ...`, " +
+				"then re-run `burrow addon install postgres --env prod`"},
+	}
+	out := addonInstallSummary(io.Discard, a)
+	if !strings.Contains(out, "backups: none") || !strings.Contains(out, "burrow addon install postgres") {
+		t.Errorf("an instance that archives nowhere must say so and name the re-run:\n%s", out)
+	}
+	if !strings.Contains(out, "Warning:") {
+		t.Errorf("a database whose only copy is in the cluster is a warning, not a footnote:\n%s", out)
+	}
+}
+
+// TestAddonInstallSummaryStatesAMissingBaseBackup is issue #467's half of the same line. Archiving
+// with nothing to replay onto is the failure that looks most like success, so it gets the warning
+// label and the command that takes one.
+func TestAddonInstallSummaryStatesAMissingBaseBackup(t *testing.T) {
+	a := client.Addon{
+		Name: "burrow-postgres", Type: "postgres", Endpoint: "e", Capabilities: []string{"database"},
+		Backups: &client.AddonBackups{State: client.AddonBackupsArchiving, Bucket: "b",
+			BaseBackup: client.AddonBaseBackupNone,
+			Detail:     "take one now with `burrow addon backup-instance postgres --env prod`"},
+	}
+	out := addonInstallSummary(io.Discard, a)
+	if !strings.Contains(out, "base backup: none") || !strings.Contains(out, "backup-instance") {
+		t.Errorf("a repository with no base backup must say so and name the command that takes one:\n%s", out)
+	}
+}
+
+// TestAddonInstallSummaryDoesNotWarnForAddonsWithNoBackupPath keeps the loud label for the case that
+// deserves it. A cache holding rebuildable data is working as designed; saying so is a statement of
+// fact, not a caution.
+func TestAddonInstallSummaryDoesNotWarnForAddonsWithNoBackupPath(t *testing.T) {
+	a := client.Addon{
+		Name: "burrow-cache", Type: "cache", Endpoint: "e", Capabilities: []string{"cache"},
+		Backups: &client.AddonBackups{State: client.AddonBackupsNone, Detail: "a cache holds rebuildable data"},
+	}
+	out := addonInstallSummary(io.Discard, a)
+	if !strings.Contains(out, "backups: none") {
+		t.Errorf("every add-on says what it does about backups:\n%s", out)
+	}
+	if strings.Contains(out, "Warning:") {
+		t.Errorf("a cache with no backups is not a warning:\n%s", out)
+	}
+}
+
+// TestHumanBackupScheduleLeavesUnknownCronAlone guards the six-field cron whose leading field is
+// SECONDS. A schedule this does not recognise is printed verbatim rather than guessed at, because a
+// wrong statement about when a backup runs is worse than an unparsed one.
+func TestHumanBackupScheduleLeavesUnknownCronAlone(t *testing.T) {
+	if got := humanBackupSchedule("0 30 3 * * *"); got != "daily at 03:30" {
+		t.Errorf("humanBackupSchedule(daily) = %q", got)
+	}
+	if got := humanBackupSchedule("0 0 */6 * * *"); !strings.Contains(got, "0 0 */6 * * *") {
+		t.Errorf("an unrecognised schedule must be printed as it is: %q", got)
+	}
+	if got := humanBackupSchedule(""); got != "" {
+		t.Errorf("humanBackupSchedule(empty) = %q, want empty", got)
+	}
+}

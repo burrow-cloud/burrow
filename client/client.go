@@ -737,6 +737,58 @@ type Addon struct {
 	// plugin, even though an object-storage destination is registered (ADR-0066 §3). Empty when
 	// there is nothing to say.
 	Warning string `json:"warning,omitempty"`
+	// Backups is what this instance does about backups, read back from the instance itself at install
+	// time. Nil on a row read from the registry: it is a fact about one moment, not a property of the
+	// add-on, so it is never persisted.
+	Backups *AddonBackups `json:"backups,omitempty"`
+}
+
+// The values AddonBackups.State takes. A caller deciding whether backups are on switches on one of
+// these rather than reading a sentence.
+const (
+	// AddonBackupsArchiving: the instance's own wiring says it archives to object storage.
+	AddonBackupsArchiving = "archiving"
+	// AddonBackupsNone: it archives nowhere, or the add-on type has no backup path at all.
+	AddonBackupsNone = "none"
+	// AddonBackupsUnknown: the wiring could not be read back, so Burrow does not claim either way.
+	AddonBackupsUnknown = "unknown"
+)
+
+// The values AddonBackups.BaseBackup takes, for an archiving instance. Archived write-ahead log with
+// no base backup under it cannot be restored, so this is the half of the answer "archiving" does not
+// give.
+const (
+	// AddonBaseBackupPresent: the repository holds at least one full backup.
+	AddonBaseBackupPresent = "present"
+	// AddonBaseBackupRequested: this install asked for the first one; it has not landed yet.
+	AddonBaseBackupRequested = "requested"
+	// AddonBaseBackupNone: the repository holds none and none was requested.
+	AddonBaseBackupNone = "none"
+	// AddonBaseBackupUnknown: the repository's own count could not be read.
+	AddonBaseBackupUnknown = "unknown"
+)
+
+// AddonBackups is what one installed add-on instance does about backups: whether it archives, where,
+// on what schedule, and whether anything exists for the archived write-ahead log to be replayed onto.
+// Names and numbers only — never a credential.
+type AddonBackups struct {
+	State string `json:"state"`
+	// Provider is the registry name of the object store, reported only when the instance's own
+	// repository is demonstrably the one that provider names.
+	Provider string `json:"provider,omitempty"`
+	// Bucket and RepoPath come from the instance's pgBackRest stanza, not from what the install
+	// resolved.
+	Bucket   string `json:"bucket,omitempty"`
+	RepoPath string `json:"repo_path,omitempty"`
+	// RetentionDays is how long a full backup is kept; 0 when the repository declares no window.
+	RetentionDays int `json:"retention_days,omitempty"`
+	// Schedule is the base backup's cron expression in CloudNativePG's six-field form (leading field
+	// is seconds).
+	Schedule string `json:"schedule,omitempty"`
+	// BaseBackup is one of the AddonBaseBackup* values, empty when the instance does not archive.
+	BaseBackup string `json:"base_backup,omitempty"`
+	// Detail is one line elaborating the state, safe to print.
+	Detail string `json:"detail,omitempty"`
 }
 
 // InstallAddonOptions is everything `addon install` carries beyond the add-on's type and its

@@ -460,4 +460,112 @@ type AddonInfo struct {
 	// installing silently would hand somebody an instance they believe is archiving. So the instance
 	// is created without archiving and the omission is stated.
 	Warning string `json:"warning,omitempty"`
+	// Backups is what this instance actually does about backups, READ BACK from the cluster after the
+	// install rather than inferred from what the install intended. Nil on a row read from the
+	// registry, for Warning's reason: it is a fact about an instance at one moment, not a fact about
+	// what an add-on is, and a persisted copy would go stale while continuing to read as current.
+	Backups *AddonBackups `json:"backups,omitempty"`
+}
+
+// AddonBackupState is whether an add-on instance archives to object storage. It is a closed set so a
+// caller deciding whether backups are on switches on a value instead of parsing prose.
+type AddonBackupState string
+
+const (
+	// AddonBackupsArchiving means the instance's own wiring — the plugin entry on its CloudNativePG
+	// `Cluster`, read back from the API server — says it hands its write-ahead log to an
+	// object-storage repository.
+	AddonBackupsArchiving AddonBackupState = "archiving"
+	// AddonBackupsNone means the instance archives nowhere. It is the ordinary state of an install
+	// with no object-storage provider registered, and it is also what an install gets when the
+	// cluster has no backup plugin to archive with. Detail says which.
+	AddonBackupsNone AddonBackupState = "none"
+	// AddonBackupsUnknown means Burrow could not read the wiring back and will not guess. A
+	// destination resolved at install time and an instance that actually carries the plugin are
+	// different facts; when the second one cannot be read, saying so is the only honest answer.
+	AddonBackupsUnknown AddonBackupState = "unknown"
+)
+
+// AddonBaseBackupState is whether a base backup — the thing archived write-ahead log is replayed
+// ONTO — exists for an archiving instance. Archived write-ahead log with no base backup under it
+// cannot be restored, so "archiving" on its own is not the whole answer and this is the rest of it
+// (ADR-0066 §2).
+type AddonBaseBackupState string
+
+const (
+	// AddonBaseBackupPresent means the repository holds at least one full backup, as the instance's
+	// own pgBackRest stanza reports it.
+	AddonBaseBackupPresent AddonBaseBackupState = "present"
+	// AddonBaseBackupRequested means this install asked for one immediately and it has not landed
+	// yet. It is deliberately not "present": the request is a fact, the backup is not one until the
+	// repository says so.
+	AddonBaseBackupRequested AddonBaseBackupState = "requested"
+	// AddonBaseBackupNone means the repository holds none and none was requested — an instance
+	// installed before immediate first backups existed. It is the state that needs an operator to do
+	// something, so it is reported as its own value rather than folded into "requested".
+	AddonBaseBackupNone AddonBaseBackupState = "none"
+	// AddonBaseBackupUnknown means the repository's own count could not be read.
+	AddonBaseBackupUnknown AddonBaseBackupState = "unknown"
+)
+
+// AddonBackups is what one add-on instance does about backups, as read from the instance rather than
+// from the install's intent. Every field is a name, a number or a member of a closed set — never a
+// credential.
+//
+// It exists because `addon install` used to be silent about this, and silence is the worst shape the
+// answer can take: an install with no object-storage provider registered produced exactly the same
+// success message as one that archives, and the difference only showed up months later when somebody
+// went looking for a backup that had never been taken.
+type AddonBackups struct {
+	// State says whether the instance archives. Every add-on type carries one, because "this kind of
+	// add-on has no backups at all" is an answer somebody needs told too.
+	State AddonBackupState `json:"state"`
+	// Provider is the registry name of the object-storage provider the instance archives to. A name,
+	// never an endpoint credential.
+	Provider string `json:"provider,omitempty"`
+	// Bucket and RepoPath are where in that object store the repository lives, read back from the
+	// instance's own pgBackRest stanza rather than from the destination the install resolved. The two
+	// can differ — an instance keeps the repository it was created against — and when they do, what
+	// the instance says is the fact.
+	Bucket   string `json:"bucket,omitempty"`
+	RepoPath string `json:"repo_path,omitempty"`
+	// RetentionDays is how long a full backup is kept, 0 when the repository declares no window.
+	RetentionDays int `json:"retention_days,omitempty"`
+	// Schedule is the cron expression the base backup runs on, in CloudNativePG's six-field form
+	// (the leading field is seconds). It is reported so how much a restore could lose is readable
+	// without going and finding a custom resource.
+	Schedule string `json:"schedule,omitempty"`
+	// BaseBackup says whether there is anything for the archived write-ahead log to be replayed onto.
+	// Empty when State is not "archiving", where the question does not arise.
+	BaseBackup AddonBaseBackupState `json:"base_backup,omitempty"`
+	// Detail is one Burrow-authored line elaborating the state — why nothing is archiving, or what to
+	// run to fix it. Safe to print: it carries no credential and no vendor response body.
+	Detail string `json:"detail,omitempty"`
+}
+
+// Archiving reports whether the instance is known to archive. It is a helper for callers rendering a
+// line, so the "unknown" state cannot be accidentally read as a yes by a `!= none` test.
+func (b *AddonBackups) Archiving() bool { return b != nil && b.State == AddonBackupsArchiving }
+
+// TypeBackups is the backup answer for an add-on type that has no backup mechanism of its own. Only
+// Postgres has one; every other add-on in the catalog is reported as backing up nothing, in its own
+// words, rather than left silent.
+//
+// Saying it for the types that do nothing is the point rather than filler. An operator reading a
+// successful install has no way to tell "this add-on is backed up" from "this add-on has no backups
+// and never will" unless the output distinguishes them, and the second one is a decision they may
+// want to argue with — a metrics store holding ten gigabytes of samples on a volume nothing copies
+// is a fact worth knowing at install time, not after a node dies.
+func TypeBackups(t AddonType) *AddonBackups {
+	switch t {
+	case AddonCache:
+		return &AddonBackups{State: AddonBackupsNone,
+			Detail: "a cache holds rebuildable data, so this instance has no volume and nothing to back up"}
+	case AddonPostgres:
+		// Postgres has one; its state is read from the instance, not from the catalog.
+		return nil
+	default:
+		return &AddonBackups{State: AddonBackupsNone,
+			Detail: "Burrow takes no backup of this add-on's data volume; only the postgres add-on has a backup path"}
+	}
 }

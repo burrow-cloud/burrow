@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/controlplane/kube"
@@ -490,5 +491,230 @@ func TestPgBackRestManifestURLIsPinned(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(url), "barman") {
 		t.Errorf("manifest URL %q is a barman plugin; ADR-0066 §3 declines it on licence", url)
+	}
+}
+
+// setStanzaBackupCount writes the count of full backups the plugin's own sidecar keeps on a
+// `Stanza`'s status. It is the repository's account of itself and the only place Burrow can read
+// whether a base backup exists without asking pgBackRest directly.
+func setStanzaBackupCount(t *testing.T, dyn dynamic.Interface, name string, full int64) {
+	t.Helper()
+	stanza := getStanza(t, dyn, name)
+	if err := unstructured.SetNestedField(stanza.Object, full, "status", "backupsCount", "Full"); err != nil {
+		t.Fatalf("setting the Stanza backup count: %v", err)
+	}
+	if _, err := dyn.Resource(stanzaGVR).Namespace(cnpgTestNamespace).
+		Update(context.Background(), stanza, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("updating the Stanza: %v", err)
+	}
+}
+
+// TestNewInstanceAsksForItsBaseBackupImmediately is issue #467. An instance created with
+// `immediate: false` archives write-ahead log from the moment it starts and has nothing to replay it
+// onto until the schedule first fires — up to a day in which every artifact of a working backup
+// exists and a restore is impossible. The window is at its widest right after creation, which is also
+// when somebody is most likely to load data in.
+func TestNewInstanceAsksForItsBaseBackupImmediately(t *testing.T) {
+	ctx := context.Background()
+	client, dyn := archivingCluster()
+	a := kube.New(client, "burrow").WithDynamicClient(dyn)
+
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30))
+	if err != nil {
+		t.Fatalf("DeployAddon with an archive: %v", err)
+	}
+	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
+
+	sb, err := dyn.Resource(scheduledBackupGVR).Namespace(cnpgTestNamespace).Get(ctx, instance+"-schedule", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reading the ScheduledBackup: %v", err)
+	}
+	immediate, found, err := unstructured.NestedBool(sb.Object, "spec", "immediate")
+	if err != nil || !found || !immediate {
+		t.Fatalf("ScheduledBackup immediate = %v (found %v): a fresh instance must not archive for a day with nothing to restore onto", immediate, found)
+	}
+	// And the install SAYS it asked, without claiming the backup exists: the request is a fact, the
+	// backup is not one until the repository says so.
+	if info.Backups.BaseBackup != controlplane.AddonBaseBackupRequested {
+		t.Errorf("base backup state = %q, want %q", info.Backups.BaseBackup, controlplane.AddonBaseBackupRequested)
+	}
+}
+
+// TestInstallReportsTheArchiveItActuallyWired is issue #466. The reported repository comes from the
+// instance's own objects, and the state is a value a script can switch on rather than a sentence it
+// has to parse.
+func TestInstallReportsTheArchiveItActuallyWired(t *testing.T) {
+	ctx := context.Background()
+	client, dyn := archivingCluster()
+	a := kube.New(client, "burrow").WithDynamicClient(dyn)
+
+	archive := testArchive(controlplane.DefaultEnvironment, 45)
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, archive)
+	if err != nil {
+		t.Fatalf("DeployAddon with an archive: %v", err)
+	}
+	b := info.Backups
+	if b == nil || b.State != controlplane.AddonBackupsArchiving {
+		t.Fatalf("backups = %+v, want state %q", b, controlplane.AddonBackupsArchiving)
+	}
+	if b.Bucket != archive.Config.Bucket || b.RepoPath != archive.RepoPath {
+		t.Errorf("reported repository = %s/%s, want %s/%s", b.Bucket, b.RepoPath, archive.Config.Bucket, archive.RepoPath)
+	}
+	if b.RetentionDays != 45 {
+		t.Errorf("retention = %d days, want 45 — the window an operator would otherwise read out of a custom resource", b.RetentionDays)
+	}
+	if b.Provider != archive.Provider {
+		t.Errorf("provider = %q, want %q", b.Provider, archive.Provider)
+	}
+	if b.Schedule == "" {
+		t.Error("the base-backup schedule is not reported, so how much a restore could lose is unreadable")
+	}
+}
+
+// TestInstallWithNoArchiveWarnsAndNamesTheFix asserts the second form issue #466 asks for: an
+// instance that archives nowhere says so, and names the two commands that change it. Silence here is
+// the failure that shows up months later.
+func TestInstallWithNoArchiveWarnsAndNamesTheFix(t *testing.T) {
+	ctx := context.Background()
+	client, dyn := archivingCluster()
+	a := kube.New(client, "burrow").WithDynamicClient(dyn)
+
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil)
+	if err != nil {
+		t.Fatalf("DeployAddon with no destination: %v", err)
+	}
+	b := info.Backups
+	if b == nil || b.State != controlplane.AddonBackupsNone {
+		t.Fatalf("backups = %+v, want state %q", b, controlplane.AddonBackupsNone)
+	}
+	for _, want := range []string{"burrow config provider add", "burrow addon install postgres"} {
+		if !strings.Contains(b.Detail, want) {
+			t.Errorf("the detail must name %q, at the moment the reader learns they need it: %q", want, b.Detail)
+		}
+	}
+}
+
+// TestInstallWithoutThePluginReportsNoArchiving is the case where the destination was registered and
+// the instance still archives nowhere, because the cluster has no plugin. It is exactly the gap
+// between intent and wiring the report exists to close: a provider was registered, and this instance
+// does not archive.
+func TestInstallWithoutThePluginReportsNoArchiving(t *testing.T) {
+	ctx := context.Background()
+	client, dyn := cnpgReadyCluster()
+	a := kube.New(client, "burrow").WithDynamicClient(dyn)
+
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30))
+	if err != nil {
+		t.Fatalf("DeployAddon without the plugin must succeed: %v", err)
+	}
+	if info.Backups == nil || info.Backups.State != controlplane.AddonBackupsNone {
+		t.Fatalf("backups = %+v, want state %q even though a destination was resolved", info.Backups, controlplane.AddonBackupsNone)
+	}
+	if info.Backups.Detail != info.Warning {
+		t.Errorf("the detail must be the install's own note rather than a second wording of it: %q vs %q", info.Backups.Detail, info.Warning)
+	}
+}
+
+// TestReinstallDoesNotClaimABaseBackupItCouldNotAskFor covers the instance that already exists.
+// CloudNativePG honours `immediate` only while a schedule has never been checked, so a re-run cannot
+// ask for a first backup that way — and reporting one as requested would be the overstatement this
+// surface exists to remove. It reports none, and names the command that takes one.
+func TestReinstallDoesNotClaimABaseBackupItCouldNotAskFor(t *testing.T) {
+	ctx := context.Background()
+	client, dyn := archivingCluster()
+	a := kube.New(client, "burrow").WithDynamicClient(dyn)
+	spec, archive := postgresSpec(t), testArchive(controlplane.DefaultEnvironment, 30)
+
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, archive); err != nil {
+		t.Fatalf("first DeployAddon: %v", err)
+	}
+	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
+	setStanzaBackupCount(t, dyn, instance, 0)
+
+	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, archive)
+	if err != nil {
+		t.Fatalf("re-running DeployAddon: %v", err)
+	}
+	if info.Backups.BaseBackup != controlplane.AddonBaseBackupNone {
+		t.Fatalf("base backup state = %q, want %q", info.Backups.BaseBackup, controlplane.AddonBaseBackupNone)
+	}
+	if !strings.Contains(info.Backups.Detail, "burrow addon backup-instance postgres") {
+		t.Errorf("an instance with archived write-ahead log and no base backup must be told how to take one: %q", info.Backups.Detail)
+	}
+}
+
+// TestBaseBackupIsReportedPresentFromTheRepository asserts the positive case is read from the
+// repository's own count rather than from Burrow having asked for a backup at some point.
+func TestBaseBackupIsReportedPresentFromTheRepository(t *testing.T) {
+	ctx := context.Background()
+	client, dyn := archivingCluster()
+	a := kube.New(client, "burrow").WithDynamicClient(dyn)
+	spec, archive := postgresSpec(t), testArchive(controlplane.DefaultEnvironment, 30)
+
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, archive); err != nil {
+		t.Fatalf("first DeployAddon: %v", err)
+	}
+	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
+	setStanzaBackupCount(t, dyn, instance, 3)
+
+	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, archive)
+	if err != nil {
+		t.Fatalf("re-running DeployAddon: %v", err)
+	}
+	if info.Backups.BaseBackup != controlplane.AddonBaseBackupPresent {
+		t.Errorf("base backup state = %q, want %q", info.Backups.BaseBackup, controlplane.AddonBaseBackupPresent)
+	}
+}
+
+// TestBackupsAreNotClaimedWhenTheWiringCannotBeRead is the honesty case. A build with no dynamic
+// client cannot read a `Cluster` back at all, and the answer is "not confirmed" rather than either of
+// the two confident ones — a report that guesses is worse than the silence it replaced.
+func TestBackupsAreNotClaimedWhenTheWiringCannotBeRead(t *testing.T) {
+	ctx := context.Background()
+	client, dyn := archivingCluster()
+	a := kube.New(client, "burrow").WithDynamicClient(dyn)
+
+	// burrowd installed before the Postgres add-on existed holds no grant on postgresql.cnpg.io, so
+	// this read is refused on a cluster that has not been upgraded. It is the one case where Burrow
+	// genuinely cannot tell whether the instance archives.
+	dyn.(*dynamicfake.FakeDynamicClient).PrependReactor("get", "clusters",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: kube.CNPGAPIGroup, Resource: "clusters"}, "", errors.New("no grant"))
+		})
+
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30))
+	if err != nil {
+		t.Fatalf("DeployAddon: %v", err)
+	}
+	if info.Backups == nil || info.Backups.State != controlplane.AddonBackupsUnknown {
+		t.Fatalf("backups = %+v, want state %q rather than a confident answer Burrow cannot stand behind", info.Backups, controlplane.AddonBackupsUnknown)
+	}
+	if info.Backups.Detail == "" {
+		t.Error("an unconfirmed report must say what could not be read")
+	}
+}
+
+// TestAddonsWithNoBackupPathSaySo is the rest of issue #466: the same silence applied to every other
+// add-on type. A metrics store holding samples on a volume nothing copies is a fact worth stating at
+// install time rather than after a node goes.
+func TestAddonsWithNoBackupPathSaySo(t *testing.T) {
+	for _, tt := range []struct {
+		addon controlplane.AddonType
+		want  string
+	}{
+		{controlplane.AddonCache, "rebuildable"},
+		{controlplane.AddonLogs, "data volume"},
+		{controlplane.AddonMetrics, "data volume"},
+	} {
+		b := controlplane.TypeBackups(tt.addon)
+		if b == nil || b.State != controlplane.AddonBackupsNone {
+			t.Fatalf("%s backups = %+v, want state %q", tt.addon, b, controlplane.AddonBackupsNone)
+		}
+		if !strings.Contains(b.Detail, tt.want) {
+			t.Errorf("%s detail = %q, want it to mention %q", tt.addon, b.Detail, tt.want)
+		}
+	}
+	if controlplane.TypeBackups(controlplane.AddonPostgres) != nil {
+		t.Error("postgres must report from the instance, not from the catalog")
 	}
 }

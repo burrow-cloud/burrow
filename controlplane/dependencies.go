@@ -595,6 +595,7 @@ const dependencyJobTTLSeconds int32 = 3600
 //
 // It runs nothing at all when the app has no derived dependency, which is the common case for an
 // unpublished app with no database: no Job, no pull, no added latency.
+//
 // progress reports the check as a deploy stage (issue #480). It is emitted below the disabled and
 // nothing-derived returns and after the settle, so a deploy that runs no check pod reports no check
 // stage and the stage's clock covers the check itself rather than the rollout wait in front of it.

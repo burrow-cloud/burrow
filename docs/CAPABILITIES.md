@@ -1387,8 +1387,9 @@ Two different surfaces, and picking the wrong one is a common mistake.
 - **`burrow app logs <app>` / `burrow-agent logs <app>`** reads live Pod logs through the
   Kubernetes API, concatenated across the app's Pods. The **only** flag is `--tail`. There is
   **no `--follow`, no `--since`, no `--previous`, and no `--container`** — streaming is not
-  supported, and the response is fully buffered. Log lines carry a pod name and a message;
-  the timestamp field on the type is never populated on this path.
+  supported, and the response is fully buffered. Log lines carry a pod name, the UTC instant
+  the cluster recorded the line, and the application's own message with that instant stripped
+  off. A zero timestamp means no time could be read for that line, not that the field is unused.
 - **`burrow addon logs` / `burrow-agent logs-query`** queries the durable logs add-on (or a
   connected Loki) in LogsQL or LogQL. This is the surface for "what happened an hour ago".
 

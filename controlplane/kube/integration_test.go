@@ -87,9 +87,18 @@ func TestIntegration(t *testing.T) {
 			return false, nil // pod may still be starting; keep waiting
 		}
 		for _, l := range lines {
-			if strings.Contains(l.Message, "hello-from-burrow") {
-				return true, nil
+			if !strings.Contains(l.Message, "hello-from-burrow") {
+				continue
 			}
+			// A real cluster stamps every line it emits, so the instant must survive the round
+			// trip and the prefix must not be left duplicated in the message (#480).
+			if l.Timestamp.IsZero() {
+				return false, fmt.Errorf("log line %q carries a zero timestamp", l.Message)
+			}
+			if strings.HasPrefix(l.Message, l.Timestamp.Format("2006-01-02")) {
+				return false, fmt.Errorf("log line %q still carries its timestamp prefix", l.Message)
+			}
+			return true, nil
 		}
 		return false, nil
 	})

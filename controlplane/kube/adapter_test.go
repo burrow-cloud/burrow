@@ -1226,6 +1226,55 @@ func TestLogs(t *testing.T) {
 	}
 }
 
+// TestLogsCarryTimestamps is the adapter half of #480: the pod-log request asks Kubernetes to stamp
+// every line, and the instant comes back on the LogLine with the prefix stripped out of the message
+// rather than left duplicated in the application's text.
+func TestLogsCarryTimestamps(t *testing.T) {
+	ctx := context.Background()
+	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "web-abc", Namespace: ns,
+		Labels: map[string]string{"app.kubernetes.io/name": "web"},
+	}}
+	client := fake.NewSimpleClientset(dep, pod)
+
+	var gotOpts *corev1.PodLogOptions
+	client.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		opts, ok := action.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions)
+		if !ok {
+			t.Errorf("log request value = %T, want *corev1.PodLogOptions", action.(k8stesting.GenericAction).GetValue())
+			return false, nil, nil
+		}
+		gotOpts = opts
+		body := "2026-08-04T02:49:46.5Z GET /auth/github/callback 500 1.888s\n" +
+			"trailing frame with no prefix\n"
+		return true, &runtime.Unknown{Raw: []byte(body)}, nil
+	})
+
+	lines, err := kube.New(client, ns).Logs(ctx, "web", cp.LogOptions{})
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+	if gotOpts == nil || !gotOpts.Timestamps {
+		t.Fatalf("pod log options = %+v, want Timestamps set", gotOpts)
+	}
+
+	want := time.Date(2026, 8, 4, 2, 49, 46, 500000000, time.UTC)
+	if len(lines) != 2 {
+		t.Fatalf("lines = %+v, want 2", lines)
+	}
+	if !lines[0].Timestamp.Equal(want) || lines[0].Message != "GET /auth/github/callback 500 1.888s" {
+		t.Errorf("first line = %+v, want %v / message without the prefix", lines[0], want)
+	}
+	// The unstamped frame is a continuation: it keeps its raw text and inherits the instant above it.
+	if !lines[1].Timestamp.Equal(want) || lines[1].Message != "trailing frame with no prefix" {
+		t.Errorf("second line = %+v, want the inherited instant %v and the raw text", lines[1], want)
+	}
+}
+
 // TestApplyNoPodMutatorLeavesDeploymentUnchanged guards the backward-compatible default of the
 // ADR-0061 deploy-path extension point (WithPodMutator): with no mutator wired, the Deployment the
 // adapter constructs is byte-for-byte what it was before the hook existed. ADR-0061 §3 makes that a

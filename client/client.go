@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -148,6 +149,23 @@ type DeployRequest struct {
 	MetricsPort int32    `json:"metrics_port,omitempty"`
 	Replicas    int32    `json:"replicas"`
 	Confirm     bool     `json:"confirm,omitempty"`
+	// Progress receives the deploy's stages as the control plane reports them (issue #480). Setting
+	// it is what asks for them: Deploy then negotiates the streaming response, and a control plane
+	// that does not offer one is handled transparently. Nil — the default, and the shape that goes on
+	// the wire, since json ignores this field — is the deploy this package has always issued.
+	//
+	// It is called from Deploy's own goroutine as each line arrives, so a slow reporter slows the
+	// read. It is never called after Deploy returns.
+	Progress func(DeployProgress) `json:"-"`
+}
+
+// DeployProgress is one stage transition of a running deploy: which stage of the deploy the control
+// plane is in, and what happened to it. Both are members of the control plane's closed vocabularies
+// (controlplane.DeployStages, controlplane.DeployStatuses); a value outside them is a newer control
+// plane's, and a caller renders it rather than failing on it.
+type DeployProgress struct {
+	Stage  string `json:"stage"`
+	Status string `json:"status"`
 }
 
 // SourceRef names the git source an in-cluster build clones and checks out inside the cluster
@@ -663,10 +681,110 @@ func (c *Client) Capacity(ctx context.Context) (CapacityReport, error) {
 // for — a `post-deploy` hook to tell (ADR-0072 §4), or a dependency Burrow derived from an attached
 // database or a published port to check (ADR-0076 §4) — and that wait is bounded by an operational
 // limit, not by anything this client picked (issue #404).
+//
+// Setting req.Progress asks the control plane to report the deploy's stages over the same call
+// (issue #480). It changes nothing else: the same endpoint, the same body, the same budget, and the
+// same errors — including a guardrail hold, which still arrives status-coded because the control
+// plane writes the stream's header only once it has committed to doing work.
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
-	err := c.doWithin(ctx, c.budget.deploy, http.MethodPost, c.appPath(app, "deploy"), req, &out)
+	path := c.appPath(app, "deploy")
+	if req.Progress == nil {
+		return out, c.doWithin(ctx, c.budget.deploy, http.MethodPost, path, req, &out)
+	}
+	err := c.within(ctx, c.budget.deploy, func(ctx context.Context) error {
+		return c.deployStreaming(ctx, path, req, &out)
+	})
 	return out, err
+}
+
+// deployStreamLine is one line of the control plane's ndjson deploy stream: an event while the
+// deploy runs, then one terminal line that is either the result or the error.
+type deployStreamLine struct {
+	Event  *DeployProgress `json:"event"`
+	Result *DeployResult   `json:"result"`
+	Error  *struct {
+		Status            int    `json:"status"`
+		Error             string `json:"error"`
+		Code              string `json:"code"`
+		NeedsConfirmation bool   `json:"needs_confirmation"`
+		ServerVersion     string `json:"server_version"`
+		ServerInstallID   string `json:"server_install_id"`
+	} `json:"error"`
+}
+
+// deployStreaming issues a deploy asking for the progress stream and reports each stage to
+// req.Progress as it arrives.
+//
+// IT MUST SURVIVE A CONTROL PLANE THAT DOES NOT OFFER ONE. The Accept header is a request, not a
+// requirement: a server predating this ignores it and answers with the single JSON object it always
+// has, so the response's Content-Type decides which path is taken. That is what makes a new client
+// safe against an old control plane, which is the ordinary state of an install mid-upgrade.
+func (c *Client) deployStreaming(ctx context.Context, path string, req DeployRequest, out *DeployResult) error {
+	b, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("encoding request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", ndjsonMediaType)
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("control plane request: %w", err)
+	}
+	defer resp.Body.Close()
+	// A refusal is always an ordinary status-coded body — a hold, a denial, an unknown app — and a
+	// control plane with no progress stream answers 200 with a plain object. Both are the same
+	// non-streaming decode, so neither can be mistaken for a truncated stream.
+	if resp.StatusCode/100 != 2 || !isNDJSON(resp.Header.Get("Content-Type")) {
+		return decodeResponse(resp, out)
+	}
+
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var line deployStreamLine
+		if err := dec.Decode(&line); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("reading the deploy stream: %w", err)
+		}
+		switch {
+		case line.Error != nil:
+			// An error raised after the first stage — a failed pre-deploy hook, a failed apply. It
+			// carries the status and the fields an ordinary error body has, so the *APIError rebuilt
+			// here is indistinguishable from the one the non-streaming path would have produced.
+			return &APIError{
+				StatusCode:        line.Error.Status,
+				Code:              line.Error.Code,
+				Message:           line.Error.Error,
+				NeedsConfirmation: line.Error.NeedsConfirmation,
+				ServerVersion:     line.Error.ServerVersion,
+				ServerInstallID:   line.Error.ServerInstallID,
+			}
+		case line.Result != nil:
+			*out = *line.Result
+			return nil
+		case line.Event != nil:
+			req.Progress(*line.Event)
+		}
+	}
+	// The stream ended with neither a result nor an error: burrowd went away mid-deploy. The deploy
+	// itself may well have landed, so this says so rather than implying it did not happen.
+	return fmt.Errorf("the control plane closed the deploy stream without reporting an outcome; the deploy may still be in progress — check the app's status before retrying")
+}
+
+// ndjsonMediaType is the content type of the deploy progress stream: one JSON object per line.
+const ndjsonMediaType = "application/x-ndjson"
+
+// isNDJSON reports whether a response's Content-Type is the progress stream, ignoring any parameters
+// (a charset, say) the server chose to add.
+func isNDJSON(contentType string) bool {
+	mt, _, err := mime.ParseMediaType(contentType)
+	return err == nil && mt == ndjsonMediaType
 }
 
 // Build builds an app's image from a git source reference inside the cluster and, on success, hands
@@ -1900,13 +2018,23 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 // the two, so an agent that gives a deploy thirty seconds gets thirty seconds. What can no longer
 // happen is this package silently imposing a bound shorter than the work it is waiting for.
 func (c *Client) doWithin(ctx context.Context, budget time.Duration, method, path string, body, out any) error {
+	return c.within(ctx, budget, func(ctx context.Context) error {
+		return c.request(ctx, method, path, body, out)
+	})
+}
+
+// within applies a per-request budget to call and adds this package's own deadline message to the
+// error when the budget — rather than the caller's own deadline — is what cut the call short. It is
+// factored out of doWithin so a call that does not go through request, such as the streaming deploy,
+// is bounded and reports a timeout identically rather than growing a second story about deadlines.
+func (c *Client) within(ctx context.Context, budget time.Duration, call func(context.Context) error) error {
 	reqCtx := ctx
 	if budget > 0 {
 		var cancel context.CancelFunc
 		reqCtx, cancel = context.WithTimeout(ctx, budget)
 		defer cancel()
 	}
-	err := c.request(reqCtx, method, path, body, out)
+	err := call(reqCtx)
 	// A request THIS package's budget cut short gets a message saying what a bare "deadline
 	// exceeded" does not: the control plane is not a transaction that rolls back when the caller
 	// stops listening, so the operation may well be finishing right now. Retrying is what turns one
@@ -1944,31 +2072,16 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 		return fmt.Errorf("control plane request: %w", err)
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
+	return decodeResponse(resp, out)
+}
 
+// decodeResponse turns a completed response into either a decoded result or an *APIError. It is
+// shared with the streaming deploy, which takes this path whenever the control plane answered with
+// an ordinary JSON body — a refusal, or a server that does not offer a progress stream at all.
+func decodeResponse(resp *http.Response, out any) error {
+	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		var e struct {
-			Error             string `json:"error"`
-			Code              string `json:"code"`
-			NeedsConfirmation bool   `json:"needs_confirmation"`
-			ServerVersion     string `json:"server_version"`
-			ServerInstallID   string `json:"server_install_id"`
-		}
-		_ = json.Unmarshal(data, &e)
-		msg := e.Error
-		if msg == "" {
-			if msg = strings.TrimSpace(string(data)); msg == "" {
-				msg = resp.Status
-			}
-		}
-		return &APIError{
-			StatusCode:        resp.StatusCode,
-			Code:              e.Code,
-			Message:           msg,
-			NeedsConfirmation: e.NeedsConfirmation,
-			ServerVersion:     e.ServerVersion,
-			ServerInstallID:   e.ServerInstallID,
-		}
+		return apiErrorFrom(resp.StatusCode, resp.Status, data)
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -1976,4 +2089,33 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 		}
 	}
 	return nil
+}
+
+// apiErrorFrom builds the *APIError for a non-2xx body. It is the ONE place the control plane's
+// error shape becomes this package's error type, so a refusal that arrives inside a progress stream
+// carries the same StatusCode, Code, Message and NeedsConfirmation an ordinary one does — which is
+// what lets `burrow-agent` classify a hold identically however the deploy was issued.
+func apiErrorFrom(status int, statusText string, body []byte) *APIError {
+	var e struct {
+		Error             string `json:"error"`
+		Code              string `json:"code"`
+		NeedsConfirmation bool   `json:"needs_confirmation"`
+		ServerVersion     string `json:"server_version"`
+		ServerInstallID   string `json:"server_install_id"`
+	}
+	_ = json.Unmarshal(body, &e)
+	msg := e.Error
+	if msg == "" {
+		if msg = strings.TrimSpace(string(body)); msg == "" {
+			msg = statusText
+		}
+	}
+	return &APIError{
+		StatusCode:        status,
+		Code:              e.Code,
+		Message:           msg,
+		NeedsConfirmation: e.NeedsConfirmation,
+		ServerVersion:     e.ServerVersion,
+		ServerInstallID:   e.ServerInstallID,
+	}
 }

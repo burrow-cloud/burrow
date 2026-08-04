@@ -607,7 +607,11 @@ const dependencyJobTTLSeconds int32 = 3600
 //
 // It runs nothing at all when the app has no derived dependency, which is the common case for an
 // unpublished app with no database: no Job, no pull, no added latency.
-func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env, ns, image string, cfg map[string]string, settle rolloutSettle) []DependencyResult {
+//
+// progress reports the check as a deploy stage (issue #480). It is emitted below the disabled and
+// nothing-derived returns and after the settle, so a deploy that runs no check pod reports no check
+// stage and the stage's clock covers the check itself rather than the rollout wait in front of it.
+func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env, ns, image string, cfg map[string]string, settle rolloutSettle, progress deployProgress) []DependencyResult {
 	enabled, err := e.db.DependencyChecksEnabled(ctx, app, env)
 	if err != nil {
 		slog.WarnContext(ctx, "reading whether the deploy-time dependency check is enabled failed",
@@ -660,6 +664,10 @@ func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env
 	runCtx, cancel := context.WithTimeout(ctx, dependencyCheckDeadline)
 	defer cancel()
 
+	// The stage reports WHETHER THE CHECK RAN, not what it found. A dependency that failed its check
+	// is a result on a successful deploy (§6) and travels back as one; a check pod that could not be
+	// scheduled is the case where the stage itself did not work, and that is what the mark means.
+	progress.started(StageDependencyCheck)
 	res, runErr := k.RunJob(runCtx, RunSpec{
 		App:        app,
 		ID:         "check-" + e.ids.NewID(),
@@ -672,6 +680,7 @@ func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env
 		// app's image does not have.
 		Probe: &ProbeSpec{Env: map[string]string{ProbePlanEnv: encoded}},
 	})
+	progress.finish(StageDependencyCheck, runErr == nil)
 
 	var results []DependencyResult
 	if runErr == nil {

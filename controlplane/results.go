@@ -32,6 +32,14 @@ type DeployRequest struct {
 	// Confirm acknowledges a guardrail whose disposition is confirm, letting the operation
 	// proceed past it (ADR-0020). It has no effect on a guardrail set to deny.
 	Confirm bool `json:"confirm,omitempty"`
+	// Progress receives the deploy's stage transitions as they happen (issue #480), so a caller can
+	// say what the deploy is doing across the ten to twenty seconds it takes rather than going quiet.
+	// Nil asks for nothing and is the default: the API's JSON decode leaves it nil, so the request's
+	// wire shape is unchanged and no caller that did not ask pays anything.
+	//
+	// It is called SYNCHRONOUSLY on the deploying goroutine, in stage order, so a slow reporter slows
+	// the deploy. A reporter writes and returns.
+	Progress func(DeployEvent) `json:"-"`
 }
 
 // DeployResult reports the outcome of a successful deploy.

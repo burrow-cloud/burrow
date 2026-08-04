@@ -226,18 +226,20 @@ func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"app": app})
 }
 
+// deploy applies an image to an app (ADR-0007). A caller that sends `Accept: application/x-ndjson`
+// gets the deploy's stages reported as they happen over the same call (issue #480); everyone else
+// gets the single JSON object this endpoint has always returned. See deploystream.go.
 func (s *server) deploy(w http.ResponseWriter, r *http.Request) {
 	var req controlplane.DeployRequest
 	if !decode(w, r, &req) {
 		return
 	}
 	req.App = r.PathValue("app") // the path is authoritative for the app name
-	res, err := s.engine.Deploy(r.Context(), req)
-	if err != nil {
-		writeEngineError(w, err)
+	if wantsProgressStream(r) {
+		s.deployStream(w, r, req)
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	s.deployPlain(w, r, req)
 }
 
 // build clones a git source reference and builds the app's image inside the cluster, then hands the
@@ -1585,34 +1587,45 @@ func writeError(w http.ResponseWriter, status int, msg, code string) {
 	writeJSON(w, status, errorResponse{Error: msg, Code: code})
 }
 
-// writeEngineError maps a deploy-engine error to its HTTP status and structured body.
+// writeEngineError maps a deploy-engine error to its HTTP status and structured body and writes it.
+// It is the ordinary error path: a status-coded JSON response.
 func writeEngineError(w http.ResponseWriter, err error) {
+	status, body := engineError(err)
+	writeJSON(w, status, body)
+}
+
+// engineError is the CLASSIFIER behind writeEngineError: it maps a deploy-engine error to its HTTP
+// status and structured body and writes nothing.
+//
+// It is split out because the streaming deploy has to report an error it cannot send a status line
+// for — the response header went out with the first progress event — so it carries the status and
+// the body inside the stream's final line instead (issue #480). Both paths call THIS, so the
+// classification cannot drift: a `hook_failed` is the same code and the same 422 whether the caller
+// asked for progress or not, and a client rebuilds the same *APIError from either.
+func engineError(err error) (int, errorResponse) {
 	// An operational limit exceeded is a structured refusal, not a system failure and not a policy
 	// decision (ADR-0068 §2): the request was understood, it crosses a bound a human set, and no
 	// confirmation opens it. It carries the same requested/limit pair a guardrail refusal does, and
 	// NeedsConfirmation is deliberately absent — there is nothing to confirm.
 	if l, ok := controlplane.AsLimit(err); ok {
 		req, lim := l.Requested, l.Limit
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+		return http.StatusUnprocessableEntity, errorResponse{
 			Error: err.Error(), Code: string(l.Code), Requested: &req, Limit: &lim,
-		})
-		return
+		}
 	}
 	if g, ok := controlplane.AsGuardrail(err); ok {
 		req, lim := g.Requested, g.Limit
-		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{
+		return http.StatusUnprocessableEntity, errorResponse{
 			Error: g.Error(), Code: string(g.Code), Requested: &req, Limit: &lim,
 			NeedsConfirmation: g.NeedsConfirmation,
-		})
-		return
+		}
 	}
 	// An ambiguous environment target is a structured, actionable refusal (ADR-0047 §1): the mutating
 	// request named no environment while more than one is registered, so burrowd refuses to pick one.
 	// The listing of environments rides in the error text so the agent re-issues the call naming a
 	// target, without a separate probe. It is an unprocessable request, not a system failure.
 	if a, ok := controlplane.AsAmbiguousEnvironment(err); ok {
-		writeError(w, http.StatusUnprocessableEntity, a.Error(), "ambiguous_environment")
-		return
+		return http.StatusUnprocessableEntity, errorResponse{Error: a.Error(), Code: "ambiguous_environment"}
 	}
 	// A failed lifecycle hook is a structured, actionable refusal (ADR-0072 §3): the request was
 	// understood, the guardrail allowed it, and the user's own command exited non-zero, so the deploy
@@ -1621,24 +1634,22 @@ func writeEngineError(w http.ResponseWriter, err error) {
 	// diagnosable from the response instead of from a hunt through the cluster. NeedsConfirmation is
 	// deliberately absent — there is nothing to confirm; the command has to be fixed.
 	if _, ok := controlplane.AsHook(err); ok {
-		writeError(w, http.StatusUnprocessableEntity, err.Error(), "hook_failed")
-		return
+		return http.StatusUnprocessableEntity, errorResponse{Error: err.Error(), Code: "hook_failed"}
 	}
 	// Missing cluster prerequisites is a structured, actionable outcome (ADR-0006): the request was
 	// valid but the cluster is not set up for it. The full checklist rides in the error text so the
 	// agent gets each missing piece and its burrow fix in one response, without inspecting the cluster.
 	if _, ok := controlplane.AsMissingPrerequisites(err); ok {
-		writeError(w, http.StatusUnprocessableEntity, err.Error(), "missing_prerequisites")
-		return
+		return http.StatusUnprocessableEntity, errorResponse{Error: err.Error(), Code: "missing_prerequisites"}
 	}
 	switch {
 	case errors.Is(err, controlplane.ErrNotFound):
-		writeError(w, http.StatusNotFound, err.Error(), "not_found")
+		return http.StatusNotFound, errorResponse{Error: err.Error(), Code: "not_found"}
 	case errors.Is(err, controlplane.ErrInvalid):
-		writeError(w, http.StatusBadRequest, err.Error(), "invalid")
+		return http.StatusBadRequest, errorResponse{Error: err.Error(), Code: "invalid"}
 	case errors.Is(err, controlplane.ErrNotImplemented):
-		writeError(w, http.StatusNotImplemented, err.Error(), "not_implemented")
+		return http.StatusNotImplemented, errorResponse{Error: err.Error(), Code: "not_implemented"}
 	default:
-		writeError(w, http.StatusInternalServerError, err.Error(), "internal")
+		return http.StatusInternalServerError, errorResponse{Error: err.Error(), Code: "internal"}
 	}
 }

@@ -130,11 +130,14 @@ func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.A
 	// that does not exist yet is the operator racing Burrow into a failure that looks like the
 	// plugin's (ADR-0066 §3).
 	var warning string
+	var scheduleCreated bool
+	resolved := archive
 	if archive != nil {
-		w, err := a.ensurePgBackRestArchive(ctx, name, labels, archive)
+		w, created, err := a.ensurePgBackRestArchive(ctx, name, labels, archive)
 		if err != nil {
 			return controlplane.AddonInfo{}, err
 		}
+		scheduleCreated = created
 		// A non-empty warning means the archive was NOT wired — the plugin is not on this cluster —
 		// so the `Cluster` below is composed as if no destination had been resolved. It is one
 		// decision read in two places, which is why the archive is nilled here rather than tested
@@ -177,6 +180,11 @@ func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.A
 		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.addonNamespace, spec.Port),
 		Capabilities: spec.Capabilities,
 		Warning:      warning,
+		// Read back AFTER everything is written, from the objects themselves rather than from what
+		// this function decided to write (issue #466). `resolved` is the destination as it was before
+		// the archive was possibly nilled above, so a mismatch between the repository the install
+		// resolved and the one the instance actually holds is visible instead of assumed away.
+		Backups: a.describeInstanceBackups(ctx, name, env, resolved, scheduleCreated, warning),
 	}, nil
 }
 

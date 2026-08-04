@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"text/template"
@@ -906,7 +907,13 @@ func newAddonInstallCmd() *cobra.Command {
 			"already installed.\n\n" +
 			"postgres runs on CloudNativePG, so the operator has to be on the cluster first:\n" +
 			"`burrow cluster postgres install`. That is a one-time operator step — it installs\n" +
-			"cluster-scoped CustomResourceDefinitions and needs cluster-admin.",
+			"cluster-scoped CustomResourceDefinitions and needs cluster-admin.\n\n" +
+			"The result says whether the instance archives to object storage and where, and whether the\n" +
+			"repository holds a base backup — archived write-ahead log cannot be restored without one. A\n" +
+			"postgres instance installed before an object-storage provider was registered archives\n" +
+			"nowhere: register one, then re-run this command to wire the instance to it. Re-running is\n" +
+			"safe and leaves the data untouched. An instance whose repository still holds no base backup\n" +
+			"is reported as such; take one with `burrow addon backup-instance postgres`.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -952,15 +959,7 @@ func newAddonInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			human := fmt.Sprintf("installed the %s add-on %q (%s)\nin-cluster endpoint: %s\nprovides: %s",
-				a.Type, a.Name, a.Image, a.Endpoint, strings.Join(a.Capabilities, ", "))
-			// The warning goes on the human output as its own line rather than being folded into the
-			// summary: it says what this instance does NOT do, and an install that quietly took no
-			// backups is exactly the thing nobody should have to read carefully to notice.
-			if a.Warning != "" {
-				human += "\nnote: " + a.Warning
-			}
-			return o.emitChange(out, a, human)
+			return o.emitChange(out, a, addonInstallSummary(out, a))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -969,6 +968,136 @@ func newAddonInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&archiveDestination, "archive-destination", "",
 		"the object-storage `provider` a postgres instance archives to (only needed when more than one is registered)")
 	return cmd
+}
+
+// addonInstallSummary renders what an install did, in the order a reader needs it (issue #466).
+//
+// THE BACKUP LINE IS THE REASON THIS FUNCTION EXISTS. An install either archives to object storage or
+// it does not, that is decided at install time, and the output used to say neither — so an install
+// with no provider registered produced the same success message as one that archives, and the
+// difference surfaced months later when somebody went looking for a backup nobody had ever taken.
+//
+// The image moves BELOW the endpoint. It was the longest thing on the first line and the least useful
+// one: nobody chose it, and it pushed the facts a reader is scanning for off the edge of a terminal.
+// It stays, because an operator auditing what is running needs to be able to read it.
+//
+// The first line is the headline on purpose: emitChange appends the target clause to it, so what the
+// install did and where it landed stay in the same breath.
+func addonInstallSummary(w io.Writer, a client.Addon) string {
+	lines := []string{
+		fmt.Sprintf("%s installed the %s add-on %q", okMark(w), a.Type, a.Name),
+		fmt.Sprintf("%s endpoint: %s", okMark(w), a.Endpoint),
+	}
+	lines = append(lines, addonBackupLines(w, a)...)
+	lines = append(lines, "  provides: "+strings.Join(a.Capabilities, ", "))
+	if a.Image != "" {
+		lines = append(lines, "  image: "+a.Image)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// addonBackupLines states what the instance does about backups, from what Burrow read back off it
+// rather than from what the install meant to do.
+//
+// An add-on that CANNOT archive and one that merely does not are marked differently, and the
+// difference is not cosmetic: a cache holding rebuildable data is working as designed, while a
+// Postgres instance archiving nowhere is a database whose only copy shares a failure domain with the
+// cluster. The second gets the warning label and the command that fixes it; the first gets a plain
+// statement of fact.
+//
+// A server that reports nothing at all (an older burrowd, or a path that does not fill this in) falls
+// back to the install's own note, so the output never gets quieter than it was.
+func addonBackupLines(w io.Writer, a client.Addon) []string {
+	b := a.Backups
+	if b == nil {
+		if a.Warning != "" {
+			return []string{warning(w) + a.Warning}
+		}
+		return nil
+	}
+	loud := a.Type == string(controlplane.AddonPostgres)
+	switch b.State {
+	case client.AddonBackupsArchiving:
+		out := []string{fmt.Sprintf("%s backups: archiving to %s", okMark(w), archiveRepositoryPhrase(b))}
+		if line := baseBackupLine(w, b); line != "" {
+			out = append(out, line)
+		}
+		return out
+	case client.AddonBackupsUnknown:
+		return []string{warning(w) + "backups: not confirmed — " + b.Detail}
+	default:
+		if loud {
+			return []string{warning(w) + "backups: none — " + b.Detail}
+		}
+		return []string{"  backups: none — " + b.Detail}
+	}
+}
+
+// archiveRepositoryPhrase names where an archiving instance writes, and how long what it writes is
+// kept. Every part is omitted when it was not read rather than filled in with a plausible value.
+func archiveRepositoryPhrase(b *client.AddonBackups) string {
+	phrase := "object storage"
+	if b.Provider != "" {
+		phrase = fmt.Sprintf("the %q object store", b.Provider)
+	}
+	var detail []string
+	if b.Bucket != "" {
+		detail = append(detail, "bucket "+b.Bucket)
+	}
+	if b.RetentionDays > 0 {
+		detail = append(detail, fmt.Sprintf("%d-day retention", b.RetentionDays))
+	}
+	if len(detail) > 0 {
+		phrase += " (" + strings.Join(detail, ", ") + ")"
+	}
+	if s := humanBackupSchedule(b.Schedule); s != "" {
+		phrase += ", base backup " + s
+	}
+	return phrase
+}
+
+// baseBackupLine says whether there is anything for the archived write-ahead log to be replayed onto.
+// Archiving without a base backup is the failure worth a line of its own: every artifact of a working
+// backup exists — a stanza, a schedule, segments arriving in the bucket — except the one that makes
+// them restorable.
+func baseBackupLine(w io.Writer, b *client.AddonBackups) string {
+	switch b.BaseBackup {
+	case client.AddonBaseBackupPresent:
+		return fmt.Sprintf("%s base backup: the repository holds one, so the archived write-ahead log can be replayed onto it", okMark(w))
+	case client.AddonBaseBackupRequested:
+		return "  base backup: requested — " + b.Detail
+	case client.AddonBaseBackupNone:
+		return warning(w) + "base backup: none — " + b.Detail
+	case client.AddonBaseBackupUnknown:
+		return "  base backup: not confirmed — " + b.Detail
+	default:
+		return ""
+	}
+}
+
+// humanBackupSchedule renders CloudNativePG's six-field cron as the sentence an operator is actually
+// asking for — how much a restore could lose. The leading field is SECONDS, which is the difference
+// from crontab and the mistake worth not making, so a schedule this does not recognise is printed
+// verbatim rather than guessed at.
+func humanBackupSchedule(schedule string) string {
+	fields := strings.Fields(schedule)
+	if len(fields) != 6 {
+		if schedule == "" {
+			return ""
+		}
+		return "on the schedule " + schedule
+	}
+	sec, min, hour := fields[0], fields[1], fields[2]
+	daily := fields[3] == "*" && fields[4] == "*" && fields[5] == "*"
+	if !daily || strings.ContainsAny(sec+min+hour, "*/,-") {
+		return "on the schedule " + schedule
+	}
+	h, errH := strconv.Atoi(hour)
+	m, errM := strconv.Atoi(min)
+	if errH != nil || errM != nil {
+		return "on the schedule " + schedule
+	}
+	return fmt.Sprintf("daily at %02d:%02d", h, m)
 }
 
 // listInstallableAddons prints the static list of installable add-ons and, when a cluster is

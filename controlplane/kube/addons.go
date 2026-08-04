@@ -194,6 +194,10 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 		Image:        spec.Image,
 		Endpoint:     fmt.Sprintf("%s.%s.svc:%d", name, a.addonNamespace, spec.Port),
 		Capabilities: spec.Capabilities,
+		// Every add-on type says what it does about backups, including the types that do nothing
+		// (issue #466). A logs or metrics store holding gigabytes on a volume nothing copies is a fact
+		// worth stating at install time rather than one to discover after a node goes.
+		Backups: controlplane.TypeBackups(spec.Type),
 	}, nil
 }
 

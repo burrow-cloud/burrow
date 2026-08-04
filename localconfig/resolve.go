@@ -67,8 +67,10 @@ func (r Resolved) Cloud() bool { return r.Kind == TargetKindCloud }
 // when it is a handle inside that same cluster (a pin for a different cluster is not a narrowing of
 // this one). A Burrow Cloud target has no kubeconfig to resolve and is reported as such.
 //
-// With no target selected the behaviour is exactly as before. When a handle is pinned (cfg.Current
-// set), it resolves to that handle, erroring clearly if the pinned name is not registered.
+// With no target selected the behaviour is as it was. When a handle is pinned (cfg.Current set), it
+// resolves to that handle, erroring clearly if the pinned name is not registered — or if the context
+// it records is no longer in the kubeconfig, which is the check a renamed context needs and the one
+// that was missing.
 // Otherwise it follows the kubeconfig's current context: the target is that context, its namespace
 // (so kubens moves Burrow too; empty when the context sets none, leaving the burrowd default to
 // apply), and the default control-plane namespace. If the current context matches a registered
@@ -196,6 +198,12 @@ func resolveWithoutTarget(cfg *Config, kubeconfigPath string) (Resolved, error) 
 		if !ok {
 			return Resolved{}, errUnknownPin(cfg.Current)
 		}
+		// The handle's context is checked against the kubeconfig for the same reason a target's is,
+		// and it was the one pinned path that did not check (issue #473). Follow mode needs no check:
+		// its context comes FROM the kubeconfig.
+		if pinnedContextMissing(kubeconfigPath, env.Context) {
+			return Resolved{}, errPinnedContextMissing(env.Name, env.Context)
+		}
 		return fromHandle(env, ModePinned, ""), nil
 	}
 
@@ -238,14 +246,55 @@ func fromHandle(env Environment, mode Mode, target string) Resolved {
 	}
 }
 
+// ContextMissingError reports that a target or an environment handle names a kube context the
+// kubeconfig no longer holds. It is a type rather than a formatted string so the commands that
+// REPORT on the configuration — `burrow env list`, `burrow auth status` — can recognise it and mark
+// the stale entry, instead of failing in place of the command that would have failed.
+//
+// Name is the target or handle, Context the name it records, and Pinned distinguishes the two
+// wordings: the fixes differ, and an error that names the wrong command is barely better than none.
+type ContextMissingError struct {
+	Name    string
+	Context string
+	Pinned  bool
+}
+
+func (e *ContextMissingError) Error() string {
+	if e.Pinned {
+		return fmt.Sprintf(
+			"localconfig: the pinned environment %q names kube context %q, which is not in your kubeconfig; the kubeconfig may have moved or the context may have been renamed. Re-point the handle with \"burrow env use %s --context <context>\", or follow your current kube context again with \"burrow env follow\"",
+			e.Name, e.Context, e.Name)
+	}
+	return fmt.Sprintf(
+		"localconfig: the active target %q names kube context %q, which is not in your kubeconfig; the kubeconfig may have moved or the context may have been renamed. Point at it again with \"burrow auth login\", or pick another target with \"burrow auth switch <name>\"",
+		e.Name, e.Context)
+}
+
 // errTargetContextMissing is what a selected Kubernetes target says when the kube context it names
 // is not in the kubeconfig. It names both, says the two things that usually cause it, and gives the
 // two commands that fix it. Every resolution path shares it, so a stale target reads the same way
 // whether an app command or a privileged one tripped over it.
 func errTargetContextMissing(name, kubeContext string) error {
-	return fmt.Errorf(
-		"localconfig: the active target %q names kube context %q, which is not in your kubeconfig; the kubeconfig may have moved or the context may have been renamed. Point at it again with \"burrow auth login\", or pick another target with \"burrow auth switch <name>\"",
-		name, kubeContext)
+	return &ContextMissingError{Name: name, Context: kubeContext}
+}
+
+// errPinnedContextMissing is the same for a PINNED environment handle, and it exists because a
+// handle recording a context that has since been renamed is not a harmless stale string.
+//
+// What it used to do was worse than failing. The handle is where the pinned path gets its context
+// from, and nothing checked it, so the name flowed into the display while the connection was made
+// some other way — through the scoped, burrowd-only credential the handle also carries (ADR-0038),
+// which holds the cluster's address and CA and needs no kubeconfig context at all. The command
+// succeeded, on the right cluster, and reported a cluster that does not exist (issue #473). The
+// mechanism built to say which cluster you acted on answered with one you did not.
+//
+// It is also not only a display problem. A handle is matched to its context by NAME in follow mode,
+// so once the context is renamed the handle stops matching, and commands quietly resolve to the
+// cluster's default environment rather than the one the handle names. Both failures are silent, and
+// both are fixed by the same one-line correction — which is why this refuses and says how, rather
+// than carrying on with a value it knows to be wrong.
+func errPinnedContextMissing(name, kubeContext string) error {
+	return &ContextMissingError{Name: name, Context: kubeContext, Pinned: true}
 }
 
 // errUnknownPin is the message for a pinned handle name that is not registered.
@@ -253,6 +302,32 @@ func errUnknownPin(name string) error {
 	return fmt.Errorf(
 		"localconfig: pinned environment %q is not in the config; pin a registered environment with \"burrow env use <name>\" or return to following the kube context with \"burrow env follow\"",
 		name)
+}
+
+// pinnedContextMissing reports whether a pinned handle names a kube context the kubeconfig does not
+// have, which is the state issue #473 leaves undetected.
+//
+// Two situations are deliberately NOT missing, and both are the difference between a check and an
+// obstruction:
+//
+//   - A kubeconfig that cannot be read. The pinned path did not open one at all before this check
+//     existed, and a handle carrying a scoped, burrowd-only credential (ADR-0038) reaches its
+//     cluster without one. Refusing on a file this resolution has no other use for would take
+//     working access away over a file that is not in the path.
+//   - A kubeconfig with no contexts. With no view of what exists, "missing" is not something this
+//     can know, and asserting it would send somebody re-pointing a handle that is fine.
+//     `burrow auth status` applies the same tolerance when it marks a target's context missing.
+func pinnedContextMissing(kubeconfigPath, name string) bool {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfigPath != "" {
+		rules.ExplicitPath = kubeconfigPath
+	}
+	cfg, err := rules.Load()
+	if err != nil || len(cfg.Contexts) == 0 {
+		return false
+	}
+	_, ok := cfg.Contexts[name]
+	return !ok
 }
 
 // contextNamespace reads one named kubeconfig context's namespace and reports whether the context

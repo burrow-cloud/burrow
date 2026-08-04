@@ -163,7 +163,15 @@ func runEnvList(ctx context.Context, w io.Writer, o *envListOpts) error {
 	}
 	resolved, err := localconfig.Resolve(cfg, o.kubeconfig)
 	if err != nil {
-		return err
+		// A pinned handle naming a context the kubeconfig no longer holds is precisely what this
+		// listing is for showing, so it reports it instead of failing with it. Every command that
+		// ACTS still refuses; a person sent here to find out what is wrong should find the table with
+		// the offending row marked, not the same error again.
+		var missing *localconfig.ContextMissingError
+		if !errors.As(err, &missing) || !missing.Pinned {
+			return err
+		}
+		resolved = localconfig.Resolved{Name: missing.Name, Context: missing.Context, Mode: localconfig.ModePinned}
 	}
 	if o.json {
 		return emit(w, true, envListResult{
@@ -174,8 +182,33 @@ func runEnvList(ctx context.Context, w io.Writer, o *envListOpts) error {
 			Namespace:    resolved.Namespace,
 		}, "")
 	}
-	writeEnvList(w, cfg.Environments, resolved)
+	writeEnvList(w, cfg.Environments, resolved, missingContexts(cfg.Environments, o.kubeconfig))
 	return nil
+}
+
+// missingContexts is the set of handle contexts that are not in the kubeconfig, so the listing can
+// mark them (issue #473). A handle whose context has been renamed away is the state that used to be
+// invisible until a command failed — or worse, until one succeeded and named a cluster that does not
+// exist — and the place to see it is the listing of handles.
+//
+// A kubeconfig that cannot be read marks nothing rather than marking everything: with no view of the
+// contexts, "missing" is not something this can know.
+func missingContexts(envs []localconfig.Environment, kubeconfig string) map[string]bool {
+	contexts, err := listContexts(kubeconfig)
+	if err != nil || len(contexts) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(contexts))
+	for _, c := range contexts {
+		known[c.Name] = true
+	}
+	missing := map[string]bool{}
+	for _, e := range envs {
+		if e.Context != "" && !known[e.Context] {
+			missing[e.Context] = true
+		}
+	}
+	return missing
 }
 
 // envFooter points to the full environment command list, printed after both the populated table
@@ -189,12 +222,17 @@ const envFooter = "Run `burrow env -h` for all environment commands."
 // names it instead, since no row is marked (ADR-0036). With no handles at all it prints a structured
 // empty-state instead, routing a new user to the ways to register one. Both forms close with the
 // help footer.
-func writeEnvList(w io.Writer, envs []localconfig.Environment, resolved localconfig.Resolved) {
+//
+// A handle whose kube context is in `missing` is marked in the CONTEXT column and explained once
+// below the table, because a handle pointing at a context that no longer exists is the state that
+// makes every command targeting it refuse — and this is where somebody looks for it.
+func writeEnvList(w io.Writer, envs []localconfig.Environment, resolved localconfig.Resolved, missing map[string]bool) {
 	if len(envs) == 0 {
 		writeEnvEmptyState(w, resolved)
 		return
 	}
 	active := resolved.Name != ""
+	anyMissing := false
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CURRENT\tNAME\tCONTEXT\tNAMESPACE")
 	for _, e := range envs {
@@ -202,9 +240,18 @@ func writeEnvList(w io.Writer, envs []localconfig.Environment, resolved localcon
 		if active && e.Name == resolved.Name {
 			marker = "*"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", marker, e.Name, e.Context, e.AppNamespace)
+		context := e.Context
+		if missing[e.Context] {
+			context += " (missing)"
+			anyMissing = true
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", marker, e.Name, context, e.AppNamespace)
 	}
 	_ = tw.Flush()
+	if anyMissing {
+		fmt.Fprintln(w, "\n(missing) that kube context is not in your kubeconfig, so the handle points at nothing. It may\n"+
+			"have been renamed; re-point the handle with `burrow env use <name> --context <context>`.")
+	}
 	switch {
 	case active && resolved.Mode == localconfig.ModePinned:
 		fmt.Fprintln(w, "\n* current environment, pinned. Return to following your kube context with `burrow env follow`.")
@@ -233,12 +280,21 @@ func writeEnvEmptyState(w io.Writer, resolved localconfig.Resolved) {
 }
 
 // newEnvUseCmd pins a handle so commands target it regardless of kube context switches (ADR-0036).
+//
+// --context re-points the handle at a different kube context first, and it is here rather than in a
+// verb of its own because a handle whose context has been renamed away is unusable until it is
+// re-pointed: the command somebody runs next is this one. It changes only ~/.burrow/config and
+// contacts no cluster.
 func newEnvUseCmd() *cobra.Command {
+	var kubeContext, kubeconfig string
 	cmd := &cobra.Command{
 		Use:   "use <name>",
 		Short: "Pin a handle so commands target it until you run `burrow env follow`",
 		Long: "use pins the named handle: commands then target it regardless of which context kubectl\n" +
-			"points at. Return to following the current kube context with `burrow env follow`.",
+			"points at. Return to following the current kube context with `burrow env follow`.\n\n" +
+			"With --context it first re-points the handle at that kube context. That is what to run\n" +
+			"after renaming a context in your kubeconfig, which otherwise leaves the handle naming a\n" +
+			"context that no longer exists. It changes only your local config; no cluster is contacted.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
@@ -250,6 +306,11 @@ func newEnvUseCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("environment %q is not a registered handle; see `burrow env list`", name)
 			}
+			if kubeContext != "" {
+				if err := repointHandle(cfg, &env, kubeContext, kubeconfig, cmd.OutOrStdout()); err != nil {
+					return err
+				}
+			}
 			cfg.Current = name
 			if err := cfg.Save(); err != nil {
 				return err
@@ -258,7 +319,40 @@ func newEnvUseCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&kubeContext, "context", "", "re-point the handle at this kube context before pinning it")
+	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "path to the kubeconfig the context is checked against (default: ambient)")
 	return cmd
+}
+
+// repointHandle records a new kube context on a handle, in the config the caller will Save.
+//
+// The context has to be one the kubeconfig actually holds, checked here: re-pointing a stale handle
+// at a second name that does not exist either would leave the person exactly where they started,
+// having been told it worked.
+//
+// A handle that carries a scoped agent credential (ADR-0038) gets a note, because that credential —
+// not the context — is what the connection uses on the per-app path. It holds the cluster's address
+// and CA directly, so renaming a context does not disturb it, and pointing a handle at a DIFFERENT
+// cluster does not move it either. Saying so is the difference between a fact and a surprise.
+func repointHandle(cfg *localconfig.Config, env *localconfig.Environment, kubeContext, kubeconfig string, out io.Writer) error {
+	contexts, err := listContexts(kubeconfig)
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(contexts, func(c connect.Context) bool { return c.Name == kubeContext }) {
+		return fmt.Errorf("context %q is not in your kubeconfig; available: %s", kubeContext, contextNames(contexts))
+	}
+	previous := env.Context
+	if !cfg.SetEnvironmentContext(env.Name, kubeContext) {
+		return fmt.Errorf("environment %q is not a registered handle; see `burrow env list`", env.Name)
+	}
+	env.Context = kubeContext
+	fmt.Fprintf(out, "Re-pointed %q from context %q to %q.\n", env.Name, previous, kubeContext)
+	if env.AgentKubeconfig != "" {
+		fmt.Fprintf(out, "Its scoped credential (%s) still reaches the cluster it was minted for; if that is a different\n"+
+			"cluster now, re-join it with `burrow join` or re-install with `burrow cluster install %s`.\n", env.AgentKubeconfig, kubeContext)
+	}
+	return nil
 }
 
 // newEnvFollowCmd clears the pin so commands track the current kube context again (ADR-0036). It is

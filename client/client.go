@@ -112,6 +112,12 @@ type APIError struct {
 // generic remedy with one it can establish locally — which binary it is, and where it is installed.
 const CodeClientTooOld = "client_too_old"
 
+// CodeUnknownOperation is the machine-readable code burrowd returns for a route it does not have
+// (ADR-0039): a newer client calling a feature the server lacks, told as a structured refusal
+// naming both versions and the upgrade rather than as a bare 404. A client matches on it to say
+// which of ITS features the gap corresponds to, since the server can only name the route.
+const CodeUnknownOperation = "unknown_operation"
+
 // CodeInstallMismatch is the machine-readable code burrowd returns when the caller named an install
 // id and this control plane is a different install (ADR-0084 §5) — the kube context resolved, the
 // credential was accepted, and the Burrow on the other end is not the one the target was pointed at.
@@ -1440,38 +1446,118 @@ type GuardScope struct {
 // the global policy; a named environment lists its effective policy under the env to global to
 // default fallback, and a name narrows that to one app or add-on instance, each entry marking which
 // tier its disposition came from (ADR-0035 phase 2c, ADR-0085 §4).
+//
+// A control plane too old to know the name tier answers the name-scoped route with a 404, which
+// becomes a refusal rather than the environment's policy relabelled as one app's (see guardPath).
 func (c *Client) Guardrails(ctx context.Context, scope GuardScope) ([]Guardrail, error) {
 	var out struct {
 		Guardrails []Guardrail `json:"guardrails"`
 	}
-	err := c.do(ctx, http.MethodGet, withGuardScope("/v1/guard", scope), nil, &out)
-	return out.Guardrails, err
+	if err := c.do(ctx, http.MethodGet, guardPath(scope, ""), nil, &out); err != nil {
+		return nil, guardScopeRefusal(scope, "", err)
+	}
+	return out.Guardrails, nil
 }
 
 // SetGuardrail sets a guardrail's disposition and returns the updated policy. An empty scope sets
 // the global disposition; a named environment scopes it to that environment, storing the
 // env-prefixed code (ADR-0035 phase 2c); a name scopes it to one app or add-on instance in that
 // environment, storing env.name.code (ADR-0085 §1).
+//
+// A control plane too old to know the name tier answers the name-scoped route with a 404, so the
+// write is refused instead of landing one tier wider than it was meant to (see guardPath).
 func (c *Client) SetGuardrail(ctx context.Context, scope GuardScope, code, disposition string) ([]Guardrail, error) {
 	var out struct {
 		Guardrails []Guardrail `json:"guardrails"`
 	}
 	body := map[string]string{"disposition": disposition}
-	err := c.do(ctx, http.MethodPut, withGuardScope("/v1/guard/"+url.PathEscape(code), scope), body, &out)
-	return out.Guardrails, err
+	if err := c.do(ctx, http.MethodPut, guardPath(scope, code), body, &out); err != nil {
+		return nil, guardScopeRefusal(scope, code, err)
+	}
+	return out.Guardrails, nil
 }
 
-// withGuardScope appends the scope's non-empty parts to path as query parameters.
-func withGuardScope(path string, scope GuardScope) string {
-	path = withEnv(path, scope.Env)
-	if scope.Name == "" {
-		return path
+// guardPath builds the guard route for a scope: the environment rides a query parameter, and the
+// NAME RIDES THE PATH.
+//
+// That asymmetry is deliberate and it is a safety property, not a style choice. A scope that
+// narrows a write has to be something an older control plane can FAIL on. A query parameter cannot
+// be: a control plane that predates the name tier (ADR-0085) ignores an unknown query parameter,
+// performs the write one tier wider — for every app in the environment rather than for the one app
+// named — and answers 200, so the client reports a success whose scope is the opposite of the one
+// asked for. That is issue #472, and on the install it was found on it would have frozen every
+// application in an environment while the operator believed one was protected.
+//
+// In the path it is a route, and a route the server does not have is already handled: the
+// ADR-0039 handshake turns an unknown route into a structured "this control plane (vX) does not
+// recognize ...; ask an operator to run `burrow upgrade`" refusal, naming both versions. So the
+// scope the server cannot honour is refused by the mechanism that already exists, with nothing
+// written, rather than by a second mechanism that would have to be told about every new parameter.
+//
+// The rule this encodes, for anything added later: A REQUEST PARAMETER THAT NARROWS THE SCOPE OF A
+// WRITE BELONGS IN THE ROUTE. A parameter that selects an existing route's behaviour in a way an
+// older server would honour or reject on its own may stay a parameter.
+func guardPath(scope GuardScope, code string) string {
+	path := "/v1/guard"
+	if scope.Name != "" {
+		path += "/name/" + url.PathEscape(scope.Name)
 	}
-	sep := "?"
-	if strings.Contains(path, "?") {
-		sep = "&"
+	if code != "" {
+		path += "/" + url.PathEscape(code)
 	}
-	return path + sep + "name=" + url.QueryEscape(scope.Name)
+	return withEnv(path, scope.Env)
+}
+
+// CodeScopeUnsupported is the machine-readable code on a refusal this CLIENT raises: the caller
+// asked for a scope the control plane on the other end cannot express, so the call was not
+// performed at a wider one. It is not a code any control plane returns — it is the client naming a
+// gap it detected from the server's own unknown-route refusal (ADR-0039) — and it is an APIError
+// like every other refusal so a --json caller and an agent branch on it the same way.
+const CodeScopeUnsupported = "scope_unsupported"
+
+// guardScopeRefusal turns the control plane's unknown-route answer into a refusal that says what
+// was NOT done and why, and leaves every other error untouched.
+//
+// It fires only for a name-scoped call, because that is the only scope a supported control plane
+// can lack, and only for the two answers that mean "no such route": the structured
+// unknown_operation the handshake produces, and a bare 404 from a control plane older than the
+// handshake itself. An engine 404 — an unknown environment, say — carries "not_found" and is a real
+// answer to a real route, so it passes through unchanged.
+//
+// An empty code is the read and a code is the write, and the two are worded differently because
+// only one of them could have changed anything: "nothing was written" is the sentence an operator
+// needs, and printing it after a listing would be a lie about what was at stake.
+//
+// The server's own message rides along verbatim when there is one, because it is the half that
+// names both versions and the upgrade; wording it again here would either duplicate it or
+// contradict it as the server's message improves.
+func guardScopeRefusal(scope GuardScope, code string, err error) error {
+	var api *APIError
+	if scope.Name == "" || !errors.As(err, &api) || api.StatusCode != http.StatusNotFound {
+		return err
+	}
+	if api.Code != "" && api.Code != CodeUnknownOperation {
+		return err
+	}
+	where := "the default environment"
+	if scope.Env != "" {
+		where = strconv.Quote(scope.Env)
+	}
+	msg := fmt.Sprintf("this control plane cannot report the policy for one app or add-on instance, so there is nothing to show: what it would answer with is the policy for every app in %s", where)
+	if code != "" {
+		msg = fmt.Sprintf("this control plane cannot scope a guardrail to one app or add-on instance, so nothing was written: the same call without the name would have set %q for every app in %s", code, where)
+	}
+	if api.Code == CodeUnknownOperation {
+		msg += ". The control plane reports: " + api.Message
+	} else {
+		msg += ". It predates per-app guardrails; ask an operator to run `burrow upgrade` to update the control plane, then run this again"
+	}
+	return &APIError{
+		StatusCode:    api.StatusCode,
+		Code:          CodeScopeUnsupported,
+		Message:       msg,
+		ServerVersion: api.ServerVersion,
+	}
 }
 
 // Limit is one operational limit and its effective value (ADR-0068): a bound a human sets, which is

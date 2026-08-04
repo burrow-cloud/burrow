@@ -72,22 +72,118 @@ func TestGuardListJSONSeparatesTheTwoGroups(t *testing.T) {
 // TestGuardSetCarriesTheScope confirms `guard set` sends the environment and the name it was given,
 // and says in plain words what it changed. The control plane decides which combinations are legal —
 // this only has to carry them faithfully (ADR-0085 §1).
+//
+// The name is in the PATH, and that is the half of issue #472 a test has to hold: as a query
+// parameter it was droppable by a control plane that did not know the tier, which turned "deny this
+// for one app" into "deny this for every app in the environment". This is also the matched-pair
+// case — a current CLI against a current control plane — so it fails if the name-scoped write ever
+// stops being carried at all.
 func TestGuardSetCarriesTheScope(t *testing.T) {
-	var gotQuery string
+	var gotMethod, gotPath, gotQuery string
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.RawQuery
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
 		cannedGuardrails(w, r)
 	}, "guard", "set", "app.deploy", "deny", "--env", "prod", "--name", "website")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(gotQuery, "env=prod") || !strings.Contains(gotQuery, "name=website") {
-		t.Errorf("query = %q, want both the environment and the name", gotQuery)
+	if gotMethod != "PUT" || gotPath != "/v1/guard/name/website/app.deploy" {
+		t.Errorf("request = %s %s, want PUT /v1/guard/name/website/app.deploy", gotMethod, gotPath)
+	}
+	if !strings.Contains(gotQuery, "env=prod") {
+		t.Errorf("query = %q, want the environment", gotQuery)
 	}
 	for _, want := range []string{`"app.deploy"`, `"deny"`, `"website"`, `"prod"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("confirmation %q is missing %s", out, want)
 		}
+	}
+}
+
+// TestGuardSetNameRefusedByOlderControlPlane is issue #472 at the surface it was hit on. A CLI that
+// knows the name tier is pointed at a control plane that does not. The operator has to be told that
+// nothing was written, in a message naming both versions and the upgrade, rather than being told
+// that one application was protected while every application in the environment was.
+func TestGuardSetNameRefusedByOlderControlPlane(t *testing.T) {
+	var wrote bool
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		// A control plane without the name tier: it has PUT /v1/guard/{code} and nothing under it,
+		// so the name-scoped route gets the structured unknown-operation refusal (ADR-0039).
+		if r.URL.Path == "/v1/guard/app.rollback" {
+			wrote = true
+			cannedGuardrails(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "this control plane (v0.14.0-rc.2) does not recognize " + r.Method + " " + r.URL.Path +
+				"; if your burrow CLI (v0.14.0-rc.5) is newer, ask an operator to run `burrow upgrade` to update the control plane",
+			"code":           "unknown_operation",
+			"server_version": "v0.14.0-rc.2",
+		})
+	}, "guard", "set", "app.rollback", "deny", "--env", "prod", "--name", "burrowd-cloud")
+	if err == nil {
+		t.Fatal("guard set succeeded against a control plane without the name tier")
+	}
+	if wrote {
+		t.Fatal("the environment-wide entry was written after the name-scoped route was refused")
+	}
+	if out != "" {
+		t.Errorf("a refused set printed a result line: %q", out)
+	}
+	for _, want := range []string{"nothing was written", "v0.14.0-rc.2", "v0.14.0-rc.5", "burrow upgrade", "scope_unsupported"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal is missing %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestGuardSetNameRefusalPrintsNoJSONResult holds the --json contract on the same path: a refusal is
+// an error, not a success shape with a result in it. A tool that reads stdout must find nothing to
+// parse when nothing was written.
+func TestGuardSetNameRefusalPrintsNoJSONResult(t *testing.T) {
+	out, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "this control plane (v0.14.0-rc.2) does not recognize the operation",
+			"code":  "unknown_operation",
+		})
+	}, "guard", "set", "app.rollback", "deny", "--env", "prod", "--name", "burrowd-cloud", "--json")
+	if err == nil {
+		t.Fatal("guard set --json succeeded against a control plane without the name tier")
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("stdout = %q, want nothing: the write did not happen", out)
+	}
+}
+
+// TestGuardSetForTheDefaultEnvironmentSaysItWroteGlobally is the second half of issue #472. `prod`
+// is the default environment, so `--env prod` writes the GLOBAL policy (ADR-0067 §2) and a
+// confirmation naming the environment would describe a scope narrower than the one that landed.
+func TestGuardSetForTheDefaultEnvironmentSaysItWroteGlobally(t *testing.T) {
+	out, _, err := runCLI(t, cannedGuardrails, "guard", "set", "app.delete", "deny", "--env", "prod")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(out, `in environment "prod"`) {
+		t.Errorf("the confirmation names an environment scope that was not written: %q", out)
+	}
+	for _, want := range []string{"globally", "prod is the default environment", "global policy"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("confirmation %q is missing %q", out, want)
+		}
+	}
+}
+
+// TestGuardSetForAnAddedEnvironmentNamesIt keeps the other branch honest: an environment added after
+// install has a policy of its own, and the line says so.
+func TestGuardSetForAnAddedEnvironmentNamesIt(t *testing.T) {
+	out, _, err := runCLI(t, cannedGuardrails, "guard", "set", "app.delete", "deny", "--env", "staging")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, `set guardrail "app.delete" to "deny" in environment "staging"`) {
+		t.Errorf("confirmation = %q, want it to name the environment", out)
 	}
 }
 

@@ -1372,6 +1372,13 @@ Version skew ([ADR-0039](adr/0039-cli-control-plane-version-skew.md)): every req
 a version difference alone; a client more than one minor behind gets HTTP 426 naming the
 upgrade command, and an unknown route returns a structured error saying to upgrade.
 
+That check sees **routes**, not request parameters: an older control plane ignores a query
+parameter it does not know and answers 200. So a parameter that **narrows the scope of a write**
+rides the route instead. The guardrail name tier is the case that established the rule —
+`burrow guard set --env prod --name web app.deploy deny` is `PUT /v1/guard/name/web/app.deploy`,
+so a control plane without the tier refuses the call rather than writing the same deny for every
+app in the environment. The refusal names both versions and the upgrade, and nothing is written.
+
 **Upgrade limit, worth stating plainly:** the shipped startup gate permits a re-run of the same
 version or **exactly one minor step forward**, and refuses skips, downgrades, and cross-major
 in-place moves. [ADR-0055](adr/0055-multi-version-upgrades.md), which decides multi-minor

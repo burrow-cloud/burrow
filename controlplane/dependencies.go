@@ -343,6 +343,18 @@ func ParseProbePlan(s string) (ProbePlan, error) {
 	return p, nil
 }
 
+// The two ways reading the check pod's output can fail. They are sentinels rather than prose because
+// the engine tells a reader WHICH of them happened, and the two have different fixes: output that
+// carried no marked line at all is the shape an image whose entrypoint wraps the command and
+// discards its stdout leaves, while a marked line that will not parse means the line was reached and
+// mangled.
+var (
+	// ErrNoProbeResult is a captured stream with no marked result line anywhere in it.
+	ErrNoProbeResult = errors.New("the dependency check produced no result line")
+	// ErrProbeResultUnreadable is a marked result line that is not the report Burrow prints.
+	ErrProbeResultUnreadable = errors.New("the dependency check's result line could not be read")
+)
+
 // ParseProbeReport finds the probe's marked line in a captured output stream and reads the results
 // from it. It takes the LAST marked line: the probe prints exactly one, and taking the last means a
 // user image that somehow echoed an earlier one cannot displace the real answer.
@@ -358,11 +370,11 @@ func ParseProbeReport(out string) (ProbeReport, error) {
 		}
 	}
 	if marked == "" {
-		return ProbeReport{}, fmt.Errorf("the dependency check produced no result line")
+		return ProbeReport{}, ErrNoProbeResult
 	}
 	var rep ProbeReport
 	if err := json.Unmarshal([]byte(marked), &rep); err != nil {
-		return ProbeReport{}, fmt.Errorf("reading the dependency-check result: %w", err)
+		return ProbeReport{}, fmt.Errorf("%w: %w", ErrProbeResultUnreadable, err)
 	}
 	for i, r := range rep.Results {
 		rep.Results[i] = normalizeDependencyResult(r)
@@ -630,7 +642,7 @@ func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env
 	// same answer instead of waiting out the bound a second time. It is asked for after the
 	// nothing-to-check returns above, so an app Burrow provisioned nothing for still waits for
 	// nothing.
-	settle()
+	rollout := settle()
 
 	plan := ProbePlan{}
 	for _, d := range deps {
@@ -674,21 +686,9 @@ func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env
 		// The check did not run to a readable answer. Every dependency is SKIPPED, not failed: a check
 		// pod that could not be scheduled says nothing whatever about the database.
 		//
-		// The DETAIL is where the reason lives, and it says what the cluster said wherever the cluster
-		// said anything (issue #478). "The check did not run to completion" is the status name in a
-		// sentence: it was all an operator got while a check pod sat in a terminal error state naming
-		// the exact executable it could not run, and it hid a feature that had never worked on any
-		// release. A blocked Job carries the pod's own message on ADR-0074 §2's closed vocabulary, so
-		// it is passed straight through; the generic line is the fallback for a failure with no pod
-		// behind it, such as an unparseable result from a check that did run.
-		detail := "the check did not run to completion"
-		var blocked *JobBlockedError
-		switch {
-		case res.TimedOut:
-			detail = fmt.Sprintf("the check did not finish inside its %s window", dependencyCheckDeadline)
-		case errors.As(runErr, &blocked):
-			detail = blocked.Issue
-		}
+		// The DETAIL is where the diagnosis lives; the reason stays ReasonCheckNotRun so an agent
+		// branching on it still sees that nothing was learned about the dependency.
+		detail := checkNotRunDetail(res, runErr, rollout)
 		slog.InfoContext(ctx, "the deploy-time dependency check did not produce a result",
 			"app", app, "env", env, "error", runErr)
 		for _, d := range deps {
@@ -703,6 +703,60 @@ func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env
 
 	e.recordDependencyCheck(ctx, app, env, image, results)
 	return results
+}
+
+// rolloutNotReadyClause is what a check that produced no result adds when the rollout it waited for
+// did not settle. It is the common state right after `burrow addon attach postgres <app>`, which
+// rolls the workload: the check ran against pods that had not become ready, which explains most of
+// the ways a check ends without an answer, and it is a thing the reader can act on.
+const rolloutNotReadyClause = "the app's new pods had not become ready when the check ran"
+
+// detailTruncationBytes is the room boundText's own truncation marker needs, so a composed detail can
+// leave space for it rather than discovering the overflow after the fact.
+const detailTruncationBytes = len("… (truncated)")
+
+// checkNotRunDetail says what Burrow attempted and what stopped it, for a check that produced no
+// result at all (issue #474). It replaces one string for every cause: "the check did not run to
+// completion" is the status name in a sentence, and it left a reader with no next move.
+//
+// It classifies from the run's own error rather than guessing. A blocked Job carries the pod's own
+// message on ADR-0074 §2's closed vocabulary, so it is passed straight through and the operator
+// reads the same prose the status surface would show for the same pod (issue #478). Everything
+// else names the thing that was attempted — a check pod running Burrow's probe inside the app's own
+// image — and then which way it ended, because "a pod ran and printed nothing readable" and "the
+// cluster never accepted the Job" have different fixes.
+func checkNotRunDetail(res RunResult, runErr error, rollout RolloutOutcome) string {
+	detail := checkNotRunCause(res, runErr)
+	if rollout.Settled {
+		return dependencyDetail(detail)
+	}
+	// The clause is kept INSIDE the same 300-byte bound every detail takes, by trimming the cause
+	// rather than the clause: a pod message long enough to overflow is exactly the case where "the
+	// app never became ready" explains the most, so it must not be the half that is cut.
+	if room := dependencyDetailBytes - len(rolloutNotReadyClause) - len("; ") - detailTruncationBytes; len(detail) > room {
+		detail = boundText(detail, room)
+	}
+	return dependencyDetail(detail + "; " + rolloutNotReadyClause)
+}
+
+// checkNotRunCause names what stopped the check, in the style of the probe's own statuses: what was
+// tried, and what came back.
+func checkNotRunCause(res RunResult, runErr error) string {
+	var blocked *JobBlockedError
+	switch {
+	case res.TimedOut:
+		return fmt.Sprintf("the check pod Burrow ran in the app's own image did not finish inside its %s window", dependencyCheckDeadline)
+	case errors.As(runErr, &blocked):
+		return blocked.Issue
+	case errors.Is(runErr, ErrNoProbeResult):
+		return "Burrow ran a check pod in the app's own image and it printed no result line, which is what an image whose entrypoint wraps the command and discards its output leaves"
+	case errors.Is(runErr, ErrProbeResultUnreadable):
+		return "Burrow ran a check pod in the app's own image and could not read the result line it printed"
+	case errors.Is(runErr, context.Canceled), errors.Is(runErr, context.DeadlineExceeded):
+		return "Burrow stopped waiting for the check pod it ran in the app's own image before the pod reported"
+	default:
+		return "Burrow could not run a check pod in the app's own image to completion: the cluster did not accept or finish the check Job"
+	}
 }
 
 // recordDependencyCheck writes the check's outcome to the audit log — the durable, after-the-fact
@@ -744,7 +798,10 @@ func (e *Engine) recordDependencyCheck(ctx context.Context, app, env, image stri
 }
 
 // DependencyFailureHint is the non-blocking note a deploy carries when a dependency check failed. It
-// states the two things a reader needs and would otherwise guess at: that the deploy is live and was
-// not undone, and that the failure is about a thing Burrow itself provisioned, so it is worth
-// believing.
-const DependencyFailureHint = "a dependency Burrow provisioned for this app did not answer from inside the app's own container after this deploy. The deploy was NOT rolled back and NOT failed — it is live, and the running version is the one just deployed. See `dependencies` on this result for which one and why, and `burrow app checks <app>` for what Burrow checks and how to turn it off."
+// states the two things a reader needs and would otherwise guess at: that the release is serving,
+// and that the failure is about a thing Burrow itself provisioned, so it is worth believing.
+//
+// It says the deploy is LIVE and stops there. Saying it "was NOT rolled back" named a mechanism that
+// does not exist — no dependency check reverts a deploy — so a reader who took the reassurance
+// literally would expect a rollback the next time a check failed (issue #474).
+const DependencyFailureHint = "a dependency Burrow provisioned for this app did not answer from inside the app's own container after this deploy. The deploy is live and the running version is the one just deployed. See `dependencies` on this result for which one and why, and `burrow app checks <app>` for what Burrow checks and how to turn it off."

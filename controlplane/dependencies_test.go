@@ -471,9 +471,117 @@ func TestParseProbeReportForcesTheClosedVocabulary(t *testing.T) {
 
 // TestParseProbeReportNeedsItsMarker: a check pod whose image printed something and then died must
 // not be read as a report. No marked line is an error, which the engine turns into a SKIPPED result.
+// The error is a sentinel, because the engine says WHICH way the read failed rather than one line
+// for every cause (issue #474).
 func TestParseProbeReportNeedsItsMarker(t *testing.T) {
-	if _, err := cp.ParseProbeReport("standard_init_linux.go: exec format error\n"); err == nil {
+	_, err := cp.ParseProbeReport("standard_init_linux.go: exec format error\n")
+	if err == nil {
 		t.Fatal("ParseProbeReport accepted output with no marked line")
+	}
+	if !errors.Is(err, cp.ErrNoProbeResult) {
+		t.Errorf("err = %v, want ErrNoProbeResult so the engine can say the pod printed no result line", err)
+	}
+	_, err = cp.ParseProbeReport(cp.ProbeResultPrefix + "{not json\n")
+	if !errors.Is(err, cp.ErrProbeResultUnreadable) {
+		t.Errorf("err = %v, want ErrProbeResultUnreadable: a mangled line was reached and is a different fix", err)
+	}
+}
+
+// TestSkippedCheckNamesWhatWasAttempted is issue #474's second half. "The check did not run to
+// completion" is the status name in a sentence: it named nothing that was tried and left the reader
+// with no next move. The detail now says Burrow ran a check pod in the app's own image, and which
+// way that ended — here, the case where a user image's entrypoint wraps the command and the result
+// line never reaches Burrow.
+func TestSkippedCheckNamesWhatWasAttempted(t *testing.T) {
+	e, k, d, prov := newPostgresEngine(t)
+	ctx := context.Background()
+	installPostgresAddon(t, d, cp.DefaultEnvironment)
+	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
+	// A check pod that ran and printed only the image's own noise: no marked line, so there is no
+	// result to read and no blocked pod to blame.
+	k.SetRunResult(cp.RunResult{Stdout: "starting entrypoint wrapper\n"})
+
+	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "repo/web:1.0.0"})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(res.Dependencies) != 1 {
+		t.Fatalf("dependencies = %+v, want one", res.Dependencies)
+	}
+	got := res.Dependencies[0]
+	if got.Outcome != cp.DependencySkipped || got.Reason != cp.ReasonCheckNotRun {
+		t.Errorf("outcome/reason = %q/%q, want %q/%q", got.Outcome, got.Reason, cp.DependencySkipped, cp.ReasonCheckNotRun)
+	}
+	for _, want := range []string{"check pod", "the app's own image", "no result line"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("detail = %q, does not say %q — the reader is told the check did not happen and nothing about what was tried", got.Detail, want)
+		}
+	}
+	if got.Detail == "the check did not run to completion" {
+		t.Error("detail is the old generic line, which restates the status name")
+	}
+}
+
+// TestSkippedCheckSaysTheAppHadNotBecomeReady is the case the issue calls out as worth getting
+// right. A check that produced no result while the rollout it waited for never settled is the common
+// state right after `burrow addon attach postgres <app>`, which rolls the workload: the app's new
+// pods were not ready, and that is both true and actionable.
+func TestSkippedCheckSaysTheAppHadNotBecomeReady(t *testing.T) {
+	e, k, d, prov := newPostgresEngine(t)
+	ctx := context.Background()
+	installPostgresAddon(t, d, cp.DefaultEnvironment)
+	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
+	k.SetRolloutOutcome("web", cp.RolloutOutcome{
+		Reason: cp.ReasonProgressDeadlineExceeded,
+		Detail: "0 of 1 replicas updated, 0 ready",
+	})
+	k.SetError(fake.OpRunJob, errors.New("the API server refused the check Job"))
+
+	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "repo/web:1.0.0"})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(res.Dependencies) != 1 {
+		t.Fatalf("dependencies = %+v, want one", res.Dependencies)
+	}
+	got := res.Dependencies[0]
+	if got.Reason != cp.ReasonCheckNotRun {
+		t.Errorf("reason = %q, want %q: the rollout is context, not a new reason", got.Reason, cp.ReasonCheckNotRun)
+	}
+	if !strings.Contains(got.Detail, "had not become ready") {
+		t.Errorf("detail = %q, does not say the app's new pods were not ready when the check ran", got.Detail)
+	}
+}
+
+// TestSkippedCheckDetailStaysInsideItsBound pins the composition. A blocked pod's own message can be
+// long, and the rollout clause is appended to it — so the cause is trimmed and the clause is not,
+// because a message long enough to overflow is exactly where "the app never became ready" explains
+// the most.
+func TestSkippedCheckDetailStaysInsideItsBound(t *testing.T) {
+	e, k, d, prov := newPostgresEngine(t)
+	ctx := context.Background()
+	installPostgresAddon(t, d, cp.DefaultEnvironment)
+	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
+	k.SetRolloutOutcome("web", cp.RolloutOutcome{Reason: cp.ReasonProgressDeadlineExceeded, Detail: "0 ready"})
+	k.SetError(fake.OpRunJob, &cp.JobBlockedError{
+		Job:    "burrow-run-check-1",
+		Reason: cp.ReasonUnschedulable,
+		Issue:  strings.Repeat("a very long scheduler verdict. ", 40),
+	})
+
+	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "repo/web:1.0.0"})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(res.Dependencies) != 1 {
+		t.Fatalf("dependencies = %+v, want one", res.Dependencies)
+	}
+	got := res.Dependencies[0].Detail
+	if len(got) > cp.DependencyDetailBytesForTest() {
+		t.Errorf("detail is %d bytes, over the %d-byte bound: %q", len(got), cp.DependencyDetailBytesForTest(), got)
+	}
+	if !strings.Contains(got, "had not become ready") {
+		t.Errorf("detail = %q, lost the rollout clause to the truncation", got)
 	}
 }
 

@@ -169,14 +169,35 @@ func checksHuman(res client.ChecksResult) string {
 	return b.String()
 }
 
+// The two headings the deploy's dependency block can take. Which one is used is decided by whether a
+// check FAILED, because the two blocks answer different questions.
+//
+// "The deploy is live" is load-bearing on a FAILURE and only there: a "failed" line under a deploy
+// reads as a failed deploy, and the reader needs to be told the release is serving. It stops at that
+// fact and names no mechanism. Saying the deploy "was not rolled back" invited the reader to believe
+// a dependency check can revert a deploy — nothing does, so an operator who read it and later saw a
+// failing check would wait for a rollback that never came (issue #474).
+//
+// A block of nothing but SKIPPED results is a report about checks that did not run. Nothing failed,
+// so there is no misreading to head off, and reassurance against a fear the reader did not have is
+// what raised the false mechanism in the first place.
+const (
+	dependencyFailedHeading  = "dependency check (the deploy is live):"
+	dependencySkippedHeading = "dependency check (checks that did not run):"
+)
+
 // deployDependencyHuman renders the dependency-check results carried back on a deploy, for the human
 // deploy output. It prints NOTHING when every check passed: a deploy that worked should not grow a
 // paragraph confirming that the database Burrow attached is still there.
 func deployDependencyHuman(results []client.DependencyResult) string {
 	var lines []string
+	var anyFailed bool
 	for _, r := range results {
 		if r.Outcome == "passed" {
 			continue
+		}
+		if r.Outcome == "failed" {
+			anyFailed = true
 		}
 		line := fmt.Sprintf("  %s: %s", r.Kind, r.Outcome)
 		if r.Reason != "" {
@@ -190,5 +211,9 @@ func deployDependencyHuman(results []client.DependencyResult) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	return "dependency check (the deploy is live and was NOT rolled back):\n" + strings.Join(lines, "\n")
+	heading := dependencySkippedHeading
+	if anyFailed {
+		heading = dependencyFailedHeading
+	}
+	return heading + "\n" + strings.Join(lines, "\n")
 }

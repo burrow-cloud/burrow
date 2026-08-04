@@ -66,18 +66,53 @@ func TestDeployDependencyHumanIsSilentWhenEverythingPassed(t *testing.T) {
 // TestDeployDependencyHumanSaysTheDeployIsLive is the sentence that stops a failed check being read
 // as a failed deploy. A user who sees "failed" under a deploy will otherwise assume something was
 // undone, and nothing was.
+//
+// It says the deploy is live and NAMES NO MECHANISM. Rollback vocabulary here implied a dependency
+// check can revert a deploy, which nothing does (issue #474).
 func TestDeployDependencyHumanSaysTheDeployIsLive(t *testing.T) {
 	got := deployDependencyHuman([]client.DependencyResult{
 		{Kind: "postgres", Outcome: "failed", Reason: "AuthenticationFailed", Detail: "the instance rejected the credential"},
 		{Kind: "exposure", Outcome: "passed", Status: 200},
 	})
-	for _, w := range []string{"NOT rolled back", "postgres: failed", "AuthenticationFailed", "rejected the credential"} {
+	for _, w := range []string{"the deploy is live", "postgres: failed", "AuthenticationFailed", "rejected the credential"} {
 		if !strings.Contains(got, w) {
 			t.Errorf("deployDependencyHuman() = %q, want it to contain %q", got, w)
 		}
 	}
+	requireNoRollbackVocabulary(t, got)
 	if strings.Contains(got, "exposure") {
 		t.Errorf("deployDependencyHuman() = %q, want passed checks omitted", got)
+	}
+}
+
+// TestDeployDependencyHumanSkippedOnlyIsJustAReport is issue #474's first half. A block of nothing
+// but SKIPPED results reports on checks that did not run: nothing failed, so there is nothing to
+// reassure the reader about, and the reassurance was what raised a rollback that cannot happen.
+func TestDeployDependencyHumanSkippedOnlyIsJustAReport(t *testing.T) {
+	got := deployDependencyHuman([]client.DependencyResult{
+		{Kind: "postgres", Outcome: "skipped", Reason: "CheckNotRun", Detail: "the app's new pods had not become ready when the check ran"},
+		{Kind: "exposure", Outcome: "passed", Status: 200},
+	})
+	for _, w := range []string{"did not run", "postgres: skipped", "CheckNotRun"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("deployDependencyHuman() = %q, want it to contain %q", got, w)
+		}
+	}
+	requireNoRollbackVocabulary(t, got)
+	if strings.Contains(got, "the deploy is live") {
+		t.Errorf("deployDependencyHuman() = %q, want no answer to a question a skipped check does not raise", got)
+	}
+}
+
+// requireNoRollbackVocabulary is the pin. A deploy's dependency block must never reach for rollback
+// words: no dependency check reverts a deploy, and naming the mechanism teaches an operator to wait
+// for one.
+func requireNoRollbackVocabulary(t *testing.T, got string) {
+	t.Helper()
+	for _, banned := range []string{"rollback", "rolled back", "roll back"} {
+		if strings.Contains(strings.ToLower(got), banned) {
+			t.Errorf("deployDependencyHuman() = %q, mentions %q — a dependency check cannot revert a deploy", got, banned)
+		}
 	}
 }
 

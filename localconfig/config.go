@@ -258,6 +258,24 @@ func (c *Config) SetAgentCredential(name, kubeconfig, context string) bool {
 	return false
 }
 
+// SetEnvironmentContext re-points the named handle at a different kube context, which is what a
+// renamed context needs: the handle is the record of which cluster an environment lives on, and
+// nothing else in the config can be corrected to fix a name that no longer resolves. It reports
+// whether a handle by that name was found; the caller Saves.
+//
+// It deliberately leaves any scoped agent credential alone. That credential holds the cluster's
+// address and CA rather than a context name (ADR-0038), so a rename does not invalidate it, and
+// silently discarding it here would take away the very access the handle exists to carry.
+func (c *Config) SetEnvironmentContext(name, context string) bool {
+	for i := range c.Environments {
+		if c.Environments[i].Name == name {
+			c.Environments[i].Context = context
+			return true
+		}
+	}
+	return false
+}
+
 // Add registers a new handle. The name must be non-empty and not already in use.
 func (c *Config) Add(env Environment) error {
 	if env.Name == "" {

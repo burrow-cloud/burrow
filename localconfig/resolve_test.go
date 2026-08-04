@@ -4,6 +4,7 @@
 package localconfig
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,9 +13,11 @@ import (
 	"k8s.io/client-go/tools/clientcmd/api"
 )
 
-// writeKubeconfig builds a two-context kubeconfig (do-nyc1-dev current, do-nyc1-nonprod not)
-// and writes it to a temp file, returning the path. The current context sets a namespace; the
-// other sets none, so follow-mode namespace behavior is exercised both ways.
+// writeKubeconfig builds a three-context kubeconfig (do-nyc1-dev current, do-nyc1-nonprod and
+// do-nyc1-prod not) and writes it to a temp file, returning the path. The current context sets a
+// namespace; the others set none, so follow-mode namespace behavior is exercised both ways. The
+// non-current contexts are what a pinned handle points at, and they have to be REAL contexts: a
+// pinned handle naming a context the kubeconfig does not hold is now an error in its own right.
 func writeKubeconfig(t *testing.T) string {
 	t.Helper()
 	cfg := api.NewConfig()
@@ -23,6 +26,7 @@ func writeKubeconfig(t *testing.T) string {
 	cfg.AuthInfos["user"] = &api.AuthInfo{Token: "t"}
 	cfg.Contexts["do-nyc1-dev"] = &api.Context{Cluster: "dev", AuthInfo: "user", Namespace: "team-x"}
 	cfg.Contexts["do-nyc1-nonprod"] = &api.Context{Cluster: "nonprod", AuthInfo: "user"}
+	cfg.Contexts["do-nyc1-prod"] = &api.Context{Cluster: "nonprod", AuthInfo: "user"}
 	cfg.CurrentContext = "do-nyc1-dev"
 
 	path := filepath.Join(t.TempDir(), "kubeconfig")
@@ -107,11 +111,12 @@ func TestResolvePinned(t *testing.T) {
 // TestResolvePinnedControlPlaneDefault confirms a pinned handle with no control-plane
 // namespace falls back to the default.
 func TestResolvePinnedControlPlaneDefault(t *testing.T) {
+	kubeconfig := writeKubeconfig(t)
 	cfg := &Config{
 		Current:      "stage",
-		Environments: []Environment{{Name: "stage", Context: "ctx", AppNamespace: "apps"}},
+		Environments: []Environment{{Name: "stage", Context: "do-nyc1-prod", AppNamespace: "apps"}},
 	}
-	got, err := Resolve(cfg, "")
+	got, err := Resolve(cfg, kubeconfig)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -129,6 +134,67 @@ func TestResolvePinnedMissing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ghost") {
 		t.Errorf("error = %q, want it to name the missing handle", err)
+	}
+}
+
+// TestResolvePinnedContextRenamedAway is issue #473. A handle recorded before its kube context was
+// renamed names a cluster that does not exist, and nothing used to notice: the name flowed into the
+// display while the connection was made through the handle's scoped credential, so a command
+// succeeded and reported a cluster the reader does not have. It now refuses, and the refusal names
+// the handle, the context, and the one command that corrects it.
+func TestResolvePinnedContextRenamedAway(t *testing.T) {
+	kubeconfig := writeKubeconfig(t)
+	cfg := &Config{
+		Current: "prod",
+		Environments: []Environment{
+			{Name: "prod", Context: "renamed-away", AppNamespace: "apps", AgentKubeconfig: "/somewhere/agent.kubeconfig"},
+		},
+	}
+
+	_, err := Resolve(cfg, kubeconfig)
+	if err == nil {
+		t.Fatal("Resolve should refuse a pinned handle whose kube context is not in the kubeconfig")
+	}
+	var missing *ContextMissingError
+	if !errors.As(err, &missing) {
+		t.Fatalf("error = %v, want a *ContextMissingError so a listing can report it instead of failing", err)
+	}
+	if missing.Name != "prod" || missing.Context != "renamed-away" || !missing.Pinned {
+		t.Errorf("got %+v, want the pinned handle and the context it records", missing)
+	}
+	for _, want := range []string{"prod", "renamed-away", "burrow env use prod --context"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+// TestResolvePinnedToleratesAnUncheckableKubeconfig covers the two states that are not staleness.
+//
+// A handle carrying a scoped, burrowd-only credential (ADR-0038) reaches its cluster without a
+// kubeconfig context at all, so a kubeconfig that cannot be read, or that holds no contexts, is not
+// evidence that the handle is wrong — and refusing on it would take working access away over a file
+// this resolution otherwise has no use for.
+func TestResolvePinnedToleratesAnUncheckableKubeconfig(t *testing.T) {
+	cfg := &Config{
+		Current:      "prod",
+		Environments: []Environment{{Name: "prod", Context: "do-nyc1-prod", AppNamespace: "apps"}},
+	}
+
+	got, err := Resolve(cfg, filepath.Join(t.TempDir(), "no-such-kubeconfig"))
+	if err != nil {
+		t.Fatalf("Resolve with an unreadable kubeconfig: %v", err)
+	}
+	if got.Context != "do-nyc1-prod" {
+		t.Errorf("context = %q, want the pinned handle's", got.Context)
+	}
+
+	empty := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := clientcmd.WriteToFile(*api.NewConfig(), empty); err != nil {
+		t.Fatalf("write empty kubeconfig: %v", err)
+	}
+	if _, err := Resolve(cfg, empty); err != nil {
+		t.Fatalf("Resolve with a kubeconfig holding no contexts: %v", err)
 	}
 }
 

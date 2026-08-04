@@ -15,22 +15,27 @@ import (
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
-// Every command that CHANGES something names the target it changed, in its own output (ADR-0078
-// §4). This file is the one place that happens, so the naming cannot be worded one way on deploy and
-// another on rollback, and so a command cannot omit it by forgetting a line.
+// Every command that CHANGES something says where it changed it, ONCE (ADR-0078 §4, ADR-0036). This
+// file is the one place that happens, so the naming cannot be worded one way on deploy and another
+// on rollback, and so a command cannot omit it by forgetting a line.
 //
-// Three details follow from why it exists, and each is load-bearing:
+// Four details follow from why it exists, and each is load-bearing:
 //
-//   - It goes CLOSE TO THE THING IT DID, appended to the sentence that says what happened, rather
-//     than into a header. `burrow` already prints a targeting line to stderr before an operation
-//     (ADR-0036), and a line printed before the work is a line that gets skimmed past; the point of
-//     this one is that the person reads it in the same breath as "deployed web".
+//   - Once. Two of the CLI's paths can answer "where did that go": the per-app path prints a
+//     targeting line to stderr before it works, and this file appends a clause to the result. A
+//     command on the per-app path therefore said it twice, in two vocabularies — "targeting prod"
+//     and then "on kube context \"do-nyc1\"" — which is worse than either alone, because a reader
+//     comparing the two has to work out whether they disagree. Whoever spoke first wins: a command
+//     that announced its target does not repeat itself here.
 //   - It names what the command ACTUALLY reached, resolved at the connection seam, not what the
 //     config happens to record. A command that resolves through the kubeconfig without consulting
 //     the target says so plainly; naming the selected target there would be the very mistake this
 //     exists to catch.
+//   - It names it in the CLI's own words — the target or handle you picked — and reaches for a kube
+//     context only when Burrow has no name of its own for where the command went (targetname).
 //   - The JSON result carries it too, so an agent composing a result can say WHERE it happened
-//     rather than only what happened.
+//     rather than only what happened. That is unaffected by any of the above: --json emits the
+//     `target` member whether or not a line was printed to stderr.
 //
 // Read-only commands are deliberately left out. This is about irreversible acts; printing it
 // everywhere would make it noise, and noise is what gets skimmed past.
@@ -41,8 +46,37 @@ func (o *commonOpts) emitChange(w io.Writer, v any, human string) error {
 	if o.json {
 		return emitJSONWithTarget(w, v, o.acted)
 	}
-	fmt.Fprintln(w, withTargetClause(human, o.acted))
+	fmt.Fprintln(w, o.targetClause(human))
 	return nil
+}
+
+// targetClause is the result line a changing command prints: the human text, with the target
+// appended unless this invocation has already said where it was going.
+//
+// The privileged commands — guard, cluster config, add-ons, credentials, audit, failures — print no
+// targeting line, so for them the clause is the only thing that answers the question and it is
+// always appended. The per-app commands print one, so for them appending would be the second answer
+// to a question already answered.
+func (o *commonOpts) targetClause(human string) string {
+	if o.announced {
+		return human
+	}
+	return withTargetClause(human, o.acted)
+}
+
+// targetClauseWhenDecided is targetClause for a result line that did NOT carry a target before, and
+// it appends one only when something actually decided where the command went: a target, an
+// environment handle, a --context override, or a --control-plane URL.
+//
+// The commands that have always printed the clause keep printing it unconditionally. Adding it to a
+// line that never had one is different: for somebody who has never run `burrow auth login` and has
+// no handle registered, it would change familiar output, and break anything matching it, to name a
+// kube context they never chose in Burrow.
+func (o *commonOpts) targetClauseWhenDecided(human string) string {
+	if !o.acted.Decided() {
+		return human
+	}
+	return o.targetClause(human)
 }
 
 // withTargetClause appends the target clause to the FIRST line of a human result. Several commands
@@ -57,22 +91,6 @@ func withTargetClause(human string, n targetname.Named) string {
 		return head
 	}
 	return head + "\n" + rest
-}
-
-// withTargetClauseWhenDecided is withTargetClause for a result line that did NOT carry a target
-// before, and it appends one only when something actually decided where the command went: a
-// configured target, a --context override, or a --control-plane URL.
-//
-// The commands that have always printed the clause keep printing it unconditionally, including the
-// "no target selected" form — that form is informative there precisely because its neighbours name a
-// target. Adding it to a line that never had one is different: for somebody who has never run
-// `burrow auth login` it would change familiar output, and break anything matching it, to say only
-// that they have not done a thing they were never asked to do.
-func withTargetClauseWhenDecided(human string, n targetname.Named) string {
-	if n.Name == "" && !n.Override && n.Endpoint == "" {
-		return human
-	}
-	return withTargetClause(human, n)
 }
 
 // emitJSONWithTarget prints v as indented JSON with a `target` member added. The result's own fields

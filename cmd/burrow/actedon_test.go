@@ -32,19 +32,26 @@ func selectTarget(t *testing.T, kubeContext string) {
 }
 
 // deployAgainst runs `burrow app deploy` against a fake cluster reached through a kubeconfig, which
-// is the path the target model actually decides. --control-plane would bypass it.
-func deployAgainst(t *testing.T, kubeconfig string, extra ...string) string {
+// is the path the target model actually decides. --control-plane would bypass it. It returns both
+// streams: a per-app command names its target on stderr, ahead of the work, and the result on
+// stdout stays clean for `--json`.
+func deployAgainst(t *testing.T, kubeconfig string, extra ...string) (stdout, stderr string) {
 	t.Helper()
 	args := append([]string{"app", "deploy", "web", "--image", "img:1", "--kubeconfig", kubeconfig}, extra...)
 	var out, errb bytes.Buffer
 	if err := run(context.Background(), args, &out, &errb); err != nil {
 		t.Fatalf("deploy: %v\nstderr: %s", err, errb.String())
 	}
-	return out.String()
+	return out.String(), errb.String()
 }
 
 // TestDeployNamesTheSelectedTarget is ADR-0078 §4 end to end: the change says where it landed, using
-// the name the person chose in the picker, in the same breath as what it did.
+// the name the person chose in the picker — ONCE, on the targeting line the per-app path prints
+// ahead of the work (ADR-0036, #460).
+//
+// It used to say it twice: that line, and then a clause appended to the result naming the kube
+// context behind the target. Two answers to one question, in two vocabularies, is worse than either
+// alone — a reader has to work out whether they disagree, and in issue #473 they did.
 func TestDeployNamesTheSelectedTarget(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
@@ -56,21 +63,22 @@ func TestDeployNamesTheSelectedTarget(t *testing.T) {
 	kubeconfig := writeKubeconfig(t, twoContextConfig(cluster.URL, cluster.URL))
 	selectTarget(t, "prod")
 
-	out := deployAgainst(t, kubeconfig)
-	if !strings.Contains(out, `on target "prod"`) {
-		t.Errorf("deploy did not name the active target.\ngot: %q", out)
+	out, errb := deployAgainst(t, kubeconfig)
+	if !strings.HasPrefix(errb, "targeting ") || !strings.Contains(errb, "prod") {
+		t.Errorf("deploy did not name the active target.\nstderr: %q", errb)
 	}
-	// Close to the thing it did: the target rides on the line that says what happened, not on a
-	// line of its own several lines away.
-	head, _, _ := strings.Cut(out, "\n")
-	if !strings.Contains(head, "deployed web") || !strings.Contains(head, `on target "prod"`) {
-		t.Errorf("the target is not on the line that says what happened.\nfirst line: %q", head)
+	if strings.Contains(out, "prod") || strings.Contains(out, "kube context") {
+		t.Errorf("the result answered the same question a second time.\nstdout: %q\nstderr: %q", out, errb)
+	}
+	if !strings.Contains(out, "deployed web") {
+		t.Errorf("the result no longer says what it did.\nstdout: %q", out)
 	}
 }
 
 // TestDeployWithNoTargetNamesTheKubeContext covers the case the record deliberately preserves: with
 // nothing selected the CLI follows the ambient kubeconfig (ADR-0078 §1). It says exactly that rather
-// than inventing a target name for a target that does not exist.
+// than inventing a target name for a target that does not exist — and says it once, on the targeting
+// line, without the trailing "(no target selected)" that used to ride every changed thing.
 func TestDeployWithNoTargetNamesTheKubeContext(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
@@ -81,9 +89,12 @@ func TestDeployWithNoTargetNamesTheKubeContext(t *testing.T) {
 	defer cluster.Close()
 	kubeconfig := writeKubeconfig(t, twoContextConfig(cluster.URL, cluster.URL))
 
-	out := deployAgainst(t, kubeconfig)
-	if !strings.Contains(out, `on kube context "staging" (no target selected)`) {
-		t.Errorf("with no target selected the output should name the kube context it followed.\ngot: %q", out)
+	out, errb := deployAgainst(t, kubeconfig)
+	if !strings.Contains(errb, `kube context "staging"`) {
+		t.Errorf("with no target selected the output should name the kube context it followed.\nstderr: %q", errb)
+	}
+	if strings.Contains(out+errb, "no target selected") {
+		t.Errorf("a command that changed something told the reader what they have not done.\nstdout: %q\nstderr: %q", out, errb)
 	}
 }
 
@@ -101,18 +112,19 @@ func TestDeployWithContextOverrideNamesWhatItWasOverriddenTo(t *testing.T) {
 	kubeconfig := writeKubeconfig(t, twoContextConfig(cluster.URL, cluster.URL))
 	selectTarget(t, "staging")
 
-	out := deployAgainst(t, kubeconfig, "--context", "prod")
-	if !strings.Contains(out, `on kube context "prod" (--context override)`) {
-		t.Errorf("an overridden invocation should name what it was overridden to.\ngot: %q", out)
+	out, errb := deployAgainst(t, kubeconfig, "--context", "prod")
+	if !strings.Contains(errb, `targeting context "prod"`) {
+		t.Errorf("an overridden invocation should name what it was overridden to.\nstderr: %q", errb)
 	}
-	if strings.Contains(out, `on target "staging"`) {
-		t.Errorf("the overridden-away target must not be named as the place the change landed.\ngot: %q", out)
+	if strings.Contains(out+errb, "staging") {
+		t.Errorf("the overridden-away target must not be named as the place the change landed.\nstdout: %q\nstderr: %q", out, errb)
 	}
 }
 
-// TestPrivilegedCommandNamesWhatItReached covers the other resolution path. `guard set` connects
-// with the raw kube context rather than resolving an environment handle, so it names the context it
-// reached — and the picker name only when that context is the selected target's.
+// TestPrivilegedCommandNamesWhatItReached covers the other resolution path, and the reason the
+// clause survives at all. `guard set` prints no targeting line — the privileged commands never have
+// — so for them the clause is the ONLY thing that answers where the change landed, and it is always
+// appended. It names the picker name when the context it reached is the selected target's.
 func TestPrivilegedCommandNamesWhatItReached(t *testing.T) {
 	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
 	t.Setenv("BURROW_API_TOKEN", "")
@@ -132,8 +144,90 @@ func TestPrivilegedCommandNamesWhatItReached(t *testing.T) {
 	}
 	// The kubeconfig's current context is "staging", which IS the selected target, so the name the
 	// person chose is what appears.
-	if !strings.Contains(out.String(), `on target "staging"`) {
+	if !strings.Contains(out.String(), "on staging") {
 		t.Errorf("guard set did not name the target it wrote to.\ngot: %q", out.String())
+	}
+}
+
+// saveHandle records one environment handle for a kube context and pins it when asked, the way
+// `burrow install` and `burrow env list --discover` leave a machine that has never run
+// `burrow auth login`. It writes to the $BURROW_CONFIG tempConfig set.
+func saveHandle(t *testing.T, name, kubeContext string, pin bool) {
+	t.Helper()
+	cfg := &localconfig.Config{Environments: []localconfig.Environment{{Name: name, Context: kubeContext}}}
+	if pin {
+		cfg.Current = name
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+}
+
+// TestChangeOnTheAppPathSaysWhereOnce is the line from issues #465 and #473, end to end:
+//
+//	targeting prod
+//	set KEY on web on kube context "do-nyc1-burrow-test-e2e" (no target selected)
+//
+// Four things wrong with one line, and all four are the same mistake — answering a question that was
+// already answered, in the vocabulary the answer had deliberately stopped using. The targeting line
+// is the answer; the result says what it did.
+func TestChangeOnTheAppPathSaysWhereOnce(t *testing.T) {
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	tempConfig(t)
+
+	var hit bool
+	cluster := fakeBurrowdCluster(&hit)
+	defer cluster.Close()
+	kubeconfig := writeKubeconfig(t, twoContextConfig(cluster.URL, cluster.URL))
+	saveHandle(t, "prod", "staging", true)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(),
+		[]string{"app", "config", "set", "web", "KEY=value", "--kubeconfig", kubeconfig}, &out, &errb); err != nil {
+		t.Fatalf("app config set: %v\nstderr: %s", err, errb.String())
+	}
+	if !strings.Contains(errb.String(), "targeting prod") {
+		t.Errorf("the targeting line did not name the environment.\nstderr: %q", errb.String())
+	}
+	for _, unwanted := range []string{"kube context", "no target selected", "staging"} {
+		if strings.Contains(out.String(), unwanted) {
+			t.Errorf("the result repeated where it went, saying %q.\nstdout: %q", unwanted, out.String())
+		}
+	}
+	if !strings.Contains(out.String(), "set KEY on web") {
+		t.Errorf("the result no longer says what it did.\nstdout: %q", out.String())
+	}
+}
+
+// TestPrivilegedCommandNamesTheRegisteredHandle covers the privileged path for the person who has
+// never run `burrow auth login`. Their cluster still has a name — the handle install registered for
+// it — and that is what the clause says. It used to reach past the name for the kube context and
+// then explain that no target was selected, which is Burrow's own resolution detail followed by a
+// remark about something the reader had not been asked to do (issue #465).
+func TestPrivilegedCommandNamesTheRegisteredHandle(t *testing.T) {
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	tempConfig(t)
+
+	var hit bool
+	cluster := fakeBurrowdCluster(&hit)
+	defer cluster.Close()
+	kubeconfig := writeKubeconfig(t, twoContextConfig(cluster.URL, cluster.URL))
+	saveHandle(t, "prod", "staging", false)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(),
+		[]string{"guard", "set", "app.deploy", "allow", "--kubeconfig", kubeconfig}, &out, &errb); err != nil {
+		t.Fatalf("guard set: %v\nstderr: %s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "on prod") {
+		t.Errorf("guard set did not name the cluster the way the rest of the CLI does.\ngot: %q", out.String())
+	}
+	for _, unwanted := range []string{"kube context", "no target selected"} {
+		if strings.Contains(out.String(), unwanted) {
+			t.Errorf("guard set said %q.\ngot: %q", unwanted, out.String())
+		}
 	}
 }
 
@@ -151,7 +245,7 @@ func TestJSONCarriesTheTargetAlongsideTheResult(t *testing.T) {
 	kubeconfig := writeKubeconfig(t, twoContextConfig(cluster.URL, cluster.URL))
 	selectTarget(t, "prod")
 
-	out := deployAgainst(t, kubeconfig, "--json")
+	out, _ := deployAgainst(t, kubeconfig, "--json")
 	var doc struct {
 		Target  targetname.Named `json:"target"`
 		Release struct {

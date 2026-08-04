@@ -294,6 +294,74 @@ func TestEnvUse(t *testing.T) {
 	}
 }
 
+// TestEnvListMarksAContextThatIsGone is issue #473's "visible before a deploy rather than after".
+// A handle whose kube context has been renamed away points at nothing, and the listing of handles is
+// where somebody should be able to see that — rather than discovering it from a command that failed,
+// or worse, from one that succeeded and named a cluster they do not have.
+//
+// The listing REPORTS the state that makes every acting command refuse. Failing here as well would
+// send the person who came looking for the problem away with the same error and no table.
+func TestEnvListMarksAContextThatIsGone(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "dev")
+	// "ctx-dev" was renamed to "ctx-dev-renamed", so the pinned dev handle points at nothing.
+	kc := kubeconfigWithCurrent(t, "ctx-nonprod", "ctx-dev-renamed", "ctx-nonprod")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "list", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env list: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(line, "ctx-dev") && !strings.Contains(line, "(missing)") {
+			t.Errorf("the stale row is not marked: %q", line)
+		}
+		if strings.Contains(line, "ctx-nonprod") && strings.Contains(line, "(missing)") {
+			t.Errorf("a handle whose context exists was marked missing: %q", line)
+		}
+	}
+	if !strings.Contains(s, "burrow env use <name> --context <context>") {
+		t.Errorf("the listing marks the problem without naming the fix\n%s", s)
+	}
+}
+
+// TestEnvUseRepointsAHandle covers the correction the refusal points at. A renamed context leaves the
+// handle unusable, and nothing else in the config can be edited to fix it, so `env use --context`
+// re-points it — locally, contacting no cluster.
+func TestEnvUseRepointsAHandle(t *testing.T) {
+	tempConfig(t)
+	twoHandleConfig(t, "")
+	kc := kubeconfigWithCurrent(t, "ctx-dev-renamed", "ctx-dev-renamed", "ctx-nonprod")
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"env", "use", "dev", "--context", "ctx-dev-renamed", "--kubeconfig", kc}, &out, &errb)
+	if err != nil {
+		t.Fatalf("env use --context: %v\n%s", err, errb.String())
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	env, ok := cfg.Lookup("dev")
+	if !ok || env.Context != "ctx-dev-renamed" {
+		t.Errorf("handle = %+v, want it re-pointed at ctx-dev-renamed", env)
+	}
+	if cfg.Current != "dev" {
+		t.Errorf("current = %q, want the re-pointed handle pinned", cfg.Current)
+	}
+	if !strings.Contains(out.String(), "Re-pointed") {
+		t.Errorf("the change was silent\n%s", out.String())
+	}
+
+	// A context that does not exist is refused, rather than recorded for the same failure to happen
+	// again a second time.
+	out.Reset()
+	errb.Reset()
+	if err := run(context.Background(), []string{"env", "use", "dev", "--context", "ctx-nope", "--kubeconfig", kc}, &out, &errb); err == nil {
+		t.Error("env use --context should refuse a context that is not in the kubeconfig")
+	}
+}
+
 // TestEnvFollow clears the pin.
 func TestEnvFollow(t *testing.T) {
 	tempConfig(t)
@@ -594,7 +662,7 @@ func TestWriteEnvList(t *testing.T) {
 	}
 
 	var pinned bytes.Buffer
-	writeEnvList(&pinned, envs, localconfig.Resolved{Name: "dev", Context: "ctx-dev", Mode: localconfig.ModePinned})
+	writeEnvList(&pinned, envs, localconfig.Resolved{Name: "dev", Context: "ctx-dev", Mode: localconfig.ModePinned}, nil)
 	ps := pinned.String()
 	// A CURRENT column heads the table and the active env's row leads with "*"; the legend explains
 	// the pinned mode in plain words, without the old inline "(pinned)" marker.
@@ -613,7 +681,7 @@ func TestWriteEnvList(t *testing.T) {
 	}
 
 	var unreg bytes.Buffer
-	writeEnvList(&unreg, envs, localconfig.Resolved{Context: "ctx-orphan", Mode: localconfig.ModeFollowing})
+	writeEnvList(&unreg, envs, localconfig.Resolved{Context: "ctx-orphan", Mode: localconfig.ModeFollowing}, nil)
 	if !strings.Contains(unreg.String(), "following kubectl: ctx-orphan (unregistered)") {
 		t.Errorf("unregistered follow line missing\n%s", unreg.String())
 	}
@@ -621,7 +689,7 @@ func TestWriteEnvList(t *testing.T) {
 	// The zero-handle empty-state is a structured block: the followed context, the three ways to
 	// register an environment, and the help footer.
 	var empty bytes.Buffer
-	writeEnvList(&empty, nil, localconfig.Resolved{Context: "ctx-dev", Mode: localconfig.ModeFollowing})
+	writeEnvList(&empty, nil, localconfig.Resolved{Context: "ctx-dev", Mode: localconfig.ModeFollowing}, nil)
 	es := empty.String()
 	for _, want := range []string{
 		"No environments registered yet:",

@@ -159,11 +159,13 @@ func newRootCmd() *cobra.Command {
 // commonOpts holds the configuration the control-plane operations share.
 //
 // acted is the target this invocation reached, recorded when the connection is resolved and read
-// back by emitChange so a changing command names it (ADR-0078 §4). kubeContext/installID/
-// contextResolved memoise what the privileged path resolved (clustercontext.go), so a command that
-// resolves the cluster more than once gets one answer. All of them are per-invocation state on a
-// per-command struct, not global state: newRootCmd builds a fresh commonOpts for every command on
-// every run, which is what keeps two commands in one process from seeing each other's target.
+// back by emitChange so a changing command names it (ADR-0078 §4). announced records that the
+// targeting line has already been printed for this invocation, so the result does not answer the
+// same question a second time (actedon.go). kubeContext/installID/contextResolved memoise what the
+// privileged path resolved (clustercontext.go), so a command that resolves the cluster more than
+// once gets one answer. All of them are per-invocation state on a per-command struct, not global
+// state: newRootCmd builds a fresh commonOpts for every command on every run, which is what keeps
+// two commands in one process from seeing each other's target.
 type commonOpts struct {
 	controlPlane    string
 	token           string
@@ -173,6 +175,7 @@ type commonOpts struct {
 	env             string
 	json            bool
 	acted           targetname.Named
+	announced       bool
 	kubeContext     string
 	installID       string
 	contextResolved bool
@@ -453,8 +456,13 @@ func (o *commonOpts) resolveConnect(ctx context.Context, stderr io.Writer, chang
 	if err != nil {
 		return nil, "", err
 	}
+	// Printing it here is what lets the result line stay quiet about it: this line names the
+	// environment (ADR-0036, #460), and a result that appended the target again would answer the
+	// same question twice, in two vocabularies. It is recorded rather than inferred so the rule
+	// holds for every command on this path without each one having to know it (actedon.go).
 	if changing || tgt.flagOverride {
 		fmt.Fprintln(stderr, tgt.display)
+		o.announced = true
 	}
 	tgt = applyScopedFallback(tgt, stderr)
 	c, err := o.connect(ctx, tgt)

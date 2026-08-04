@@ -325,6 +325,39 @@ func TestEnvListMarksAContextThatIsGone(t *testing.T) {
 	}
 }
 
+// TestEnvListMarksAContextThatIsGoneWithAScopedCredential is the same listing for the handle that no
+// longer refuses (issue #488). A handle carrying a scoped credential keeps working through a renamed
+// context, which is exactly why the listing has to keep marking it: this becomes the only place the
+// stale name is visible, and it is still the name follow mode matches on.
+func TestEnvListMarksAContextThatIsGoneWithAScopedCredential(t *testing.T) {
+	tempConfig(t)
+	cfg := &localconfig.Config{
+		Current: "dev",
+		Environments: []localconfig.Environment{
+			{Name: "dev", Context: "ctx-dev", AppNamespace: "burrow-apps", AgentKubeconfig: writeScopedCredential(t), AgentContext: "burrow-agent"},
+			{Name: "nonprod", Context: "ctx-nonprod", AppNamespace: "team-x"},
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	kc := kubeconfigWithCurrent(t, "ctx-nonprod", "ctx-dev-renamed", "ctx-nonprod")
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "list", "--kubeconfig", kc}, &out, &errb); err != nil {
+		t.Fatalf("env list: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(line, "ctx-dev") && !strings.Contains(line, "(missing)") {
+			t.Errorf("the stale row is not marked: %q", line)
+		}
+	}
+	if !strings.Contains(s, "burrow env use <name> --context <context>") {
+		t.Errorf("the listing marks the problem without naming the fix\n%s", s)
+	}
+}
+
 // TestEnvUseRepointsAHandle covers the correction the refusal points at. A renamed context leaves the
 // handle unusable, and nothing else in the config can be edited to fix it, so `env use --context`
 // re-points it — locally, contacting no cluster.

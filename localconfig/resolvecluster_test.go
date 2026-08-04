@@ -127,3 +127,24 @@ func TestResolveClusterRefusesAStaleTarget(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveClusterRefusesAStaleTargetEvenWithAScopedHandle. Issue #488 relaxes the PINNED path,
+// where a handle's own scoped credential reaches the cluster without a context. Nothing about that
+// reaches here: a privileged command is not scoped to an environment, a pin is never consulted for
+// which cluster it acts on, and the credential a handle happens to carry is not the target's to use.
+func TestResolveClusterRefusesAStaleTargetEvenWithAScopedHandle(t *testing.T) {
+	kubeconfig := writeKubeconfig(t)
+	cfg := &Config{
+		Current: "prod",
+		Environments: []Environment{
+			{Name: "prod", Context: "renamed-away", AgentKubeconfig: writeScopedCredential(t), AgentContext: "burrow-agent"},
+		},
+	}
+	if err := cfg.SetTarget(KubernetesTarget("renamed-away")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+
+	if _, err := ResolveCluster(cfg, kubeconfig); err == nil {
+		t.Fatal("a target naming a missing context resolved because a pinned handle carried a credential")
+	}
+}

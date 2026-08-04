@@ -364,6 +364,35 @@ func TestAuthStatusFlagsAMovedKubeconfig(t *testing.T) {
 	}
 }
 
+// TestAuthStatusFlagsAStalePinnedHandleContext. A pinned handle carrying a scoped credential keeps
+// working through a renamed kube context (issue #488), so the coordinates this command reports are
+// the one place the recorded name is still shown — and reporting it unqualified would name a cluster
+// that does not exist, which is the mistake #473 was about.
+func TestAuthStatusFlagsAStalePinnedHandleContext(t *testing.T) {
+	stubAuth(t, authContexts(), false)
+	kc := kubeconfigWithCurrent(t, "ctx-live", "ctx-live")
+	cfg := &localconfig.Config{
+		Current: "prod",
+		Environments: []localconfig.Environment{
+			{Name: "prod", Context: "renamed-away", AgentKubeconfig: writeScopedCredential(t), AgentContext: "burrow-agent"},
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(&out, authStatusOpts{kubeconfig: kc}); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{`Commands target the "prod" environment`, "renamed-away", "not in your kubeconfig", "burrow env use prod --context"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status does not contain %q:\n%s", want, got)
+		}
+	}
+}
+
 // TestAuthStatusEmptySaysWhatHappensToday confirms a person who has never logged in is told what
 // their commands do now, and how to choose.
 func TestAuthStatusEmptySaysWhatHappensToday(t *testing.T) {

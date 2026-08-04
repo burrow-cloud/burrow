@@ -997,6 +997,13 @@ Two distinct things share the name, and conflating them is the usual source of c
 | `burrow env remove <name>` | Deletes the **local handle only** — and the minted agent kubeconfig under `~/.burrow/agents/`. It does not unregister the environment in burrowd. |
 | `burrow-agent environments` | Lists what the agent can see. Read-only, local. |
 
+A pinned handle whose kube context has been **renamed away** keeps working when the handle carries a
+scoped agent credential: that credential holds the API server, the CA and the token, so nothing on
+the operate path reads the recorded name. The command says once that the name is stale, names the
+environment rather than the context that no longer exists, and carries on. A handle with no scoped
+credential has only that name to reach the cluster with, so it is refused instead — and `env list`
+and `auth status` mark the stale entry either way.
+
 Most operate verbs take `--env <name>`. Mutating operations resolve it through a forcing
 function ([ADR-0047](adr/0047-agent-environment-safety.md)): when more than one environment is
 registered and no environment is named, the operation is **refused** with a structured error

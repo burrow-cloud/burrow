@@ -52,6 +52,16 @@ type Resolved struct {
 	// covers both the CLI's targeted path and the handle-based path `burrow-agent` resolves through.
 	// A context that matches neither carries none, and sends no header.
 	InstallID string
+	// ContextStale is set when the PINNED handle this resolution came from records a kube context the
+	// kubeconfig no longer holds, and the resolution proceeded anyway because the handle carries a
+	// scoped credential that reaches the cluster without one (issue #488). It is nil on every other
+	// resolution, including the one that refuses.
+	//
+	// It is data handed back rather than a message written out for the same reason ContextMissingError
+	// is a type: this package resolves and reports, and the commands decide what to say. The caller is
+	// expected to say it once — the recorded name is wrong and correcting it is one command — and then
+	// carry on, since the credential is what the connection is made with either way.
+	ContextStale *ContextMissingError
 }
 
 // Cloud reports whether this resolution is the managed product, which is reached over HTTPS with the
@@ -69,8 +79,9 @@ func (r Resolved) Cloud() bool { return r.Kind == TargetKindCloud }
 //
 // With no target selected the behaviour is as it was. When a handle is pinned (cfg.Current set), it
 // resolves to that handle, erroring clearly if the pinned name is not registered — or if the context
-// it records is no longer in the kubeconfig, which is the check a renamed context needs and the one
-// that was missing.
+// it records is no longer in the kubeconfig AND the handle has no scoped credential to reach the
+// cluster with, which is the check a renamed context needs and the one that was missing. A handle
+// that does carry one resolves, and reports the stale name on ContextStale instead.
 // Otherwise it follows the kubeconfig's current context: the target is that context, its namespace
 // (so kubens moves Burrow too; empty when the context sets none, leaving the burrowd default to
 // apply), and the default control-plane namespace. If the current context matches a registered
@@ -202,7 +213,23 @@ func resolveWithoutTarget(cfg *Config, kubeconfigPath string) (Resolved, error) 
 		// and it was the one pinned path that did not check (issue #473). Follow mode needs no check:
 		// its context comes FROM the kubeconfig.
 		if pinnedContextMissing(kubeconfigPath, env.Context) {
-			return Resolved{}, errPinnedContextMissing(env.Name, env.Context)
+			stale := errPinnedContextMissing(env.Name, env.Context)
+			// A handle carrying a scoped, burrowd-only credential (ADR-0038) does not dial through the
+			// recorded context at all: the credential holds the API server, the CA and the token, and
+			// the connect path overrides both the kubeconfig and the context with it. Refusing there
+			// takes working access away over a label — and ADR-0084 §5 is explicit that a kube context
+			// name is a label rather than an identity, so it can be renamed under a handle that still
+			// reaches its cluster perfectly well (issue #488). The staleness is real and is handed back
+			// to be said out loud; what changes is that it is no longer fatal.
+			//
+			// A handle with no usable credential has nothing else to dial with, so for it the refusal
+			// stands exactly as it was.
+			if !scopedCredentialUsable(env.AgentKubeconfig) {
+				return Resolved{}, stale
+			}
+			resolved := fromHandle(env, ModePinned, "")
+			resolved.ContextStale = stale
+			return resolved, nil
 		}
 		return fromHandle(env, ModePinned, ""), nil
 	}
@@ -291,10 +318,33 @@ func errTargetContextMissing(name, kubeContext string) error {
 // It is also not only a display problem. A handle is matched to its context by NAME in follow mode,
 // so once the context is renamed the handle stops matching, and commands quietly resolve to the
 // cluster's default environment rather than the one the handle names. Both failures are silent, and
-// both are fixed by the same one-line correction — which is why this refuses and says how, rather
-// than carrying on with a value it knows to be wrong.
-func errPinnedContextMissing(name, kubeContext string) error {
+// both are fixed by the same one-line correction — which is why this says how.
+//
+// It is the refusal only where the handle has nothing else to dial with. Where it carries a scoped
+// credential the pinned path proceeds and reports this on Resolved.ContextStale instead (issue #488):
+// neither failure above applies there, since the pinned path finds its handle by the handle's own
+// name and the display already names the environment rather than the context.
+func errPinnedContextMissing(name, kubeContext string) *ContextMissingError {
 	return &ContextMissingError{Name: name, Context: kubeContext, Pinned: true}
+}
+
+// scopedCredentialUsable reports whether a handle's recorded scoped kubeconfig (ADR-0038) is on disk
+// and usable, which is what decides whether a stale kube context name is fatal: a credential that
+// loads makes the recorded name a label nothing reads, and a credential that does not leaves the
+// kubeconfig context as the only way to reach the cluster.
+//
+// It requires a context in the file and not merely a file that parses. An empty or truncated
+// kubeconfig loads without error and dials nothing, and treating that as a credential would trade a
+// message naming the handle and its fix for a connection error naming neither.
+func scopedCredentialUsable(path string) bool {
+	if path == "" {
+		return false
+	}
+	cfg, err := clientcmd.LoadFromFile(path)
+	if err != nil || cfg == nil {
+		return false
+	}
+	return len(cfg.Contexts) > 0
 }
 
 // errUnknownPin is the message for a pinned handle name that is not registered.

@@ -308,14 +308,20 @@ type authTargetStatus struct {
 // environment alone. They are worth knowing; they are not worth printing unbidden on every command,
 // so they are here, for somebody who asked. All three are absent for the managed product, which has
 // no cluster.
+//
+// ContextMissing marks the one case where Context is a name and not a location: a pinned handle
+// records a kube context the kubeconfig no longer holds, and commands reach the cluster with the
+// handle's scoped credential instead (issue #488). Reporting the recorded name unqualified would
+// name a cluster that does not exist, which is the failure this whole surface exists to catch.
 type authStatusResult struct {
-	Targets      []authTargetStatus `json:"targets"`
-	Active       string             `json:"active"`
-	Environment  string             `json:"environment,omitempty"`
-	Context      string             `json:"context,omitempty"`
-	Namespace    string             `json:"namespace,omitempty"`
-	AgentWired   bool               `json:"agentWired"`
-	AgentPresent bool               `json:"agentPresent"`
+	Targets        []authTargetStatus `json:"targets"`
+	Active         string             `json:"active"`
+	Environment    string             `json:"environment,omitempty"`
+	Context        string             `json:"context,omitempty"`
+	ContextMissing bool               `json:"contextMissing,omitempty"`
+	Namespace      string             `json:"namespace,omitempty"`
+	AgentWired     bool               `json:"agentWired"`
+	AgentPresent   bool               `json:"agentPresent"`
 }
 
 func runAuthStatus(out io.Writer, o authStatusOpts) error {
@@ -342,6 +348,7 @@ func runAuthStatus(out io.Writer, o authStatusOpts) error {
 	// the targets either way rather than failing in place of the command that would have failed.
 	if resolved, rerr := localconfig.ResolveOperate(cfg, o.kubeconfig); rerr == nil {
 		result.Environment, result.Context, result.Namespace = resolved.Name, resolved.Context, resolved.Namespace
+		result.ContextMissing = resolved.ContextStale != nil
 	}
 	result.AgentWired = result.AgentPresent && claudeCodeWired()
 	for _, t := range cfg.Targets {
@@ -427,10 +434,19 @@ func writeActiveEnvironment(out io.Writer, r authStatusResult) {
 	if namespace == "" {
 		namespace = "(the install's default)"
 	}
+	kubeContext := r.Context
+	if r.ContextMissing {
+		kubeContext += "  (not in your kubeconfig)"
+	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "  kube context\t%s\n", r.Context)
+	fmt.Fprintf(tw, "  kube context\t%s\n", kubeContext)
 	fmt.Fprintf(tw, "  app namespace\t%s\n", namespace)
 	_ = tw.Flush()
+	if r.ContextMissing {
+		fmt.Fprintf(out, "\nThe %q handle records a kube context that is not in your kubeconfig. Commands still reach\n"+
+			"the cluster with the handle's scoped credential, which needs no context, but the recorded name\n"+
+			"is wrong; re-point it with `burrow env use %s --context <context>`.\n", r.Environment, r.Environment)
+	}
 }
 
 // writeAgentStatusLine adds the one actionable line about an unwired coding agent. It appears here

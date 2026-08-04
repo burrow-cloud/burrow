@@ -107,6 +107,22 @@ func For(cfg *localconfig.Config, kubeContext string, override bool) Named {
 	return n
 }
 
+// ForHandle names an environment handle a command reached through the handle's OWN scoped credential
+// (ADR-0038), with no kube context involved in getting there.
+//
+// It exists for one case: the handle records a context the kubeconfig no longer holds, and the
+// command connected anyway on the credential, which carries the API server and the CA (issue #488).
+// For is no use there, because the only context it could be given is the stale one — and naming a
+// cluster that does not exist as the one a change landed on is exactly issue #473. The handle is the
+// true name of where the command went, and it is the name the rest of the CLI uses for it anyway.
+func ForHandle(name string) Named {
+	return Named{
+		Kind:   KindNone,
+		handle: name,
+		Detail: fmt.Sprintf("the %q environment, reached with its own scoped credential", name),
+	}
+}
+
 // ForCloud names a Burrow Cloud target a command acted through. It is a separate constructor from
 // For because there is no kube context to check the target against: what decided the connection is
 // the target itself, so the name is the one the person picked and the detail is the same sentence

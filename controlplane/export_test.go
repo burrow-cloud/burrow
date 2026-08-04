@@ -55,3 +55,7 @@ func SameMajorForTest(a, b string) bool {
 // deliberately not an operational limit: §4 asks for no knob, and a limit is a bound somebody is
 // enforcing rather than how long a report-only step may hold a landed deploy (ADR-0068 §2).
 func DependencyCheckDeadlineForTest() time.Duration { return dependencyCheckDeadline }
+
+// DependencyDetailBytesForTest exposes the bound every dependency detail passes through, so a test
+// can assert a composed detail still fits it. Test-build only.
+func DependencyDetailBytesForTest() int { return dependencyDetailBytes }

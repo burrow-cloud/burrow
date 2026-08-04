@@ -190,3 +190,37 @@ func TestCallersOwnDeadlineStillWins(t *testing.T) {
 		t.Fatalf("a deadline the caller set should speak for itself: %v", err)
 	}
 }
+
+// TestStreamedDeployTakesTheSameBudget pins that asking for the progress stream (issue #480) does not
+// slip the call out from under the per-operation budget. The streaming path does not go through
+// request, so it is a separate opportunity to lose the bound issue #404 established — and to lose
+// the message that stops an agent retrying a deploy that is still running.
+func TestStreamedDeployTakesTheSameBudget(t *testing.T) {
+	srv := okServer(t, 0)
+	c := NewNamedClient(srv.URL, "token", ClientNameAgent, "v0")
+	rec := &deadlineRecorder{inner: c.http.Transport}
+	c.http.Transport = rec
+
+	req := DeployRequest{Image: "img:1", Progress: func(DeployProgress) {}}
+	if _, err := c.Deploy(context.Background(), "app", req); err != nil {
+		t.Fatalf("streamed deploy: %v", err)
+	}
+	got := rec.last
+	if c.http.Timeout > 0 && c.http.Timeout < got {
+		got = c.http.Timeout
+	}
+	if got < controlplane.MaxDeployWait {
+		t.Fatalf("a streamed deploy is bounded at %s but the control plane may spend %s on it", got, controlplane.MaxDeployWait)
+	}
+
+	slow := okServer(t, time.Second)
+	c2 := NewNamedClient(slow.URL, "token", ClientNameAgent, "v0")
+	c2.budget = budgets{def: 10 * time.Millisecond, deploy: 10 * time.Millisecond}
+	_, err := c2.Deploy(context.Background(), "app", req)
+	if err == nil {
+		t.Fatal("streamed deploy under a 10ms budget: want a timeout")
+	}
+	if !strings.Contains(err.Error(), "may still be completing") {
+		t.Fatalf("the streamed timeout message does not say the operation may still be running: %v", err)
+	}
+}

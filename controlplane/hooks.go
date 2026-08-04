@@ -320,13 +320,26 @@ func validateHookCommand(command []string) error {
 // outcome carries what the POST phase is told beyond its own identity — how the rollout went
 // (ADR-0072 §4). It is nil for the pre phases, where there is no outcome yet: a variable that was
 // meaningful at some phases and not others would be worse than one that is simply absent.
-func (e *Engine) runHook(ctx context.Context, k Kubernetes, phase HookPhase, app, env, image string, cfg map[string]string, outcome map[string]string) error {
+//
+// progress is where the hook's stage is reported (issue #480). It is emitted HERE rather than at the
+// call site because this is where "is a hook even configured" is known, and a deploy must never
+// print a stage for work that did not happen: the emit sits after the unset-means-no-hook return
+// below, so an app with no hook reports nothing. hookStage maps the phase, so a phase with no stage
+// name — `pre-rollback`, which is not on the deploy path — silently reports nothing.
+func (e *Engine) runHook(ctx context.Context, k Kubernetes, phase HookPhase, app, env, image string, cfg map[string]string, outcome map[string]string, progress deployProgress) (err error) {
 	command, err := e.db.AppHook(ctx, app, envName(env), phase)
 	if err != nil {
 		return fmt.Errorf("reading the %s hook: %w", phase, err)
 	}
 	if len(command) == 0 {
 		return nil // unset means no hook and today's behaviour exactly (ADR-0072 §1)
+	}
+	// From here a hook Job really runs, so the stage is real. A phase off the deploy path reports
+	// nothing at all.
+	stage, reported := hookStage(phase)
+	if reported {
+		progress.started(stage)
+		defer func() { progress.finish(stage, err == nil) }()
 	}
 	release, err := e.hookLock.acquire(ctx, app, envName(env))
 	if err != nil {
@@ -438,6 +451,20 @@ const (
 	DeployKindRollback = "rollback"
 )
 
+// hookStage maps a hook phase to the deploy stage it is reported as (issue #480), and reports
+// whether it has one at all. `pre-rollback` deliberately has none: it fires on the rollback path,
+// which reports no progress.
+func hookStage(phase HookPhase) (string, bool) {
+	switch phase {
+	case HookPreDeploy:
+		return StagePreDeployHook, true
+	case HookPostDeploy:
+		return StagePostDeployHook, true
+	default:
+		return "", false
+	}
+}
+
 // hookEnv merges the app's config with what the phase tells the hook, without mutating either.
 //
 // BURROW'S OWN VARIABLES WIN over an app config key of the same name. That is a deliberate choice
@@ -481,7 +508,7 @@ func hookEnv(cfg, told map[string]string) map[string]string {
 //
 // It returns the hints to attach to the caller's result: what the rollout did, and what the hook did
 // about it.
-func (e *Engine) runPostDeployHook(ctx context.Context, k Kubernetes, app, env, image, releaseID, kind string, cfg map[string]string, settle rolloutSettle) []string {
+func (e *Engine) runPostDeployHook(ctx context.Context, k Kubernetes, app, env, image, releaseID, kind string, cfg map[string]string, settle rolloutSettle, progress deployProgress) []string {
 	command, err := e.db.AppHook(ctx, app, envName(env), HookPostDeploy)
 	if err != nil {
 		slog.WarnContext(ctx, "reading the post-deploy hook failed; the deploy is unaffected",
@@ -514,7 +541,7 @@ func (e *Engine) runPostDeployHook(ctx context.Context, k Kubernetes, app, env, 
 			"the rollout of %s did not settle (%s): %s. The post-deploy hook was told so and decides what to do about it; Burrow does not roll back by itself (ADR-0072 §6)",
 			image, outcome.Reason, outcome.Detail))
 	}
-	if err := e.runHook(ctx, k, HookPostDeploy, app, env, image, cfg, told); err != nil {
+	if err := e.runHook(ctx, k, HookPostDeploy, app, env, image, cfg, told, progress); err != nil {
 		// The hook failed. Its Job is left for diagnosis and its audit row is written; here it becomes
 		// a hint, because the operation it reported on is done either way. The SUMMARY is used rather
 		// than the full error: the summary carries the phase, the command and the exit code and none
@@ -560,8 +587,22 @@ type rolloutSettle func() RolloutOutcome
 //
 // IT IS LAZY. An app with neither a derived dependency nor a `post-deploy` hook still waits for
 // nothing at all: no consumer calls this, so no observation is made.
-func (e *Engine) settleOnce(ctx context.Context, k Kubernetes, app, env string) rolloutSettle {
-	return sync.OnceValue(func() RolloutOutcome { return e.awaitRollout(ctx, k, app, env) })
+//
+// THE STAGE IS REPORTED FROM INSIDE THE ONCE-FUNC, for exactly that reason (issue #480). The settle
+// is the longest thing a deploy waits for and the one an operator most wants named, but it is also
+// the one that often does not happen — and reporting it from the call site would announce a wait
+// that laziness then skipped. Emitting here means the stage appears when, and only when, the
+// observation is actually made, and once however many consumers ask.
+func (e *Engine) settleOnce(ctx context.Context, k Kubernetes, app, env string, progress deployProgress) rolloutSettle {
+	return sync.OnceValue(func() RolloutOutcome {
+		progress.started(StageSettle)
+		out := e.awaitRollout(ctx, k, app, env)
+		// A rollout that did not settle is a FAILED stage and still a successful deploy: the image is
+		// live and the release is recorded, and Burrow does not roll back by itself (ADR-0072 §6). The
+		// mark says the wait ended badly, not that the deploy did.
+		progress.finish(StageSettle, !out.Failed())
+		return out
+	})
 }
 
 // awaitRollout waits for app's rollout to settle, bounded by the operational limit ADR-0072 §5 puts

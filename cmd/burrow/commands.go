@@ -109,6 +109,9 @@ func newDeployCmd() *cobra.Command {
 					return err
 				}
 			}
+			// The deploy reports what it is doing as it does it (issue #480). It goes to STDERR, like
+			// the targeting line above it and for the same reason: stdout carries the result, and
+			// --json makes that a contract.
 			res, err := c.Deploy(ctx, app, client.DeployRequest{
 				Env:         env,
 				Image:       image,
@@ -116,6 +119,7 @@ func newDeployCmd() *cobra.Command {
 				MetricsPort: int32(metricsPort),
 				Replicas:    int32(replicas),
 				Confirm:     confirm,
+				Progress:    newDeployProgressPrinter(cmd.ErrOrStderr(), time.Now),
 			})
 			if err != nil {
 				return err

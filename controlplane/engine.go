@@ -277,6 +277,15 @@ func (e *Engine) Deploy(ctx context.Context, req DeployRequest) (DeployResult, e
 // a manual deploy that moves the app to a strictly lower semver than it is running disables
 // auto-deploy so the watcher does not fight the deliberate downgrade (§5).
 func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProvenance) (DeployResult, error) {
+	// Normalise the caller's reporter into a no-op ONCE, here, so no emit site below carries a nil
+	// check (issue #480). Nothing is emitted before recordDecision returns: everything above it —
+	// validation, the environment, the replica ceiling, and above all the guardrail decision — is a
+	// refusal the caller must receive status-coded, and a stage event is what commits a transport to
+	// having succeeded.
+	progress := deployProgress(noProgress)
+	if req.Progress != nil {
+		progress = req.Progress
+	}
 	if err := (App{Name: req.App}).Validate(); err != nil {
 		return DeployResult{}, fmt.Errorf("deploy: %w: %w", ErrInvalid, err)
 	}
@@ -389,7 +398,7 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	// serving on the old schema, and the failure is reported as the deploy's failure with the
 	// command's output. The release is recorded failed so the history shows the attempt; a failed
 	// release is not a rollback target, so the rollback handle is unchanged.
-	if err := e.runHook(ctx, k, HookPreDeploy, req.App, req.Env, req.Image, env, nil); err != nil {
+	if err := e.runHook(ctx, k, HookPreDeploy, req.App, req.Env, req.Image, env, nil, progress); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
 		e.recordExecution(ctx, auditOpDeploy, req.App, args, auditableHookError(err))
@@ -397,12 +406,15 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	}
 
 	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Readiness: readiness, Replicas: replicas, ReleaseID: rel.ID}
+	progress.started(StageApply)
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
+		progress.failed(StageApply)
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
 		e.recordExecution(ctx, auditOpDeploy, req.App, args, err)
 		return DeployResult{}, fmt.Errorf("deploy %s: applying to cluster: %w", req.App, err)
 	}
+	progress.done(StageApply)
 
 	// The cluster is updated. From here a SaveRelease failure leaves the record behind
 	// the cluster (the release stays Pending though the new image is live) — a drift
@@ -466,8 +478,8 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	// most once however many things want to know how it went (issue #407) — and the check and the
 	// hook cannot report differently on the same rollout. It stays deferred, so an app with neither
 	// feature waits for nothing at all.
-	settle := e.settleOnce(ctx, k, req.App, envName(req.Env))
-	res.Dependencies = e.runDependencyChecks(ctx, k, req.App, envName(req.Env), ns, req.Image, env, settle)
+	settle := e.settleOnce(ctx, k, req.App, envName(req.Env), progress)
+	res.Dependencies = e.runDependencyChecks(ctx, k, req.App, envName(req.Env), ns, req.Image, env, settle, progress)
 	for _, d := range res.Dependencies {
 		if d.Failed() {
 			res.Hints = append(res.Hints, DependencyFailureHint)
@@ -479,7 +491,7 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	// does nothing at all and waits for nothing, so a deploy nobody asked to be told about is
 	// unchanged. Whatever it and the rollout report comes back as hints (ADR-0072 §6 — Burrow
 	// reports, the hook decides).
-	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, k, req.App, req.Env, req.Image, rel.ID, DeployKindDeploy, env, settle)...)
+	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, k, req.App, req.Env, req.Image, rel.ID, DeployKindDeploy, env, settle, progress)...)
 	return res, nil
 }
 
@@ -2584,7 +2596,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	// rollback, the same rule §3 gives the other pre phase, because letting the older code serve
 	// against a half-stepped-back schema is the outcome the ordering exists to prevent. With no
 	// pre-rollback hook set nothing runs at all, which is the safe forward-only default.
-	if err := e.runHook(ctx, e.k8s.WithNamespace(ns), HookPreRollback, app, env, cur.Image, cfg, nil); err != nil {
+	if err := e.runHook(ctx, e.k8s.WithNamespace(ns), HookPreRollback, app, env, cur.Image, cfg, nil, noProgress); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
 		e.recordExecution(ctx, auditOpRollback, app, args, auditableHookError(err))
@@ -2626,8 +2638,12 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	//
 	// A rollback runs no dependency check, so it has only one consumer for the settle and gets its own
 	// (issue #407); the hook is still the only thing that can cause a wait here.
+	//
+	// It reports NO PROGRESS. Issue #480 is about the silence of a deploy; a rollback reaches the
+	// same two functions, and widening the reported surface to a second operation is a separate
+	// change with its own client and CLI half.
 	rk := e.k8s.WithNamespace(ns)
-	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, rk, app, env, target.Image, rel.ID, DeployKindRollback, cfg, e.settleOnce(ctx, rk, app, envName(env)))...)
+	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, rk, app, env, target.Image, rel.ID, DeployKindRollback, cfg, e.settleOnce(ctx, rk, app, envName(env), noProgress), noProgress)...)
 	return res, nil
 }
 

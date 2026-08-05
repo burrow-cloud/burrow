@@ -122,7 +122,8 @@ func bindEnv(flags *pflag.FlagSet, o *connOpts) {
 //
 // The target it returns is what a mutating verb puts in its outcome envelope, so an agent composing
 // a result can say WHERE the change happened rather than only what happened (ADR-0078 §4). It names
-// the context actually connected to, which is why it is built here and not from the config alone.
+// what this invocation actually reached, which is why it is built here and not from the config alone
+// (nameTarget).
 func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Client, string, targetname.Named, error) {
 	strict := truthy(os.Getenv("BURROW_AGENT_REQUIRE_SCOPED"))
 	if o.controlPlane != "" {
@@ -184,7 +185,42 @@ func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Clien
 	if err != nil {
 		return nil, "", targetname.Named{}, err
 	}
-	return c, envName, targetname.For(cfg, kubeContext, o.context != ""), nil
+	return c, envName, o.nameTarget(cfg, resolved, kubeContext), nil
+}
+
+// nameTarget names what this invocation acted on, for the `target` member of the outcome envelope
+// (ADR-0078 §4). It is built from the resolution and the context actually connected to, not from the
+// config alone, so an override is named as what it was overridden TO and an unselected target reads
+// as the kubeconfig it followed.
+//
+// A PINNED handle whose recorded kube context has been renamed away is the exception (issue #488).
+// The resolution proceeds there because the handle's scoped credential (ADR-0038) carries the API
+// server, the CA and the token and reaches the cluster with no context at all — so the recorded name
+// decided nothing, and naming it would put a cluster that does not exist in the envelope, which is
+// issue #473 in the machine-readable form an agent actually reads. targetname.ForHandle names the
+// environment and no context, so the stale string cannot reach any field of the JSON.
+//
+// It applies only where the scoped credential is what the connection is made with — neither
+// --kubeconfig nor --context set. With --context the person named the cluster for this one command
+// and that is what was reached; with --kubeconfig the connection is sent through the recorded
+// context, which is the very name that kubeconfig does not have, so it fails at connect and there is
+// no envelope to name anything in.
+//
+// Nothing else is said about the staleness, deliberately. The `burrow` CLI notes it on stderr, which
+// is not this binary's idiom: it prints one JSON document and, on a mutating verb, nothing else
+// (ADR-0049 §1). The envelope has no channel for it either — outcome, operation, result, code,
+// message, confirm_required, hint and target are the whole contract, and each describes the
+// OPERATION (ADR-0020). A field carrying the stale name would also be one the agent cannot act on:
+// re-pointing a handle is `burrow env use`, a config write structurally absent from this binary
+// (ADR-0049 §2a), so relaying it would be noise in front of a fix only the person can apply — and
+// their own surfaces already report it, `burrow auth status` on its contextMissing member and
+// `burrow env list` on the row. What the envelope owes the agent is where the operation landed, and
+// ForHandle's detail — the environment, reached with its own scoped credential — is exactly that.
+func (o *connOpts) nameTarget(cfg *localconfig.Config, resolved localconfig.Resolved, kubeContext string) targetname.Named {
+	if resolved.ContextStale != nil && o.kubeconfig == "" && o.context == "" {
+		return targetname.ForHandle(resolved.Name)
+	}
+	return targetname.For(cfg, kubeContext, o.context != "")
 }
 
 // cloudBaseURL is the origin the managed product answers on, and the one seam a test redirects so no

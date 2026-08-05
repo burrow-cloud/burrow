@@ -48,9 +48,18 @@ func newAuthCmd() *cobra.Command {
 			"their own kubeconfig context and installs nothing.\n\n" +
 			"A Kubernetes target records the context NAME and never a copy of your credential, so rotating\n" +
 			"your kubeconfig, re-issuing a certificate, or letting a provider CLI manage it all keep working.",
+		// A bare `burrow auth` describes its subcommands and stops. It used to run `auth status`,
+		// which loads the kubeconfig, resolves the active environment, and reports on an unwired
+		// coding agent — checks and warnings nobody asked for from a group name. The status is worth
+		// having and is unchanged; it belongs to the verb that names it.
+		//
+		// The RunE is kept, rather than dropped for Cobra's help-by-default, so that NoArgs is
+		// reached at all: Cobra returns help (and exit 0) from a group with no RunE BEFORE it
+		// validates args, which would make `auth bogus` look like it quietly worked. With one,
+		// `auth bogus` is rejected by name. `burrow-agent addon` carries a RunE for the same reason.
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAuthStatus(cmd.OutOrStdout(), authStatusOpts{})
+			return cmd.Help()
 		},
 	}
 	cmd.AddCommand(newAuthLoginCmd(), newAuthStatusCmd(), newAuthSwitchCmd())

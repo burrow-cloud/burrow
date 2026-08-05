@@ -308,6 +308,105 @@ func loadAuthConfigPath(t *testing.T) string {
 	return p
 }
 
+// TestAuthBareCommandPrintsHelpAndChecksNothing confirms a bare `burrow auth` describes its
+// subcommands and stops. It used to run `auth status`, so naming the group loaded the kubeconfig,
+// resolved the active environment, and warned about an unwired coding agent — work nobody asked for
+// from a group name, reported where nobody asked for it.
+//
+// The local config here cannot be parsed and the seams are counted, so "it printed help" is also
+// "it read nothing": every path that resolves a target loads that config first and would fail on it.
+func TestAuthBareCommandPrintsHelpAndChecksNothing(t *testing.T) {
+	f := stubAuth(t, authContexts(), false)
+	f.installClaudeConfigDir(t) // an installed, unwired agent: what status would warn about
+	if err := os.WriteFile(f.configPath, []byte("targets: [ not a config\n"), 0o600); err != nil {
+		t.Fatalf("writing the unreadable config: %v", err)
+	}
+	reads := 0
+	orig := listContexts
+	listContexts = func(string) ([]connect.Context, error) {
+		reads++
+		return authContexts(), nil
+	}
+	t.Cleanup(func() { listContexts = orig })
+
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetArgs([]string{"auth"})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("bare `burrow auth` should print help and succeed, got: %v", err)
+	}
+	got := out.String()
+	if reads != 0 {
+		t.Errorf("bare `burrow auth` read the kubeconfig %d times, want none", reads)
+	}
+	// The description, then every subcommand it groups.
+	for _, want := range []string{"auth chooses the TARGET", "login", "status", "switch", "burrow auth [command]"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("help does not contain %q:\n%s", want, got)
+		}
+	}
+	// None of what status reports, which is the whole point.
+	for _, unwanted := range []string{"No target is configured", "Commands target", "app namespace", "not restricted to burrow-agent"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("bare `burrow auth` still reports %q:\n%s", unwanted, got)
+		}
+	}
+}
+
+// TestAuthStatusStillReportsEverything is the other half: nothing about the status output is wrong,
+// it was only wrong as the default for the group. Run by its own name it still resolves where
+// commands go, flags a recorded kube context the kubeconfig no longer holds, and names an unwired
+// coding agent.
+func TestAuthStatusStillReportsEverything(t *testing.T) {
+	f := stubAuth(t, authContexts(), false)
+	f.installClaudeConfigDir(t)
+	kc := kubeconfigWithCurrent(t, "ctx-live", "ctx-live")
+	cfg := &localconfig.Config{
+		Current: "prod",
+		Environments: []localconfig.Environment{
+			{
+				Name:            "prod",
+				Context:         "do-nyc1-burrow-test-e2e",
+				AppNamespace:    "burrow-apps",
+				AgentKubeconfig: writeScopedCredential(t),
+				AgentContext:    "burrow-agent",
+			},
+		},
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetArgs([]string{"auth", "status", "--kubeconfig", kc})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("`burrow auth status`: %v", err)
+	}
+	got := out.String()
+	want := []string{
+		"No target is configured",
+		"burrow auth login",
+		`Commands target the "prod" environment`,
+		"kube context",
+		"do-nyc1-burrow-test-e2e",
+		"not in your kubeconfig",
+		"app namespace",
+		"burrow-apps",
+		"burrow env use prod --context",
+		"not restricted to burrow-agent",
+	}
+	for _, w := range want {
+		if !strings.Contains(got, w) {
+			t.Errorf("status does not contain %q:\n%s", w, got)
+		}
+	}
+}
+
 // TestAuthStatusReportsTheActiveTarget confirms status lists what is configured, marks the active
 // one, and says what each target is.
 func TestAuthStatusReportsTheActiveTarget(t *testing.T) {

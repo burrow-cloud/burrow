@@ -98,22 +98,45 @@ type Capability struct {
 // answers — the first is a limit an operator can relax with `guard set`, the second is not on the
 // binary at all — and an agent must be able to tell them apart without parsing prose.
 type GuardReport struct {
+	// Scope echoes what the answer is ABOUT when it is about something narrower than the whole
+	// cluster, and is omitted otherwise. It is what makes each entry's `source` legible: `deny` with
+	// `"source":"name"` means nothing on its own, and means "denied for the app website in prod, by a
+	// disposition set for that app" beside `{"env":"prod","name":"website"}`. Without it a reader has
+	// to remember the arguments the call was made with to interpret the answer, which an agent
+	// relaying the answer to a human generally cannot (ADR-0085 §4, ADR-0065 §7).
+	Scope      *GuardReportScope  `json:"scope,omitempty"`
 	Guardrails []client.Guardrail `json:"guardrails"`
 	// AbsentCapabilities is never omitted, even when empty: an agent reading this answer is asking
 	// what it cannot do, and a missing key reads as "unknown" where an empty list reads as "none".
 	AbsentCapabilities []Capability `json:"absent_capabilities"`
 }
 
-// NewGuardReport pairs guardrail dispositions with absent capabilities, normalizing a nil absent
-// list to an empty one so the JSON shape is stable.
-func NewGuardReport(guardrails []client.Guardrail, absent []Capability) GuardReport {
+// GuardReportScope names the environment and the one app or add-on instance a scoped report answers
+// for (ADR-0085 §1). Both members are omitted when empty, so the global listing carries no scope at
+// all rather than an object of blanks.
+type GuardReportScope struct {
+	Env  string `json:"env,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+// NewGuardReport pairs guardrail dispositions with absent capabilities for the scope they were read
+// for, normalizing a nil absent list to an empty one so the JSON shape is stable.
+//
+// A scope that names nothing produces no `scope` member: the report is then the global policy, every
+// entry's Source is empty because there is no tier to distinguish, and an object saying so would be
+// noise on the answer every agent reads first.
+func NewGuardReport(scope client.GuardScope, guardrails []client.Guardrail, absent []Capability) GuardReport {
 	if absent == nil {
 		absent = []Capability{}
 	}
 	if guardrails == nil {
 		guardrails = []client.Guardrail{}
 	}
-	return GuardReport{Guardrails: guardrails, AbsentCapabilities: absent}
+	r := GuardReport{Guardrails: guardrails, AbsentCapabilities: absent}
+	if scope.Env != "" || scope.Name != "" {
+		r.Scope = &GuardReportScope{Env: scope.Env, Name: scope.Name}
+	}
+	return r
 }
 
 // catalogue is every Burrow capability that either sits on the agent surface or is deliberately

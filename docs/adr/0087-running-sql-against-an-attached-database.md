@@ -14,6 +14,8 @@ default.
 - **burrowd run the statement**, using the credential it already minted for that app. No port
   forward, no laptop reach the database.
 - **Result is columns and rows**, so an agent can read it. CLI draw a table, `--json` give the rows.
+- **Relational add-ons only.** `cache`, `logs`, `metrics` take no statement — they already have their
+  own query verbs. Query surfaces belong to the add-on type.
 - **New guardrail `addon.sql`, denied by default** — [ADR-0065](0065-what-belongs-on-the-agent-surface.md)
   §3 tier 2. Operator open it per environment.
 - **Burrow never decide read versus write.** Telling them apart need a parser and a model of every
@@ -85,7 +87,31 @@ the whole instance, `template1`, or another app's database — the database-per-
 ([ADR-0031](0031-postgres-addon.md)) is the boundary here too, and a statement that could cross it
 would make one app's guardrail meaningless.
 
-### 2. burrowd runs it, with the credential it already minted
+**Both arguments are load-bearing, which is worth stating because one of them looks redundant.**
+`<addon>` names a **type** (`postgres`), not an instance and not a database: `addon install postgres`
+provisions one instance per environment, and `addon attach postgres web` creates a database and a
+role **per app** on it. So an instance holds as many databases as it has attached apps, and
+`addon sql postgres` on its own names a server rather than a target. Dropping `<app>` would leave
+the command to pick a database itself — which means connecting as a superuser and letting the
+statement choose, the one shape this section rules out.
+
+### 2. It applies to relational add-ons only, and says so when it does not
+
+`sql` is defined for add-ons that speak it. Today that is `postgres` alone; `cache` (ValKey), `logs`
+(VictoriaLogs) and `metrics` (VictoriaMetrics) are the other three installable types and none of them
+takes a statement.
+
+This is not a special case bolted on — it is the shape Burrow already has. `addon logs [query]` and
+`addon metrics <query>` exist, and each speaks its own store's query language. **Query surfaces are
+per-add-on-type**, and `sql` is the relational member of that set rather than a general facility that
+happens to work on one type.
+
+Asked for an add-on that is not relational, it refuses by naming the verb that add-on does take, so
+the refusal teaches the shape instead of merely reporting a mismatch. A future relational add-on
+gains `sql` by being relational; nothing about this command is Postgres-specific beyond the dialect
+the statement is written in, which is the caller's concern rather than Burrow's.
+
+### 3. burrowd runs it, with the credential it already minted
 
 burrowd generated the DSN it wrote into the app's Secret, so it needs no new secret and no new grant
 to connect. It opens a connection to the instance, runs the statement, and closes it.
@@ -98,7 +124,7 @@ database whose app is crash-looping is still queryable, which is the case `app r
 It connects as the **app's own role**, not as a superuser. What the statement may touch is what the
 application itself may touch, and nothing this command does raises that.
 
-### 3. The result is columns and rows
+### 4. The result is columns and rows
 
 The response carries the column names, the rows, the row count, and whether the result was truncated.
 The CLI renders a table for a human; `--json` returns the rows, so an agent composes on the result
@@ -108,7 +134,7 @@ A statement returning no rows returns its command tag and the number of rows aff
 returns Postgres's own message, `SQLSTATE` included, unmodified — a database error is an outcome,
 not a CLI failure, the same treatment [ADR-0048](0048-one-off-command-runner.md) §3 gives a non-zero exit code.
 
-### 4. A new `addon.sql` guardrail, denied by default
+### 5. A new `addon.sql` guardrail, denied by default
 
 Denied by default. Under [ADR-0065](0065-what-belongs-on-the-agent-surface.md) §6, which requires a
 new capability to state its tier: this is **tier 2 — denied by default** (§3), not tier 1. The verb
@@ -124,7 +150,7 @@ It is env-scopable, and the expected shape is a gradient set with
 `guard set --env <env> addon.sql …`: allow in development, where the database is disposable and the
 agent inspecting it is the whole value; confirm or deny in production.
 
-### 5. Burrow does not classify a statement as a read or a write
+### 6. Burrow does not classify a statement as a read or a write
 
 There is **one** guardrail code and it gates whether the statement runs, not what it does. Burrow
 does not parse the statement, does not branch on its leading keyword, and does not report it as a
@@ -142,7 +168,7 @@ not, because the enforcement belongs to the engine rather than to us. It is not 
 needs its own decision about what it does to the volatile-function and lock cases, and shipping it
 alongside the unrestricted form would blur which of the two the guardrail is about.
 
-### 6. Every run is bounded
+### 7. Every run is bounded
 
 A **statement timeout**, so a query cannot sit on the instance holding locks. A **row cap** on what
 is returned, with truncation reported rather than silent. A **single connection**, closed when the

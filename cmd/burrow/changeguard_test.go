@@ -66,7 +66,7 @@ type commandClass struct {
 // an entry here is a claim about what the command does to a target, and it needs to stay true.
 var commandClasses = map[string]commandClass{
 	// --- Choosing and inspecting the target itself ---
-	"auth":        {class: classReads, why: "prints the target status"},
+	"auth":        {class: classReads, why: "a group with no action of its own"},
 	"auth login":  {class: classLocal, why: "records which target is active; it installs nothing and contacts no cluster (ADR-0078 §3)"},
 	"auth status": {class: classReads, why: "lists the configured targets"},
 	"auth switch": {class: classLocal, why: "changes which recorded target is active; nothing on any target moves"},

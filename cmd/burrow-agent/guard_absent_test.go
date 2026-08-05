@@ -115,7 +115,9 @@ func TestGuardStaysReadOnly(t *testing.T) {
 	}
 	guard.Flags().VisitAll(func(f *pflag.Flag) {
 		switch f.Name {
-		case "control-plane", "token", "env", "context", "namespace", "timeout", "kubeconfig":
+		// --name narrows what is READ to one app or add-on instance (ADR-0085). It is on this list
+		// because a scope is not a verb: the command it rides has no way to write whatever it names.
+		case "control-plane", "token", "env", "name", "context", "namespace", "timeout", "kubeconfig":
 		default:
 			t.Errorf("burrow-agent `guard` grew the flag --%s; check it cannot write", f.Name)
 		}

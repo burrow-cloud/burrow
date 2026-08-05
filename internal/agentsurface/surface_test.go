@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/burrow-cloud/burrow/client"
 )
 
 // TestCatalogueEntriesAreComplete asserts every entry carries what a reader needs, because the
@@ -147,7 +149,7 @@ func TestAgentSurfaceIsTheAgentHalf(t *testing.T) {
 // and an absent verb are different answers and must be distinguishable without parsing prose
 // (ADR-0065 §7). It also pins that the absent list is always present, even when empty.
 func TestGuardReportKeepsTheTwoGroupsApart(t *testing.T) {
-	b, err := json.Marshal(NewGuardReport(nil, nil))
+	b, err := json.Marshal(NewGuardReport(client.GuardScope{}, nil, nil))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -164,14 +166,33 @@ func TestGuardReportKeepsTheTwoGroupsApart(t *testing.T) {
 		t.Errorf("empty absent list encoded as %s, want [] (a missing key reads as \"unknown\" to an agent)",
 			raw["absent_capabilities"])
 	}
+	// The global listing carries no scope: there is no tier to distinguish, so an object of blanks
+	// would be noise on the answer every agent reads first.
+	if _, ok := raw["scope"]; ok {
+		t.Errorf("unscoped guard report carries a scope: %s", b)
+	}
 
-	b, err = json.Marshal(NewGuardReport(nil, AbsentFromAgentSurface()))
+	b, err = json.Marshal(NewGuardReport(client.GuardScope{}, nil, AbsentFromAgentSurface()))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	for _, want := range []string{`"capability"`, `"what"`, `"why"`, `"who"`, `"operator_command"`, "addon remove"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("guard report JSON is missing %s: %s", want, b)
+		}
+	}
+
+	// A scoped report says what it is about, so `"source":"name"` on an entry below is readable
+	// without the reader knowing the arguments the call was made with (ADR-0085 §4).
+	scoped := NewGuardReport(client.GuardScope{Env: "prod", Name: "website"},
+		[]client.Guardrail{{Code: "app.run", Disposition: "deny", Source: "name"}}, nil)
+	b, err = json.Marshal(scoped)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"scope"`, `"env":"prod"`, `"name":"website"`, `"source":"name"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("scoped guard report JSON is missing %s: %s", want, b)
 		}
 	}
 }

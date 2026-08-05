@@ -1084,8 +1084,15 @@ something it does not name is refused with a sentence saying how far it does rea
 anything narrower than the whole cluster, which tier it came from: set for the named app or add-on
 instance, set for the environment, or inherited from the global policy or the built-in default.
 `burrow guard set [--env <name>] [--name <thing>] <code> <allow\|confirm\|deny>` persists an
-override in the control-plane database. `burrow-agent guard` can **read** the policy and cannot set
-it — structurally, the verb does not exist on that binary.
+override in the control-plane database.
+
+`burrow-agent guard [--env <name>] [--name <thing>]` can **read** the same three tiers and cannot
+set any of them — structurally, the verb does not exist on that binary. It takes `--name` so an
+agent can ask about the thing it is about to act on rather than about the cluster: without it a
+guardrail denying one app would read as allowed, which is the opposite of what an agent needs to see
+([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §7). Its `--json` answer carries a
+`source` on each entry naming the tier that supplied the disposition, and a `scope` object naming
+what the answer is about, so an agent can tell a person which of the three rules to move.
 
 Three tiers resolve, most specific first ([ADR-0085](adr/0085-a-guardrail-can-name-the-app-it-guards.md) §2):
 
@@ -1095,8 +1102,10 @@ burrow guard set --env staging app.deploy allow              # every app in stag
 burrow guard set --env prod --name website app.deploy deny   # one app
 ```
 
-`--name` requires `--env`: on its own a name cannot be told apart from an environment of the same
-name, since both are DNS labels, so it is refused rather than guessed at.
+`--name` requires `--env`, on the read as much as on the set: on its own a name cannot be told apart
+from an environment of the same name, since both are DNS labels, so it is refused rather than
+guessed at. Reading is where guessing would cost most — an answer for every app in the `website`
+environment, returned for the `website` app, is the wider policy wearing the narrower one's label.
 
 Both `guard` surfaces report a **second kind of limit** alongside the dispositions: the
 capabilities absent from the `burrow-agent` binary, each with what it is, why it is held back,
@@ -1390,6 +1399,11 @@ rides the route instead. The guardrail name tier is the case that established th
 `burrow guard set --env prod --name web app.deploy deny` is `PUT /v1/guard/name/web/app.deploy`,
 so a control plane without the tier refuses the call rather than writing the same deny for every
 app in the environment. The refusal names both versions and the upgrade, and nothing is written.
+
+The same shape carries the **read**, on both CLIs: `guard list --name` and `burrow-agent guard
+--name` are `GET /v1/guard/name/web`. A widened read is not merely cosmetic — a policy that denies
+one app, reported as the environment's, is what an agent would go on to act against — so it is
+refused with nothing shown rather than answered one tier out.
 
 **Upgrade limit, worth stating plainly:** the shipped startup gate permits a re-run of the same
 version or **exactly one minor step forward**, and refuses skips, downgrades, and cross-major

@@ -45,7 +45,8 @@ func newGuardListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			gs, err := c.Guardrails(ctx, client.GuardScope{Env: o.env, Name: name})
+			scope := client.GuardScope{Env: o.env, Name: name}
+			gs, err := c.Guardrails(ctx, scope)
 			if err != nil {
 				return err
 			}
@@ -56,7 +57,7 @@ func newGuardListCmd() *cobra.Command {
 			absent := agentsurface.AbsentFromAgentSurface()
 			out := cmd.OutOrStdout()
 			if o.json {
-				return emit(out, true, agentsurface.NewGuardReport(gs, absent), "")
+				return emit(out, true, agentsurface.NewGuardReport(scope, gs, absent), "")
 			}
 			named := name != "" || (o.env != "" && o.env != "default")
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)

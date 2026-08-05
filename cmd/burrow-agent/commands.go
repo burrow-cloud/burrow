@@ -439,29 +439,50 @@ func newMetricsQueryCmd() *cobra.Command {
 // Reading this enumerates the surface, which ADR-0065 §7 accepts outright: the CLI is open source
 // and `--help` already reveals it, so nothing is withheld and no access control guards the read.
 //
-// The command stays READ-ONLY. It has no subcommands and writes nothing: `guard set` is the
-// operator's lever, run with the admin kubeconfig, and its absence from this binary is what makes
-// every disposition above trustworthy rather than advisory.
+// --name is what lets the agent ask about the thing it is ABOUT TO ACT ON rather than about the
+// cluster. Guardrails resolve in three tiers — the named app or add-on instance, then the
+// environment, then the global policy or the built-in default (ADR-0085 §2) — so a read that could
+// only see the widest tier could report an operation as allowed while the narrowest tier denies it,
+// which is the opposite of ADR-0065 §7's requirement that the agent be able to see what it cannot
+// do. Each entry's `source` names the tier that answered, and the report echoes the scope it was
+// read for, so the agent can tell a person WHICH rule to move rather than only that something is
+// denied.
+//
+// --name is refused without an environment, and that refusal is the CONTROL PLANE's rather than this
+// binary's, for two reasons. It applies to the read as much as to the write (Engine.Guardrails
+// refuses it in the same words as SetGuardrail): the key is env.name.code, so without an environment
+// segment the lookup would have to fall back to name.code, which is byte-identical to the key an
+// ENVIRONMENT of that name produces, and an answer for "everything in the `website` environment"
+// returned for "the `website` app" would be the exact mis-report this flag exists to prevent. And
+// the environment here is not simply the --env flag: it is the environment `resolve` produced, which
+// a pinned handle can supply with no flag given at all, so a client-side check on the flag would
+// refuse calls the control plane accepts.
 func newGuardCmd() *cobra.Command {
 	o := &connOpts{}
+	var name string
 	cmd := &cobra.Command{
 		Use:   "guard",
 		Short: "List the control-plane guardrails, their dispositions, and the capabilities absent from this binary",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
-				gs, err := c.Guardrails(ctx, client.GuardScope{Env: env})
+				scope := client.GuardScope{Env: env, Name: name}
+				gs, err := c.Guardrails(ctx, scope)
 				if err != nil {
 					return nil, err
 				}
 				// Derived from the command tree this binary actually registers, so a verb dropped
 				// from the binary becomes legible here with no second edit.
-				return agentsurface.NewGuardReport(gs, absentCapabilities(cmd.Root())), nil
+				return agentsurface.NewGuardReport(scope, gs, absentCapabilities(cmd.Root())), nil
 			})
 		},
 	}
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	// One flag for both kinds of target, as on the operator CLI: the guardrail code already says
+	// which kind of thing it is, an app for the app.* codes and an add-on instance for the addon.*
+	// ones (ADR-0085 §1).
+	cmd.Flags().StringVar(&name, "name", "", "read the effective policy for one app or add-on instance (requires an environment; the guardrail decides which kind of name it is)")
 	return cmd
 }
 

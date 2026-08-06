@@ -59,12 +59,15 @@ func newGuardListCmd() *cobra.Command {
 			if o.json {
 				return emit(out, true, agentsurface.NewGuardReport(scope, gs, absent), "")
 			}
-			named := name != "" || (o.env != "" && o.env != "default")
+			if name == "" && o.env == controlplane.DefaultEnvironment {
+				writeDefaultEnvironmentPolicyNotice(out, o.env)
+			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			if named {
+			if guardSourcesReported(gs) {
 				// The SOURCE column shows which tier each effective disposition came from: set for
 				// the named app or add-on instance, set for this environment, or inherited from the
-				// global policy or the built-in default.
+				// global policy or the built-in default. It is printed only when the control plane
+				// answered with tiers to name (see guardSourcesReported).
 				fmt.Fprintln(tw, "GUARDRAIL\tDISPOSITION\tSOURCE\tDESCRIPTION")
 				for _, g := range gs {
 					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", g.Code, g.Disposition, guardSourceLabel(g.Source, name), g.Description)
@@ -116,10 +119,50 @@ func writeAbsentCapabilities(w io.Writer, absent []agentsurface.Capability) {
 	_ = tw.Flush()
 }
 
+// guardSourcesReported decides whether the listing carries a SOURCE column, by reading the ANSWER
+// rather than re-deriving the rule that produced it.
+//
+// The control plane fills a guardrail's Source in exactly when there is a tier to name, and leaves
+// it empty when there is not (ADR-0085 §4). The global listing is the second case, and so is the
+// default environment's: `prod` is the environment install created, resolution deliberately skips
+// the environment tier for it, and its policy IS the global policy rather than a layer over it
+// (ADR-0067 §2). Every row of that listing therefore comes back with an empty Source, and a column
+// filled from empty strings can only invent a tier the disposition did not come from.
+//
+// Following the response keeps the two sides from drifting: the column appears when it has
+// something true to say and is absent when it does not, without this CLI holding a second copy of
+// the control plane's resolution rule that could disagree with it.
+func guardSourcesReported(gs []client.Guardrail) bool {
+	for _, g := range gs {
+		if g.Source != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// writeDefaultEnvironmentPolicyNotice explains a listing for the default environment, which is the
+// global policy under another name (ADR-0067 §2) and is printed without a SOURCE column for that
+// reason. It is the read-side counterpart of the line `guard set --env prod` prints: an operator
+// who asked about one environment is told that the answer is not scoped to it, rather than left to
+// infer it from a missing column.
+//
+// No em-dashes: this is user-facing CLI output.
+func writeDefaultEnvironmentPolicyNotice(w io.Writer, env string) {
+	fmt.Fprintf(w, "%s is the default environment, so this is the global policy: these dispositions\n", env)
+	fmt.Fprintln(w, "apply everywhere until another environment sets its own.")
+	fmt.Fprintln(w)
+}
+
 // guardSourceLabel renders a guardrail's source for a scoped listing. A disposition set for the
 // named app or add-on instance reads as that name, so the row says what it is about; an env-specific
 // override reads as "environment"; the inherited cases name where the value comes from so it is
 // clear nothing was set for the thing that was asked about.
+//
+// An unset source is rendered as a dash, never as one of the inherited labels. A control plane
+// reports no source when there was no tier to distinguish, which is not the same statement as
+// "nothing was set for this anywhere", and a row that claimed the latter would be reporting a
+// resolution that never happened.
 func guardSourceLabel(source, name string) string {
 	switch source {
 	case "name":
@@ -128,8 +171,10 @@ func guardSourceLabel(source, name string) string {
 		return "environment"
 	case "global":
 		return "inherited (global)"
-	default:
+	case "default":
 		return "inherited (default)"
+	default:
+		return "-"
 	}
 }
 

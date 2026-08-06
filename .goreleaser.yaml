@@ -68,10 +68,19 @@ brews:
     install: |
       bin.install "burrow"
       bin.install "burrow-agent"
+    # The caveat says only what an upgrade actually asks of somebody. It used to tell people to
+    # restart their agent session so it picked up the new binary, which was true of the MCP server
+    # (a long-running process an agent connected to, removed by ADR-0062) and is not true of
+    # burrow-agent: the agent invokes it per call, so a replaced binary is in effect on the next
+    # invocation with nothing to restart. What an upgrade CAN leave stale is the wiring that
+    # `burrow agent <tool> install` writes into the agent's own configuration, which is read when a
+    # session starts — so that, and not a restart, is what this points at.
     caveats: |
-      burrow-agent (the agent's control channel) was updated. Restart any open agent
-      session so it picks up the new binary. You can resume your previous one (for
-      example, `claude --resume`). Your `burrow` CLI in the terminal is already up to date.
+      `burrow` and `burrow-agent` both take effect immediately; nothing needs restarting.
+
+      If this release changed the agent's verbs, re-run `burrow agent <tool> install` (for
+      example, `burrow agent claude install`) so the wiring in your agent's configuration
+      matches what the binary now does. It is idempotent, and it backs up any file it edits.
 
 release:
   github:

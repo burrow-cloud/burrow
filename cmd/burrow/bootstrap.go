@@ -172,7 +172,7 @@ type publicIPDetector interface {
 // newIPDetector builds the public-IP detector. It is a package var so a test can substitute a fake
 // detector without reaching the network; the real detector queries the ipify echo service.
 var newIPDetector = func() publicIPDetector {
-	return echoIPDetector{url: ipifyURL, client: http.DefaultClient}
+	return echoIPDetector{url: ipifyURL, client: outboundHTTPClient}
 }
 
 // echoIPDetector resolves the public IP by GETting an echo service that returns the caller's public

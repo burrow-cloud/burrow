@@ -1,7 +1,7 @@
 {{- define "appNamespaceRole" -}}
 # The control plane manages app workloads in an app namespace, so its Role and binding live there
 # (the ServiceAccount itself lives in the control-plane namespace). This single rule set is shared
-# VERBATIM by `burrow install` (the default app namespace) and `burrow env add` (each per-environment
+# VERBATIM by `burrow cluster install` (the default app namespace) and `burrow env add` (each per-environment
 # namespace; ADR-0035) through this one template, so the two grants can never drift: an environment's
 # namespace gets exactly the same app-namespace permissions burrowd has by default, no more.
 apiVersion: rbac.authorization.k8s.io/v1

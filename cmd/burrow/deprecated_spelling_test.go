@@ -4,10 +4,12 @@
 package main
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -62,19 +64,27 @@ func TestHelpSurfaceNamesClusterSpelling(t *testing.T) {
 }
 
 // TestNoDeprecatedSpellingInSourceStrings scans every non-test Go file in the module for a string
-// literal naming a retired spelling. Help text is only part of the problem: the report that started
-// this came from a runtime hint (`burrow version`), and the same wording lives in errors the control
-// plane returns, in join output, and in the fail-closed messages `burrow-agent` prints — none of
-// which the command tree above can reach.
+// literal naming a retired spelling, and every manifest template line for the same. Help text is
+// only part of the problem: the report that started this came from a runtime hint (`burrow
+// version`), and the same wording lives in errors the control plane returns, in join output, in the
+// fail-closed messages `burrow-agent` prints, and in the manifest templates' own comments — which
+// `--dry-run` prints verbatim. None of those is reachable from the command tree above.
 //
-// Comments are deliberately out of scope here: the alias itself has to be described somewhere, and
+// Go comments are deliberately out of scope: the alias itself has to be described somewhere, and
 // `newInstallAliasCmd`, `newUpgradeAliasCmd`, and the root command's wiring all name the old
-// spelling on purpose. What the scan CANNOT see is a message assembled from pieces
-// (`"burrow " + verb`); that is the accepted gap, and the help-surface walk above covers the
-// composed case for everything cobra renders.
+// spelling on purpose. Template comments are IN scope for the opposite reason — they are output.
+// What the scan CANNOT see is a message assembled from pieces (`"burrow " + verb`); that is the
+// accepted gap, and the help-surface walk above covers the composed case for everything cobra
+// renders.
 func TestNoDeprecatedSpellingInSourceStrings(t *testing.T) {
 	root := filepath.Join("..", "..")
 	fset := token.NewFileSet()
+	report := func(where, text string) {
+		if m := deprecatedSpelling.FindString(text); m != "" {
+			t.Errorf("%s: names the deprecated spelling %q; ADR-0060 moved it under `burrow cluster`\n\t%s",
+				where, m, strings.TrimSpace(text))
+		}
+	}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -85,28 +95,34 @@ func TestNoDeprecatedSpellingInSourceStrings(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		f, perr := parser.ParseFile(fset, path, nil, 0)
-		if perr != nil {
-			return perr
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
+		switch {
+		// Rendered into the manifests `--dry-run` prints, so every line is output.
+		case strings.HasSuffix(path, ".tmpl"):
+			b, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			for i, line := range strings.Split(string(b), "\n") {
+				report(fmt.Sprintf("%s:%d", path, i+1), line)
+			}
+		case strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go"):
+			f, perr := parser.ParseFile(fset, path, nil, 0)
+			if perr != nil {
+				return perr
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				lit, ok := n.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return true
+				}
+				s, uerr := strconv.Unquote(lit.Value)
+				if uerr != nil {
+					s = lit.Value
+				}
+				report(fset.Position(lit.Pos()).String(), s)
 				return true
-			}
-			s, uerr := strconv.Unquote(lit.Value)
-			if uerr != nil {
-				s = lit.Value
-			}
-			if m := deprecatedSpelling.FindString(s); m != "" {
-				t.Errorf("%s: string names the deprecated spelling %q; ADR-0060 moved it under `burrow cluster`\n\t%s",
-					fset.Position(lit.Pos()), m, s)
-			}
-			return true
-		})
+			})
+		}
 		return nil
 	})
 	if err != nil {

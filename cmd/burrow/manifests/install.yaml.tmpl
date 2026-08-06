@@ -1,4 +1,4 @@
-# Burrow control-plane install manifests, rendered by `burrow install` (text/template).
+# Burrow control-plane install manifests, rendered by `burrow cluster install` (text/template).
 # Bundles everything Burrow needs in the cluster: the namespace, a least-privilege
 # ServiceAccount (manage Deployments, read Pods/logs), an in-cluster Postgres for
 # control-plane state (ADR-0012), the secrets, and burrowd.
@@ -219,7 +219,7 @@ stringData:
 # non-secret behind the RBAC that gates real credentials would make joining need permissions it has
 # no reason to need.
 #
-# `burrow upgrade` reads this back and re-renders the same value rather than minting a new one, the
+# `burrow cluster upgrade` reads this back and re-renders the same value rather than minting a new one, the
 # same treatment it gives the API token and the database password. A regenerated id would make every
 # target already pointed here report a mismatch after a routine upgrade.
 apiVersion: v1
@@ -271,7 +271,7 @@ subjects:
     namespace: {{.Namespace}}
 ---
 # The scoped agent credential (ADR-0038): a ServiceAccount whose reachable capability is EXACTLY
-# "the guardrailed control plane" and nothing else. `burrow install` mints a long-lived token for
+# "the guardrailed control plane" and nothing else. `burrow cluster install` mints a long-lived token for
 # it (the Secret below) and writes a self-contained, burrowd-only kubeconfig under ~/.burrow/; the
 # agent — and any `kubectl` it shells out to — is confined to reaching burrowd by this Role. The
 # human keeps their own admin kubeconfig for privileged and governance work. All users' agents
@@ -319,7 +319,7 @@ subjects:
     namespace: {{.Namespace}}
 ---
 # A long-lived ServiceAccount token for the agent (ADR-0038 §3). The token controller populates
-# .data.token and .data["ca.crt"] once this Secret exists; `burrow install` polls for that and mints
+# .data.token and .data["ca.crt"] once this Secret exists; `burrow cluster install` polls for that and mints
 # the scoped kubeconfig from it. A long-lived token is acceptable because the RBAC narrowness above
 # is the real control and the token is revocable by deleting this Secret or the ServiceAccount; a
 # bound short-lived token (TokenRequest) or a client certificate are noted future tightenings.

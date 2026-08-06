@@ -10,7 +10,7 @@
 # existing "{{.IssuerName}}" Let's Encrypt ClusterIssuer. No node or containerd editing. The internally
 # pushed image and the publicly pulled reference share the same repository path and digest, so they
 # resolve to the same stored image. `burrow cluster registry install` applies these resources as a
-# standalone, opt-in step (ADR-0054): `burrow install` provisions only the control plane.
+# standalone, opt-in step (ADR-0054): `burrow cluster install` provisions only the control plane.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

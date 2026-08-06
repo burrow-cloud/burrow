@@ -208,7 +208,13 @@ func TestSecretEmitsKeysOnly(t *testing.T) {
 
 // TestEnvironmentsReadsLocalConfig confirms the environments verb reports the local handles with no
 // cluster contact, reading them from $BURROW_CONFIG.
+//
+// $KUBECONFIG is pointed at a fixture holding the handles' contexts, because resolving a pinned
+// handle checks its context against the ambient kubeconfig: without this the test read whatever
+// kubeconfig the developer happened to have and failed on any machine that had one, while passing
+// on CI, which has none (issue #486).
 func TestEnvironmentsReadsLocalConfig(t *testing.T) {
+	t.Setenv("KUBECONFIG", kubeconfigWithCurrent(t, "prod-ctx", "prod-ctx", "staging-ctx"))
 	writeConfig(t, `apiVersion: burrow.dev/v1
 kind: Config
 current: prod

@@ -20,9 +20,10 @@ import (
 // `list` is read-only; `set` is the operator's lever — `burrow-agent` deliberately carries no
 // `guard set`, so an agent cannot change its own guardrails.
 //
-// `list` also reports the capabilities absent from the agent binary (ADR-0065 §7), which is the
-// other half of the boundary: a disposition is a limit this CLI can move, an absent capability is
-// one it cannot, and an operator asking "what can my agent do?" needs both.
+// `list --json` also carries the capabilities absent from the agent binary (ADR-0065 §7), which
+// burrow-agent consumes. They are NOT in the human table: a disposition is policy an operator set
+// and can change here, an absent capability is the shape of another binary, and printing the two
+// together as one listing said they were halves of one setting (issue #445).
 func newGuardCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "guard",
@@ -37,7 +38,7 @@ func newGuardListCmd() *cobra.Command {
 	var name string
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List the guardrails and their dispositions, and the capabilities absent from burrow-agent",
+		Short: "List the guardrails and their dispositions",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -53,7 +54,9 @@ func newGuardListCmd() *cobra.Command {
 			// The capabilities the agent binary does not carry, from the same catalogue
 			// burrow-agent reports (ADR-0065 §7). This CLI is a different binary and cannot walk
 			// the agent's command tree, so it reports the catalogue's declaration — which the
-			// surface-guard test pins to that tree, so the two answers agree.
+			// surface-guard test pins to that tree, so the two answers agree. It rides in the
+			// --json report, which burrow-agent consumes; the human table below is dispositions
+			// only (issue #445).
 			absent := agentsurface.AbsentFromAgentSurface()
 			out := cmd.OutOrStdout()
 			if o.json {
@@ -81,7 +84,7 @@ func newGuardListCmd() *cobra.Command {
 			if err := tw.Flush(); err != nil {
 				return err
 			}
-			writeAbsentCapabilities(out, absent)
+			writeAbsentCapabilitiesPointer(out, absent)
 			return nil
 		},
 	}
@@ -91,32 +94,26 @@ func newGuardListCmd() *cobra.Command {
 	return cmd
 }
 
-// writeAbsentCapabilities prints the capabilities the `burrow-agent` binary does not carry, under
-// the guardrail table ([ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) §7).
+// writeAbsentCapabilitiesPointer prints the one line that says the absent-capability list exists and
+// where to read it ([ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) §7).
 //
-// It is the operator's side of the same answer the agent gets. Two limits govern what an agent can
-// do and they are not the same: a guardrail disposition above, which this CLI can change with
-// `guard set`, and a capability that is simply not compiled into the agent binary, which it
-// cannot. Showing them together is how an operator sees the whole boundary in one place, and the
-// RUN INSTEAD column is what a human does when the agent relays "that is not something I can do".
+// It used to be a second table under the dispositions, and that was the wrong thing for this command
+// to print (issue #445). A guardrail disposition is POLICY: an operator decided it and `guard set`
+// can change it. An absent capability is SHAPE: the verb is not compiled into `burrow-agent` at all,
+// and no disposition will produce it. Printed side by side they read as two halves of one setting,
+// and the half that is not what the command is for was the larger one — with a RUN INSTEAD column
+// addressed to somebody who was not being refused anything.
 //
-// The human table stays two columns so it fits a terminal; the per-capability detail the agent
-// reads (what it is, why it is held back, who can do it) is in the --json report. No em-dashes:
-// this is user-facing CLI output.
-func writeAbsentCapabilities(w io.Writer, absent []agentsurface.Capability) {
+// Nothing is lost by not printing it. The agent receives the list over the API at runtime, which is
+// what makes it relay a real refusal, and `--json` still carries every capability in full.
+//
+// No em-dashes: this is user-facing CLI output.
+func writeAbsentCapabilitiesPointer(w io.Writer, absent []agentsurface.Capability) {
 	if len(absent) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "\nAbsent from burrow-agent: %d capabilities the agent binary cannot express.\n", len(absent))
-	fmt.Fprintln(w, "It reports each one to the agent with what it is and who can run it, so the agent")
-	fmt.Fprintln(w, "relays a refusal instead of an unknown command. Use --json for the full detail.")
-	fmt.Fprintln(w)
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CAPABILITY\tRUN INSTEAD")
-	for _, c := range absent {
-		fmt.Fprintf(tw, "%s\t%s\n", c.Path, c.Command)
-	}
-	_ = tw.Flush()
+	fmt.Fprintf(w, "\n%d capabilities are absent from burrow-agent entirely, which no disposition changes.\n", len(absent))
+	fmt.Fprintln(w, "Run `burrow guard list --json` to see them and what to run instead.")
 }
 
 // guardSourcesReported decides whether the listing carries a SOURCE column, by reading the ANSWER

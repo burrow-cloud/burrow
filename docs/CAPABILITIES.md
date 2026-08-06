@@ -416,7 +416,7 @@ arguments; both stores are sourced at deploy time.
 
 | | `burrow app config` | `burrow app secret` |
 | --- | --- | --- |
-| Commands | `set <app> KEY=VALUE`, `unset`, `list` | `set <app> KEY=VALUE`, `unset`, `list` |
+| Commands | `set <app> KEY=VALUE`, `unset`, `list` | `set <app> KEY --stdin` (or `KEY=VALUE`), `unset`, `list` |
 | Stored in | the control-plane Postgres (`app_env`) | a Kubernetes Secret, `burrow-app-<app>-secrets`, in the app's namespace |
 | Reaches the Pod as | individual `env` entries inlined in the Pod template | `envFrom` a `secretRef` on that one Secret (`optional: true`) |
 | `list` shows | keys **and values** | **keys only** |
@@ -1334,8 +1334,8 @@ The reversibility tier ships too: `app.delete` and `dns.delete` are `deny` by de
 `burrow-agent delete` and `burrow-agent domain remove` exist, are refused, and say what would
 change the answer (see [Guardrails](#guardrails)).
 
-**An absent capability is legible rather than a dead end** (ADR-0065 §7). `burrow guard list` and
-`burrow-agent guard` both report the absent capabilities alongside the dispositions: what each one
+**An absent capability is legible rather than a dead end** (ADR-0065 §7). `burrow guard list --json`
+and `burrow-agent guard` both report the absent capabilities alongside the dispositions: what each one
 is, why it is not on the agent surface, who can perform it ("the burrow operator CLI, run by a
 human with the cluster's admin kubeconfig"), and the exact command that person runs. So an agent
 asked to remove an add-on relays "that is not something I can do, and here is who can" instead of

@@ -175,11 +175,16 @@ func newRegistryCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// A list of bare hosts is the same believable answer whichever cluster it came from,
+			// which is how a credential on one cluster gets read as evidence about another
+			// (issue #443). So the listing names the cluster it read, the same way `login` and
+			// `logout` name the one they wrote to.
 			out := cmd.OutOrStdout()
 			if len(hosts) == 0 {
-				fmt.Fprintln(out, "no image registries configured")
+				fmt.Fprintln(out, o.targetClauseWhenDecided("no image registries configured"))
 				return nil
 			}
+			fmt.Fprintln(out, o.targetClauseWhenDecided("image registries configured for your apps")+":")
 			for _, h := range hosts {
 				fmt.Fprintln(out, h)
 			}

@@ -244,39 +244,54 @@ func addObjectStorageProvider(cmd *cobra.Command, o *commonOpts, opts objectStor
 	if err != nil {
 		return err
 	}
-	return o.emitChange(cmd.OutOrStdout(), p, objectStorageSummary(p))
+	out := cmd.OutOrStdout()
+	return o.emitChange(out, p, objectStorageSummary(out, p))
 }
 
 // objectStorageSummary is what a human is told after a registration. It reports the bucket Burrow
 // RECORDED (the only one it will ever write to), that the probe object was written and deleted, and
-// the lifecycle verdict — including, and especially, that the verdict is unknown, since ADR-0063 §3
-// forbids reporting an unverifiable invariant as verified.
-func objectStorageSummary(p client.Provider) string {
+// the lifecycle verdict.
+//
+// Every line is one status, and a line is TICKED only when it reports something Burrow verified
+// (issue #465). Six flowing sentences read the same whether they were a result or standing advice,
+// so a reader scanning for "did it work" had to read all of them. Two lines deliberately do not
+// tick:
+//
+//   - lifecycle UNKNOWN. ADR-0063 §3 forbids reporting an unverifiable invariant as verified, and a
+//     tick beside UNKNOWN would do exactly that.
+//   - the closing advice about scoping the credential. It is not a result, and ticking it would say
+//     it had been checked.
+//
+// The marks go through okMark/note/warning (style.go), so they colour on a terminal and degrade to
+// plain labels in piped output and logs. `created this bucket` stays its own line: a bucket Burrow
+// created is a different fact from one it verified, and a reader should be able to tell.
+func objectStorageSummary(w io.Writer, p client.Provider) string {
+	ok := okMark(w) + " "
 	var b strings.Builder
-	fmt.Fprintf(&b, "registered provider %q (type %s, capabilities %s)\n",
-		p.Name, p.Type, strings.Join(p.Capabilities, ", "))
+	fmt.Fprintf(&b, "%sregistered provider %q (type %s, capabilities %s)\n",
+		ok, p.Name, p.Type, strings.Join(p.Capabilities, ", "))
 	if p.ObjectStore != nil {
-		fmt.Fprintf(&b, "bucket %s at %s\n", p.ObjectStore.Bucket, p.ObjectStore.Endpoint)
-		fmt.Fprintf(&b, "credential stored in burrow-credentials under keys %q and %q\n",
-			p.ObjectStore.AccessKeyIDKey, p.ObjectStore.SecretAccessKeyKey)
+		fmt.Fprintf(&b, "%sbucket: %s at %s\n", ok, p.ObjectStore.Bucket, p.ObjectStore.Endpoint)
+		fmt.Fprintf(&b, "%scredential: stored in burrow-credentials under keys %q and %q\n",
+			ok, p.ObjectStore.AccessKeyIDKey, p.ObjectStore.SecretAccessKeyKey)
 	}
 	if p.Verification == nil {
 		return strings.TrimRight(b.String(), "\n")
 	}
 	if p.Verification.BucketCreated {
-		fmt.Fprintf(&b, "created this bucket; Burrow writes only to the bucket it recorded\n")
+		fmt.Fprintf(&b, "%sbucket created: Burrow writes only to the bucket it recorded\n", ok)
 	}
 	if p.Verification.ProbeObject {
-		fmt.Fprintf(&b, "verified: a probe object was written and deleted\n")
+		fmt.Fprintf(&b, "%sprobe: an object was written and deleted\n", ok)
 	}
 	switch p.Verification.Lifecycle.Status {
 	case "unknown":
-		fmt.Fprintf(&b, "lifecycle: UNKNOWN — %s\n", p.Verification.Lifecycle.Detail)
+		fmt.Fprintf(&b, "%slifecycle UNKNOWN. %s\n", note(w), p.Verification.Lifecycle.Detail)
 	default:
-		fmt.Fprintf(&b, "lifecycle: %s — %s\n", p.Verification.Lifecycle.Status, p.Verification.Lifecycle.Detail)
+		fmt.Fprintf(&b, "%slifecycle %s: %s\n", ok, p.Verification.Lifecycle.Status, p.Verification.Lifecycle.Detail)
 	}
-	b.WriteString("scope this credential to this one bucket at the vendor where it permits it: " +
-		"it is the most consequential key in burrow-credentials")
+	fmt.Fprintf(&b, "%sScope this credential to this one bucket at the vendor where it permits it. "+
+		"It is the most consequential key in burrow-credentials.", warning(w))
 	return b.String()
 }
 
@@ -317,12 +332,15 @@ func newProviderListCmd() *cobra.Command {
 	return cmd
 }
 
-// readToken reads a secret token. When in is an interactive terminal it prints prompt and reads
-// the token without echoing it (so it never shows on screen or in shell history); when in is
-// piped or redirected (a script, `echo "$TOKEN" | …`) it reads the token from there instead.
-// Surrounding whitespace is trimmed.
+// readToken reads a secret value: a registry token, an S3 secret access key, a secret env value.
+// When in is an interactive terminal it prints prompt and reads the value without echoing it (so it
+// never shows on screen or in shell history); when in is piped or redirected (a script,
+// `echo "$TOKEN" | …`) it reads the value from there instead. Surrounding whitespace is trimmed.
+//
+// The terminal test goes through the stdinIsTerminal seam (registry.go) so a test can force the
+// non-interactive path without a TTY, and so the whole CLI decides "is this a terminal" once.
 func readToken(in io.Reader, out io.Writer, prompt string) (string, error) {
-	if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+	if f, ok := in.(*os.File); ok && stdinIsTerminal(in) {
 		fmt.Fprint(out, prompt)
 		b, err := term.ReadPassword(int(f.Fd()))
 		fmt.Fprintln(out) // terminate the line the hidden input was typed on

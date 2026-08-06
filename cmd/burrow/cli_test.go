@@ -28,6 +28,27 @@ func runCLI(t *testing.T, h http.HandlerFunc, args ...string) (stdout, stderr st
 	return out.String(), errb.String(), err
 }
 
+// runCLIStdin is runCLI with standard input supplied, for the commands that read a secret value
+// from it. It forces the stdinIsTerminal seam off so the piped path is taken deterministically,
+// with no dependence on whether the test process happens to have a TTY.
+func runCLIStdin(t *testing.T, stdin string, h http.HandlerFunc, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return false }
+	t.Cleanup(func() { stdinIsTerminal = origTerm })
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	var out, errb bytes.Buffer
+	root := newRootCmd()
+	root.SetArgs(append(append([]string{}, args...), "--control-plane", srv.URL, "--token", "x"))
+	root.SetOut(&out)
+	root.SetErr(&errb)
+	root.SetIn(strings.NewReader(stdin))
+	err = root.ExecuteContext(context.Background())
+	return out.String(), errb.String(), err
+}
+
 func TestDeploy(t *testing.T) {
 	var gotMethod, gotPath string
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {

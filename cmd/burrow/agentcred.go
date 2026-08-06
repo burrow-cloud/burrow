@@ -28,7 +28,7 @@ import (
 // additive rather than a rewrite.
 const defaultPrincipal = "shared-agent"
 
-// agentServiceAccountName is the name of the shared scoped ServiceAccount `burrow install` mints
+// agentServiceAccountName is the name of the shared scoped ServiceAccount `burrow cluster install` mints
 // for the agent (ADR-0038). It is also the Role/RoleBinding name and is threaded into the install
 // manifests as {{.AgentServiceAccount}}.
 const agentServiceAccountName = "burrow-agent"
@@ -184,7 +184,7 @@ func readAgentToken(ctx context.Context, cs kubernetes.Interface, namespace, sec
 		}
 		if apierrors.IsNotFound(getErr) {
 			return "", nil, fmt.Errorf("%w: secret %s/%s was not found; an operator can mint it by running "+
-				"`burrow upgrade` on this cluster (ADR-0038)", errAgentCredentialAbsent, namespace, secret)
+				"`burrow cluster upgrade` on this cluster (ADR-0038)", errAgentCredentialAbsent, namespace, secret)
 		}
 		return "", nil, fmt.Errorf("reading the agent token secret %s/%s: %w", namespace, secret, getErr)
 	}

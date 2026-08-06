@@ -150,7 +150,7 @@ func TestPrivilegedCommandNamesWhatItReached(t *testing.T) {
 }
 
 // saveHandle records one environment handle for a kube context and pins it when asked, the way
-// `burrow install` and `burrow env list --discover` leave a machine that has never run
+// `burrow cluster install` and `burrow env list --discover` leave a machine that has never run
 // `burrow auth login`. It writes to the $BURROW_CONFIG tempConfig set.
 func saveHandle(t *testing.T, name, kubeContext string, pin bool) {
 	t.Helper()

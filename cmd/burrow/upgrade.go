@@ -25,7 +25,7 @@ const dbSecretName = "burrowd-db"
 // cmdUpgrade rolls the in-cluster control plane forward in place. It reuses the existing
 // install's secrets and app namespace and re-renders the manifests with a new burrowd image,
 // so only the burrowd Deployment rolls — Postgres and its data are untouched. The image
-// defaults to this CLI's pinned release, so `burrow upgrade` after a CLI update is the whole
+// defaults to this CLI's pinned release, so `burrow cluster upgrade` after a CLI update is the whole
 // control-plane upgrade. Migrations ride burrowd's startup behind the single-minor-step gate
 // (ADR-0013). See ADR-0016.
 // newUpgradeAliasCmd is the deprecated top-level `burrow upgrade` (ADR-0060): upgrade now lives
@@ -336,8 +336,8 @@ func secretValue(ctx context.Context, cs kubernetes.Interface, namespace, name, 
 }
 
 // alreadyInstalled reports whether a Burrow control plane is already present in the namespace,
-// detected by its API-token Secret. `burrow install` refuses to run over an existing install
-// (re-minting secrets would break the running control plane); use `burrow upgrade` instead.
+// detected by its API-token Secret. `burrow cluster install` refuses to run over an existing install
+// (re-minting secrets would break the running control plane); use `burrow cluster upgrade` instead.
 func alreadyInstalled(ctx context.Context, cs kubernetes.Interface, namespace string) (bool, error) {
 	_, err := cs.CoreV1().Secrets(namespace).Get(ctx, connect.DefaultTokenSecret, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {

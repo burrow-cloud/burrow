@@ -120,7 +120,7 @@ func TestGuardSetNameRefusedByOlderControlPlane(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": "this control plane (v0.14.0-rc.2) does not recognize " + r.Method + " " + r.URL.Path +
-				"; if your burrow CLI (v0.14.0-rc.5) is newer, ask an operator to run `burrow upgrade` to update the control plane",
+				"; if your burrow CLI (v0.14.0-rc.5) is newer, ask an operator to run `burrow cluster upgrade` to update the control plane",
 			"code":           "unknown_operation",
 			"server_version": "v0.14.0-rc.2",
 		})
@@ -134,7 +134,7 @@ func TestGuardSetNameRefusedByOlderControlPlane(t *testing.T) {
 	if out != "" {
 		t.Errorf("a refused set printed a result line: %q", out)
 	}
-	for _, want := range []string{"nothing was written", "v0.14.0-rc.2", "v0.14.0-rc.5", "burrow upgrade", "scope_unsupported"} {
+	for _, want := range []string{"nothing was written", "v0.14.0-rc.2", "v0.14.0-rc.5", "burrow cluster upgrade", "scope_unsupported"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal is missing %q:\n%v", want, err)
 		}

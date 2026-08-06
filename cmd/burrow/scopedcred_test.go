@@ -203,7 +203,7 @@ func saveStaleHandle(t *testing.T, agentKubeconfig string) {
 	}
 }
 
-// writeScopedCredential writes a scoped kubeconfig of the shape `burrow install` mints (ADR-0038):
+// writeScopedCredential writes a scoped kubeconfig of the shape `burrow cluster install` mints (ADR-0038):
 // self-contained, one context, everything needed to reach burrowd with no ambient kubeconfig. It is
 // what makes a renamed kube context harmless, so it has to be a real loadable one here.
 func writeScopedCredential(t *testing.T) string {

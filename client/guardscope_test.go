@@ -45,7 +45,7 @@ func oldControlPlane(t *testing.T, seen *[]string) *httptest.Server {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": "this control plane (v0.14.0-rc.2) does not recognize " + r.Method + " " + r.URL.Path +
-				"; if your burrow CLI (v0.14.0-rc.5) is newer, ask an operator to run `burrow upgrade` to update the control plane",
+				"; if your burrow CLI (v0.14.0-rc.5) is newer, ask an operator to run `burrow cluster upgrade` to update the control plane",
 			"code":           "unknown_operation",
 			"server_version": "v0.14.0-rc.2",
 		})
@@ -77,7 +77,7 @@ func TestGuardNameScopeRefusedByOlderControlPlane(t *testing.T) {
 	if api.ServerVersion != "v0.14.0-rc.2" {
 		t.Errorf("ServerVersion = %q, want the version the control plane reported", api.ServerVersion)
 	}
-	for _, want := range []string{"nothing was written", "app.rollback", `"prod"`, "v0.14.0-rc.2", "v0.14.0-rc.5", "burrow upgrade"} {
+	for _, want := range []string{"nothing was written", "app.rollback", `"prod"`, "v0.14.0-rc.2", "v0.14.0-rc.5", "burrow cluster upgrade"} {
 		if !strings.Contains(api.Message, want) {
 			t.Errorf("refusal is missing %q:\n%s", want, api.Message)
 		}
@@ -106,7 +106,7 @@ func TestGuardNameScopeListRefusedByOlderControlPlane(t *testing.T) {
 	if !errors.As(err, &api) || api.Code != client.CodeScopeUnsupported {
 		t.Fatalf("error = %v, want a %s refusal", err, client.CodeScopeUnsupported)
 	}
-	if !strings.Contains(api.Message, "burrow upgrade") {
+	if !strings.Contains(api.Message, "burrow cluster upgrade") {
 		t.Errorf("refusal does not name the upgrade:\n%s", api.Message)
 	}
 }
@@ -126,7 +126,7 @@ func TestGuardNameScopeRefusedByPreHandshakeControlPlane(t *testing.T) {
 	if !errors.As(err, &api) || api.Code != client.CodeScopeUnsupported {
 		t.Fatalf("error = %v, want a %s refusal", err, client.CodeScopeUnsupported)
 	}
-	for _, want := range []string{"nothing was written", "burrow upgrade"} {
+	for _, want := range []string{"nothing was written", "burrow cluster upgrade"} {
 		if !strings.Contains(api.Message, want) {
 			t.Errorf("refusal is missing %q:\n%s", want, api.Message)
 		}

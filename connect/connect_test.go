@@ -177,7 +177,7 @@ func notInstalledServer() *httptest.Server {
 
 // TestClientNotInstalled confirms that when the token Secret is absent (burrowd not installed),
 // Client returns an actionable message that names the targeted context and points at
-// `burrow install`, with no raw "reading token secret ... not found" Kubernetes error.
+// `burrow cluster install`, with no raw "reading token secret ... not found" Kubernetes error.
 func TestClientNotInstalled(t *testing.T) {
 	srv := notInstalledServer()
 	defer srv.Close()
@@ -190,7 +190,7 @@ func TestClientNotInstalled(t *testing.T) {
 		t.Fatal("Client should fail when burrowd is not installed")
 	}
 	msg := err.Error()
-	for _, want := range []string{`burrow is not installed in context "ctx-one"`, `namespace "burrow"`, `run "burrow install"`} {
+	for _, want := range []string{`burrow is not installed in context "ctx-one"`, `namespace "burrow"`, `run "burrow cluster install"`} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error = %q, want substring %q", msg, want)
 		}

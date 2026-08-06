@@ -8,14 +8,14 @@
 ## Shipped: v0.1 — the thin vertical slice ✅
 
 An agent operates a real application on the user's own Kubernetes cluster, end to end,
-safely — proven against the reference DigitalOcean cluster. `burrow install` lands the
+safely — proven against the reference DigitalOcean cluster. `burrow cluster install` lands the
 control plane and an in-cluster Postgres; the CLI and MCP server reach it through the
 Kubernetes API-server proxy using the developer's kubeconfig
 ([ADR-0014](adr/0014-self-host-connectivity-via-kubeconfig.md),
 [ADR-0015](adr/0015-token-header-only-x-burrow-token.md)); an agent connected over MCP can
 `deploy` by image reference, then `status`, `logs`, `rollback`, and `scale`, every mutating
 call passing through the control-plane guardrails
-([ADR-0006](adr/0006-guardrails-in-the-control-plane.md)). `burrow upgrade` rolls the
+([ADR-0006](adr/0006-guardrails-in-the-control-plane.md)). `burrow cluster upgrade` rolls the
 control plane forward in place ([ADR-0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md)).
 The detail lives in git history, the now-green tests (unit + k3d integration + the capstone
 e2e), and the ADRs.
@@ -139,7 +139,7 @@ environment, with prod gated while staging stays permissive.
   over named local handles in `~/.burrow/config` that **follows the kube context by default**
   (`use`/`follow`/`list`/`rename`/`scan`); retires `burrow context`.
 - **CLI onboarding and organization** ([ADR-0037](adr/0037-cli-onboarding-and-organization.md)):
-  intent-based `--help` groups, an explicit positional `burrow install <context>` that names and records
+  intent-based `--help` groups, an explicit positional `burrow cluster install <context>` that names and records
   the environment, a first-run banner, shell completion, and `system` folded into `cluster`. **`burrow`
   no longer needs `kubectl`** (client-go server-side apply).
 - **Surface cleanups**: the `app env`→`app config` rename, a cleaner `burrow version`, and connection
@@ -210,7 +210,7 @@ the MCP server, and burrowd get along across versions, and prepares the OSS/ente
   sends its release version in `X-Burrow-Client-Version`; burrowd is the compatibility anchor: it serves
   any client within one minor and never hard-blocks on a version difference alone, but turns genuine skew
   into an actionable error. A client too old is told to `brew upgrade burrow-cloud/tap/burrow`; a newer
-  client calling a route this control plane lacks is told to ask an operator to run `burrow upgrade`,
+  client calling a route this control plane lacks is told to ask an operator to run `burrow cluster upgrade`,
   instead of an opaque 404. The acting client version is recorded in the audit log next to the
   principal (migration 00012).
 - **Control-plane transport seam** ([ADR-0045](adr/0045-oss-enterprise-boundary.md)) — the CLI's

@@ -79,7 +79,7 @@ type Environment struct {
 	ControlPlaneNamespace string `yaml:"controlPlaneNamespace,omitempty"`
 	AppNamespace          string `yaml:"appNamespace,omitempty"`
 	Env                   string `yaml:"env,omitempty"`
-	// AgentKubeconfig is the path to the self-contained, burrowd-only kubeconfig `burrow install`
+	// AgentKubeconfig is the path to the self-contained, burrowd-only kubeconfig `burrow cluster install`
 	// mints for the scoped agent credential (ADR-0038), written under ~/.burrow/ (never
 	// ~/.kube/config). AgentContext names the single context inside it. Both are empty for handles
 	// created before the scoped credential existed or joined out of band; consumers fall back to

@@ -601,7 +601,7 @@ func TestRenderManifestsBurrowAppsNamespace(t *testing.T) {
 	}
 }
 
-// TestRenderManifestsWithoutRegistry asserts `burrow install` provisions ONLY the control plane
+// TestRenderManifestsWithoutRegistry asserts `burrow cluster install` provisions ONLY the control plane
 // (ADR-0054): the optional in-cluster registry (ADR-0053 §5) is never part of the install manifests —
 // no registry resources and no default-push-target env — so a plain install costs no extra
 // PersistentVolume or memory. The registry is a standalone `burrow cluster registry install`.
@@ -721,7 +721,7 @@ func TestInstallRequiresImageWhenNoDefault(t *testing.T) {
 	}
 }
 
-// TestDeploymentRolledOut pins the readiness predicate waitForDeployment uses so `burrow upgrade`
+// TestDeploymentRolledOut pins the readiness predicate waitForDeployment uses so `burrow cluster upgrade`
 // (a rolling update) only reports the control plane ready once the NEW revision is fully rolled
 // out. The regression it guards: Status.ReadyReplicas counts ready pods across BOTH the old and
 // new ReplicaSets, so the old pod satisfied it while the new pod was still ContainerCreating and
@@ -928,7 +928,7 @@ func TestObjectStorageCredentialWidensNoRBAC(t *testing.T) {
 
 // TestRenderManifestsRecordsTheInstallID confirms an install writes its own id where both halves of
 // the check can reach it (ADR-0084 §5): a ConfigMap in the control-plane namespace, which is what a
-// joining person and `burrow upgrade` read, and burrowd's own environment, which is what the request
+// joining person and `burrow cluster upgrade` read, and burrowd's own environment, which is what the request
 // check compares against. burrowd reads the value FROM the ConfigMap rather than having it restated,
 // so the recorded id and the enforced id cannot drift apart.
 func TestRenderManifestsRecordsTheInstallID(t *testing.T) {

@@ -24,7 +24,7 @@ import (
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
-// existingInstall builds a fake cluster that looks like a completed `burrow install` in
+// existingInstall builds a fake cluster that looks like a completed `burrow cluster install` in
 // namespace ns, deploying apps into appNS. Extra container env vars (e.g. the add-on
 // namespace) can be appended to model installs from different eras.
 func existingInstall(ns, appNS string, extraEnv ...corev1.EnvVar) *fake.Clientset {

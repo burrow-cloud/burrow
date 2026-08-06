@@ -1103,7 +1103,7 @@ func humanBackupSchedule(schedule string) string {
 // listInstallableAddons prints the static list of installable add-ons and, when a cluster is
 // reachable, which are already installed. It never fails the listing when Burrow is not installed or
 // unreachable: the installable set is compiled in, so it stays useful offline (the INSTALLED column
-// blanks to "-" and a hint points at `burrow install`).
+// blanks to "-" and a hint points at `burrow cluster install`).
 func listInstallableAddons(ctx context.Context, o *commonOpts, out, stderr io.Writer) error {
 	installed := map[string]bool{}
 	connected := false
@@ -1133,7 +1133,7 @@ func listInstallableAddons(ctx context.Context, o *commonOpts, out, stderr io.Wr
 	_ = tw.Flush()
 	fmt.Fprintln(out)
 	if !connected {
-		fmt.Fprintln(out, "Connect to a cluster to see which are installed (run `burrow install <context>` first).")
+		fmt.Fprintln(out, "Connect to a cluster to see which are installed (run `burrow cluster install <context>` first).")
 	}
 	fmt.Fprintln(out, "Install one with `burrow addon install <name>`.")
 	return nil

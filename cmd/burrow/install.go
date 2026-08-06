@@ -175,7 +175,7 @@ type installArgs struct {
 	// scoped burrow-agent credential via the manifests), skipping the laptop-oriented local
 	// bookkeeping: it records no ~/.burrow environment handle and prints no "connect your agent"
 	// guidance. `burrow cluster bootstrap` sets it when it deploys burrowd on the VPS (ADR-0044); the
-	// bootstrap prints the join-token block instead. Normal `burrow install` leaves it false.
+	// bootstrap prints the join-token block instead. Normal `burrow cluster install` leaves it false.
 	clusterOnly bool
 }
 

@@ -9,7 +9,7 @@ only when the control plane is your agent's **only** path to the cluster
 
 ## The scoped agent credential is the boundary
 
-At `burrow install` Burrow mints a **scoped, burrowd-only credential** for the agent
+At `burrow cluster install` Burrow mints a **scoped, burrowd-only credential** for the agent
 ([ADR-0038](adr/0038-scoped-agent-credential.md)): a `burrow-agent` ServiceAccount with a narrow
 Role granting only what the client needs to reach burrowd (proxy access to the burrowd Service and
 `get` on the API-token Secret) and nothing else — no pods, no other secrets, no other namespaces,
@@ -52,10 +52,10 @@ environment isolation, not assume the scope alone is a per-operation boundary.
 
 ### Joining an already-installed cluster (multi-user)
 
-A second person on an already-installed cluster does not re-install: `burrow install <context>`
+A second person on an already-installed cluster does not re-install: `burrow cluster install <context>`
 detects the existing control plane and performs a **local join** — it reads the existing
 `burrow-agent` credential and writes only their own `~/.burrow` scoped kubeconfig, making no cluster
-changes. `burrow env list --discover` and `burrow upgrade` do the same backfill for handles and for clusters
+changes. `burrow env list --discover` and `burrow cluster upgrade` do the same backfill for handles and for clusters
 installed before the scoped credential existed.
 
 The join reads the `burrow-agent-token` Secret in the control-plane namespace, so a joining user
@@ -106,7 +106,7 @@ re-grants the agent full cluster access. Two behaviors matter:
 
 - A handle that records a scoped credential whose file is gone is always an error. `burrow-agent`
   refuses to fall back to the ambient (admin) kubeconfig and tells the operator to re-mint the
-  credential with `burrow upgrade` (or `burrow install`). This holds even without the strict mode
+  credential with `burrow cluster upgrade` (or `burrow cluster install`). This holds even without the strict mode
   below.
 - Set `BURROW_AGENT_REQUIRE_SCOPED=1` in the agent's environment and `burrow-agent` refuses the ambient
   fallback entirely. A context with no scoped credential at all (an unregistered context, or a

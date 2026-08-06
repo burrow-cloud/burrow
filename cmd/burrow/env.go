@@ -119,7 +119,7 @@ func newEnvListCmd() *cobra.Command {
 			"with --namespace). It prints what it finds, registers a local handle for each installed\n" +
 			"context that does not have one yet, then prints the updated list. Discovery reads clusters\n" +
 			"but changes only ~/.burrow/config (override with $BURROW_CONFIG); it never modifies a cluster.\n" +
-			"To install Burrow into a cluster that has none, use `burrow install`.",
+			"To install Burrow into a cluster that has none, use `burrow cluster install`.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runEnvList(cmd.Context(), cmd.OutOrStdout(), o)
@@ -273,7 +273,7 @@ func writeEnvEmptyState(w io.Writer, resolved localconfig.Resolved) {
 	fmt.Fprintln(w, "No environments registered yet:")
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "  burrow env list --discover\tdiscover and register an existing Burrow")
-	fmt.Fprintln(tw, "  burrow install <context>\tinstall Burrow into a cluster")
+	fmt.Fprintln(tw, "  burrow cluster install <context>\tinstall Burrow into a cluster")
 	fmt.Fprintln(tw, "  burrow env add <name>\tcreate a namespace-scoped environment")
 	_ = tw.Flush()
 	fmt.Fprintf(w, "\n%s\n", envFooter)

@@ -80,8 +80,8 @@ ex_ensure_cluster() {
   local image
   image=$(cd "$REPO_ROOT" && KO_DOCKER_REPO=ko.local ko build ./cmd/burrowd)
   k3d image import "$image" -c "$CLUSTER"
-  echo "=== burrow install (waits for the control plane to be ready) ==="
-  "$BURROW" install --burrowd-image "$image" --kubeconfig "$KCFG"
+  echo "=== burrow cluster install (waits for the control plane to be ready) ==="
+  "$BURROW" cluster install --burrowd-image "$image" --kubeconfig "$KCFG"
 }
 
 # ex_save_env records the run state so verify.sh (a separate invocation) can find the same

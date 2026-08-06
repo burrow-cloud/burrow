@@ -40,7 +40,7 @@ type probeRow struct {
 }
 
 // classifyProbe maps a burrowd probe result to the three-way status that both `burrow env list
-// --discover` and the `burrow install` context listing report, the same way `burrow version`
+// --discover` and the `burrow cluster install` context listing report, the same way `burrow version`
 // classifies a cluster (ADR-0036): a clean read is an installed control plane (version carries its
 // image tag), an IsNotFound means none is installed, and any other error is an unreachable cluster
 // (version carries the failure reason). Factoring it here keeps the two call sites from drifting.
@@ -93,7 +93,7 @@ func discoverEnvironments(ctx context.Context, kubeconfig, namespace string) (ro
 		// Backfill the scoped agent credential for this handle (ADR-0038 §4): read the existing
 		// burrow-agent credential and write the local scoped kubeconfig. Best-effort — a pre-Phase-1
 		// install carries none and a joining user may lack read access, so register the handle
-		// without a scoped cred rather than fail discovery; the operator can `burrow upgrade` to mint
+		// without a scoped cred rather than fail discovery; the operator can `burrow cluster upgrade` to mint
 		// it. Idempotent by construction: a context that already has a handle is skipped above, so a
 		// re-run neither rewrites the kubeconfig nor duplicates the handle.
 		if path, agentCtx, jerr := joinAgentCredentialFn(ctx, kubeconfig, row.context, namespace, name); jerr == nil {
@@ -141,7 +141,7 @@ func writeDiscoverReport(w io.Writer, rows []probeRow, added []string, namespace
 	case installed > 0:
 		fmt.Fprintln(w, "\nAll installed environments are already registered.")
 	default:
-		fmt.Fprintf(w, "\nNo Burrow control plane found in any context. Install one with `burrow install <context>`.\n")
+		fmt.Fprintf(w, "\nNo Burrow control plane found in any context. Install one with `burrow cluster install <context>`.\n")
 		fmt.Fprintf(w, "(probed the %q control-plane namespace; pass --namespace if yours differs.)\n", namespace)
 	}
 }

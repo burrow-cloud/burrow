@@ -52,7 +52,7 @@ type clusterPostgresOptions struct {
 // newClusterPostgresCmd is `burrow cluster postgres install`: the operator-CLI setup step that puts
 // the CloudNativePG operator on the cluster (ADR-0066 §1).
 //
-// It is a setup command and not part of `burrow install` for the same reason
+// It is a setup command and not part of `burrow cluster install` for the same reason
 // `cluster ingress install` is: additive cluster components are opt-in subcommands, not `--with-*`
 // flags on install (ADR-0054). It is separate from the AGENT surface for a harder reason —
 // installing CRDs needs cluster-admin, which the agent does not have and must not. ADR-0066's

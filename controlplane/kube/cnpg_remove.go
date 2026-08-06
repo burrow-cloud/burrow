@@ -196,7 +196,7 @@ func (a *Adapter) readCNPGClusterForRemoval(ctx context.Context, name string) (*
 	case apierrors.IsForbidden(err):
 		return nil, false, fmt.Errorf("kube: burrowd is not permitted to read the CloudNativePG %s %q, so this "+
 			"removal cannot tell whether the instance is still running and refuses rather than assume it is gone. "+
-			"Re-run `burrow install` to bring the control plane's grants up to date: %w",
+			"Re-run `burrow cluster install` to bring the control plane's grants up to date: %w",
 			cnpgClusterKind, name, err)
 	case err != nil:
 		return nil, false, fmt.Errorf("kube: reading the CloudNativePG %s %q: %w", cnpgClusterKind, name, err)

@@ -207,3 +207,106 @@ func TestGuardListForOneAppShowsWhichTierAnswered(t *testing.T) {
 		}
 	}
 }
+
+// TestGuardListSourceColumnFollowsTheAnswer holds the rule the SOURCE column obeys: it is printed
+// when the control plane named the tier each disposition came from, and left out when it did not.
+//
+// The case that drove it is `--env prod`. `prod` is the default environment, resolution skips the
+// environment tier for it, and its policy IS the global policy (ADR-0067 §2), so the control plane
+// reports no source at all for that listing. A column keyed off the flags instead of the answer
+// printed one anyway and filled every row from an empty string, so a listing of the global policy
+// claimed each disposition was "inherited (default)" when it was nothing of the sort.
+//
+// `--name` under the same environment is a different question and must not be collapsed into it:
+// an app-tier rule in `prod` has a real source worth naming, and the last cases pin it.
+func TestGuardListSourceColumnFollowsTheAnswer(t *testing.T) {
+	// The rows a control plane returns for each scope, straight from its own resolution: a source
+	// per row when there is a tier to name, and no source member when there is not.
+	global := []map[string]any{
+		{"code": "app.deploy", "disposition": "allow", "description": "deploy a new release of an application"},
+		{"code": "app.delete", "disposition": "deny", "description": "delete an app entirely"},
+	}
+	scoped := func(sources ...string) []map[string]any {
+		rows := []map[string]any{
+			{"code": "app.deploy", "disposition": "allow", "description": "deploy a new release of an application"},
+			{"code": "app.delete", "disposition": "deny", "description": "delete an app entirely"},
+		}
+		for i, s := range sources {
+			rows[i]["source"] = s
+		}
+		return rows
+	}
+
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		guardrails  []map[string]any
+		want        []string
+		wantMissing []string
+	}{
+		{
+			name:        "the unscoped listing is the global policy and names no tier",
+			args:        []string{"guard", "list"},
+			guardrails:  global,
+			want:        []string{"GUARDRAIL", "DISPOSITION", "app.deploy", "allow"},
+			wantMissing: []string{"SOURCE", "inherited", "default environment"},
+		},
+		{
+			name:       "the default environment is the global policy and says so",
+			args:       []string{"guard", "list", "--env", "prod"},
+			guardrails: global,
+			want: []string{
+				"prod is the default environment", "global policy", "app.deploy", "allow",
+			},
+			wantMissing: []string{"SOURCE", "inherited"},
+		},
+		{
+			name:        "an added environment names the tier that answered",
+			args:        []string{"guard", "list", "--env", "staging"},
+			guardrails:  scoped("env", "global"),
+			want:        []string{"SOURCE", "environment", "inherited (global)"},
+			wantMissing: []string{"default environment", "inherited (default)"},
+		},
+		{
+			name:        "an app in the default environment names the app tier",
+			args:        []string{"guard", "list", "--env", "prod", "--name", "web"},
+			guardrails:  scoped("name", "global"),
+			want:        []string{"SOURCE", "web", "inherited (global)"},
+			wantMissing: []string{"default environment", "inherited (default)"},
+		},
+		{
+			name:        "the built-in default is named as itself",
+			args:        []string{"guard", "list", "--env", "staging"},
+			guardrails:  scoped("env", "default"),
+			want:        []string{"SOURCE", "environment", "inherited (default)"},
+			wantMissing: []string{"default environment"},
+		},
+		{
+			name:        "a row without a source is blank rather than mislabelled",
+			args:        []string{"guard", "list", "--env", "staging"},
+			guardrails:  scoped("env"),
+			want:        []string{"SOURCE", "environment", "app.delete"},
+			wantMissing: []string{"inherited"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"guardrails": tc.guardrails})
+			}, tc.args...)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			table, _, _ := strings.Cut(out, "\nAbsent from burrow-agent")
+			for _, want := range tc.want {
+				if !strings.Contains(table, want) {
+					t.Errorf("guard list output is missing %q:\n%s", want, table)
+				}
+			}
+			for _, unwanted := range tc.wantMissing {
+				if strings.Contains(table, unwanted) {
+					t.Errorf("guard list output claims %q:\n%s", unwanted, table)
+				}
+			}
+		})
+	}
+}

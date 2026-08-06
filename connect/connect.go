@@ -13,6 +13,7 @@ package connect
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -158,15 +159,34 @@ func Client(ctx context.Context, o Options) (*client.Client, error) {
 		// is unreachable. Every command that connects goes through here, so they all benefit.
 		return nil, connectError(o, err)
 	}
-	hc, err := rest.HTTPClientFor(cfg)
+	rt, err := rest.TransportFor(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("connect: building HTTP client: %w", err)
+		return nil, fmt.Errorf("connect: building HTTP transport: %w", err)
 	}
 	// The kubeconfig transport authenticates to the API server; wrap it so every request also
 	// carries the burrowd API token in X-Burrow-Token, which the proxy forwards untouched
 	// (ADR-0015, ADR-0045), plus the handshake headers and the install the caller expects to reach
 	// (ADR-0039, ADR-0084 §5). The Client itself stays auth-agnostic.
-	hc.Transport = client.NewInstallTokenRoundTripper(token, o.ClientName, o.ClientVersion, o.InstallID, hc.Transport)
+	//
+	// The http.Client is assembled here rather than taken from rest.HTTPClientFor on purpose, and
+	// the transport is only WRAPPED, never assigned into a client this function did not make.
+	// HTTPClientFor returns the process-global http.DefaultClient whenever the config resolves to
+	// http.DefaultTransport with no timeout — a plain-HTTP, credential-free API-server endpoint,
+	// which is what `kubectl proxy` and similar local setups produce. Writing the token round
+	// tripper onto that client would attach the control-plane credential to every other request the
+	// process makes through the default client, including ones aimed at third parties (the GitHub
+	// release check in `burrow version`, a manifest URL passed to `apply`, the public-IP echo
+	// service), and a second Connect in the same process would wrap the already-wrapped transport
+	// so the outer headers were overwritten by the first connection's (issue #459).
+	//
+	// TransportFor may still hand back the shared http.DefaultTransport; that is fine and
+	// deliberate — connection pooling is meant to be shared. Only the *http.Client is ours, and
+	// the round tripper that holds this connection's headers is built fresh per call, so nothing
+	// here mutates state another caller can observe.
+	hc := &http.Client{
+		Transport: client.NewInstallTokenRoundTripper(token, o.ClientName, o.ClientVersion, o.InstallID, rt),
+		Timeout:   cfg.Timeout,
+	}
 	return client.NewClientWithHTTP(proxyBaseURL(cfg.Host, o.Namespace, o.Service, o.Port), hc), nil
 }
 

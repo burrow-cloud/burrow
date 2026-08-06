@@ -64,14 +64,16 @@ func serverSideApplyURL(ctx context.Context, kubeconfig, kubeContext, url string
 	return applyFn(ctx, kubeconfig, kubeContext, manifests, verbose, stdout, stderr)
 }
 
-// fetchManifest GETs a manifest URL and returns its body. The standard client follows the
-// redirects upstream release manifests use (e.g. a GitHub release download to its storage backend).
+// fetchManifest GETs a manifest URL and returns its body. The client follows the redirects upstream
+// release manifests use (e.g. a GitHub release download to its storage backend). The URL comes from
+// the caller and points at a third party, so the request goes through outboundHTTPClient and carries
+// no Burrow credential.
 func fetchManifest(ctx context.Context, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("requesting %s: %w", url, err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := outboundHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetching %s: %w", url, err)
 	}

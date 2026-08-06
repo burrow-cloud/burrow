@@ -25,8 +25,11 @@ import (
 )
 
 // latestReleaseURL is the unauthenticated GitHub API endpoint that returns this repository's
-// latest published release. The repository is public, so it reads without a token.
-const latestReleaseURL = "https://api.github.com/repos/burrow-cloud/burrow/releases/latest"
+// latest published release. The repository is public, so it reads without a token — and this
+// request must carry no Burrow credential, which is why it goes through outboundHTTPClient. It is
+// a package var so a test can point the fetch at an httptest server and assert exactly that,
+// without reaching GitHub.
+var latestReleaseURL = "https://api.github.com/repos/burrow-cloud/burrow/releases/latest"
 
 // latestReleaseTimeout bounds the latest-release check so `burrow version` never hangs on a slow
 // or unreachable network: the check is best-effort and skipped silently on any failure.
@@ -44,7 +47,7 @@ var fetchLatestRelease = func(ctx context.Context) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := outboundHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}

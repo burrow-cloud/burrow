@@ -193,6 +193,20 @@ func TestUpgradeHints(t *testing.T) {
 			wantHas:   []string{"You are on the latest release."},
 			wantNotIn: []string{"burrow upgrade"},
 		},
+		{
+			// Issue #442: an rc ahead of the newest stable release is not "on the latest release",
+			// and during an rc cycle that is the normal state rather than an edge case.
+			name: "rc ahead of the latest stable is told so", cli: "v0.14.0-rc.2", cp: "v0.14.0-rc.2", latest: "v0.13.1",
+			wantHas:   []string{"You are on v0.14.0-rc.2, ahead of the latest release v0.13.1."},
+			wantNotIn: []string{"You are on the latest release.", "brew upgrade"},
+		},
+		{
+			// A newer rc is an upgrade for somebody already on one, but not a brew upgrade: the tap
+			// ships released versions, so the hint names the route that actually installs it.
+			name: "newer rc names the prerelease route", cli: "v0.14.0-rc.2", cp: "v0.14.0-rc.2", latest: "v0.14.0-rc.3",
+			wantHas:   []string{"A newer prerelease (v0.14.0-rc.3) is available.", "cmd/burrow@v0.14.0-rc.3"},
+			wantNotIn: []string{"brew upgrade", "You are on the latest release."},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,6 +222,49 @@ func TestUpgradeHints(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestLatestReleaseForSeesPrereleasesOnlyForAPrerelease is the other half of issue #442: which
+// question the release check asks. /releases/latest cannot see an rc at all, so during an rc cycle
+// it names a tag older than what is already installed and the rc under test is invisible. A CLI on
+// a prerelease therefore reads the release LIST; a CLI on a stable release keeps reading
+// /releases/latest, because an rc is not an upgrade for somebody who did not ask for one.
+func TestLatestReleaseForSeesPrereleasesOnlyForAPrerelease(t *testing.T) {
+	stubLatestRelease(t, "v0.13.1", nil)
+	origTags := fetchReleaseTags
+	// Publication order, not version order: the newest tag is deliberately not first.
+	fetchReleaseTags = func(context.Context) ([]string, error) {
+		return []string{"v0.13.1", "v0.14.0-rc.3", "v0.14.0-rc.2"}, nil
+	}
+	t.Cleanup(func() { fetchReleaseTags = origTags })
+
+	got, err := latestReleaseFor(context.Background(), "v0.14.0-rc.2")
+	if err != nil {
+		t.Fatalf("latestReleaseFor on an rc: %v", err)
+	}
+	if got != "v0.14.0-rc.3" {
+		t.Errorf("latest for an rc = %q, want the newest published rc v0.14.0-rc.3", got)
+	}
+
+	got, err = latestReleaseFor(context.Background(), "v0.13.1")
+	if err != nil {
+		t.Fatalf("latestReleaseFor on a stable release: %v", err)
+	}
+	if got != "v0.13.1" {
+		t.Errorf("latest for a stable release = %q, want the latest STABLE release v0.13.1; an rc is not an upgrade here", got)
+	}
+}
+
+// TestLatestReleaseForStaysBestEffort keeps the release check's contract: a failed list is returned
+// as an error for the caller to skip silently, never a tag and never a failure of `burrow version`.
+func TestLatestReleaseForStaysBestEffort(t *testing.T) {
+	origTags := fetchReleaseTags
+	fetchReleaseTags = func(context.Context) ([]string, error) { return nil, errors.New("rate limited") }
+	t.Cleanup(func() { fetchReleaseTags = origTags })
+
+	if got, err := latestReleaseFor(context.Background(), "v0.14.0-rc.2"); err == nil || got != "" {
+		t.Errorf("latestReleaseFor = %q, %v; want no tag and an error to skip the check on", got, err)
 	}
 }
 

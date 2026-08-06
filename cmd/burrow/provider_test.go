@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/burrow-cloud/burrow/client"
 )
 
 func TestProviderAddWithoutTypeListsSupportedTypes(t *testing.T) {
@@ -171,15 +173,55 @@ func TestProviderAddS3SendsPairAndReportsVerification(t *testing.T) {
 		t.Errorf("the CLI output leaked the secret access key:\n%s", human)
 	}
 	for _, want := range []string{
-		"burrow-backups-9f2c1ab3",  // the recorded bucket — the only one Burrow writes to
-		"s3.access-key-id",         // the key NAMES, never the values
-		"s3.secret-access-key",     //
-		"probe object was written", // the destination was proven, not assumed
-		"UNKNOWN",                  // an unverifiable invariant is never reported as verified
-		"most consequential key",   // the credential-scoping advice ADR-0063 asks for
+		"burrow-backups-9f2c1ab3",           // the recorded bucket — the only one Burrow writes to
+		"s3.access-key-id",                  // the key NAMES, never the values
+		"s3.secret-access-key",              //
+		"an object was written and deleted", // the destination was proven, not assumed
+		"UNKNOWN",                           // an unverifiable invariant is never reported as verified
+		"most consequential key",            // the credential-scoping advice ADR-0063 asks for
 	} {
 		if !strings.Contains(human, want) {
 			t.Errorf("provider add output missing %q:\n%s", want, human)
+		}
+	}
+}
+
+// TestObjectStorageSummaryTicksVerifiedResultsOnly is issue #465: the registration summary is one
+// status per line, and a line is marked verified only when Burrow verified it. `lifecycle: unknown`
+// is the case that matters — ADR-0063 §3 forbids reporting an unverifiable invariant as verified,
+// so it carries the advisory label rather than the tick — and so does the closing advice, which is
+// standing guidance rather than a result.
+func TestObjectStorageSummaryTicksVerifiedResultsOnly(t *testing.T) {
+	p := client.Provider{
+		Name: "s3", Type: "s3", Capabilities: []string{"object-storage"},
+		ObjectStore: &client.ObjectStoreConfig{
+			Bucket: "burrow-cloud", Endpoint: "https://s3.example.com",
+			AccessKeyIDKey: "s3.access-key-id", SecretAccessKeyKey: "s3.secret-access-key",
+		},
+		Verification: &client.ProviderVerification{
+			Bucket: "burrow-cloud", BucketCreated: true, ProbeObject: true,
+			Lifecycle: client.LifecycleCheck{Status: "ok", Detail: "the bucket has no lifecycle rules"},
+		},
+	}
+	var w bytes.Buffer
+	lines := strings.Split(objectStorageSummary(&w, p), "\n")
+	if len(lines) != 7 {
+		t.Fatalf("summary is %d lines, want one status per line:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	for _, l := range lines[:6] {
+		if !strings.HasPrefix(l, okGlyph+" ") {
+			t.Errorf("line %q reports a verified result and is not marked as one", l)
+		}
+	}
+	if !strings.HasPrefix(lines[6], "Warning: ") {
+		t.Errorf("the credential-scoping advice = %q, want it marked as advice rather than a result", lines[6])
+	}
+
+	p.Verification.Lifecycle = client.LifecycleCheck{Status: "unknown", Detail: "Burrow could not read the lifecycle configuration"}
+	w.Reset()
+	for _, l := range strings.Split(objectStorageSummary(&w, p), "\n") {
+		if strings.Contains(l, "UNKNOWN") && strings.HasPrefix(l, okGlyph) {
+			t.Errorf("an unverified lifecycle is reported as verified: %q", l)
 		}
 	}
 }

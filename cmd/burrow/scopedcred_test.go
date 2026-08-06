@@ -29,12 +29,20 @@ func writeScopedKubeconfig(t *testing.T) string {
 }
 
 // saveScopedHandle points $BURROW_CONFIG at a temp file holding a single pinned handle carrying the
-// given scoped credential, so resolveTarget resolves it without touching the kubeconfig (a pinned
-// handle resolves from the config alone). It returns the handle's kube context.
+// given scoped credential, and $KUBECONFIG at a fixture holding the handle's context. It returns
+// the handle's kube context.
+//
+// The fixture is what makes these tests say the same thing everywhere (issue #486). Resolution
+// checks a pinned handle's context against the kubeconfig, and with only $BURROW_CONFIG isolated
+// that check read whatever kubeconfig the developer happened to have: on a bare machine, and on
+// CI's runners, there are no contexts and the check is skipped, so the tests passed; on a machine
+// with a real kubeconfig the pinned context is absent from it and every one of them failed. A test
+// whose answer depends on who runs it is not testing what it claims to.
 func saveScopedHandle(t *testing.T, agentKubeconfig, agentContext string) string {
 	t.Helper()
 	tempConfig(t)
 	const kubeContext = "do-nyc1-prod"
+	t.Setenv("KUBECONFIG", kubeconfigWithCurrent(t, kubeContext, kubeContext))
 	cfg := &localconfig.Config{
 		Current: "prod",
 		Environments: []localconfig.Environment{{

@@ -192,6 +192,38 @@ func execRegistry(t *testing.T, cs *fake.Clientset, stdin string, terminal bool,
 	return out.String(), errb.String(), err
 }
 
+// TestRegistryListNamesTheCluster is issue #443: a list of bare hosts is the same believable answer
+// whichever cluster it was read from, so two clusters produce two answers with nothing to tell them
+// apart afterwards. The listing names the cluster the same way `login` and `logout` name the one
+// they wrote to — the handle registered for it, not Kubernetes vocabulary.
+func TestRegistryListNamesTheCluster(t *testing.T) {
+	tempConfig(t)
+	saveHandle(t, "prod", "do-nyc1-prod", false)
+	t.Setenv("KUBECONFIG", kubeconfigWithCurrent(t, "do-nyc1-prod", "do-nyc1-prod"))
+
+	cs := nsWithDefaultSA("apps")
+	mustLogin(t, cs, "apps", "ghcr.io", "alice", "t1")
+	orig := registryClientset
+	registryClientset = func(string, string) (kubernetes.Interface, error) { return cs, nil }
+	t.Cleanup(func() { registryClientset = orig })
+
+	var out, errb bytes.Buffer
+	cmd := newRegistryCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs([]string{"--app-namespace", "apps", "list"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("registry list: %v (stderr: %s)", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "on prod") {
+		t.Errorf("registry list did not name the cluster it read:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "ghcr.io") {
+		t.Errorf("registry list dropped the hosts:\n%s", out.String())
+	}
+}
+
 // TestRegistryOutputHasNoNamespaceJargon locks the developer-facing result messages to plain,
 // non-Kubernetes language: Burrow's users are not cluster experts, so the raw term "namespace"
 // must not leak into login, logout, or empty-list output.

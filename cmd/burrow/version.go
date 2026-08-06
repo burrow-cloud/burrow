@@ -64,6 +64,95 @@ var fetchLatestRelease = func(ctx context.Context) (string, error) {
 	return body.TagName, nil
 }
 
+// releasesURL lists this repository's published releases, newest first. Unlike /releases/latest it
+// INCLUDES prereleases, which is the only way to answer "is there a newer rc than the one I am
+// running". One page is plenty: the question is only ever about the newest few tags.
+const releasesURL = "https://api.github.com/repos/burrow-cloud/burrow/releases?per_page=30"
+
+// fetchReleaseTags returns the tags of the most recently published releases, prereleases included
+// and drafts excluded (a draft is not published, so it is not something to upgrade to). It is a
+// package var so tests can fake it with no network, and it is best-effort by contract exactly as
+// fetchLatestRelease is: every failure is returned for the caller to skip the check silently.
+var fetchReleaseTags = func(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, latestReleaseTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releasesURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github releases API returned %s", resp.Status)
+	}
+	var body []struct {
+		TagName string `json:"tag_name"`
+		Draft   bool   `json:"draft"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	tags := make([]string, 0, len(body))
+	for _, r := range body {
+		if !r.Draft {
+			tags = append(tags, r.TagName)
+		}
+	}
+	return tags, nil
+}
+
+// isPrerelease reports whether a version is a release candidate or other prerelease tag, and not a
+// Go pseudo-version. A pseudo-version carries a prerelease field of its own ("v0.7.3-0.2026…") but
+// it is a local source build rather than something published to compare against.
+func isPrerelease(v string) bool {
+	return semver.IsValid(v) && semver.Prerelease(v) != "" && !module.IsPseudoVersion(v)
+}
+
+// newestTag returns the highest valid semver tag in the list, or "" when none is valid. GitHub
+// returns releases in publication order, which is not version order once a patch is cut on an older
+// line, so the comparison is done here rather than trusting the first element.
+func newestTag(tags []string) string {
+	var newest string
+	for _, t := range tags {
+		if !semver.IsValid(t) {
+			continue
+		}
+		if newest == "" || semver.Compare(t, newest) > 0 {
+			newest = t
+		}
+	}
+	return newest
+}
+
+// latestReleaseFor returns the release this CLI should be compared against.
+//
+// A CLI on a stable release is compared against the latest STABLE release: an rc is not an upgrade
+// for somebody who did not ask for one, and offering it would be telling them to leave the released
+// line. A CLI on a prerelease is compared against the newest release of either kind, because the
+// whole point of running an rc is to test the current one, and /releases/latest cannot see rcs at
+// all — during an rc cycle it names a tag OLDER than what is already installed.
+//
+// Both paths are best-effort, as the release check has always been: a failure is returned and the
+// caller skips the check silently rather than failing `burrow version`.
+func latestReleaseFor(ctx context.Context, cliVer string) (string, error) {
+	if !isPrerelease(cliVer) {
+		return fetchLatestRelease(ctx)
+	}
+	tags, err := fetchReleaseTags(ctx)
+	if err != nil {
+		return "", err
+	}
+	newest := newestTag(tags)
+	if newest == "" {
+		return "", fmt.Errorf("no published release carries a version tag")
+	}
+	return newest, nil
+}
+
 // agentBinary is the agent's control-channel executable (ADR-0049 §1), looked up on PATH so
 // `burrow version` can report the version the AGENT would send to the control plane, not just the
 // CLI's. The two binaries ship together but are installed and updated independently, so they drift;
@@ -210,7 +299,7 @@ func newVersionCmd() *cobra.Command {
 			// control plane. Any failure (offline, timeout, rate-limited) is skipped silently, so
 			// `burrow version` still works with no network and never hangs.
 			var hints []string
-			if latest, lerr := fetchLatestRelease(cmd.Context()); lerr == nil && latest != "" {
+			if latest, lerr := latestReleaseFor(cmd.Context(), cliVersion()); lerr == nil && latest != "" {
 				fmt.Fprintf(tw, "latest release:\t%s\n", latest)
 				hints = upgradeHints(cliVersion(), cpVer, latest)
 			}
@@ -276,8 +365,13 @@ func cliVersion() string {
 // cluster or network:
 //   - a control plane on a valid release older than latest gets the `burrow upgrade` hint;
 //   - a CLI on a valid, non-pseudo release older than latest gets the `brew upgrade` hint (a local
-//     dev/pseudo build is exempt, since there is nothing to brew-upgrade);
-//   - when neither is behind, a single reassurance that this is the latest release.
+//     dev/pseudo build is exempt, since there is nothing to brew-upgrade). When the newer tag is
+//     itself a prerelease the hint names the prerelease route instead, because the Homebrew tap
+//     ships released versions and `brew upgrade` would not install an rc;
+//   - a CLI AHEAD of the latest release is told so, which is the normal state during an rc cycle
+//     and is not the same statement as being on the latest release (issue #442);
+//   - when neither is behind and neither is ahead, a single reassurance that this is the latest
+//     release.
 //
 // It assumes latest is a non-empty tag (the caller only calls it when the release check succeeded).
 func upgradeHints(cliVer, cpVer, latest string) []string {
@@ -286,10 +380,19 @@ func upgradeHints(cliVer, cpVer, latest string) []string {
 		hints = append(hints, fmt.Sprintf("Your control plane is behind. Run `burrow upgrade` to update it to %s.", latest))
 	}
 	if semver.IsValid(cliVer) && !module.IsPseudoVersion(cliVer) && semver.Compare(cliVer, latest) < 0 {
-		hints = append(hints, fmt.Sprintf("A newer burrow (%s) is available. Run `brew upgrade burrow-cloud/tap/burrow`.", latest))
+		if isPrerelease(latest) {
+			hints = append(hints, fmt.Sprintf("A newer prerelease (%s) is available. Install it from the release page, "+
+				"or with `go install github.com/burrow-cloud/burrow/cmd/burrow@%s`.", latest, latest))
+		} else {
+			hints = append(hints, fmt.Sprintf("A newer burrow (%s) is available. Run `brew upgrade burrow-cloud/tap/burrow`.", latest))
+		}
 	}
 	if len(hints) == 0 {
-		hints = append(hints, "You are on the latest release.")
+		if semver.IsValid(cliVer) && !module.IsPseudoVersion(cliVer) && semver.Compare(cliVer, latest) > 0 {
+			hints = append(hints, fmt.Sprintf("You are on %s, ahead of the latest release %s.", cliVer, latest))
+		} else {
+			hints = append(hints, "You are on the latest release.")
+		}
 	}
 	return hints
 }

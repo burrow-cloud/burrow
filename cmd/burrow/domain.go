@@ -37,7 +37,10 @@ func newDomainAddCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if address == "" && app == "" {
-				return errors.New("give --address (the cluster's external address) or --app (an exposed app to read it from)")
+				// The reader usually wants `burrow app publish`: --app reads an address FROM an
+				// already-published app, so with nothing published yet neither flag has an answer
+				// and the error that names only the flags leaves them stuck (issue #475).
+				return errors.New("give --address (the cluster's external address) or --app (an app already published, to read its address from; publish one with `burrow app publish <app> --host <host> --port <port>`)")
 			}
 			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {

@@ -20,12 +20,12 @@ func cannedGuardrails(w http.ResponseWriter, _ *http.Request) {
 	}})
 }
 
-// TestGuardListReportsAbsentCapabilities asserts the operator sees both halves of the boundary in
-// one place ([ADR-0065](../../docs/adr/0065-what-belongs-on-the-agent-surface.md) §7): the
-// dispositions this CLI can change with `guard set`, and the capabilities the agent binary does
-// not carry at all, which it cannot. The second half is what a human is handed when the agent
-// relays "removing an add-on is not something I can do".
-func TestGuardListReportsAbsentCapabilities(t *testing.T) {
+// TestGuardListPrintsDispositionsOnly asserts the human listing is guardrails and nothing else
+// (issue #445). The absent-capability table used to print under it, larger than the listing itself
+// and addressed to somebody who was not being refused anything — policy an operator set and the
+// shape of another binary are not two halves of one setting. A single line says the list exists and
+// where to read it; the capabilities themselves stay in --json, which is what burrow-agent consumes.
+func TestGuardListPrintsDispositionsOnly(t *testing.T) {
 	out, _, err := runCLI(t, cannedGuardrails, "guard", "list")
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -33,10 +33,13 @@ func TestGuardListReportsAbsentCapabilities(t *testing.T) {
 	if !strings.Contains(out, "app.deploy") {
 		t.Errorf("guard list dropped the dispositions: %q", out)
 	}
-	for _, want := range []string{"Absent from burrow-agent", "addon remove", "burrow addon remove <name>", "guard set"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("guard list output is missing %q:\n%s", want, out)
+	for _, unwanted := range []string{"RUN INSTEAD", "burrow addon remove <name>", "addon remove"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("guard list still prints the absent-capability table (%q):\n%s", unwanted, out)
 		}
+	}
+	if !strings.Contains(out, "absent from burrow-agent") || !strings.Contains(out, "--json") {
+		t.Errorf("guard list output is missing the one-line pointer at the list:\n%s", out)
 	}
 }
 

@@ -464,11 +464,13 @@ func (e *Engine) deriveDependencies(ctx context.Context, app, env, ns string) ([
 	}
 
 	// ADR-0076 §4 names a third dependency — a mounted volume, checked by creating, reading back and
-	// deleting a file under it — and it is deliberately absent. Burrow mounts no volume on a USER's
-	// workload today: WorkloadSpec has no volume field, and every PersistentVolumeClaim in the tree
-	// belongs to an add-on or to the backup path. Deriving a volume dependency would therefore mean
-	// inventing one, which is the thing this whole file exists not to do. It lands here, as a third
-	// case, when apps can mount volumes. See TestDependencyVolumeCheckAwaitsAppVolumes.
+	// deleting a file under it — and it is deliberately absent. The one volume Burrow authors on a
+	// USER's workload is the READ-ONLY Secret projection of ADR-0089, which nothing can write to and
+	// which needs no check to tell you whether it arrived: a missing key is a missing file. Every
+	// PersistentVolumeClaim in the tree belongs to an add-on or to the backup path. Deriving a volume
+	// dependency would therefore mean inventing one, which is the thing this whole file exists not to
+	// do. It lands here, as a third case, when apps can mount WRITABLE storage. See
+	// TestDependencyVolumeCheckAwaitsAppVolumes.
 
 	return deps, strings.Join(notes, "; "), nil
 }

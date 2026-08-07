@@ -872,6 +872,31 @@ type Database interface {
 	// none is a no-op.
 	DeleteHealthEndpoints(ctx context.Context, app string) error
 
+	// SecretMounts returns the secret keys app projects as FILES in env, and the directory they land
+	// in (ADR-0089 §1, §5). It records KEY NAMES AND FILENAMES ONLY — a value never reaches Postgres,
+	// which is the same thing the store already records about a secret. An app that mounts nothing
+	// yields the zero value and no error: no mount is where every app starts.
+	//
+	// It is here rather than on a release because a mount describes how a credential reaches whatever
+	// code is running (§5). A release-scoped mount would mean a rollback to a release cut before the
+	// mount existed removed the file the running app needs.
+	SecretMounts(ctx context.Context, app, env string) (SecretMounts, error)
+	// SetSecretMount upserts one key's projection for app in env — the write behind
+	// `burrow app secret mount`. The key and filename arrive already validated, and the caller has
+	// already confirmed the key exists in the app's Secret.
+	SetSecretMount(ctx context.Context, m SecretMount) error
+	// UnsetSecretMount stops projecting one key as a file for app in env. Removing a mount that was
+	// never made is a no-op, not an error, and it never touches the value.
+	UnsetSecretMount(ctx context.Context, app, env, key string) error
+	// SetSecretsDir records the directory app's mounted keys land in, in env, overriding
+	// DefaultSecretsDir. It is stored apart from the mounts because the directory is a property of
+	// the APP and never of a key (ADR-0089 §2): a per-key path forces a subPath mount, the one
+	// Secret-volume form the kubelet does not update in place.
+	SetSecretsDir(ctx context.Context, app, env, dir string, at time.Time) error
+	// DeleteSecretMounts removes every mount and directory override for app across all environments —
+	// the durable side of an app teardown, alongside DeleteHealthEndpoints.
+	DeleteSecretMounts(ctx context.Context, app string) error
+
 	// DependencyChecksEnabled reports whether the deploy-time dependency check runs for app in env
 	// (ADR-0076 §4). It answers TRUE when nothing was recorded: the check is a Burrow-supplied
 	// default, so a row exists only where someone made a decision about it, and a missing row is the

@@ -47,6 +47,19 @@ type WorkloadSpec struct {
 	// crash loop it was meant to detect.
 	Readiness ReadinessCheck
 	Replicas  int32
+	// SecretFiles is the set of the app's secret KEYS that are projected into files, and the one
+	// directory they land in (ADR-0089 §1-§2). It is this type's first field that is not about the
+	// container's code, and it is what the app PodSpec's first Volumes entry is built from.
+	//
+	// It carries key names and filenames and NEVER a value: the value stays in the per-app Secret,
+	// and the pod template gains a KeyToPath reference to it (ADR-0029 holds unchanged). The zero
+	// value adds no volume, no volume mount and no BURROW_SECRETS_DIR, so an app that mounts nothing
+	// gets the pod template it had before mounts existed.
+	//
+	// Like Env and Readiness it is CURRENT STATE rather than a snapshot on the release: the engine
+	// reads it on every apply, so a rollback keeps the files the running code needs rather than
+	// taking them back to whatever was mounted when the older release was cut (ADR-0089 §5).
+	SecretFiles SecretMounts
 	// ReleaseID is the release this workload is applying. It is stamped on the pod template (under
 	// ReleaseAnnotation) so a new release always rolls the workload, even when the image reference
 	// is unchanged; re-applying the same release reuses the same ID, so the apply stays idempotent.

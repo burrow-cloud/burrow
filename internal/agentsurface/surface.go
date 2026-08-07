@@ -194,6 +194,14 @@ var catalogue = []Capability{
 	{Surface: Agent, Path: "config unset", What: "removes a non-secret config var from one app"},
 	{Surface: Agent, Path: "secret", What: "read-only: one app's secret KEY names, never values"},
 	{Surface: Agent, Path: "secret unset", What: "removes one app secret by key; carries no value"},
+	// Projecting a secret into a file (ADR-0089 §7). Tier 3: the effect is the one app named, it is
+	// reversible with `unmount`, and it names a KEY exactly as `secret unset` does. It is also the
+	// one verb in this neighbourhood that makes a credential SAFER — an environment variable is
+	// inherited by every child process and a file is not — so it is the wrong place to invent the
+	// first guardrail for a neighbourhood that has none. `secret set` stays absent, unchanged.
+	{Surface: Agent, Path: "secret mounts", What: "read-only: which of one app's secret keys are read as files, and where"},
+	{Surface: Agent, Path: "secret mount", What: "projects one app secret key into a file; names a key, carries no value"},
+	{Surface: Agent, Path: "secret unmount", What: "stops projecting one app secret key as a file; the value is untouched"},
 
 	// Health. The agent is on this surface because it is the only party that CAN close the gap
 	// ADR-0076 describes: Burrow cannot write a health endpoint into the user's application, and the

@@ -43,6 +43,11 @@ type Database struct {
 	// The declared health endpoints (ADR-0076 §5), keyed the same way exposures are, because the
 	// readiness default reads one against the other.
 	health map[string]controlplane.HealthEndpoint // "app\x00env" -> declared health endpoint
+	// The secret keys each app projects as FILES (ADR-0089 §5) and the directory they land in, keyed
+	// the same way. Key names and filenames only — the values stay in the fake Kubernetes' Secret
+	// map, exactly as they stay in the cluster's.
+	secretMounts map[string]map[string]controlplane.SecretMount // "app\x00env" -> key -> mount
+	secretDirs   map[string]string                              // "app\x00env" -> directory override
 	// Whether the deploy-time dependency check runs (ADR-0076 §4), keyed the same way. An absent
 	// entry means ENABLED: the check is Burrow's default, so only a decision against it is recorded.
 	depChecks map[string]bool // "app\x00env" -> the check runs
@@ -58,23 +63,25 @@ type Database struct {
 // NewDatabase returns an empty fake database with the default guardrail policy.
 func NewDatabase() *Database {
 	return &Database{
-		byID:        make(map[string]controlplane.Release),
-		order:       make(map[string][]string),
-		providers:   make(map[string]controlplane.Provider),
-		addons:      make(map[string]controlplane.AddonInfo),
-		appEnv:      make(map[string]map[string]string),
-		hooks:       make(map[string]controlplane.Hook),
-		autoDeploy:  make(map[string]map[string]controlplane.AutoDeployLevel),
-		reason:      make(map[string]map[string]string),
-		backups:     make(map[string]controlplane.Backup),
-		envs:        make(map[string]controlplane.Environment),
-		errs:        make(map[Op]error),
-		policy:      controlplane.DefaultPolicy(),
-		exposures:   make(map[string]controlplane.Exposure),
-		health:      make(map[string]controlplane.HealthEndpoint),
-		depChecks:   make(map[string]bool),
-		attachments: make(map[string]string),
-		limits:      controlplane.OperationalConfig{Values: map[controlplane.LimitCode]string{}},
+		byID:         make(map[string]controlplane.Release),
+		order:        make(map[string][]string),
+		providers:    make(map[string]controlplane.Provider),
+		addons:       make(map[string]controlplane.AddonInfo),
+		appEnv:       make(map[string]map[string]string),
+		hooks:        make(map[string]controlplane.Hook),
+		autoDeploy:   make(map[string]map[string]controlplane.AutoDeployLevel),
+		reason:       make(map[string]map[string]string),
+		backups:      make(map[string]controlplane.Backup),
+		envs:         make(map[string]controlplane.Environment),
+		errs:         make(map[Op]error),
+		policy:       controlplane.DefaultPolicy(),
+		exposures:    make(map[string]controlplane.Exposure),
+		health:       make(map[string]controlplane.HealthEndpoint),
+		secretMounts: make(map[string]map[string]controlplane.SecretMount),
+		secretDirs:   make(map[string]string),
+		depChecks:    make(map[string]bool),
+		attachments:  make(map[string]string),
+		limits:       controlplane.OperationalConfig{Values: map[controlplane.LimitCode]string{}},
 	}
 }
 

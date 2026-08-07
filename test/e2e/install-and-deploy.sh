@@ -77,6 +77,19 @@ on_err() {
 trap 'on_err "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 WORK=$(mktemp -d)
+
+# An isolated HOME keeps this off the real ~/.burrow: `burrow cluster install` below records an
+# environment handle there and mints a scoped credential beside it (ADR-0038), so run from a
+# developer's machine the script would repoint their CLI at this disposable k3d cluster. It also
+# means the install lands on a clean slate, exactly as it would on a stranger's machine, rather
+# than into whatever handles already exist. Capture the Go build and module caches from the real
+# HOME FIRST and export them, so relocating HOME does not force a cold recompile or a redownload
+# of the module graph — the same isolation quickstart.sh already does.
+export GOCACHE="${GOCACHE:-$(go env GOCACHE)}"
+export GOMODCACHE="${GOMODCACHE:-$(go env GOMODCACHE)}"
+export HOME="$WORK/home"
+mkdir -p "$HOME"
+
 BURROW="$WORK/burrow"
 echo "=== build the burrow CLI ==="
 go build -o "$BURROW" ./cmd/burrow

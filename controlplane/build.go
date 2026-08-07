@@ -75,7 +75,7 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 	// Build inside the cluster, pushing to pushTarget. A builder error is terminal for the build:
 	// surface it and do NOT touch the deploy path — nothing is rolled out, no release is recorded
 	// (ADR-0053 §4).
-	digest, err := e.builder.Build(ctx, req.Source, pushTarget, insecure, cred)
+	digest, err := e.runBuild(ctx, req.Source, pushTarget, insecure, cred, req.Progress)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}
@@ -90,11 +90,44 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 	// chain, and audit entry — stamped manual because an in-cluster build is an explicit, human- or
 	// agent-triggered call (ADR-0053 §2).
 	image := pinDigest(deployBase, digest)
-	dep, err := e.deploy(ctx, DeployRequest{App: req.App, Env: req.Env, Image: image, Confirm: req.Confirm}, manualProvenance())
+	// The SAME reporter carries on into the deploy, so a build reports one continuous sequence — its
+	// own stages, then the deploy's — rather than two disjoint runs of stages with a silence between
+	// them. A caller that asked for nothing passes nil on, which is what every other deploy does.
+	dep, err := e.deploy(ctx, DeployRequest{App: req.App, Env: req.Env, Image: image, Confirm: req.Confirm, Progress: req.Progress}, manualProvenance())
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}
 	return BuildResult{Digest: digest, Deploy: dep}, nil
+}
+
+// runBuild runs the builder, reporting the build's stages when the builder can observe them and
+// bracketing the whole build as one stage when it cannot. reporter is the caller's own — nil when
+// nobody asked for anything, which is every existing caller.
+//
+// A NIL REPORTER TAKES THE PLAIN SEAM CALL, and not merely because there is nothing to write to:
+// observing a build costs the cluster a pod read per interval, and a build nobody is watching must
+// not pay for a report it will not deliver. It is the same rule the deploy path follows — an event
+// nobody asked for is not produced.
+//
+// A Builder that does not implement ProgressBuilder is not a lesser builder, and the caller must not
+// be able to tell which kind it got beyond the granularity of the report: either way the build is one
+// stage that starts and then finishes, so either way the first event is emitted before the long wait
+// rather than after it. That is the property the transport depends on — the stream's header is
+// written on the first event, and an event that arrives only at the end is an event that arrives
+// after the proxy has given up (issue #503).
+func (e *Engine) runBuild(ctx context.Context, source SourceRef, target string, insecure bool, cred SourceCredential, reporter func(DeployEvent)) (string, error) {
+	if pb, ok := e.builder.(ProgressBuilder); ok && reporter != nil {
+		return pb.BuildWithProgress(ctx, source, target, insecure, cred, reporter)
+	}
+	// Normalised once, here, so neither emit site below carries a nil check.
+	progress := deployProgress(noProgress)
+	if reporter != nil {
+		progress = reporter
+	}
+	progress.started(StageBuild)
+	digest, err := e.builder.Build(ctx, source, target, insecure, cred)
+	progress.finish(StageBuild, err == nil)
+	return digest, err
 }
 
 // resolveSourceCredential returns the source-provider credential that authenticates a clone of repo,

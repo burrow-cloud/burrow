@@ -14,8 +14,9 @@ import (
 )
 
 // A deploy takes ten to twenty seconds and used to say nothing across all of it, so a slow image
-// pull and a hung command looked identical (issue #480). The control plane now reports its stages;
-// this renders them.
+// pull and a hung command looked identical (issue #480). A build takes minutes and had the same
+// silence (issue #503). The control plane now reports the stages of both — a build's are its own
+// followed by the deploy's, as one sequence — and this renders them, the same way for either.
 //
 // IT PRINTS TO STDERR, NEVER STDOUT. `--json` is a contract — a caller pipes stdout into a parser —
 // and the targeting line already goes to stderr for exactly this reason. Progress is commentary on a
@@ -26,10 +27,13 @@ import (
 // the same okMark/failMark helpers, so the glyphs stay TTY-gated and captured output stays free of
 // escape codes. A deploy is run more often than either and had no reason to look different.
 
-// deployStageLabels is what each stage of a deploy is called in front of a person. The stage names
-// themselves are the control plane's closed vocabulary, meant for a program; these say what the
-// deploy is actually doing.
+// deployStageLabels is what each stage of a deploy or a build is called in front of a person. The
+// stage names themselves are the control plane's closed vocabulary, meant for a program; these say
+// what the operation is actually doing. A build reports its own stages and then the deploy's as one
+// sequence (issue #503), so one table covers both.
 var deployStageLabels = map[string]string{
+	controlplane.StageClone:           "cloning the source in the cluster",
+	controlplane.StageBuild:           "building and pushing the image",
 	controlplane.StageApply:           "writing the Deployment",
 	controlplane.StagePreDeployHook:   "running the pre-deploy hook",
 	controlplane.StageSettle:          "waiting for the rollout to settle",
@@ -73,6 +77,15 @@ func newDeployProgressPrinter(out io.Writer, now func() time.Time) func(client.D
 			fmt.Fprintf(out, "  %s ...", deployStageLabel(p.Stage))
 			startedAt = now()
 			open = true
+		case controlplane.DeployProgressing:
+			// The stage is still running. A build's is minutes long (issue #503), and a line that has
+			// sat unchanged for four minutes tells a reader nothing about whether anything is alive —
+			// so each report extends it by a dot. It neither opens nor closes a line: with no line
+			// open there is nothing to extend.
+			if !open {
+				return
+			}
+			fmt.Fprint(out, ".")
 		case controlplane.DeployDone, controlplane.DeployFailed:
 			if !open {
 				return // a close with no open line: print nothing rather than a stray mark

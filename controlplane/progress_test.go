@@ -50,7 +50,7 @@ func TestDeployStagesAreClosedVocabulary(t *testing.T) {
 			t.Errorf("IsDeployStage(%q) = true, want false — the set is closed", s)
 		}
 	}
-	wantStatuses := []string{"started", "done", "failed"}
+	wantStatuses := []string{"started", "progressing", "done", "failed"}
 	if strings.Join(cp.DeployStatuses(), ",") != strings.Join(wantStatuses, ",") {
 		t.Errorf("DeployStatuses() = %v, want %v", cp.DeployStatuses(), wantStatuses)
 	}
@@ -67,6 +67,40 @@ func TestDeployStagesAreClosedVocabulary(t *testing.T) {
 	cp.DeployStages()[0] = "clobbered"
 	if cp.DeployStages()[0] == "clobbered" {
 		t.Error("DeployStages() shares its backing array with the catalogue")
+	}
+}
+
+// TestBuildStagesAreTheBuildsThenTheDeploys pins the shape of the build vocabulary (issue #503): a
+// build reports ONE sequence — its own stages and then the deploy stages it hands off to — because
+// that is what a build is. Two separate vocabularies would say a build and the deploy it ends in were
+// separate operations, and a caller rendering a build would have to know that they are not.
+func TestBuildStagesAreTheBuildsThenTheDeploys(t *testing.T) {
+	want := append([]string{"clone", "build"}, cp.DeployStages()...)
+	got := cp.BuildStages()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("BuildStages() = %v, want %v (the build's own stages, then the deploy's)", got, want)
+	}
+	for _, s := range want {
+		if !cp.IsBuildStage(s) {
+			t.Errorf("IsBuildStage(%q) = false", s)
+		}
+	}
+	// The push happens inside the builder container's own script and is not observable from outside
+	// it, so there is no push stage: the vocabulary names what the control plane can see.
+	for _, s := range []string{"", "push", "fetch", "Build"} {
+		if cp.IsBuildStage(s) {
+			t.Errorf("IsBuildStage(%q) = true, want false — the set is closed", s)
+		}
+	}
+	// A build's own stages are not a deploy's: an operation reporting `clone` is a build.
+	for _, s := range []string{"clone", "build"} {
+		if cp.IsDeployStage(s) {
+			t.Errorf("IsDeployStage(%q) = true, want false", s)
+		}
+	}
+	cp.BuildStages()[0] = "clobbered"
+	if cp.BuildStages()[0] == "clobbered" {
+		t.Error("BuildStages() shares its backing array with the catalogue")
 	}
 }
 

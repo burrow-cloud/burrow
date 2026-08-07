@@ -85,6 +85,14 @@ type BuildRequest struct {
 	// Confirm acknowledges the app.deploy guardrail whose disposition is confirm, letting the deploy
 	// the build hands off to proceed past it (ADR-0020). It has no effect on a guardrail set to deny.
 	Confirm bool `json:"confirm,omitempty"`
+	// Progress receives the build's stage transitions as they happen (issue #503) — its own stages
+	// (BuildStages) and then the deploy stages it hands off to, as one continuous sequence. Nil asks
+	// for nothing and is the default: the API's JSON decode leaves it nil, so the request's wire shape
+	// is unchanged and no caller that did not ask pays anything.
+	//
+	// It is called SYNCHRONOUSLY on the building goroutine, in stage order, so a slow reporter slows
+	// the build. A reporter writes and returns.
+	Progress func(DeployEvent) `json:"-"`
 }
 
 // BuildResult reports the outcome of a successful build-then-deploy (ADR-0053 §4): the digest of the

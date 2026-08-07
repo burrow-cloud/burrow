@@ -12,6 +12,10 @@ import (
 
 var _ controlplane.Builder = (*Builder)(nil)
 
+// The fake reports stages like the real adapter does, so the build's progress stream can be exercised
+// end to end without a cluster (issue #503).
+var _ controlplane.ProgressBuilder = (*Builder)(nil)
+
 // Builder is an in-memory controlplane.Builder. Tests seed the digest it returns with SetDigest,
 // inject a build failure with SetError, and read back the source ref and target image it was called
 // with (LastSource / LastTarget) plus the call count, so the in-cluster build orchestration can be
@@ -26,6 +30,9 @@ type Builder struct {
 	lastInsecure bool
 	lastCred     controlplane.SourceCredential
 	calls        int
+	// progressCalls counts the calls that came in through the reporting seam, so a test can tell the
+	// two entry points apart.
+	progressCalls int
 }
 
 // DefaultDigest is the digest NewBuilder returns until SetDigest overrides it, so a test can assert
@@ -88,7 +95,34 @@ func (b *Builder) Calls() int {
 	return b.calls
 }
 
+// ProgressCalls returns how many times the engine took the reporting seam rather than the plain one,
+// so a test can assert that a build nobody asked to observe is not observed.
+func (b *Builder) ProgressCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.progressCalls
+}
+
 func (b *Builder) Build(_ context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) (string, error) {
+	return b.build(source, targetImage, insecure, cred, func(string, string) {})
+}
+
+// BuildWithProgress records the call exactly as Build does and reports the stage sequence the real
+// adapter reports: the clone, then the build. A seeded error fails the BUILD stage, which is where a
+// build fails in the case worth modelling — a Dockerfile step that exited non-zero, after the source
+// was already on disk. The heartbeat the adapter emits across a long build has nothing to stand for
+// here — a fake build takes no time — so it is not reported.
+func (b *Builder) BuildWithProgress(_ context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, progress func(controlplane.DeployEvent)) (string, error) {
+	b.mu.Lock()
+	b.progressCalls++
+	b.mu.Unlock()
+	return b.build(source, targetImage, insecure, cred, func(stage, status string) {
+		progress(controlplane.DeployEvent{Stage: stage, Status: status})
+	})
+}
+
+// build is what both entry points do: record the call and walk the stages, reporting each to event.
+func (b *Builder) build(source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, event func(stage, status string)) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls++
@@ -96,8 +130,13 @@ func (b *Builder) Build(_ context.Context, source controlplane.SourceRef, target
 	b.lastTarget = targetImage
 	b.lastInsecure = insecure
 	b.lastCred = cred
+	event(controlplane.StageClone, controlplane.DeployStarted)
+	event(controlplane.StageClone, controlplane.DeployDone)
+	event(controlplane.StageBuild, controlplane.DeployStarted)
 	if b.err != nil {
+		event(controlplane.StageBuild, controlplane.DeployFailed)
 		return "", b.err
 	}
+	event(controlplane.StageBuild, controlplane.DeployDone)
 	return b.digest, nil
 }

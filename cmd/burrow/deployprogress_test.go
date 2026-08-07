@@ -146,13 +146,101 @@ func TestDeployHoldIsStillTheConfirmError(t *testing.T) {
 	}
 }
 
+// TestBuildPrintsOneSequenceOfStagesOnStderr is `burrow app build` presenting a build the way
+// `burrow app deploy` presents a deploy (issue #503): the same tick style, on stderr, with the
+// build's own stages running into the deploy's as one sequence — and stdout still carrying only the
+// result.
+func TestBuildPrintsOneSequenceOfStagesOnStderr(t *testing.T) {
+	var accept string
+	stdout, stderr, err := runCLI(t, ndjsonDeploy(&accept,
+		`{"event":{"stage":"clone","status":"started"}}`,
+		`{"event":{"stage":"clone","status":"done"}}`,
+		`{"event":{"stage":"build","status":"started"}}`,
+		`{"event":{"stage":"build","status":"progressing"}}`,
+		`{"event":{"stage":"build","status":"done"}}`,
+		`{"event":{"stage":"apply","status":"started"}}`,
+		`{"event":{"stage":"apply","status":"done"}}`,
+		`{"result":{"digest":"sha256:abc","deploy":{"release":{"id":"r1","app":"web","image":"img:1@sha256:abc","status":"deployed","replicas":1}}}}`,
+	), "app", "build", "web", "--source", "https://github.com/acme/web", "--ref", "v1.2.3", "--image", "img:1")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(accept, "x-ndjson") {
+		t.Errorf("Accept = %q, want the CLI to ask for the progress stream", accept)
+	}
+	for _, want := range []string{"cloning the source in the cluster", "building and pushing the image", "writing the Deployment"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to name the stage %q", stderr, want)
+		}
+		if strings.Contains(stdout, want) {
+			t.Errorf("stdout carried the stage %q; progress belongs on stderr", want)
+		}
+	}
+	if !strings.Contains(stdout, "built web (digest sha256:abc)") {
+		t.Errorf("stdout = %q, want the result line", stdout)
+	}
+}
+
+// TestBuildAgainstAControlPlaneWithNoStream keeps a new CLI working against an older control plane:
+// it answers the build with plain JSON, the CLI prints no stages, and the build still reports its
+// result.
+func TestBuildAgainstAControlPlaneWithNoStream(t *testing.T) {
+	stdout, stderr, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"digest": "sha256:abc",
+			"deploy": map[string]any{"release": map[string]any{"id": "r1", "app": "web", "image": "img:1@sha256:abc", "status": "deployed", "replicas": 1}},
+		})
+	}, "app", "build", "web", "--source", "https://github.com/acme/web", "--ref", "v1.2.3", "--image", "img:1")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(stderr, "building and pushing the image") {
+		t.Errorf("stderr = %q, want no stages from a control plane that reported none", stderr)
+	}
+	if !strings.Contains(stdout, "built web (digest sha256:abc)") {
+		t.Errorf("stdout = %q, want the result line", stdout)
+	}
+}
+
 // TestDeployStageLabelsCoverTheControlPlanesVocabulary is the guard against the two halves drifting:
-// a stage the control plane can report and this CLI has no words for would print a raw token.
+// a stage the control plane can report and this CLI has no words for would print a raw token. It
+// covers a build's stages too, since a build reports its own and then the deploy's (issue #503).
 func TestDeployStageLabelsCoverTheControlPlanesVocabulary(t *testing.T) {
-	for _, stage := range controlplane.DeployStages() {
+	for _, stage := range append(controlplane.DeployStages(), controlplane.BuildStages()...) {
 		if _, ok := deployStageLabels[stage]; !ok {
 			t.Errorf("no human label for the stage %q", stage)
 		}
+	}
+}
+
+// TestAStillRunningStageExtendsItsLine covers what a build's minutes-long stage looks like: each
+// report the control plane sends to keep the response alive extends the open line rather than
+// starting a new one, so the reader sees the stage is still working and still reads one line per
+// stage.
+func TestAStillRunningStageExtendsItsLine(t *testing.T) {
+	var buf bytes.Buffer
+	p := newDeployProgressPrinter(&buf, stepClock(30*time.Second))
+	p(client.DeployProgress{Stage: "build", Status: controlplane.DeployStarted})
+	p(client.DeployProgress{Stage: "build", Status: controlplane.DeployProgressing})
+	p(client.DeployProgress{Stage: "build", Status: controlplane.DeployProgressing})
+	p(client.DeployProgress{Stage: "build", Status: controlplane.DeployDone})
+
+	got := buf.String()
+	if strings.Count(got, "building and pushing the image") != 1 {
+		t.Errorf("output = %q, want the stage named once", got)
+	}
+	if !strings.Contains(got, ".....") {
+		t.Errorf("output = %q, want each report to extend the open line", got)
+	}
+	if !strings.Contains(got, okGlyph) {
+		t.Errorf("output = %q, want the line closed with a mark", got)
+	}
+	// A report with no line open has nothing to extend and prints nothing.
+	var stray bytes.Buffer
+	q := newDeployProgressPrinter(&stray, stepClock(time.Second))
+	q(client.DeployProgress{Stage: "build", Status: controlplane.DeployProgressing})
+	if stray.String() != "" {
+		t.Errorf("output = %q, want nothing for a report with no line open", stray.String())
 	}
 }
 

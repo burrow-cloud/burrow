@@ -13,8 +13,10 @@ import (
 )
 
 // A deploy takes ten to twenty seconds and every stage of it happens server-side, so the client
-// cannot narrate it (issue #480). This is how the control plane says what it is doing over the call
-// the client is already blocked on.
+// cannot narrate it (issue #480). An in-cluster build takes minutes and is worse: a response that
+// starts only when the build ends never arrives at all, because every reverse proxy in front of a
+// control plane has a read timeout and 60 seconds is the common default (issue #503). This is how the
+// control plane says what it is doing over the call the client is already blocked on, for both.
 //
 // IT IS THE SAME ENDPOINT, OPT-IN PER REQUEST. A client that wants the stages sends
 // `Accept: application/x-ndjson`; a control plane that predates this ignores an Accept header it
@@ -33,13 +35,16 @@ import (
 // ndjsonMediaType is the content type of the progress stream: one JSON object per line.
 const ndjsonMediaType = "application/x-ndjson"
 
-// deployStreamLine is one line of the stream. Exactly one field is ever set: an event while the
-// deploy runs, then a single terminal line that is either the result or the error. The wrapper keys
-// are what let a reader tell the three apart without guessing at a shape.
-type deployStreamLine struct {
-	Event  *controlplane.DeployEvent  `json:"event,omitempty"`
-	Result *controlplane.DeployResult `json:"result,omitempty"`
-	Error  *streamError               `json:"error,omitempty"`
+// streamLine is one line of the stream. Exactly one field is ever set: an event while the operation
+// runs, then a single terminal line that is either the result or the error. The wrapper keys are what
+// let a reader tell the three apart without guessing at a shape.
+//
+// Result is an interface because the same framing carries a deploy's result and a build's; what a
+// reader has to do with it — read the key, decode the value — is identical either way.
+type streamLine struct {
+	Event  *controlplane.DeployEvent `json:"event,omitempty"`
+	Result any                       `json:"result,omitempty"`
+	Error  *streamError              `json:"error,omitempty"`
 }
 
 // streamError is an error raised AFTER the first event — a failed `pre-deploy` hook, a failed apply,
@@ -65,55 +70,82 @@ func wantsProgressStream(r *http.Request) bool {
 	return false
 }
 
-// deployStream runs a deploy, reporting its stages as they happen and ending with one terminal line.
-//
-// A ResponseWriter that cannot flush falls back to the ordinary buffered response: the caller then
-// gets its answer at the end instead of the stages as they happen, which is today's behaviour rather
-// than a failure. Every writer on the real serving path flushes — the API-server service proxy this
-// travels through streams fine, and no middleware on a matched /v1 route wraps the writer.
-func (s *server) deployStream(w http.ResponseWriter, r *http.Request, req controlplane.DeployRequest) {
+// progressStream is the ndjson writer both streaming operations share: the lazily-written header, one
+// flushed line per event, and the single terminal line. There is exactly ONE of these because there
+// is exactly one framing — a deploy and a build differ in the work they do and the result they carry,
+// not in how either is put on the wire.
+type progressStream struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	enc     *json.Encoder
+	open    bool
+}
+
+// newProgressStream returns a stream over w, or ok=false when w cannot flush — the caller then serves
+// the ordinary buffered response instead. That is today's behaviour rather than a failure: the caller
+// gets its answer at the end instead of the stages as they happen. Every writer on the real serving
+// path flushes — the API-server service proxy this travels through streams fine, and no middleware on
+// a matched /v1 route wraps the writer.
+func newProgressStream(w http.ResponseWriter) (*progressStream, bool) {
 	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return nil, false
+	}
+	return &progressStream{w: w, flusher: flusher, enc: json.NewEncoder(w)}, true
+}
+
+// write emits one line, writing the response header first if this is the first. Until that happens
+// the handler can still answer with an ordinary status-coded error.
+//
+// The engine calls the reporter synchronously on the serving goroutine, in stage order, so there is
+// no concurrent writer to guard against.
+func (s *progressStream) write(line streamLine) {
+	if !s.open {
+		s.open = true
+		s.w.Header().Set("Content-Type", ndjsonMediaType)
+		// The stream is JSON objects, not a document; nosniff stops a proxy or a browser deciding
+		// otherwise part-way through.
+		s.w.Header().Set("X-Content-Type-Options", "nosniff")
+		s.w.WriteHeader(http.StatusOK)
+	}
+	_ = s.enc.Encode(line)
+	s.flusher.Flush()
+}
+
+// progress is the reporter handed to the engine.
+func (s *progressStream) progress(ev controlplane.DeployEvent) { s.write(streamLine{Event: &ev}) }
+
+// finish closes the stream on an operation that produced a result.
+func (s *progressStream) finish(res any) { s.write(streamLine{Result: res}) }
+
+// fail closes the stream on an operation that errored, and reports whether it did. It returns false
+// when nothing has been written yet: the refusal is then an ordinary status-coded one and the caller
+// writes it as such — byte for byte what a caller that never asked for progress receives.
+func (s *progressStream) fail(err error) bool {
+	if !s.open {
+		return false
+	}
+	status, body := engineError(err)
+	s.write(streamLine{Error: &streamError{Status: status, errorResponse: body}})
+	return true
+}
+
+// deployStream runs a deploy, reporting its stages as they happen and ending with one terminal line.
+func (s *server) deployStream(w http.ResponseWriter, r *http.Request, req controlplane.DeployRequest) {
+	stream, ok := newProgressStream(w)
 	if !ok {
 		s.deployPlain(w, r, req)
 		return
 	}
-	enc := json.NewEncoder(w)
-	open := false
-	// begin writes the response header, once, at the moment the first line is produced. Until it is
-	// called the handler can still answer with an ordinary status-coded error.
-	begin := func() {
-		if open {
-			return
-		}
-		open = true
-		w.Header().Set("Content-Type", ndjsonMediaType)
-		// The stream is JSON objects, not a document; nosniff stops a proxy or a browser deciding
-		// otherwise part-way through.
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.WriteHeader(http.StatusOK)
-	}
-	write := func(line deployStreamLine) {
-		begin()
-		_ = enc.Encode(line)
-		flusher.Flush()
-	}
-	// The engine calls this synchronously on this goroutine, in stage order, so there is no
-	// concurrent writer to guard against.
-	req.Progress = func(ev controlplane.DeployEvent) { write(deployStreamLine{Event: &ev}) }
-
+	req.Progress = stream.progress
 	res, err := s.engine.Deploy(r.Context(), req)
 	if err != nil {
-		if !open {
-			// Nothing has been written, so this is an ordinary refusal and stays one — byte for byte
-			// what a caller that never asked for progress receives.
+		if !stream.fail(err) {
 			writeEngineError(w, err)
-			return
 		}
-		status, body := engineError(err)
-		write(deployStreamLine{Error: &streamError{Status: status, errorResponse: body}})
 		return
 	}
-	write(deployStreamLine{Result: &res})
+	stream.finish(&res)
 }
 
 // deployPlain is the deploy the API has always served: one JSON object, status-coded.

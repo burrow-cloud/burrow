@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -61,11 +62,15 @@ func newBuildCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The build reports what it is doing as it does it (issue #503) — its own stages and then
+			// the deploy's, as one sequence. It goes to STDERR, like the targeting line above it and
+			// for the same reason: stdout carries the result, and --json makes that a contract.
 			res, err := c.Build(ctx, app, client.BuildRequest{
 				Env:         env,
 				Source:      client.SourceRef{Repo: repo, Ref: ref},
 				TargetImage: image,
 				Confirm:     confirm,
+				Progress:    newDeployProgressPrinter(cmd.ErrOrStderr(), time.Now),
 			})
 			if err != nil {
 				return err

@@ -159,10 +159,10 @@ type DeployRequest struct {
 	Progress func(DeployProgress) `json:"-"`
 }
 
-// DeployProgress is one stage transition of a running deploy: which stage of the deploy the control
-// plane is in, and what happened to it. Both are members of the control plane's closed vocabularies
-// (controlplane.DeployStages, controlplane.DeployStatuses); a value outside them is a newer control
-// plane's, and a caller renders it rather than failing on it.
+// DeployProgress is one stage transition of a running deploy or build: which stage the control plane
+// is in, and what happened to it. Both are members of the control plane's closed vocabularies
+// (controlplane.DeployStages or controlplane.BuildStages, and controlplane.DeployStatuses); a value
+// outside them is a newer control plane's, and a caller renders it rather than failing on it.
 type DeployProgress struct {
 	Stage  string `json:"stage"`
 	Status string `json:"status"`
@@ -189,6 +189,15 @@ type BuildRequest struct {
 	Source      SourceRef `json:"source"`
 	TargetImage string    `json:"target_image"`
 	Confirm     bool      `json:"confirm,omitempty"`
+	// Progress receives the build's stages as the control plane reports them (issue #503): the build's
+	// own stages and then the deploy stages it hands off to, as one continuous sequence. Setting it is
+	// what asks for them: Build then negotiates the streaming response, and a control plane that does
+	// not offer one is handled transparently. Nil — the default, and the shape that goes on the wire,
+	// since json ignores this field — is the build this package has always issued.
+	//
+	// It is called from Build's own goroutine as each line arrives, so a slow reporter slows the read.
+	// It is never called after Build returns.
+	Progress func(DeployProgress) `json:"-"`
 }
 
 // BuildResult reports the outcome of a successful build-then-deploy (ADR-0053 §4): the digest of the
@@ -693,16 +702,18 @@ func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (Dep
 		return out, c.doWithin(ctx, c.budget.deploy, http.MethodPost, path, req, &out)
 	}
 	err := c.within(ctx, c.budget.deploy, func(ctx context.Context) error {
-		return c.deployStreaming(ctx, path, req, &out)
+		return c.streaming(ctx, path, req, req.Progress, &out)
 	})
 	return out, err
 }
 
-// deployStreamLine is one line of the control plane's ndjson deploy stream: an event while the
-// deploy runs, then one terminal line that is either the result or the error.
-type deployStreamLine struct {
+// streamLine is one line of the control plane's ndjson progress stream: an event while the operation
+// runs, then one terminal line that is either the result or the error. The result stays raw because
+// the framing is shared — a deploy and a build differ only in what that key carries — and the caller
+// is the one that knows which type it asked for.
+type streamLine struct {
 	Event  *DeployProgress `json:"event"`
-	Result *DeployResult   `json:"result"`
+	Result json.RawMessage `json:"result"`
 	Error  *struct {
 		Status            int    `json:"status"`
 		Error             string `json:"error"`
@@ -713,14 +724,16 @@ type deployStreamLine struct {
 	} `json:"error"`
 }
 
-// deployStreaming issues a deploy asking for the progress stream and reports each stage to
-// req.Progress as it arrives.
+// streaming issues an operation asking for the progress stream, reports each stage to progress as it
+// arrives, and decodes the terminal result into out. It is ONE implementation for every streaming
+// operation — a deploy (issue #480) and a build (issue #503) — because the negotiation, the framing,
+// and the fallback are the same problem in both.
 //
 // IT MUST SURVIVE A CONTROL PLANE THAT DOES NOT OFFER ONE. The Accept header is a request, not a
 // requirement: a server predating this ignores it and answers with the single JSON object it always
 // has, so the response's Content-Type decides which path is taken. That is what makes a new client
 // safe against an old control plane, which is the ordinary state of an install mid-upgrade.
-func (c *Client) deployStreaming(ctx context.Context, path string, req DeployRequest, out *DeployResult) error {
+func (c *Client) streaming(ctx context.Context, path string, req any, progress func(DeployProgress), out any) error {
 	b, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("encoding request: %w", err)
@@ -745,12 +758,12 @@ func (c *Client) deployStreaming(ctx context.Context, path string, req DeployReq
 
 	dec := json.NewDecoder(resp.Body)
 	for {
-		var line deployStreamLine
+		var line streamLine
 		if err := dec.Decode(&line); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return fmt.Errorf("reading the deploy stream: %w", err)
+			return fmt.Errorf("reading the progress stream: %w", err)
 		}
 		switch {
 		case line.Error != nil:
@@ -765,16 +778,18 @@ func (c *Client) deployStreaming(ctx context.Context, path string, req DeployReq
 				ServerVersion:     line.Error.ServerVersion,
 				ServerInstallID:   line.Error.ServerInstallID,
 			}
-		case line.Result != nil:
-			*out = *line.Result
+		case len(line.Result) > 0:
+			if err := json.Unmarshal(line.Result, out); err != nil {
+				return fmt.Errorf("decoding the result: %w", err)
+			}
 			return nil
 		case line.Event != nil:
-			req.Progress(*line.Event)
+			progress(*line.Event)
 		}
 	}
-	// The stream ended with neither a result nor an error: burrowd went away mid-deploy. The deploy
-	// itself may well have landed, so this says so rather than implying it did not happen.
-	return fmt.Errorf("the control plane closed the deploy stream without reporting an outcome; the deploy may still be in progress — check the app's status before retrying")
+	// The stream ended with neither a result nor an error: burrowd went away mid-operation. What it
+	// was doing may well have landed, so this says so rather than implying it did not happen.
+	return fmt.Errorf("the control plane closed the progress stream without reporting an outcome; the operation may still be in progress — check the app's status before retrying")
 }
 
 // ndjsonMediaType is the content type of the deploy progress stream: one JSON object per line.
@@ -792,9 +807,22 @@ func isNDJSON(contentType string) bool {
 // BuildResult carries the built digest and the deploy that shipped it. It is gated by the app.deploy
 // guardrail — a held deploy returns a guardrail error the caller surfaces for confirmation, re-invoking
 // with Confirm set only on explicit human approval.
+//
+// Setting req.Progress asks the control plane to report the build's stages over the same call (issue
+// #503), which is what makes a build that runs for minutes survivable across a proxy with a read
+// timeout. It changes nothing else: the same endpoint, the same body, the same budget, and the same
+// errors — a guardrail hold included, which arrives as an *APIError with NeedsConfirmation either
+// way, because a build's hold is decided after its stages are already on the wire and therefore
+// travels in the stream carrying the status it would have been written with.
 func (c *Client) Build(ctx context.Context, app string, req BuildRequest) (BuildResult, error) {
 	var out BuildResult
-	err := c.doWithin(ctx, c.budget.build, http.MethodPost, c.appPath(app, "build"), req, &out)
+	path := c.appPath(app, "build")
+	if req.Progress == nil {
+		return out, c.doWithin(ctx, c.budget.build, http.MethodPost, path, req, &out)
+	}
+	err := c.within(ctx, c.budget.build, func(ctx context.Context) error {
+		return c.streaming(ctx, path, req, req.Progress, &out)
+	})
 	return out, err
 }
 

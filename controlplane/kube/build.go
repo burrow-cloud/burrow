@@ -28,6 +28,10 @@ import (
 
 var _ controlplane.Builder = (*BuildAdapter)(nil)
 
+// The adapter reports its own stages, so the engine hands it the caller's reporter rather than
+// bracketing the whole build as one opaque stage (issue #503).
+var _ controlplane.ProgressBuilder = (*BuildAdapter)(nil)
+
 const (
 	// defaultGitImage is the image the clone init container runs. It only needs `git`; a minimal
 	// git image keeps the pull small. Phase 3's install wiring (ADR-0053 §5) may override it.
@@ -310,6 +314,15 @@ func (b *BuildAdapter) WithBuildPodMutator(fn func(*corev1.PodSpec)) *BuildAdapt
 // caller does NOT touch the deploy path on error (ADR-0053 §4). It blocks until the Job succeeds or
 // fails, or the build timeout elapses.
 func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) (string, error) {
+	return b.BuildWithProgress(ctx, source, targetImage, insecure, cred, func(controlplane.DeployEvent) {})
+}
+
+// BuildWithProgress is Build, reporting the build's stages as the Job reaches them (issue #503): the
+// clone, then the build, from what the Job's pod actually shows, plus a repeat of the running stage
+// often enough that the response survives a proxy's read timeout. Its result and its errors are
+// Build's, exactly — reporting is beside the build, never part of it. progress must not be nil; Build
+// passes a no-op, and the engine normalises a caller that asked for nothing into one.
+func (b *BuildAdapter) BuildWithProgress(ctx context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, progress func(controlplane.DeployEvent)) (string, error) {
 	if err := source.Validate(); err != nil {
 		return "", fmt.Errorf("kube: build: %w: %w", controlplane.ErrInvalid, err)
 	}
@@ -381,16 +394,37 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 		}
 	}
 
+	// The Job exists and its first container is the clone, so the report opens here — before the wait,
+	// not after it. The first event is what commits the streaming response's header (issue #503), and
+	// an event emitted only once the build is over is an event nobody is still connected to receive.
+	reporter := newBuildReporter(progress)
+	reporter.start()
+
 	// awaitJob fails fast when the build pod cannot start rather than waiting out the thirty-minute
 	// deadline (issue #352). The capacity pre-flight above catches the "no node has room" case before
 	// any Job exists, but it cannot catch the rest: a clone init container whose credential Secret is
 	// missing, an unreachable builder image, a taint the build pod does not tolerate. Those all leave
 	// both Job counters at zero, and thirty minutes is a long time to learn nothing.
-	j, err := awaitJob(ctx, b.client, b.namespace, name, buildJobTimeout, buildJobPoll, unschedulableGrace(ctx, b.limits))
+	//
+	// The observer runs on the same goroutine, once per poll, and reads the pod only when it is about
+	// to say something — so the report costs one extra pod read per interval and nothing else.
+	j, err := awaitJobObserved(ctx, b.client, b.namespace, name, buildJobTimeout, buildJobPoll, unschedulableGrace(ctx, b.limits), func() {
+		if reporter.due() {
+			reporter.observe(b.buildPhase(ctx, name))
+		}
+	})
 	if err != nil {
+		// A wait that ended badly — a pod that cannot start, the deadline, a cancelled request — ends
+		// the stage it was in. The error itself is unchanged and carries the diagnosis.
+		reporter.enter(b.buildPhase(ctx, name))
+		reporter.finish(false)
 		return "", err
 	}
 	if j.Status.Failed > 0 {
+		// Read the pod once more before closing the report: a clone that could not authenticate and a
+		// Dockerfile step that exited non-zero are different failures, and the stage says which.
+		reporter.enter(b.buildPhase(ctx, name))
+		reporter.finish(false)
 		// Leave the failed Job (and its pod logs) for diagnosis; the TTL controller reaps it after
 		// buildJobTTLSeconds so failures no longer accumulate indefinitely (issue #280).
 		return "", fmt.Errorf("kube: build job %q failed", name)
@@ -398,9 +432,13 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 	digest := b.jobTerminationDigest(ctx, name)
 	if digest == "" {
 		// The Job reported success but wrote no digest — treat it as a build failure rather
-		// than pinning a deploy to nothing. Leave the Job for diagnosis.
+		// than pinning a deploy to nothing. Leave the Job for diagnosis. The Job ran to completion, so
+		// whatever went wrong went wrong in the build.
+		reporter.enter(controlplane.StageBuild)
+		reporter.finish(false)
 		return "", fmt.Errorf("kube: build job %q reported success but produced no image digest", name)
 	}
+	reporter.finish(true)
 	// Reap on success immediately (a clean cluster: a good build has nothing to diagnose) —
 	// the TTL is only the backstop for the failures left behind above (issue #280).
 	policy := metav1.DeletePropagationBackground

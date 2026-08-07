@@ -51,6 +51,18 @@ import (
 // operational configuration and passes it in, so a waiter believes an Unschedulable pod at exactly
 // the moment the status surface does.
 func awaitJob(ctx context.Context, client kubernetes.Interface, namespace, name string, timeout, poll, grace time.Duration) (*batchv1.Job, error) {
+	return awaitJobObserved(ctx, client, namespace, name, timeout, poll, grace, nil)
+}
+
+// awaitJobObserved is awaitJob with an observer called once per poll on a Job that is still working,
+// after the terminal and blocking checks and before the sleep. It exists for the in-cluster build,
+// which reports what it is doing across the minutes it takes (issue #503) and has nowhere else to do
+// it from: the wait loop is the only place that learns anything while the Job runs.
+//
+// The observer is a REPORTER, never a decision: it is called on the waiting goroutine, its result is
+// ignored, and nothing it does changes whether the wait continues. A nil observer is the wait every
+// other Job takes, unchanged.
+func awaitJobObserved(ctx context.Context, client kubernetes.Interface, namespace, name string, timeout, poll, grace time.Duration, observe func()) (*batchv1.Job, error) {
 	jobs := client.BatchV1().Jobs(namespace)
 	deadline := time.Now().Add(timeout)
 	for {
@@ -70,6 +82,9 @@ func awaitJob(ctx context.Context, client kubernetes.Interface, namespace, name 
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("kube: %w", jobDeadlineError(ctx, client, namespace, name, timeout))
+		}
+		if observe != nil {
+			observe()
 		}
 		select {
 		case <-ctx.Done():

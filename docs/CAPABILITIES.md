@@ -1153,6 +1153,13 @@ in `--json` — `guardrails` and `absent_capabilities` — because they are diff
 `deny` is a limit an operator can move with `guard set`, an absent capability is not on the
 binary at all. See [The agent surface](#the-agent-surface).
 
+On the operator CLI the **human** listing prints dispositions only, and points at
+`burrow agent capabilities` for the other list. The two are different kinds of answer, not two
+halves of one setting: `guard list` shows policy an operator chose and `guard set` can change,
+while `burrow agent capabilities` shows the shape of another binary, which no disposition moves.
+`burrow agent capabilities` reads a compiled-in catalogue, so it answers with no cluster and no
+credential, and `--json` carries the same `absent_capabilities` list under the same key.
+
 Limits:
 
 - **`app.delete` and `dns.delete` are denied, and a deny is not a hold** — no `--confirm`
@@ -1372,8 +1379,9 @@ The reversibility tier ships too: `app.delete` and `dns.delete` are `deny` by de
 `burrow-agent delete` and `burrow-agent domain remove` exist, are refused, and say what would
 change the answer (see [Guardrails](#guardrails)).
 
-**An absent capability is legible rather than a dead end** (ADR-0065 §7). `burrow guard list --json`
-and `burrow-agent guard` both report the absent capabilities alongside the dispositions: what each one
+**An absent capability is legible rather than a dead end** (ADR-0065 §7). `burrow agent capabilities`
+lists them on the operator CLI, and `burrow guard list --json`
+and `burrow-agent guard` both report them alongside the dispositions: what each one
 is, why it is not on the agent surface, who can perform it ("the burrow operator CLI, run by a
 human with the cluster's admin kubeconfig"), and the exact command that person runs. So an agent
 asked to remove an add-on relays "that is not something I can do, and here is who can" instead of

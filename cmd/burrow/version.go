@@ -67,12 +67,20 @@ var fetchLatestRelease = func(ctx context.Context) (string, error) {
 // releasesURL lists this repository's published releases, newest first. Unlike /releases/latest it
 // INCLUDES prereleases, which is the only way to answer "is there a newer rc than the one I am
 // running". One page is plenty: the question is only ever about the newest few tags.
-const releasesURL = "https://api.github.com/repos/burrow-cloud/burrow/releases?per_page=30"
+//
+// It is a package var for the same reason latestReleaseURL is: so a test can point the fetch at an
+// httptest server and assert that this request carries no Burrow credential either, without reaching
+// GitHub.
+var releasesURL = "https://api.github.com/repos/burrow-cloud/burrow/releases?per_page=30"
 
 // fetchReleaseTags returns the tags of the most recently published releases, prereleases included
 // and drafts excluded (a draft is not published, so it is not something to upgrade to). It is a
 // package var so tests can fake it with no network, and it is best-effort by contract exactly as
 // fetchLatestRelease is: every failure is returned for the caller to skip the check silently.
+//
+// Like its sibling it goes through outboundHTTPClient and not http.DefaultClient: api.github.com is
+// a third party with no business seeing a control-plane credential, and this is the request an rc
+// cycle makes on every `burrow version` (issue #442).
 var fetchReleaseTags = func(ctx context.Context) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, latestReleaseTimeout)
 	defer cancel()
@@ -81,7 +89,7 @@ var fetchReleaseTags = func(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := outboundHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

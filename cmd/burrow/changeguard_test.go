@@ -77,6 +77,7 @@ var commandClasses = map[string]commandClass{
 	"upgrade":                    {class: classClusterAdmin, why: "deprecated alias for `cluster upgrade`"},
 	"mcp":                        {class: classLocal, why: "a removed-command stub that only points at `burrow agent <tool> install`"},
 	"agent":                      {class: classLocal, why: "writes a coding agent's own configuration file on this machine"},
+	"agent capabilities":         {class: classReads, why: "lists the capabilities absent from the burrow-agent binary, from a compiled-in catalogue; it reaches no target at all"},
 	"cluster install":            {class: classClusterAdmin, why: "puts a control plane into a cluster named as an explicit argument (ADR-0078 §3)"},
 	"cluster upgrade":            {class: classClusterAdmin, why: "replaces the running control plane in a named kubeconfig context"},
 	"cluster ingress install":    {class: classClusterAdmin, why: "installs cluster components with the operator's kubeconfig"},

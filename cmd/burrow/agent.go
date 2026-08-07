@@ -105,6 +105,8 @@ const agentOverview = "Wire your AI agent to burrow-agent, its scoped control ch
 	"  burrow agent <tool>\n\n" +
 	"Apply it:\n" +
 	"  burrow agent <tool> install\n\n" +
+	"See what the agent cannot do at all:\n" +
+	"  burrow agent capabilities\n\n" +
 	"burrow-agent is a single binary on the agent's PATH; this writes the agent's permission rules to\n" +
 	"allow it and deny the human `burrow` admin CLI, keeping every cluster change on Burrow's guarded path.\n" +
 	"Using another agent? Request support: " + agentIssuesURL + "\n"
@@ -147,6 +149,10 @@ func newAgentCmd() *cobra.Command {
 	// blocking it by default would be overreach. No em-dashes in the help string: it is user-facing.
 	cmd.Flags().BoolVar(&denyKubectl, "deny-kubectl", false,
 		"Also deny kubectl in the agent's shell, keeping every cluster change on Burrow's guarded path")
+	// `capabilities` is a real subcommand; a tool name is a positional argument. Cobra runs this
+	// command's own RunE for any first argument that is not a registered subcommand, so
+	// `burrow agent claude install` is unaffected.
+	cmd.AddCommand(newAgentCapabilitiesCmd())
 	return cmd
 }
 

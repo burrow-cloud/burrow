@@ -256,6 +256,101 @@ func TestLatestReleaseForSeesPrereleasesOnlyForAPrerelease(t *testing.T) {
 	}
 }
 
+// TestReleaseCheckAcrossTheFourReleaseStates is issue #442 stated as the four states a user can
+// actually be in, run through BOTH halves together: which release the check compares against
+// (latestReleaseFor) and what it then says (upgradeHints). The two are correct only in combination,
+// and testing them apart is what let "you are on the latest release" survive on top of a comparison
+// against an older tag.
+//
+// The published set is fixed for every case: stable v0.13.1 is the newest release GitHub's
+// /releases/latest will name, and v0.14.0-rc.3 is the newest tag of any kind.
+func TestReleaseCheckAcrossTheFourReleaseStates(t *testing.T) {
+	const (
+		newestStable = "v0.13.1"
+		newestRC     = "v0.14.0-rc.3"
+		olderRC      = "v0.14.0-rc.2"
+	)
+	cases := []struct {
+		name       string
+		cli        string
+		stable     string   // what /releases/latest answers
+		tags       []string // what the release list answers, prereleases included
+		wantLatest string
+		wantHas    []string
+		wantNotIn  []string
+	}{
+		{
+			// (a) On the newest rc. The list is read, the newest tag IS the installed one, and the
+			// reassurance is earned rather than inherited from a comparison against something older.
+			name: "on the newest rc",
+			cli:  newestRC, stable: newestStable, tags: []string{newestStable, olderRC, newestRC},
+			wantLatest: newestRC,
+			wantHas:    []string{"You are on the latest release."},
+			wantNotIn:  []string{"A newer", "brew upgrade", "ahead of the latest release"},
+		},
+		{
+			// (b) On an older rc with a newer rc out. This is the state the issue was reported from,
+			// where the CLI used to say nothing at all. The hint names the route that installs an rc:
+			// the Homebrew tap ships released versions, so `brew upgrade` would not produce it.
+			name: "older rc with a newer rc published",
+			cli:  olderRC, stable: newestStable, tags: []string{newestStable, olderRC, newestRC},
+			wantLatest: newestRC,
+			wantHas:    []string{"A newer prerelease (v0.14.0-rc.3) is available.", "cmd/burrow@v0.14.0-rc.3"},
+			wantNotIn:  []string{"You are on the latest release.", "brew upgrade"},
+		},
+		{
+			// (c) On an rc with a newer STABLE out. The rc line has been superseded by a release, so
+			// the right move is back onto the released line and `brew upgrade` is the route that does
+			// it. The newest tag of any kind is the stable one, so no prerelease is named.
+			name: "rc with a newer stable published",
+			cli:  olderRC, stable: "v0.15.0", tags: []string{"v0.15.0", olderRC, newestStable},
+			wantLatest: "v0.15.0",
+			wantHas:    []string{"A newer burrow (v0.15.0) is available. Run `brew upgrade burrow-cloud/tap/burrow`."},
+			wantNotIn:  []string{"You are on the latest release.", "prerelease"},
+		},
+		{
+			// (d) On a stable release with a newer rc out. The comparison never sees the rc:
+			// /releases/latest is read instead of the list, so the user is told they are current
+			// rather than pushed onto a pre-release they did not ask for. Telling somebody on a
+			// released version that they are behind because a candidate exists would be wrong.
+			name: "stable with a newer rc published",
+			cli:  newestStable, stable: newestStable, tags: []string{newestStable, olderRC, newestRC},
+			wantLatest: newestStable,
+			wantHas:    []string{"You are on the latest release."},
+			wantNotIn:  []string{"v0.14.0-rc.3", "A newer", "ahead of the latest release"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubLatestRelease(t, tc.stable, nil)
+			origTags := fetchReleaseTags
+			fetchReleaseTags = func(context.Context) ([]string, error) { return tc.tags, nil }
+			t.Cleanup(func() { fetchReleaseTags = origTags })
+
+			latest, err := latestReleaseFor(context.Background(), tc.cli)
+			if err != nil {
+				t.Fatalf("latestReleaseFor(%s): %v", tc.cli, err)
+			}
+			if latest != tc.wantLatest {
+				t.Fatalf("compared against %q, want %q", latest, tc.wantLatest)
+			}
+			// The control plane is held at the CLI's own version so only the CLI's statement is under
+			// test here; the control-plane hint has its own cases in TestUpgradeHints.
+			got := strings.Join(upgradeHints(tc.cli, tc.cli, latest), "\n")
+			for _, want := range tc.wantHas {
+				if !strings.Contains(got, want) {
+					t.Errorf("on %s against %s the CLI says %q, want substring %q", tc.cli, latest, got, want)
+				}
+			}
+			for _, no := range tc.wantNotIn {
+				if strings.Contains(got, no) {
+					t.Errorf("on %s against %s the CLI says %q, which should not contain %q", tc.cli, latest, got, no)
+				}
+			}
+		})
+	}
+}
+
 // TestLatestReleaseForStaysBestEffort keeps the release check's contract: a failed list is returned
 // as an error for the caller to skip silently, never a tag and never a failure of `burrow version`.
 func TestLatestReleaseForStaysBestEffort(t *testing.T) {

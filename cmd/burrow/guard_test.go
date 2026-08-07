@@ -38,8 +38,8 @@ func TestGuardListPrintsDispositionsOnly(t *testing.T) {
 			t.Errorf("guard list still prints the absent-capability table (%q):\n%s", unwanted, out)
 		}
 	}
-	if !strings.Contains(out, "absent from burrow-agent") || !strings.Contains(out, "--json") {
-		t.Errorf("guard list output is missing the one-line pointer at the list:\n%s", out)
+	if !strings.Contains(out, "absent from burrow-agent") || !strings.Contains(out, "burrow agent capabilities") {
+		t.Errorf("guard list output is missing the one-line pointer at `burrow agent capabilities`:\n%s", out)
 	}
 }
 

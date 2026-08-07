@@ -5,10 +5,11 @@ package main
 
 import "net/http"
 
-// outboundHTTPClient is the client every request to a THIRD PARTY goes through: the GitHub latest-
-// release check behind `burrow version`, a manifest URL handed to the server-side applier, and the
-// public-IP echo service the VPS bootstrap queries. None of those are Burrow's control plane and
-// none of them may see a Burrow credential.
+// outboundHTTPClient is the client every request to a THIRD PARTY goes through: both GitHub release
+// reads behind `burrow version` (the latest stable release, and the release list an rc is compared
+// against), a manifest URL handed to the server-side applier, and the public-IP echo service the VPS
+// bootstrap queries. None of those are Burrow's control plane and none of them may see a Burrow
+// credential.
 //
 // It exists so those calls never travel on http.DefaultClient. The default client is process-global
 // mutable state: anything in the process — this repository or a dependency — can install a

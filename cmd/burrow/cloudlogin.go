@@ -64,6 +64,10 @@ const (
 // endpoint cannot make the CLI hold an arbitrary amount of memory.
 const maxDeviceResponseBytes = 1 << 20
 
+// defaultCloudBaseURL is what cloudBaseURL ships as. It is named separately because cloudBaseURL is
+// a seam every test overwrites, so the shipped value would otherwise be unassertable.
+const defaultCloudBaseURL = "https://" + localconfig.CloudAPIEndpoint
+
 // The seams a test substitutes, so no test opens a browser, sleeps, or reaches a real
 // burrow-cloud.dev:
 //
@@ -78,10 +82,6 @@ const maxDeviceResponseBytes = 1 << 20
 // redemption carries the device code and the PKCE verifier; a redirect off the token endpoint would
 // hand both to whatever it pointed at. There is nothing legitimate for these two endpoints to
 // redirect to, so a redirect is surfaced as the unexpected status it is.
-// defaultCloudBaseURL is what cloudBaseURL ships as. It is named separately because cloudBaseURL is
-// a seam every test overwrites, so the shipped value would otherwise be unassertable.
-const defaultCloudBaseURL = "https://" + localconfig.CloudAPIEndpoint
-
 var (
 	cloudBaseURL    = defaultCloudBaseURL
 	cloudHTTPClient = &http.Client{

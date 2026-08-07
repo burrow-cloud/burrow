@@ -1440,8 +1440,9 @@ a version difference alone; a client more than one minor behind gets HTTP 426 na
 upgrade command, and an unknown route returns a structured error saying to upgrade.
 
 That check sees **routes**, not request parameters: an older control plane ignores a query
-parameter it does not know and answers 200 — and it drops an unrecognised **body field** the same
-way. So a parameter that **narrows the scope of a write** rides the route instead. The guardrail
+parameter it does not know and answers 200 — and every burrowd released before this one drops an
+unrecognised **body field** the same way. So a parameter that **narrows the scope of a write** rides
+the route instead. The guardrail
 name tier is the case that established the rule —
 `burrow guard set --env prod --name web app.deploy deny` is `PUT /v1/guard/name/web/app.deploy`,
 so a control plane without the tier refuses the call rather than writing the same deny for every
@@ -1452,8 +1453,8 @@ The same shape carries the **read**, on both CLIs: `guard list --name` and `burr
 one app, reported as the environment's, is what an agent would go on to act against — so it is
 refused with nothing shown rather than answered one tier out.
 
-**The rule now covers the calls that destroy things**, which is where a widened write costs data
-rather than accuracy:
+**Every write now follows the rule.** Each segment is named after the parameter it replaces, so a
+route reads as the request it carries:
 
 | Call | Route | What an older control plane would otherwise have done |
 | --- | --- | --- |
@@ -1462,6 +1463,21 @@ rather than accuracy:
 | `burrow app delete <app> --env staging` | `DELETE /v1/apps/{app}/env/{env}` | Deleted the **default environment's** app — workload, routing and release history |
 | `burrow addon detach postgres <app> --env staging` | `POST /v1/addons/detach/env/{env}` | Dropped the default environment's database |
 | `burrow addon restore postgres <app> --env staging` | `POST /v1/addons/restore/env/{env}` | Overwritten the default environment's live database |
+| `burrow app deploy <app> --env staging` | `POST /v1/apps/{app}/deploy/env/{env}` | Replaced what is **running in production** |
+| `burrow app rollback <app> --env staging` | `POST /v1/apps/{app}/rollback/env/{env}` | Rolled production back to its previous release |
+| `burrow app scale <app> <n> --env staging` | `POST /v1/apps/{app}/scale/env/{env}` | Resized production — and at `0`, stopped it serving |
+| `burrow app publish <app> --env staging` | `POST /v1/apps/{app}/expose/env/{env}` | Pointed the hostname at production's workload |
+| `burrow app unpublish <app> --env staging` | `POST /v1/apps/{app}/unexpose/env/{env}` | Removed production's ingress and routing |
+| `burrow secret set <app> KEY=VALUE --env staging` | `POST /v1/apps/{app}/secrets/env/{env}` | Written the value into **production's Secret**, which cannot be unwritten |
+| `burrow secret unset <app> KEY --env staging` | `DELETE /v1/apps/{app}/secrets/{key}/env/{env}` | Taken the value production is running on out from under it |
+| `burrow addon install postgres --env staging` | `POST /v1/addons/env/{env}` | Stood the instance up as the default environment's |
+| `burrow addon install postgres --archive-destination b2` | `POST /v1/addons/archive-destination/{destination}` | Created the instance with **no write-ahead-log archiving**, and reported it installed |
+| `burrow addon backup postgres <app> --env staging` | `POST /v1/addons/backup/env/{env}` | Dumped from the default environment's instance |
+| `burrow addon backup postgres <app> --destination b2` | `POST /v1/addons/backup/destination/{destination}` | Left the dump **inside the cluster**, on a disk beside the database it insures, and recorded a completed backup |
+| `burrow addon backups postgres --env staging` | `GET /v1/addons/backups/env/{env}` | Listed every environment's backups — see the read-side note below |
+
+A call with two narrowings appends both segments in a fixed order, so `addon install postgres
+--env staging --archive-destination b2` is `POST /v1/addons/env/staging/archive-destination/b2`.
 
 The add-on removal is the one that motivated the change and the only one where **both** answers are
 routes. `--delete-data` is an opt-in, so saying nothing means *keep my data* — but it was not always
@@ -1476,11 +1492,35 @@ says otherwise. A client older than the inversion meant "destroy" by saying noth
 data kept instead — a narrower outcome than it asked for, named in the response as a retained volume,
 which is the only direction the ambiguity can safely be resolved in.
 
-Not everything scope-shaped has moved. The `env` filter on `secret`, `scale`, `rollback`, `expose`,
-`unexpose` and `deploy`, `archive_destination` on `addon install`, and the backup routes' `env` and
-`destination` still ride a parameter, and against an older control plane still act on the wrong
-environment or the wrong storage. They are tracked in
-[issue #485](https://github.com/burrow-cloud/burrow/issues/485).
+**The reads keep the query parameter, on purpose, with one exception.** `app status`, `app logs`,
+`app list`, `app reachability`, `config list` and the secret **key** listing still carry `?env=`. A read
+answered one scope out misinforms whoever is reading it and changes nothing — and against a control
+plane too old for named environments there is only one environment, so what comes back is the only
+data there is rather than another environment's, labelled with a name the server never learned. What
+makes that safe is that the read is not the last line of defence: every write it might lead to is in
+the table above and is refused on its own. Refusing the reads too would take away the commands an
+operator reaches for while working out what is wrong.
+
+The exception is `addon backups`, which is in the table. Its answer is not a display, it is an
+**argument**: it is the picker for `addon restore`, and the id chosen from it is handed to a call
+that overwrites a live database. A backup id is an opaque string, so nothing downstream can tell that
+it came from the wrong environment's list — the list has to be refused rather than answered wide.
+
+**A parameter that cannot outrun its own route needs none of this**, whatever it narrows: it can only
+reach a control plane that shipped no earlier than it did. That covers `skip_final_backup` and
+`backup_destination` on the removal; `env` and `destination` on `addon backup-instance` and
+`addon restore-instance`, whose routes and parameters are all v0.14.0-rc.1; and — the one most worth
+naming, because its absence from the table above otherwise looks like an oversight — `env` on
+`config set` and `config unset`, whose route arrived in the same v0.7.0 that added named
+environments. They stay parameters. Around 45 others are safe for the same reason.
+
+**An unrecognised request field is now refused rather than dropped.** burrowd reads a request body
+with unknown fields disallowed, so a field a control plane is too old to know produces the same kind
+of structured, version-naming refusal an unknown route does — code `unknown_field`, with nothing
+done — instead of a request half-carried-out and reported as a success. That is what catches the
+*next* narrowing added as a body field, before anyone has to notice it. It protects from this release
+forward and repairs nothing already deployed, which is why the routes above exist as well. An older
+client is unaffected: it sends fewer fields, never unknown ones.
 
 **Upgrade limit, worth stating plainly:** the shipped startup gate permits a re-run of the same
 version or **exactly one minor step forward**, and refuses skips, downgrades, and cross-major

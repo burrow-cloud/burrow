@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1248,17 +1249,6 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		podAnnotations[controlplane.ReleaseAnnotation] = spec.ReleaseID
 	}
 
-	// Source every key in the app's per-app Secret as an env var (ADR-0028). optional: true so a
-	// workload with no secrets set still applies (the Secret may not exist yet) — the values live
-	// only in the Secret, never inlined here. The name is derived from the app, so a deploy,
-	// rollback, or env reapply all inject the same Secret without it crossing the API.
-	envFrom := []corev1.EnvFromSource{{
-		SecretRef: &corev1.SecretEnvSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: controlplane.AppSecretName(spec.App)},
-			Optional:             boolPtr(true),
-		},
-	}}
-
 	// The keys the app asked to receive as FILES (ADR-0089 §1-§3). This is the app PodSpec's first
 	// and only Volumes entry; an app that mounts nothing gets none of it, and its pod template is
 	// what it was before mounts existed.
@@ -1271,6 +1261,12 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		// nothing and fail at the credential.
 		env = append(env, corev1.EnvVar{Name: controlplane.SecretsDirEnvVar, Value: spec.SecretFiles.Directory()})
 	}
+
+	// And how the Secret reaches the ENVIRONMENT — wholesale, or enumerated around the keys that were
+	// taken out of it (ADR-0089 §4). Resolved after the config vars above because the enumerated form
+	// has to see the names they already took.
+	secretEnv, envFrom := secretEnvironment(spec, env)
+	env = append(env, secretEnv...)
 
 	replicas := spec.Replicas
 	dep := &appsv1.Deployment{
@@ -1310,6 +1306,64 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		a.podMutator(&dep.Spec.Template.Spec)
 	}
 	return dep
+}
+
+// secretEnvironment decides how the app's per-app Secret reaches the container's ENVIRONMENT: the
+// wholesale envFrom that every app had before ADR-0089 §4 existed, or one enumerated secretKeyRef
+// per key that is still an environment variable. It returns exactly one of the two, and taken is the
+// env the container already has, so the enumerated form can leave the names it took alone.
+//
+// THE FAST PATH IS THE DEFAULT AND MUST STAY FREE. An app that marks no key file-only gets the same
+// EnvFromSource, byte for byte, and no Env entry of its own — envFrom sources every key in the
+// Secret (ADR-0028) with optional: true, so a workload whose Secret does not exist yet still applies
+// and a `secret set` of a NEW key reaches the pod on a restart with no template change at all.
+//
+// A file-only key costs that. envFrom sources the Secret WHOLESALE and there is no way to exclude
+// one key from it, so the only way to keep a credential out of /proc/self/environ is to stop using
+// it and name the rest. Two consequences, both deliberate:
+//
+//   - The keys are enumerated from the SECRET'S CURRENT CONTENTS, resolved by the engine at apply
+//     time. A key set afterwards is not in this template, which is why `secret set` re-applies the
+//     workload for an enumerated app rather than bumping the restart annotation.
+//   - Each ref is OPTIONAL, exactly as envFrom is. A key that is unset between two applies leaves the
+//     variable simply absent — a required ref would instead wedge every pod at CreateContainerConfigError.
+//
+// A key that a config var already named is skipped rather than emitted twice: the kubelet applies
+// envFrom first and lets Env override it, so config beat the Secret under the fast path, and it has
+// to beat it here too or a file-only key would silently change which value an app reads.
+func secretEnvironment(spec controlplane.WorkloadSpec, taken []corev1.EnvVar) ([]corev1.EnvVar, []corev1.EnvFromSource) {
+	if !spec.SecretFiles.AnyFileOnly() {
+		// Source every key in the app's per-app Secret as an env var (ADR-0028). optional: true so a
+		// workload with no secrets set still applies (the Secret may not exist yet) — the values live
+		// only in the Secret, never inlined here. The name is derived from the app, so a deploy,
+		// rollback, or env reapply all inject the same Secret without it crossing the API.
+		return nil, []corev1.EnvFromSource{{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: controlplane.AppSecretName(spec.App)},
+				Optional:             boolPtr(true),
+			},
+		}}
+	}
+	named := make(map[string]bool, len(taken))
+	for _, e := range taken {
+		named[e.Name] = true
+	}
+	keys := slices.Clone(spec.SecretEnvKeys)
+	slices.Sort(keys) // the same set of keys always renders the same template, so a reapply rolls nothing
+	out := make([]corev1.EnvVar, 0, len(keys))
+	for _, key := range keys {
+		if named[key] {
+			continue
+		}
+		out = append(out, corev1.EnvVar{Name: key, ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: controlplane.AppSecretName(spec.App)},
+				Key:                  key,
+				Optional:             boolPtr(true),
+			},
+		}})
+	}
+	return out, nil
 }
 
 // secretVolume builds the one Secret volume an app's mounted keys are projected through, and the

@@ -203,7 +203,7 @@ func newSecretUnsetCmd() *cobra.Command {
 // does not take it out of the environment.
 const mountLong = "A mount changes only how a secret is DELIVERED. The value does not move: it stays in the same\n" +
 	"per-app Kubernetes Secret, written the same way, and mounting a key does not remove it from the\n" +
-	"app's environment.\n\n" +
+	"app's environment unless you ask with --no-env.\n\n" +
 	"Files land in a directory Burrow owns — /run/secrets by default — and only the keys you mount\n" +
 	"are in it. The directory is on the app as BURROW_SECRETS_DIR, never the value, so an app that\n" +
 	"takes a path from the environment (GOOGLE_APPLICATION_CREDENTIALS, KUBECONFIG) is pointed at a\n" +
@@ -216,6 +216,7 @@ const mountLong = "A mount changes only how a secret is DELIVERED. The value doe
 func newSecretMountCmd() *cobra.Command {
 	o := &commonOpts{}
 	var filename, dir string
+	var noEnv bool
 	cmd := &cobra.Command{
 		Use:   "mount <app> KEY",
 		Short: "Project a secret key into a file the app can read",
@@ -228,9 +229,16 @@ func newSecretMountCmd() *cobra.Command {
 			"--dir moves the directory for the WHOLE APP, and there is deliberately no per-key path:\n" +
 			"a per-key path can shadow a file in the app's own image, and it stops Kubernetes updating\n" +
 			"the file in place when the value is rotated.\n\n" +
+			"--no-env is what actually takes the credential out of the environment, and it has a price\n" +
+			"worth knowing before you pay it. Burrow sources the whole Secret with envFrom, which cannot\n" +
+			"exclude one key, so the first --no-env key on an app switches it to naming each remaining\n" +
+			"key one at a time. From then on `secret set` of a NEW key re-applies the app rather than\n" +
+			"restarting it — slower, and it still arrives. Re-mount with --no-env=false, or unmount the\n" +
+			"key, to put the variable back; a mount that does not mention --no-env leaves it as it is.\n\n" +
 			"This re-applies the running workload, so the app rolls with the file in place.\n\n" + mountLong,
 		Example: "  burrow app secret mount web GOOGLE_CREDENTIALS\n" +
 			"  burrow app secret mount web TLS_KEY --filename tls.key\n" +
+			"  burrow app secret mount web KUBECONFIG --no-env\n" +
 			"  burrow app secret mount api KUBECONFIG --dir /etc/app/secrets",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -239,7 +247,7 @@ func newSecretMountCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.MountSecret(ctx, args[0], env, args[1], filename, dir)
+			res, err := c.MountSecret(ctx, args[0], env, args[1], filename, dir, askedNoEnv(cmd, noEnv))
 			if err != nil {
 				return err
 			}
@@ -250,7 +258,19 @@ func newSecretMountCmd() *cobra.Command {
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&filename, "filename", "", "the `name` the key lands under (default: the key itself)")
 	cmd.Flags().StringVar(&dir, "dir", "", "the `directory` this app's mounted keys land in (default: /run/secrets) — per app, never per key")
+	cmd.Flags().BoolVar(&noEnv, "no-env", false, "read this key from its file ONLY, and keep it out of the app's environment; --no-env=false puts the variable back")
 	return cmd
+}
+
+// askedNoEnv turns the --no-env flag into the tri-state the API takes: nil when the caller did not
+// mention it, so a mount that renames a file or moves a directory leaves the app's environment
+// exactly as it found it (ADR-0089 §4). Silently returning a credential to /proc/self/environ
+// because a later command did not repeat --no-env is the failure this shape exists to prevent.
+func askedNoEnv(cmd *cobra.Command, noEnv bool) *bool {
+	if !cmd.Flags().Changed("no-env") {
+		return nil
+	}
+	return &noEnv
 }
 
 // newSecretUnmountCmd stops projecting one key as a file. It removes a FILE, never a value.
@@ -259,8 +279,9 @@ func newSecretUnmountCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "unmount <app> KEY",
 		Short: "Stop projecting a secret key into a file",
-		Long: "Stop projecting a secret key into a file. The value is untouched: the key stays set and\n" +
-			"stays in the app's environment, so this cannot lose a credential.\n\n" +
+		Long: "Stop projecting a secret key into a file. The value is untouched: the key stays set, and it\n" +
+			"goes back into the app's environment even if it was mounted --no-env, so this cannot lose a\n" +
+			"credential — a key is only ever file-only while it has a file.\n\n" +
 			"This re-applies the running workload, so the app rolls without the file.\n\n" + mountLong,
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -307,8 +328,9 @@ func newSecretMountsCmd() *cobra.Command {
 	return cmd
 }
 
-// mountsHuman renders a projection for a person: the path each mounted key lands at, and the
-// variable that carries the directory. It prints key names, which is all the result holds.
+// mountsHuman renders a projection for a person: the path each mounted key lands at, whether it is
+// still in the environment as well, and the variable that carries the directory. It prints key
+// names, which is all the result holds.
 func mountsHuman(app string, res client.SecretMounts) string {
 	if len(res.Mounts) == 0 {
 		return fmt.Sprintf("No secret is mounted as a file on %s. Mount one with `burrow app secret mount %s KEY`.", app, app)
@@ -316,8 +338,17 @@ func mountsHuman(app string, res client.SecretMounts) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s reads %d secret(s) as files, mode 0400, read-only:\n", app, len(res.Mounts))
 	for _, m := range res.Mounts {
-		fmt.Fprintf(&b, "  %s\t%s\n", m.Key, m.Path)
+		where := "file and environment"
+		if m.NoEnv {
+			where = "file only"
+		}
+		fmt.Fprintf(&b, "  %s\t%s\t%s\n", m.Key, m.Path, where)
 	}
 	fmt.Fprintf(&b, "%s=%s is set on the app.", controlplane.SecretsDirEnvVar, res.Dir)
+	// The cost of a file-only key, said once and where the person who just paid it will read it.
+	if res.Enumerated {
+		fmt.Fprintf(&b, "\n%s names each remaining secret key in its pod template rather than sourcing them\n"+
+			"wholesale, so `burrow app secret set` re-applies the app instead of restarting it.", app)
+	}
 	return b.String()
 }

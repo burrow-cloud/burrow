@@ -37,7 +37,7 @@ func (s *Store) SecretMounts(ctx context.Context, app, env string) (controlplane
 	}
 
 	const q = `
-SELECT app, environment, key, filename, updated_at
+SELECT app, environment, key, filename, no_env, updated_at
 FROM app_secret_mounts
 WHERE app = $1 AND environment = $2
 ORDER BY key`
@@ -48,7 +48,7 @@ ORDER BY key`
 	defer rows.Close()
 	for rows.Next() {
 		var m controlplane.SecretMount
-		if err := rows.Scan(&m.App, &m.Environment, &m.Key, &m.Filename, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.App, &m.Environment, &m.Key, &m.Filename, &m.NoEnv, &m.UpdatedAt); err != nil {
 			return controlplane.SecretMounts{}, fmt.Errorf("postgres: secret mounts for %q in %q: %w", app, env, err)
 		}
 		out.Mounts = append(out.Mounts, m)
@@ -60,7 +60,9 @@ ORDER BY key`
 }
 
 // SetSecretMount upserts one key's projection for an app in one environment. Re-mounting a key under
-// a new filename replaces the old projection rather than adding a second file.
+// a new filename replaces the old projection rather than adding a second file. The whole projection
+// is written, file-only marking included: the engine resolved it against the existing row, so a
+// mount that said nothing about the environment arrives here carrying what the key already had.
 func (s *Store) SetSecretMount(ctx context.Context, m controlplane.SecretMount) error {
 	if m.App == "" {
 		return fmt.Errorf("postgres: set secret mount: empty app")
@@ -69,15 +71,15 @@ func (s *Store) SetSecretMount(ctx context.Context, m controlplane.SecretMount) 
 		return fmt.Errorf("postgres: set secret mount for %q: empty key", m.App)
 	}
 	const q = `
-INSERT INTO app_secret_mounts (app, environment, key, filename, updated_at)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO app_secret_mounts (app, environment, key, filename, no_env, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (app, environment, key) DO UPDATE SET
-    filename = EXCLUDED.filename, updated_at = EXCLUDED.updated_at`
+    filename = EXCLUDED.filename, no_env = EXCLUDED.no_env, updated_at = EXCLUDED.updated_at`
 	env := m.Environment
 	if env == "" {
 		env = controlplane.DefaultEnvironment
 	}
-	if _, err := s.db.ExecContext(ctx, q, m.App, env, m.Key, m.Filename, m.UpdatedAt); err != nil {
+	if _, err := s.db.ExecContext(ctx, q, m.App, env, m.Key, m.Filename, m.NoEnv, m.UpdatedAt); err != nil {
 		// The key NAME is in the message and the value is not, because there is no value here to be
 		// in it (ADR-0029).
 		return fmt.Errorf("postgres: set secret mount %q for %q in %q: %w", m.Key, m.App, env, err)

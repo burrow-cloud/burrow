@@ -198,7 +198,9 @@ var catalogue = []Capability{
 	// reversible with `unmount`, and it names a KEY exactly as `secret unset` does. It is also the
 	// one verb in this neighbourhood that makes a credential SAFER — an environment variable is
 	// inherited by every child process and a file is not — so it is the wrong place to invent the
-	// first guardrail for a neighbourhood that has none. `secret set` stays absent, unchanged.
+	// first guardrail for a neighbourhood that has none. `mount --no-env` rides the same verb and the
+	// same tier (§4): it takes the variable AWAY, which is the safer direction still.
+	// `secret set` stays absent, unchanged.
 	{Surface: Agent, Path: "secret mounts", What: "read-only: which of one app's secret keys are read as files, and where"},
 	{Surface: Agent, Path: "secret mount", What: "projects one app secret key into a file; names a key, carries no value"},
 	{Surface: Agent, Path: "secret unmount", What: "stops projecting one app secret key as a file; the value is untouched"},

@@ -473,7 +473,7 @@ arguments; both stores are sourced at deploy time.
 | Reaches the Pod as | individual `env` entries inlined in the Pod template | `envFrom` a `secretRef` on that one Secret (`optional: true`), plus a **file per mounted key** |
 | `list` shows | keys **and values** | **keys only** |
 | Scope | **app-global** — the same values apply in every environment | **per-environment**, because the Secret lives in the environment's namespace |
-| On set/unset | re-applies the workload so the change rolls; `--no-restart` skips it | patches a `burrow.cloud/restarted-at` annotation so the change rolls; `--no-restart` skips it |
+| On set/unset | re-applies the workload so the change rolls; `--no-restart` skips it | patches a `burrow.cloud/restarted-at` annotation so the change rolls; `--no-restart` skips it. An app with a `--no-env` key re-applies the workload instead (see below) |
 | With no running release | persisted, applied at the next deploy | persisted, applied at the next deploy |
 | On `burrow-agent` | `config set` / `config unset` / `config` — **yes** | `secret unset`, `secret mount` / `unmount` / `mounts`, and key listing — **`secret set` does not exist on the agent binary** |
 
@@ -494,12 +494,21 @@ Secret, same writer — only the projection changes.
 | What is in it | **only the keys that were mounted** (`items`), so mounting one key does not put every other secret the app holds on disk |
 | The path | arrives as `BURROW_SECRETS_DIR`; the **value never does**. Point an app that hardcodes a path variable at the file with `burrow app config set` |
 | Rotation | a whole-volume Secret mount is updated in place by the kubelet, so `secret set` replaces the file and restarts the pod; `--no-restart` gives an app that re-reads the file rotation with no downtime |
-| The variable | **stays**. Mounting adds a file; it does not remove the environment variable, and `--no-env` is not built yet |
-| Rollback | a mount is app configuration, not a release property, so a rollback **keeps** the file |
+| The variable | **stays** unless you pass `--no-env`. Mounting adds a file; on its own it does not remove the environment variable, because the code that reads the file has to be deployed before the variable it replaces disappears |
+| Rollback | a mount is app configuration, not a release property, so a rollback **keeps** the file (and keeps a `--no-env` key out of the environment) |
 
 `burrow app secret mounts <app>` lists what is mounted and where. `mount` refuses a key that is not
 set: an app that starts, finds no file, and fails at the moment it needs the credential is the
 failure this exists to avoid.
+
+**`--no-env` makes a key file-only**, and it has a stated price. `envFrom` sources the Secret
+wholesale and cannot exclude one key, so the first `--no-env` key on an app switches its Pod template
+to an enumerated `secretKeyRef` per remaining key. On that app, `secret set` of a **new** key
+re-applies the workload rather than bumping the restart annotation — slower, and the key still
+arrives. **An app with no `--no-env` key keeps `envFrom` and its Pod template is unchanged.**
+A key is file-only only while it is mounted: re-mount with `--no-env=false`, or `unmount` it, and the
+variable is back. A mount that does not mention `--no-env` leaves the marking as it is, so renaming a
+file cannot silently return a credential to the environment.
 
 Two more limits: keys must match `^[A-Za-z_][A-Za-z0-9_]*$`, and **Burrow enforces no size
 limit** on a value — the effective ceiling is Kubernetes' own Secret size limit, unenforced
@@ -1663,8 +1672,8 @@ finds `/metrics`; queries go through `burrow addon metrics` / `burrow-agent metr
 
 Consolidated, so a reader can stop looking:
 
-- **No file-mounted config or secrets, and no volumes on app Pods at all.** Environment
-  variables are the only injection mechanism.
+- **No file-mounted config.** A secret key can be mounted as a file (`secret mount`, above) and is
+  the only thing that puts a volume on an app Pod; config vars are environment variables only.
 - **No persistent storage for apps.** No PVC, no StatefulSet — the only supported app workload
   kind is Deployment. Add-ons get volumes; apps do not.
 - **No resource requests or limits, probes, security context, node selectors, tolerations,

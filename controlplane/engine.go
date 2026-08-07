@@ -460,15 +460,15 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
 	}
 
-	// The file projection is read here for the same reason the env and the probe above it are: it is
+	// The secret projection is read here for the same reason the env and the probe above it are: it is
 	// current app configuration rather than a property of this release (ADR-0089 §5), so a deploy
 	// renders whatever the app has mounted now.
-	mounts, err := e.secretMountsFor(ctx, req.App, envName(req.Env))
+	mounts, secretEnv, err := e.secretProjectionFor(ctx, k, req.App, envName(req.Env))
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
 	}
 
-	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, ReleaseID: rel.ID}
+	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, SecretEnvKeys: secretEnv, ReleaseID: rel.ID}
 	progress.started(StageApply)
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		progress.failed(StageApply)
@@ -664,13 +664,14 @@ func (e *Engine) reapplyWorkload(ctx context.Context, k Kubernetes, op, app, env
 	if err != nil {
 		return false, fmt.Errorf("%s %s: %w", op, app, err)
 	}
-	// Like the env and the probe, the file projection is read on every apply rather than snapshotted
-	// (ADR-0089 §5), so this is also the path a mount or an unmount reaches the running pods through.
-	mounts, err := e.secretMountsFor(ctx, app, env)
+	// Like the env and the probe, the secret projection is read on every apply rather than snapshotted
+	// (ADR-0089 §5), so this is also the path a mount, an unmount, or a `secret set` on an app that
+	// enumerates its secret environment reaches the running pods through.
+	mounts, secretEnv, err := e.secretProjectionFor(ctx, k, app, env)
 	if err != nil {
 		return false, fmt.Errorf("%s %s: %w", op, app, err)
 	}
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: cfg, Command: cur.Command, MetricsPort: cur.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, ReleaseID: cur.ID}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: cfg, Command: cur.Command, MetricsPort: cur.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, SecretEnvKeys: secretEnv, ReleaseID: cur.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		return false, fmt.Errorf("%s %s: applying to cluster: %w", op, app, err)
 	}
@@ -721,6 +722,16 @@ func (e *Engine) SetSecret(ctx context.Context, app, env, key, value string, noR
 	if noRestart {
 		return nil
 	}
+	// An app that marked a key file-only ENUMERATES its secret environment (ADR-0089 §4), so a key
+	// set here is not in the running pod template at all and a restart would roll the app without it.
+	// Reapply instead — slower, and correct. This is the cost the record names, and it is paid only
+	// by the apps that asked for it.
+	if enumerated, err := e.enumeratesSecretEnv(ctx, app, env); err != nil {
+		return fmt.Errorf("set secret %s: %w", app, err)
+	} else if enumerated {
+		_, err := e.reapplyWorkload(ctx, k, "set secret", app, envName(env))
+		return err
+	}
 	// envFrom is read only at pod start, so writing a value under an existing key does not roll
 	// the Deployment on its own — bump the restart annotation. A missing workload means nothing is
 	// running yet: not an error, the change lands on the next deploy.
@@ -731,6 +742,18 @@ func (e *Engine) SetSecret(ctx context.Context, app, env, key, value string, noR
 		return fmt.Errorf("set secret %s: rolling workload: %w", app, err)
 	}
 	return nil
+}
+
+// enumeratesSecretEnv reports whether app has left the envFrom fast path in env (ADR-0089 §4) — the
+// question `secret set` and `secret unset` have to ask before they roll a workload. envFrom picks up
+// whatever the Secret holds, so under it a restart is enough; an enumerated template names each key,
+// so adding or removing one is a template change and only a reapply carries it.
+func (e *Engine) enumeratesSecretEnv(ctx context.Context, app, env string) (bool, error) {
+	mounts, err := e.secretMountsFor(ctx, app, envName(env))
+	if err != nil {
+		return false, err
+	}
+	return mounts.AnyFileOnly(), nil
 }
 
 // UnsetSecret removes one key from an app's per-app Secret and, unless noRestart, rolls the
@@ -754,6 +777,16 @@ func (e *Engine) UnsetSecret(ctx context.Context, app, env, key string, noRestar
 	}
 	if noRestart {
 		return nil
+	}
+	// And the same for a removal on an app that enumerates its secret environment (ADR-0089 §4): the
+	// pod template still names the key that just went away. The optional secretKeyRef means the pod
+	// would start regardless, but it would start with a stale template, so reapply and leave the
+	// template saying what the Secret says.
+	if enumerated, err := e.enumeratesSecretEnv(ctx, app, env); err != nil {
+		return fmt.Errorf("unset secret %s: %w", app, err)
+	} else if enumerated {
+		_, err := e.reapplyWorkload(ctx, k, "unset secret", app, envName(env))
+		return err
 	}
 	// envFrom is read only at pod start, so removing a key from the Secret does not roll the
 	// Deployment on its own — bump the restart annotation. A missing workload means nothing is
@@ -2852,16 +2885,16 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 		}
 	}
 
-	// And the same for the file projection, where it matters most: a mount records how a credential
+	// And the same for the secret projection, where it matters most: a mount records how a credential
 	// is delivered to whatever code is running, so a rollback to a release cut BEFORE the mount
 	// existed keeps the file (ADR-0089 §5). Were this a release property, the incident escape hatch
 	// would take the credential with it.
-	mounts, err := e.secretMountsFor(ctx, app, envName(env))
+	mounts, secretEnv, err := e.secretProjectionFor(ctx, e.k8s.WithNamespace(ns), app, envName(env))
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
 	}
 
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, ReleaseID: rel.ID}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, SecretEnvKeys: secretEnv, ReleaseID: rel.ID}
 	if err := e.k8s.WithNamespace(ns).ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)

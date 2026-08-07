@@ -60,6 +60,15 @@ type WorkloadSpec struct {
 	// reads it on every apply, so a rollback keeps the files the running code needs rather than
 	// taking them back to whatever was mounted when the older release was cut (ADR-0089 §5).
 	SecretFiles SecretMounts
+	// SecretEnvKeys is the app's secret keys that still reach the container as ENVIRONMENT VARIABLES,
+	// for an app that marked at least one key file-only (ADR-0089 §4). It is read only when
+	// SecretFiles says so, and it is nil for every other app — which is what keeps their pod template
+	// bit-for-bit what it was, sourcing the whole Secret through envFrom.
+	//
+	// It exists because envFrom cannot exclude a key. The only way to keep one out of the environment
+	// is to stop sourcing the Secret wholesale and name the rest, and the price of that is that a NEW
+	// key becomes a pod-template change rather than something a restart picks up.
+	SecretEnvKeys []string
 	// ReleaseID is the release this workload is applying. It is stamped on the pod template (under
 	// ReleaseAnnotation) so a new release always rolls the workload, even when the image reference
 	// is unchanged; re-applying the same release reuses the same ID, so the apply stays idempotent.

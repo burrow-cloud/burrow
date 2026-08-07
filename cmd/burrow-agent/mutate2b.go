@@ -545,6 +545,7 @@ func newSecretUnsetCmd() *cobra.Command {
 func newSecretMountCmd() *cobra.Command {
 	o := &connOpts{}
 	var filename, dir string
+	var noEnv bool
 	cmd := &cobra.Command{
 		Use:   "mount <app> KEY",
 		Short: "Project a secret key into a file the app reads from disk (no value crosses the agent channel)",
@@ -559,11 +560,16 @@ func newSecretMountCmd() *cobra.Command {
 			"own (GOOGLE_APPLICATION_CREDENTIALS, KUBECONFIG), point it at the file with `config set`.\n\n" +
 			"--dir moves the directory for the whole app; there is no per-key path, because one can\n" +
 			"shadow a file in the app's image and it stops the file being updated in place on rotation.\n\n" +
-			"Mounting does NOT remove the environment variable, and unmounting does not unset the key.",
+			"Mounting on its own does NOT remove the environment variable, and unmounting does not unset\n" +
+			"the key. --no-env is what removes it, and only reach for it once the deployed code reads\n" +
+			"the file: taking the variable away from code that still reads it breaks the app. It also\n" +
+			"switches this app to naming each remaining secret key in its pod template, after which a\n" +
+			"`secret set` re-applies the app rather than restarting it. Re-mount with --no-env=false to\n" +
+			"put the variable back; leaving the flag off leaves the key however it already was.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "secret_mount", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.MountSecret(ctx, args[0], env, args[1], filename, dir)
+				return c.MountSecret(ctx, args[0], env, args[1], filename, dir, askedNoEnv(cmd, noEnv))
 			})
 		},
 	}
@@ -571,7 +577,19 @@ func newSecretMountCmd() *cobra.Command {
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&filename, "filename", "", "the `name` the key lands under (default: the key itself)")
 	cmd.Flags().StringVar(&dir, "dir", "", "the `directory` this app's mounted keys land in (default: /run/secrets) — per app, never per key")
+	cmd.Flags().BoolVar(&noEnv, "no-env", false, "read this key from its file ONLY, and keep it out of the app's environment; --no-env=false puts the variable back")
 	return cmd
+}
+
+// askedNoEnv turns the --no-env flag into the tri-state the API takes: nil when the caller did not
+// mention it, so a mount that renames a file leaves the app's environment exactly as it found it
+// (ADR-0089 §4). An agent re-running a mount it is not sure took must not thereby return a
+// credential to /proc/self/environ.
+func askedNoEnv(cmd *cobra.Command, noEnv bool) *bool {
+	if !cmd.Flags().Changed("no-env") {
+		return nil
+	}
+	return &noEnv
 }
 
 // newSecretUnmountCmd stops projecting one key as a file. It removes a FILE and never a value: the
@@ -581,8 +599,9 @@ func newSecretUnmountCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "unmount <app> KEY",
 		Short: "Stop projecting a secret key into a file (the value is untouched)",
-		Long: "Stop projecting a secret key into a file. The value is untouched: the key stays set and stays\n" +
-			"in the app's environment, so this cannot lose a credential — it is `secret mount` undone.\n\n" +
+		Long: "Stop projecting a secret key into a file. The value is untouched: the key stays set, and it is\n" +
+			"back in the app's environment even if it was mounted --no-env, so this cannot lose a\n" +
+			"credential — it is `secret mount` undone.\n\n" +
 			"The running app is rolled so the file leaves its pods.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

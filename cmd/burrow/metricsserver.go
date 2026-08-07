@@ -49,7 +49,8 @@ func metricsServerPresent(cs kubernetes.Interface) (bool, error) {
 // only ensured when absent, never installed over a vendor's copy.
 //
 //   - skip (from `--minimal` / `--no-metrics-server`) short-circuits to a one-line note so an
-//     operator who manages metrics-server themselves is not overridden.
+//     operator who manages metrics-server themselves is not overridden. It names the standalone
+//     command, because opting out once should not be a one-way door (issue #524).
 //   - a cluster that already serves the Metrics API is left untouched and reported present.
 //   - otherwise the pinned baseline manifest is applied through the same apply seam install uses.
 //
@@ -59,7 +60,8 @@ func metricsServerPresent(cs kubernetes.Interface) (bool, error) {
 func ensureMetricsServer(ctx context.Context, kubeconfig, kubeContext string, cs kubernetes.Interface, skip, verbose bool, stdout, stderr io.Writer) error {
 	if skip {
 		fmt.Fprintln(stdout, "Skipping the metrics-server baseline (--no-metrics-server). `kubectl top`, HPA")
-		fmt.Fprintln(stdout, "autoscaling, and utilization reporting need it; ensure it yourself or re-run without the flag.")
+		fmt.Fprintln(stdout, "autoscaling, and utilization reporting need it; ensure it yourself, or add it later with")
+		fmt.Fprintln(stdout, "`burrow cluster metrics install`.")
 		return nil
 	}
 

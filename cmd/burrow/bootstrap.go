@@ -364,7 +364,7 @@ func newBootstrapCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&a.wait, "wait", true, "wait for the control plane to become ready before printing the join token")
 	cmd.Flags().BoolVar(&a.yes, "yes", false, "skip the confirmation prompt (for intentional automation)")
 	cmd.Flags().BoolVar(&a.minimal, "minimal", false, "install only the control plane, skipping the detected lightweight baseline (metrics-server)")
-	cmd.Flags().BoolVar(&a.noMetricsServer, "no-metrics-server", false, "do not auto-ensure the metrics-server baseline (needed for HPA autoscaling and `kubectl top`)")
+	cmd.Flags().BoolVar(&a.noMetricsServer, "no-metrics-server", false, "do not auto-ensure the metrics-server baseline (needed for HPA autoscaling and `kubectl top`; add it later with `burrow cluster metrics install`)")
 	cmd.Flags().StringVar(&a.database, "database", databaseCNPG,
 		"how the control plane's own database runs: cnpg (a CloudNativePG cluster, with failover and backups) or plain (a single Deployment, with neither)")
 	cmd.Flags().DurationVar(&a.apiReadyBudget, "k3s-api-timeout", defaultK3sAPIReadyBudget, "how long to wait for the k3s API to answer after install (a slow first-start on a small VPS needs a generous budget)")

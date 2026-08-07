@@ -84,6 +84,7 @@ var commandClasses = map[string]commandClass{
 	"cluster registry install":   {class: classClusterAdmin, why: "installs the in-cluster registry with the operator's kubeconfig"},
 	"cluster registry uninstall": {class: classClusterAdmin, why: "removes the in-cluster registry with the operator's kubeconfig"},
 	"cluster postgres install":   {class: classClusterAdmin, why: "installs the CloudNativePG operator with the operator's kubeconfig"},
+	"cluster metrics install":    {class: classClusterAdmin, why: "installs the metrics-server baseline with the operator's kubeconfig; it registers a cluster-scoped APIService"},
 	"cluster bootstrap":          {class: classClusterAdmin, why: "turns a bare VPS into a cluster; there is no control plane to target yet"},
 	"config registry login":      {class: classClusterAdmin, why: "writes an image-pull Secret straight through the kubeconfig; it has no --context of its own and never reaches a control plane"},
 	"config registry logout":     {class: classClusterAdmin, why: "removes that Secret through the same kubeconfig path"},
@@ -139,6 +140,7 @@ var commandClasses = map[string]commandClass{
 	"cluster ingress":       {class: classReads, why: "a group with no action of its own"},
 	"cluster registry":      {class: classReads, why: "a group with no action of its own"},
 	"cluster postgres":      {class: classReads, why: "a group with no action of its own"},
+	"cluster metrics":       {class: classReads, why: "a group with no action of its own"},
 
 	// --- Changes: these name the target they acted on ---
 	"app deploy":            {class: classChanges, why: "rolls out a release", args: []string{"app", "deploy", "web", "--image", "img:1"}},

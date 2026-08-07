@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -215,5 +216,103 @@ func TestBuildGoodSourceAccepted(t *testing.T) {
 	}
 	if oc := decodeOutcome(t, out); oc.Outcome != outcomeExecuted || code != exitCodeExecuted {
 		t.Errorf("outcome = %q exit = %d, want executed 0", oc.Outcome, code)
+	}
+}
+
+// A build runs for MINUTES, and until issue #503 it sent nothing across all of them — so any proxy in
+// front of the control plane killed the call long before the build finished, however well the build
+// went. `burrow-agent build` therefore asks for the progress stream, unlike `burrow-agent deploy`
+// (which takes ten to twenty seconds and has no such problem), and discards every stage it carries.
+// The stream is asked for to keep the response alive, not to narrate anything.
+
+// TestAgentBuildAsksForTheStream is the request half.
+func TestAgentBuildAsksForTheStream(t *testing.T) {
+	f := newFakeCP(t)
+	var accept string
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		accept = r.Header.Get("Accept")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"digest": "sha256:abc123",
+			"deploy": map[string]any{"release": map[string]any{"id": "r7", "app": "web", "image": "reg/web:1", "status": "deployed"}},
+		})
+	}
+	out, code := runMutate(t, f, "build", "web",
+		"--source", "https://github.com/user/app", "--ref", "v1.4.0", "--image", "reg/web:1")
+	if code != exitCodeExecuted {
+		t.Fatalf("exit code = %d, want %d (%s)", code, exitCodeExecuted, out)
+	}
+	if !strings.Contains(accept, "x-ndjson") {
+		t.Errorf("Accept = %q; a build must ask for the stream or the response cannot outlive a proxy timeout", accept)
+	}
+}
+
+// TestAgentBuildPrintsExactlyOneEnvelopeFromAStream is the output half, and the one that matters to
+// an agent: however many stages the control plane reports, stdout carries one JSON document.
+func TestAgentBuildPrintsExactlyOneEnvelopeFromAStream(t *testing.T) {
+	f := newFakeCP(t)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		for _, l := range []string{
+			`{"event":{"stage":"clone","status":"started"}}`,
+			`{"event":{"stage":"clone","status":"done"}}`,
+			`{"event":{"stage":"build","status":"started"}}`,
+			`{"event":{"stage":"build","status":"progressing"}}`,
+			`{"event":{"stage":"build","status":"done"}}`,
+			`{"result":{"digest":"sha256:abc123","deploy":{"release":{"id":"r7","app":"web","image":"reg/web:1","status":"deployed"}}}}`,
+		} {
+			_, _ = io.WriteString(w, l+"\n")
+			w.(http.Flusher).Flush()
+		}
+	}
+	out, code := runMutate(t, f, "build", "web",
+		"--source", "https://github.com/user/app", "--ref", "v1.4.0", "--image", "reg/web:1")
+	if code != exitCodeExecuted {
+		t.Fatalf("exit code = %d, want %d (%s)", code, exitCodeExecuted, out)
+	}
+	dec := json.NewDecoder(strings.NewReader(out))
+	var first outcome
+	if err := dec.Decode(&first); err != nil {
+		t.Fatalf("stdout is not a JSON envelope: %v (%q)", err, out)
+	}
+	if first.Outcome != outcomeExecuted || first.Operation != "build" {
+		t.Errorf("envelope = %+v, want an executed build", first)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		t.Errorf("stdout carries more than one document: %q", out)
+	}
+}
+
+// TestAgentClassifiesAHeldBuildFromTheStream is the load-bearing one. A build's guardrail is the
+// DEPLOY's, and the deploy happens after the build — so the hold is raised once the stages are
+// already on the wire and can only travel as the stream's error line. The agent classifies a hold by
+// the *client.APIError's status and needs_confirmation, and it must reach the same verdict from that
+// line as from a status-coded refusal, or a held build would be relayed to the human as a failure.
+func TestAgentClassifiesAHeldBuildFromTheStream(t *testing.T) {
+	f := newFakeCP(t)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		for _, l := range []string{
+			`{"event":{"stage":"clone","status":"started"}}`,
+			`{"event":{"stage":"build","status":"done"}}`,
+			`{"error":{"status":422,"error":"app.deploy is held for confirmation","code":"app.deploy","needs_confirmation":true}}`,
+		} {
+			_, _ = io.WriteString(w, l+"\n")
+			w.(http.Flusher).Flush()
+		}
+	}
+	out, code := runMutate(t, f, "build", "web",
+		"--source", "https://github.com/user/app", "--ref", "v1.4.0", "--image", "reg/web:1")
+	oc := decodeOutcome(t, out)
+	if oc.Outcome != outcomeHeld {
+		t.Fatalf("outcome = %q, want held: %q", oc.Outcome, out)
+	}
+	if oc.Code != "app.deploy" {
+		t.Errorf("code = %q, want app.deploy", oc.Code)
+	}
+	if code != exitCodeHeld {
+		t.Errorf("exit code = %d, want %d", code, exitCodeHeld)
 	}
 }

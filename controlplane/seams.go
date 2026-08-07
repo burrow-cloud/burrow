@@ -156,6 +156,28 @@ type Builder interface {
 	Build(ctx context.Context, source SourceRef, targetImage string, insecure bool, cred SourceCredential) (digest string, err error)
 }
 
+// ProgressBuilder is a Builder that can say what its build is DOING while it does it (issue #503):
+// which stage the build Job has reached, and that it is still running. A build routinely takes
+// minutes, and a caller blocked on it needs bytes on the wire to survive a proxy read timeout as much
+// as it needs the report.
+//
+// It is a SEPARATE, OPTIONAL interface rather than a wider Builder for two reasons. Reporting is not
+// part of what a builder must do — a Builder that cannot observe its own stages is still a correct
+// Builder, and the engine brackets the whole build as one stage for it. And Builder is public API a
+// separate implementation (the managed product's sandboxed executor, ADR-0053 §6) satisfies: widening
+// it would break every implementation that never asked to report anything.
+//
+// progress is called SYNCHRONOUSLY, in stage order, on the goroutine running the build; it is never
+// nil, so an implementation carries no nil check. Reporting must not change what the build does: an
+// implementation reports beside work it was already doing and never waits, retries, or polls in order
+// to have something to say.
+type ProgressBuilder interface {
+	Builder
+	// BuildWithProgress is Build, reporting the build's stages (StageClone, StageBuild) as it reaches
+	// them. Its result and its errors are Build's, exactly.
+	BuildWithProgress(ctx context.Context, source SourceRef, targetImage string, insecure bool, cred SourceCredential, progress func(DeployEvent)) (digest string, err error)
+}
+
 // DatabaseProvisioner is the seam over an installed Postgres add-on instance's admin surface
 // (ADR-0031). burrowd connects to the environment's instance as the superuser and gives each app its
 // own database and login role inside it; the engine calls this on attach/detach. It is an optional

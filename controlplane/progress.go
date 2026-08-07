@@ -42,11 +42,40 @@ const (
 	StagePostDeployHook = "post-deploy-hook"
 )
 
+// The stages of an in-cluster build (ADR-0053), in the order they occur, ahead of the deploy stages
+// the build hands off to. A build is a front-end that ends where deploy begins, so it reports ONE
+// continuous sequence: its own stages, then the deploy's.
+//
+// The set is what the control plane can actually SEE. The build Job clones in an init container and
+// builds in the main container, so those two are observable and are reported; the push is a step
+// inside the builder container's own script, indistinguishable from the build from outside the
+// container, so there is no push stage. Reporting one would be a guess dressed as an observation.
+const (
+	// StageClone is the build Job's clone of the git source inside the cluster (ADR-0053 §3) — the
+	// Job's init container. It covers everything before the source is on disk: scheduling the build
+	// pod, pulling the git image, and the fetch itself.
+	StageClone = "clone"
+	// StageBuild is the image build and its push to the target registry (ADR-0053 §4) — the Job's
+	// builder container. It is the long one: dependency resolution and every Dockerfile step.
+	StageBuild = "build"
+)
+
 // The status a stage event carries. A stage that starts always reaches done or failed, so a client
 // rendering a line on started always has something to close it with.
 const (
 	// DeployStarted is the stage beginning.
 	DeployStarted = "started"
+	// DeployProgressing is the stage STILL RUNNING, reported at intervals by a stage long enough that
+	// silence is indistinguishable from a stall (issue #503). It is what keeps a minutes-long
+	// in-cluster build on the wire: every reverse proxy in front of a control plane has a read
+	// timeout — 60 seconds is ingress-nginx's default, and it is measured between two successive
+	// reads — so a stage that reports nothing while it works is a stage that outlives the connection
+	// carrying its result.
+	//
+	// It never opens or closes a line: a stage that reports it has already reported started and will
+	// still report done or failed. A client that does not know it ignores it, which is why it can be
+	// added to a vocabulary an older client is reading.
+	DeployProgressing = "progressing"
 	// DeployDone is the stage finishing without an error.
 	DeployDone = "done"
 	// DeployFailed is the stage finishing badly. On a stage that aborts the deploy — a `pre-deploy`
@@ -64,13 +93,36 @@ var deployStages = []string{
 	StagePostDeployHook,
 }
 
+// buildStages is the closed set of a build's OWN stages, in the order a build runs them. The stages
+// a build reports after them are the deploy's, unchanged — see BuildStages.
+var buildStages = []string{StageClone, StageBuild}
+
 // deployStatuses is the closed set of statuses a stage event may carry.
-var deployStatuses = []string{DeployStarted, DeployDone, DeployFailed}
+var deployStatuses = []string{DeployStarted, DeployProgressing, DeployDone, DeployFailed}
 
 // DeployStages returns every stage a deploy may report, in the order they occur, so a caller can
 // name the set without reaching into the vocabulary.
 func DeployStages() []string {
 	return append([]string(nil), deployStages...)
+}
+
+// BuildStages returns every stage a build may report, in the order they occur: the build's own
+// stages followed by the deploy stages it hands off to. It is ONE sequence rather than two because
+// that is what a build is — the built image rejoins the guarded deploy path (ADR-0053 §4) — and a
+// caller rendering a build renders all of it.
+func BuildStages() []string {
+	return append(append([]string(nil), buildStages...), deployStages...)
+}
+
+// IsBuildStage reports whether stage is a member of the sequence a build reports — its own stages or
+// the deploy stages it ends in.
+func IsBuildStage(stage string) bool {
+	for _, s := range buildStages {
+		if s == stage {
+			return true
+		}
+	}
+	return IsDeployStage(stage)
 }
 
 // DeployStatuses returns every status a stage event may carry.
@@ -114,12 +166,14 @@ type DeployEvent struct {
 // no-op once, so no emit site carries a nil check.
 type deployProgress func(DeployEvent)
 
-// noProgress is the reporter of a caller that asked for no progress — every path but a deploy that
-// requested it, including rollback, the auto-deploy watcher, and an in-cluster build.
+// noProgress is the reporter of a caller that asked for no progress — every path but a deploy or a
+// build that requested it, including rollback and the auto-deploy watcher.
 func noProgress(DeployEvent) {}
 
-// started, done and failed are the three things any emit site says, named so the call sites read as
-// the work they bracket.
+// started, done and failed are the three things any emit site in this package says, named so the call
+// sites read as the work they bracket. DeployProgressing has no helper here because no stage this
+// package runs is long enough to repeat itself: it is said by the in-cluster build's wait loop, which
+// lives behind the Builder seam and reports through the caller's own reporter.
 func (p deployProgress) started(stage string) { p(DeployEvent{Stage: stage, Status: DeployStarted}) }
 func (p deployProgress) done(stage string)    { p(DeployEvent{Stage: stage, Status: DeployDone}) }
 func (p deployProgress) failed(stage string)  { p(DeployEvent{Stage: stage, Status: DeployFailed}) }

@@ -1966,14 +1966,23 @@ type SecretMount struct {
 	Key      string `json:"key"`
 	Filename string `json:"filename"`
 	Path     string `json:"path"`
+	// NoEnv is true when the key is FILE-ONLY: read from the file above and kept out of the app's
+	// environment (ADR-0089 §4). False is the default a mount arrives with — it adds a file and
+	// leaves the variable alone.
+	NoEnv bool `json:"no_env"`
 }
 
 // SecretMounts is an app's whole file projection in one environment: the directory its mounted keys
 // land in — already resolved, so it is the real path whether or not the app overrode it — and one
 // entry per mounted key.
+//
+// Enumerated says the app has left the envFrom fast path, which is true exactly when one of its keys
+// is file-only. It is a behaviour the caller owns from then on: `secret set` of a new key re-applies
+// the workload rather than restarting it, because an enumerated pod template names each key.
 type SecretMounts struct {
-	Dir    string        `json:"dir"`
-	Mounts []SecretMount `json:"mounts"`
+	Dir        string        `json:"dir"`
+	Enumerated bool          `json:"enumerated"`
+	Mounts     []SecretMount `json:"mounts"`
 }
 
 // SecretMounts returns which of an app's secret keys are projected into files, and where (ADR-0089
@@ -1990,8 +1999,15 @@ func (c *Client) SecretMounts(ctx context.Context, app, env string) (SecretMount
 //
 // The key must ALREADY BE SET or the control plane refuses: mounting a key that was never set
 // produces an app that starts, finds no file, and fails at the moment it needs the credential.
-func (c *Client) MountSecret(ctx context.Context, app, env, key, filename, dir string) (SecretMounts, error) {
+//
+// noEnv marks the key file-only (§4) and is nil for "leave that as it is", so a mount that only
+// renames a file does not put a credential back into the environment. Passing true here is what
+// takes the app off the envFrom fast path.
+func (c *Client) MountSecret(ctx context.Context, app, env, key, filename, dir string, noEnv *bool) (SecretMounts, error) {
 	body := map[string]any{"filename": filename, "dir": dir}
+	if noEnv != nil {
+		body["no_env"] = *noEnv
+	}
 	var out SecretMounts
 	err := c.do(ctx, http.MethodPut, withEnv(c.secretMountPath(app, key), env), body, &out)
 	return out, err

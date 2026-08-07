@@ -1599,3 +1599,33 @@ func TestSecretMountEndpoints(t *testing.T) {
 		}
 	}
 }
+
+// TestSecretMountNoEnvOverTheAPI is ADR-0089 §4 over the wire. The interesting field is `no_env`
+// being ABSENT rather than false: absent means "leave the key's marking alone", so a mount that only
+// renames a file cannot put a credential back into an environment somebody took it out of.
+func TestSecretMountNoEnvOverTheAPI(t *testing.T) {
+	h, k, _ := newAPI(t)
+	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
+	k.SetSecret("web", "KUBECONFIG", "apiVersion: v1")
+	k.SetSecret("web", "STRIPE_KEY", "sk_live_x")
+
+	rr := do(h, "PUT", "/v1/apps/web/secrets/mounts/KUBECONFIG", token, `{"no_env":true}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("mount --no-env = %d %s", rr.Code, rr.Body.String())
+	}
+	if b := rr.Body.String(); !strings.Contains(b, `"no_env":true`) || !strings.Contains(b, `"enumerated":true`) {
+		t.Errorf("mount response = %s, want the key marked file-only and the app reported as enumerated", b)
+	}
+
+	// A body that says nothing about the environment leaves the marking as it is.
+	rr = do(h, "PUT", "/v1/apps/web/secrets/mounts/KUBECONFIG", token, `{"filename":"kubeconfig.yaml"}`)
+	if b := rr.Body.String(); !strings.Contains(b, `"no_env":true`) || !strings.Contains(b, `"path":"/run/secrets/kubeconfig.yaml"`) {
+		t.Errorf("rename response = %s, want the file renamed and the key still file-only", b)
+	}
+
+	// And an explicit false puts the variable back, which returns the app to the fast path.
+	rr = do(h, "PUT", "/v1/apps/web/secrets/mounts/KUBECONFIG", token, `{"no_env":false}`)
+	if b := rr.Body.String(); !strings.Contains(b, `"no_env":false`) || !strings.Contains(b, `"enumerated":false`) {
+		t.Errorf("un-mark response = %s, want the marking removed and the app back on envFrom", b)
+	}
+}

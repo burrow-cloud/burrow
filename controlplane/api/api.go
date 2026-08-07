@@ -732,7 +732,7 @@ func (s *server) mountSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mounts, err := s.engine.MountSecret(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"),
-		r.PathValue("key"), req.Filename, req.Dir)
+		r.PathValue("key"), req.Filename, req.Dir, req.NoEnv)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -752,33 +752,45 @@ func (s *server) unmountSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 // secretMountRequest is the body of a mount. Filename is empty for "name the file after the key";
-// Dir moves the whole app's secrets directory and is deliberately not per key (ADR-0089 §2). Neither
+// Dir moves the whole app's secrets directory and is deliberately not per key (ADR-0089 §2). No
 // field can carry a value, and there is no field here that could.
+//
+// NoEnv is a POINTER because absent and false are different requests (§4): absent leaves the key's
+// file-only marking as it is, so a mount that only renames a file cannot silently put a credential
+// back into an environment somebody deliberately took it out of.
 type secretMountRequest struct {
 	Filename string `json:"filename,omitempty"`
 	Dir      string `json:"dir,omitempty"`
+	NoEnv    *bool  `json:"no_env,omitempty"`
 }
 
 // secretMountsResponse is an app's file projection: the directory, already resolved to the default
 // when there is no override, and one entry per mounted key with the full path it lands at.
+//
+// Enumerated says the app has left the envFrom fast path (ADR-0089 §4) — true exactly when some key
+// is file-only. It is in the answer because it is a behaviour the caller now owns: on this app a
+// `secret set` of a new key re-applies the workload rather than restarting it.
 type secretMountsResponse struct {
-	Dir    string            `json:"dir"`
-	Mounts []secretMountJSON `json:"mounts"`
+	Dir        string            `json:"dir"`
+	Enumerated bool              `json:"enumerated"`
+	Mounts     []secretMountJSON `json:"mounts"`
 }
 
 type secretMountJSON struct {
 	Key      string `json:"key"`
 	Filename string `json:"filename"`
 	Path     string `json:"path"`
+	NoEnv    bool   `json:"no_env"`
 }
 
 func newSecretMountsResponse(m controlplane.SecretMounts) secretMountsResponse {
-	out := secretMountsResponse{Dir: m.Directory(), Mounts: []secretMountJSON{}}
+	out := secretMountsResponse{Dir: m.Directory(), Enumerated: m.AnyFileOnly(), Mounts: []secretMountJSON{}}
 	for _, mount := range m.Mounts {
 		out.Mounts = append(out.Mounts, secretMountJSON{
 			Key:      mount.Key,
 			Filename: mount.Filename,
 			Path:     m.Directory() + "/" + mount.Filename,
+			NoEnv:    mount.NoEnv,
 		})
 	}
 	return out

@@ -682,17 +682,30 @@ func (e *Engine) runDependencyChecks(ctx context.Context, k Kubernetes, app, env
 	runCtx, cancel := context.WithTimeout(ctx, dependencyCheckDeadline)
 	defer cancel()
 
+	// The check runs in the app's image with the app's environment, so it takes the app's secret
+	// projection too (ADR-0089 §4): a key the app marked file-only must not come back as a variable
+	// in a Job Burrow authored. A failure to read it is reported the way every other failure in this
+	// report-only path is — the deploy has already succeeded, and no check is better than a wrong one.
+	files, secretEnv, err := e.secretProjectionFor(ctx, k, app, env)
+	if err != nil {
+		slog.WarnContext(ctx, "reading the app's secret projection for the dependency check failed",
+			"app", app, "env", env, "error", err)
+		return nil
+	}
+
 	// The stage reports WHETHER THE CHECK RAN, not what it found. A dependency that failed its check
 	// is a result on a successful deploy (§6) and travels back as one; a check pod that could not be
 	// scheduled is the case where the stage itself did not work, and that is what the mark means.
 	progress.started(StageDependencyCheck)
 	res, runErr := k.RunJob(runCtx, RunSpec{
-		App:        app,
-		ID:         "check-" + e.ids.NewID(),
-		Image:      image,
-		Command:    []string{ProbePath, ProbeCheckCommand},
-		Env:        cfg,
-		TTLSeconds: dependencyJobTTLSeconds,
+		App:           app,
+		ID:            "check-" + e.ids.NewID(),
+		Image:         image,
+		Command:       []string{ProbePath, ProbeCheckCommand},
+		Env:           cfg,
+		TTLSeconds:    dependencyJobTTLSeconds,
+		SecretFiles:   files,
+		SecretEnvKeys: secretEnv,
 		// Probe asks the adapter for the init container that puts a working binary in an image that
 		// may contain nothing at all. Without it the check container would try to execute a path the
 		// app's image does not have.

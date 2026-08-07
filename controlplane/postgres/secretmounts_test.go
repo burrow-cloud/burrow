@@ -80,6 +80,52 @@ func TestStoreSecretMountRoundTrip(t *testing.T) {
 	}
 }
 
+// TestStoreSecretMountNoEnvRoundTrip: the file-only marking is a column on the mount (ADR-0089 §4),
+// so it arrives and leaves with the projection. A mount made before the column existed reads back
+// false — which is the record's own default, not a convenience: mounting adds a file and leaves the
+// variable alone.
+func TestStoreSecretMountNoEnvRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := mountApp(t, "web")
+	at := time.Date(2026, 8, 7, 2, 0, 0, 0, time.UTC)
+
+	if err := s.SetSecretMount(ctx, cp.SecretMount{App: app, Environment: "prod", Key: "KUBECONFIG", Filename: "kubeconfig", UpdatedAt: at}); err != nil {
+		t.Fatalf("SetSecretMount: %v", err)
+	}
+	got, _ := s.SecretMounts(ctx, app, "prod")
+	if got.AnyFileOnly() {
+		t.Fatalf("a plain mount reads back file-only: %+v", got.Mounts)
+	}
+
+	// Marking it, and un-marking it, are both a re-write of the same row.
+	for _, want := range []bool{true, false} {
+		m := cp.SecretMount{App: app, Environment: "prod", Key: "KUBECONFIG", Filename: "kubeconfig", NoEnv: want, UpdatedAt: at}
+		if err := s.SetSecretMount(ctx, m); err != nil {
+			t.Fatalf("SetSecretMount(no_env=%v): %v", want, err)
+		}
+		got, _ = s.SecretMounts(ctx, app, "prod")
+		if len(got.Mounts) != 1 || got.Mounts[0].NoEnv != want {
+			t.Fatalf("mounts = %+v, want no_env=%v on the one row", got.Mounts, want)
+		}
+		if got.AnyFileOnly() != want || len(got.FileOnly()) != map[bool]int{true: 1, false: 0}[want] {
+			t.Errorf("AnyFileOnly = %v, FileOnly = %v, want them to agree with no_env=%v", got.AnyFileOnly(), got.FileOnly(), want)
+		}
+	}
+
+	// And it cannot outlive the mount: unmounting takes the row, and the marking with it.
+	if err := s.SetSecretMount(ctx, cp.SecretMount{App: app, Environment: "prod", Key: "KUBECONFIG", Filename: "kubeconfig", NoEnv: true, UpdatedAt: at}); err != nil {
+		t.Fatalf("SetSecretMount: %v", err)
+	}
+	if err := s.UnsetSecretMount(ctx, app, "prod", "KUBECONFIG"); err != nil {
+		t.Fatalf("UnsetSecretMount: %v", err)
+	}
+	got, _ = s.SecretMounts(ctx, app, "prod")
+	if got.AnyFileOnly() {
+		t.Errorf("mounts = %+v after an unmount, want no file-only key: a key is file-only only while it has a file", got.Mounts)
+	}
+}
+
 // TestStoreSecretsDirIsPerAppAndPerEnvironment: the directory is one value for the whole app in one
 // environment (ADR-0089 §2), and the same app in another environment is untouched by it.
 func TestStoreSecretsDirIsPerAppAndPerEnvironment(t *testing.T) {

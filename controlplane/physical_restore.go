@@ -719,7 +719,10 @@ func (e *Engine) cutOverApps(ctx context.Context, t AddonType, targetEnv, ns str
 			stranded = append(stranded, StrandedApp{App: app, Reason: fmt.Sprintf("its %s could not be written; re-attach it with `burrow addon attach %s %s --env %s`", key, t, app, targetEnv)})
 			continue
 		}
-		if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
+		// The cutover rewrites a key the app ALREADY holds, so a restart would carry it — but it goes
+		// through the same helper the attach it mirrors does, because "which roll does this app need"
+		// (ADR-0089 §4) is not a question a second copy of this path should answer for itself.
+		if err := e.rollForSecretChange(ctx, k, "cut over", app, targetEnv); err != nil {
 			// The credential IS written, so this app is connected — it is the roll that did not
 			// happen, and the pods are still holding the previous value until something restarts them.
 			stranded = append(stranded, StrandedApp{App: app, Reason: "its connection string was rewritten but the app could not be restarted onto it, so its pods are still using the previous one"})

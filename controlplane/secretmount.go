@@ -42,6 +42,18 @@ import (
 // and re-read by deploy, env reapply and rollback, exactly as `cfg` is. If it rode the release,
 // rolling back to a release cut before the mount existed would remove the file the running app
 // needs — a rollback, the incident escape hatch, would take the credential with it.
+//
+// MOUNTING ADDS A FILE; IT DOES NOT REMOVE THE VARIABLE (§4). The code that reads the file has to be
+// deployed before the variable it replaces disappears, and Burrow does not know when that happened,
+// so removing it on mount would break an app mid-rollout. NoEnv is how a caller says otherwise, and
+// it is the half of this record that actually takes a credential out of /proc/self/environ.
+//
+// Its cost is stated rather than discovered. envFrom sources the Secret wholesale and there is no
+// way to exclude one key from it, so the first file-only key on an app switches its pod template to
+// an ENUMERATED secretKeyRef per remaining key. That changes a behaviour for that app: a `secret
+// set` of a NEW key used to reach the pod on a restart, because envFrom picks up whatever the Secret
+// holds, and an enumerated template has to be re-applied instead. An app with no file-only key keeps
+// envFrom and is bit-for-bit what it was.
 
 const (
 	// DefaultSecretsDir is where an app's mounted secret keys land unless `--dir` moves them
@@ -70,7 +82,16 @@ type SecretMount struct {
 	Key string
 	// Filename is the name the key lands under in the app's secrets directory. It defaults to the
 	// key and is validated as a single path segment.
-	Filename  string
+	Filename string
+	// NoEnv marks the key FILE-ONLY (ADR-0089 §4): projected into the file above, and kept out of the
+	// container's environment. It is the answer for a credential whose whole reason for being on disk
+	// is to stay out of /proc/self/environ, where every child process inherits it.
+	//
+	// It is a field of the MOUNT, and that placement is the rule "a key can be file-only only if it
+	// is mounted" expressed in the type: there is no row here without a projection, so there is
+	// nowhere to record a key that reaches the app by no route at all. Unmounting takes the marking
+	// with the file and puts the variable back.
+	NoEnv     bool
 	UpdatedAt time.Time
 }
 
@@ -109,6 +130,32 @@ func (m SecretMounts) Keys() []string {
 		keys = append(keys, mount.Key)
 	}
 	return keys
+}
+
+// FileOnly returns the mounted keys that are kept out of the app's environment, sorted (ADR-0089
+// §4). It is the set the enumerated pod template subtracts from the app's Secret keys, and — because
+// the mounts are sorted — the same projection always yields the same list and so the same template.
+func (m SecretMounts) FileOnly() []string {
+	var keys []string
+	for _, mount := range m.Mounts {
+		if mount.NoEnv {
+			keys = append(keys, mount.Key)
+		}
+	}
+	return keys
+}
+
+// AnyFileOnly reports whether this app has left the envFrom fast path (ADR-0089 §4). It is the one
+// switch: false means the pod template sources the Secret wholesale, exactly as it did before any of
+// this existed, and true means it enumerates a secretKeyRef per key that is still in the
+// environment. Nearly every app answers false and must not pay for the ones that do not.
+func (m SecretMounts) AnyFileOnly() bool {
+	for _, mount := range m.Mounts {
+		if mount.NoEnv {
+			return true
+		}
+	}
+	return false
 }
 
 // Sort orders the mounts by key. The store returns them sorted; this is for the callers that build a
@@ -175,6 +222,12 @@ func (e *Engine) SecretMounts(ctx context.Context, app, env string) (SecretMount
 // moves the whole app's secrets directory (§2) — it is per app on purpose and there is no per-key
 // form of it.
 //
+// noEnv marks the key FILE-ONLY (§4), and it is a POINTER because "leave it as it is" is a different
+// answer from "put the variable back". A caller re-mounting a key to rename its file, or an agent
+// re-running a mount it is not sure took, must not silently return a credential to an environment
+// somebody deliberately took it out of. nil keeps whatever the key already has, true takes the
+// variable away, false gives it back.
+//
 // THE KEY MUST ALREADY EXIST, or this refuses. Mounting a key that was never set produces an app
 // that starts, finds no file, and fails at the moment it needs the credential — which is the failure
 // this whole record exists to avoid making easy. The check reads KEY NAMES from the Secret and never
@@ -184,7 +237,7 @@ func (e *Engine) SecretMounts(ctx context.Context, app, env string) (SecretMount
 // invent one for is the single verb that makes a credential SAFER: mounting a key the app already
 // holds as an environment variable moves a credential it can already read from one place it can read
 // it to another.
-func (e *Engine) MountSecret(ctx context.Context, app, env, key, filename, dir string) (SecretMounts, error) {
+func (e *Engine) MountSecret(ctx context.Context, app, env, key, filename, dir string, noEnv *bool) (SecretMounts, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return SecretMounts{}, fmt.Errorf("mount secret: %w: %w", ErrInvalid, err)
 	}
@@ -213,22 +266,48 @@ func (e *Engine) MountSecret(ctx context.Context, app, env, key, filename, dir s
 		return SecretMounts{}, fmt.Errorf("mount secret %s: %w: %s is not set on %s; set it with `burrow app secret set %s %s` first, or the app would start and only fail when it opened the file",
 			app, ErrInvalid, key, app, app, key)
 	}
+	// Resolve the file-only marking against what the key already has, so a mount that says nothing
+	// about the environment changes nothing about it.
+	fileOnly, err := e.fileOnly(ctx, app, env, key, noEnv)
+	if err != nil {
+		return SecretMounts{}, fmt.Errorf("mount secret %s: %w", app, err)
+	}
 	if dir != "" {
 		if err := e.db.SetSecretsDir(ctx, app, envName(env), dir, e.clock.Now()); err != nil {
 			return SecretMounts{}, fmt.Errorf("mount secret %s: recording the secrets directory: %w", app, err)
 		}
 	}
-	m := SecretMount{App: app, Environment: envName(env), Key: key, Filename: filename, UpdatedAt: e.clock.Now()}
+	m := SecretMount{App: app, Environment: envName(env), Key: key, Filename: filename, NoEnv: fileOnly, UpdatedAt: e.clock.Now()}
 	if err := e.db.SetSecretMount(ctx, m); err != nil {
 		return SecretMounts{}, fmt.Errorf("mount secret %s: recording the mount of %s: %w", app, key, err)
 	}
 	return e.applySecretMounts(ctx, ns, "mount secret", app, env)
 }
 
+// fileOnly answers whether key ends up marked file-only, given what the caller asked for and what
+// the key already is (ADR-0089 §4). An explicit request wins; nil is "leave it alone", which for a
+// key that was never mounted is false — the variable stays, which is the default the record states.
+func (e *Engine) fileOnly(ctx context.Context, app, env, key string, noEnv *bool) (bool, error) {
+	if noEnv != nil {
+		return *noEnv, nil
+	}
+	mounts, err := e.secretMountsFor(ctx, app, envName(env))
+	if err != nil {
+		return false, err
+	}
+	for _, m := range mounts.Mounts {
+		if m.Key == key {
+			return m.NoEnv, nil
+		}
+	}
+	return false, nil
+}
+
 // UnmountSecret stops projecting one key as a file and re-applies the running workload so the file
-// leaves its pods (ADR-0089 §1). The VALUE is untouched: the key stays in the Secret and stays in the
-// app's environment, so unmounting is not a way to lose a credential. Unmounting a key that was not
-// mounted is not an error — it is the state the app is already in.
+// leaves its pods (ADR-0089 §1). The VALUE is untouched: the key stays in the Secret and, because a
+// file-only marking is a field of the mount, it goes back into the app's environment along with the
+// file leaving — so unmounting is not a way to lose a credential, even one that was file-only.
+// Unmounting a key that was not mounted is not an error — it is the state the app is already in.
 func (e *Engine) UnmountSecret(ctx context.Context, app, env, key string) (SecretMounts, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return SecretMounts{}, fmt.Errorf("unmount secret: %w: %w", ErrInvalid, err)
@@ -273,4 +352,39 @@ func (e *Engine) secretMountsFor(ctx context.Context, app, env string) (SecretMo
 		return SecretMounts{}, fmt.Errorf("reading the app's secret mounts: %w", err)
 	}
 	return mounts, nil
+}
+
+// secretProjectionFor is the whole answer to "how does this app's Secret reach its pods" for one
+// apply: which keys are FILES, and which keys are still ENVIRONMENT VARIABLES. Every path that
+// authors a workload asks it, so a rolled-back app gets the files and the variables a redeploy would
+// have given it (ADR-0089 §5).
+//
+// THE SECOND RETURN IS EMPTY FOR NEARLY EVERY APP, and that is the point. Without a file-only key
+// the pod template sources the Secret wholesale through envFrom, so there is nothing to enumerate
+// and this makes no extra call — an app that never asked for any of this pays neither a template
+// change nor a read.
+//
+// The keys come from the CLUSTER because the Secret is where they live: Postgres records which keys
+// are projected as files and never what the Secret holds (ADR-0029). A key that is set and not
+// file-only is an environment variable, which is exactly what envFrom would have made it.
+func (e *Engine) secretProjectionFor(ctx context.Context, k Kubernetes, app, env string) (SecretMounts, []string, error) {
+	mounts, err := e.secretMountsFor(ctx, app, env)
+	if err != nil {
+		return SecretMounts{}, nil, err
+	}
+	if !mounts.AnyFileOnly() {
+		return mounts, nil, nil
+	}
+	keys, err := k.SecretKeys(ctx, app)
+	if err != nil {
+		return SecretMounts{}, nil, fmt.Errorf("reading the app's secret keys: %w", err)
+	}
+	fileOnly := mounts.FileOnly()
+	envKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if !slices.Contains(fileOnly, key) {
+			envKeys = append(envKeys, key)
+		}
+	}
+	return mounts, envKeys, nil
 }

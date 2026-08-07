@@ -138,18 +138,16 @@ func (a *Adapter) runJob(name string, spec controlplane.RunSpec) *batchv1.Job {
 	var backoff int32
 	ttl := spec.TTLSeconds
 
-	var env []corev1.EnvVar
-	for _, k := range sortedKeys(spec.Env) { // deterministic order
-		env = append(env, corev1.EnvVar{Name: k, Value: spec.Env[k]})
-	}
-	// Source the app's per-app Secret as env exactly as the running workload does (ADR-0048 §2), so
-	// DATABASE_URL and every secret resolve as the app sees them. Optional: the Secret may not exist.
-	envFrom := []corev1.EnvFromSource{{
-		SecretRef: &corev1.SecretEnvSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: controlplane.AppSecretName(spec.App)},
-			Optional:             boolPtr(true),
-		},
-	}}
+	// The app's config and its per-app Secret, assembled by the SAME function the app's own Deployment
+	// is (ADR-0048 §2), so DATABASE_URL and every other secret resolve as the app sees them — through
+	// exactly the door the app reads them through.
+	//
+	// THAT SHARED FUNCTION IS THE POINT. A key the app marked file-only (ADR-0089 §4) is not in this
+	// Job's environment either, which matters most here of all: a run is where a shell gets started
+	// and an environment variable is inherited by every child process, so a Job that sourced the
+	// Secret wholesale would put a credential back exactly where the app took it out of. It arrives
+	// as the file it is instead.
+	env, envFrom, volumes, mounts := appEnvironment(spec.App, spec.Env, spec.SecretFiles, spec.SecretEnvKeys)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: labels},
@@ -160,12 +158,14 @@ func (a *Adapter) runJob(name string, spec controlplane.RunSpec) *batchv1.Job {
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
+					Volumes:       volumes,
 					Containers: []corev1.Container{{
-						Name:    runContainerName,
-						Image:   spec.Image,
-						Command: spec.Command,
-						Env:     env,
-						EnvFrom: envFrom,
+						Name:         runContainerName,
+						Image:        spec.Image,
+						Command:      spec.Command,
+						Env:          env,
+						EnvFrom:      envFrom,
+						VolumeMounts: mounts,
 					}},
 				},
 			},

@@ -38,7 +38,7 @@ func TestMountProjectsOnlyTheKeyItNames(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 
-	res, err := e.MountSecret(ctx, "web", "", "GOOGLE_CREDENTIALS", "", "")
+	res, err := e.MountSecret(ctx, "web", "", "GOOGLE_CREDENTIALS", "", "", nil)
 	if err != nil {
 		t.Fatalf("MountSecret: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestMountRefusesAKeyThatIsNotSet(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 
-	_, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "", "")
+	_, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "", "", nil)
 	if err == nil {
 		t.Fatal("MountSecret of an unset key succeeded, want a refusal")
 	}
@@ -85,12 +85,12 @@ func TestMountFilenameIsOneSegment(t *testing.T) {
 	k.SetSecret("web", "TLS_KEY", "-----BEGIN PRIVATE KEY-----")
 
 	for _, name := range []string{"sub/tls.key", "../../etc/passwd", "..", "."} {
-		if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", name, ""); err == nil {
+		if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", name, "", nil); err == nil {
 			t.Errorf("--filename %q was accepted, want a refusal", name)
 		}
 	}
 	// The record's own example, and the ordinary case, both stay legal.
-	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "tls.key", ""); err != nil {
+	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "tls.key", "", nil); err != nil {
 		t.Errorf("--filename tls.key: %v", err)
 	}
 }
@@ -105,15 +105,15 @@ func TestMountDirIsPerAppAndValidated(t *testing.T) {
 	k.SetSecret("web", "TLS_CERT", "-----BEGIN CERTIFICATE-----")
 
 	for _, dir := range []string{"etc/app", "/etc/app/../secrets", "/"} {
-		if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "", dir); err == nil {
+		if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "", dir, nil); err == nil {
 			t.Errorf("--dir %q was accepted, want a refusal", dir)
 		}
 	}
-	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "", "/etc/app/secrets"); err != nil {
+	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "", "/etc/app/secrets", nil); err != nil {
 		t.Fatalf("MountSecret: %v", err)
 	}
 	// The second key inherits the app's directory rather than carrying one of its own.
-	res, err := e.MountSecret(ctx, "web", "", "TLS_CERT", "", "")
+	res, err := e.MountSecret(ctx, "web", "", "TLS_CERT", "", "", nil)
 	if err != nil {
 		t.Fatalf("MountSecret: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestUnmountLeavesTheValueAlone(t *testing.T) {
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "tls.key", ""); err != nil {
+	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "tls.key", "", nil); err != nil {
 		t.Fatalf("MountSecret: %v", err)
 	}
 
@@ -173,7 +173,7 @@ func TestMountSurvivesARollbackToAnEarlierRelease(t *testing.T) {
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:2", Replicas: 1}); err != nil {
 		t.Fatalf("deploy v2: %v", err)
 	}
-	if _, err := e.MountSecret(ctx, "web", "", "GOOGLE_CREDENTIALS", "creds.json", ""); err != nil {
+	if _, err := e.MountSecret(ctx, "web", "", "GOOGLE_CREDENTIALS", "creds.json", "", nil); err != nil {
 		t.Fatalf("MountSecret: %v", err)
 	}
 
@@ -197,7 +197,7 @@ func TestMountReachesTheNextDeploy(t *testing.T) {
 	e, k, _, _ := newEngine(t, permissive())
 	k.SetSecret("web", "TLS_KEY", "-----BEGIN PRIVATE KEY-----")
 
-	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "tls.key", ""); err != nil {
+	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "tls.key", "", nil); err != nil {
 		t.Fatalf("MountSecret before any deploy: %v", err)
 	}
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
@@ -218,7 +218,7 @@ func TestMountIsPerEnvironment(t *testing.T) {
 	}
 	k.WithNamespace("burrow-staging").(*fake.Kubernetes).SetSecret("web", "TLS_KEY", "-----BEGIN PRIVATE KEY-----")
 
-	if _, err := e.MountSecret(ctx, "web", "staging", "TLS_KEY", "", ""); err != nil {
+	if _, err := e.MountSecret(ctx, "web", "staging", "TLS_KEY", "", "", nil); err != nil {
 		t.Fatalf("MountSecret(staging): %v", err)
 	}
 	prod, err := e.SecretMounts(ctx, "web", "")
@@ -243,7 +243,7 @@ func TestMountAuditsNothingAndHoldsNoValue(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 	before := d.AuditRows()
-	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "tls.key", ""); err != nil {
+	if _, err := e.MountSecret(ctx, "web", "", "TLS_KEY", "tls.key", "", nil); err != nil {
 		t.Fatalf("MountSecret: %v", err)
 	}
 	if _, err := e.UnmountSecret(ctx, "web", "", "TLS_KEY"); err != nil {

@@ -60,6 +60,15 @@ type WorkloadSpec struct {
 	// reads it on every apply, so a rollback keeps the files the running code needs rather than
 	// taking them back to whatever was mounted when the older release was cut (ADR-0089 §5).
 	SecretFiles SecretMounts
+	// SecretEnvKeys is the app's secret keys that still reach the container as ENVIRONMENT VARIABLES,
+	// for an app that marked at least one key file-only (ADR-0089 §4). It is read only when
+	// SecretFiles says so, and it is nil for every other app — which is what keeps their pod template
+	// bit-for-bit what it was, sourcing the whole Secret through envFrom.
+	//
+	// It exists because envFrom cannot exclude a key. The only way to keep one out of the environment
+	// is to stop sourcing the Secret wholesale and name the rest, and the price of that is that a NEW
+	// key becomes a pod-template change rather than something a restart picks up.
+	SecretEnvKeys []string
 	// ReleaseID is the release this workload is applying. It is stamped on the pod template (under
 	// ReleaseAnnotation) so a new release always rolls the workload, even when the image reference
 	// is unchanged; re-applying the same release reuses the same ID, so the apply stays idempotent.
@@ -97,6 +106,16 @@ type RunSpec struct {
 	// No code travels here either (ADR-0004): the init container's image is Burrow's own published
 	// image, named by the adapter, and the only thing that moves is a reference to it.
 	Probe *ProbeSpec
+	// SecretFiles and SecretEnvKeys are the app's secret projection, carried here for the same
+	// reason Image and Env are: a Job runs the app's own image with the app's own environment
+	// (ADR-0048 §2), and the app's environment is now two doors rather than one.
+	//
+	// A run is where this matters MOST. An environment variable is inherited by every child process,
+	// and a run is what starts a shell; a Job that sourced the Secret wholesale would put a key the
+	// app marked file-only (ADR-0089 §4) back exactly where the app took it out of. Carrying the
+	// projection means the Job reads it as the file it is.
+	SecretFiles   SecretMounts
+	SecretEnvKeys []string
 }
 
 // ProbeSpec is the extra a Job needs to run Burrow's probe inside the app's image (ADR-0076 §4).

@@ -66,11 +66,18 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 
 	// Env is the app-global config store, sourced into the Job exactly as a deploy sources it
-	// (ADR-0028) so the command sees the same non-secret config; the per-app Secret is injected via
-	// envFrom in the kube seam, so no secret value passes through here.
+	// (ADR-0028) so the command sees the same non-secret config; the per-app Secret is injected by
+	// the kube seam, so no secret value passes through here.
 	env, err := e.db.AppEnv(ctx, req.App)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("run %s: reading env: %w", req.App, err)
+	}
+	// And the secret projection, resolved the same way a deploy resolves it, so the command sees the
+	// app's environment as the app sees it — including a key the app took OUT of its environment,
+	// which reaches this Job as a file rather than as a variable a child process inherits.
+	mounts, secretEnv, err := e.secretProjectionFor(ctx, k, req.App, envName(req.Env))
+	if err != nil {
+		return RunResult{}, fmt.Errorf("run %s: %w", req.App, err)
 	}
 
 	pol, err := e.db.Policy(ctx)
@@ -89,7 +96,7 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	// The execution-row args carry the env KEY NAMES only — never values (ADR-0027).
 	args["env_keys"] = auditKeys(env)
 
-	res, err := k.RunJob(ctx, RunSpec{App: req.App, ID: e.ids.NewID(), Image: cur.Image, Command: req.Command, Env: env, TTLSeconds: ttl})
+	res, err := k.RunJob(ctx, RunSpec{App: req.App, ID: e.ids.NewID(), Image: cur.Image, Command: req.Command, Env: env, TTLSeconds: ttl, SecretFiles: mounts, SecretEnvKeys: secretEnv})
 	if err != nil {
 		e.recordExecution(ctx, auditOpRun, req.App, args, err)
 		return RunResult{}, fmt.Errorf("run %s: %w", req.App, err)

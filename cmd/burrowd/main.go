@@ -317,6 +317,10 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		// cleanly (ErrNotImplemented) when it is not wired; it is wired here so `burrow app build` and
 		// the agent build verb (later phases) have a builder.
 		Builder: builder,
+		// The same adapter reads back the builds that succeeded and were never deployed (issue #504).
+		// It is the same object because the build Job is both the work and the record of what the work
+		// was for: the builder writes that intent, the ledger reads it.
+		BuildLedger: builder,
 		// The zero-config default push target for an in-cluster build with no explicit target (ADR-0053
 		// §5): the in-cluster registry `burrow cluster registry install` deploys, whose in-cluster
 		// Service reference it wires here via BURROW_BUILD_REGISTRY. The build pushes here in-cluster
@@ -396,7 +400,28 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		})
 		go observer.Run(ctx)
 	}
+
+	// Start the stranded-build reconciler (issue #504): it finds builds that SUCCEEDED and whose
+	// deploy never ran — a client that dropped mid-build, a control plane restarted while a build was
+	// running — and finishes them through the same guarded deploy path, so a build nobody is still
+	// connected to is not silently discarded along with the minutes and the budget it cost. Its first
+	// sweep runs immediately, which is the point: a control plane that went down mid-build is the case
+	// nothing else covers. A non-positive BURROW_BUILD_RECONCILE_INTERVAL turns it off, leaving builds
+	// exactly as fragile as they were before it existed. It runs for the life of the process on ctx.
+	if buildInterval := buildReconcileInterval(); buildInterval < 0 {
+		log.Printf("burrowd: build reconciler disabled (BURROW_BUILD_RECONCILE_INTERVAL <= 0) — a build whose client disconnects will be discarded")
+	} else {
+		reconciler := engine.NewBuildReconciler(controlplane.BuildReconcilerConfig{Interval: buildInterval})
+		go reconciler.Run(ctx)
+	}
 	return nil
+}
+
+// buildReconcileInterval reads the stranded-build sweep cadence from BURROW_BUILD_RECONCILE_INTERVAL,
+// a Go duration. It returns 0 when unset — the reconciler applies DefaultBuildReconcileInterval — and
+// a negative sentinel when set to a non-positive value, which turns recovery off.
+func buildReconcileInterval() time.Duration {
+	return envDuration("BURROW_BUILD_RECONCILE_INTERVAL")
 }
 
 // observeInterval reads the observation cadence from BURROW_OBSERVE_INTERVAL, a Go duration. It

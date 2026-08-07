@@ -369,6 +369,25 @@ left in place for diagnosis). Job names are content-derived, so re-running the s
 repo/ref/target reuses a succeeded or active build. A capacity pre-flight refuses the build
 when no node has room.
 
+**A build that succeeds is not discarded when its client goes away.** The build Job outlives the
+request that started it, so it also carries what it is for — the app, the environment, and the
+reference its deploy pins. burrowd sweeps for build Jobs that succeeded and whose deploy never ran
+(every minute by default; `BURROW_BUILD_RECONCILE_INTERVAL` changes the cadence or turns it off) and
+finishes them through the same guarded deploy path, at most once per image. That covers a dropped
+connection, a `Ctrl-C`, and a control plane restarted while a build was running. Its deploys are
+audited as `recovered=build`, so the trail never claims somebody was present. Three consequences
+worth knowing:
+
+- A recovered deploy carries **no confirmation**, because nobody is there to give one, so a
+  `confirm`-disposition `app.deploy` guardrail holds it. The hold is recorded in the audit log and
+  the build is left in place, so re-running the same build with `--confirm` reuses the image instead
+  of building it again.
+- A build that has been **overtaken is not deployed**. If anything was released for that app after
+  the build finished — or the app was deleted — recovery would move the app backwards or resurrect
+  it, so the build is set aside instead. It stays available to re-run deliberately.
+- There is **no build id to ask about**. A build's outcome is visible once it lands
+  (`burrow app history`) or, when it was held, in `burrow audit` — not while it is in flight.
+
 Sharp edges on that path:
 
 - The **build container runs `privileged`** with `seccompProfile: Unconfined` and a writable

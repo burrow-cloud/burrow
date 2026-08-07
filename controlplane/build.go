@@ -75,7 +75,15 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 	// Build inside the cluster, pushing to pushTarget. A builder error is terminal for the build:
 	// surface it and do NOT touch the deploy path — nothing is rolled out, no release is recorded
 	// (ADR-0053 §4).
-	digest, err := e.runBuild(ctx, req.Source, pushTarget, insecure, cred, req.Progress)
+	//
+	// The intent is recorded WITH the build, not held in this call frame, because this call frame is
+	// the thing that goes away (issue #504). A build runs for minutes on a Kubernetes object that
+	// outlives the request; if the only record of what it was for lives here, a client that drops —
+	// a lost network, a closed lid, a Ctrl-C — takes it with it and a build that then succeeds is
+	// discarded. Recorded against the build, the same intent is readable by the reconciler below, by
+	// a later pass, and by a restarted control plane.
+	intent := BuildIntent{App: req.App, Env: envName(req.Env), Image: deployBase}
+	digest, err := e.runBuild(ctx, intent, req.Source, pushTarget, insecure, cred, req.Progress)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}
@@ -104,10 +112,10 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 // bracketing the whole build as one stage when it cannot. reporter is the caller's own — nil when
 // nobody asked for anything, which is every existing caller.
 //
-// A NIL REPORTER TAKES THE PLAIN SEAM CALL, and not merely because there is nothing to write to:
-// observing a build costs the cluster a pod read per interval, and a build nobody is watching must
-// not pay for a report it will not deliver. It is the same rule the deploy path follows — an event
-// nobody asked for is not produced.
+// A NIL REPORTER PRODUCES NO EVENTS, and not merely because there is nothing to write to: a build
+// nobody is watching must not pay for a report it will not deliver. It is the same rule the deploy
+// path follows — an event nobody asked for is not produced. Whether that is expressed by taking a
+// plainer seam or by handing the seam a nil reporter is the implementation's business.
 //
 // A Builder that does not implement ProgressBuilder is not a lesser builder, and the caller must not
 // be able to tell which kind it got beyond the granularity of the report: either way the build is one
@@ -115,7 +123,15 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 // rather than after it. That is the property the transport depends on — the stream's header is
 // written on the first event, and an event that arrives only at the end is an event that arrives
 // after the proxy has given up (issue #503).
-func (e *Engine) runBuild(ctx context.Context, source SourceRef, target string, insecure bool, cred SourceCredential, reporter func(DeployEvent)) (string, error) {
+//
+// A builder that can record what a build is FOR takes that seam whether or not anybody is watching,
+// because attribution is not a report: it is what makes the build recoverable after the watcher has
+// gone, and it is needed EXACTLY in the case where no reporter exists to want it (issue #504). It
+// costs one label and two annotations on an object the adapter was creating anyway.
+func (e *Engine) runBuild(ctx context.Context, intent BuildIntent, source SourceRef, target string, insecure bool, cred SourceCredential, reporter func(DeployEvent)) (string, error) {
+	if ab, ok := e.builder.(AttributedBuilder); ok {
+		return ab.BuildAttributed(ctx, intent, source, target, insecure, cred, reporter)
+	}
 	if pb, ok := e.builder.(ProgressBuilder); ok && reporter != nil {
 		return pb.BuildWithProgress(ctx, source, target, insecure, cred, reporter)
 	}

@@ -57,9 +57,13 @@ metadata:
 rules:
   # The build itself is a Job (a git-clone init container, then the buildah/buildpacks build container).
   # burrowd creates it, polls it to completion, and reaps it (deleting on a ttl and on idempotent re-run).
+  # It also patches the Job's own metadata — the app, environment, and deploy reference the build is
+  # FOR, plus a marker for one whose deploy a guardrail held. That metadata is what lets a build that
+  # succeeds after its caller has disconnected still be finished rather than discarded (issue #504);
+  # patch is scoped to this namespace and reaches only the build Jobs burrowd itself creates.
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # burrowd reads the build Job's pod for status and streams its logs back to the caller.
   - apiGroups: [""]
     resources: ["pods"]

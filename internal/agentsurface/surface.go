@@ -233,9 +233,12 @@ var catalogue = []Capability{
 	{Surface: Agent, Path: "addons", What: "read-only: the installed add-ons and their capabilities"},
 	{Surface: Agent, Path: "backups", What: "read-only: the backups taken of an add-on"},
 
-	// Routing: Services, Ingresses, and DNS records for an app.
-	{Surface: Agent, Path: "expose", What: "creates a Service and Ingress for one app, guarded"},
-	{Surface: Agent, Path: "unexpose", What: "removes an app's Service and Ingress"},
+	// Routing: Services, Ingresses, and DNS records for an app. `publish` is the WHOLE operation
+	// (ADR-0041 §3) and carries `expose` as an alias, so an agent told the older verb reaches the
+	// complete one rather than `unknown command`; the same holds for `unpublish` and `unexpose`.
+	// An alias registers no command of its own, which is why only the canonical names are listed.
+	{Surface: Agent, Path: "publish", What: "makes one app reachable at a hostname over HTTPS — Service, Ingress, DNS, and the certificate — guarded"},
+	{Surface: Agent, Path: "unpublish", What: "removes an app's Service and Ingress; leaves its DNS record and its workload alone"},
 	{Surface: Agent, Path: "domain", What: "group: the DNS operations"},
 	{Surface: Agent, Path: "domain add", What: "writes a DNS record at an already-configured provider, guarded"},
 	{Surface: Agent, Path: "domain remove", What: "removes a DNS record at an already-configured provider"},

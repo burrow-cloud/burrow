@@ -11,7 +11,10 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-var _ controlplane.Resolver = (*Resolver)(nil)
+var (
+	_ controlplane.Resolver              = (*Resolver)(nil)
+	_ controlplane.AuthoritativeResolver = (*Resolver)(nil)
+)
 
 // Resolver is an in-memory controlplane.Resolver. Seed what a host resolves to with Set;
 // an unseeded host returns an error, modelling NXDOMAIN.
@@ -51,4 +54,12 @@ func (r *Resolver) LookupHost(ctx context.Context, host string) ([]string, error
 		return nil, fmt.Errorf("fake resolver: no record for %q", host)
 	}
 	return append([]string(nil), addrs...), nil
+}
+
+// LookupHostAuthoritative answers from the same seeded table, so one fake can stand in for both
+// resolver seams. A test that needs them to DISAGREE — the publish pre-flight falling back from an
+// authoritative nameserver that will not answer to a recursive resolver that will — wires two
+// resolvers and puts an error on one.
+func (r *Resolver) LookupHostAuthoritative(ctx context.Context, host string) ([]string, error) {
+	return r.LookupHost(ctx, host)
 }

@@ -58,6 +58,9 @@ const (
 	// from that ceiling rather than from the default, for the rule this file holds — a client sized to
 	// the typical case is how the bug comes back the first time an operator raises a limit.
 	SQLTimeout = controlplane.MaxAddonSQLWait + TimeoutMargin
+	// PublishTimeout bounds a publish, which waits on four links in turn: an external address, DNS
+	// pointing at it, the pre-flight's plain-HTTP probe, and the certificate (ADR-0041 §3).
+	PublishTimeout = controlplane.MaxPublishWait + TimeoutMargin
 
 	// ProviderTimeout bounds registering a provider, which for an object store verifies the
 	// destination with a run of calls to the vendor before it answers (ADR-0063 §2-§4).
@@ -82,6 +85,7 @@ type budgets struct {
 	// a different bound from a backup Job's and would be wrong stated as either.
 	sql      time.Duration
 	provider time.Duration
+	publish  time.Duration
 }
 
 // derivedBudgets is the table every constructed client gets: the constants above, each derived from
@@ -96,5 +100,6 @@ func derivedBudgets() budgets {
 		restoreInstance: RestoreInstanceTimeout,
 		sql:             SQLTimeout,
 		provider:        ProviderTimeout,
+		publish:         PublishTimeout,
 	}
 }

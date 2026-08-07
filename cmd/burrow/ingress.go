@@ -315,8 +315,8 @@ func writeIngressDone(w io.Writer, o ingressOptions) {
 		fmt.Fprintln(w, note(w)+"no --email set, so Let's Encrypt expiry and renewal-failure notices are off.")
 		fmt.Fprintln(w, "  Add one anytime: burrow cluster ingress install --email <you@example.com>")
 	}
-	fmt.Fprintln(w, "\nExpose an app and request a certificate:")
-	fmt.Fprintln(w, "  burrow app publish <app> --host <name> --port <n> --tls")
+	fmt.Fprintln(w, "\nPublish an app at a hostname (TLS is on by default):")
+	fmt.Fprintln(w, "  burrow app publish <app> --host <name> --port <n>")
 	fmt.Fprintln(w, "The controller's external address can take a few minutes; check `burrow app reachability <app>`.")
 }
 

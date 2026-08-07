@@ -287,6 +287,12 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		Resolver:    sys.Resolver{},
 		Credentials: creds,
 		DNS:         dns.NewFactory(),
+		// The publish pre-flight's two seams (ADR-0041 §3): the host is resolved at its zone's own
+		// nameservers, and the ACME challenge path is requested over plain HTTP, before a
+		// certificate is ever asked for — so a path that cannot answer the challenge never opens an
+		// order against the account's rate limit.
+		AuthoritativeResolver: sys.AuthoritativeResolver{},
+		HTTPProbe:             sys.HTTPProbe{},
 		// ObjectStore reaches an S3-compatible endpoint so a backup destination outside this cluster
 		// can be registered and verified (ADR-0063). It is outbound-only and is never on the deploy
 		// path, which stays independent of any third party being reachable (ADR-0040).

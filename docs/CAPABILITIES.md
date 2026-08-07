@@ -411,8 +411,8 @@ Sharp edges on that path:
 
 | Capability | Command | What it does | ADR |
 | --- | --- | --- | --- |
-| Publish at a hostname | `burrow app publish <app> --host <fqdn> --port <n> [--tls]` | Creates a ClusterIP Service (`80` → the container port) and an Ingress for that one host. With `--tls`, annotates it for cert-manager and names a `<app>-tls` Secret. Both `--host` and `--port` are required. | [0018](adr/0018-reaching-an-app-at-a-url.md), [0041](adr/0041-flatten-path-to-a-reachable-app.md) |
-| Remove routing | `burrow app unpublish <app>` | Deletes that Service and Ingress. Leaves the Deployment, the TLS Secret, and any DNS record alone. Not guardrailed. | [0024](adr/0024-cli-command-taxonomy.md) |
+| Publish at a hostname | `burrow app publish <app> --host <fqdn> --port <n>`, `burrow-agent publish` (alias: `expose`) | The whole chain in one operation: a ClusterIP Service (`80` → the container port), an Ingress for that one host, the DNS record when a provider is configured, a pre-flight that confirms the host resolves to this cluster and answers on port 80, then the cert-manager annotation and the wait for the certificate. **TLS is on by default**; `--tls=false` publishes plain HTTP and is refused on an HSTS-preloaded domain. The result carries `reachable`, and when it is false, `blocked_on` and `next`. Both `--host` and `--port` are required. | [0018](adr/0018-reaching-an-app-at-a-url.md), [0041](adr/0041-flatten-path-to-a-reachable-app.md) |
+| Remove routing | `burrow app unpublish <app>`, `burrow-agent unpublish` (alias: `unexpose`) | Deletes that Service and Ingress. Leaves the Deployment, the TLS Secret, and any DNS record alone. Not guardrailed. | [0024](adr/0024-cli-command-taxonomy.md) |
 | Install the routing substrate | `burrow cluster ingress install --email <you>` | Installs ingress-nginx `controller-v1.11.3` (cloud manifest, so a `type=LoadBalancer` Service) and cert-manager `v1.16.2` if absent, then a Let's Encrypt `ClusterIssuer` (default name `letsencrypt`; `--staging` selects the staging directory). Detect-and-skip per component. | [0022](adr/0022-routing-backend-and-supported-kubernetes.md), [0042](adr/0042-use-existing-ingress-controller.md), [0043](adr/0043-public-reachability-is-a-loadbalancer.md) |
 | Public DNS records | `burrow app domain add <host> --address <ip>` / `--app <app>`; `burrow app domain remove <host>` | Creates, updates, or deletes an `A` or `CNAME` record at a configured provider. `A` when the address parses as IPv4, `CNAME` otherwise. Idempotent. | [0018](adr/0018-reaching-an-app-at-a-url.md), [0023](adr/0023-provider-credentials.md) |
 | Diagnose reachability | `burrow app reachability <app> [--wait --timeout]` | Walks the chain and reports the first broken link in `blocked_on`: `deployment` → `workload` → `ingress` → `ingress controller` → `tls certificate` → `dns` → reachable. Resolves the host over public DNS and compares against the controller-assigned address. `--wait` polls (3s, 3-minute default). | [0018](adr/0018-reaching-an-app-at-a-url.md), [0041](adr/0041-flatten-path-to-a-reachable-app.md) |
@@ -437,16 +437,23 @@ Limits worth knowing before you plan around this surface:
   multiple hosts, no multiple backends.
 - **HTTP(S) only.** No TCP or UDP exposure, no websocket configuration, and no way to set a
   custom ingress annotation — the only annotation Burrow ever writes on an app Ingress is
-  `cert-manager.io/cluster-issuer`, and only with `--tls`.
-- **There is no HTTP-01 pre-flight.** `publish --tls` against a host whose DNS does not yet
-  point at the cluster will create the Ingress and open an ACME order that cannot complete;
-  the only signal is `reachability` reporting `blocked_on: "tls certificate"`. Prerequisite
-  checking covers the ingress controller and cert-manager being present, not the DNS path.
-- **`publish` does not touch DNS and does not wait for a certificate.** Those are `domain add`
-  and `reachability --wait`. [ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md) decides a
-  single operation that chains Service, Ingress, TLS, DNS and cert-wait, and that a deploy with
-  a port should create a Service on its own; **neither is built** — there is no `--port` on
-  `deploy`, and the only app Service in the code is created by publish.
+  `cert-manager.io/cluster-issuer`, and only once the publish pre-flight has passed (or on an
+  `expose --tls`, which is the primitive and runs no pre-flight).
+- **The certificate is requested only after a pre-flight passes.** A publish routes the host over
+  plain HTTP first, writes the DNS record, then checks that the host resolves to this cluster — at
+  the zone's own nameservers when burrowd can reach them, a recursive resolver otherwise — and that
+  a plain-HTTP request to the ACME challenge path is answered. Only then is the cert-manager
+  annotation attached, which is what opens the ACME order. A path that cannot work therefore spends
+  none of Let's Encrypt's failed-authorization budget, and cert-manager's own self-check is the
+  backstop rather than the first line. The pre-flight's HTTP request leaves burrowd, so it traverses
+  the cluster's egress and the load balancer; a cluster whose egress cannot reach its own external
+  address reports `blocked_on: "http path"` and requests no certificate.
+- **`publish` writes DNS only when a provider is configured**, and never with `--no-dns`. With no
+  provider it writes nothing, reports the address to point the host at, and still runs the
+  pre-flight — so a host pointed by hand publishes on the next run.
+- **A deploy with a port does not create a Service on its own.**
+  [ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md) decides it should; there is no `--port`
+  on `deploy`, and the only app Service in the code is created by publish.
 - `reachability` never probes the app itself. "Reachable" means every link in the chain is in
   place, not that the app answered.
 
@@ -1369,8 +1376,10 @@ records sorted key *names* only. There is **no time-range filter and no environm
 the environment appears inside `args` but is not queryable. There is **no retention or
 pruning**, so the table grows without bound. There is no update or delete path by design.
 Writes are best-effort: a failed append is logged and swallowed rather than failing the
-operation it describes. `guard set`, `addon connect`, `unexpose`, and provider registration are
-**not** audited.
+operation it describes. `guard set`, `addon connect`, `unpublish`, and provider registration are
+**not** audited. A `publish` writes the rows of the links it composes — an `expose` row for the
+plain-HTTP routing, a `dns_write` row for the record, and a second `expose` row when the pre-flight
+passes and the certificate is attached — rather than one row of its own.
 
 ---
 
@@ -1428,7 +1437,7 @@ pinned by tests that fail if a verb is added or removed.
 
 **Mutating** (each returns an outcome envelope — `executed` / `held_for_confirmation` /
 `denied` / `error`, exit codes 0/2/3/1): `deploy`, `build`, `rollback`, `scale`, `autoscale`,
-`run`, `expose`, `unexpose`, `domain add`, `domain remove`, `addon install`, `addon attach`,
+`run`, `publish` (alias `expose`), `unpublish` (alias `unexpose`), `domain add`, `domain remove`, `addon install`, `addon attach`,
 `addon backup`, `config set`, `config unset`, `health set`, `health unset`, `secret unset`, `delete`.
 
 **Absent from the agent binary entirely** — these are operator actions on the `burrow` CLI:
@@ -1552,7 +1561,7 @@ route reads as the request it carries:
 | `burrow app deploy <app> --env staging` | `POST /v1/apps/{app}/deploy/env/{env}` | Replaced what is **running in production** |
 | `burrow app rollback <app> --env staging` | `POST /v1/apps/{app}/rollback/env/{env}` | Rolled production back to its previous release |
 | `burrow app scale <app> <n> --env staging` | `POST /v1/apps/{app}/scale/env/{env}` | Resized production — and at `0`, stopped it serving |
-| `burrow app publish <app> --env staging` | `POST /v1/apps/{app}/expose/env/{env}` | Pointed the hostname at production's workload |
+| `burrow app publish <app> --env staging` | `POST /v1/apps/{app}/publish/env/{env}` | Pointed the hostname at production's workload |
 | `burrow app unpublish <app> --env staging` | `POST /v1/apps/{app}/unexpose/env/{env}` | Removed production's ingress and routing |
 | `burrow secret set <app> KEY=VALUE --env staging` | `POST /v1/apps/{app}/secrets/env/{env}` | Written the value into **production's Secret**, which cannot be unwritten |
 | `burrow secret unset <app> KEY --env staging` | `DELETE /v1/apps/{app}/secrets/{key}/env/{env}` | Taken the value production is running on out from under it |
@@ -1671,7 +1680,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | --- | --- | --- |
 | Detect the cluster's existing ingress controller and bind to its IngressClass | [0042](adr/0042-use-existing-ingress-controller.md) | Not built — the IngressClass and the HTTP-01 solver class are the literal `"nginx"`. |
 | A deploy with a port creates a ClusterIP Service on its own | [0041](adr/0041-flatten-path-to-a-reachable-app.md) | Not built — no `--port` on `deploy`; the Service is created by `publish`. |
-| One publish operation chaining Service, Ingress, TLS, DNS, and a cert wait | [0041](adr/0041-flatten-path-to-a-reachable-app.md) | Partial — `publish` does Service, Ingress, and the TLS request. DNS and waiting are separate commands. |
+| One publish operation chaining Service, Ingress, TLS, DNS, and a cert wait | [0041](adr/0041-flatten-path-to-a-reachable-app.md) | Built — `publish` does the Service, the Ingress, the DNS record where a provider is configured, a DNS-and-plain-HTTP pre-flight, the certificate, and the wait, and reports the converged verdict. It is the same operation on both surfaces (`burrow app publish`, `burrow-agent publish`). The `--wait` on `reachability` and `domain add` remain as the primitives beneath it. |
 | Multi-minor forward database upgrades in one step | [0055](adr/0055-multi-version-upgrades.md) | Proposed, not built — the gate allows one minor step. |
 | Scheduled backups with retention | [0032](adr/0032-postgres-backups.md) | Not built. |
 | Audit-log retention | [0027](adr/0027-audit-log.md) | Not built; deferred in the ADR. |

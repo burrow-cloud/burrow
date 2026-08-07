@@ -9,19 +9,28 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/burrow-cloud/burrow/client"
 )
 
 func newPublishCmd() *cobra.Command {
 	o := &commonOpts{}
-	var host, issuer string
+	var host, issuer, provider string
 	var port int
-	var tls, confirm bool
+	var tls, noDNS, confirm bool
 	cmd := &cobra.Command{
 		Use:   "publish <app>",
-		Short: "Make an app reachable at a hostname over HTTP(S)",
-		Long: "publish routes an external hostname to the app (a Service + Ingress), optionally with\n" +
-			"an HTTPS certificate via cert-manager (--tls). Point the hostname's DNS at the cluster\n" +
-			"with `burrow app domain add` to finish the reachability chain.",
+		Short: "Make an app reachable at a hostname over HTTPS: routing, DNS, and the certificate",
+		Long: "publish is the whole path to a reachable app in one command: it routes the hostname to\n" +
+			"the app (a Service + Ingress), writes the DNS record when a provider is configured, checks\n" +
+			"the host really reaches this cluster over plain HTTP, and only then requests the HTTPS\n" +
+			"certificate and waits for it. It reports whether the app ended up live, and when it did not,\n" +
+			"the one link it is waiting on.\n\n" +
+			"TLS is on by default. Pass --tls=false to publish over plain HTTP; that is refused for a host\n" +
+			"on an HSTS-preloaded domain such as .dev, where a browser will not open http:// at all.\n\n" +
+			"The certificate is requested only AFTER the host is confirmed to resolve to this cluster and\n" +
+			"answer on port 80, so a misconfigured hostname does not spend the certificate authority's\n" +
+			"rate limit on an order that cannot complete.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -35,21 +44,24 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Expose(ctx, args[0], env, host, int32(port), tls, issuer, confirm)
+			res, err := c.Publish(ctx, args[0], client.PublishRequest{
+				Env: env, Host: host, Port: int32(port), NoTLS: !tls, Issuer: issuer,
+				SkipDNS: noDNS, Provider: provider, Confirm: confirm,
+			})
 			if err != nil {
 				return err
 			}
-			human := fmt.Sprintf("published %s at %s (%s)\nReachable once an ingress controller is running and DNS points %s at the cluster.",
-				res.App, res.Host, res.URL, res.Host)
-			return o.emitChange(cmd.OutOrStdout(), res, human)
+			return o.emitChange(cmd.OutOrStdout(), res, res.Summary)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&host, "host", "", "external hostname to route to the app (required)")
 	cmd.Flags().IntVar(&port, "port", 0, "the app's container port to forward to (required)")
-	cmd.Flags().BoolVar(&tls, "tls", false, "request an HTTPS certificate for the host via cert-manager")
+	cmd.Flags().BoolVar(&tls, "tls", true, "request an HTTPS certificate for the host via cert-manager (--tls=false publishes plain HTTP)")
 	cmd.Flags().StringVar(&issuer, "tls-issuer", "letsencrypt", "cert-manager ClusterIssuer to request the certificate from")
+	cmd.Flags().BoolVar(&noDNS, "no-dns", false, "leave DNS alone; publish only routes the host and waits for what already points at the cluster")
+	cmd.Flags().StringVar(&provider, "provider", "", "configured DNS provider to write the record at (default: the only one configured)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
 }

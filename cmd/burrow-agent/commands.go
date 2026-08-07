@@ -19,8 +19,8 @@ import (
 // authenticates. It is the discovery surface (ADR-0049 §5) — the bare invocation prints it.
 const rootLong = `burrow-agent is your control channel to Burrow: it reports the state of the user's applications
 on their Kubernetes cluster so you can survey and diagnose, and it carries the operate-verbs so you
-can act — the compute verbs (deploy, build, rollback, scale, autoscale, run), the routing verbs (expose,
-unexpose, domain add/remove), the add-on operations (addon install/attach/backup), the config
+can act — the compute verbs (deploy, build, rollback, scale, autoscale, run), the routing verbs (publish,
+unpublish, domain add/remove), the add-on operations (addon install/attach/backup), the config
 writes (config set/unset), secret unset, and the guarded destructive delete.
 
 Every command prints its result as indented JSON, so you can pipe, grep, and jq it
@@ -104,8 +104,8 @@ func newRootCmd() *cobra.Command {
 		// The remaining agent-exposed mutating verbs (ADR-0049 Phase 2b): routing, add-on, and the
 		// guarded destructive delete. Each funnels through the same confirm flow in mutate.go. (config
 		// set/unset and secret unset are attached as subcommands of the config/secret list verbs above.)
-		newExposeCmd(),
-		newUnexposeCmd(),
+		newPublishCmd(),
+		newUnpublishCmd(),
 		newDomainCmd(),
 		newAddonCmd(),
 		newDeleteCmd(),

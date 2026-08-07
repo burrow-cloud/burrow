@@ -263,6 +263,39 @@ func TestClientScaleBody(t *testing.T) {
 	}
 }
 
+// TestClientPublish confirms the publish call posts the one publish operation and decodes the
+// verdict — including the fields that say the app is NOT live, which is the half a caller must not
+// lose (ADR-0041 §3).
+func TestClientPublish(t *testing.T) {
+	var gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "host": "web.example.com", "reachable": false,
+			"blocked_on": "tls certificate", "next": "wait for cert-manager",
+			"summary": "web is published at web.example.com but not live yet.",
+		})
+	}))
+	defer srv.Close()
+
+	c := client.NewClient(srv.URL, "tok")
+	res, err := c.Publish(context.Background(), "web", client.PublishRequest{Host: "web.example.com", Port: 8080})
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if gotPath != "/v1/apps/web/publish" {
+		t.Errorf("path = %q, want /v1/apps/web/publish", gotPath)
+	}
+	if strings.Contains(gotBody, "no_tls") || strings.Contains(gotBody, "skip_dns") {
+		t.Errorf("body = %s, want the zero request to ask for the complete publish", gotBody)
+	}
+	if res.Reachable || res.BlockedOn != "tls certificate" || res.Next == "" {
+		t.Errorf("result = %+v, want the not-live verdict carried through", res)
+	}
+}
+
 func TestClientStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

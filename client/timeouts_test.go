@@ -96,6 +96,10 @@ func TestRequestBudgetCoversTheControlPlanesOwnBound(t *testing.T) {
 			_, err := c.RemoveAddon(ctx, "postgres", RemoveAddonOptions{DeleteData: true, Confirm: true})
 			return err
 		}},
+		{"publish", controlplane.MaxPublishWait, func(c *Client) error {
+			_, err := c.Publish(ctx, "app", PublishRequest{Host: "app.example.com", Port: 8080})
+			return err
+		}},
 		{"add provider", controlplane.MaxProviderWait, func(c *Client) error {
 			_, err := c.AddProvider(ctx, AddProviderRequest{Type: "backblaze"})
 			return err

@@ -28,6 +28,16 @@ type Engine struct {
 	resolver    Resolver
 	credentials Credentials
 	dns         DNSFactory
+	// authoritative resolves a host at its zone's own nameservers for the publish pre-flight
+	// (ADR-0041 §3). Optional: nil falls back to resolver, which answers the same question against
+	// a recursive resolver.
+	authoritative AuthoritativeResolver
+	// probe makes the publish pre-flight's plain-HTTP request to the ACME challenge path
+	// (ADR-0041 §3). Optional: nil means the pre-flight rests on its DNS half alone.
+	probe HTTPProbe
+	// after is the timer seam a publish waits on between polls. Nil applies time.After; a test
+	// supplies its own so the waits are driven without real time (ADR-0010).
+	after func(d time.Duration) <-chan time.Time
 	// objectStore builds an ObjectStore for an S3-compatible endpoint and credential pair
 	// (ADR-0063 §1). Optional: nil is allowed, and registering an object-storage provider errors
 	// cleanly (ErrNotImplemented) when it is not wired.
@@ -101,6 +111,17 @@ type Deps struct {
 	Credentials Credentials
 	// DNS builds a DNSProvider for a vendor type and token (ADR-0023).
 	DNS DNSFactory
+	// AuthoritativeResolver resolves a host at its zone's own nameservers for the publish
+	// pre-flight (ADR-0041 §3). Optional — nil is allowed, and the pre-flight falls back to
+	// Resolver, verifying the same thing against a recursive resolver's answer.
+	AuthoritativeResolver AuthoritativeResolver
+	// HTTPProbe makes the publish pre-flight's plain-HTTP request to the ACME challenge path
+	// (ADR-0041 §3). Optional — nil is allowed, and the pre-flight rests on its DNS half alone
+	// rather than blocking every publish on a seam a build did not wire.
+	HTTPProbe HTTPProbe
+	// After is the timer seam a publish waits on between polls. Optional — nil applies time.After;
+	// a test supplies its own so a publish's waits run without real time (ADR-0010).
+	After func(d time.Duration) <-chan time.Time
 	// ObjectStore builds an ObjectStore for an S3-compatible endpoint and credential pair, so a
 	// backup can be written outside the cluster it came from (ADR-0063). Optional — nil is allowed,
 	// and registering an object-storage provider errors cleanly (ErrNotImplemented) when it is not
@@ -192,6 +213,9 @@ func New(d Deps) (*Engine, error) {
 		resolver:            d.Resolver,
 		credentials:         d.Credentials,
 		dns:                 d.DNS,
+		authoritative:       d.AuthoritativeResolver,
+		probe:               d.HTTPProbe,
+		after:               d.After,
 		objectStore:         d.ObjectStore,
 		logs:                d.Logs,
 		metrics:             d.Metrics,

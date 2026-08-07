@@ -302,11 +302,15 @@ func newRollbackCmd() *cobra.Command {
 		Long: "Roll an application back to its previously running release by redeploying that release's\n" +
 			"image reference. Rollback is a recovery action, allowed by default; an operator may set the\n" +
 			"app.rollback guardrail to hold it for confirmation. When held, the outcome says so — relay it\n" +
-			"and re-run with --confirm ONLY after the human approves.",
+			"and re-run with --confirm ONLY after the human approves.\n\n" +
+			"If the app has a pre-rollback hook and it fails, the rollback aborts and the outcome names the\n" +
+			"command a human runs to roll back around it (`burrow app rollback <app> --skip-hooks`). That\n" +
+			"flag is not on this binary: skipping a safety step is an operator's judgement. Relay the\n" +
+			"outcome rather than retrying.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "rollback", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.Rollback(ctx, args[0], env, confirm)
+				return c.Rollback(ctx, args[0], env, client.RollbackOptions{Confirm: confirm})
 			})
 		},
 	}

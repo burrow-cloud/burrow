@@ -46,7 +46,7 @@ This file is the place both questions get answered together.
 | Override the entrypoint | `burrow app deploy <app> --image <ref> -- ./worker --queue emails` | Sets the container's `command`. There is no separate `args`. | [0007](adr/0007-explicit-deploy-by-image-reference.md) |
 | Set replicas | `--replicas N` on deploy, or `burrow app scale <app> <n>` | `scale` issues a replicas-only patch and records no release. `--replicas 0` on a deploy means "keep the current count". | [0020](adr/0020-guardrails-as-configurable-policy.md) |
 | Autoscale | `burrow app autoscale <app> --min --max --cpu [--memory]` | Creates an `autoscaling/v2` HorizontalPodAutoscaler targeting the Deployment. Defaults: min 1, max 10, CPU 80%, memory off. `burrow app autoscale <app> off` deletes it. | [0020](adr/0020-guardrails-as-configurable-policy.md) |
-| Roll back | `burrow app rollback <app>` | Re-applies the release the current one supersedes — **exactly one step back**; there is no "roll back to release X". | [0007](adr/0007-explicit-deploy-by-image-reference.md) |
+| Roll back | `burrow app rollback <app>` | Re-applies the release the current one supersedes — **exactly one step back**; there is no "roll back to release X". A failed `pre-rollback` hook aborts it; `--skip-hooks` (operator CLI only) rolls back without running the hook, leaves it configured, and records the skip. See [Lifecycle hooks](#lifecycle-hooks). | [0007](adr/0007-explicit-deploy-by-image-reference.md), [0080](adr/0080-a-rollback-is-not-blocked-by-its-own-hook.md) |
 | Release history | `burrow app history <app>` | Lists releases newest-first from the control-plane database. | [0012](adr/0012-in-cluster-postgres.md) |
 | Status | `burrow app status <app>`, `burrow app list` | Live workload state: desired/ready/updated replicas, availability, and — when the app is blocked — an actionable issue naming the fix, plus a machine-usable reason from a closed set: `ImagePullBackOff`, `ErrImagePull`, `Unschedulable`, `VolumeUnavailable`, `CrashLoopBackOff`, `CreateContainerConfigError`, `OOMKilled`, `ProgressDeadlineExceeded`, `DeadlineExceeded`. Conditions that resolve on their own (`ContainerCreating`, `PodInitializing`) are deliberately not reported. A crash loop carries a bounded tail of the container's own output; a missing config or secret **key** is named, a value never is. `status` also carries the app's recent failure history from the ledger (last 24h, up to 10 rows, resolved episodes included) and the observation coverage over that window. | [0011](adr/0011-kubernetes-integration.md), [0074](adr/0074-burrow-observes-what-it-manages.md) |
 | What is broken, cluster-wide | `burrow failures`, `burrow-agent failures` | Lists the ledger's failures across every managed object. See [Failure ledger](#failure-ledger). | [0074](adr/0074-burrow-observes-what-it-manages.md) |
@@ -61,7 +61,9 @@ Every verb above except `auto-deploy` and `hook` also exists on `burrow-agent` (
 `autoscale`, `rollback`, `run`, `delete`, `apps`, `status`, `history`, `health`/`health set`/
 `health unset`, `checks`). Setting the auto-deploy level, setting a lifecycle hook, and turning
 the deploy-time dependency check off are deliberately operator actions: each is standing
-authority for something that happens with nobody watching.
+authority for something that happens with nobody watching. `rollback` is on both CLIs; its
+`--skip-hooks` flag is on the operator CLI only, and `burrow-agent guard` reports it as a capability
+the agent does not have, so an agent that meets a blocked rollback can say who closes it.
 Declaring a health endpoint deliberately is not, because the agent is the only party that can
 write one into the application's code.
 
@@ -221,6 +223,29 @@ hooks existed.
 deploy of an older image. Rolling back B to A, A's migration tool does not know B's migration
 exists, so running it would step back one of *A's own* migrations instead — worse than doing
 nothing. This is pinned by a test.
+
+**A failed `pre` hook aborts what it ran ahead of** — the deploy, or the rollback. For a rollback
+that abort has a way past it, because two different failures arrive as the same one: the migration
+revert failed (aborting is right), or the hook could not run at all — it will not pull, the Job will
+not schedule, the command has a typo — in which case the schema is fine and the rollback is blocked
+by something unrelated, at the moment an incident leaves least room for a detour.
+
+```sh
+burrow app rollback web --skip-hooks
+```
+
+It does not run the hook, **leaves the hook configured** (the older way past was `hook unset`, which
+deletes it), states the skip in its own output, and records it in the audit log — so "we rolled back
+around a broken hook" is a fact somebody can find afterwards
+([ADR-0080](adr/0080-a-rollback-is-not-blocked-by-its-own-hook.md)). Reach for it when the hook
+could not *run*, not when the revert itself failed: past a failed revert the older code serves
+against a schema nobody stepped back.
+
+**The flag exists on `rollback` and nowhere else, and only on the operator CLI.** A deploy can wait
+for a broken hook to be fixed; an outage cannot — and the same flag on `deploy` would be a way to
+routinely skip migrations. Deciding that a safety step does not apply is a judgement about the
+situation, which is not on the agent surface: a rollback the agent runs still aborts, with a message
+naming the command a human runs, which the agent relays.
 
 **There is no `post-rollback`.** A rollback fires `post-deploy`, told that it was a rollback:
 "did this settle and is it serving?" is the same question whichever direction the image moved, and a

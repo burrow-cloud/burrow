@@ -350,7 +350,7 @@ func TestRollbackReportsNoProgress(t *testing.T) {
 		}
 	}
 	// A rollback takes no reporter at all, so there is nothing to assert but that it still runs.
-	if _, err := e.Rollback(ctx, "web", "", true); err != nil {
+	if _, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{Confirm: true}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 }

@@ -360,6 +360,26 @@ var catalogue = []Capability{
 			"makes once, deliberately, and opts into (ADR-0058)",
 		Command: "burrow app auto-deploy <app> <patch|minor|major|off>",
 	},
+	// The rollback itself IS on the agent surface — it is the recovery action, allowed by default —
+	// and only the override that steps around its `pre-rollback` hook is held back (ADR-0080 §3). The
+	// entry is a flag variant for the same reason `addon remove --delete-data` is: the verb and the
+	// dangerous way of spelling it are different capabilities, and reporting only the verb would leave
+	// an agent that met a hook abort with no account of what closes it.
+	//
+	// It is reported rather than merely absent BECAUSE it is the incident path. An agent that hits a
+	// blocked rollback and can say "a human runs `burrow app rollback web --skip-hooks`" has turned a
+	// dead end into a handover; one that can only report a failure is the case ADR-0021 says ends with
+	// the agent reaching for kubectl.
+	{
+		Surface: Operator,
+		Path:    "rollback --skip-hooks",
+		What:    "rolls an app back WITHOUT running its pre-rollback hook",
+		Why: "tier 1 (ADR-0065 §2, ADR-0080 §3): deciding that a safety step does not apply is a " +
+			"judgement about the situation — whether the schema is actually fine and the hook's failure " +
+			"unrelated — and the blast radius of being wrong is an application serving against a schema " +
+			"nobody verified. The rollback itself is on this surface; only skipping the hook is not",
+		Command: "burrow app rollback <app> --skip-hooks",
+	},
 	{
 		Surface: Operator,
 		Path:    "hook set",

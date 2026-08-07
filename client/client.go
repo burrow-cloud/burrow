@@ -331,6 +331,11 @@ type RollbackResult struct {
 	Release               Release `json:"release"`
 	RolledBackToReleaseID string  `json:"rolled_back_to_release_id"`
 	SupersededReleaseID   string  `json:"superseded_release_id"`
+	// Hints are the control plane's non-blocking notes about the rollback: that a `pre-rollback` hook
+	// was skipped and which command did not run (ADR-0080 §4), and what a `post-deploy` hook made of
+	// the rollout (ADR-0072 §4). The field must exist here or the notes are decoded away before any
+	// caller sees them — a skip that is reported to nobody is the silence the flag exists to avoid.
+	Hints []string `json:"hints,omitempty"`
 }
 
 type ExposeResult struct {
@@ -1487,14 +1492,32 @@ func (c *Client) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	return err
 }
 
+// RollbackOptions carries the caller's choices for a rollback: the guardrail confirmation, and the
+// operator-only override that rolls back around a broken `pre-rollback` hook (ADR-0080).
+type RollbackOptions struct {
+	// Confirm satisfies a guardrail whose disposition holds the rollback for confirmation.
+	Confirm bool
+	// SkipHooks rolls back without running the app's `pre-rollback` hook. The hook stays configured
+	// and the control plane records the skip. It is set by the operator CLI's `--skip-hooks` and by
+	// nothing on the agent surface (ADR-0080 §3).
+	SkipHooks bool
+}
+
 // Rollback returns an app to its previous release. It takes the deploy budget: a rollback runs the
 // `pre-rollback` hook and then waits for the rollout to settle and tells the `post-deploy` hook the
 // same way a deploy does (ADR-0072 §8), so it waits on the same server-side bounds.
-func (c *Client) Rollback(ctx context.Context, app, env string, confirm bool) (RollbackResult, error) {
+func (c *Client) Rollback(ctx context.Context, app, env string, opts RollbackOptions) (RollbackResult, error) {
 	var out RollbackResult
 	path := c.appPath(app, "rollback")
-	if confirm {
-		path += "?confirm=true"
+	var params []string
+	if opts.Confirm {
+		params = append(params, "confirm=true")
+	}
+	if opts.SkipHooks {
+		params = append(params, "skip_hooks=true")
+	}
+	if len(params) > 0 {
+		path += "?" + strings.Join(params, "&")
 	}
 	err := c.doWithin(ctx, c.budget.deploy, http.MethodPost, withEnv(path, env), nil, &out)
 	return out, err

@@ -147,6 +147,14 @@ from the image being rolled back *away from*: that is where the code that knows 
 own migration lives. `pre-rollback` is unset by default, so a rollback runs nothing unless
 someone deliberately configured it.
 
+A failed `pre-rollback` hook aborts the rollback, because letting the older code serve against a
+half-reverted schema is what the ordering exists to prevent. When the hook failed for a reason
+that has nothing to do with the schema — it will not pull, it will not schedule, the command is
+wrong — `burrow app rollback <app> --skip-hooks` rolls back without running it
+([ADR-0080](adr/0080-a-rollback-is-not-blocked-by-its-own-hook.md)). The hook stays configured, the
+skip is stated on the result and recorded in the audit log, and the flag is on the operator CLI
+only: the abort an agent meets names the command a human runs, which the agent relays.
+
 ## Components and code layout
 
 All code is licensed Apache-2.0 ([ADR-0033](adr/0033-relicense-to-apache.md),

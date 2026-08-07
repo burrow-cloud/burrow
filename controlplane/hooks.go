@@ -169,6 +169,12 @@ func (e *HookError) Summary() string {
 // failure aborted nothing — the deploy it was reporting on was already live and recorded — so the
 // message says exactly that, because a reader who saw "the deploy did not happen" after a deploy
 // that plainly did would trust the surface less, not more.
+//
+// A `pre-rollback` failure ends with THE ONE ACTION that gets an operator moving (ADR-0080 §3). It is
+// the last line rather than the first because the captured output sits between them and can run to
+// eight kilobytes: the recovery instruction has to be the thing still on screen, not the thing that
+// scrolled past. Nothing equivalent is printed for `pre-deploy`, and that asymmetry is the decision
+// — a deploy can wait for the hook to be fixed, an outage cannot (ADR-0080 §2).
 func (e *HookError) Error() string {
 	var b strings.Builder
 	b.WriteString(e.Summary())
@@ -181,7 +187,58 @@ func (e *HookError) Error() string {
 		b.WriteString("\noutput (combined stdout+stderr):\n")
 		b.WriteString(e.Output)
 	}
+	if e.Phase == HookPreRollback {
+		b.WriteString("\n")
+		b.WriteString(e.rollbackRecovery())
+	}
 	return b.String()
+}
+
+// SkipHooksFlag is how the operator override spells itself wherever a person reads it (ADR-0080 §2):
+// in the refusal a blocked rollback returns, and in the note a skipped one carries. It is a constant
+// so those two cannot drift from each other — a message naming a flag that does not exist would be
+// worse than no message. The operator CLI registers the same option (cobra takes the name without
+// the dashes), and `guard` reports it as a capability absent from the agent binary.
+const SkipHooksFlag = "--skip-hooks"
+
+// rollbackRecovery is the sentence a blocked rollback ends with: the exact command that gets the
+// operator moving, what it costs, and when NOT to reach for it (ADR-0080 §3, §4).
+//
+// It says three things because an incident leaves room for exactly one read. WHAT TO RUN, with the
+// app and the environment already filled in, so nobody reconstructs an invocation under pressure.
+// WHAT IT DOES NOT COST — the hook stays configured — because the escape that existed before this
+// one worked by deleting the hook, and an operator who has met that will assume this one does too.
+// And WHEN IT IS WRONG: the two failures behind a `pre-rollback` abort look identical here, so the
+// message names the distinction it cannot make for them rather than implying the flag is always safe.
+//
+// It also states that the agent cannot supply the flag. That is not an apology — it is what turns an
+// absent capability into a refusal the agent can relay to a human (ADR-0065 §7): an agent told only
+// "the rollback failed" is an agent that retries, and one told which command a person runs is an
+// agent doing the most useful thing available to it mid-incident.
+func (e *HookError) rollbackRecovery() string {
+	cmd := "burrow app rollback " + e.App
+	if e.Env != "" && e.Env != DefaultEnvironment {
+		cmd += " --env " + e.Env
+	}
+	cmd += " " + SkipHooksFlag
+	return fmt.Sprintf("To roll back around this hook, a human runs `%s`: it does not run the hook, leaves it configured, and records the skip. "+
+		"Reach for it when the hook could not RUN — the image would not pull, the Job would not schedule, the command is wrong — and NOT when the revert itself failed, "+
+		"because past a failed revert the older code serves against a schema nobody stepped back. "+
+		"%s is on the operator CLI only; burrow-agent cannot supply it (ADR-0080 §3).", cmd, SkipHooksFlag)
+}
+
+// skippedHookNote is what a rollback that skipped its `pre-rollback` hook says about it, at the
+// moment it happens (ADR-0080 §4). An operator who reaches for the flag under pressure should not
+// have to infer from silence that it worked, and the next person to ask why the schema looks the way
+// it does should find the answer on the rollback rather than reconstruct it.
+//
+// It names the command that did not run, because "a hook was skipped" and "`./migrate down` did not
+// run" are different facts to somebody deciding what to do next.
+func skippedHookNote(app, env string, command []string) string {
+	return fmt.Sprintf("the pre-rollback hook of %s in %s was SKIPPED with %s: %q did not run before the rollback. "+
+		"The hook is still configured — nothing was unset — and the skip is recorded in the audit log. "+
+		"If that command would have stepped the schema back, the release now serving has not had that done for it.",
+		app, envName(env), SkipHooksFlag, strings.Join(command, " "))
 }
 
 // operation names what the hook's failure aborted, so the message says what did not happen rather

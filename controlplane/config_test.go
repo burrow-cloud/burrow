@@ -153,7 +153,7 @@ func TestRollbackRendersCurrentStoreConfig(t *testing.T) {
 		t.Fatalf("SetConfig after v2: %v", err)
 	}
 
-	res, err := e.Rollback(ctx, "web", "", false)
+	res, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{})
 	if err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}

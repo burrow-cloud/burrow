@@ -229,7 +229,7 @@ func TestRollbackWithNoPreRollbackHookRunsNothing(t *testing.T) {
 	mustDeploy(ctx, t, e, "web", "img:1")
 	mustDeploy(ctx, t, e, "web", "img:2")
 
-	if _, err := e.Rollback(ctx, "web", "", true); err != nil {
+	if _, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{Confirm: true}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if runs := k.RunJobs(); len(runs) != 0 {
@@ -246,7 +246,7 @@ func TestRollbackRunsPreRollbackFromTheImageBeingLeft(t *testing.T) {
 	mustDeploy(ctx, t, e, "web", "img:B")
 	setHook(ctx, t, e, "web", "", cp.HookPreRollback, "./migrate", "down")
 
-	if _, err := e.Rollback(ctx, "web", "", true); err != nil {
+	if _, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{Confirm: true}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	runs := k.RunJobs()
@@ -274,7 +274,7 @@ func TestRollbackNeverFiresPreDeploy(t *testing.T) {
 	setHook(ctx, t, e, "web", "", cp.HookPreDeploy, "./migrate", "up")
 	setHook(ctx, t, e, "web", "", cp.HookPreRollback, "./migrate", "down")
 
-	if _, err := e.Rollback(ctx, "web", "", true); err != nil {
+	if _, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{Confirm: true}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	runs := k.RunJobs()
@@ -301,7 +301,7 @@ func TestFailedPreRollbackAbortsTheRollback(t *testing.T) {
 	setHook(ctx, t, e, "web", "", cp.HookPreRollback, "./migrate", "down")
 	k.SetRunResult(cp.RunResult{ExitCode: 1, Stdout: "cannot drop column in use\n"})
 
-	_, err := e.Rollback(ctx, "web", "", true)
+	_, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{Confirm: true})
 	h := mustHookError(t, err, cp.HookPreRollback)
 	if h.Image != "img:B" {
 		t.Errorf("hook image = %q, want img:B", h.Image)

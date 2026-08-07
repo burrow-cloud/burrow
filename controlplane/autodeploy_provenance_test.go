@@ -90,7 +90,7 @@ func TestRollbackDisablesAutoDeploy(t *testing.T) {
 		t.Fatalf("level after forward deploy = %q, want the default (unchanged)", lvl)
 	}
 
-	if _, err := e.Rollback(ctx, "web", "", true); err != nil {
+	if _, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{Confirm: true}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if lvl, _ := e.AutoDeploy(ctx, "web", ""); lvl != cp.AutoDeployOff {
@@ -168,7 +168,7 @@ func TestRollbackDisableIsPerEnvironment(t *testing.T) {
 			t.Fatalf("Deploy %s: %v", img, err)
 		}
 	}
-	if _, err := e.Rollback(ctx, "web", cp.DefaultEnvironment, true); err != nil {
+	if _, err := e.Rollback(ctx, "web", cp.DefaultEnvironment, cp.RollbackOptions{Confirm: true}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 

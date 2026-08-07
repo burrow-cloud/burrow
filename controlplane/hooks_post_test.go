@@ -326,7 +326,7 @@ func TestRollbackFiresPostDeployToldItWasARollback(t *testing.T) {
 	mustDeploy(ctx, t, e, "web", "img:2")
 	setHook(ctx, t, e, "web", "", cp.HookPostDeploy, "./notify")
 
-	res, err := e.Rollback(ctx, "web", "", true)
+	res, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}

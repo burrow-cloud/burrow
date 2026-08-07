@@ -28,8 +28,9 @@ func newSecretCmd() *cobra.Command {
 		Use:   "secret",
 		Short: "Manage an app's secret environment configuration",
 		Long: "secret manages an app's secret environment — database URLs, API keys — sourced into\n" +
-			"the workload at runtime from a per-app Kubernetes Secret. `secret list` shows only the\n" +
-			"KEYS, never a value. See `burrow app secret set --help` for how a value is supplied.",
+			"the workload at runtime from a per-app Kubernetes Secret. `secret list` shows the KEYS,\n" +
+			"never a value, and a value is never typed as a command argument: `secret set` prompts\n" +
+			"for it, or reads it from a pipe.",
 	}
 	cmd.AddCommand(newSecretSetCmd(), newSecretListCmd(), newSecretUnsetCmd())
 	return cmd
@@ -37,34 +38,33 @@ func newSecretCmd() *cobra.Command {
 
 // newSecretSetCmd sends a secret value to burrowd over the authenticated control-plane API, which
 // writes it into the per-app Secret (ADR-0029). The value never crosses the agent control channel,
-// is never logged, and
-// is never stored in the database (ADR-0004). By default burrowd rolls the running app so it picks
-// the new value up (envFrom is read only at pod start); --no-restart defers that to the next deploy.
+// is never logged, and is never stored in the database (ADR-0004). It is also never an ARGUMENT: it
+// is typed at a hidden prompt or piped in (readSecretValue). By default burrowd rolls the running
+// app so it picks the new value up (envFrom is read only at pod start); --no-restart defers that to
+// the next deploy.
 func newSecretSetCmd() *cobra.Command {
 	o := &commonOpts{}
 	var noRestart, stdin bool
 	cmd := &cobra.Command{
-		Use:   "set <app> KEY=VALUE",
+		Use:   "set <app> KEY",
 		Short: "Set (upsert) a secret environment variable for an app",
-		Long: "set sends a secret value to burrowd over the authenticated control-plane API (TLS),\n" +
-			"and burrowd writes it into the app's per-app Kubernetes Secret.\n\n" +
-			"--stdin takes the KEY alone and reads the value from standard input: hidden input at a\n" +
-			"terminal, the pipe in a script. Prefer it. A value typed as an argument lands in your\n" +
-			"shell history and in the process table, where it stays long after the command is done,\n" +
-			"and a multi-line value (a PEM key) can only be supplied this way.\n\n" +
-			"NEVER paste a secret value into an agent prompt — it is retained in the conversation\n" +
-			"and re-sent on every later tool call. Run this command yourself at your terminal; the\n" +
-			"agent can confirm the key landed with `burrow app secret list <app>`.\n\n" +
-			"By default the running app is rolled so it picks the value up; pass --no-restart to\n" +
-			"defer it to the next deploy.",
-		Example: "  burrow app secret set web STRIPE_SECRET_KEY --stdin\n" +
-			"  cat key.pem | burrow app secret set web GITHUB_APP_KEY --stdin\n" +
-			"  burrow app secret set web LOG_LEVEL=debug",
+		Long: "set stores one secret value for an app. The value is never an argument: type it at the\n" +
+			"hidden prompt, or pipe it in with --stdin for a script. Anything in argv lands in your\n" +
+			"shell history and in the process table, where it stays long after the command is done.\n\n" +
+			"NEVER paste a secret value into an agent prompt — it is retained in the conversation and\n" +
+			"re-sent on every later tool call. Run this yourself; an agent can confirm the key landed\n" +
+			"with `burrow app secret list <app>`.\n\n" +
+			"The value goes to burrowd over the authenticated control-plane API (TLS), which writes it\n" +
+			"into the app's per-app Kubernetes Secret. It is never logged and never stored in the\n" +
+			"database.",
+		Example: "  burrow app secret set web STRIPE_SECRET_KEY\n" +
+			"  printf '%s' \"$STRIPE_SECRET_KEY\" | burrow app secret set web STRIPE_SECRET_KEY --stdin\n" +
+			"  burrow app secret set web GITHUB_APP_KEY --stdin < key.pem",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			app := args[0]
-			key, value, err := secretKeyValue(cmd, args[1], stdin)
+			app, key := args[0], args[1]
+			value, err := readSecretValue(cmd, key, stdin)
 			if err != nil {
 				return err
 			}
@@ -85,42 +85,48 @@ func newSecretSetCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "persist the value without rolling the running workload; it lands on the next deploy")
-	cmd.Flags().BoolVar(&stdin, "stdin", false, "read the value from standard input (hidden at a terminal), taking the argument as the KEY alone")
+	cmd.Flags().BoolVar(&stdin, "stdin", false, "read the value from a pipe or a redirect instead of prompting for it (for scripts and CI)")
 	return cmd
 }
 
-// secretKeyValue resolves the KEY and its value from the second positional argument.
+// readSecretValue reads the secret value for key. There is only one positional argument after the
+// app — the KEY — because the value has no argv form at all (issue #425).
 //
-// Without --stdin the argument is KEY=VALUE, split on the FIRST `=` so a value that contains one —
-// a DSN, a base64 payload — survives intact. With --stdin the argument is the KEY and the value is
-// read from standard input, which is the form that keeps the value out of shell history and out of
-// the process table where any other user on the machine can read it (issue #425). Reading is
-// delegated to readToken, the same helper `registry login` and `provider add` use, so a value is
-// supplied one way across the CLI: hidden input at a terminal, the pipe in a script.
+// argv is the wrong channel for a secret and there is no way to make it a right one: an argument is
+// written to the shell's history file, which almost nobody audits, and it is visible in `ps` to
+// every other user on the machine for as long as the process runs. `KEY=VALUE` also had to guess
+// where the key ended, and a DSN or a base64 payload contains `=` routinely. Both problems go away
+// when the value is never an argument.
 //
-// Neither form ever blocks on a read the caller did not ask for: without --stdin nothing is read at
-// all, so a non-interactive invocation that forgot the value fails on the argument instead of
-// hanging.
-func secretKeyValue(cmd *cobra.Command, arg string, stdin bool) (key, value string, err error) {
-	if !stdin {
-		k, v, ok := strings.Cut(arg, "=")
-		if !ok || k == "" {
-			return "", "", fmt.Errorf("expected KEY=VALUE, got %q; or pass the KEY alone with --stdin "+
-				"and keep the value out of your shell history", arg)
-		}
-		return k, v, nil
+// So it is read instead, through readToken — the helper `registry login` and `provider add` already
+// use, so a secret is supplied one way across the whole CLI: hidden input at a terminal, the pipe in
+// a script. That is also the only form a multi-line credential (a PEM private key) can take.
+//
+// The one thing it must never do is block on a read nobody asked for. A terminal is prompted at; a
+// non-interactive invocation reads standard input only when --stdin says so, and otherwise fails
+// saying which flag to pass. So a CI job that forgot the value ends with a message rather than a
+// hung build.
+func readSecretValue(cmd *cobra.Command, key string, stdin bool) (string, error) {
+	// The KEY half is echoed back and the value half deliberately is not. Repeating it would copy the
+	// thing this refusal exists to contain into stderr, and from there into a CI log, which is the
+	// same mistake in a different file.
+	if k, _, ok := strings.Cut(key, "="); ok {
+		return "", fmt.Errorf("a secret value is not passed as an argument: it would land in your shell "+
+			"history and in the process table. Run `burrow app secret set <app> %s` and type the value at "+
+			"the prompt, or pipe it in with --stdin", k)
 	}
-	if strings.Contains(arg, "=") {
-		return "", "", fmt.Errorf("with --stdin the argument is the KEY alone (got %q); the value is read from standard input", arg)
+	if !stdin && !stdinIsTerminal(cmd.InOrStdin()) {
+		return "", fmt.Errorf("no terminal to prompt for the value of %s: pipe it in with --stdin "+
+			"(printf '%%s' \"$VALUE\" | burrow app secret set <app> %s --stdin)", key, key)
 	}
-	value, err = readToken(cmd.InOrStdin(), cmd.OutOrStdout(), fmt.Sprintf("Value for %s: ", arg))
+	value, err := readToken(cmd.InOrStdin(), cmd.OutOrStdout(), fmt.Sprintf("Value for %s: ", key))
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	if value == "" {
-		return "", "", fmt.Errorf("no value for %s arrived on standard input", arg)
+		return "", fmt.Errorf("no value supplied for %s", key)
 	}
-	return arg, value, nil
+	return value, nil
 }
 
 func newSecretListCmd() *cobra.Command {
@@ -144,7 +150,7 @@ func newSecretListCmd() *cobra.Command {
 				return emit(out, true, map[string][]string{"keys": keys}, "")
 			}
 			if len(keys) == 0 {
-				fmt.Fprintf(out, "No secrets set for %s. Set one with `burrow app secret set %s KEY --stdin`.\n", args[0], args[0])
+				fmt.Fprintf(out, "No secrets set for %s. Set one with `burrow app secret set %s KEY`.\n", args[0], args[0])
 				return nil
 			}
 			for _, k := range keys {

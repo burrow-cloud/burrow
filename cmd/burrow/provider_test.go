@@ -13,6 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/burrow-cloud/burrow/client"
 )
 
@@ -223,6 +226,121 @@ func TestObjectStorageSummaryTicksVerifiedResultsOnly(t *testing.T) {
 		if strings.Contains(l, "UNKNOWN") && strings.HasPrefix(l, okGlyph) {
 			t.Errorf("an unverified lifecycle is reported as verified: %q", l)
 		}
+	}
+}
+
+// fakeProviderCluster stands in for one cluster's API server on the privileged path: it serves the
+// install-token Secret the CLI reads to authenticate, then answers the proxied `provider add` with a
+// recorded provider. It exists so a test can drive the real kubeconfig resolution — which is what
+// decides the banner — rather than bypassing it with --control-plane.
+func fakeProviderCluster(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/secrets/") {
+			_ = json.NewEncoder(w).Encode(&corev1.Secret{
+				TypeMeta:   metav1.TypeMeta{Kind: "Secret", APIVersion: "v1"},
+				ObjectMeta: metav1.ObjectMeta{Name: "burrowd-api-token", Namespace: "burrow"},
+				Data:       map[string][]byte{"token": []byte("s3cr3t")},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "cloudflare", "type": "cloudflare",
+			"capabilities": []string{"dns"}, "secret_key": "cloudflare",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return writeKubeconfig(t, twoContextConfig(srv.URL, srv.URL))
+}
+
+// addCloudflareProvider runs `config provider add cloudflare` against a kubeconfig, with the token
+// piped in. It returns stdout, which is where the registration summary and its target clause land.
+func addCloudflareProvider(t *testing.T, kubeconfig string) string {
+	t.Helper()
+	var out, errb bytes.Buffer
+	root := newRootCmd()
+	root.SetArgs([]string{"config", "provider", "add", "cloudflare", "--kubeconfig", kubeconfig})
+	root.SetOut(&out)
+	root.SetErr(&errb)
+	root.SetIn(strings.NewReader("cf-token\n"))
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("provider add: %v\nstderr: %s", err, errb.String())
+	}
+	return out.String()
+}
+
+// TestProviderAddNamesTheTargetNotTheKubeContext is the banner half of issue #465. `provider add`
+// goes through the privileged connection path, which prints no targeting line, so the clause on the
+// result is the only thing that says where the registration landed — and it used to say it in
+// Kubernetes vocabulary: `on kube context "do-nyc1-burrow-cloud" (no target selected)`.
+//
+// The kubeconfig is only the ROUTE here. The CLI never writes the Secret; burrowd does, which is
+// what its burrowd-credentials Role exists for. So the context is plumbing, and naming it answered
+// with the mechanism instead of the thing (#460 settled that for the app path).
+func TestProviderAddNamesTheTargetNotTheKubeContext(t *testing.T) {
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+
+	// The selected target and the registered handle are the two names Burrow has for a cluster, and
+	// the clause has to reach for either before it falls back to a kube context. The handle case is
+	// the one the issue was filed from: somebody who installed Burrow but never ran `burrow auth
+	// login`, whose cluster HAS a name.
+	t.Run("selected target", func(t *testing.T) {
+		tempConfig(t)
+		forbidCloud(t)
+		kubeconfig := fakeProviderCluster(t)
+		selectTarget(t, "prod")
+
+		out := addCloudflareProvider(t, kubeconfig)
+		if !strings.Contains(out, "on prod") {
+			t.Errorf("provider add did not name the selected target.\ngot: %q", out)
+		}
+		for _, unwanted := range []string{"kube context", "no target selected"} {
+			if strings.Contains(out, unwanted) {
+				t.Errorf("provider add said %q.\ngot: %q", unwanted, out)
+			}
+		}
+	})
+
+	t.Run("registered handle", func(t *testing.T) {
+		tempConfig(t)
+		forbidCloud(t)
+		kubeconfig := fakeProviderCluster(t)
+		// The handle's name differs from the kube context it names, so "on production" can only have
+		// come from Burrow's own name for the cluster.
+		saveHandle(t, "production", "staging", false)
+
+		out := addCloudflareProvider(t, kubeconfig)
+		if !strings.Contains(out, "on production") {
+			t.Errorf("provider add did not name the cluster the way the rest of the CLI does.\ngot: %q", out)
+		}
+		if strings.Contains(out, "kube context") {
+			t.Errorf("provider add named the route rather than the target.\ngot: %q", out)
+		}
+	})
+}
+
+// TestProviderAddTicksTheRegistrationOfATokenProvider covers the OTHER half of the same output. The
+// s3 path got the tick pattern; a cloudflare/digitalocean/github registration — the common case —
+// was still two bare sentences, so a reader scanning for "did it work" had to read them (issue
+// #465). Both lines are results the control plane confirmed, so both tick, and the target clause
+// rides the first line rather than trailing the block.
+func TestProviderAddTicksTheRegistrationOfATokenProvider(t *testing.T) {
+	p := client.Provider{Name: "cloudflare", Type: "cloudflare", Capabilities: []string{"dns"}, SecretKey: "cloudflare"}
+	var w bytes.Buffer
+	lines := strings.Split(tokenProviderSummary(&w, p), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("summary is %d lines, want one status per line:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	for _, l := range lines {
+		if !strings.HasPrefix(l, okGlyph+" ") {
+			t.Errorf("line %q reports a confirmed result and is not marked as one", l)
+		}
+	}
+	// The key NAME is reported; there is nowhere in this summary a token value could appear.
+	if !strings.Contains(lines[1], `"cloudflare"`) {
+		t.Errorf("the summary does not say where the credential was stored: %q", lines[1])
 	}
 }
 

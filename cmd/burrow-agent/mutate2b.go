@@ -391,7 +391,9 @@ func newSecretUnsetCmd() *cobra.Command {
 			"is allowed here. By default the running app is rolled so it drops the value; pass --no-restart to\n" +
 			"only persist the removal and let it land on the next deploy.\n\n" +
 			"There is deliberately no `secret set`: a secret VALUE never routes through the agent channel. To\n" +
-			"set a secret, the human runs `burrow app secret set <app> KEY=VALUE` at their own terminal.",
+			"set a secret, the human runs `burrow app secret set <app> KEY` at their own terminal and types the\n" +
+			"value at its hidden prompt. Never ask for the value here: anything in this conversation is\n" +
+			"retained and re-sent.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "secret_unset", func(ctx context.Context, c *client.Client, env string) (any, error) {

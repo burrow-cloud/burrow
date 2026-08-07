@@ -157,7 +157,7 @@ var commandClasses = map[string]commandClass{
 	"app health unset":      {class: classChanges, why: "returns the app to the default probe and re-applies it", args: []string{"app", "health", "unset", "web"}},
 	"app checks enable":     {class: classChanges, why: "turns the deploy-time check back on for an app", args: []string{"app", "checks", "enable", "web"}},
 	"app checks disable":    {class: classChanges, why: "turns the deploy-time check off for an app", args: []string{"app", "checks", "disable", "web"}},
-	"app secret set":        {class: classChanges, why: "writes a secret value into the app's Secret", args: []string{"app", "secret", "set", "web", "K=V"}},
+	"app secret set":        {class: classChanges, why: "writes a secret value into the app's Secret", args: []string{"app", "secret", "set", "web", "K", "--stdin"}},
 	"app secret unset":      {class: classChanges, why: "removes a secret from the app", args: []string{"app", "secret", "unset", "web", "K"}},
 	"app publish":           {class: classChanges, why: "creates the Service and Ingress that expose an app", args: []string{"app", "publish", "web", "--host", "app.example.com", "--port", "8080"}},
 	"app unpublish":         {class: classChanges, why: "removes them again", args: []string{"app", "unpublish", "web"}},

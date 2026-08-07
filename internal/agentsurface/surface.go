@@ -369,8 +369,10 @@ var catalogue = []Capability{
 		Path:    "secret set",
 		What:    "sets a secret VALUE on an app",
 		Why: "a secret value never crosses the agent control channel (ADR-0029); the agent can list " +
-			"secret KEY names and unset a key, and never reads or writes a value",
-		Command: "burrow app secret set <app> KEY=VALUE",
+			"secret KEY names and unset a key, and never reads or writes a value. The human's own " +
+			"command takes the KEY only and prompts for the value, so it is never in a command line " +
+			"an agent could have composed or a history file either of them could read",
+		Command: "burrow app secret set <app> KEY",
 	},
 	{
 		Surface: Operator,

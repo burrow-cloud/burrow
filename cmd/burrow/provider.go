@@ -95,26 +95,24 @@ func newProviderAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <type>",
 		Short: "Register a provider credential (type: " + providerTypesHint() + ")",
-		Long: "add registers a provider of the given type and stores its API token. You are\n" +
-			"prompted for the token with the input hidden, so it never lands in your shell\n" +
-			"history or the process table; for scripts, pipe it in instead\n" +
-			"(echo \"$TOKEN\" | burrow config provider add cloudflare). The token travels over\n" +
-			"burrowd's authenticated control-plane API (TLS), which writes it into the\n" +
-			"burrow-credentials Secret; a DNS provider's token is validated against the vendor\n" +
-			"first. It never travels over the agent control channel and is never logged. For a private\n" +
-			"build source use\n" +
-			"a github or gitlab token — one token clones the private repo and authenticates its\n" +
-			"registry; a fine-grained token scoped to the repos you build (plus\n" +
-			"read:packages where the registry is shared) keeps the blast radius small. Pass --name\n" +
-			"to register more than one provider of the same type.\n\n" +
-			"An s3 provider is a BACKUP DESTINATION, so a backup can leave the cluster it came from.\n" +
-			"It is addressed by S3-compatible endpoint rather than by vendor, its credential is a\n" +
-			"PAIR (--access-key-id plus a secret access key read from stdin), and registering it\n" +
-			"verifies the destination: Burrow creates or checks the bucket, writes and deletes a\n" +
-			"probe object so a wrong key fails now rather than at the first backup, and refuses a\n" +
-			"bucket whose lifecycle rules would expire a backup that must stay restorable. Scope the\n" +
-			"credential to one bucket at the vendor where it permits that — it is the most\n" +
-			"consequential key in burrow-credentials.\n\n" +
+		Long: "add registers one provider credential and stores it in the burrow-credentials Secret. You\n" +
+			"are prompted for the token with the input hidden, so it never lands in your shell history\n" +
+			"or the process table; a script pipes it in instead. The token travels over burrowd's\n" +
+			"authenticated control-plane API (TLS), never over the agent control channel, and is never\n" +
+			"logged.\n\n" +
+			"A DNS provider (cloudflare, digitalocean) is validated against the vendor before anything\n" +
+			"is written, so a wrong token fails here rather than at the first record.\n\n" +
+			"A source provider (github, gitlab) supplies ONE token that both clones a private repo and\n" +
+			"authenticates that provider's image registry. A fine-grained token scoped to the repos you\n" +
+			"build, plus read:packages where the registry is shared, keeps the blast radius small.\n\n" +
+			"An s3 provider is a BACKUP DESTINATION, addressed by S3-compatible endpoint rather than by\n" +
+			"vendor. Its credential is a pair: --access-key-id, and a secret access key read from stdin.\n" +
+			"Registering it verifies the destination — the bucket is created or checked, a probe object\n" +
+			"is written and deleted so a wrong key fails now rather than at the first backup, and a\n" +
+			"bucket whose lifecycle rules would expire a backup early is refused. Scope this credential\n" +
+			"to one bucket where the vendor permits it: it is the most consequential key in\n" +
+			"burrow-credentials.\n\n" +
+			"Pass --name to register more than one provider of the same type.\n\n" +
 			"Supported types: " + providerTypesHint() + " (see `burrow config provider types`).",
 		Example: "  burrow config provider add cloudflare\n" +
 			"  burrow config provider add digitalocean --name do-dns\n" +
@@ -127,6 +125,13 @@ func newProviderAddCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			providerType := args[0]
+			// Refuse a target with no cluster BEFORE the credential is asked for. This command writes
+			// into a cluster's burrow-credentials Secret, so with Burrow Cloud selected there is
+			// nowhere for it to go (clusteronly.go) — and prompting for a token first would have
+			// somebody produce a credential for a registration that was never going to happen.
+			if err := o.requireCluster(); err != nil {
+				return err
+			}
 			if providerType == objectStorageType {
 				return addObjectStorageProvider(cmd, o, objectStorageOpts{
 					name:          name,
@@ -170,10 +175,8 @@ func newProviderAddCmd() *cobra.Command {
 				return err
 			}
 
-			human := fmt.Sprintf("registered provider %q (type %s, capabilities %s)\n"+
-				"token stored in burrow-credentials under key %q",
-				p.Name, p.Type, strings.Join(p.Capabilities, ", "), p.SecretKey)
-			return o.emitChange(cmd.OutOrStdout(), p, human)
+			out := cmd.OutOrStdout()
+			return o.emitChange(out, p, tokenProviderSummary(out, p))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -187,6 +190,21 @@ func newProviderAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&accessKeyID, "access-key-id", "", "s3: the access key id (its secret access key is read from stdin)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	return cmd
+}
+
+// tokenProviderSummary is what a human is told after a single-token registration — a DNS or a source
+// provider. It is the same shape as objectStorageSummary and for the same reason (issue #465): one
+// status per line, each marked as a result the control plane confirmed, so a reader scanning for
+// "did it work" reads marks rather than sentences.
+//
+// Both lines tick because both are results: the registration is recorded, and the token is in
+// burrow-credentials under the key named — burrowd wrote nothing at all if it rejected the token
+// (ADR-0030), so arriving here IS the confirmation. The key NAME is reported and the value never is.
+func tokenProviderSummary(w io.Writer, p client.Provider) string {
+	ok := okMark(w) + " "
+	return fmt.Sprintf("%sregistered provider %q (type %s, capabilities %s)\n"+
+		"%stoken: stored in burrow-credentials under key %q",
+		ok, p.Name, p.Type, strings.Join(p.Capabilities, ", "), ok, p.SecretKey)
 }
 
 // objectStorageOpts are the flags of an object-storage registration. The secret access key is NOT

@@ -76,6 +76,10 @@ var clusterOnlyCommands = [][]string{
 	{"app", "domain", "add", "example.com", "--address", "203.0.113.1"},
 	{"app", "domain", "remove", "example.com"},
 	{"config", "provider", "list"},
+	// `provider add` refuses before it prompts for the token, which is why it can be driven here with
+	// no stdin at all: a credential must not be asked for on behalf of a registration that has
+	// nowhere to be written.
+	{"config", "provider", "add", "cloudflare"},
 	{"config", "registry", "list"},
 	{"config", "registry", "login", "ghcr.io", "-u", "me", "-p", "tok"},
 	{"config", "registry", "logout", "ghcr.io"},

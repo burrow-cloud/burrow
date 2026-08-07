@@ -238,7 +238,13 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	// each app its own database and role (ADR-0031). It reads the superuser password from the
 	// per-instance superuser Secret in the add-on namespace, so it is scoped there; which instance a
 	// call reaches is decided per operation by the environment it names (ADR-0067 §1).
-	dbProvisioner, err := kube.NewPostgresProvisionerFromConfig(kubeCfg, os.Getenv("BURROW_ADDON_NAMESPACE"))
+	//
+	// It is TOLD which instances those are rather than working it out from where it is running
+	// (issue #519). burrowd is the single-tenant control plane and its databases are add-on instances
+	// in its own cluster, so it names exactly that — AddonInstanceTarget over the same add-on
+	// namespace the rest of the install uses, which for an install that never set the variable is the
+	// default one. Nothing new to configure, and nothing left for the provisioner to guess.
+	dbProvisioner, err := kube.NewPostgresProvisionerFromConfig(kubeCfg, kube.AddonInstanceTarget(os.Getenv("BURROW_ADDON_NAMESPACE")))
 	if err != nil {
 		return err
 	}

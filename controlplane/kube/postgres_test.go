@@ -70,7 +70,7 @@ func TestProvisionerRejectsBadIdentifiers(t *testing.T) {
 	// No Secret and no database: a rejection must come from validation, before any I/O. (If
 	// validation let a name through, the call would instead fail trying to read the Secret.)
 	client := fake.NewSimpleClientset()
-	p := NewPostgresProvisioner(client, addonNS)
+	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
 
 	bad := []string{"a; DROP DATABASE x", "App", "1x", "", "-web", "web name", "web\"; --", "WEB", "web_db", "web;"}
 	for _, name := range bad {
@@ -88,7 +88,7 @@ func TestProvisionerRejectsBadIdentifiers(t *testing.T) {
 func TestProvisionerAcceptsValidIdentifiers(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
-	p := NewPostgresProvisioner(client, addonNS)
+	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
 	for _, name := range []string{"web", "my-app", "a", "web2", "a1b2-c3"} {
 		_, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment)
 		if errors.Is(err, controlplane.ErrInvalid) {
@@ -125,7 +125,7 @@ func TestProvisionerRequiresAnEnvironment(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
 		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
 	})
-	p := NewPostgresProvisioner(client, addonNS)
+	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
 
 	for _, env := range []string{"", "Staging", "not a label", "staging/prod"} {
 		if _, err := p.EnsureAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
@@ -150,7 +150,7 @@ func TestProvisionerReachesTheEnvironmentsOwnInstance(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
 		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
 	})
-	p := NewPostgresProvisioner(client, addonNS)
+	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
 
 	defHost, err := p.instanceHost(controlplane.DefaultEnvironment)
 	if err != nil {
@@ -175,5 +175,118 @@ func TestProvisionerReachesTheEnvironmentsOwnInstance(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "burrow-postgres-staging") {
 		t.Errorf("error %q does not name staging's own instance", err)
+	}
+}
+
+// TestAddonInstanceTargetIsTheInstanceAnExistingInstallAlreadyHas is the upgrade guarantee of issue
+// #519: making the instance an explicit target must not MOVE it. The target burrowd is wired with —
+// including for an install that never set BURROW_ADDON_NAMESPACE, which is every default install —
+// names the same instance, in the same namespace, at the same host the provisioner used to derive
+// for itself. The expected values are spelled out literally rather than recomputed from the helpers
+// under test, so a change to either side fails here instead of quietly agreeing with itself.
+func TestAddonInstanceTargetIsTheInstanceAnExistingInstallAlreadyHas(t *testing.T) {
+	// What burrowd builds when BURROW_ADDON_NAMESPACE is unset.
+	unconfigured := AddonInstanceTarget("")
+
+	target, err := unconfigured(controlplane.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("default environment: %v", err)
+	}
+	if target.Instance != "burrow-postgres" || target.Namespace != "burrow-addons" {
+		t.Errorf("default target = %s/%s, want burrow-addons/burrow-postgres — an existing install's instance moved", target.Namespace, target.Instance)
+	}
+	if got := target.Host(); got != "burrow-postgres.burrow-addons.svc" {
+		t.Errorf("default host = %q, want burrow-postgres.burrow-addons.svc — every existing DATABASE_URL names that host", got)
+	}
+
+	// A second environment keeps its own instance, beside the first rather than on top of it
+	// (ADR-0067 §1) — the environment still selects, it just selects within a configured set.
+	staging, err := unconfigured("staging")
+	if err != nil {
+		t.Fatalf("staging: %v", err)
+	}
+	if got := staging.Host(); got != "burrow-postgres-staging.burrow-addons.svc" {
+		t.Errorf("staging host = %q, want burrow-postgres-staging.burrow-addons.svc", got)
+	}
+
+	// An install that DID set the add-on namespace is targeted at the namespace it set.
+	elsewhere, err := AddonInstanceTarget("other-addons")(controlplane.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("configured namespace: %v", err)
+	}
+	if got := elsewhere.Host(); got != "burrow-postgres.other-addons.svc" {
+		t.Errorf("host with a configured add-on namespace = %q, want burrow-postgres.other-addons.svc", got)
+	}
+
+	// And the address the provisioner actually dials is that host on the add-on port.
+	p := NewPostgresProvisioner(fake.NewSimpleClientset(), unconfigured)
+	hostPort, err := p.adminHostPort(controlplane.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("adminHostPort: %v", err)
+	}
+	if hostPort != "burrow-postgres.burrow-addons.svc:5432" {
+		t.Errorf("dialed address = %q, want burrow-postgres.burrow-addons.svc:5432", hostPort)
+	}
+}
+
+// TestProvisionerActsOnlyOnTheInstanceItWasGiven asserts a provisioner told to act on an instance
+// elsewhere neither dials nor reads the credential of a default-named instance sitting right there
+// in the cluster its client is pointed at. That is issue #519 in miniature: a name derived from the
+// caller's surroundings made a same-named database nearby indistinguishable from the intended one,
+// and only a password mismatch kept the two apart. The surroundings can no longer supply a name.
+func TestProvisionerActsOnlyOnTheInstanceItWasGiven(t *testing.T) {
+	ctx := context.Background()
+	// A fully installed default-named instance, in the default add-on namespace — the thing the old
+	// derivation would have found and used.
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
+		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
+	})
+	p := NewPostgresProvisioner(client, func(string) (PostgresTarget, error) {
+		return PostgresTarget{Instance: "tenant-postgres", Namespace: "tenant-addons"}, nil
+	})
+
+	host, err := p.instanceHost(controlplane.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("instanceHost: %v", err)
+	}
+	if host != "tenant-postgres.tenant-addons.svc" {
+		t.Errorf("host = %q, want the configured tenant-postgres.tenant-addons.svc", host)
+	}
+
+	// The configured instance is not installed here, so the attach fails closed naming IT — rather
+	// than succeeding against the one that is.
+	_, err = p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment)
+	if !errors.Is(err, controlplane.ErrNotFound) {
+		t.Fatalf("EnsureAppDatabase err = %v, want ErrNotFound for the configured instance", err)
+	}
+	if !strings.Contains(err.Error(), "tenant-addons/tenant-postgres") {
+		t.Errorf("error %q does not name the configured instance", err)
+	}
+	if strings.Contains(err.Error(), addonNS+"/"+PostgresSecretName) {
+		t.Errorf("error %q reached the default-named instance the provisioner was not configured with", err)
+	}
+}
+
+// TestProvisionerWithNoInstanceProvisionsNothing asserts a provisioner built with no target refuses
+// every operation as ErrInvalid instead of falling back to a derived name. The default-named
+// instance is present so a fallback would get all the way to a connection: "refused" and "quietly
+// defaulted" are only distinguishable when defaulting would have worked.
+func TestProvisionerWithNoInstanceProvisionsNothing(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
+		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
+	})
+	p := NewPostgresProvisioner(client, nil)
+
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+		t.Errorf("EnsureAppDatabase err = %v, want ErrInvalid", err)
+	}
+	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+		t.Errorf("DropAppDatabase err = %v, want ErrInvalid", err)
+	}
+	if _, err := p.ListAppDatabases(ctx, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+		t.Errorf("ListAppDatabases err = %v, want ErrInvalid", err)
 	}
 }

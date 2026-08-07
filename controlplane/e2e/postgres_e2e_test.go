@@ -91,7 +91,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 	}
 
 	k8s := kube.New(client, appNS).WithAddonNamespace(addonNS).WithDynamicClient(dyn)
-	prov := kube.NewPostgresProvisioner(client, addonNS)
+	prov := kube.NewPostgresProvisioner(client, kube.AddonInstanceTarget(addonNS))
 	db := fake.NewDatabase()
 	engine, err := cp.New(cp.Deps{
 		Kubernetes:          k8s,
@@ -292,7 +292,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 	}
 
 	k8s := kube.New(client, appNS).WithAddonNamespace(addonNS).WithDynamicClient(dyn)
-	prov := kube.NewPostgresProvisioner(client, addonNS)
+	prov := kube.NewPostgresProvisioner(client, kube.AddonInstanceTarget(addonNS))
 	engine, err := cp.New(cp.Deps{
 		Kubernetes:          k8s,
 		Database:            fake.NewDatabase(),

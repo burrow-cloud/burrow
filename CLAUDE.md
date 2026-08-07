@@ -126,6 +126,23 @@ no correctness surface to test here. Three layers instead:
   `scale` paths against a local **kind or k3d** cluster, covering the real adapters fakes
   cannot. (Wiring lands with the v0.1 slice — see [docs/PLAN.md](docs/PLAN.md).)
 
+**No test reads the machine it runs on.** The client surface resolves state ambiently by design
+— the kubeconfig from `$KUBECONFIG` else `~/.kube/config`, the local config from
+`$BURROW_CONFIG` else `~/.burrow/config` — so a test that reaches a resolver without a fixture
+reads the developer's own setup, which on a maintainer's laptop names live production clusters.
+Any package whose tests can reach one of those paths gives its whole test binary an empty home
+with [`internal/ambienttest`](internal/ambienttest/):
+
+```go
+func TestMain(m *testing.M) { ambienttest.Isolate(m) }
+```
+
+Fixtures still work unchanged (`t.Setenv` over the top of it), and every package starts from the
+same bare machine CI's runners are, so `task check` gives the same answer in both places. The
+gated integration suites keep their own `$BURROW_TEST_KUBECONFIG`, which the guard deliberately
+leaves alone: a disposable cluster is named explicitly, never inherited. The package doc lists
+what the guard cannot catch.
+
 ## Code layout
 
 All code is licensed **Apache-2.0** ([ADR-0033](docs/adr/0033-relicense-to-apache.md),

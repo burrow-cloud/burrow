@@ -1259,6 +1259,19 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		},
 	}}
 
+	// The keys the app asked to receive as FILES (ADR-0089 §1-§3). This is the app PodSpec's first
+	// and only Volumes entry; an app that mounts nothing gets none of it, and its pod template is
+	// what it was before mounts existed.
+	volumes, mounts := secretVolume(spec)
+	if len(mounts) > 0 {
+		// The DIRECTORY reaches the app, and the value never does (§3) — the shape build.go already
+		// uses for its own credentials. It is appended AFTER the app's own config so Burrow's value
+		// wins if a config var of the same name was set: the variable's whole job is to name where
+		// Burrow put the files, and an app pointed at a directory Burrow did not mount would read
+		// nothing and fail at the credential.
+		env = append(env, corev1.EnvVar{Name: controlplane.SecretsDirEnvVar, Value: spec.SecretFiles.Directory()})
+	}
+
 	replicas := spec.Replicas
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: spec.App, Namespace: a.namespace, Labels: labels},
@@ -1268,12 +1281,14 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
+					Volumes: volumes,
 					Containers: []corev1.Container{{
-						Name:    spec.App,
-						Image:   spec.Image,
-						Command: spec.Command,
-						Env:     env,
-						EnvFrom: envFrom,
+						Name:         spec.App,
+						Image:        spec.Image,
+						Command:      spec.Command,
+						Env:          env,
+						EnvFrom:      envFrom,
+						VolumeMounts: mounts,
 						// Readiness only, and nil when the engine resolved no probe (ADR-0076 §1,
 						// §3). LivenessProbe and StartupProbe are deliberately left unset: a wrong
 						// liveness probe restarts a working container in a loop and presents as the
@@ -1295,6 +1310,49 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		a.podMutator(&dep.Spec.Template.Spec)
 	}
 	return dep
+}
+
+// secretVolume builds the one Secret volume an app's mounted keys are projected through, and the
+// read-only mount that puts it at the app's secrets directory (ADR-0089 §2). An app with no mount
+// gets nil for both, so nothing about its pod template changes.
+//
+// FOUR PROPERTIES, AND EACH IS LOAD-BEARING:
+//
+//   - Items, one KeyToPath per MOUNTED key, sorted. This is what keeps a mount honest: an unmounted
+//     key is not in the volume, so projecting one credential does not put every other credential the
+//     app holds on disk, where a path-traversal bug or a stray `tar` would reach them.
+//   - ReadOnly, and DefaultMode 0400. The app opens the file; nothing writes it back.
+//   - Optional, for the same reason envFrom is optional: a workload whose Secret does not exist yet
+//     still applies, and a key that is mounted and then unset leaves the pod with no file rather
+//     than blocking it from starting.
+//   - ONE WHOLE-VOLUME MOUNT AT ONE DIRECTORY, never a subPath per key. A subPath mount is the one
+//     form of Secret volume the kubelet DOES NOT UPDATE IN PLACE, so a per-key path would silently
+//     trade rotation-without-a-rollout for the ability to name a path. The type this reads carries
+//     one directory for the whole app, so there is no per-key path to build one from.
+func secretVolume(spec controlplane.WorkloadSpec) ([]corev1.Volume, []corev1.VolumeMount) {
+	if !spec.SecretFiles.Any() {
+		return nil, nil
+	}
+	items := make([]corev1.KeyToPath, 0, len(spec.SecretFiles.Mounts))
+	for _, m := range spec.SecretFiles.Mounts {
+		items = append(items, corev1.KeyToPath{Key: m.Key, Path: m.Filename})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Key < items[j].Key })
+	volumes := []corev1.Volume{{
+		Name: controlplane.SecretsVolumeName,
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  controlplane.AppSecretName(spec.App),
+			Items:       items,
+			DefaultMode: int32Ptr(0o400),
+			Optional:    boolPtr(true),
+		}},
+	}}
+	mounts := []corev1.VolumeMount{{
+		Name:      controlplane.SecretsVolumeName,
+		MountPath: spec.SecretFiles.Directory(),
+		ReadOnly:  true,
+	}}
+	return volumes, mounts
 }
 
 // readinessProbe translates the engine's resolved ReadinessCheck into the Kubernetes probe, or nil
@@ -1333,6 +1391,8 @@ func readinessProbe(r controlplane.ReadinessCheck) *corev1.Probe {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func int32Ptr(i int32) *int32 { return &i }
 
 func deploymentAvailable(dep *appsv1.Deployment, desired int32) bool {
 	for _, c := range dep.Status.Conditions {

@@ -587,12 +587,13 @@ func TestSkippedCheckDetailStaysInsideItsBound(t *testing.T) {
 
 // TestDependencyVolumeCheckAwaitsAppVolumes names the one part of ADR-0076 §4 this does not build.
 // The record lists a mounted volume as a third dependency, checked by creating, reading back and
-// deleting a file under it. Burrow mounts no volume on a USER's workload — WorkloadSpec has no
-// volume field, and every claim in the tree belongs to an add-on or the backup path — so deriving one
-// would mean inventing a dependency, which is the thing §4 exists not to do. This is the skipped test
-// CLAUDE.md asks for in place of a status note in the record.
+// deleting a file under it. The one volume Burrow authors on a USER's workload is ADR-0089's
+// READ-ONLY Secret projection, which that check cannot be run against and does not need — a missing
+// key is a missing file — and every claim in the tree belongs to an add-on or the backup path. So
+// deriving one would still mean inventing a dependency, which is the thing §4 exists not to do. This
+// is the skipped test CLAUDE.md asks for in place of a status note in the record.
 func TestDependencyVolumeCheckAwaitsAppVolumes(t *testing.T) {
-	t.Skip("ADR-0076 §4's volume check is unbuildable until an app can mount a volume: the app Pod has no Volumes, so there is nothing provisioned to derive a volume dependency from")
+	t.Skip("ADR-0076 §4's volume check is unbuildable until an app can mount WRITABLE storage: the only volume on an app Pod is a read-only Secret projection, which nothing can create, read back and delete a file under")
 }
 
 // newEngine3 is newEngine without the clock, for the cases that do not arrange time.

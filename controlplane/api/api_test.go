@@ -1538,3 +1538,64 @@ func storedPolicy(t *testing.T, d *fake.Database) cp.Policy {
 	}
 	return p
 }
+
+// TestSecretMountEndpoints is ADR-0089 over the API: a key is projected into a file by NAME, the
+// projection reads back with the path it lands at, and no request or response on this path has
+// anywhere to put a value.
+func TestSecretMountEndpoints(t *testing.T) {
+	h, k, _ := newAPI(t)
+	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
+	const value = "-----BEGIN PRIVATE KEY-----super-secret"
+	k.SetSecret("web", "TLS_KEY", value)
+	k.SetSecret("web", "STRIPE_KEY", "sk_live_x")
+
+	// Nothing mounted: the default directory and an empty list, not an error.
+	rr := do(h, "GET", "/v1/apps/web/secrets/mounts", token, "")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"dir":"/run/secrets"`) {
+		t.Fatalf("mounts (none) = %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr = do(h, "PUT", "/v1/apps/web/secrets/mounts/TLS_KEY", token, `{"filename":"tls.key"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("mount = %d %s", rr.Code, rr.Body.String())
+	}
+	if b := rr.Body.String(); !strings.Contains(b, `"path":"/run/secrets/tls.key"`) {
+		t.Errorf("mount response = %s, want the path the key lands at", b)
+	}
+	if b := rr.Body.String(); strings.Contains(b, value) {
+		t.Fatalf("mount response leaked the value: %s", b)
+	}
+	// STRIPE_KEY is set on the app and not mounted, so it must not be in the projection.
+	if b := rr.Body.String(); strings.Contains(b, "STRIPE_KEY") {
+		t.Errorf("mount response names an unmounted key: %s", b)
+	}
+
+	// Mounting a key that is not set is refused rather than producing an app that fails later.
+	if rr := do(h, "PUT", "/v1/apps/web/secrets/mounts/NOT_SET", token, `{}`); rr.Code != http.StatusBadRequest {
+		t.Errorf("mount of an unset key = %d, want 400", rr.Code)
+	}
+	// A filename that escapes the directory Burrow owns is refused.
+	if rr := do(h, "PUT", "/v1/apps/web/secrets/mounts/TLS_KEY", token, `{"filename":"../../etc/passwd"}`); rr.Code != http.StatusBadRequest {
+		t.Errorf("mount with a traversal filename = %d, want 400", rr.Code)
+	}
+
+	rr = do(h, "DELETE", "/v1/apps/web/secrets/mounts/TLS_KEY", token, "")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"mounts":[]`) {
+		t.Fatalf("unmount = %d %s", rr.Code, rr.Body.String())
+	}
+	// An unmount removes a file, never a value.
+	if v, ok := k.SecretValue("web", "TLS_KEY"); !ok || v != value {
+		t.Errorf("TLS_KEY after an unmount = %q, %v; want the value untouched", v, ok)
+	}
+
+	// An unknown environment is a 404 on every verb.
+	for _, tc := range []struct{ method, path, body string }{
+		{"GET", "/v1/apps/web/secrets/mounts?env=nope", ""},
+		{"PUT", "/v1/apps/web/secrets/mounts/TLS_KEY?env=nope", `{}`},
+		{"DELETE", "/v1/apps/web/secrets/mounts/TLS_KEY?env=nope", ""},
+	} {
+		if rr := do(h, tc.method, tc.path, token, tc.body); rr.Code != http.StatusNotFound {
+			t.Errorf("%s %s = %d, want 404", tc.method, tc.path, rr.Code)
+		}
+	}
+}

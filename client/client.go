@@ -1959,6 +1959,57 @@ func (c *Client) UnsetSecret(ctx context.Context, app, env, key string, noRestar
 	return err
 }
 
+// SecretMount is one secret key projected into a file (ADR-0089 §1): the key, the filename it lands
+// under, and the full path in the container. It carries no value and there is no field here that
+// could — the value stays in the per-app Kubernetes Secret, and a mount is a reference to it.
+type SecretMount struct {
+	Key      string `json:"key"`
+	Filename string `json:"filename"`
+	Path     string `json:"path"`
+}
+
+// SecretMounts is an app's whole file projection in one environment: the directory its mounted keys
+// land in — already resolved, so it is the real path whether or not the app overrode it — and one
+// entry per mounted key.
+type SecretMounts struct {
+	Dir    string        `json:"dir"`
+	Mounts []SecretMount `json:"mounts"`
+}
+
+// SecretMounts returns which of an app's secret keys are projected into files, and where (ADR-0089
+// §1). It is a read of key names and filenames; a value never appears on this path.
+func (c *Client) SecretMounts(ctx context.Context, app, env string) (SecretMounts, error) {
+	var out SecretMounts
+	err := c.do(ctx, http.MethodGet, withEnv(c.appPath(app, "secrets/mounts"), env), nil, &out)
+	return out, err
+}
+
+// MountSecret projects one of an app's secret keys into a file and rolls the running workload so the
+// file reaches its pods (ADR-0089 §1). filename is empty for "name the file after the key"; dir is
+// empty unless the app moves its whole secrets directory, which is per app and never per key (§2).
+//
+// The key must ALREADY BE SET or the control plane refuses: mounting a key that was never set
+// produces an app that starts, finds no file, and fails at the moment it needs the credential.
+func (c *Client) MountSecret(ctx context.Context, app, env, key, filename, dir string) (SecretMounts, error) {
+	body := map[string]any{"filename": filename, "dir": dir}
+	var out SecretMounts
+	err := c.do(ctx, http.MethodPut, withEnv(c.secretMountPath(app, key), env), body, &out)
+	return out, err
+}
+
+// UnmountSecret stops projecting one key as a file and rolls the running workload so the file leaves
+// its pods (ADR-0089 §1). The value is untouched: the key stays in the Secret and stays in the app's
+// environment, so an unmount is not a way to lose a credential.
+func (c *Client) UnmountSecret(ctx context.Context, app, env, key string) (SecretMounts, error) {
+	var out SecretMounts
+	err := c.do(ctx, http.MethodDelete, withEnv(c.secretMountPath(app, key), env), nil, &out)
+	return out, err
+}
+
+func (c *Client) secretMountPath(app, key string) string {
+	return "/v1/apps/" + url.PathEscape(app) + "/secrets/mounts/" + url.PathEscape(key)
+}
+
 // Hook is one configured lifecycle command: the phase it fires at and the command it runs, for one
 // app in one environment (ADR-0072 §1). Phase is `pre-deploy` (before a deploy's image reaches the
 // cluster, from that image) or `pre-rollback` (before a rollback's older image does, from the image

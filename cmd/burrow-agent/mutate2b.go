@@ -538,6 +538,85 @@ func newSecretUnsetCmd() *cobra.Command {
 	return cmd
 }
 
+// newSecretMountCmd projects one of an app's secret keys into a file (ADR-0089 §1). Like
+// `secret unset` it names a KEY and carries no value, so it is on this surface — and it is the one
+// verb here that makes a credential SAFER, by taking it out of an environment every child process
+// inherits. Not guarded (§7): config and secret mutation are ungated today.
+func newSecretMountCmd() *cobra.Command {
+	o := &connOpts{}
+	var filename, dir string
+	cmd := &cobra.Command{
+		Use:   "mount <app> KEY",
+		Short: "Project a secret key into a file the app reads from disk (no value crosses the agent channel)",
+		Long: "Project one of an app's secret keys into a file under a directory Burrow owns, /run/secrets\n" +
+			"by default. Reach for this when the credential is file-shaped — a kubeconfig, a PEM private\n" +
+			"key, a service-account JSON — or when it should stay out of the environment: a variable is\n" +
+			"readable at /proc/<pid>/environ and is inherited by every child process.\n\n" +
+			"This names a KEY and never a value. The key must already be SET, by the human at their own\n" +
+			"terminal; mounting one that is not set is refused, because it would produce an app that\n" +
+			"starts and only fails when it opens the file. Never ask for the value here.\n\n" +
+			"The app reads the directory from BURROW_SECRETS_DIR. If it hardcodes a path variable of its\n" +
+			"own (GOOGLE_APPLICATION_CREDENTIALS, KUBECONFIG), point it at the file with `config set`.\n\n" +
+			"--dir moves the directory for the whole app; there is no per-key path, because one can\n" +
+			"shadow a file in the app's image and it stops the file being updated in place on rotation.\n\n" +
+			"Mounting does NOT remove the environment variable, and unmounting does not unset the key.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return o.mutate(cmd, "secret_mount", func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.MountSecret(ctx, args[0], env, args[1], filename, dir)
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVar(&filename, "filename", "", "the `name` the key lands under (default: the key itself)")
+	cmd.Flags().StringVar(&dir, "dir", "", "the `directory` this app's mounted keys land in (default: /run/secrets) — per app, never per key")
+	return cmd
+}
+
+// newSecretUnmountCmd stops projecting one key as a file. It removes a FILE and never a value: the
+// key stays set and stays in the app's environment, which is what makes it reversible.
+func newSecretUnmountCmd() *cobra.Command {
+	o := &connOpts{}
+	cmd := &cobra.Command{
+		Use:   "unmount <app> KEY",
+		Short: "Stop projecting a secret key into a file (the value is untouched)",
+		Long: "Stop projecting a secret key into a file. The value is untouched: the key stays set and stays\n" +
+			"in the app's environment, so this cannot lose a credential — it is `secret mount` undone.\n\n" +
+			"The running app is rolled so the file leaves its pods.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return o.mutate(cmd, "secret_unmount", func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.UnmountSecret(ctx, args[0], env, args[1])
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	return cmd
+}
+
+// newSecretMountsCmd lists which of an app's keys are read as files, and where. A read of key names
+// and paths — the same class as the key listing it hangs beside.
+func newSecretMountsCmd() *cobra.Command {
+	o := &connOpts{}
+	cmd := &cobra.Command{
+		Use:   "mounts <app>",
+		Short: "List the secret keys an app reads as files, and where they land",
+		Long: "List which of an app's secret keys are projected into files, and the path each one lands at.\n" +
+			"Keys and paths only — a value never crosses this channel.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return o.withClient(cmd, func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.SecretMounts(ctx, args[0], env)
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	return cmd
+}
+
 // newDeleteCmd deletes an app entirely — its workload, routing, and release history. It is guarded by
 // app.delete, DENIED by default (ADR-0065 §3) because destroying the release history leaves nothing to
 // roll back to. The verb stays on this surface rather than leaving the binary: a denial the agent can

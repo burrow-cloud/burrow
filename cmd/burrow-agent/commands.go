@@ -272,7 +272,13 @@ func newSecretCmd() *cobra.Command {
 	// `secret unset` (removing a key carries no value) hangs off the list verb as a subcommand. There
 	// is deliberately NO `secret set`: a secret VALUE never routes through the agent channel (ADR-0029),
 	// so the agent binary cannot express it — the human sets secrets with the `burrow` CLI.
-	cmd.AddCommand(newSecretUnsetCmd())
+	//
+	// `secret mount`, `secret unmount` and `secret mounts` are the same class (ADR-0089 §7): each
+	// names a KEY and never a value, and a mount moves a credential the app can already read from
+	// one place it can read it to another. They ship ungated, because config and secret mutation are
+	// ungated today and the wrong verb to invent the first guardrail for is the one that makes a
+	// credential safer.
+	cmd.AddCommand(newSecretUnsetCmd(), newSecretMountCmd(), newSecretUnmountCmd(), newSecretMountsCmd())
 	return cmd
 }
 

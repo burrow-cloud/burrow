@@ -460,7 +460,15 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
 	}
 
-	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Readiness: readiness, Replicas: replicas, ReleaseID: rel.ID}
+	// The file projection is read here for the same reason the env and the probe above it are: it is
+	// current app configuration rather than a property of this release (ADR-0089 §5), so a deploy
+	// renders whatever the app has mounted now.
+	mounts, err := e.secretMountsFor(ctx, req.App, envName(req.Env))
+	if err != nil {
+		return DeployResult{}, fmt.Errorf("deploy %s: %w", req.App, err)
+	}
+
+	spec := WorkloadSpec{App: req.App, Kind: WorkloadDeployment, Image: req.Image, Env: env, Command: req.Command, MetricsPort: req.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, ReleaseID: rel.ID}
 	progress.started(StageApply)
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		progress.failed(StageApply)
@@ -656,7 +664,13 @@ func (e *Engine) reapplyWorkload(ctx context.Context, k Kubernetes, op, app, env
 	if err != nil {
 		return false, fmt.Errorf("%s %s: %w", op, app, err)
 	}
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: cfg, Command: cur.Command, MetricsPort: cur.MetricsPort, Readiness: readiness, Replicas: replicas, ReleaseID: cur.ID}
+	// Like the env and the probe, the file projection is read on every apply rather than snapshotted
+	// (ADR-0089 §5), so this is also the path a mount or an unmount reaches the running pods through.
+	mounts, err := e.secretMountsFor(ctx, app, env)
+	if err != nil {
+		return false, fmt.Errorf("%s %s: %w", op, app, err)
+	}
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: cur.Image, Env: cfg, Command: cur.Command, MetricsPort: cur.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, ReleaseID: cur.ID}
 	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		return false, fmt.Errorf("%s %s: applying to cluster: %w", op, app, err)
 	}
@@ -1733,6 +1747,13 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	// already gone, and failing the delete afterwards would report a completed teardown as broken.
 	if err := e.db.DeleteHealthEndpoints(ctx, app); err != nil {
 		slog.WarnContext(ctx, "removing the app's declared health endpoints failed", "app", app, "error", err)
+	}
+	// And the same for the keys it projected as files (ADR-0089 §5): the record is key names and
+	// filenames about an app that no longer exists, and an app created later under the same name must
+	// start with nothing on disk rather than inherit a previous occupant's file layout. Best-effort
+	// for the same reason.
+	if err := e.db.DeleteSecretMounts(ctx, app); err != nil {
+		slog.WarnContext(ctx, "removing the app's secret mounts failed", "app", app, "error", err)
 	}
 	// And the same for a decision to turn the deploy-time dependency check off (ADR-0076 §4): an app
 	// created later under the same name must start checked, which is Burrow's default, rather than
@@ -2824,7 +2845,16 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 		}
 	}
 
-	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Readiness: readiness, Replicas: replicas, ReleaseID: rel.ID}
+	// And the same for the file projection, where it matters most: a mount records how a credential
+	// is delivered to whatever code is running, so a rollback to a release cut BEFORE the mount
+	// existed keeps the file (ADR-0089 §5). Were this a release property, the incident escape hatch
+	// would take the credential with it.
+	mounts, err := e.secretMountsFor(ctx, app, envName(env))
+	if err != nil {
+		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
+	}
+
+	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, ReleaseID: rel.ID}
 	if err := e.k8s.WithNamespace(ns).ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)

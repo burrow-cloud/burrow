@@ -147,6 +147,19 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/secrets", s.listSecrets)
 	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/{key}", s.unsetSecret)
 	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/{key}/env/{env}", s.unsetSecret)
+	// Secret MOUNTS: which of an app's secret keys are projected into files (ADR-0089 §1). All three
+	// carry a key NAME and a filename and no value — a mount changes where a value the app already
+	// holds is delivered, not what it is.
+	//
+	// The environment is a query parameter on all three, including the writes, and the exception to
+	// the rule above is a property of the route being NEW. The narrowing form exists because an older
+	// control plane silently ignores an `env` it does not understand and performs the write in the
+	// default environment; one that does not understand mounts does not have these routes at all, so
+	// it refuses the whole call with the structured unknown-operation answer (ADR-0039) rather than
+	// mounting a key somewhere nobody asked for.
+	v1.HandleFunc("GET /v1/apps/{app}/secrets/mounts", s.listSecretMounts)
+	v1.HandleFunc("PUT /v1/apps/{app}/secrets/mounts/{key}", s.mountSecret)
+	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/mounts/{key}", s.unmountSecret)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
 	// The name tier (ADR-0085) is a ROUTE, not a query parameter, because it narrows a write. A
@@ -695,6 +708,80 @@ func (s *server) unsetSecret(w http.ResponseWriter, r *http.Request) {
 // per-app Kubernetes Secret (ADR-0028/0004).
 type secretsResponse struct {
 	Keys []string `json:"keys"`
+}
+
+// listSecretMounts returns which of an app's secret keys are projected into files, and where
+// (ADR-0089 §1). Like every other read on this path it answers with key names — a mount is a
+// KeyToPath reference, and there is no value anywhere in it.
+func (s *server) listSecretMounts(w http.ResponseWriter, r *http.Request) {
+	mounts, err := s.engine.SecretMounts(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newSecretMountsResponse(mounts))
+}
+
+// mountSecret projects one of an app's secret keys into a file and rolls the running workload so the
+// file reaches its pods (ADR-0089 §1). It is UNGATED (§7): config and secret mutation carry no
+// guardrail today, and the verb that makes a credential safer is the wrong one to invent the first
+// for. The key must already be set, or the engine refuses.
+func (s *server) mountSecret(w http.ResponseWriter, r *http.Request) {
+	var req secretMountRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	mounts, err := s.engine.MountSecret(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"),
+		r.PathValue("key"), req.Filename, req.Dir)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newSecretMountsResponse(mounts))
+}
+
+// unmountSecret stops projecting one key as a file. The value is untouched: it stays in the Secret
+// and stays in the app's environment, so an unmount cannot lose a credential.
+func (s *server) unmountSecret(w http.ResponseWriter, r *http.Request) {
+	mounts, err := s.engine.UnmountSecret(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), r.PathValue("key"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newSecretMountsResponse(mounts))
+}
+
+// secretMountRequest is the body of a mount. Filename is empty for "name the file after the key";
+// Dir moves the whole app's secrets directory and is deliberately not per key (ADR-0089 §2). Neither
+// field can carry a value, and there is no field here that could.
+type secretMountRequest struct {
+	Filename string `json:"filename,omitempty"`
+	Dir      string `json:"dir,omitempty"`
+}
+
+// secretMountsResponse is an app's file projection: the directory, already resolved to the default
+// when there is no override, and one entry per mounted key with the full path it lands at.
+type secretMountsResponse struct {
+	Dir    string            `json:"dir"`
+	Mounts []secretMountJSON `json:"mounts"`
+}
+
+type secretMountJSON struct {
+	Key      string `json:"key"`
+	Filename string `json:"filename"`
+	Path     string `json:"path"`
+}
+
+func newSecretMountsResponse(m controlplane.SecretMounts) secretMountsResponse {
+	out := secretMountsResponse{Dir: m.Directory(), Mounts: []secretMountJSON{}}
+	for _, mount := range m.Mounts {
+		out.Mounts = append(out.Mounts, secretMountJSON{
+			Key:      mount.Key,
+			Filename: mount.Filename,
+			Path:     m.Directory() + "/" + mount.Filename,
+		})
+	}
+	return out
 }
 
 // secretSetRequest is the body of a secret set (the app comes from the path). Value is the secret

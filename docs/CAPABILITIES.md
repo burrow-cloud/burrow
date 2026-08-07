@@ -166,9 +166,10 @@ check reaches the release that was just deployed rather than the one it replaced
 *not* settle is checked anyway: an app that cannot reach the database it was given is a common reason
 a rollout never becomes ready.
 
-One thing §4 describes is **not** built: there is no volume check, because Burrow mounts no volume on
-a user's workload — the app Pod has no `Volumes` at all — so a volume dependency would have to be
-invented rather than derived.
+One thing §4 describes is **not** built: there is no volume check. The only volume Burrow authors on
+a user's Pod is the **read-only** Secret projection of [ADR-0089](adr/0089-a-secret-can-reach-an-app-as-a-file.md),
+which nothing can create, read back and delete a file under — so a volume dependency would still have
+to be invented rather than derived.
 
 The one escape hatch is `Adapter.WithPodMutator` ([ADR-0061](adr/0061-deploy-pod-mutator-seam.md)),
 a `func(*corev1.PodSpec)` applied on both create and update. It is a **compile-time seam for an
@@ -467,24 +468,38 @@ arguments; both stores are sourced at deploy time.
 
 | | `burrow app config` | `burrow app secret` |
 | --- | --- | --- |
-| Commands | `set <app> KEY=VALUE`, `unset`, `list` | `set <app> KEY --stdin` (or `KEY=VALUE`), `unset`, `list` |
+| Commands | `set <app> KEY=VALUE`, `unset`, `list` | `set <app> KEY --stdin` (or `KEY=VALUE`), `unset`, `list`, `mount`, `unmount`, `mounts` |
 | Stored in | the control-plane Postgres (`app_env`) | a Kubernetes Secret, `burrow-app-<app>-secrets`, in the app's namespace |
-| Reaches the Pod as | individual `env` entries inlined in the Pod template | `envFrom` a `secretRef` on that one Secret (`optional: true`) |
+| Reaches the Pod as | individual `env` entries inlined in the Pod template | `envFrom` a `secretRef` on that one Secret (`optional: true`), plus a **file per mounted key** |
 | `list` shows | keys **and values** | **keys only** |
 | Scope | **app-global** — the same values apply in every environment | **per-environment**, because the Secret lives in the environment's namespace |
 | On set/unset | re-applies the workload so the change rolls; `--no-restart` skips it | patches a `burrow.cloud/restarted-at` annotation so the change rolls; `--no-restart` skips it |
 | With no running release | persisted, applied at the next deploy | persisted, applied at the next deploy |
-| On `burrow-agent` | `config set` / `config unset` / `config` — **yes** | `secret unset` and key listing only — **`secret set` does not exist on the agent binary** |
+| On `burrow-agent` | `config set` / `config unset` / `config` — **yes** | `secret unset`, `secret mount` / `unmount` / `mounts`, and key listing — **`secret set` does not exist on the agent binary** |
 
 Secret values traverse the control-plane API, are written straight into the Kubernetes Secret,
 and are never written to Postgres, never logged, and never audited (the audit record carries
 sorted **key names** only). The same Secret is what `burrow app run` injects, so a one-off
 command sees `DATABASE_URL` and everything else exactly as the app does.
 
-**A Secret cannot be mounted as a file.** The deploy path builds a Pod with no `Volumes` and
-no `VolumeMounts` at all, and there is no `--file` or `--mount` flag. Config and secrets reach
-a container as environment variables or not at all. An app that needs a credential on disk
-must write it out itself at startup.
+**A secret key can be mounted as a file** ([ADR-0089](adr/0089-a-secret-can-reach-an-app-as-a-file.md)).
+`burrow app secret mount <app> KEY` projects that one key into a file; `--filename` names it
+something else, and `--dir` moves the directory for the whole app. The value does not move — same
+Secret, same writer — only the projection changes.
+
+| | |
+| --- | --- |
+| Where | one Secret volume per app, mounted **read-only** at `/run/secrets` (`--dir` overrides it **per app**, never per key) |
+| Mode | `0400`, owned by the container's user — an app that drops privileges and *then* opens the file needs its own `runAsUser`, not a different mount |
+| What is in it | **only the keys that were mounted** (`items`), so mounting one key does not put every other secret the app holds on disk |
+| The path | arrives as `BURROW_SECRETS_DIR`; the **value never does**. Point an app that hardcodes a path variable at the file with `burrow app config set` |
+| Rotation | a whole-volume Secret mount is updated in place by the kubelet, so `secret set` replaces the file and restarts the pod; `--no-restart` gives an app that re-reads the file rotation with no downtime |
+| The variable | **stays**. Mounting adds a file; it does not remove the environment variable, and `--no-env` is not built yet |
+| Rollback | a mount is app configuration, not a release property, so a rollback **keeps** the file |
+
+`burrow app secret mounts <app>` lists what is mounted and where. `mount` refuses a key that is not
+set: an app that starts, finds no file, and fails at the moment it needs the credential is the
+failure this exists to avoid.
 
 Two more limits: keys must match `^[A-Za-z_][A-Za-z0-9_]*$`, and **Burrow enforces no size
 limit** on a value — the effective ceiling is Kubernetes' own Secret size limit, unenforced
@@ -1432,13 +1447,14 @@ JSON-first, and invoked directly by the agent
 pinned by tests that fail if a verb is added or removed.
 
 **Read-only:** `apps`, `status`, `history`, `next-tag`, `logs`, `config`, `secret` (keys),
-`reachability`, `cluster`, `cluster capacity`, `addons`, `backups`, `logs-query`,
+`reachability`, `secret mounts`, `cluster`, `cluster capacity`, `addons`, `backups`, `logs-query`,
 `metrics-query`, `guard`, `audit`, `failures`, `health`, `checks`, `providers`, `environments`.
 
 **Mutating** (each returns an outcome envelope — `executed` / `held_for_confirmation` /
 `denied` / `error`, exit codes 0/2/3/1): `deploy`, `build`, `rollback`, `scale`, `autoscale`,
 `run`, `publish` (alias `expose`), `unpublish` (alias `unexpose`), `domain add`, `domain remove`, `addon install`, `addon attach`,
-`addon backup`, `config set`, `config unset`, `health set`, `health unset`, `secret unset`, `delete`.
+`addon backup`, `config set`, `config unset`, `health set`, `health unset`, `secret unset`,
+`secret mount`, `secret unmount`, `delete`.
 
 **Absent from the agent binary entirely** — these are operator actions on the `burrow` CLI:
 `cluster install`, `cluster upgrade`, `cluster bootstrap`, `cluster ingress install`,

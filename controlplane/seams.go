@@ -305,9 +305,9 @@ type BuildLedger interface {
 // change underneath it. The production implementation now writes CloudNativePG `Database` and
 // `DatabaseRole` objects and lets the operator run the SQL (ADR-0066 §2) rather than opening a
 // superuser connection of its own, and the engine did not have to know: the contract was always "the
-// app has a working database and here is its URL". Two consequences do reach a caller, though, and
-// they are stated on the methods: provisioning is ASYNCHRONOUS (an attach waits on somebody else's
-// reconcile, so it can take seconds and can time out), and a detach KEEPS THE DATA.
+// app has a working database and here is its URL". One consequence does reach a caller, and it is
+// stated on both methods: the work is ASYNCHRONOUS. Each call waits on somebody else's reconcile, so
+// it can take seconds and it can time out — where an inline statement either returned or did not.
 //
 // EVERY METHOD TAKES THE ENVIRONMENT, AND IT IS NOT OPTIONAL (ADR-0067 §1). Databases keep their
 // simple names — an app called web has a database called web — so the environment is the only thing
@@ -332,15 +332,16 @@ type DatabaseProvisioner interface {
 	// the database and the credential are known to be there. A caller that treats it as a fast local
 	// operation will be wrong about how long an attach takes; nothing else about the contract moved.
 	EnsureAppDatabase(ctx context.Context, app, env string) (databaseURL string, err error)
-	// DropAppDatabase releases app's database and login role on environment env's instance — the
-	// teardown side of detach. Releasing something already absent is a no-op, not an error. env and
-	// app are validated first, exactly as in EnsureAppDatabase, so a detach can no more reach another
-	// environment's server than an attach can.
+	// DropAppDatabase removes app's database and login role from environment env's instance — the
+	// destructive side of detach. Dropping a database/role that is already absent is a no-op, not an
+	// error. env and app are validated first, exactly as in EnsureAppDatabase, so a detach can no
+	// more reach another environment's server than an attach can.
 	//
-	// IT KEEPS THE DATA. The app's credential is destroyed and its database is not: a detached app's
-	// rows are still there and a later attach of the same app adopts them (ADR-0064's default, made
-	// structural by the reclaim policy on the objects that describe the database). The caller's job
-	// is to stop the app seeing the connection string, which the engine does before calling this.
+	// THE CALLER MUST HAVE STOPPED THE APP USING IT FIRST. A database with a live session cannot be
+	// dropped, so the engine takes the connection string out of the app's environment and rolls the
+	// workload before calling this; an implementation is entitled to fail rather than to force the
+	// sessions off. Like the attach, this waits on the removal actually happening rather than on
+	// having asked for it, so it can take seconds and it can time out.
 	DropAppDatabase(ctx context.Context, app, env string) error
 }
 

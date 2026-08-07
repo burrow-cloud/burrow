@@ -31,17 +31,26 @@ const (
 	// cnpgAPIVersionV1 is the object's identity in the write itself, for both kinds above.
 	cnpgAPIVersionV1 = CNPGAPIGroup + "/v1"
 
-	// cnpgReclaimRetain is the reclaim policy BOTH provisioning objects carry. It is CloudNativePG's
-	// own default on both CRDs, and it is spelled anyway: ADR-0064 is a decision about what happens
-	// to tenant data when the thing that describes it goes away, and a decision that survives only
-	// because an upstream default happens to agree with it is one release note away from being
-	// reversed by somebody who never read the record. Written into the object, "deleting this does
-	// not destroy the database" is a property of the object rather than of the caller's discipline.
+	// The reclaim policies, which are what decides whether deleting one of these objects destroys the
+	// database behind it. BOTH VALUES ARE WRITTEN DELIBERATELY, at different moments, and the pair is
+	// the whole safety argument:
+	//
+	//   - An attach writes `retain`. CloudNativePG's default agrees, and it is spelled anyway — so
+	//     that no accident that removes an object (a namespace teardown, a garbage collector, a
+	//     `kubectl delete` by somebody tidying up) can take an app's data with it.
+	//   - A detach writes `delete`, immediately before deleting the object, because `addon detach` IS
+	//     destructive (ADR-0031) and the user was told so at the confirmation prompt.
+	//
+	// So destruction is never a side effect of an object going away; it happens only where something
+	// deliberately said so first, which is exactly the distinction ADR-0064 draws for `addon remove`
+	// and this pair draws for one app.
 	cnpgReclaimRetain = "retain"
+	cnpgReclaimDelete = "delete"
 
 	// cnpgEnsurePresent is the `Database.spec.ensure` value that means "make sure it exists". The
-	// other value, `absent`, makes the operator DROP the database, and nothing in Burrow writes it —
-	// see DropAppDatabase, which deletes the object and lets the reclaim policy above keep the data.
+	// other value, `absent`, also drops the database — the teardown path uses the reclaim policy
+	// instead, because `DatabaseRole` has no `ensure` field at all and one mechanism spelled the same
+	// way on both objects is easier to be right about than two.
 	cnpgEnsurePresent = "present"
 
 	// cnpgReloadLabel is the label CloudNativePG watches a referenced Secret under. Without it a
@@ -103,9 +112,29 @@ func databaseRoleSpec(target PostgresTarget, app string) map[string]any {
 	}
 }
 
+// databaseRoleTeardownSpec is the same role, described one last time by a detach: keep it until this
+// object is deleted, then DROP it.
+//
+// It names NO password Secret, and that is not an oversight. The credential is irrelevant to a role
+// about to be dropped, and a reference to a Secret that a half-finished detach already removed —
+// or that an attachment predating declarative provisioning never had — would leave CloudNativePG
+// unable to apply the object at all, which is to say unable to drop the role.
+func databaseRoleTeardownSpec(target PostgresTarget, app string) map[string]any {
+	return map[string]any{
+		"cluster":                   map[string]any{"name": target.Instance},
+		"name":                      roleName(app),
+		"login":                     true,
+		"databaseRoleReclaimPolicy": cnpgReclaimDelete,
+	}
+}
+
 // databaseSpec is the `Database` that gives app its database on the target instance, owned by the
 // login role above. The database is named after the app, which is ADR-0031's contract and is what
 // every DATABASE_URL already says.
+//
+// `allowConnections` is stated rather than left to the default, because the teardown spec below
+// turns it OFF and a re-attach has to turn it back on. A field only ever written in one direction is
+// a field that eventually gets stuck there.
 //
 // Note what is NOT expressible here: the `REVOKE CONNECT ... FROM PUBLIC` that keeps one app's role
 // out of another app's database. The CRD has no grant field of any kind, so that statement survives
@@ -116,7 +145,29 @@ func databaseSpec(target PostgresTarget, app string) map[string]any {
 		"name":                  app,
 		"owner":                 roleName(app),
 		"ensure":                cnpgEnsurePresent,
+		"allowConnections":      true,
 		"databaseReclaimPolicy": cnpgReclaimRetain,
+	}
+}
+
+// databaseTeardownSpec is the same database, described one last time by a detach: stop accepting
+// connections, and drop when this object is deleted.
+//
+// `allowConnections: false` is the load-bearing half, and it exists because of a gap between what
+// Burrow used to do and what CloudNativePG does. The admin SQL this replaced dropped the database
+// `WITH (FORCE)`, which terminates whatever is still connected; the operator issues a plain
+// `DROP DATABASE IF EXISTS`, which a single live session refuses. Turning connections off first is
+// how the drop stops depending on nothing having reconnected in the meantime — the engine has
+// already taken the credential out of the app's environment and rolled it, and this closes the door
+// behind it.
+func databaseTeardownSpec(target PostgresTarget, app string) map[string]any {
+	return map[string]any{
+		"cluster":               map[string]any{"name": target.Instance},
+		"name":                  app,
+		"owner":                 roleName(app),
+		"ensure":                cnpgEnsurePresent,
+		"allowConnections":      false,
+		"databaseReclaimPolicy": cnpgReclaimDelete,
 	}
 }
 
@@ -265,16 +316,40 @@ func (p *PostgresProvisioner) ensureRolePasswordSecret(ctx context.Context, targ
 	return nil
 }
 
-// deleteCNPGObject removes one provisioning object. An object that is already gone is a no-op, not
-// an error — a detach of something half-attached has to be able to finish.
+// deleteCNPGObject removes one provisioning object and blocks until it is actually gone. An object
+// that is already absent is a no-op, not an error — a detach of something half-attached has to be
+// able to finish.
 //
-// DELETING THE OBJECT DOES NOT DELETE THE DATABASE. Both objects are written with a `retain` reclaim
-// policy, so the operator releases them and leaves the database and the role where they are; a
-// re-attach adopts them again. That is the whole mechanism by which a detach stops being destructive
-// — nothing here issues a DROP, and nothing here could.
-func deleteCNPGObject(ctx context.Context, ri dynamic.ResourceInterface, kind, name string) error {
+// WAITING IS THE POINT, not politeness. The object carries a finalizer, and CloudNativePG only
+// releases it once it has done what the reclaim policy asks — so on the teardown path, where that
+// policy is `delete`, the object disappearing is the only evidence the database was actually
+// dropped. Returning at the delete call would report a destroyed database on the strength of having
+// asked, which for the one verb a user runs to get rid of data is the wrong thing to be optimistic
+// about.
+//
+// A drop the operator cannot perform yet — a session still attached to the database — is retried by
+// the operator and shows up here as the object not going away. That is why the deadline is generous
+// and why the error says what it says.
+func deleteCNPGObject(ctx context.Context, ri dynamic.ResourceInterface, kind, name string, timeout, poll time.Duration) error {
 	if err := ri.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("kube: deleting the CloudNativePG %s %q: %w", kind, name, err)
 	}
-	return nil
+	deadline := time.Now().Add(timeout)
+	for {
+		_, err := ri.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("kube: reading the CloudNativePG %s %q: %w", kind, name, err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("kube: CloudNativePG has not finished removing the %s %q after %s, so the database it describes may still be there; nothing has been left in the app's environment pointing at it, and re-running this detach resumes the removal", kind, name, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
 }

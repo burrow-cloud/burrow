@@ -31,16 +31,16 @@ import (
 // provisioner against a live cluster (ADR-0031): install the instance, attach an app (which writes
 // the `Database` and `DatabaseRole` objects CloudNativePG provisions from, and DATABASE_URL into the
 // app's Secret), then run an in-cluster Job that connects with that DATABASE_URL and round-trips a
-// row, then detach and re-attach to prove the data outlived the attachment. Like the other e2es it
-// runs only when BURROW_TEST_KUBECONFIG points at a disposable cluster; it creates its own
-// namespaces and cleans them up. The round-trip runs inside the cluster because the add-on Service
+// row, and finally detach (dropping the database). Like the other e2es it runs only when
+// BURROW_TEST_KUBECONFIG points at a disposable cluster; it creates its own namespaces and cleans
+// them up. The round-trip runs inside the cluster because the add-on Service
 // (burrow-postgres.<ns>.svc) is only reachable from in-cluster.
 //
 // IT IS THE ONLY PLACE THE OPERATOR IS ACTUALLY ASKED. Every unit test around provisioning asserts
 // what Burrow WRITES — the objects, their fields, the reclaim policy — because that is all a fake
 // API server can answer. Whether CloudNativePG then creates the database, applies a rewritten
-// password out of the labelled Secret, and honours `retain` on a delete are claims about somebody
-// else's controller, and this is where they are tested rather than assumed.
+// password out of the labelled Secret, and actually DROPS on a `delete` reclaim are claims about
+// somebody else's controller, and this is where they are tested rather than assumed.
 //
 // The instance is a CloudNativePG `Cluster` (ADR-0066 §1), which makes the OPERATOR a prerequisite
 // of this test rather than a variant of it: there is no second mechanism to fall back to. The
@@ -225,15 +225,32 @@ psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 7`)
 		`test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t;")" = "1"
 psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
 
-	// Detaching in staging touches staging only. It needs no port-forward: a detach deletes the two
-	// provisioning objects and runs no SQL at all (ADR-0066 §2).
+	// Detaching in staging drops staging's database only: the default environment's data survives,
+	// which is the destructive half of the same property. It needs no port-forward — a detach
+	// destroys through the objects and runs no SQL of its own (ADR-0066 §2).
 	if err := engine.DetachAddon(ctx, cp.AddonPostgres, app, "staging", true); err != nil {
 		t.Fatalf("DetachAddon (staging): %v", err)
 	}
 	runSQLJob(t, ctx, client, appNS, app, "survives",
 		`psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
 
-	// Detach: removes the DATABASE_URL key and releases the database and role.
+	// AND STAGING'S DATA IS GONE, which is the claim only a real operator can be asked. A unit test
+	// can assert that the object was deleted holding `databaseReclaimPolicy: delete`; whether
+	// CloudNativePG then issued the DROP is this. Re-attaching gives staging a fresh, EMPTY database
+	// — the row written through the previous attachment is not in it.
+	//
+	// The environment is NAMED on every mutating call from here on: staging has been registered, and
+	// a mutating operation with more than one environment registered is refused rather than defaulted
+	// (ADR-0067 §1).
+	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "re-attach addon (staging)", func(localPort int) error {
+		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
+		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", "")
+		return aerr
+	})
+	runSQLJob(t, ctx, client, stagingNS, app, "destroyed",
+		`test "$(psql "$DATABASE_URL" -tAc "SELECT to_regclass('public.t') IS NULL;")" = "t"`)
+
+	// Detach: drops the database and role and removes the DATABASE_URL key.
 	if err := engine.DetachAddon(ctx, cp.AddonPostgres, app, cp.DefaultEnvironment, true); err != nil {
 		t.Fatalf("DetachAddon: %v", err)
 	}
@@ -246,23 +263,6 @@ psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
 			t.Errorf("DATABASE_URL should be removed from the app's Secret after detach")
 		}
 	}
-
-	// AND THE DATA IS STILL THERE. Both provisioning objects carry a `retain` reclaim policy, so the
-	// detach above released the description and left the database (ADR-0064); re-attaching adopts it,
-	// under a new credential, with the row this test wrote before the detach still in it. This is the
-	// end-to-end statement of the policy: a unit test can assert the field, only a real operator can
-	// be asked whether it honoured it.
-	//
-	// The environment is NAMED here, unlike the first attach at the top of this test: staging has
-	// been registered since, and a mutating operation with more than one environment registered is
-	// refused rather than defaulted (ADR-0067 §1).
-	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "re-attach addon", func(localPort int) error {
-		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, cp.DefaultEnvironment, "")
-		return aerr
-	})
-	runSQLJob(t, ctx, client, appNS, app, "retained",
-		`psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
 }
 
 // TestPostgresBackupRestoreE2E drives on-demand backup and restore through the real Kubernetes

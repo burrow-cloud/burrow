@@ -129,6 +129,43 @@ func provisionerFor(t *testing.T, ns string, objects ...runtime.Object) (*Postgr
 	return p, dyn, rec
 }
 
+// deletionRecorder captures what each provisioning object SAID at the moment it was deleted, and in
+// what order. A teardown's whole effect is carried by the spec the object is holding when it goes —
+// after which there is nothing left to read — so it has to be observed on the way past.
+type deletionRecorder struct {
+	mu    sync.Mutex
+	specs map[schema.GroupVersionResource]map[string]any
+	order []schema.GroupVersionResource
+}
+
+func (d *deletionRecorder) spec(gvr schema.GroupVersionResource) (map[string]any, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s, ok := d.specs[gvr]
+	return s, ok
+}
+
+// recordDeletions installs a reactor per provisioning resource that reads the object out of the
+// tracker before the delete goes through, then lets the delete proceed.
+func recordDeletions(dyn *dynamicfake.FakeDynamicClient) *deletionRecorder {
+	rec := &deletionRecorder{specs: map[schema.GroupVersionResource]map[string]any{}}
+	for gvr := range provisioningGVRs {
+		gvr := gvr
+		dyn.PrependReactor("delete", gvr.Resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
+			del := action.(k8stesting.DeleteAction)
+			if obj, err := dyn.Tracker().Get(gvr, del.GetNamespace(), del.GetName()); err == nil {
+				u := obj.(*unstructured.Unstructured)
+				rec.mu.Lock()
+				rec.specs[gvr] = u.DeepCopy().Object
+				rec.order = append(rec.order, gvr)
+				rec.mu.Unlock()
+			}
+			return false, nil, nil // fall through to the tracker's own delete
+		})
+	}
+	return rec
+}
+
 // nestedString reads a string out of an unstructured object, failing the test if it is not there.
 func nestedString(t *testing.T, obj map[string]any, fields ...string) string {
 	t.Helper()
@@ -389,11 +426,41 @@ func TestAttachNeverHandsOutACredentialTheServerRefuses(t *testing.T) {
 	}
 }
 
-// TestDetachKeepsTheDataAndRunsNoSQL asserts the destructive half is no longer destructive. Detach
-// deletes the objects and the credential; the `retain` reclaim policy both objects were written with
-// is what leaves the database and the role on the server (ADR-0064), and nothing on the path runs a
-// statement at all.
-func TestDetachKeepsTheDataAndRunsNoSQL(t *testing.T) {
+// TestAttachLeavesTheDataSafeFromAnObjectGoingAway asserts the reclaim policy an ATTACH writes.
+// While an app is attached, nothing that removes its objects — a namespace teardown, a collector,
+// somebody tidying with kubectl — may take the database with them; only a detach, which flips the
+// policy first, ever destroys anything.
+func TestAttachLeavesTheDataSafeFromAnObjectGoingAway(t *testing.T) {
+	ctx := context.Background()
+	p, dyn, _ := provisionerFor(t, addonNS)
+	name := provisioningObjectName(PostgresSecretName, "web")
+
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("EnsureAppDatabase: %v", err)
+	}
+	// Asserted on the objects themselves, because it is the objects — not this code — that decide
+	// what happens to the data when they are deleted.
+	for gvr, field := range map[schema.GroupVersionResource]string{
+		cnpgDatabaseGVR:     "databaseReclaimPolicy",
+		cnpgDatabaseRoleGVR: "databaseRoleReclaimPolicy",
+	} {
+		obj := getObject(t, dyn, gvr, addonNS, name)
+		if got := nestedString(t, obj.Object, "spec", field); got != cnpgReclaimRetain {
+			t.Errorf("%s %s = %q, want %q — an attached app's data would go with an object deleted by accident", gvr.Resource, field, got, cnpgReclaimRetain)
+		}
+	}
+	// And the database accepts connections, which the teardown path turns off and a re-attach has to
+	// turn back on.
+	if allow, found, _ := unstructured.NestedBool(getObject(t, dyn, cnpgDatabaseGVR, addonNS, name).Object, "spec", "allowConnections"); !found || !allow {
+		t.Error("an attached database does not state allowConnections: true, so a detach that failed halfway would leave it closed")
+	}
+}
+
+// TestDetachDestroysTheDataThroughTheObjects is the destructive half, and it stays destructive
+// (ADR-0031): the user was told at the confirmation prompt that their data goes. It goes through the
+// objects rather than through admin SQL — each described one last time with a `delete` reclaim
+// policy, then deleted — and the call does not return until the operator has actually finished.
+func TestDetachDestroysTheDataThroughTheObjects(t *testing.T) {
 	ctx := context.Background()
 	p, dyn, rec := provisionerFor(t, addonNS)
 	name := provisioningObjectName(PostgresSecretName, "web")
@@ -401,59 +468,88 @@ func TestDetachKeepsTheDataAndRunsNoSQL(t *testing.T) {
 	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
-	// The policy is asserted on the objects themselves, because it is the objects — not this code —
-	// that decide what happens to the data when they are deleted.
-	for gvr, kind := range map[schema.GroupVersionResource]string{
-		cnpgDatabaseGVR:     "databaseReclaimPolicy",
-		cnpgDatabaseRoleGVR: "databaseRoleReclaimPolicy",
-	} {
-		obj := getObject(t, dyn, gvr, addonNS, name)
-		if got := nestedString(t, obj.Object, "spec", kind); got != cnpgReclaimRetain {
-			t.Errorf("%s %s = %q, want %q — deleting this object would destroy the app's data", gvr.Resource, kind, got, cnpgReclaimRetain)
-		}
-	}
+
+	// What the objects SAID when they were deleted is the whole of the destruction, so it is recorded
+	// as they go rather than read afterwards from something that no longer exists.
+	deleted := recordDeletions(dyn)
 
 	before := len(rec.statements)
 	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DropAppDatabase: %v", err)
 	}
 	if len(rec.statements) != before {
-		t.Errorf("a detach ran %v; it deletes objects and runs no SQL", rec.statements[before:])
+		t.Errorf("a detach ran %v; it destroys through the objects and runs no SQL of its own", rec.statements[before:])
 	}
+
+	db, ok := deleted.spec(cnpgDatabaseGVR)
+	if !ok {
+		t.Fatal("the Database object was never deleted, so nothing dropped the app's database")
+	}
+	if got := nestedString(t, db, "spec", "databaseReclaimPolicy"); got != cnpgReclaimDelete {
+		t.Errorf("the Database was deleted holding databaseReclaimPolicy %q, want %q — the database would have survived the detach", got, cnpgReclaimDelete)
+	}
+	// The door is closed before the drop: CloudNativePG issues a plain DROP DATABASE, which one live
+	// session refuses, where the admin SQL this replaced used WITH (FORCE).
+	if allow, found, _ := unstructured.NestedBool(db, "spec", "allowConnections"); !found || allow {
+		t.Error("the database was still accepting connections when it was dropped, so anything reconnecting would have blocked the drop")
+	}
+	role, ok := deleted.spec(cnpgDatabaseRoleGVR)
+	if !ok {
+		t.Fatal("the DatabaseRole object was never deleted, so nothing dropped the app's login role")
+	}
+	if got := nestedString(t, role, "spec", "databaseRoleReclaimPolicy"); got != cnpgReclaimDelete {
+		t.Errorf("the DatabaseRole was deleted holding databaseRoleReclaimPolicy %q, want %q", got, cnpgReclaimDelete)
+	}
+	// PostgreSQL will not drop a role that still owns a database, so the order is not cosmetic.
+	if deleted.order[0] != cnpgDatabaseGVR {
+		t.Error("the login role was deleted before the database it owns; that DROP ROLE fails forever")
+	}
+
 	for _, gvr := range []schema.GroupVersionResource{cnpgDatabaseGVR, cnpgDatabaseRoleGVR} {
 		if _, err := dyn.Resource(gvr).Namespace(addonNS).Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 			t.Errorf("the %s object survived the detach (err = %v)", gvr.Resource, err)
 		}
 	}
-	// The credential does not survive, even though the data does.
 	if _, err := p.client.CoreV1().Secrets(addonNS).Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("the role's password secret survived the detach (err = %v)", err)
 	}
 
-	// Detaching twice is a no-op, not an error: a half-finished attach has to be releasable.
+	// Detaching twice is a no-op, not an error: a half-finished attach has to be tearable down.
 	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
 		t.Errorf("a second detach: %v", err)
 	}
 }
 
-// TestReattachAfterDetachAdoptsTheRetainedDatabase closes the loop on the two above: the data a
-// detach kept is reachable again, under a new credential, without anything having to recreate it.
-func TestReattachAfterDetachAdoptsTheRetainedDatabase(t *testing.T) {
+// TestDetachDescribesAnAttachmentItNeverProvisioned is the upgrade hole this would otherwise have,
+// and it is the dangerous direction: an app attached before provisioning became declarative has a
+// database and a role and NO objects describing them, so a detach that only deleted objects would
+// destroy nothing and report success — leaving the data of an app somebody believed they had
+// scrubbed. The teardown describes the attachment first, so it reaches exactly what the admin SQL
+// used to.
+func TestDetachDescribesAnAttachmentItNeverProvisioned(t *testing.T) {
 	ctx := context.Background()
 	p, dyn, _ := provisionerFor(t, addonNS)
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	// No attach: nothing has ever written an object for this app.
+	deleted := recordDeletions(dyn)
 	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
-		t.Fatalf("detach: %v", err)
+		t.Fatalf("DropAppDatabase: %v", err)
 	}
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
-		t.Fatalf("re-attach: %v", err)
+	db, ok := deleted.spec(cnpgDatabaseGVR)
+	if !ok {
+		t.Fatal("detaching an attachment with no objects deleted nothing, so the database was never dropped")
 	}
-	obj := getObject(t, dyn, cnpgDatabaseGVR, addonNS, provisioningObjectName(PostgresSecretName, "web"))
-	if got := nestedString(t, obj.Object, "spec", "name"); got != "web" {
-		t.Errorf("the re-attach describes %q, want the retained web", got)
+	if got := nestedString(t, db, "spec", "name"); got != "web" {
+		t.Errorf("the Database written to destroy the attachment names %q, want web", got)
+	}
+	if got := nestedString(t, db, "spec", "databaseReclaimPolicy"); got != cnpgReclaimDelete {
+		t.Errorf("databaseReclaimPolicy = %q, want %q", got, cnpgReclaimDelete)
+	}
+	// It must not reference a password Secret that does not exist: the operator could not apply the
+	// object at all, which is to say it could not drop the role.
+	role, _ := deleted.spec(cnpgDatabaseRoleGVR)
+	if _, found, _ := unstructured.NestedMap(role, "spec", "passwordSecret"); found {
+		t.Error("the teardown DatabaseRole references a password Secret; an attachment made before this existed has none")
 	}
 }
 

@@ -582,24 +582,36 @@ ORDER BY d.datname`
 	return apps, nil
 }
 
-// DropAppDatabase releases app's database and login role on environment env's instance: it deletes
-// the two provisioning objects and the role's password Secret. Releasing something already absent is
-// a no-op, not an error, so a detach of a half-finished attach can still finish.
+// DropAppDatabase drops app's database and login role from environment env's instance (ADR-0031) —
+// the destructive side of detach, and it stays destructive. Dropping something already absent is a
+// no-op, not an error, so a detach of a half-finished attach can still finish.
 //
-// IT KEEPS THE DATA, AND IT RUNS NO SQL AT ALL. Both objects were written with a `retain` reclaim
-// policy, so CloudNativePG releases them and leaves the database and the role exactly where they
-// are; the app stops holding a credential for them (the engine removes the connection-string
-// variable first) and a later attach of the same app adopts them again. There is no DROP anywhere on
-// this path — not because nobody wrote one, but because expressing removal at all would mean either
-// an `ensure: absent` on the object or a superuser connection, and ADR-0064 is a decision that the
-// data outlives the thing that describes it.
+// IT DESTROYS THE DATA THROUGH THE OBJECTS, WHICH IS THE ONLY THING THAT CHANGED. Both are described
+// one last time with a `delete` reclaim policy and then deleted; CloudNativePG runs the DROPs. There
+// is no superuser connection here any more than there is on the attach path, and no statement of
+// Burrow's at all.
 //
-// The credential does NOT survive: the password Secret goes, so the role's password is no longer
-// anywhere in the cluster. A re-attach mints a new one and the adopted role takes it.
+// The reclaim policy is FLIPPED HERE rather than written at attach, and that asymmetry is the safety
+// property: an object that goes away for any reason other than a detach — a namespace teardown, a
+// collector, somebody tidying with kubectl — takes nothing with it, because the policy it is holding
+// at that moment says `retain`. Only a deliberate detach ever writes `delete`, immediately before
+// deleting the thing it wrote it on.
 //
-// The environment is required and unvalidated values are refused before anything is deleted, for the
-// reason they always were: reaching another environment's server here would release a database that
-// is still in use (ADR-0067 §1).
+// The objects are ENSURED before they are destroyed, and that is not redundant. An app attached
+// before provisioning became declarative has a database and a role and no objects describing them;
+// without this, detaching it would delete nothing and report success, leaving the data of an app
+// somebody believed they had scrubbed. Describing it first is what makes the destructive path reach
+// exactly the databases the old one did.
+//
+// THE ORDER IS DICTATED BY POSTGRESQL. `allowConnections: false` goes on before anything is deleted,
+// because the operator issues a plain `DROP DATABASE IF EXISTS` and a single live session refuses it
+// — where the admin SQL this replaced used `WITH (FORCE)`. Then the database, then the role, each
+// waited on: PostgreSQL will not drop a role that still owns a database, so releasing the role's
+// description before the database is gone is a DROP ROLE that fails forever.
+//
+// The environment is required and unvalidated values are refused before anything is written, for the
+// reason they always were: this is the destructive half of the pair, so reaching another
+// environment's server here would drop a database that is still in use (ADR-0067 §1).
 func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app, env string) error {
 	if err := validateAppIdentifier(app); err != nil {
 		return err
@@ -613,15 +625,35 @@ func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app, env stri
 		return err
 	}
 	name := provisioningObjectName(target.Instance, app)
+	labels := map[string]string{
+		addonLabel:    string(controlplane.AddonPostgres),
+		addonEnvLabel: env,
+	}
 
-	// The `Database` first: it names the role as its owner, so releasing the role's description while
-	// a database still points at it is the ordering with a window in it.
-	if err := deleteCNPGObject(ctx, databases, cnpgDatabaseKind, name); err != nil {
+	// The role's description first and waited on, because the database below names it as owner: a
+	// `Database` whose owner the operator has not reconciled yet is an object it refuses and retries,
+	// which turns an ordering detail into seconds of an attach-shaped error in the log.
+	if err := applyCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, target.Namespace, databaseRoleTeardownSpec(target, app), labels); err != nil {
 		return err
 	}
-	if err := deleteCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name); err != nil {
+	if err := awaitCNPGApplied(ctx, roles, cnpgDatabaseRoleKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: describing %s's login role in environment %q before dropping it: %w", app, env, err)
+	}
+	if err := applyCNPGObject(ctx, databases, cnpgDatabaseKind, name, target.Namespace, databaseTeardownSpec(target, app), labels); err != nil {
 		return err
 	}
+	// Waiting for the closed door specifically: until the operator has applied it, a reconnect is
+	// still possible and the drop below would be racing whatever did it.
+	if err := awaitCNPGApplied(ctx, databases, cnpgDatabaseKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: closing %s's database to new connections in environment %q before dropping it: %w", app, env, err)
+	}
+	if err := deleteCNPGObject(ctx, databases, cnpgDatabaseKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: dropping the database for %s in environment %q: %w", app, env, err)
+	}
+	if err := deleteCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: dropping the login role for %s in environment %q: %w", app, env, err)
+	}
+	// The credential last, once there is nothing left for it to open.
 	if err := p.client.CoreV1().Secrets(target.Namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("kube: deleting the role password secret %s/%s: %w", target.Namespace, name, err)
 	}

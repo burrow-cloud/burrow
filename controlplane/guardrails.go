@@ -65,13 +65,9 @@ const (
 	// GuardrailAddonRemove: the operation would remove an installed add-on — the destructive
 	// side, since dependent apps may rely on it (ADR-0025).
 	GuardrailAddonRemove GuardrailCode = "addon.remove"
-	// GuardrailAddonDetach: the operation would detach an app from an add-on — for Postgres, taking
-	// away the app's credential and releasing its database and role (ADR-0031). The DATA IS KEPT
-	// (ADR-0064): the provisioning objects carry a `retain` reclaim policy, so a re-attach adopts
-	// what was there. Still held for confirmation by default, because the app loses its database
-	// access and is rolled: relaxing the disposition on the strength of the data surviving is a
-	// posture change, not a consequence of this one. (Attach is not guarded: it provisions, it
-	// destroys nothing.)
+	// GuardrailAddonDetach: the operation would detach an app from an add-on — for Postgres,
+	// dropping the app's database and role and destroying its data (ADR-0031). Held for
+	// confirmation by default. (Attach is not guarded: it provisions, it destroys nothing.)
 	GuardrailAddonDetach GuardrailCode = "addon.detach"
 	// GuardrailAddonRestore: the operation would restore an app's database from a backup,
 	// overwriting its live contents (ADR-0032). Held for confirmation by default, like detach.
@@ -211,7 +207,7 @@ type GuardrailScope struct {
 // which kind of thing that is — an application or an add-on instance. It is what `--name` refers
 // to, which is why one flag suffices: the code decides the kind.
 //
-// Where an operation names two things — `addon detach <addon> <app>` releases one app's database on
+// Where an operation names two things — `addon detach <addon> <app>` drops one app's database on
 // one instance — the name is the INSTANCE, because that is where the data lives and where the reach
 // stops. Scoping such an operation by app would let an operator protect `web` while the identical
 // verb wipes `api` on the same instance, which reads as protection and is not.
@@ -251,7 +247,7 @@ var knownGuardrails = []guardrailDef{
 		reach: "a DNS record is a name at a provider outside the cluster, which no single app or add-on owns, and the record may not be one Burrow created"},
 	{code: GuardrailAddonInstall, description: "install a building-block add-on (backing service) onto the cluster", names: targetAddon},
 	{code: GuardrailAddonRemove, description: "remove an installed add-on from the cluster", names: targetAddon},
-	{code: GuardrailAddonDetach, description: "detach an app from an add-on, taking away its access (e.g. release its Postgres database; the data is kept)", names: targetAddon},
+	{code: GuardrailAddonDetach, description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)", names: targetAddon},
 	{code: GuardrailAddonRestore, description: "restore an app's database from a backup, overwriting its live contents", names: targetAddon},
 	{code: GuardrailAddonRestoreInstance, description: "rewind a whole Postgres instance to a point in its object-storage repository, taking every app's database on it back together", names: targetAddon},
 	{code: GuardrailAddonSQL, description: "run a statement against one app's database on a relational add-on", envScoped: true, names: targetAddon},

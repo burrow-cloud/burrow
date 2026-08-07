@@ -60,6 +60,18 @@ const (
 	// was asked to leave behind.
 	PostgresClaimRemovalTimeout = 5 * time.Minute
 
+	// MaxAddonSQLTimeout is the largest value an operator may set the addon.sql_timeout limit to. It
+	// is the limit catalogue's declared ceiling (see knownLimits), stated as a constant so the
+	// catalogue and the callers that must outlast it read the same symbol.
+	MaxAddonSQLTimeout = 5 * time.Minute
+
+	// AddonSQLConnectTimeout is how long burrowd waits to open the one connection an `addon sql`
+	// statement runs on (ADR-0087 §3, §7). It is separate from the statement's own bound because it
+	// covers what the database has not started measuring yet — resolving the instance's Service,
+	// completing the handshake, authenticating — and because a wedged instance should be reported as
+	// unreachable rather than spending the whole statement budget getting there.
+	AddonSQLConnectTimeout = 30 * time.Second
+
 	// ObjectStoreCallTimeout bounds ONE HTTP call to an S3-compatible object store (ADR-0063).
 	// Registering an object-storage provider makes several in a row — create the bucket, write,
 	// read and delete the probe object, read and reconcile the lifecycle configuration — so the
@@ -108,6 +120,10 @@ const (
 	// an invented bound, which is the rule this file holds: a client's budget is a sum of bounds the
 	// control plane declares, never of ones a reader estimated.
 	MaxRestoreInstanceWait = MaxBackupWait + PostgresClaimRemovalTimeout + PostgresRecoveryTimeout
+
+	// MaxAddonSQLWait is the longest one `addon sql` statement can occupy the server: opening the
+	// connection, then the statement at its own configured ceiling (ADR-0087 §7).
+	MaxAddonSQLWait = AddonSQLConnectTimeout + MaxAddonSQLTimeout
 
 	// MaxProviderWait is the longest registering an object-storage provider can occupy the server:
 	// six object-store calls at their own bound — create the bucket, put/get/delete the probe

@@ -87,6 +87,30 @@ const (
 	// one: `addon restore-instance` is not compiled into `burrow-agent` at all (ADR-0065 §2 tier 1),
 	// and this code exists so the hold is legible and configurable for the human who can run it.
 	GuardrailAddonRestoreInstance GuardrailCode = "addon.restore_instance"
+	// GuardrailAddonSQL: the operation would run a caller-supplied statement against one app's
+	// database on a relational add-on (ADR-0087). DENIED by default — ADR-0065 §3's tier 2, not tier
+	// 1: the verb is compiled into `burrow-agent` and the agent can see that it exists and that it is
+	// closed, because an agent that knows a capability is denied asks for it rather than inventing a
+	// way around it.
+	//
+	// Deny rather than confirm, and the difference from app.run is the reason. `app.run`'s confirm
+	// default is defensible because a human reads a command line and recognises `npm run migrate`; a
+	// human reading a hundred-line statement is not meaningfully approving it, and where a
+	// confirmation cannot be an informed one, holding for confirmation is theatre. There is also no
+	// upper bound on what a statement does (ADR-0087 §5).
+	//
+	// ONE code, gating whether the statement runs and not what it does (ADR-0087 §6). Burrow does not
+	// parse the statement and does not branch on its leading keyword: a `SELECT` can delete
+	// (`WITH d AS (DELETE … RETURNING *) SELECT * FROM d`), a function call is whatever the function
+	// is, and `COPY … TO PROGRAM` is not a query at all. A classifier that is wrong in the permissive
+	// direction is a gate people trust and should not.
+	//
+	// It is env-scopable, and the expected shape is a gradient set with
+	// `guard set --env <env> addon.sql …`: allow in development, where the database is disposable and
+	// the agent inspecting it is the whole value; confirm or deny in production. It is also the FIRST
+	// addon.* code that is env-scopable, which is deliberate rather than an inconsistency — see
+	// knownGuardrails below.
+	GuardrailAddonSQL GuardrailCode = "addon.sql"
 	// GuardrailAppDelete: the operation would delete an app entirely — its workload, routing,
 	// and release history — so it disappears from the apps listing. The destructive teardown
 	// of a deployed application. Denied by default (ADR-0065 §3): destroying the release history
@@ -167,10 +191,17 @@ type GuardrailScope struct {
 //
 // envScoped asserts that the guarded operation CARRIES an environment to scope the lookup to. The
 // app-level guardrails gate per-app operations that always name one, so they can be locked down per
-// environment — strict prod, permissive staging. dns.* and addon.* are evaluated with an empty
-// environment (the DNS request has no environment at all; an add-on operation names one but its
-// instance name already carries it), so declaring them env-scopable would promise an override that
-// is never read.
+// environment — strict prod, permissive staging. dns.* has no environment at all, so declaring it
+// env-scopable would promise an override that is never read.
+//
+// The addon.* codes are nearly all NOT env-scoped, and not because of their prefix: an add-on
+// operation does name an environment, but its instance name already carries it
+// (AddonInstanceName: burrow-postgres, burrow-postgres-staging), so the name tier already draws the
+// per-environment line and an env tier over the top of it would be a second way to say the same
+// thing. `addon.sql` is the exception, and it is a DECLARED one: ADR-0087 §5 asks for a gradient set
+// with `guard set --env <env> addon.sql …` — allow in development, deny in production — which is a
+// statement about the ENVIRONMENT rather than about one server, and an operator who added a second
+// Postgres instance to an environment should not have to repeat the disposition on it.
 //
 // names asserts that the operation acts on exactly ONE thing whose name bounds its effect, and says
 // which kind of thing that is — an application or an add-on instance. It is what `--name` refers
@@ -219,6 +250,7 @@ var knownGuardrails = []guardrailDef{
 	{code: GuardrailAddonDetach, description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)", names: targetAddon},
 	{code: GuardrailAddonRestore, description: "restore an app's database from a backup, overwriting its live contents", names: targetAddon},
 	{code: GuardrailAddonRestoreInstance, description: "rewind a whole Postgres instance to a point in its object-storage repository, taking every app's database on it back together", names: targetAddon},
+	{code: GuardrailAddonSQL, description: "run a statement against one app's database on a relational add-on", envScoped: true, names: targetAddon},
 	{code: GuardrailAppDelete, description: "delete an app entirely (its workload, routing, and release history)", envScoped: true, names: targetApp},
 	{code: GuardrailRollback, description: "roll an application back to its previous release", envScoped: true, names: targetApp},
 	{code: GuardrailAutoscale, description: "configure autoscaling for an application", envScoped: true, names: targetApp},

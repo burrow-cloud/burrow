@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,7 +67,7 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupInstanceCmd(), newAddonBackupsCmd(), newAddonBackupHealthCmd(), newAddonRestoreCmd(), newAddonRestoreInstanceCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupInstanceCmd(), newAddonBackupsCmd(), newAddonBackupHealthCmd(), newAddonRestoreCmd(), newAddonRestoreInstanceCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonSQLCmd(), newAddonRemoveCmd())
 	return cmd
 }
 
@@ -928,6 +929,176 @@ func metricLabels(labels map[string]string) string {
 		parts = append(parts, fmt.Sprintf("%s=%q", k, labels[k]))
 	}
 	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// newAddonSQLCmd is `burrow addon sql <addon> <app>`: run one statement against that app's database
+// on the named environment's relational add-on instance and get columns and rows back (ADR-0087).
+//
+// burrowd runs the statement, connecting as the APP'S OWN ROLE with the credential it already
+// minted. Nothing opens a connection from this machine: there is no port-forward and no proxy, so
+// this CLI never becomes a path from a laptop to tenant data — and the statement runs independently
+// of the application, so a database whose app is crash-looping is still queryable, which is the case
+// `burrow app run web -- psql` cannot serve.
+//
+// The addon.sql guardrail is DENIED by default. That is not a mistake to be worked around: there is
+// no upper bound on what a statement does, and where a confirmation cannot be an informed one,
+// holding for confirmation is theatre (ADR-0087 §5). An operator opens it per environment with
+// `burrow guard set --env <env> addon.sql allow`.
+func newAddonSQLCmd() *cobra.Command {
+	o := &commonOpts{}
+	var statement, file string
+	var confirm bool
+	cmd := &cobra.Command{
+		Use:   "sql <addon> <app>",
+		Short: "Run a statement against an app's database and get rows back",
+		Long: "sql runs one statement against an app's database on the named environment's Postgres\n" +
+			"instance and returns columns and rows: a table here, and the rows themselves under --json.\n\n" +
+			"Supply the statement with -c, with --file, or on stdin. The add-on and the app together name\n" +
+			"the database, the same pair attach and detach take: it targets one app's database and there is\n" +
+			"no form of it that reaches the instance, another app's database, or template1.\n\n" +
+			"burrowd runs it, connecting as the app's own role with the credential it already minted, so\n" +
+			"the statement can touch exactly what the application can touch and nothing more. No connection\n" +
+			"to the database is opened from this machine.\n\n" +
+			"Burrow does NOT tell a read from a write, and does not try: a SELECT can delete, and a gate\n" +
+			"labelled safe that is not is worse than no gate. One guardrail, addon.sql, gates whether the\n" +
+			"statement runs at all, and it is denied by default; an operator opens it per environment with\n" +
+			"`burrow guard set --env <env> addon.sql allow`.\n\n" +
+			"Every run is bounded by a statement timeout and a row cap (`burrow cluster config list`), and\n" +
+			"a result cut short says so rather than looking complete. The statement text is written to the\n" +
+			"audit log, so a literal in a WHERE clause is recorded.",
+		Args: exactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			stmt, err := readStatement(cmd, statement, file)
+			if err != nil {
+				return err
+			}
+			c, err := o.client(ctx, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			res, err := c.AddonSQL(ctx, args[0], args[1], o.env, stmt, confirm)
+			if err != nil {
+				return err
+			}
+			// emitChange, not emit, and Burrow's refusal to classify the statement is why. A `SELECT`
+			// can delete, so every statement is treated as one that changed something and names the
+			// target it ran against (ADR-0078 §4) — the honest reading of a verb whose effect Burrow
+			// deliberately does not inspect (ADR-0087 §6).
+			return o.emitChange(cmd.OutOrStdout(), res, formatSQLResult(args[1], res))
+		},
+	}
+	bindCommon(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVarP(&statement, "statement", "c", "", "the `SQL` to run (or use --file, or pipe it on stdin)")
+	cmd.Flags().StringVar(&file, "file", "", "read the statement from a `path` instead of -c or stdin")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a statement a guardrail holds for confirmation (the default disposition is deny, which this does not open)")
+	return cmd
+}
+
+// readStatement resolves the statement from exactly one of -c, --file, or stdin. Naming two is
+// refused rather than resolved by precedence: which one won would be invisible in the output, and the
+// output is a statement someone ran against a live database.
+//
+// With none of the three and a terminal on stdin it refuses instead of waiting, because a command
+// that silently blocks reads as a hung control plane.
+func readStatement(cmd *cobra.Command, statement, file string) (string, error) {
+	if statement != "" && file != "" {
+		return "", errors.New("pass the statement with -c or with --file, not both")
+	}
+	if statement != "" {
+		return statement, nil
+	}
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("reading the statement from %s: %w", file, err)
+		}
+		if strings.TrimSpace(string(b)) == "" {
+			return "", fmt.Errorf("%s holds no statement", file)
+		}
+		return string(b), nil
+	}
+	if stdinIsTerminal(cmd.InOrStdin()) {
+		return "", errors.New("a statement is required: pass it with -c 'select …', with --file <path>, or pipe it on stdin")
+	}
+	b, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return "", fmt.Errorf("reading the statement from stdin: %w", err)
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return "", errors.New("a statement is required: pass it with -c 'select …', with --file <path>, or pipe it on stdin")
+	}
+	return string(b), nil
+}
+
+// formatSQLResult renders a statement's outcome for a human: a HEADLINE saying what ran and what
+// came back, then the body — a table of rows, or the database's own error where it raised one.
+//
+// The headline is first because the target clause is appended to the first line (withTargetClause),
+// and "which database did that statement run against" is the sentence the target belongs to.
+//
+// A truncated result says so and names the limit to raise, because a short answer nobody was told
+// about is the failure this whole shape exists to avoid. No em-dashes: it is user-facing CLI output.
+func formatSQLResult(app string, res client.SQLResult) string {
+	var b strings.Builder
+	if res.Error != nil {
+		// The database's own words, unmodified, with the SQLSTATE that makes it identifiable.
+		fmt.Fprintf(&b, "ran a statement against %s's database: the database refused it", app)
+		if res.Error.SQLState != "" {
+			fmt.Fprintf(&b, " (SQLSTATE %s)", res.Error.SQLState)
+		}
+		fmt.Fprintf(&b, "\n%s", res.Error.Message)
+		if res.Error.Detail != "" {
+			fmt.Fprintf(&b, "\ndetail: %s", res.Error.Detail)
+		}
+		if res.Error.Hint != "" {
+			fmt.Fprintf(&b, "\nhint: %s", res.Error.Hint)
+		}
+		return b.String()
+	}
+	if len(res.Columns) == 0 {
+		// No row set: the command tag and what it changed is the whole answer.
+		fmt.Fprintf(&b, "ran a statement against %s's database: %s row(s) affected", app, strconv.FormatInt(res.RowsAffected, 10))
+		if res.Command != "" {
+			fmt.Fprintf(&b, " (%s)", res.Command)
+		}
+		return b.String()
+	}
+	fmt.Fprintf(&b, "ran a statement against %s's database: %d row(s)", app, res.RowCount)
+	if res.Truncated {
+		fmt.Fprintf(&b, ", cut off at the row cap of %d, so there are more than these", res.RowLimit)
+	}
+	b.WriteString("\n")
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, strings.Join(res.Columns, "\t"))
+	for _, row := range res.Rows {
+		cells := make([]string, len(row))
+		for i, v := range row {
+			if v == nil {
+				// A NULL and an empty string are different answers, so the table says which.
+				cells[i] = "NULL"
+				continue
+			}
+			cells[i] = *v
+		}
+		fmt.Fprintln(tw, strings.Join(cells, "\t"))
+	}
+	_ = tw.Flush()
+	if res.Truncated {
+		fmt.Fprintf(&b, "Narrow the statement, or raise the cap with `burrow cluster config set --env %s addon.sql_rows <n>`.",
+			envOrDefaultName(res.Environment))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// envOrDefaultName is the environment to name in a hint, falling back to a placeholder when the
+// result carried none, so the printed command is never `--env ` with nothing after it.
+func envOrDefaultName(env string) string {
+	if env == "" {
+		return "<env>"
+	}
+	return env
 }
 
 func newAddonInstallCmd() *cobra.Command {

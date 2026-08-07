@@ -166,7 +166,12 @@ const (
 	// because the two have different blast radii and an audit trail that collapsed them would answer
 	// "was anything rewound beyond the app it was asked about" with a shrug.
 	auditOpAddonRestoreInstance = "addon_restore_instance"
-	auditOpRun                  = "run"
+	// auditOpAddonSQL is one statement run against an app's database (ADR-0087). Its args carry the
+	// STATEMENT TEXT, which ADR-0087's Consequences name as an accepted cost: a literal in a `WHERE`
+	// clause — an email address, a token somebody pasted in — is recorded, and redacting it would
+	// mean parsing the statement, which §6 refuses to do.
+	auditOpAddonSQL = "addon_sql"
+	auditOpRun      = "run"
 	// auditOpHook is one lifecycle hook's execution (ADR-0072). It carries no guardrail decision row
 	// of its own: a hook runs as part of a deploy or a rollback and is gated by that operation's
 	// guardrail, so the decision was already recorded under `deploy` or `rollback`.

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -185,8 +186,84 @@ func newAddonCmd() *cobra.Command {
 			return cmd.Help()
 		},
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonAttachCmd(), newAddonBackupCmd(), newAddonBackupHealthCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonAttachCmd(), newAddonBackupCmd(), newAddonBackupHealthCmd(), newAddonSQLCmd())
 	return cmd
+}
+
+// newAddonSQLCmd runs ONE statement against ONE app's database and returns columns and rows
+// (ADR-0087). It is the first verb that reads the application's own data rather than the platform's
+// state, which is why it is here at all and why it is closed by default.
+//
+// IT IS ON THIS SURFACE AND DENIED, and both halves are the decision (ADR-0087 §5, ADR-0065 §3 tier
+// 2). On the surface, because an agent that can see the verb exists and is denied asks the human for
+// it, while an agent that meets `unknown command` reaches for `kubectl` or a shell — the failure
+// ADR-0021 says Burrow cannot close from the inside. Denied rather than held, because there is no
+// upper bound on what a statement does: a human reading a hundred-line statement is not meaningfully
+// approving it, and where a confirmation cannot be an informed one, holding for confirmation is
+// theatre. `--confirm` is here for the operator who has moved the disposition to confirm for an
+// environment; it does nothing to a deny.
+//
+// Burrow does not tell a read from a write, and the agent should not report one either: a `SELECT`
+// can delete, a function call is whatever the function is, and a gate labelled safe that is not is
+// worse than no gate (ADR-0087 §6).
+func newAddonSQLCmd() *cobra.Command {
+	o := &connOpts{}
+	var statement string
+	var confirm bool
+	cmd := &cobra.Command{
+		Use:   "sql <addon> <app>",
+		Short: "Run a statement against one app's database and get columns and rows back",
+		Long: "Run ONE statement against one application's database on the named environment's Postgres\n" +
+			"instance. Supply it with -c, or pipe it on stdin. The result is structured — column names, rows,\n" +
+			"a row count, and whether it was truncated — so you can compose on it rather than parse a table.\n\n" +
+			"The add-on type (\"postgres\") and the app together name the database, the same pair attach\n" +
+			"takes. There is no form of this that reaches the instance, template1, or another app's\n" +
+			"database: burrowd connects as that app's OWN role with the credential it already minted, so the\n" +
+			"statement can touch exactly what the application can touch.\n\n" +
+			"It runs independently of the application, so a database whose app is crash-looping is still\n" +
+			"queryable — this is the tool for that case, not `run`.\n\n" +
+			"A statement returning no rows comes back with its command tag and rows_affected. A statement\n" +
+			"the database REFUSES comes back as an executed outcome carrying the error and its SQLSTATE: the\n" +
+			"call worked, the statement did not, and 42P01 means the table is not there whatever the message\n" +
+			"says. Read `truncated` before concluding you have seen every row.\n\n" +
+			"GUARDED BY addon.sql AND DENIED BY DEFAULT. A denial is not something to work around: relay it,\n" +
+			"and tell the human it is opened per environment with\n" +
+			"`burrow guard set --env <env> addon.sql allow`. Burrow does not classify a statement as a read\n" +
+			"or a write and neither should you — a SELECT can delete. The statement text is recorded in the\n" +
+			"audit log, so do not put a secret in a literal.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			stmt, err := agentStatement(cmd, statement)
+			if err != nil {
+				return err
+			}
+			return o.mutate(cmd, "addon_sql", func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.AddonSQL(ctx, args[0], args[1], env, stmt, confirm)
+			})
+		},
+	}
+	bindConn(cmd.Flags(), o)
+	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVarP(&statement, "statement", "c", "", "the `SQL` to run (or pipe it on stdin)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a statement a guardrail holds for confirmation (the default disposition is deny, which this does not open)")
+	return cmd
+}
+
+// agentStatement resolves the statement from -c or from stdin. There is no --file on this surface:
+// an agent composes the statement it wants to run, so a path would only add a way for the text that
+// is audited to differ from the text somebody read.
+func agentStatement(cmd *cobra.Command, statement string) (string, error) {
+	if strings.TrimSpace(statement) != "" {
+		return statement, nil
+	}
+	b, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return "", fmt.Errorf("reading the statement from stdin: %w", err)
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return "", errors.New("a statement is required: pass it with -c 'select …' or pipe it on stdin")
+	}
+	return string(b), nil
 }
 
 // newAddonBackupHealthCmd reports what Burrow observed about an add-on's backups (ADR-0063 §7,

@@ -242,6 +242,12 @@ func New(cfg Config) (http.Handler, error) {
 	// blast radius depended on which fields were populated would be one decode away from rewinding an
 	// environment somebody meant to restore one app of (ADR-0066 §4).
 	v1.HandleFunc("POST /v1/addons/restore-instance", s.restoreInstance)
+	// A statement against one app's database (ADR-0087). The environment RIDES THE ROUTE for the
+	// reason detach's and restore's do, and it is if anything sharper here: an environment a server
+	// drops sends a statement written for staging to the app of that name on the default
+	// environment's instance, and the statement may write (issue #485).
+	v1.HandleFunc("POST /v1/addons/sql", s.addonSQL)
+	v1.HandleFunc("POST /v1/addons/sql/env/{env}", s.addonSQL)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	// What the removal does to the DATA is a route, and BOTH dispositions are, because here it is
@@ -1269,6 +1275,43 @@ func (s *server) restoreAddon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"addon": req.Addon, "app": req.App, "backup": req.Backup})
 }
 
+// addonSQL runs one statement against an app's database on a relational add-on and returns columns
+// and rows (ADR-0087). It is gated by the addon.sql guardrail, DENIED by default — a held statement
+// maps to 422 with needs_confirmation and a denied one to the refusal the guardrail produced, like
+// every other guarded operation.
+//
+// A DATABASE ERROR IS A 200. The statement ran, the server answered, and the answer was a refusal
+// carrying its own SQLSTATE — an outcome the caller reads out of the result, not a transport
+// failure (ADR-0087 §4), the same treatment `run` gives a non-zero exit code. Only a statement that
+// did not run at all — an unattached app, an unreachable instance — comes back as an error status.
+//
+// No credential crosses this boundary in either direction: the connection string is read inside the
+// control plane, next to the connection it opens, and the response carries columns and rows only.
+//
+// The path is authoritative for the environment where the route carries one, for the reason the
+// detach and restore routes are.
+func (s *server) addonSQL(w http.ResponseWriter, r *http.Request) {
+	var req addonSQLRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	if env := r.PathValue("env"); env != "" {
+		req.Env = env
+	}
+	res, err := s.engine.AddonSQL(r.Context(), controlplane.SQLRequest{
+		Addon:     controlplane.AddonType(req.Addon),
+		App:       req.App,
+		Env:       req.Env,
+		Statement: req.Statement,
+		Confirm:   req.Confirm,
+	})
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // restoreInstance rewinds one environment's whole Postgres instance to a point in its object-storage
 // repository (ADR-0066 §4): burrowd takes a physical backup of the current state first, replaces the
 // instance with one recovered from the repository, waits for it to serve, and re-points every
@@ -1350,6 +1393,24 @@ type addonRestoreRequest struct {
 	// registered; Burrow refuses to guess, because an instance keeps the repository it was created
 	// against. A provider NAME, never a credential.
 	ArchiveDestination string `json:"archive_destination,omitempty"`
+}
+
+// addonSQLRequest is the body of an addon sql: the add-on type, the app whose database is queried,
+// the statement, and confirm (which satisfies an addon.sql guardrail an operator has moved to
+// confirm; the default disposition is deny, which no confirmation opens).
+//
+// The statement is carried VERBATIM and nothing here parses it (ADR-0087 §6). There is deliberately
+// no field naming a database, a schema, or a role: the app and the environment name the database,
+// and the credential the control plane connects with is what chooses it.
+type addonSQLRequest struct {
+	Addon string `json:"addon"`
+	App   string `json:"app"`
+	// Env is the environment whose instance holds the database (ADR-0067 §1). The route carries it
+	// too and the route wins — a dropped environment would run the statement against another
+	// instance's database of the same name.
+	Env       string `json:"env,omitempty"`
+	Statement string `json:"statement"`
+	Confirm   bool   `json:"confirm,omitempty"`
 }
 
 // backupsResponse wraps the backup list so the shape can grow without breaking object decoders.

@@ -316,6 +316,71 @@ type AppDatabaseLister interface {
 	ListAppDatabases(ctx context.Context, env string) ([]string, error)
 }
 
+// DatabaseQuerier runs ONE caller-supplied statement against ONE app's database on an environment's
+// relational add-on instance and returns columns and rows (ADR-0087). It is the seam behind
+// `burrow addon sql`.
+//
+// It is a SEPARATE optional interface rather than a method on DatabaseProvisioner, for the reason
+// AppDatabaseLister is: an existing provisioner implementation stays valid unchanged, and the engine
+// type-asserts its provisioner to it and reports ErrNotImplemented when it is absent.
+//
+// THE IMPLEMENTATION READS THE APP'S OWN CREDENTIAL AND CONNECTS WITH IT, and that is why the
+// statement and the credential meet inside one adapter instead of the engine handing a connection
+// string down. burrowd generated the DSN it wrote into the app's Secret (AttachAddon), so this needs
+// no new secret and no new grant — but the value is a secret one, and the narrowest place to read it
+// is the same call that spends it. Nothing in this interface carries a connection string in either
+// direction: the caller names the Secret's key, never its value, so no DSN crosses a seam, an API,
+// an audit row, or the agent control channel (ADR-0029/0031).
+//
+// It connects as the APP'S OWN ROLE, never as a superuser (ADR-0087 §3). What the statement may
+// touch is what the application itself may touch, and nothing this command does raises that — which
+// is also what makes the database-per-app boundary (ADR-0031) the boundary here: the credential
+// chooses the database, the caller does not, so there is no form of this call that reaches the
+// instance, `template1`, or another app's database.
+type DatabaseQuerier interface {
+	// QueryAppDatabase opens one connection to environment q.Env's instance as app q.App's own role,
+	// runs q.Statement under q.Timeout, and closes the connection. It fills the SQLResult's data —
+	// columns, rows, row count, truncation, the command tag, and a database error if the statement
+	// raised one — and leaves the identity fields (add-on, app, environment) to the engine, which is
+	// the layer that knows them.
+	//
+	// A statement that Postgres refuses is an OUTCOME, not an error: it comes back in the result's
+	// Error with its SQLSTATE intact and a nil error, the same treatment ADR-0048 §3 gives a non-zero
+	// exit code. A returned error means the statement did not run at all — the app is not attached,
+	// the instance would not answer, the credential was refused.
+	QueryAppDatabase(ctx context.Context, q AppStatement) (SQLResult, error)
+}
+
+// AppStatement is one statement to run against one app's database: which database (the app, the
+// environment, and the namespace and Secret key its credential is under) and the bounds it runs
+// within (ADR-0087 §7).
+//
+// SecretKey names the variable the attachment was written under and nothing more — the engine reads
+// it from the attachment record (Database.AddonEnvKey) so a statement follows the same name detach,
+// rotation and a restore's cutover follow, rather than assuming AppDatabaseURLKey.
+type AppStatement struct {
+	// App is the application whose database the statement runs against. It is also the database's
+	// name (ADR-0031).
+	App string
+	// Env is the environment whose instance holds it. It is required for the reason every
+	// DatabaseProvisioner method's is: the environment selects the instance, and there is no value
+	// meaning "whichever instance is there" (ADR-0067 §1).
+	Env string
+	// Namespace is where the app's per-app Secret lives — the environment's app namespace, resolved
+	// by the engine, since that mapping is the engine's (ADR-0035 phase 2b).
+	Namespace string
+	// SecretKey is the key in that Secret holding the app's connection string.
+	SecretKey string
+	// Statement is the caller's SQL, verbatim. It is never parsed, rewritten, or classified as a read
+	// or a write (ADR-0087 §6).
+	Statement string
+	// Timeout bounds the statement itself, applied as the connection's `statement_timeout`.
+	Timeout time.Duration
+	// MaxRows is the largest number of rows to return. A result with more is truncated to this and
+	// reports itself as truncated — never silently short (ADR-0087 §4).
+	MaxRows int
+}
+
 // Kubernetes is the seam over the target cluster: the only path from the control plane
 // to the runtime. It is deliberately narrow — the v0.1 operations (deploy, status,
 // logs, scale, and the delete that supports teardown) and nothing more.

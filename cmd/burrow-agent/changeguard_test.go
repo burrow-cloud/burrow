@@ -79,6 +79,7 @@ var agentCommandClasses = map[string]agentCommand{
 	"addon install": {mutates: true, why: "deploys a backing service into the add-on namespace", args: []string{"addon", "install", "logs"}},
 	"addon attach":  {mutates: true, why: "provisions an app's database and writes its connection string", args: []string{"addon", "attach", "postgres", "web"}},
 	"addon backup":  {mutates: true, why: "runs a backup Job and records the backup", args: []string{"addon", "backup", "postgres", "web"}},
+	"addon sql":     {mutates: true, why: "runs a caller-supplied statement against an app's database, which Burrow deliberately does not classify as a read or a write (ADR-0087 §6), so it goes through the outcome envelope that names the target it ran against", args: []string{"addon", "sql", "postgres", "web", "-c", "select 1"}},
 }
 
 const agentChangeRationale = `

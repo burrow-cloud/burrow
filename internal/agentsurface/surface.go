@@ -222,6 +222,14 @@ var catalogue = []Capability{
 	{Surface: Agent, Path: "addon attach", What: "gives one app a database on its environment's add-on instance; the URL is generated server-side"},
 	{Surface: Agent, Path: "addon backup", What: "takes a backup of an add-on's data"},
 	{Surface: Agent, Path: "addon backup-health", What: "reads how old the last backup is, how old the last one to leave the cluster is, the last failure, and whether the destination answers; changes nothing"},
+	// ADR-0087 §5 puts `addon sql` in ADR-0065 §3's TIER 2 — compiled in and denied by default —
+	// rather than tier 1, and being here is the whole of what that means. An agent that can see the
+	// verb exists and is closed asks for it; an agent that meets `unknown command` reaches for
+	// `kubectl` or a shell instead, which is the failure ADR-0021 says Burrow cannot close from the
+	// inside. It passes ADR-0065 §1's SCOPE test — the credential is one app's own role, so the
+	// statement reaches that app's database and nothing else — and fails its REVERSIBILITY test
+	// outright, which is exactly what a deny-by-default disposition is for.
+	{Surface: Agent, Path: "addon sql", What: "runs one statement against one app's database as that app's own role, guarded by addon.sql (denied by default)"},
 	{Surface: Agent, Path: "addons", What: "read-only: the installed add-ons and their capabilities"},
 	{Surface: Agent, Path: "backups", What: "read-only: the backups taken of an add-on"},
 

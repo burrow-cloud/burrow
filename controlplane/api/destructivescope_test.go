@@ -84,13 +84,22 @@ func TestEnvironmentRoutesCarryTheScopeAndTheOldFormsStillWork(t *testing.T) {
 			unnarrowed: "/v1/addons/restore", viaRoute: "/v1/addons/restore/env/staging", viaOldForm: "/v1/addons/restore",
 			body: `{"addon":"postgres","app":"web","backup":"b-1"}`, oldBody: `{"addon":"postgres","app":"web","backup":"b-1","env":"staging"}`,
 		},
+		// A statement is the sharpest case of the four (ADR-0087): a dropped environment does not
+		// merely read the wrong instance, it RUNS the caller's SQL against the app of that name on
+		// the default environment's, and the statement may write.
+		{
+			name: "run a statement against an app's database", method: "POST",
+			unnarrowed: "/v1/addons/sql", viaRoute: "/v1/addons/sql/env/staging", viaOldForm: "/v1/addons/sql",
+			body: `{"addon":"postgres","app":"web","statement":"select 1"}`, oldBody: `{"addon":"postgres","app":"web","statement":"select 1","env":"staging"}`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, d := newProvisionedAPI(t)
 			d.SetPolicy(cp.DefaultPolicy().
 				With(cp.GuardrailAppDelete, cp.DispositionAllow).
 				With(cp.GuardrailAddonDetach, cp.DispositionAllow).
-				With(cp.GuardrailAddonRestore, cp.DispositionAllow))
+				With(cp.GuardrailAddonRestore, cp.DispositionAllow).
+				With(cp.GuardrailAddonSQL, cp.DispositionAllow))
 			if err := d.CreateEnvironment(context.Background(), "staging", "burrow-apps-staging"); err != nil {
 				t.Fatalf("CreateEnvironment: %v", err)
 			}

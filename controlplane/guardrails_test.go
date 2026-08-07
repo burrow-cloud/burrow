@@ -423,6 +423,7 @@ func TestNameScopableIsDeclaredNotInferred(t *testing.T) {
 		GuardrailAddonDetach:          "add-on instance",
 		GuardrailAddonRestore:         "add-on instance",
 		GuardrailAddonRestoreInstance: "add-on instance",
+		GuardrailAddonSQL:             "add-on instance",
 		GuardrailDNSWrite:             "",
 		GuardrailDNSDelete:            "",
 		GuardrailBucketCreate:         "",

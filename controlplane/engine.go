@@ -1105,6 +1105,13 @@ type AttachResult struct {
 	// SecretKey is the env-var name under which the generated connection string was written into
 	// the app's per-app Secret. The value is never returned (ADR-0029/0031).
 	SecretKey string `json:"secret_key"`
+	// PreviousSecretKey is the name this attachment used BEFORE this call, set only when the attach
+	// renamed it. One app has one database per environment, so a rename MOVES the variable rather
+	// than adding a second: the connection string is written under the new name and the old name is
+	// removed, because the old one would otherwise hold a password this attach has already rotated —
+	// a variable the app still reads and that no longer connects. It is reported so the move is
+	// stated rather than inferred from a variable quietly disappearing (issue #462).
+	PreviousSecretKey string `json:"previous_secret_key,omitempty"`
 }
 
 // AttachAddon gives app its own database on ENVIRONMENT env's Postgres instance and wires it into
@@ -1123,7 +1130,13 @@ type AttachResult struct {
 // production's data. Resolving the environment first sends the provisioning at staging's own
 // instance, and sends the Secret to staging's own namespace, so the two attaches have nothing in
 // common to collide over.
-func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env string) (AttachResult, error) {
+//
+// envKey NAMES THE VARIABLE the connection string is written under, and EMPTY IS NOT A SYNONYM FOR
+// "DATABASE_URL" (issue #462). Empty means "whatever this attachment already uses", which is
+// DATABASE_URL for every app that never chose otherwise and the chosen name for one that did — so
+// omitting it keeps today's behaviour exactly, and a re-attach of a renamed attachment rotates the
+// password into the name it is actually read under instead of quietly moving it back to the default.
+func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey string) (AttachResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return AttachResult{}, fmt.Errorf("attach addon: %w: %w", ErrInvalid, err)
 	}
@@ -1133,14 +1146,42 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env string) 
 	if e.dbProvisioner == nil {
 		return AttachResult{}, fmt.Errorf("attach addon %s: database provisioning is not configured: %w", t, ErrNotImplemented)
 	}
+	if envKey != "" {
+		if err := validateEnvKey(envKey); err != nil {
+			return AttachResult{}, fmt.Errorf("attach addon %s for %s: %w: %w", t, app, ErrInvalid, err)
+		}
+	}
 	targetEnv, ns, err := e.resolveMutatingEnvironment(ctx, env)
 	if err != nil {
 		return AttachResult{}, fmt.Errorf("attach addon %s for %s: %w", t, app, err)
 	}
-	// The redacted audit args carry the add-on, app, and environment NAMES only — never the
+	// The name this attachment uses today: the recorded one, or DATABASE_URL for an attachment made
+	// before the name was a choice. It is both the default for this call and the key a rename has to
+	// clean up afterwards.
+	current, err := e.db.AddonEnvKey(ctx, string(t), app, targetEnv)
+	if err != nil {
+		return AttachResult{}, fmt.Errorf("attach addon %s for %s: reading the recorded variable name: %w", t, app, err)
+	}
+	key := current
+	if envKey != "" {
+		key = envKey
+	}
+	k := e.k8s.WithNamespace(ns)
+	// A NAME THIS ATTACHMENT DOES NOT ALREADY OWN MUST BE FREE. Attach writes a value nobody can read
+	// back, so writing over an app's existing API token or a config var would destroy it with no way
+	// to recover it and no way to notice — and it is exactly what a plausible-looking name would do.
+	// Checked only for an explicitly named key: the attachment's own name is its to overwrite, which
+	// is what a re-attach rotating the password does.
+	if envKey != "" && envKey != current {
+		if err := e.refuseOccupiedEnvKey(ctx, k, app, targetEnv, envKey); err != nil {
+			return AttachResult{}, fmt.Errorf("attach addon %s for %s: %w", t, app, err)
+		}
+	}
+	// The redacted audit args carry the add-on, app, environment and KEY names only — never the
 	// generated URL (ADR-0031). The environment is salient, non-secret metadata: it is what says
-	// which database the app was given (ADR-0027).
-	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv}
+	// which database the app was given (ADR-0027); the key name says where the app reads it, and a
+	// key NAME is not a secret (ADR-0028) — it is already in every error on this path.
+	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "key": key}
 
 	// Provision the database/role on THIS environment's instance and compose the connection string.
 	// The returned url is a SECRET value: from here it is handed only to SetSecretValue and never
@@ -1155,29 +1196,84 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env string) 
 	// Write the connection string into the app's per-app Secret IN THIS ENVIRONMENT'S NAMESPACE and
 	// roll the app there to pick it up — the ADR-0029 secret path, the same one `secret set` uses.
 	// The value never crosses the audit log, the agent control channel, or Postgres.
-	k := e.k8s.WithNamespace(ns)
-	// The one constant three operations agree about: attach writes this key, detach removes it, and a
-	// physical restore rewrites it during its cutover (physical_restore.go).
-	const key = databaseURLSecretKey
 	if err := k.SetSecretValue(ctx, app, key, url); err != nil {
 		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
 		// SetSecretValue's error names the app and key only — never the value.
 		return AttachResult{}, fmt.Errorf("attach addon %s for %s: writing %s: %w", t, app, key, err)
+	}
+	// RECORD THE NAME IMMEDIATELY AFTER WRITING IT, before anything else can fail. Detach, the
+	// dependency check and the restore cutover all read this row to find the variable, so the window
+	// where the Secret holds a name the record does not know is the window where a detach would leave
+	// a live credential behind. A failure here is reported rather than swallowed, and re-running the
+	// same attach closes it.
+	if err := e.db.SetAddonEnvKey(ctx, string(t), app, targetEnv, key, e.clock.Now()); err != nil {
+		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
+		return AttachResult{}, fmt.Errorf("attach addon %s for %s: the connection string was written into %s but the name could not be recorded, so re-run this attach: %w", t, app, key, err)
+	}
+	// A rename MOVES the variable. EnsureAppDatabase has just rotated the role's password, so the old
+	// name now holds a connection string that no longer authenticates: leaving it would give the app
+	// two database variables, one of them silently dead, which is worse than the single name this
+	// replaces. Removing an absent key is a no-op.
+	previous := ""
+	if key != current {
+		if err := k.UnsetSecretKey(ctx, app, current); err != nil {
+			e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
+			return AttachResult{}, fmt.Errorf("attach addon %s for %s: the connection string was written into %s but the previous %s could not be removed, so the app still holds a stale one: %w", t, app, key, current, err)
+		}
+		previous = current
 	}
 	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
 		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
 		return AttachResult{}, fmt.Errorf("attach addon %s for %s: rolling workload: %w", t, app, err)
 	}
 	e.recordExecution(ctx, auditOpAddonAttach, app, args, nil)
-	return AttachResult{App: app, Addon: t, Environment: targetEnv, SecretKey: key}, nil
+	return AttachResult{App: app, Addon: t, Environment: targetEnv, SecretKey: key, PreviousSecretKey: previous}, nil
 }
 
-// DetachAddon removes app's DATABASE_URL and, behind the addon.detach confirm guardrail (it
-// destroys data), drops app's database and role from ENVIRONMENT env's Postgres instance
-// (ADR-0031/0067 §1). The audit row records {addon, app, env} only. The environment is required for
-// the same reason attach requires it, and the stakes are higher: without it, detaching `web` in
-// staging would have dropped production's `web` database — the same collision as issue #339, with
-// the destructive verb.
+// refuseOccupiedEnvKey refuses a requested attachment variable that something else in the app's
+// environment already answers to, NAMING WHAT HOLDS IT (issue #462's "refused with a message naming
+// the conflict").
+//
+// Two sources can hold it, and both are checked because the app cannot tell them apart at runtime —
+// its environment is the config store and the per-app Secret merged. A Secret key is the destructive
+// case: the value is unreadable, so overwriting it destroys a credential permanently. A config key
+// is the confusing one: both would render into the workload under one name, and which wins is not
+// something a user should have to know.
+//
+// A cluster that will not answer is a REFUSAL rather than an assumption of "free". The whole point of
+// the check is that the write is irreversible; proceeding on an unreadable Secret would be deciding
+// the dangerous way on no evidence. A missing Secret is not that — an app that has never had one has
+// nothing to overwrite, and that is the ordinary state of a first attach.
+func (e *Engine) refuseOccupiedEnvKey(ctx context.Context, k Kubernetes, app, env, key string) error {
+	keys, err := k.SecretKeys(ctx, app)
+	switch {
+	case err == nil:
+		for _, existing := range keys {
+			if existing == key {
+				return fmt.Errorf("%s is already a secret in %s's environment %s, and attaching would overwrite a value that cannot be read back; remove it with `burrow secret unset %s %s` or attach under another name: %w", key, app, env, app, key, ErrInvalid)
+			}
+		}
+	case errors.Is(err, ErrNotFound):
+		// No Secret yet: nothing to overwrite. The ordinary state of a first attach.
+	default:
+		return fmt.Errorf("%s could not be checked against %s's existing secrets, and attaching would overwrite a value that cannot be read back: %w", key, app, err)
+	}
+	cfg, err := e.db.AppEnv(ctx, app)
+	if err != nil {
+		return fmt.Errorf("%s could not be checked against %s's config: %w", key, app, err)
+	}
+	if _, taken := cfg[key]; taken {
+		return fmt.Errorf("%s is already a config var of %s, and the app would see two values under one name; remove it with `burrow config unset %s %s` or attach under another name: %w", key, app, app, key, ErrInvalid)
+	}
+	return nil
+}
+
+// DetachAddon removes the variable app's connection string was written under and, behind the
+// addon.detach confirm guardrail (it destroys data), drops app's database and role from ENVIRONMENT
+// env's Postgres instance (ADR-0031/0067 §1). The audit row records {addon, app, env, key} — names
+// only, never the value. The environment is required for the same reason attach requires it, and the
+// stakes are higher: without it, detaching `web` in staging would have dropped production's `web`
+// database — the same collision as issue #339, with the destructive verb.
 func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, confirm bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("detach addon: %w: %w", ErrInvalid, err)
@@ -1204,7 +1300,16 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	if err != nil {
 		return fmt.Errorf("detach addon %s for %s: %w", t, app, err)
 	}
-	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv}
+	// THE KEY IS READ, NOT ASSUMED. Detach removes the variable this attachment was written under,
+	// which is the recorded name — DATABASE_URL only for an attachment that never chose another
+	// (issue #462). Reading it here, before the guardrail, means a detach that cannot find out what to
+	// remove refuses rather than removing the default and leaving a live credential in the app's
+	// environment pointing at a database this call is about to drop.
+	key, err := e.db.AddonEnvKey(ctx, string(t), app, targetEnv)
+	if err != nil {
+		return fmt.Errorf("detach addon %s for %s: reading the recorded variable name: %w", t, app, err)
+	}
+	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "key": key}
 	if err := e.recordDecision(ctx, auditOpAddonDetach, app, args, GuardrailAddonDetach,
 		// addon.* is not EnvScopable, so the environment reaches the lookup through the instance
 		// name rather than as a tier of its own; it is named in the message and the audit args
@@ -1214,16 +1319,23 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 		return err
 	}
 
-	// Remove the DATABASE_URL key first (the app stops seeing the credential), then drop the
+	// Remove the connection-string key first (the app stops seeing the credential), then drop the
 	// database/role. Both act in this environment only. A missing key is a no-op.
 	k := e.k8s.WithNamespace(ns)
-	if err := k.UnsetSecretKey(ctx, app, databaseURLSecretKey); err != nil {
+	if err := k.UnsetSecretKey(ctx, app, key); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
-		return fmt.Errorf("detach addon %s for %s: removing DATABASE_URL: %w", t, app, err)
+		return fmt.Errorf("detach addon %s for %s: removing %s: %w", t, app, key, err)
 	}
 	if err := e.dbProvisioner.DropAppDatabase(ctx, app, targetEnv); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
 		return fmt.Errorf("detach addon %s for %s: %w", t, app, err)
+	}
+	// The attachment is gone, so the recorded name describes nothing. Leaving it would have a later
+	// attach of the same app default to a name the app no longer reads. Best-effort: the variable and
+	// the database are already gone, and failing the detach afterwards would report a completed
+	// teardown as broken — and a stale row only ever names a key a re-attach would then write.
+	if err := e.db.DeleteAddonEnvKey(ctx, string(t), app, targetEnv); err != nil {
+		slog.WarnContext(ctx, "forgetting the attachment's recorded variable name failed", "app", app, "env", targetEnv, "error", err)
 	}
 	// Roll the app so it drops the removed credential. A missing workload is not an error.
 	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
@@ -1587,6 +1699,14 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	// silently inherit a previous occupant's opt-out. Best-effort for the same reason.
 	if err := e.db.DeleteDependencyCheckSettings(ctx, app); err != nil {
 		slog.WarnContext(ctx, "removing the app's dependency-check setting failed", "app", app, "error", err)
+	}
+	// And the same for the variable name its attachments were written under (issue #462): an app
+	// created later under the same name gets Burrow's default rather than a previous occupant's
+	// choice, which would otherwise decide where a fresh attach writes. Best-effort for the same
+	// reason. The database itself is not dropped here — deleting an app has never dropped its data,
+	// which is what `addon detach` is for.
+	if err := e.db.DeleteAppAttachments(ctx, app); err != nil {
+		slog.WarnContext(ctx, "removing the app's recorded attachment variable names failed", "app", app, "error", err)
 	}
 	e.recordExecution(ctx, auditOpAppDelete, app, args, nil)
 	return nil

@@ -112,6 +112,9 @@ const (
 	OpUnsetHealthEndpoint     Op = "UnsetHealthEndpoint"
 	OpDependencyChecksEnabled Op = "DependencyChecksEnabled"
 	OpSetDependencyChecks     Op = "SetDependencyChecks"
+	OpAddonEnvKey             Op = "AddonEnvKey"
+	OpSetAddonEnvKey          Op = "SetAddonEnvKey"
+	OpDeleteAddonEnvKey       Op = "DeleteAddonEnvKey"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

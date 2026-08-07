@@ -93,7 +93,7 @@ func TestAttachPostgres(t *testing.T) {
 		t.Fatalf("seed workload: %v", err)
 	}
 
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "")
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "")
 	if err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestAttachPostgres(t *testing.T) {
 func TestAttachPostgresNoWorkload(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
 		t.Fatalf("AttachAddon with no workload: %v", err)
 	}
 	if _, ok := k.SecretValue("web", "DATABASE_URL"); !ok {
@@ -140,10 +140,10 @@ func TestAttachPostgresNoWorkload(t *testing.T) {
 func TestAttachRejectsBadInput(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonCache, "web", ""); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AttachAddon(ctx, cp.AddonCache, "web", "", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("attach non-postgres err = %v, want ErrInvalid", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "Bad_Name", ""); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "Bad_Name", "", ""); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("attach bad app name err = %v, want ErrInvalid", err)
 	}
 	if got := prov.Ensured(); len(got) != 0 {
@@ -165,7 +165,7 @@ func TestAttachWithoutProvisioner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", ""); !errors.Is(err, cp.ErrNotImplemented) {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); !errors.Is(err, cp.ErrNotImplemented) {
 		t.Errorf("attach without provisioner err = %v, want ErrNotImplemented", err)
 	}
 }
@@ -178,7 +178,7 @@ func TestDetachPostgres(t *testing.T) {
 	if err := k.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Kind: cp.WorkloadDeployment, Image: "busybox", Replicas: 1}); err != nil {
 		t.Fatalf("seed workload: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 
@@ -205,14 +205,16 @@ func TestDetachPostgres(t *testing.T) {
 }
 
 // TestAttachAuditRedactsURL drives attach and detach and asserts every audit row carries only the
-// {addon, app, env} args — never the connection-string value, the key name as a value, or anything
-// that looks like a secret. The environment is salient non-secret metadata and is recorded; the URL
-// is neither. The audit log is the redaction boundary (ADR-0027/0031/0067 §1).
+// {addon, app, env, key} args — never the connection-string value or anything that looks like a
+// secret. The environment is salient non-secret metadata and is recorded; so is the KEY NAME, which
+// is what says where the app reads the credential now that an attach can name it (issue #462) and
+// which the redaction boundary has always allowed (audit.go: env/secret key NAMES, never a value).
+// The URL is neither. The audit log is the redaction boundary (ADR-0027/0031/0067 §1).
 func TestAttachAuditRedactsURL(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", true); err != nil {
@@ -232,10 +234,11 @@ func TestAttachAuditRedactsURL(t *testing.T) {
 		if row.Operation == "addon_attach" {
 			sawAttach = true
 		}
-		// Args carry only the allowlist: addon + app names, nothing resembling a URL or password.
+		// Args carry only the allowlist: addon + app + env + key names, nothing resembling a URL or
+		// password.
 		for key, v := range row.Args {
-			if key != "addon" && key != "app" && key != "env" {
-				t.Errorf("audit row %s has unexpected arg key %q (only addon/app/env allowed)", row.Operation, key)
+			if key != "addon" && key != "app" && key != "env" && key != "key" {
+				t.Errorf("audit row %s has unexpected arg key %q (only addon/app/env/key allowed)", row.Operation, key)
 			}
 			if strings.Contains(v, "postgres://") || strings.Contains(v, "@burrow-postgres") || v == url {
 				t.Errorf("audit arg %q leaks a connection string: %q", key, v)
@@ -262,7 +265,7 @@ func TestAttachDoesNotLogTheURL(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	e, _, _, _ := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", true); err != nil {

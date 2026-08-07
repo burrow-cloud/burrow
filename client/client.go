@@ -1173,17 +1173,38 @@ type AttachResult struct {
 	// which is what says WHICH database the app was given, since databases keep their simple names.
 	Environment string `json:"environment,omitempty"`
 	SecretKey   string `json:"secret_key"`
+	// PreviousSecretKey is the name the attachment used before this call, present only when this
+	// attach RENAMED it: the connection string moved to SecretKey and this key was removed, because
+	// the attach rotated the password and the old name would otherwise hold a dead one (issue #462).
+	PreviousSecretKey string `json:"previous_secret_key,omitempty"`
 }
 
 // AttachAddon gives an app its own database on ENVIRONMENT env's Postgres instance and wires it in
 // (ADR-0031/0067 §1). The caller supplies only the add-on type, app name, and environment; burrowd
-// generates the DATABASE_URL server-side and writes it into the app's Secret in that environment's
-// namespace — no secret value crosses this API or the agent control channel. The result carries the
-// environment and the KEY name, never the value.
-func (c *Client) AttachAddon(ctx context.Context, addonType, app, env string) (AttachResult, error) {
+// generates the connection string server-side and writes it into the app's Secret in that
+// environment's namespace — no secret value crosses this API or the agent control channel. The result
+// carries the environment and the KEY name, never the value.
+//
+// envKey names the environment variable to write it under. EMPTY IS NOT "DATABASE_URL" — it is
+// "whatever this attachment already uses", which burrowd resolves, so omitting it keeps today's
+// behaviour for an app that never named one and does not move the variable of an app that did.
+//
+// THE NAME RIDES THE ROUTE (see narrowing), and it is the one narrowing here that does not narrow
+// scope: the same database on the same instance in the same namespace, whatever the variable is
+// called. What it aims is the KEY, and a control plane that predates it drops the field and writes
+// DATABASE_URL — over whatever the app was keeping there — then answers 200 reporting a name the
+// caller never asked for. That is the failure #485 describes with the target one level in, so it
+// takes the same form: an older control plane refuses a route it does not serve, having written
+// nothing.
+func (c *Client) AttachAddon(ctx context.Context, addonType, app, env, envKey string) (AttachResult, error) {
 	var out AttachResult
 	body := map[string]any{"addon": addonType, "app": app, "env": env}
-	err := c.do(ctx, http.MethodPost, "/v1/addons/attach", body, &out)
+	path := narrowing("/v1/addons/attach", "env-key", envKey)
+	err := c.do(ctx, http.MethodPost, path, body, &out)
+	if err != nil && envKey != "" {
+		what := fmt.Sprintf("this control plane cannot write an attachment's connection string into a variable of your choosing, so nothing was attached: the same call against it would have written %q's connection string into DATABASE_URL rather than into %q — over whatever %q already holds there — and reported it attached", app, envKey, app)
+		return out, scopeRefusal(what, "naming the variable an attachment is written into", err)
+	}
 	return out, err
 }
 
@@ -1957,6 +1978,13 @@ func (c *Client) SetGuardrail(ctx context.Context, scope GuardScope, code, dispo
 // the query parameter (see withEnv). Backups does not, because its answer is an ARGUMENT: the id it
 // returns is fed to a restore that overwrites a live database, and no later refusal can tell that the
 // id came from the wrong list.
+//
+// A PARAMETER THAT AIMS A WRITE FOLLOWS THE RULE EVEN WHEN IT NARROWS NOTHING, which is where the
+// rule generalizes: an attach's variable name (issue #462) leaves the scope exactly as it was — same
+// database, same instance, same namespace — and still rides the route, because what it decides is
+// which key of the app's Secret is overwritten, and a control plane that drops it overwrites a
+// different one and reports success. Scope was the first case of "the write landed somewhere the
+// caller did not aim it", not the whole of it.
 //
 // A parameter that CANNOT OUTRUN ITS OWN ROUTE needs none of this, whatever it narrows: it can only
 // reach a control plane that shipped no earlier than it did. That is why `skip_final_backup` stays a

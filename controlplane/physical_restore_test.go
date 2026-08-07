@@ -113,6 +113,44 @@ func TestRestoreInstanceRewindsTheInstanceAndReconnectsEveryApp(t *testing.T) {
 	}
 }
 
+// TestRestoreInstanceFollowsEachAppsOwnVariable covers an environment where the apps do not agree on
+// the variable name (issue #462). Both halves of the cutover have to follow the record rather than a
+// constant: the enumeration, or an app named otherwise is missing from the blast radius the operator
+// is asked to approve and is never reconnected; and the write, or it comes back with a working
+// credential under a name it does not read and a dead one under the name it does.
+func TestRestoreInstanceFollowsEachAppsOwnVariable(t *testing.T) {
+	ctx := context.Background()
+	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
+	seedAttachedApp(t, k, "", "api")
+	// `web` attached under its own name: no DATABASE_URL at all, a recorded PG_DSN instead.
+	if err := k.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Kind: cp.WorkloadDeployment, Image: "img:1", Replicas: 1}); err != nil {
+		t.Fatalf("ApplyWorkload web: %v", err)
+	}
+	k.SetSecret("web", "PG_DSN", "postgres://old")
+	if err := d.SetAddonEnvKey(ctx, string(cp.AddonPostgres), "web", cp.DefaultEnvironment, "PG_DSN", time.Now()); err != nil {
+		t.Fatalf("SetAddonEnvKey: %v", err)
+	}
+	backup := takePhysicalBackup(t, e, k, osf, cp.DefaultEnvironment, "20260801-020000F")
+
+	res, err := e.RestoreInstance(ctx, cp.AddonPostgres, "", cp.RestoreInstanceOptions{Backup: backup.ID, Confirm: true})
+	if err != nil {
+		t.Fatalf("RestoreInstance: %v", err)
+	}
+	if got := strings.Join(res.Apps, ","); got != "api,web" {
+		t.Errorf("apps = %q, want both: an app attached under its own variable is attached", got)
+	}
+	if got, _ := k.SecretValue("web", "PG_DSN"); got != fake.URLFor("web", cp.DefaultEnvironment) {
+		t.Errorf("web PG_DSN was not reissued for the recovered instance: got %q", got)
+	}
+	if _, ok := k.SecretValue("web", "DATABASE_URL"); ok {
+		t.Error("the cutover invented a DATABASE_URL for an app that reads PG_DSN")
+	}
+	if got, _ := k.SecretValue("api", "DATABASE_URL"); got != fake.URLFor("api", cp.DefaultEnvironment) {
+		t.Errorf("api DATABASE_URL was not reissued: got %q", got)
+	}
+}
+
 // TestRestoreInstanceRefusesALogicalBackup is the mirror of the refusal slice 5 put on `addon
 // restore <addon> <app>`, and the pair is the point: each path refuses the other's backup BY NAME and
 // says which command to use, so an id picked off a listing under pressure cannot silently mean the

@@ -429,10 +429,18 @@ func (e *Engine) deriveDependencies(ctx context.Context, app, env, ns string) ([
 	case err != nil:
 		return nil, "", err
 	case attached:
+		// WHETHER a database is attached is derived; WHAT THE VARIABLE IS CALLED is recorded, because
+		// no derivation can produce a name somebody chose (issue #462). A missing record answers
+		// AppDatabaseURLKey, which is what every attachment made before the name was a choice used, so
+		// this reads identically for them.
+		key, err := e.db.AddonEnvKey(ctx, string(AddonPostgres), app, envName(env))
+		if err != nil {
+			return nil, "", fmt.Errorf("reading the attachment's variable name: %w", err)
+		}
 		deps = append(deps, Dependency{
 			Kind:        DependencyPostgres,
 			Provisioned: fmt.Sprintf("a database and login role on environment %s's Postgres instance, with the connection string written into this app's Secret", env),
-			EnvKey:      AppDatabaseURLKey,
+			EnvKey:      key,
 		})
 	case !known:
 		notes = append(notes, "Burrow could not ask this environment's Postgres instance whether a database is attached to this app, so a database dependency may exist and is not listed")
@@ -493,9 +501,17 @@ func (e *Engine) hasProvisionedDatabase(ctx context.Context, app, env string) (a
 	return false, true, nil
 }
 
-// AppDatabaseURLKey is the environment variable Burrow writes an attached app's connection string
-// into (ADR-0031). It is the KEY NAME and nothing else; the value lives only in the app's Kubernetes
-// Secret. It is named here so the derivation and the attach path cannot drift.
+// AppDatabaseURLKey is the DEFAULT environment variable Burrow writes an attached app's connection
+// string into (ADR-0031). It is the KEY NAME and nothing else; the value lives only in the app's
+// Kubernetes Secret.
+//
+// It is a default rather than the answer: an attach may name its own variable, and the name it chose
+// is recorded with the attachment (issue #462). This constant is what an attachment that named
+// nothing uses — which is every attachment made before naming existed — so it is the value the store
+// returns for a missing record, and it is the only place the string appears. Nothing that acts on an
+// attachment reads it directly: attach, detach, the dependency derivation and the restore cutover all
+// go through Database.AddonEnvKey, so there is one name per attachment rather than four opinions
+// about it.
 const AppDatabaseURLKey = "DATABASE_URL"
 
 // appServiceURL is the in-cluster address of an app's own Service. The Service listens on port 80 and

@@ -790,6 +790,26 @@ type Database interface {
 	// never recorded one is a no-op.
 	DeleteDependencyCheckSettings(ctx context.Context, app string) error
 
+	// AddonEnvKey returns the environment variable name app's attachment to addon in env was written
+	// under (ADR-0031, issue #462) — the one fact about an attachment that cannot be derived, since a
+	// derivation can only ever produce the name nobody chose.
+	//
+	// It answers AppDatabaseURLKey when nothing was recorded. Every attachment made before the name
+	// was a choice is unrecorded and was written there, so a missing row is the answer rather than an
+	// error, and detach, the dependency derivation and the restore cutover all read this instead of
+	// each holding their own copy of the constant.
+	AddonEnvKey(ctx context.Context, addon, app, env string) (string, error)
+	// SetAddonEnvKey records the variable name app's attachment to addon in env is written under.
+	// The attach calls it AFTER the value is written, so the recorded name is never one the Secret
+	// does not hold.
+	SetAddonEnvKey(ctx context.Context, addon, app, env, key string, at time.Time) error
+	// DeleteAddonEnvKey forgets one attachment's recorded name, which a detach does once it has
+	// removed the variable. Deleting an unrecorded attachment is a no-op.
+	DeleteAddonEnvKey(ctx context.Context, addon, app, env string) error
+	// DeleteAppAttachments forgets every recorded name for app — the durable side of an app
+	// teardown, alongside DeleteHealthEndpoints.
+	DeleteAppAttachments(ctx context.Context, app string) error
+
 	// RecordFailure opens or extends the ledger row for one observed failure (ADR-0074 §4). The row
 	// is keyed by (object, reason) so concurrent reasons on one object coexist as separate rows with
 	// independent lifetimes (§5). A first sighting writes first_seen, last_seen and a count of one; a

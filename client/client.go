@@ -1075,15 +1075,26 @@ type RemoveAddonOptions struct {
 // destroyed too, and — where an object-storage provider is registered — burrowd takes a final backup
 // of every attached database first and refuses the whole removal if it does not reach the store
 // (ADR-0064 §5).
+//
+// WHAT HAPPENS TO THE DATA RIDES THE ROUTE, and unlike every other case that follows the rule (see
+// guardPath) there is no unnarrowed form to fall back to: BOTH dispositions are routes, because on
+// this call it is the ABSENCE of the parameter that destroys. `delete_data` inverted the default
+// (issue #323) — before it, a removal destroyed the volume unconditionally — so a current client
+// that says nothing, MEANING KEEP MY DATA, is the request an older control plane answers by
+// destroying the volume, with no final backup to fall back on because it takes none. A query
+// parameter cannot express that: its absence is indistinguishable from a caller that never had it.
+// A route can, and a control plane that has neither route refuses both removals with nothing
+// touched (issue #485).
 func (c *Client) RemoveAddon(ctx context.Context, name string, opts RemoveAddonOptions) (RemoveAddonResult, error) {
 	var out RemoveAddonResult
-	path := "/v1/addons/" + name
+	disposition := "keep"
+	if opts.DeleteData {
+		disposition = "delete"
+	}
+	path := "/v1/addons/" + url.PathEscape(name) + "/data/" + disposition
 	q := url.Values{}
 	if opts.Confirm {
 		q.Set("confirm", "true")
-	}
-	if opts.DeleteData {
-		q.Set("delete_data", "true")
 	}
 	if opts.SkipFinalBackup {
 		q.Set("skip_final_backup", "true")
@@ -1094,7 +1105,24 @@ func (c *Client) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 	if len(q) > 0 {
 		path += "?" + q.Encode()
 	}
-	return out, c.doWithin(ctx, c.budget.backup, http.MethodDelete, path, nil, &out)
+	// skip_final_backup and backup_destination stay parameters, and are safe as parameters, because
+	// they can only ever reach a control plane that has the route above — which is a control plane
+	// that shipped after they did. A parameter that cannot outrun its own route needs no protection.
+	err := c.doWithin(ctx, c.budget.backup, http.MethodDelete, path, nil, &out)
+	if err != nil {
+		return out, removeAddonScopeRefusal(name, opts.DeleteData, err)
+	}
+	return out, nil
+}
+
+// removeAddonScopeRefusal names what a control plane without the data-disposition routes would have
+// done instead, which is different in each direction and destructive in both.
+func removeAddonScopeRefusal(name string, deleteData bool, err error) error {
+	what := fmt.Sprintf("this control plane cannot be asked to KEEP an add-on's data, so nothing was removed: it destroys the data volume on every removal, so the same call against it would have destroyed %q's data — and every attached app's database with it — with no final backup, which is the opposite of what was asked", name)
+	if deleteData {
+		what = fmt.Sprintf("this control plane cannot take the final backup that a data-destroying removal makes first, so nothing was removed: the same call against it would have destroyed %q's data volume with no copy left off the cluster", name)
+	}
+	return scopeRefusal(what, "the choice of what a removal does to an add-on's data", err)
 }
 
 // AttachResult is the non-secret outcome of attaching an app to an add-on (ADR-0031): the KEY NAME
@@ -1122,9 +1150,26 @@ func (c *Client) AttachAddon(ctx context.Context, addonType, app, env string) (A
 
 // DetachAddon detaches an app from an add-on, dropping its data (e.g. its Postgres database). It is
 // held for confirmation by a guardrail by default; pass confirm=true to proceed past the hold.
+//
+// The ENVIRONMENT RIDES THE ROUTE (see guardPath). A control plane that predates per-environment
+// add-ons drops the body field it does not know exactly as it drops an unknown query parameter, so a
+// detach aimed at staging would land on the default environment's instance — production's database,
+// dropped, reported as staging's (issue #485).
 func (c *Client) DetachAddon(ctx context.Context, addonType, app, env string, confirm bool) error {
-	body := map[string]any{"addon": addonType, "app": app, "env": env, "confirm": confirm}
-	return c.do(ctx, http.MethodPost, "/v1/addons/detach", body, nil)
+	body := map[string]any{"addon": addonType, "app": app, "confirm": confirm}
+	if env == "" {
+		// Nothing was narrowed — the default environment is one every control plane has — so the
+		// unnarrowed route and its unchanged wire shape are exactly right.
+		body["env"] = ""
+		return c.do(ctx, http.MethodPost, "/v1/addons/detach", body, nil)
+	}
+	path := "/v1/addons/detach/env/" + url.PathEscape(env)
+	err := c.do(ctx, http.MethodPost, path, body, nil)
+	if err != nil {
+		what := fmt.Sprintf("this control plane cannot detach an app from an add-on in a NAMED environment, so nothing was detached: the same call against it would have dropped %q's database on the default environment's instance rather than on %q's", app, env)
+		return scopeRefusal(what, "per-environment add-on instances", err)
+	}
+	return nil
 }
 
 // Backup is one recorded per-app database backup (ADR-0032): the control-plane index row for a dump
@@ -1281,9 +1326,24 @@ func (c *Client) BackupHealth(ctx context.Context, addonType, app, env string) (
 
 // RestoreAddon restores an app's database from a recorded backup, overwriting its live contents
 // (ADR-0032). It is held for confirmation by a guardrail by default; pass confirm=true to proceed.
+//
+// The ENVIRONMENT RIDES THE ROUTE, for the reason DetachAddon's does: a restore aimed at staging,
+// against a control plane that drops the field, overwrites the live database of whatever app of that
+// name is on the default environment's instance (issue #485).
 func (c *Client) RestoreAddon(ctx context.Context, addonType, app, backupID, env string, confirm bool) error {
-	body := map[string]any{"addon": addonType, "app": app, "backup": backupID, "env": env, "confirm": confirm}
-	return c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/restore", body, nil)
+	body := map[string]any{"addon": addonType, "app": app, "backup": backupID, "confirm": confirm}
+	if env == "" {
+		// Unnarrowed, so the route and the body stay exactly as they were (see DetachAddon).
+		body["env"] = ""
+		return c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/restore", body, nil)
+	}
+	path := "/v1/addons/restore/env/" + url.PathEscape(env)
+	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, path, body, nil)
+	if err != nil {
+		what := fmt.Sprintf("this control plane cannot restore into a NAMED environment, so nothing was restored: the same call against it would have overwritten the live database of %q on the default environment's instance rather than on %q's", app, env)
+		return scopeRefusal(what, "per-environment add-on instances", err)
+	}
+	return nil
 }
 
 // StrandedApp is one app a physical restore's DATABASE_URL cutover did not finish for, and why.
@@ -1406,12 +1466,25 @@ func (c *Client) Logs(ctx context.Context, app, env string, tail int) ([]LogLine
 // DeleteApp removes an app entirely — its workload, routing, and release history — in the target
 // environment (ADR-0035 phase 2b). The delete is guarded and held for confirmation by default; pass
 // confirm=true to proceed past the hold.
+//
+// The ENVIRONMENT RIDES THE ROUTE (see guardPath). It is the one parameter on this call that decides
+// WHICH app is destroyed, and against a control plane that predates named environments a query
+// parameter naming staging is dropped and the PRODUCTION app is deleted instead — workload, routing
+// and release history — under a line that says staging (issue #485).
 func (c *Client) DeleteApp(ctx context.Context, app, env string, confirm bool) error {
 	path := "/v1/apps/" + url.PathEscape(app)
+	if env != "" {
+		path += "/env/" + url.PathEscape(env)
+	}
 	if confirm {
 		path += "?confirm=true"
 	}
-	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
+	err := c.do(ctx, http.MethodDelete, path, nil, nil)
+	if err != nil && env != "" {
+		what := fmt.Sprintf("this control plane cannot delete an app in a NAMED environment, so nothing was deleted: the same call against it would have deleted %q — its workload, routing and release history — in the DEFAULT environment rather than in %q", app, env)
+		return scopeRefusal(what, "named environments", err)
+	}
+	return err
 }
 
 // Rollback returns an app to its previous release. It takes the deploy budget: a rollback runs the
@@ -1702,7 +1775,12 @@ func (c *Client) SetGuardrail(ctx context.Context, scope GuardScope, code, dispo
 //
 // The rule this encodes, for anything added later: A REQUEST PARAMETER THAT NARROWS THE SCOPE OF A
 // WRITE BELONGS IN THE ROUTE. A parameter that selects an existing route's behaviour in a way an
-// older server would honour or reject on its own may stay a parameter.
+// older server would honour or reject on its own may stay a parameter. It applies to a BODY field
+// exactly as it applies to a query parameter: `decode` reads the body with a plain json.Decoder, so
+// an older control plane drops a field it does not know just as silently.
+//
+// Issue #485 audited the rest of the API against this rule and found the destructive violations,
+// which now follow it: see RemoveAddon, DeleteApp, DetachAddon and RestoreAddon.
 func guardPath(scope GuardScope, code string) string {
 	path := "/v1/guard"
 	if scope.Name != "" {
@@ -1721,42 +1799,57 @@ func guardPath(scope GuardScope, code string) string {
 // like every other refusal so a --json caller and an agent branch on it the same way.
 const CodeScopeUnsupported = "scope_unsupported"
 
-// guardScopeRefusal turns the control plane's unknown-route answer into a refusal that says what
-// was NOT done and why, and leaves every other error untouched.
-//
-// It fires only for a name-scoped call, because that is the only scope a supported control plane
-// can lack, and only for the two answers that mean "no such route": the structured
-// unknown_operation the handshake produces, and a bare 404 from a control plane older than the
-// handshake itself. An engine 404 — an unknown environment, say — carries "not_found" and is a real
-// answer to a real route, so it passes through unchanged.
+// guardScopeRefusal words scopeRefusal for the guardrail name tier. It fires only for a name-scoped
+// call, because that is the only scope on this route a supported control plane can lack.
 //
 // An empty code is the read and a code is the write, and the two are worded differently because
 // only one of them could have changed anything: "nothing was written" is the sentence an operator
 // needs, and printing it after a listing would be a lie about what was at stake.
-//
-// The server's own message rides along verbatim when there is one, because it is the half that
-// names both versions and the upgrade; wording it again here would either duplicate it or
-// contradict it as the server's message improves.
 func guardScopeRefusal(scope GuardScope, code string, err error) error {
-	var api *APIError
-	if scope.Name == "" || !errors.As(err, &api) || api.StatusCode != http.StatusNotFound {
-		return err
-	}
-	if api.Code != "" && api.Code != CodeUnknownOperation {
+	if scope.Name == "" {
 		return err
 	}
 	where := "the default environment"
 	if scope.Env != "" {
 		where = strconv.Quote(scope.Env)
 	}
-	msg := fmt.Sprintf("this control plane cannot report the policy for one app or add-on instance, so there is nothing to show: what it would answer with is the policy for every app in %s", where)
+	what := fmt.Sprintf("this control plane cannot report the policy for one app or add-on instance, so there is nothing to show: what it would answer with is the policy for every app in %s", where)
 	if code != "" {
-		msg = fmt.Sprintf("this control plane cannot scope a guardrail to one app or add-on instance, so nothing was written: the same call without the name would have set %q for every app in %s", code, where)
+		what = fmt.Sprintf("this control plane cannot scope a guardrail to one app or add-on instance, so nothing was written: the same call without the name would have set %q for every app in %s", code, where)
 	}
+	return scopeRefusal(what, "per-app guardrails", err)
+}
+
+// scopeRefusal is the shared body of every "the scope you asked for is not one this control plane
+// can express" refusal: guardScopeRefusal's rule (issue #472), generalized to the destructive calls
+// that carried the same shape (issue #485).
+//
+// what is the sentence naming the operation and — the part an operator needs — what the same call
+// would have done instead, in the past tense of something that did NOT happen. predates names the
+// feature the control plane is missing, for the one case where it cannot say so itself.
+//
+// It fires only for the two answers that mean "no such route": the structured unknown_operation the
+// ADR-0039 handshake produces, and a bare 404 from a control plane older than the handshake itself.
+// An engine 404 — an unknown environment, say — carries "not_found" and is a real answer to a real
+// route, so it passes through unchanged, and so does every other error. Callers invoke it only when
+// they narrowed the request, because an unnarrowed call has no wider scope to have landed at.
+//
+// The server's own message rides along verbatim when there is one, because it is the half that names
+// both versions and the upgrade; wording it again here would either duplicate it or contradict it as
+// the server's message improves.
+func scopeRefusal(what, predates string, err error) error {
+	var api *APIError
+	if !errors.As(err, &api) || api.StatusCode != http.StatusNotFound {
+		return err
+	}
+	if api.Code != "" && api.Code != CodeUnknownOperation {
+		return err
+	}
+	msg := what
 	if api.Code == CodeUnknownOperation {
 		msg += ". The control plane reports: " + api.Message
 	} else {
-		msg += ". It predates per-app guardrails; ask an operator to run `burrow cluster upgrade` to update the control plane, then run this again"
+		msg += ". It predates " + predates + "; ask an operator to run `burrow cluster upgrade` to update the control plane, then run this again"
 	}
 	return &APIError{
 		StatusCode:    api.StatusCode,

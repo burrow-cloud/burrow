@@ -560,6 +560,13 @@ collector ([ADR-0064](adr/0064-addon-removal-keeps-its-data.md) §1). Destroying
 `--delete-data`. The removal output names the volume it kept and how to reclaim it; the
 confirmation the `addon.remove` guardrail holds names the affected apps.
 
+**Which of the two it is rides the route, so an older control plane cannot decide it by default.**
+`burrow addon remove` is `DELETE /v1/addons/{name}/data/keep` and `--delete-data` is
+`.../data/delete`. A control plane too old to know that keeping is even an option has neither route
+and refuses the removal, naming both versions and the upgrade, with the add-on and its data still
+there — rather than reading the silence as permission to destroy the volume. The rule this follows,
+and the other calls that follow it, are under [Cluster lifecycle](#cluster-lifecycle).
+
 **`--delete-data` has a second gate the guardrail does not provide.** On a terminal it prints a
 warning naming the data volume, its namespace, the attached apps whose databases are in it, and
 the backup volume that survives — then requires the add-on's name to be **typed back** before
@@ -1400,8 +1407,9 @@ a version difference alone; a client more than one minor behind gets HTTP 426 na
 upgrade command, and an unknown route returns a structured error saying to upgrade.
 
 That check sees **routes**, not request parameters: an older control plane ignores a query
-parameter it does not know and answers 200. So a parameter that **narrows the scope of a write**
-rides the route instead. The guardrail name tier is the case that established the rule —
+parameter it does not know and answers 200 — and it drops an unrecognised **body field** the same
+way. So a parameter that **narrows the scope of a write** rides the route instead. The guardrail
+name tier is the case that established the rule —
 `burrow guard set --env prod --name web app.deploy deny` is `PUT /v1/guard/name/web/app.deploy`,
 so a control plane without the tier refuses the call rather than writing the same deny for every
 app in the environment. The refusal names both versions and the upgrade, and nothing is written.
@@ -1410,6 +1418,36 @@ The same shape carries the **read**, on both CLIs: `guard list --name` and `burr
 --name` are `GET /v1/guard/name/web`. A widened read is not merely cosmetic — a policy that denies
 one app, reported as the environment's, is what an agent would go on to act against — so it is
 refused with nothing shown rather than answered one tier out.
+
+**The rule now covers the calls that destroy things**, which is where a widened write costs data
+rather than accuracy:
+
+| Call | Route | What an older control plane would otherwise have done |
+| --- | --- | --- |
+| `burrow addon remove <name>` | `DELETE /v1/addons/{name}/data/keep` | **Destroyed the data volume**, and every attached app's database with it, on a request that asked to keep it — see below |
+| `burrow addon remove <name> --delete-data` | `DELETE /v1/addons/{name}/data/delete` | Destroyed the volume with no final backup, since it takes none |
+| `burrow app delete <app> --env staging` | `DELETE /v1/apps/{app}/env/{env}` | Deleted the **default environment's** app — workload, routing and release history |
+| `burrow addon detach postgres <app> --env staging` | `POST /v1/addons/detach/env/{env}` | Dropped the default environment's database |
+| `burrow addon restore postgres <app> --env staging` | `POST /v1/addons/restore/env/{env}` | Overwritten the default environment's live database |
+
+The add-on removal is the one that motivated the change and the only one where **both** answers are
+routes. `--delete-data` is an opt-in, so saying nothing means *keep my data* — but it was not always
+so, and a control plane from before the inversion destroys the volume on every removal. There is no
+request a current client can send such a control plane that means "keep", so neither disposition can
+be a parameter, and a removal against one is refused with the add-on still standing.
+
+Old clients keep working throughout: every one of these routes is **added** beside the form clients
+in the field already send, which keeps its old meaning exactly (ADR-0039 §2). For the removal that
+means an unnarrowed `DELETE /v1/addons/{name}` still keeps the data volume unless `delete_data=true`
+says otherwise. A client older than the inversion meant "destroy" by saying nothing, and gets the
+data kept instead — a narrower outcome than it asked for, named in the response as a retained volume,
+which is the only direction the ambiguity can safely be resolved in.
+
+Not everything scope-shaped has moved. The `env` filter on `secret`, `scale`, `rollback`, `expose`,
+`unexpose` and `deploy`, `archive_destination` on `addon install`, and the backup routes' `env` and
+`destination` still ride a parameter, and against an older control plane still act on the wrong
+environment or the wrong storage. They are tracked in
+[issue #485](https://github.com/burrow-cloud/burrow/issues/485).
 
 **Upgrade limit, worth stating plainly:** the shipped startup gate permits a re-run of the same
 version or **exactly one minor step forward**, and refuses skips, downgrades, and cross-major

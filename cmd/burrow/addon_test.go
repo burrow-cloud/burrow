@@ -341,9 +341,9 @@ func TestAddonConnectUnauthenticatedSendsNoToken(t *testing.T) {
 // reinstall reuses it — or the operator cannot tell a preserved database from a destroyed one.
 func TestAddonRemoveDefaultReportsKeptData(t *testing.T) {
 	isolateConfig(t)
-	var gotQuery string
+	var gotPath, gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.RawQuery
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"name": "burrow-postgres", "type": "postgres", "namespace": "burrow-addons",
 			"data_deleted": false, "retained_data_volume": "burrow-postgres",
@@ -358,8 +358,12 @@ func TestAddonRemoveDefaultReportsKeptData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addon remove: %v (stderr: %s)", err, errb.String())
 	}
-	// Without --delete-data the request must not ask for deletion: the safe default is the wire
-	// default too.
+	// Without --delete-data the request must SAY it keeps the data, in the route, rather than say
+	// nothing: a control plane that reads silence as "destroy" has to be unable to answer at all
+	// (issue #485).
+	if gotPath != "/v1/addons/burrow-postgres/data/keep" {
+		t.Errorf("path = %q, want the keep-the-data route", gotPath)
+	}
 	if strings.Contains(gotQuery, "delete_data") {
 		t.Errorf("query %q asks to delete data without --delete-data", gotQuery)
 	}
@@ -384,9 +388,9 @@ func TestAddonRemoveDefaultReportsKeptData(t *testing.T) {
 // carries the acknowledgement flag --delete-data requires with no terminal to type into (ADR-0064 §2).
 func TestAddonRemoveDeleteDataAsksAndReports(t *testing.T) {
 	isolateConfig(t)
-	var gotQuery string
+	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.RawQuery
+		gotPath = r.URL.Path
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"name": "burrow-postgres", "type": "postgres", "namespace": "burrow-addons",
 			"data_deleted": true, "retained_backup_volume": "burrow-postgres-backups",
@@ -400,8 +404,8 @@ func TestAddonRemoveDeleteDataAsksAndReports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addon remove --delete-data: %v (stderr: %s)", err, errb.String())
 	}
-	if !strings.Contains(gotQuery, "delete_data=true") {
-		t.Errorf("query %q does not carry delete_data=true", gotQuery)
+	if gotPath != "/v1/addons/burrow-postgres/data/delete" {
+		t.Errorf("path = %q, want the destroy-the-data route", gotPath)
 	}
 	s := out.String()
 	for _, want := range []string{"DESTROYED", "1 attached app(s) (web)", "lost their database", "kept the backup volume"} {
@@ -516,8 +520,8 @@ func TestAddonRemoveDeleteDataTypedNameProceeds(t *testing.T) {
 	if strings.Contains(out, "Type the add-on's name") {
 		t.Errorf("the typed-name prompt must not land on stdout:\n%s", out)
 	}
-	if len(deletes) != 1 || !strings.Contains(deletes[0], "delete_data=true") {
-		t.Fatalf("expected one removal carrying delete_data=true, got %v", deletes)
+	if len(deletes) != 1 || !strings.HasPrefix(deletes[0], "/v1/addons/burrow-postgres/data/delete?") {
+		t.Fatalf("expected one removal on the destroy-the-data route, got %v", deletes)
 	}
 }
 
@@ -576,8 +580,8 @@ func TestAddonRemoveDeleteDataAcknowledgedProceedsNonInteractively(t *testing.T)
 	if strings.Contains(errb+out, "Type the add-on's name") {
 		t.Errorf("the acknowledgement flag should skip the prompt:\n%s%s", errb, out)
 	}
-	if len(deletes) != 1 || !strings.Contains(deletes[0], "delete_data=true") {
-		t.Fatalf("expected one removal carrying delete_data=true, got %v", deletes)
+	if len(deletes) != 1 || !strings.HasPrefix(deletes[0], "/v1/addons/burrow-postgres/data/delete?") {
+		t.Fatalf("expected one removal on the destroy-the-data route, got %v", deletes)
 	}
 }
 
@@ -626,8 +630,8 @@ func TestAddonRemoveDefaultNeedsNoTerminal(t *testing.T) {
 	if strings.Contains(errb+out, "Type the add-on's name") {
 		t.Errorf("a removal without --delete-data must not prompt:\n%s%s", errb, out)
 	}
-	if len(deletes) != 1 || strings.Contains(deletes[0], "delete_data") {
-		t.Fatalf("expected one removal that does not ask to delete data, got %v", deletes)
+	if len(deletes) != 1 || !strings.HasPrefix(deletes[0], "/v1/addons/burrow-postgres/data/keep?") {
+		t.Fatalf("expected one removal on the keep-the-data route, got %v", deletes)
 	}
 }
 

@@ -60,6 +60,12 @@ func New(cfg Config) (http.Handler, error) {
 	v1 := http.NewServeMux()
 	v1.HandleFunc("GET /v1/apps", s.listApps)
 	v1.HandleFunc("DELETE /v1/apps/{app}", s.deleteApp)
+	// The environment is a ROUTE on the delete, not a query parameter, because it decides WHICH app
+	// is destroyed. A control plane without this route refuses the call (ADR-0039); one that only
+	// ever saw `?env=` would have ignored it and deleted the default environment's app — workload,
+	// routing and release history — under a line naming another environment (issue #485). The
+	// `?env=` form below stays served for a client already in the field (ADR-0039 §2–§3).
+	v1.HandleFunc("DELETE /v1/apps/{app}/env/{env}", s.deleteApp)
 	v1.HandleFunc("POST /v1/apps/{app}/deploy", s.deploy)
 	// build clones a git source and builds the image inside the cluster, then hands the result into
 	// the same guarded deploy path (ADR-0053): only the git ref crosses, never source bytes.
@@ -149,6 +155,11 @@ func New(cfg Config) (http.Handler, error) {
 	// guardrail (it drops data).
 	v1.HandleFunc("POST /v1/addons/attach", s.attachAddon)
 	v1.HandleFunc("POST /v1/addons/detach", s.detachAddon)
+	// The environment rides the route on detach for the reason it does on the app delete: it names
+	// WHICH instance loses the database. A body field is dropped by an older control plane exactly
+	// as a query parameter is — `decode` uses a plain json.Decoder — so a detach aimed at staging
+	// would drop production's database instead (issue #485).
+	v1.HandleFunc("POST /v1/addons/detach/env/{env}", s.detachAddon)
 	// backup/backups/restore manage per-app Postgres backups (ADR-0032). backup and the backups
 	// listing move no secret value (an in-cluster Job does the dump). restore is held by a confirm
 	// guardrail (it overwrites the live database).
@@ -163,6 +174,9 @@ func New(cfg Config) (http.Handler, error) {
 	// destination probe signs a request with the stored credential and reports names, never values.
 	v1.HandleFunc("GET /v1/addons/backup-health", s.backupHealthHandler)
 	v1.HandleFunc("POST /v1/addons/restore", s.restoreAddon)
+	// And on the restore, which overwrites a live database rather than dropping one: an environment
+	// the server ignores puts the dump into production's instance (issue #485).
+	v1.HandleFunc("POST /v1/addons/restore/env/{env}", s.restoreAddon)
 	// A PHYSICAL restore is a separate route from the per-app one, not a flag on it. The two act on
 	// different things — one app's database against the whole instance — and a single endpoint whose
 	// blast radius depended on which fields were populated would be one decode away from rewinding an
@@ -170,6 +184,17 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/addons/restore-instance", s.restoreInstance)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
+	// What the removal does to the DATA is a route, and BOTH dispositions are, because here it is
+	// the absence of the parameter that destroys: `delete_data` inverted the default (issue #323),
+	// so a caller that says nothing means KEEP, and a control plane that predates the inversion
+	// destroys the volume on every removal. Neither disposition can be told to such a control plane
+	// as a parameter, so neither is one, and a control plane without these routes refuses both
+	// removals with nothing touched (issue #485).
+	//
+	// They are two literal routes rather than one `{disposition}` wildcard so that no value but
+	// these two is a route at all: a typo must 404, never fall through to a default that acts.
+	v1.HandleFunc("DELETE /v1/addons/{name}/data/keep", s.removeAddonKeepData)
+	v1.HandleFunc("DELETE /v1/addons/{name}/data/delete", s.removeAddonDeleteData)
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
 	v1.HandleFunc("POST /v1/metrics/query", s.queryMetrics)
 	v1.HandleFunc("GET /v1/audit", s.audit)
@@ -216,10 +241,19 @@ type server struct {
 	engine *controlplane.Engine
 }
 
+// deleteApp removes an app entirely in one environment. The environment comes from the path where
+// the route has one and from the query otherwise: the path is the form current clients send, and is
+// what makes a control plane without named environments refuse the delete rather than perform it in
+// the default environment (see the route table); the query is the form clients already in the field
+// send, still honoured so they keep working.
 func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("app")
 	confirm := r.URL.Query().Get("confirm") == "true"
-	if err := s.engine.DeleteApp(r.Context(), app, r.URL.Query().Get("env"), confirm); err != nil {
+	env := r.PathValue("env")
+	if env == "" {
+		env = r.URL.Query().Get("env")
+	}
+	if err := s.engine.DeleteApp(r.Context(), app, env, confirm); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -917,18 +951,52 @@ func (s *server) listAddonsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, addonsResponse{Addons: addons, RetainedVolumes: retained})
 }
 
-// removeAddon tears an add-on down. delete_data is the explicit, separate opt-in that also destroys
-// the add-on's data volume; its absence is the safe default, so a caller that forgets it stops the
-// add-on rather than destroying every attached app's database (ADR-0025/0031). The response reports
-// what was kept so the caller can say so.
+// removeAddon tears an add-on down on the LEGACY route, where what happens to the data volume is the
+// `delete_data` query parameter: an explicit opt-in whose absence is the safe default, so a caller
+// that forgets it stops the add-on rather than destroying every attached app's database
+// (ADR-0025/0031). The response reports what was kept so the caller can say so.
+//
+// Current clients do not send it — they name the disposition in the route, `/data/keep` or
+// `/data/delete`, so that a control plane that predates the safe default cannot answer a removal at
+// all instead of answering it by destroying the volume (issue #485).
 //
 // skip_final_backup is the override for ADR-0064 §5's final backup, and it is absent-means-safe for
 // the same reason delete_data is: a caller that forgets it gets the backup, not the shortcut past
-// it. It is honoured only alongside delete_data, since it names nothing to skip otherwise.
+// it. It is honoured only alongside a data-destroying removal, since it names nothing to skip
+// otherwise. It stays a parameter on all three routes, and safely: it can only reach a control plane
+// that already has the route it rides on, which is one that shipped no earlier than it did.
+//
+// This route keeps the meaning clients in the field were built against, unchanged: absent
+// delete_data KEEPS the volume. It is deliberately NOT made symmetric with the two routes above by,
+// say, refusing a removal that states no disposition. The control plane is the compatibility anchor
+// (ADR-0039 §2): a client in the field must keep working and its request must not start meaning
+// something new. And the ambiguity this route carries — a client older than the inversion meant
+// "destroy" by saying nothing — can only be resolved one way, because the two readings differ by
+// whether data is destroyed. Reading it as "keep" gives such a client a narrower outcome than it
+// expected, and the response already names the volume that survived; reading it as "destroy" would
+// guess a database away.
 func (s *server) removeAddon(w http.ResponseWriter, r *http.Request) {
+	s.removeAddonWith(w, r, r.URL.Query().Get("delete_data") == "true")
+}
+
+// removeAddonKeepData serves DELETE /v1/addons/{name}/data/keep: tear the add-on down and leave its
+// data volume, so a reinstall picks the data back up.
+func (s *server) removeAddonKeepData(w http.ResponseWriter, r *http.Request) {
+	s.removeAddonWith(w, r, false)
+}
+
+// removeAddonDeleteData serves DELETE /v1/addons/{name}/data/delete: tear the add-on down AND
+// destroy its data volume, taking the ADR-0064 §5 final backup of every attached database first.
+func (s *server) removeAddonDeleteData(w http.ResponseWriter, r *http.Request) {
+	s.removeAddonWith(w, r, true)
+}
+
+// removeAddonWith performs the removal with the data disposition its caller established, from the
+// route on the two routes that state one and from the query on the legacy route.
+func (s *server) removeAddonWith(w http.ResponseWriter, r *http.Request, deleteData bool) {
 	q := r.URL.Query()
 	opts := controlplane.RemoveAddonOptions{
-		DeleteData:        q.Get("delete_data") == "true",
+		DeleteData:        deleteData,
 		SkipFinalBackup:   q.Get("skip_final_backup") == "true",
 		BackupDestination: q.Get("backup_destination"),
 		Confirm:           q.Get("confirm") == "true",
@@ -961,10 +1029,16 @@ func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
 
 // detachAddon detaches an app from an add-on, dropping its data (e.g. its Postgres database). It is
 // held by a confirm guardrail by default (ADR-0031).
+//
+// The path is authoritative for the environment where the route carries one, the body is the form
+// clients already in the field send, and the reason the path form exists is in the route table.
 func (s *server) detachAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonDetachRequest
 	if !decode(w, r, &req) {
 		return
+	}
+	if env := r.PathValue("env"); env != "" {
+		req.Env = env
 	}
 	if err := s.engine.DetachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env, req.Confirm); err != nil {
 		writeEngineError(w, err)
@@ -1047,10 +1121,16 @@ func (s *server) backupHealthHandler(w http.ResponseWriter, r *http.Request) {
 // (ADR-0032). It is held by the addon.restore confirm guardrail by default. burrowd runs an
 // in-cluster Job that pg_restores the named dump; the Job reads the superuser password only via
 // secretKeyRef.
+//
+// The path is authoritative for the environment where the route carries one, for the reason the
+// detach route above is.
 func (s *server) restoreAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonRestoreRequest
 	if !decode(w, r, &req) {
 		return
+	}
+	if env := r.PathValue("env"); env != "" {
+		req.Env = env
 	}
 	if err := s.engine.RestoreAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Backup, req.Env, req.Confirm); err != nil {
 		writeEngineError(w, err)

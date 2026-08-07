@@ -187,6 +187,12 @@ type deployState struct {
 	// issue is the injected blocking pod condition, in the same evidence shape the real adapter
 	// reads off a pod (SetImagePullFailure/SetWedgedRollout/SetIssue); nil when healthy.
 	issue *controlplane.IssueEvidence
+	// issueServing marks an injected condition that does NOT stop the workload serving — a container
+	// that was killed and came back (issue #416). The real adapter attaches that Issue on the
+	// ROLLED-OUT path and leaves availability exactly as the replica counts report it, so a fake that
+	// forced not-available for every injected condition could not model the case at all. Set by
+	// SetServingIssue and cleared by every other injector.
+	issueServing bool
 }
 
 // status builds the observed WorkloadStatus for this deploy state, mirroring the real adapter:
@@ -201,6 +207,11 @@ type deployState struct {
 // cannot pull its image while the PREVIOUS release's pods keep serving, so a naive ready>=desired
 // check would wrongly read healthy. The real adapter reaches the same verdict by inspecting the
 // updated pods; the fake models it directly.
+//
+// A condition injected with SetServingIssue is the ONE exception, and it is the other half of the
+// same principle: a container killed and restarted in place leaves a workload that really is serving
+// (issue #416), so it carries the Issue with availability untouched. Both cases exist so that a bare
+// "available" is never read as "nothing is happening" — they differ only in whether the app is up.
 func (d *deployState) status(app string) controlplane.WorkloadStatus {
 	st := controlplane.WorkloadStatus{
 		App:             app,
@@ -219,7 +230,9 @@ func (d *deployState) status(app string) controlplane.WorkloadStatus {
 			// off the pod each time it is asked.
 			ev.Image = d.spec.Image
 		}
-		st.Available = false
+		if !d.issueServing {
+			st.Available = false
+		}
 		st.Issue = ev.Message()
 		st.IssueReason = ev.Reason
 	}
@@ -675,7 +688,7 @@ func (k *Kubernetes) setImagePullFailure(app, reason, message string) {
 	defer k.mu.Unlock()
 	if d := k.deploys[k.key(app)]; d != nil {
 		d.ready = 0
-		d.issue = imagePullEvidence(reason, message)
+		d.issue, d.issueServing = imagePullEvidence(reason, message), false
 	}
 }
 
@@ -710,10 +723,33 @@ func (k *Kubernetes) SetIssue(app string, ev controlplane.IssueEvidence) {
 		return
 	}
 	if !controlplane.IsIssueReason(ev.Reason) {
-		d.issue = nil
+		d.issue, d.issueServing = nil, false
 		return
 	}
-	d.issue = &ev
+	d.issue, d.issueServing = &ev, false
+}
+
+// SetServingIssue injects a condition observed on a workload that is STILL SERVING: the shape a
+// container killed and restarted in place leaves behind (issue #416). The workload reports the
+// Issue and its reason, and its availability stays exactly what the replica counts say — which is
+// what the real adapter does on the rolled-out path, where a kill the app survived attaches an
+// Issue and never downgrades availability.
+//
+// It is a separate setter rather than a flag on SetIssue because the two model opposite facts about
+// the same app, and a test that reaches for the wrong one should not compile into a plausible-looking
+// assertion. Pass a reason outside the closed set to clear the condition.
+func (k *Kubernetes) SetServingIssue(app string, ev controlplane.IssueEvidence) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	d := k.deploys[k.key(app)]
+	if d == nil {
+		return
+	}
+	if !controlplane.IsIssueReason(ev.Reason) {
+		d.issue, d.issueServing = nil, false
+		return
+	}
+	d.issue, d.issueServing = &ev, true
 }
 
 // SetWedgedRollout models issue #307: a NEW release whose image cannot be pulled while the
@@ -726,7 +762,7 @@ func (k *Kubernetes) SetWedgedRollout(app, reason string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if d := k.deploys[k.key(app)]; d != nil {
-		d.issue = imagePullEvidence(reason, "")
+		d.issue, d.issueServing = imagePullEvidence(reason, ""), false
 	}
 }
 

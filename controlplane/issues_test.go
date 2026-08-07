@@ -99,6 +99,26 @@ func TestIssueEvidenceMessageIsActionable(t *testing.T) {
 			want:     []string{cp.ReasonOOMKilled, "no memory limit is set"},
 		},
 		{
+			// A kill the app came back from sits beside an AVAILABLE workload, so the message has to
+			// say the container is up — otherwise the reader cannot tell an outage from a limit to
+			// raise before the next kill (issue #416).
+			name:     "a survived OOM kill says the container is serving again",
+			evidence: cp.IssueEvidence{Reason: cp.ReasonOOMKilled, Container: "web", Detail: "128Mi", Restarts: 3},
+			want:     []string{cp.ReasonOOMKilled, "128Mi", "serving again now, after 3 restarts", "Raise the limit"},
+		},
+		{
+			name:     "one survived kill is counted as one, not as 1 restarts",
+			evidence: cp.IssueEvidence{Reason: cp.ReasonOOMKilled, Container: "web", Detail: "128Mi", Restarts: 1},
+			want:     []string{"after 1 restart"},
+		},
+		{
+			// The container is RUNNING at this instant, so it is not sitting in a back-off now and
+			// saying it is would send the reader looking for a pod that is down.
+			name:     "repeated restarts read off a running container do not claim a back-off",
+			evidence: cp.IssueEvidence{Reason: cp.ReasonCrashLoopBackOff, Container: "web", ExitCode: 1, Restarts: 4},
+			want:     []string{cp.ReasonCrashLoopBackOff, "has restarted 4 times", "serving again now", "exited with code 1"},
+		},
+		{
 			name:     "progress deadline admits it found nothing more specific",
 			evidence: cp.IssueEvidence{Reason: cp.ReasonProgressDeadlineExceeded},
 			want:     []string{cp.ReasonProgressDeadlineExceeded, "progress deadline", "no blocking pod condition"},

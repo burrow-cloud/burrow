@@ -104,6 +104,36 @@ func TestAwaitRolloutSettlesOnACompletedRollout(t *testing.T) {
 	}
 }
 
+// TestAwaitRolloutSettlesDespiteARecentRestart guards the boundary issue #416 draws. The status
+// surface now attaches an Issue to a workload that is SERVING but whose container was killed and
+// came back — and rolloutVerdict treats any IssueReason on an unfinished rollout as the reason it is
+// wedged. A survived kill is not that: it is a fact about the app, not a verdict on this release, and
+// a deploy must not be reported failed because the previous pod had been OOM-killed a minute ago.
+//
+// The completion test running FIRST is what keeps the two apart, and this is the test that says so.
+func TestAwaitRolloutSettlesDespiteARecentRestart(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	seedDeployment(t, client, rolloutNS, "web", 1, appsv1.DeploymentStatus{
+		ObservedGeneration: 1, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1,
+	})
+	at := metav1.NewTime(time.Now().Add(-time.Minute))
+	seedAppPod(t, client, rolloutNS, "web", "web-restarted", corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "app", Ready: true, RestartCount: 3,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: at}},
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				Reason: controlplane.ReasonOOMKilled, ExitCode: 137, FinishedAt: at,
+			}},
+		}},
+	})
+
+	out := mustSettleWithin(t, New(client, rolloutNS), "web", time.Minute)
+	if !out.Settled || out.Reason != "" {
+		t.Fatalf("outcome = %+v, want settled with no reason: the release rolled out, and a kill it survived is not a failed deploy", out)
+	}
+}
+
 // TestAwaitRolloutFailsFastOnACrashLoop is the case the post phase exists for. The old ReplicaSet is
 // still serving, so a naive readiness check would call this healthy; the wait must instead return
 // the reason the status surface reports for the same pod, and return it immediately rather than at

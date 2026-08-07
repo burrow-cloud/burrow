@@ -53,6 +53,12 @@ const (
 	// the safety backup, the wait for the pre-restore volume to go, and the recovery.
 	RestoreInstanceTimeout = controlplane.MaxRestoreInstanceWait + TimeoutMargin
 
+	// SQLTimeout bounds one statement against an app's database (ADR-0087 §7): opening the connection
+	// plus the statement at the largest bound an operator may set addon.sql_timeout to. It is derived
+	// from that ceiling rather than from the default, for the rule this file holds — a client sized to
+	// the typical case is how the bug comes back the first time an operator raises a limit.
+	SQLTimeout = controlplane.MaxAddonSQLWait + TimeoutMargin
+
 	// ProviderTimeout bounds registering a provider, which for an object store verifies the
 	// destination with a run of calls to the vendor before it answers (ADR-0063 §2-§4).
 	ProviderTimeout = controlplane.MaxProviderWait + TimeoutMargin
@@ -71,7 +77,11 @@ type budgets struct {
 	// budget would report a recovery that is still running as a failure, which is the exact defect
 	// issue #404 was.
 	restoreInstance time.Duration
-	provider        time.Duration
+	// sql is separate because an `addon sql` statement waits on the DATABASE rather than on a Job:
+	// its ceiling is the largest statement_timeout an operator may set plus the connection, which is
+	// a different bound from a backup Job's and would be wrong stated as either.
+	sql      time.Duration
+	provider time.Duration
 }
 
 // derivedBudgets is the table every constructed client gets: the constants above, each derived from
@@ -84,6 +94,7 @@ func derivedBudgets() budgets {
 		run:             RunTimeout,
 		backup:          BackupTimeout,
 		restoreInstance: RestoreInstanceTimeout,
+		sql:             SQLTimeout,
 		provider:        ProviderTimeout,
 	}
 }

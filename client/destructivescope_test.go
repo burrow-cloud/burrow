@@ -212,6 +212,13 @@ func TestDestructiveScopeRoutesOnAMatchedPair(t *testing.T) {
 		{"restore in an environment", func() error {
 			return c.RestoreAddon(ctx, "postgres", "web", "backup-1", "staging", true)
 		}, "POST", "/v1/addons/restore/env/staging"},
+		// A statement carries its environment the same way, and for a sharper version of the same
+		// reason: a dropped environment runs the caller's SQL against another instance's database of
+		// the same name (ADR-0087 §1).
+		{"a statement in an environment", func() error {
+			_, err := c.AddonSQL(ctx, "postgres", "web", "staging", "select 1", false)
+			return err
+		}, "POST", "/v1/addons/sql/env/staging"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gotMethod, gotPath, gotBody = "", "", ""

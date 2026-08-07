@@ -729,6 +729,47 @@ to the existing app namespace (§2–§3).
 | Connect an existing backend | `burrow addon connect <loki\|prometheus> --endpoint <url> [--auth]` | Registers a backend you already run — **deploys nothing**. Only `loki` (logs) and `prometheus` (metrics) are connectable. Operator CLI only. |
 | Query logs | `burrow addon logs [query] [--limit]` / `burrow-agent logs-query` | LogsQL against VictoriaLogs, or LogQL against Loki. Limit clamps to 200 when out of range or unset, capped at 1000. |
 | Query metrics | `burrow addon metrics <query>` / `burrow-agent metrics-query` | PromQL **instant** query against VictoriaMetrics or Prometheus. |
+| Run a statement | `burrow addon sql postgres <app> -c '…'` / `burrow-agent addon sql` | **Postgres only.** burrowd opens one connection to that environment's instance **as the app's own role** and runs the statement, returning column names, rows, a row count and a truncation flag — a table for a human, the rows under `--json`. Guarded by `addon.sql`, **denied by default**. |
+
+**`addon sql` is how Burrow reads a row out of a database it provisioned**
+([ADR-0087](adr/0087-running-sql-against-an-attached-database.md)). It replaces the only route there
+was — `burrow app run web -- psql "$DATABASE_URL" -c '…'` — which needed a database client in a
+production image, returned a text blob where every other verb returns structured output, and could
+not reach a database whose app would not start.
+
+Five things about it are decisions rather than details:
+
+- **It targets one app's database.** The add-on type and the app together name it, the same pair
+  `attach` and `detach` take. There is no form that reaches the instance, `template1`, or another
+  app's database, and that is structural rather than a check: burrowd connects with the credential
+  `attach` already minted for that app, so the **credential** chooses the database and the caller
+  does not. The role is `app_<app>`, never the instance superuser, so the statement can touch exactly
+  what the application can touch.
+- **No connection to the database leaves the cluster.** There is no port-forward and no proxy —
+  adding one would make the operator's kubeconfig a credential for tenant data — and because the
+  statement runs independently of the application, a database whose app is crash-looping is still
+  queryable.
+- **Burrow does not tell a read from a write.** One guardrail code gates whether the statement runs,
+  not what it does. A `SELECT` can delete (`WITH d AS (DELETE … RETURNING *) SELECT * FROM d`), a
+  function call is whatever the function is, and `COPY … TO PROGRAM` is not a query at all — so
+  classifying would take a parser plus a model of every reachable function, and a gate labelled
+  "reads are allowed" that lets a `DELETE` through is worse than no gate. A `--read-only` mode, where
+  Postgres itself refuses the write inside a `READ ONLY` transaction, is the one credible softer
+  default and ADR-0087 §6 defers it deliberately.
+- **Denied by default**, and env-scopable: `burrow guard set --env dev addon.sql allow`. Deny rather
+  than confirm because there is no upper bound on what a statement does, and a human reading a
+  hundred-line statement is not meaningfully approving it. The verb IS compiled into `burrow-agent`
+  ([ADR-0065](adr/0065-what-belongs-on-the-agent-surface.md) §3 tier 2), so the agent can see that it
+  exists and is closed and ask for it, rather than meeting `unknown command` and reaching for a shell.
+- **Every run is bounded** by `addon.sql_timeout` and `addon.sql_rows` (see
+  [Operational limits](#operational-limits)), on one connection that is closed when the statement
+  finishes. A result cut short at the cap says so; it is never silently short. `--json` renders a
+  NULL as `null` rather than as an empty string.
+
+**The statement text is written to the audit log.** That is what makes the capability accountable,
+and it means a literal in a `WHERE` clause — an email address, a token somebody pasted in — is
+recorded and readable by anyone with audit access. ADR-0087 states this as a cost rather than
+mitigating it: redacting a literal means parsing the statement, which it refuses to do.
 
 **Add-on instances are per environment, and every add-on operation names one.**
 `burrow addon install postgres --env staging` stands up a second instance (`burrow-postgres-staging`)
@@ -1109,7 +1150,7 @@ Guardrails are policy evaluated in the control plane, between the agent and the 
 - **`deny`** — refused; `--confirm` cannot bypass it. An unset or invalid disposition also
   reads as deny.
 
-These are all fifteen, in listing order, with their defaults. **Env-scopable** says whether a
+These are all sixteen, in listing order, with their defaults. **Env-scopable** says whether a
 guardrail can be set for one environment; **`--name`** says what one name of it refers to — the one
 app or the one add-on instance its effect stops at, or nothing where the effect is wider than either:
 
@@ -1125,6 +1166,7 @@ app or the one add-on instance its effect stops at, or nothing where the effect 
 | `addon.detach` | detaching an app from an add-on, destroying its data | `confirm` | no | add-on instance |
 | `addon.restore` | restoring a database over its live contents | `confirm` | no | add-on instance |
 | `addon.restore_instance` | rewinding a whole Postgres instance, taking every app's database on it back together | `confirm` | no | add-on instance |
+| `addon.sql` | running a statement against one app's database on a relational add-on | `deny` | **yes** | add-on instance |
 | `app.delete` | deleting an app entirely | `deny` | yes | app |
 | `app.rollback` | rolling back to the previous release | `allow` | yes | app |
 | `app.autoscale` | configuring autoscaling | `allow` | yes | app |
@@ -1136,6 +1178,14 @@ guardrail names two things — `addon detach <addon> <app>` drops one app's data
 `--name` means the **instance**, because that is where the data lives and where the effect stops
 ([ADR-0085](adr/0085-a-guardrail-can-name-the-app-it-guards.md) §3). Setting a guardrail for
 something it does not name is refused with a sentence saying how far it does reach.
+
+`addon.sql` is the one `addon.` code that is **env-scopable**, and that is a declaration rather than
+an oversight in the others. An add-on operation names an environment, but its instance name already
+carries it (`burrow-postgres`, `burrow-postgres-staging`), so the `--name` tier already draws the
+per-environment line. What `addon.sql` wants is the gradient
+[ADR-0087](adr/0087-running-sql-against-an-attached-database.md) §5 asks for — `allow` in
+development, `deny` in production — which is a statement about the **environment** rather than about
+one server.
 
 `burrow guard list [--env <name>] [--name <thing>]` shows the effective disposition and, for
 anything narrower than the whole cluster, which tier it came from: set for the named app or add-on
@@ -1226,6 +1276,8 @@ refusal names the limit, the tier the effective bound came from, and the command
 | `addon.metric_retention` | how long the metrics add-on keeps samples, applied when its instance is created | `744h0m0s` (24h – 87600h) | cluster |
 | `status.unschedulable_grace` | how long a pod must have been unschedulable before Burrow reports it as an Issue | `30s` (0s – 1h) | cluster |
 | `deploy.settle_timeout` | how long a deploy waits for its rollout to settle before telling a `post-deploy` hook what it observed | `5m0s` (10s – 30m) | environment or cluster |
+| `addon.sql_timeout` | how long one `addon sql` statement may run before the database aborts it | `30s` (1s – 5m) | environment or cluster |
+| `addon.sql_rows` | the largest number of rows one `addon sql` statement returns before the result is reported as truncated | `500` (1 – 10000) | environment or cluster |
 
 Two operator-owned tiers, resolved in the order guardrail dispositions already use — the
 environment's value, then the cluster's, then the built-in default:
@@ -1245,13 +1297,15 @@ and useful, but ADR-0068 leaves the shape of an agent-side read undecided, so th
 
 Limits:
 
-- **Three of the five are cluster-only**, and deliberately: how long a build's logs are worth
+- **Three of the seven are cluster-only**, and deliberately: how long a build's logs are worth
   keeping, how long metric samples are kept, and how long a pod may sit unschedulable are all facts
   about the cluster. An operator who tuned the last of them per environment would be encoding the
   same scheduler fact twice and would eventually disagree with themselves. The replica ceiling and
   the settle timeout go the other way: a production ceiling and a development ceiling are the case
   that motivates limits at all, and a production rollout of twenty replicas takes longer to settle
-  than a development one of one.
+  than a development one of one. The two `addon.sql` bounds go the same way: a development database
+  is disposable and an agent exploring it is the whole value, while a statement holding locks in
+  production is an outage.
 - **`deploy.settle_timeout` costs nothing unless the deploy has something to report on.** It is the
   bound on the only wait Burrow performs on the deploy path, and that wait happens when there is a
   `post-deploy` hook to tell the result to or a derived dependency to check once the rollout is
@@ -1394,9 +1448,9 @@ on that environment's `postgres`, so it removes *the* add-on for an environment 
 attached app in it with it. The surface-guard test
 asserts its absence rather than leaving it to be a property of the current command tree.
 
-The reversibility tier ships too: `app.delete` and `dns.delete` are `deny` by default, so
-`burrow-agent delete` and `burrow-agent domain remove` exist, are refused, and say what would
-change the answer (see [Guardrails](#guardrails)).
+The reversibility tier ships too: `app.delete`, `dns.delete` and `addon.sql` are `deny` by default,
+so `burrow-agent delete`, `burrow-agent domain remove` and `burrow-agent addon sql` exist, are
+refused, and say what would change the answer (see [Guardrails](#guardrails)).
 
 **An absent capability is legible rather than a dead end** (ADR-0065 §7). `burrow agent capabilities`
 lists them on the operator CLI, and `burrow guard list --json`

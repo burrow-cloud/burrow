@@ -36,7 +36,7 @@ to the credential it carries, what that lets it do, and what it cannot:
 | You, via `kubectl` | your admin kubeconfig (`~/.kube/config`) | Everything on the cluster: any resource, any namespace, cluster-scoped objects, exec, delete, RBAC. No Burrow guardrails. | Nothing restricts it. Full cluster admin, and it is what installs Burrow. |
 | You, via `burrow` (setup and governance): `install`, `upgrade`, `cluster ingress install`, `config registry`, `config provider`, `env add`, `env list --discover`, `guard set`, `addon`, `domain`, `audit` | your admin kubeconfig | Install/upgrade Burrow, write its namespaces/RBAC/secrets, set the guardrail policy, configure registry and DNS-provider credentials, install add-ons, manage DNS, read the audit log. | These are admin operations. `guard set` lives here on purpose: only the human, with admin, changes guardrails. |
 | You, via `burrow` (operate an app): `app deploy`/`status`/`logs`/`scale`/`rollback`/`autoscale`, `app config`/`secret`, `publish` | the scoped agent kubeconfig (falls back to admin if none) | Operate apps through burrowd, with every action guardrail-checked and audited. | Reach the cluster around burrowd; the guardrails gate what is allowed. You still have kubectl for raw access. |
-| Your agent, via `burrow-agent` | only the scoped kubeconfig (`~/.burrow/agents/<env>`), granting exactly: proxy to the `burrowd` Service, and `get` the `burrowd-api-token` Secret | The `burrow-agent` operate-verbs only (deploy, status, logs, scale, rollback, autoscale, config, secret list/unset, expose, addons, domains, reachability, metrics/logs query, guard read-only, audit read), every mutating verb guardrailed and audited. | Anything else on the cluster: no arbitrary kubectl, no other Secrets, no other namespaces, no cluster-scoped reads, no exec, and it cannot change guardrails. It cannot leave burrowd. |
+| Your agent, via `burrow-agent` | only the scoped kubeconfig (`~/.burrow/agents/<env>`), granting exactly: proxy to the `burrowd` Service, and `get` the `burrowd-api-token` Secret | The `burrow-agent` operate-verbs only (deploy, status, logs, scale, rollback, autoscale, config, secret list/unset, expose, addons, domains, reachability, metrics/logs query, guard read-only, audit read), every mutating verb guardrailed and audited. `addon sql` is on the list too and is **denied by default** — see below. | Anything else on the cluster: no arbitrary kubectl, no other Secrets, no other namespaces, no cluster-scoped reads, no exec, and it cannot change guardrails. It cannot leave burrowd. |
 
 **Two independent layers.** The scoped credential is the wall that keeps the agent from going around
 burrowd (touching the cluster directly). The guardrails are the policy for what is allowed through
@@ -49,6 +49,26 @@ surface do that (and the guard verb is read-only). Per-principal authorization i
 is denied specific endpoints regardless of tooling, is future work, and the `principal` seam added in
 ADR-0038 is the groundwork for it. A hardening-conscious operator should lean on the guardrails plus
 environment isolation, not assume the scope alone is a per-operation boundary.
+
+**One verb reaches application DATA, and it is closed until you open it.** `burrow-agent addon sql`
+runs a statement against one app's database ([ADR-0087](adr/0087-running-sql-against-an-attached-database.md)).
+Every other verb acts on the platform's own state; this one reads and can write what your users put
+in. Three things bound it, and the third is the one to act on:
+
+- burrowd connects as the **app's own role**, never the instance superuser, with the credential it
+  already minted at attach — so a statement can touch exactly what that application can touch, and
+  no more. The credential chooses the database, so there is no form of the verb that reaches the
+  instance, `template1`, or another app's database.
+- No connection to a database leaves the cluster. There is no port-forward and no proxy, deliberately:
+  a tunnel would make your kubeconfig a credential for tenant data.
+- The `addon.sql` guardrail is **`deny`** out of the box and nothing opens it but you. It is
+  env-scopable, and the shape to reach for is a gradient rather than a switch:
+  `burrow guard set --env dev addon.sql allow` and nothing in production. Burrow does **not** tell a
+  read from a write and will not pretend to — a `SELECT` can delete — so "allow" means allow, not
+  "allow reads".
+
+Opening it also means the statement text lands in the audit log, which is what makes it accountable
+and means a literal in a `WHERE` clause is recorded where anyone with audit access sees it.
 
 ### Joining an already-installed cluster (multi-user)
 

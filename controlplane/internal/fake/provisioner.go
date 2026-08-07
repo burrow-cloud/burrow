@@ -15,6 +15,7 @@ import (
 var (
 	_ controlplane.DatabaseProvisioner = (*Provisioner)(nil)
 	_ controlplane.AppDatabaseLister   = (*Provisioner)(nil)
+	_ controlplane.DatabaseQuerier     = (*Provisioner)(nil)
 )
 
 // AppDatabase is one provisioning call: the app whose database was ensured or dropped, and the
@@ -44,6 +45,12 @@ type Provisioner struct {
 	ensureErr error
 	dropErr   error
 	listErr   error
+	// statements records every AppStatement the engine handed down, in order, so a test can assert
+	// what was run, against which database, and under which bounds — including that the statement
+	// text was passed through UNMODIFIED, which ADR-0087 §6 requires (Burrow parses nothing).
+	statements  []controlplane.AppStatement
+	queryResult controlplane.SQLResult
+	queryErr    error
 }
 
 // NewProvisioner returns an empty fake provisioner.
@@ -164,6 +171,50 @@ func (p *Provisioner) DropAppDatabase(_ context.Context, app, env string) error 
 	p.dropped = append(p.dropped, AppDatabase{App: app, Env: env})
 	delete(p.databases[env], app)
 	return nil
+}
+
+// SetQueryResult makes QueryAppDatabase return res (with the engine's own identity fields left for
+// it to fill), modelling whatever the database answered — rows, a command tag, or a SQLError, which
+// is an outcome rather than a failure (ADR-0087 §4).
+func (p *Provisioner) SetQueryResult(res controlplane.SQLResult) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.queryResult = res
+}
+
+// SetQueryError makes QueryAppDatabase return err (nil clears it) — the statement not running at
+// all, as distinct from the database refusing it.
+func (p *Provisioner) SetQueryError(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.queryErr = err
+}
+
+// Statements returns the statements QueryAppDatabase was called with, in order.
+func (p *Provisioner) Statements() []controlplane.AppStatement {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]controlplane.AppStatement(nil), p.statements...)
+}
+
+// QueryAppDatabase records the call and answers with the seeded result. It refuses an app with no
+// database on that environment's instance, because the real one does: the credential it would
+// connect with is the one attach wrote, and an app that was never attached has none. Modelling that
+// is what keeps a test from asserting a statement ran against a database that does not exist.
+func (p *Provisioner) QueryAppDatabase(_ context.Context, q controlplane.AppStatement) (controlplane.SQLResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := validateProvisionEnv(q.Env); err != nil {
+		return controlplane.SQLResult{}, err
+	}
+	p.statements = append(p.statements, q)
+	if p.queryErr != nil {
+		return controlplane.SQLResult{}, p.queryErr
+	}
+	if !p.databases[q.Env][q.App] {
+		return controlplane.SQLResult{}, fmt.Errorf("fake: %s has no database on environment %q's instance: %w", q.App, q.Env, controlplane.ErrNotFound)
+	}
+	return p.queryResult, nil
 }
 
 // validateProvisionEnv refuses an unnamed environment exactly as the real provisioner does, so a

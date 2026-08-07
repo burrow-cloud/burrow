@@ -1504,6 +1504,74 @@ func (c *Client) RestoreInstance(ctx context.Context, addonType, env string, opt
 	return out, err
 }
 
+// SQLResult is what one statement against an app's database produced (ADR-0087 §4): columns and
+// rows, so a caller composes on the result rather than parsing a rendering of it.
+//
+// A statement that returned no row set carries its command tag and the number of rows it affected
+// instead. A statement the database REFUSED carries Error, with Postgres's own message and SQLSTATE
+// unmodified — a database error is an outcome, not a call that failed.
+type SQLResult struct {
+	Addon       string   `json:"addon"`
+	App         string   `json:"app"`
+	Environment string   `json:"environment"`
+	Columns     []string `json:"columns"`
+	// Rows are the result's rows, aligned with Columns. A NULL is a nil entry (JSON null), which is
+	// the distinction a plain string per cell would lose.
+	Rows     [][]*string `json:"rows"`
+	RowCount int         `json:"row_count"`
+	// Truncated reports the result had more rows than RowLimit and the rest were not read — reported
+	// rather than silent (ADR-0087 §7).
+	Truncated bool `json:"truncated"`
+	RowLimit  int  `json:"row_limit"`
+	// Command is Postgres's command tag ("SELECT 3", "UPDATE 2"), absent for a truncated read.
+	Command      string    `json:"command,omitempty"`
+	RowsAffected int64     `json:"rows_affected"`
+	Error        *SQLError `json:"error,omitempty"`
+}
+
+// SQLError is the database's own refusal of a statement, carried unmodified. The SQLSTATE is what
+// makes it something to branch on rather than prose to match against.
+type SQLError struct {
+	Message  string `json:"message"`
+	SQLState string `json:"sqlstate,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+	Hint     string `json:"hint,omitempty"`
+	Position int32  `json:"position,omitempty"`
+}
+
+// AddonSQL runs one statement against an app's database on a relational add-on and returns its
+// columns and rows (ADR-0087). burrowd runs it, connecting as the app's own role with the credential
+// it already minted — no connection to the database leaves the cluster, and the statement runs
+// independently of the application, so a database whose app will not start is still queryable.
+//
+// It is gated by the addon.sql guardrail, DENIED by default: a refusal comes back as a guardrail
+// outcome naming the operator command that would relax it per environment. Passing confirm satisfies
+// a disposition an operator has moved to confirm and does nothing to a deny.
+//
+// A statement the database refuses is NOT an error here: it comes back in the result's Error with
+// its SQLSTATE. An error from this call means the statement did not run.
+//
+// The ENVIRONMENT RIDES THE ROUTE, for the reason RestoreAddon's does, and more sharply: a statement
+// aimed at staging, against a control plane that drops the field, runs against the app of that name
+// on the default environment's instance — and the statement may write (issue #485).
+func (c *Client) AddonSQL(ctx context.Context, addonType, app, env, statement string, confirm bool) (SQLResult, error) {
+	var out SQLResult
+	body := map[string]any{"addon": addonType, "app": app, "statement": statement, "confirm": confirm}
+	if env == "" {
+		// Unnarrowed, so the route and the body stay exactly as they were (see DetachAddon).
+		body["env"] = ""
+		return out, c.doWithin(ctx, c.budget.sql, http.MethodPost, "/v1/addons/sql", body, &out)
+	}
+	// The environment rides the ROUTE and only the route: one place carries the scope, so there is no
+	// second copy for a mismatch to hide in.
+	path := "/v1/addons/sql/env/" + url.PathEscape(env)
+	if err := c.doWithin(ctx, c.budget.sql, http.MethodPost, path, body, &out); err != nil {
+		what := fmt.Sprintf("this control plane cannot run a statement against a NAMED environment, so nothing was run: the same call against it would have reached %q's database on the default environment's instance rather than on %q's", app, env)
+		return SQLResult{}, scopeRefusal(what, "per-environment add-on instances", err)
+	}
+	return out, nil
+}
+
 // LogEntry is one record from a logs query.
 type LogEntry struct {
 	Time    string `json:"time,omitempty"`

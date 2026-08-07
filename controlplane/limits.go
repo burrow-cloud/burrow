@@ -86,6 +86,29 @@ const (
 	// Raising this bound therefore does reach ordinary apps, and a caller's own bound has to outlast
 	// it: see MaxDeployWait in apiwait.go, which is what `client` sizes itself from.
 	LimitDeploySettleTimeout LimitCode = "deploy.settle_timeout"
+
+	// LimitAddonSQLTimeout is how long one `addon sql` statement may run before Postgres aborts it.
+	// It is applied as the connection's own `statement_timeout`, so the bound is enforced by the
+	// engine rather than by a client that could decide not to wait.
+	//
+	// ADR-0087 §7 puts this here by name: a statement timeout, a row cap and a single connection are
+	// what stop one query sitting on the instance holding locks, and they are operational limits
+	// rather than guardrails in exactly ADR-0068 §2's sense — they are not dispositions, there is
+	// nothing to confirm, and `guard set` does not reach them. Whether the caller was ALLOWED to run
+	// the statement is a different question, and `addon.sql` answers it.
+	//
+	// Environment-scoped, on ADR-0068 §1's test: a development environment where an agent is
+	// exploring a disposable database wants a longer leash than production, where a statement holding
+	// locks is an outage.
+	LimitAddonSQLTimeout LimitCode = "addon.sql_timeout"
+
+	// LimitAddonSQLRows is the largest number of rows one `addon sql` statement returns. Exceeding it
+	// is not an error: the result carries the rows up to the cap and reports itself as truncated, so
+	// a caller is never handed a silently short answer (ADR-0087 §4, §7).
+	//
+	// Environment-scoped for the reason the timeout is — the same statement is a survey in
+	// development and a load on the instance in production.
+	LimitAddonSQLRows LimitCode = "addon.sql_rows"
 )
 
 // LimitKind is the shape of a limit's value, which decides how it is parsed, formatted, and
@@ -225,6 +248,38 @@ var knownLimits = []limitDef{
 		// than a literal because a caller's own bound is derived from that constant: the ceiling and
 		// the thing that has to outlast it are one symbol, so they cannot drift (issue #404).
 		max: int64(MaxDeploySettleTimeout),
+	},
+	{
+		code:        LimitAddonSQLTimeout,
+		kind:        LimitKindDuration,
+		description: "how long one `addon sql` statement may run before the database aborts it",
+		envScoped:   true,
+		// Thirty seconds. Long enough for an unindexed count over a real table, short enough that a
+		// statement holding locks is over before anybody notices — which is the bound's whole job.
+		def: int64(30 * time.Second),
+		// A second is the floor. Below that the connection setup would routinely outlast the
+		// statement's own budget, so the bound would be measuring the wrong thing.
+		min: int64(time.Second),
+		// Five minutes is the ceiling, and it is MaxAddonSQLTimeout rather than a literal because a
+		// caller's own budget is derived from that constant (client/timeouts.go): the ceiling and the
+		// thing that has to outlast it are one symbol, so they cannot drift.
+		max: int64(MaxAddonSQLTimeout),
+	},
+	{
+		code:        LimitAddonSQLRows,
+		kind:        LimitKindCount,
+		description: "the largest number of rows one `addon sql` statement returns before the result is reported as truncated",
+		envScoped:   true,
+		// 500 rows is a screenful for a human and a readable page for an agent, and it is a bound on
+		// the WORK as well as the output: the connection is closed at the cap rather than drained.
+		def: 500,
+		// One row. A cap of zero would return nothing and report every result truncated, which is not
+		// a bound anyone means to set.
+		min: 1,
+		// Ten thousand. The result is assembled in burrowd's memory and travels over one API
+		// response, so the ceiling is where "read some rows" stops being what this verb is for; an
+		// export is `addon backup`.
+		max: 10000,
 	},
 }
 

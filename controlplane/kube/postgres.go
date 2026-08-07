@@ -10,11 +10,13 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -27,12 +29,18 @@ var (
 )
 
 // appIdentifier is the strict pattern an app (and thus its database/role) name must match before
-// any SQL is built: a lowercase letter followed by lowercase letters, digits, or hyphens
+// anything is built from it: a lowercase letter followed by lowercase letters, digits, or hyphens
 // (ADR-0031). App names already satisfy this (they are DNS-1123 labels); validating again here is
-// defense-in-depth so a name can never carry SQL into an admin statement.
+// defense-in-depth.
+//
+// It now bounds TWO things rather than one. A name still cannot carry SQL into a statement — the one
+// statement left interpolates it — and it also cannot carry anything into an object name: admitting
+// no dot is what lets provisioningObjectName split an instance from an app again, and admitting no
+// uppercase or underscore is what keeps the result a legal Kubernetes name.
 var appIdentifier = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-// validateAppIdentifier rejects any name that is not a strict identifier, BEFORE it reaches SQL.
+// validateAppIdentifier rejects any name that is not a strict identifier, BEFORE it reaches SQL or
+// an object name.
 func validateAppIdentifier(app string) error {
 	if app == "" {
 		return fmt.Errorf("app name is empty: %w", controlplane.ErrInvalid)
@@ -50,21 +58,22 @@ func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
-// quoteLiteral renders s as a single-quoted SQL string literal with embedded single quotes doubled
-// — used for the generated role password, which cannot be a bind parameter in CREATE/ALTER ROLE.
-// The password is base64url (no quotes), so this too is defensive.
-func quoteLiteral(s string) string {
-	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
-}
-
 // PostgresTarget is one Postgres instance a provisioner may act on: the instance's name and the
 // namespace it runs in. Everything the provisioner needs in order to reach a server is composed from
-// this pair — the Service it dials and the Secret it reads that server's superuser password from,
-// both named after the instance (ADR-0067 §1) — so the pair is the whole answer to "which database
-// is this".
+// this pair — the CloudNativePG `Cluster` an attachment's objects name, the Service it dials, and
+// the Secret it reads that server's superuser password from, all three named after the instance
+// (ADR-0067 §1) — so the pair is the whole answer to "which database is this".
+//
+// ONE FIELD STILL NAMES ALL THREE, and that is worth stating because declarative provisioning was
+// the moment it might have stopped being true. The `Database` and `DatabaseRole` objects reference
+// their instance by `cluster.name`, which is the `Cluster` Burrow wrote at install under exactly the
+// name below, and the additional managed Service and the superuser Secret already carry it
+// (cnpg_cluster.go). Nothing here needs splitting; if a future instance is ever reached under one
+// name and credentialed under another, this is the type that grows a second field rather than the
+// place that works around it.
 type PostgresTarget struct {
-	// Instance is the add-on instance's name, which is also the name of its Service and of its
-	// superuser Secret.
+	// Instance is the add-on instance's name, which is also the name of its CloudNativePG `Cluster`,
+	// of its Service, and of its superuser Secret.
 	Instance string
 	// Namespace is the namespace that instance runs in, within the cluster the provisioner's
 	// Kubernetes client is pointed at.
@@ -108,18 +117,34 @@ func AddonInstanceTarget(addonNamespace string) PostgresTargetFunc {
 	}
 }
 
-// PostgresProvisioner is the production controlplane.DatabaseProvisioner: it connects to an
-// environment's Postgres add-on instance as the burrow_admin superuser and gives each app its own
-// database and login role (ADR-0031). It reads that instance's superuser password from the Secret of
-// the same name in the instance's namespace through a Kubernetes client (a pod can only mount a
-// Secret in its own namespace, so the password lives there), and reaches the instance at its Service
-// on port 5432. It holds no long-lived database handle — it opens a short-lived connection per
-// operation so a rotated superuser password is always picked up.
+// PostgresProvisioner is the production controlplane.DatabaseProvisioner: it gives each app its own
+// database and login role on an environment's Postgres add-on instance (ADR-0031).
+//
+// IT PROVISIONS BY WRITING OBJECTS, NOT BY RUNNING ADMIN SQL (ADR-0066 §2). An attach writes a
+// CloudNativePG `Database` and a `DatabaseRole` and waits for the operator to report them applied;
+// the operator runs the SQL, on the instance it already manages, with the credential it already
+// holds. Three things follow, and they are the reason for the change rather than a side effect of
+// it:
+//
+//   - **burrowd holds no superuser DSN for a provision.** The credential stays where the database
+//     is. Nothing on this path reads the superuser Secret, and no generated password is ever
+//     interpolated into a statement.
+//   - **A provision survives a restart.** The object is the record that the database was asked for,
+//     so a control plane that dies mid-attach leaves the operator finishing rather than an app
+//     half-provisioned with nothing recording that it was ever asked for.
+//   - **Deleting the objects does not destroy the data.** Both carry a `retain` reclaim policy, so a
+//     detach releases the description and keeps the database (ADR-0064).
+//
+// TWO STATEMENTS SURVIVE, both deliberately, and neither is a superuser one on the attach path.
+// A `Database` cannot express a grant, so the `REVOKE CONNECT ... FROM PUBLIC` that keeps one app's
+// role out of another app's database runs on a connection opened as the database's own OWNER
+// (lockDownDatabase). And ListAppDatabases still asks the server, because the question it answers —
+// whose data is in this volume — is one the objects cannot answer about a database a detach retained.
 //
 // EVERY OPERATION IS SCOPED TO AN ENVIRONMENT (ADR-0067 §1). The provisioner has no notion of "the"
-// instance: the environment argument selects the host and the credential together, so a call cannot
-// reach an instance other than the named environment's, and a call that names no environment reaches
-// none at all. That is what makes the issue #339 collision unrepresentable rather than merely
+// instance: the environment argument selects the instance and the credential together, so a call
+// cannot reach an instance other than the named environment's, and a call that names no environment
+// reaches none at all. That is what makes the issue #339 collision unrepresentable rather than merely
 // avoided — `web` in staging and `web` in production are databases with the same name on different
 // servers, and no code path can resolve one to the other.
 //
@@ -128,40 +153,80 @@ func AddonInstanceTarget(addonNamespace string) PostgresTargetFunc {
 // instance outside it.
 type PostgresProvisioner struct {
 	client kubernetes.Interface
+	// dynamic addresses the `Database` and `DatabaseRole` custom resources an attach provisions
+	// through. It is REQUIRED, not optional: there is no admin-SQL path to fall back to, so a
+	// provisioner without one refuses to provision rather than reaching for the superuser.
+	dynamic dynamic.Interface
 	// target is the instance set this provisioner acts on, given at construction. There is no
 	// fallback if it is unset — see targetFor.
 	target PostgresTargetFunc
-	// adminEndpoint, when non-empty, overrides the host:port the provisioner DIALS to run admin
-	// SQL. In production it is empty: burrowd is an in-cluster pod and reaches the instance at its
-	// Service DNS name (instanceHost). It exists only so an out-of-cluster test (which cannot
-	// resolve a .svc name) can point the admin connection at a port-forwarded local address. It
-	// never affects the app's DATABASE_URL, which is always the target's in-cluster Service name.
-	adminEndpoint string
+	// instanceEndpoint, when non-empty, overrides the host:port the provisioner DIALS for the two
+	// statements it still runs. In production it is empty: burrowd is an in-cluster pod and reaches
+	// the instance at its Service DNS name (instanceHost). It exists only so an out-of-cluster test
+	// (which cannot resolve a .svc name) can point those connections at a port-forwarded local
+	// address. It never affects the app's DATABASE_URL, which is always the target's in-cluster
+	// Service name.
+	instanceEndpoint string
+	// open is how a connection is opened, so a test can substitute one and assert what was run and
+	// as whom. Nil means openPostgres — see connect.
+	open sqlOpenFunc
+	// The bounds on waiting for somebody else's work: how long the operator has to apply an object,
+	// how long a rotated password has to reach the running server, and how often each is re-read.
+	// Fields rather than constants so a test does not have to spend them.
+	applyTimeout      time.Duration
+	credentialTimeout time.Duration
+	pollInterval      time.Duration
 }
 
-// NewPostgresProvisioner returns a provisioner over the given clientset that acts on the instances
-// target names. The target is a required argument rather than something the provisioner works out
-// for itself: there is no value meaning "whichever instance this cluster happens to have"
-// (PostgresTargetFunc). An in-cluster single-tenant install passes AddonInstanceTarget.
-func NewPostgresProvisioner(client kubernetes.Interface, target PostgresTargetFunc) *PostgresProvisioner {
-	return &PostgresProvisioner{client: client, target: target}
+// The default bounds on the two waits an attach performs. Both are generous: an object is applied in
+// well under a second on a healthy instance, and the numbers are sized for an instance that is still
+// starting rather than for the ordinary case.
+const (
+	defaultCNPGApplyTimeout      = 2 * time.Minute
+	defaultCNPGCredentialTimeout = 90 * time.Second
+	defaultCNPGPollInterval      = time.Second
+)
+
+// NewPostgresProvisioner returns a provisioner over the given clients that acts on the instances
+// target names.
+//
+// Both the dynamic client and the target are required arguments rather than things the provisioner
+// works out for itself. The target because there is no value meaning "whichever instance this
+// cluster happens to have" (PostgresTargetFunc); the dynamic client because provisioning IS writing
+// custom resources, so a caller that has not wired one has not wired a provisioner — and a missing
+// argument is a better place to find that out than a failed attach. An in-cluster single-tenant
+// install passes AddonInstanceTarget.
+func NewPostgresProvisioner(client kubernetes.Interface, dyn dynamic.Interface, target PostgresTargetFunc) *PostgresProvisioner {
+	return &PostgresProvisioner{
+		client:            client,
+		dynamic:           dyn,
+		target:            target,
+		applyTimeout:      defaultCNPGApplyTimeout,
+		credentialTimeout: defaultCNPGCredentialTimeout,
+		pollInterval:      defaultCNPGPollInterval,
+	}
 }
 
-// WithAdminEndpoint overrides the host:port the provisioner dials for admin SQL (see adminEndpoint).
-// It is for tests that reach the instance through a port-forward; production leaves it unset.
-func (p *PostgresProvisioner) WithAdminEndpoint(hostPort string) *PostgresProvisioner {
-	p.adminEndpoint = hostPort
+// WithInstanceEndpoint overrides the host:port the provisioner dials (see instanceEndpoint). It is
+// for tests that reach the instance through a port-forward; production leaves it unset.
+func (p *PostgresProvisioner) WithInstanceEndpoint(hostPort string) *PostgresProvisioner {
+	p.instanceEndpoint = hostPort
 	return p
 }
 
 // NewPostgresProvisionerFromConfig builds a provisioner from a REST config, acting on the instances
-// target names.
+// target names. It wires both clients from the one config, so burrowd cannot end up with a typed
+// client pointed at one cluster and a dynamic client pointed at another.
 func NewPostgresProvisionerFromConfig(cfg *rest.Config, target PostgresTargetFunc) (*PostgresProvisioner, error) {
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kube: building clientset: %w", err)
 	}
-	return NewPostgresProvisioner(client, target), nil
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("kube: building dynamic client: %w", err)
+	}
+	return NewPostgresProvisioner(client, dyn, target), nil
 }
 
 // targetFor resolves environment env to the instance this provisioner was configured to act on. A
@@ -186,18 +251,59 @@ func (p *PostgresProvisioner) instanceHost(env string) (string, error) {
 	return target.Host(), nil
 }
 
-// adminHostPort is the host:port the provisioner DIALS to run admin SQL for env: the test override
-// if set, otherwise the in-cluster Service address. Distinct from instanceHost so the override never
-// leaks into an app's DATABASE_URL.
-func (p *PostgresProvisioner) adminHostPort(env string) (string, error) {
-	if p.adminEndpoint != "" {
-		return p.adminEndpoint, nil
+// dialHostPort is the host:port the provisioner DIALS for env: the test override if set, otherwise
+// the in-cluster Service address. Distinct from instanceHost so the override never leaks into an
+// app's DATABASE_URL.
+func (p *PostgresProvisioner) dialHostPort(env string) (string, error) {
+	if p.instanceEndpoint != "" {
+		return p.instanceEndpoint, nil
 	}
 	host, err := p.instanceHost(env)
 	if err != nil {
 		return "", err
 	}
 	return host + ":5432", nil
+}
+
+// sqlConn is the part of *sql.DB the provisioner uses. It is an interface so a test can substitute a
+// recorder and assert WHAT was run and, more to the point, AS WHOM — "this attach opened no
+// superuser connection" is a claim about a connection string, and a claim about a connection string
+// is only testable if something can see it.
+type sqlConn interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	Close() error
+}
+
+// sqlOpenFunc opens a live connection to dsn, or reports why it could not. A returned connection has
+// already been reached — an opener that only parsed the DSN would defer every failure to the first
+// statement, and one caller (the credential wait) is asking precisely whether the server accepts
+// this credential yet.
+type sqlOpenFunc func(ctx context.Context, dsn string) (sqlConn, error)
+
+// openPostgres is the production opener: the pgx driver through database/sql, pinged so the returned
+// handle is known to be usable.
+func openPostgres(ctx context.Context, dsn string) (sqlConn, error) {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// connect opens a connection to dsn through the provisioner's opener. The DSN is a secret value, so
+// it appears in no error raised here — the caller adds the context that names the app and the
+// environment instead.
+func (p *PostgresProvisioner) connect(ctx context.Context, dsn string) (sqlConn, error) {
+	open := p.open
+	if open == nil {
+		open = openPostgres
+	}
+	return open(ctx, dsn)
 }
 
 // superuserPassword reads the generated superuser password from environment env's instance Secret.
@@ -243,8 +349,12 @@ func (p *PostgresProvisioner) adminDSN(password, database, hostPort string) stri
 // connectAdmin opens a short-lived superuser connection to the named maintenance database on
 // environment env's instance. Host and credential are resolved from env together, so there is no
 // state on the provisioner that could point one operation at a different server than another.
-func (p *PostgresProvisioner) connectAdmin(ctx context.Context, env, database string) (*sql.DB, error) {
-	hostPort, err := p.adminHostPort(env)
+//
+// EXACTLY ONE CALLER REMAINS: ListAppDatabases. Provisioning does not use it any more (ADR-0066 §2),
+// and a second caller appearing here is worth arguing about rather than adding — every one of them
+// is a superuser DSN burrowd holds.
+func (p *PostgresProvisioner) connectAdmin(ctx context.Context, env, database string) (sqlConn, error) {
+	hostPort, err := p.dialHostPort(env)
 	if err != nil {
 		return nil, err
 	}
@@ -252,13 +362,9 @@ func (p *PostgresProvisioner) connectAdmin(ctx context.Context, env, database st
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("pgx", p.adminDSN(pw, database, hostPort))
+	db, err := p.connect(ctx, p.adminDSN(pw, database, hostPort))
 	if err != nil {
-		// sql.Open does not carry the DSN into the error, but be explicit: name no value.
-		return nil, fmt.Errorf("kube: opening admin connection for environment %q: %w", env, err)
-	}
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		// The error never carries the DSN: name the environment, not the value.
 		return nil, fmt.Errorf("kube: connecting to the %q environment's postgres instance: %w", env, err)
 	}
 	return db, nil
@@ -267,14 +373,41 @@ func (p *PostgresProvisioner) connectAdmin(ctx context.Context, env, database st
 // roleName is the login role for app: app_<app>. app is already validated.
 func roleName(app string) string { return "app_" + app }
 
+// appDSN composes app's connection string against hostPort. Built with net/url so the password is
+// correctly percent-encoded into the userinfo. This is a SECRET value.
+func appDSN(role, password, hostPort, app string) string {
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(role, password),
+		Host:     hostPort,
+		Path:     "/" + app,
+		RawQuery: "sslmode=disable",
+	}
+	return u.String()
+}
+
 // EnsureAppDatabase provisions (idempotently) an isolated database and login role for app on
 // environment env's instance and returns its DATABASE_URL with a freshly generated password
-// (ADR-0031). It validates env and app against the strict identifier patterns and quotes every
-// identifier BEFORE any SQL runs. On a fresh attach it CREATEs the role and database and locks the
-// database down to that role; on a re-attach (role or database already present) it ALTERs the role's
-// password to rotate, so the returned URL is always current. The returned connection string is a
-// SECRET value — the caller writes it straight into the app's Secret and never logs, audits, or
-// returns it.
+// (ADR-0031). The returned connection string is a SECRET value — the caller writes it straight into
+// the app's Secret and never logs, audits, or returns it.
+//
+// IT OPENS NO SUPERUSER CONNECTION. The database and the role are a `Database` and a `DatabaseRole`
+// object, and CloudNativePG runs the SQL for them on the instance it already manages (ADR-0066 §2).
+// The password is written into a Secret the operator reads, so it never reaches a statement either.
+//
+// The sequence is four steps and the order is load-bearing:
+//
+//  1. The role's password Secret, BEFORE the role that references it — a `DatabaseRole` pointing at
+//     a Secret that does not exist yet is the operator racing the control plane into a failure.
+//  2. The `DatabaseRole`, before the `Database` that names it as owner.
+//  3. The `Database`.
+//  4. A wait on both, because provisioning is asynchronous now: `status.applied` is the only thing
+//     that says the server has actually got them.
+//
+// AN EXISTING INSTALL IS ADOPTED, NOT RE-PROVISIONED. An app attached before this existed has its
+// database and role already; the objects written here describe them rather than ask for them again,
+// and CloudNativePG reconciles what is there. That is the same idempotence a re-attach has always
+// relied on, moved from an existence check in this function into the operator (applyCNPGObject).
 //
 // Idempotence is what made the missing environment dangerous rather than merely wrong (issue #339):
 // finding an existing database is the NORMAL case of a re-attach, so a second environment's attach
@@ -285,9 +418,13 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 	if err := validateAppIdentifier(app); err != nil {
 		return "", err
 	}
-	// The environment is resolved to an instance BEFORE any connection or SQL: an empty or malformed
+	// The environment is resolved to an instance BEFORE anything is written: an empty or malformed
 	// environment is ErrInvalid here, never a silent fallback to whichever instance exists.
 	target, err := p.targetFor(env)
+	if err != nil {
+		return "", err
+	}
+	databases, roles, err := p.cnpgObjects(target)
 	if err != nil {
 		return "", err
 	}
@@ -296,61 +433,99 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 	if err != nil {
 		return "", err
 	}
+	name := provisioningObjectName(target.Instance, app)
+	// The descriptive labels an add-on's resources carry, so an attachment's objects are legible in
+	// the namespace as this add-on's, for this environment. Not the selectable `managed-by` one:
+	// AddonVolumes uses that to attribute claims, and nothing should select these by sweeping.
+	labels := map[string]string{
+		addonLabel:    string(controlplane.AddonPostgres),
+		addonEnvLabel: env,
+	}
+	// The Secret carries one label the objects do not, and it is functional rather than descriptive:
+	// it is what makes CloudNativePG notice a rewritten password.
+	secretLabels := map[string]string{cnpgReloadLabel: "true"}
+	for k, v := range labels {
+		secretLabels[k] = v
+	}
 
-	db, err := p.connectAdmin(ctx, env, "postgres")
+	if err := p.ensureRolePasswordSecret(ctx, target, app, password, secretLabels); err != nil {
+		return "", err
+	}
+	if err := applyCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, target.Namespace, databaseRoleSpec(target, app), labels); err != nil {
+		return "", err
+	}
+	if err := applyCNPGObject(ctx, databases, cnpgDatabaseKind, name, target.Namespace, databaseSpec(target, app), labels); err != nil {
+		return "", err
+	}
+	if err := awaitCNPGApplied(ctx, roles, cnpgDatabaseRoleKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return "", fmt.Errorf("kube: provisioning the login role for %s in environment %q: %w", app, env, err)
+	}
+	if err := awaitCNPGApplied(ctx, databases, cnpgDatabaseKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return "", fmt.Errorf("kube: provisioning the database for %s in environment %q: %w", app, env, err)
+	}
+
+	// The address this process can actually reach the instance at, which in production is the same
+	// in-cluster Service name the app is handed and out of a test's port-forward is not.
+	dial, err := p.dialHostPort(env)
 	if err != nil {
 		return "", err
 	}
-	defer db.Close()
-
-	// Role: create with the generated password, or rotate the password if it already exists. Both
-	// quote the identifier and inline the password as a quoted literal (it cannot be a bind param
-	// in CREATE/ALTER ROLE). The password value never appears in any error or log.
-	var roleExists bool
-	if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", role).Scan(&roleExists); err != nil {
-		return "", fmt.Errorf("kube: checking role for %s: %w", app, err)
+	if err := p.lockDownDatabase(ctx, appDSN(role, password, dial, app), app, env); err != nil {
+		return "", err
 	}
-	if roleExists {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD %s", quoteIdent(role), quoteLiteral(password))); err != nil {
-			return "", fmt.Errorf("kube: rotating role password for %s: %w", app, err)
+	return appDSN(role, password, target.Host()+":5432", app), nil
+}
+
+// lockDownDatabase runs the one statement provisioning cannot express as an object:
+//
+//	REVOKE CONNECT ON DATABASE <app> FROM PUBLIC
+//
+// WITHOUT IT THE DATABASE-PER-APP BOUNDARY IS NOT A BOUNDARY. PostgreSQL grants CONNECT on a new
+// database to PUBLIC by default, and PUBLIC includes every login role on the server — so every other
+// app's role could open every other app's database. That is ADR-0031's isolation, and it is also the
+// whole safety argument of `burrow addon sql`, which connects as the app's own role precisely
+// because that role reaches its own database and no other (ADR-0087 §3). The `Database` CRD has no
+// grant field of any kind, so the statement has to run somewhere, and dropping it silently would
+// take a load-bearing property out of the product without failing anything.
+//
+// IT RUNS AS THE DATABASE'S OWNER, NOT AS A SUPERUSER, and that is what keeps the superuser DSN gone.
+// A database's owner holds its privileges with grant option implicitly, so the owner can revoke
+// PUBLIC's default CONNECT on its own database — the same credential the app itself is about to be
+// handed, spent here for one statement and closed. No `GRANT CONNECT ... TO <role>` follows it: the
+// owner's own access is not a grant that can be revoked away, and the object now declares that
+// ownership rather than a statement asserting it.
+//
+// THE CONNECTION IS ALSO THE PROOF. Reaching the server with this credential is what says the
+// password written into the Secret has actually been applied to the role — a rotation the operator
+// reads out of a labelled Secret rather than out of the object's spec, and therefore the one part of
+// an attach whose completion no `status.applied` covers. So a refusal is retried for a bounded
+// window rather than failed on: a re-attach hands back a URL that has been used, or it fails loudly,
+// and never hands back one that merely ought to work.
+func (p *PostgresProvisioner) lockDownDatabase(ctx context.Context, dsn, app, env string) error {
+	deadline := time.Now().Add(p.credentialTimeout)
+	for {
+		db, err := p.connect(ctx, dsn)
+		if err == nil {
+			// Idempotent: re-running it on a database already locked down is a no-op, which is what
+			// makes it safe on every attach rather than only on the first.
+			_, execErr := db.ExecContext(ctx, fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM PUBLIC", quoteIdent(app)))
+			db.Close()
+			if execErr != nil {
+				return fmt.Errorf("kube: revoking public connect on %s's database in environment %q: %w", app, env, execErr)
+			}
+			return nil
 		}
-	} else {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD %s", quoteIdent(role), quoteLiteral(password))); err != nil {
-			return "", fmt.Errorf("kube: creating role for %s: %w", app, err)
+		if time.Now().After(deadline) {
+			// The error names the app and the environment; the DSN it could not open appears nowhere.
+			return fmt.Errorf("kube: %s's own credential was not accepted by the %q environment's postgres instance within %s, so the connection string was not handed out — CloudNativePG applies a rewritten password from the Secret it is labelled %s on, and this is where that not happening surfaces: %w",
+				app, env, p.credentialTimeout, cnpgReloadLabel, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(p.pollInterval):
 		}
 	}
-
-	// Database: create owned by the role if absent (CREATE DATABASE cannot run in a transaction and
-	// has no IF NOT EXISTS, so guard it with an existence check).
-	var dbExists bool
-	if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)", app).Scan(&dbExists); err != nil {
-		return "", fmt.Errorf("kube: checking database for %s: %w", app, err)
-	}
-	if !dbExists {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE %s OWNER %s", quoteIdent(app), quoteIdent(role))); err != nil {
-			return "", fmt.Errorf("kube: creating database for %s: %w", app, err)
-		}
-	}
-
-	// Lock the database down to this app's role: revoke CONNECT from PUBLIC, grant it to the role.
-	// Idempotent — re-running is a no-op.
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM PUBLIC", quoteIdent(app))); err != nil {
-		return "", fmt.Errorf("kube: revoking public connect for %s: %w", app, err)
-	}
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s", quoteIdent(app), quoteIdent(role))); err != nil {
-		return "", fmt.Errorf("kube: granting connect for %s: %w", app, err)
-	}
-
-	// Compose the app's connection string. Built with net/url so the password is correctly
-	// percent-encoded into the userinfo. This is the secret value the caller writes into the Secret.
-	appURL := &url.URL{
-		Scheme:   "postgres",
-		User:     url.UserPassword(role, password),
-		Host:     target.Host() + ":5432",
-		Path:     "/" + app,
-		RawQuery: "sslmode=disable",
-	}
-	return appURL.String(), nil
 }
 
 // ListAppDatabases returns the apps that hold a Burrow-provisioned database on environment env's
@@ -359,6 +534,15 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 // the only place that knows: attach records the FACT of attachment nowhere but the app's own Secret
 // and the databases on this server, and it is these databases — not a row somewhere — that a
 // data-deleting add-on removal destroys.
+//
+// THIS IS THE ONE PATH THAT STILL OPENS A SUPERUSER CONNECTION, and it is worth saying why it was not
+// moved onto the `Database` objects with the rest of provisioning (ADR-0066 §2). The objects would
+// be a cheaper and more available answer to "who is attached", but they are a different answer to the
+// question this method is actually asked: `addon remove --delete-data` names the apps whose data the
+// volume is about to take with it (ADR-0064 §3), and a database a DETACH retained has no object left
+// describing it. Listing objects would under-report exactly the databases a destructive confirmation
+// most needs to name, and under-reporting is the dangerous direction for that message. Closing this
+// last superuser read therefore needs the enumeration itself decided, not just re-plumbed.
 //
 // The set is derived from ownership, not from names: a database whose owner is one of the app_<app>
 // login roles attach creates is a provisioned app database, and its name is the app's name. That
@@ -398,32 +582,80 @@ ORDER BY d.datname`
 	return apps, nil
 }
 
-// DropAppDatabase drops app's database and login role from environment env's instance (ADR-0031).
-// It validates env and app and quotes identifiers before any SQL. Dropping an already-absent
-// database or role is a no-op (IF EXISTS), not an error. The database is dropped WITH (FORCE) so
-// live sessions do not block teardown. The environment is required and unvalidated values are
-// refused before the connection is opened: this is the destructive half of the pair, so reaching
-// another environment's server here would drop a database that is still in use (ADR-0067 §1).
+// DropAppDatabase drops app's database and login role from environment env's instance (ADR-0031) —
+// the destructive side of detach, and it stays destructive. Dropping something already absent is a
+// no-op, not an error, so a detach of a half-finished attach can still finish.
+//
+// IT DESTROYS THE DATA THROUGH THE OBJECTS, WHICH IS THE ONLY THING THAT CHANGED. Both are described
+// one last time with a `delete` reclaim policy and then deleted; CloudNativePG runs the DROPs. There
+// is no superuser connection here any more than there is on the attach path, and no statement of
+// Burrow's at all.
+//
+// The reclaim policy is FLIPPED HERE rather than written at attach, and that asymmetry is the safety
+// property: an object that goes away for any reason other than a detach — a namespace teardown, a
+// collector, somebody tidying with kubectl — takes nothing with it, because the policy it is holding
+// at that moment says `retain`. Only a deliberate detach ever writes `delete`, immediately before
+// deleting the thing it wrote it on.
+//
+// The objects are ENSURED before they are destroyed, and that is not redundant. An app attached
+// before provisioning became declarative has a database and a role and no objects describing them;
+// without this, detaching it would delete nothing and report success, leaving the data of an app
+// somebody believed they had scrubbed. Describing it first is what makes the destructive path reach
+// exactly the databases the old one did.
+//
+// THE ORDER IS DICTATED BY POSTGRESQL. `allowConnections: false` goes on before anything is deleted,
+// because the operator issues a plain `DROP DATABASE IF EXISTS` and a single live session refuses it
+// — where the admin SQL this replaced used `WITH (FORCE)`. Then the database, then the role, each
+// waited on: PostgreSQL will not drop a role that still owns a database, so releasing the role's
+// description before the database is gone is a DROP ROLE that fails forever.
+//
+// The environment is required and unvalidated values are refused before anything is written, for the
+// reason they always were: this is the destructive half of the pair, so reaching another
+// environment's server here would drop a database that is still in use (ADR-0067 §1).
 func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app, env string) error {
 	if err := validateAppIdentifier(app); err != nil {
 		return err
 	}
-	if _, err := p.targetFor(env); err != nil {
-		return err
-	}
-	role := roleName(app)
-
-	db, err := p.connectAdmin(ctx, env, "postgres")
+	target, err := p.targetFor(env)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", quoteIdent(app))); err != nil {
-		return fmt.Errorf("kube: dropping database for %s: %w", app, err)
+	databases, roles, err := p.cnpgObjects(target)
+	if err != nil {
+		return err
 	}
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP ROLE IF EXISTS %s", quoteIdent(role))); err != nil {
-		return fmt.Errorf("kube: dropping role for %s: %w", app, err)
+	name := provisioningObjectName(target.Instance, app)
+	labels := map[string]string{
+		addonLabel:    string(controlplane.AddonPostgres),
+		addonEnvLabel: env,
+	}
+
+	// The role's description first and waited on, because the database below names it as owner: a
+	// `Database` whose owner the operator has not reconciled yet is an object it refuses and retries,
+	// which turns an ordering detail into seconds of an attach-shaped error in the log.
+	if err := applyCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, target.Namespace, databaseRoleTeardownSpec(target, app), labels); err != nil {
+		return err
+	}
+	if err := awaitCNPGApplied(ctx, roles, cnpgDatabaseRoleKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: describing %s's login role in environment %q before dropping it: %w", app, env, err)
+	}
+	if err := applyCNPGObject(ctx, databases, cnpgDatabaseKind, name, target.Namespace, databaseTeardownSpec(target, app), labels); err != nil {
+		return err
+	}
+	// Waiting for the closed door specifically: until the operator has applied it, a reconnect is
+	// still possible and the drop below would be racing whatever did it.
+	if err := awaitCNPGApplied(ctx, databases, cnpgDatabaseKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: closing %s's database to new connections in environment %q before dropping it: %w", app, env, err)
+	}
+	if err := deleteCNPGObject(ctx, databases, cnpgDatabaseKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: dropping the database for %s in environment %q: %w", app, env, err)
+	}
+	if err := deleteCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: dropping the login role for %s in environment %q: %w", app, env, err)
+	}
+	// The credential last, once there is nothing left for it to open.
+	if err := p.client.CoreV1().Secrets(target.Namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("kube: deleting the role password secret %s/%s: %w", target.Namespace, name, err)
 	}
 	return nil
 }

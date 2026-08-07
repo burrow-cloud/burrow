@@ -76,7 +76,7 @@ func TestSQLRefusesBeforeConnecting(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset(attachedSecret("web", "burrow-apps", controlplane.AppDatabaseURLKey,
 		"postgres://app_web:pw@burrow-postgres.burrow-addons.svc:5432/web"))
-	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
+	p := NewPostgresProvisioner(client, nil, AddonInstanceTarget(addonNS))
 
 	base := controlplane.AppStatement{
 		App: "web", Env: controlplane.DefaultEnvironment, Namespace: "burrow-apps",
@@ -119,7 +119,7 @@ func TestSQLUnattachedAppIsNotFound(t *testing.T) {
 	}
 
 	t.Run("no Secret at all", func(t *testing.T) {
-		p := NewPostgresProvisioner(fake.NewSimpleClientset(), AddonInstanceTarget(addonNS))
+		p := NewPostgresProvisioner(fake.NewSimpleClientset(), nil, AddonInstanceTarget(addonNS))
 		_, err := p.QueryAppDatabase(ctx, q)
 		if !errors.Is(err, controlplane.ErrNotFound) {
 			t.Fatalf("QueryAppDatabase = %v, want ErrNotFound", err)
@@ -131,7 +131,7 @@ func TestSQLUnattachedAppIsNotFound(t *testing.T) {
 
 	t.Run("a Secret with no connection string under the recorded key", func(t *testing.T) {
 		client := fake.NewSimpleClientset(attachedSecret("web", "burrow-apps", "SOMETHING_ELSE", "x"))
-		p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
+		p := NewPostgresProvisioner(client, nil, AddonInstanceTarget(addonNS))
 		if _, err := p.QueryAppDatabase(ctx, q); !errors.Is(err, controlplane.ErrNotFound) {
 			t.Fatalf("QueryAppDatabase = %v, want ErrNotFound", err)
 		}
@@ -145,7 +145,7 @@ func TestSQLDoesNotLeakTheConnectionString(t *testing.T) {
 	ctx := context.Background()
 	const garbage = "not-a-dsn://app_web:supersecretpassword@nowhere"
 	client := fake.NewSimpleClientset(attachedSecret("web", "burrow-apps", controlplane.AppDatabaseURLKey, garbage))
-	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
+	p := NewPostgresProvisioner(client, nil, AddonInstanceTarget(addonNS))
 
 	_, err := p.QueryAppDatabase(ctx, controlplane.AppStatement{
 		App: "web", Env: controlplane.DefaultEnvironment, Namespace: "burrow-apps",

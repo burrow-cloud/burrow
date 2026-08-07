@@ -1369,16 +1369,28 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 		// name rather than as a tier of its own; it is named in the message and the audit args
 		// (ADR-0035 phase 2c, ADR-0067 §1).
 		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon detach", GuardrailAddonDetach, confirm,
-			fmt.Sprintf("detaching %q from the %s add-on in environment %s (drops its database and role)", app, t, targetEnv))); err != nil {
+			fmt.Sprintf("detaching %q from the %s add-on in environment %s (removes its credential; the database and its data are kept)", app, t, targetEnv))); err != nil {
 		return err
 	}
 
-	// Remove the connection-string key first (the app stops seeing the credential), then drop the
-	// database/role. Both act in this environment only. A missing key is a no-op.
+	// Remove the connection-string key first (the app stops seeing the credential), then ROLL THE APP
+	// OFF IT, and only then drop the database and role. Both act in this environment only. A missing
+	// key, and a missing workload, are each a no-op.
+	//
+	// THE ROLL COMES BEFORE THE DROP, and that ordering is load-bearing rather than tidy. PostgreSQL
+	// refuses to drop a database that anything is still connected to, and an app holding a pool is
+	// exactly that; the pods have to be replaced by ones with no connection string before the drop
+	// can succeed. It also fails in the better direction — a workload that cannot be rolled aborts
+	// the detach with the data still there, rather than destroying it and then reporting that the
+	// app was left running against nothing.
 	k := e.k8s.WithNamespace(ns)
 	if err := k.UnsetSecretKey(ctx, app, key); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
 		return fmt.Errorf("detach addon %s for %s: removing %s: %w", t, app, key, err)
+	}
+	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
+		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
+		return fmt.Errorf("detach addon %s for %s: rolling workload: %w", t, app, err)
 	}
 	if err := e.dbProvisioner.DropAppDatabase(ctx, app, targetEnv); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
@@ -1386,15 +1398,10 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	}
 	// The attachment is gone, so the recorded name describes nothing. Leaving it would have a later
 	// attach of the same app default to a name the app no longer reads. Best-effort: the variable and
-	// the database are already gone, and failing the detach afterwards would report a completed
+	// the attachment are already gone, and failing the detach afterwards would report a completed
 	// teardown as broken — and a stale row only ever names a key a re-attach would then write.
 	if err := e.db.DeleteAddonEnvKey(ctx, string(t), app, targetEnv); err != nil {
 		slog.WarnContext(ctx, "forgetting the attachment's recorded variable name failed", "app", app, "env", targetEnv, "error", err)
-	}
-	// Roll the app so it drops the removed credential. A missing workload is not an error.
-	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
-		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
-		return fmt.Errorf("detach addon %s for %s: rolling workload: %w", t, app, err)
 	}
 	e.recordExecution(ctx, auditOpAddonDetach, app, args, nil)
 	return nil

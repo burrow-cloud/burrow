@@ -161,9 +161,16 @@ type runCall struct {
 	// Env is the container environment the Job was built with: the app's config, plus the BURROW_*
 	// variables the phase tells the hook (ADR-0072 §4). A test asserts on it because "what is a post
 	// hook actually told" is the whole question that phase exists to answer, and because a dependency
-	// check must be given the app's own environment (ADR-0076 §4). No secret travels this way — the
-	// Secret arrives via envFrom in the real adapter, which is why it is absent here.
+	// check must be given the app's own environment (ADR-0076 §4). No secret VALUE travels this way —
+	// the Secret is projected by the real adapter, which is why no value is here.
 	Env map[string]string
+	// SecretFiles and SecretEnvKeys are the app's secret projection the Job was built with: which
+	// keys it reads as files and which are still environment variables (ADR-0089 §4). They are key
+	// NAMES and filenames, never a value. A test asserts on them because a Job that sourced the
+	// Secret wholesale would put a key the app marked file-only back into an environment every child
+	// process of the command inherits.
+	SecretFiles   controlplane.SecretMounts
+	SecretEnvKeys []string
 	// Probe is the ADR-0076 §4 request to make Burrow's binary executable inside the app's image,
 	// nil for an ordinary run. A test asserts the deploy-time dependency check asked for it and that
 	// the plan it carried names key NAMES and addresses rather than values.
@@ -1213,7 +1220,8 @@ func (k *Kubernetes) RunJob(ctx context.Context, spec controlplane.RunSpec) (con
 	for key, v := range spec.Env {
 		env[key] = v
 	}
-	*k.runs = append(*k.runs, runCall{App: spec.App, Image: spec.Image, Command: append([]string(nil), spec.Command...), TTLSeconds: spec.TTLSeconds, Namespace: k.ns, Env: env, Probe: spec.Probe})
+	*k.runs = append(*k.runs, runCall{App: spec.App, Image: spec.Image, Command: append([]string(nil), spec.Command...), TTLSeconds: spec.TTLSeconds, Namespace: k.ns, Env: env, Probe: spec.Probe,
+		SecretFiles: spec.SecretFiles, SecretEnvKeys: append([]string(nil), spec.SecretEnvKeys...)})
 	inFlight, res := *k.runJobHook, *k.runResult
 	k.mu.Unlock()
 	if inFlight != nil {

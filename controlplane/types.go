@@ -106,6 +106,16 @@ type RunSpec struct {
 	// No code travels here either (ADR-0004): the init container's image is Burrow's own published
 	// image, named by the adapter, and the only thing that moves is a reference to it.
 	Probe *ProbeSpec
+	// SecretFiles and SecretEnvKeys are the app's secret projection, carried here for the same
+	// reason Image and Env are: a Job runs the app's own image with the app's own environment
+	// (ADR-0048 §2), and the app's environment is now two doors rather than one.
+	//
+	// A run is where this matters MOST. An environment variable is inherited by every child process,
+	// and a run is what starts a shell; a Job that sourced the Secret wholesale would put a key the
+	// app marked file-only (ADR-0089 §4) back exactly where the app took it out of. Carrying the
+	// projection means the Job reads it as the file it is.
+	SecretFiles   SecretMounts
+	SecretEnvKeys []string
 }
 
 // ProbeSpec is the extra a Job needs to run Burrow's probe inside the app's image (ADR-0076 §4).

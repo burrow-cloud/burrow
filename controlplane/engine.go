@@ -722,38 +722,40 @@ func (e *Engine) SetSecret(ctx context.Context, app, env, key, value string, noR
 	if noRestart {
 		return nil
 	}
-	// An app that marked a key file-only ENUMERATES its secret environment (ADR-0089 §4), so a key
-	// set here is not in the running pod template at all and a restart would roll the app without it.
-	// Reapply instead — slower, and correct. This is the cost the record names, and it is paid only
-	// by the apps that asked for it.
-	if enumerated, err := e.enumeratesSecretEnv(ctx, app, env); err != nil {
-		return fmt.Errorf("set secret %s: %w", app, err)
-	} else if enumerated {
-		_, err := e.reapplyWorkload(ctx, k, "set secret", app, envName(env))
-		return err
-	}
-	// envFrom is read only at pod start, so writing a value under an existing key does not roll
-	// the Deployment on its own — bump the restart annotation. A missing workload means nothing is
-	// running yet: not an error, the change lands on the next deploy.
-	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("set secret %s: rolling workload: %w", app, err)
-	}
-	return nil
+	return e.rollForSecretChange(ctx, k, "set secret", app, env)
 }
 
-// enumeratesSecretEnv reports whether app has left the envFrom fast path in env (ADR-0089 §4) — the
-// question `secret set` and `secret unset` have to ask before they roll a workload. envFrom picks up
-// whatever the Secret holds, so under it a restart is enough; an enumerated template names each key,
-// so adding or removing one is a template change and only a reapply carries it.
-func (e *Engine) enumeratesSecretEnv(ctx context.Context, app, env string) (bool, error) {
+// rollForSecretChange makes a running workload see a change to its per-app Secret, and it is THE ONE
+// PLACE that knows how (ADR-0089 §4). Every path that writes or removes a key out of band goes
+// through it — `secret set`, `secret unset`, an add-on attach or detach, a restore cutover.
+//
+// TWO WAYS, AND WHICH IS CORRECT IS A PROPERTY OF THE APP RATHER THAN OF THE CALLER. An app that
+// sources its Secret wholesale through envFrom needs only a RESTART: envFrom is read at pod start and
+// picks up whatever the Secret holds by then, so even a key that did not exist when the pod template
+// was written arrives. An app with a file-only key ENUMERATES its secret environment, and an
+// enumerated template names each key — so a new key is not in it, a restart rolls the pod without the
+// value that was just written, and only a REAPPLY carries it.
+//
+// It is a function rather than a rule to remember because the callers are not all `secret set`, and
+// the failure is silent for the ones that are not: an `addon attach` writes DATABASE_URL straight
+// through the Kubernetes seam, and the app would come back with the attach reported successful, the
+// connection string in the Secret, and no DATABASE_URL in its environment.
+//
+// A missing workload is not an error on either path: nothing is running yet, and the change lands on
+// the next deploy.
+func (e *Engine) rollForSecretChange(ctx context.Context, k Kubernetes, op, app, env string) error {
 	mounts, err := e.secretMountsFor(ctx, app, envName(env))
 	if err != nil {
-		return false, err
+		return fmt.Errorf("%s %s: %w", op, app, err)
 	}
-	return mounts.AnyFileOnly(), nil
+	if mounts.AnyFileOnly() {
+		_, err := e.reapplyWorkload(ctx, k, op, app, envName(env))
+		return err
+	}
+	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("%s %s: rolling workload: %w", op, app, err)
+	}
+	return nil
 }
 
 // UnsetSecret removes one key from an app's per-app Secret and, unless noRestart, rolls the
@@ -778,26 +780,7 @@ func (e *Engine) UnsetSecret(ctx context.Context, app, env, key string, noRestar
 	if noRestart {
 		return nil
 	}
-	// And the same for a removal on an app that enumerates its secret environment (ADR-0089 §4): the
-	// pod template still names the key that just went away. The optional secretKeyRef means the pod
-	// would start regardless, but it would start with a stale template, so reapply and leave the
-	// template saying what the Secret says.
-	if enumerated, err := e.enumeratesSecretEnv(ctx, app, env); err != nil {
-		return fmt.Errorf("unset secret %s: %w", app, err)
-	} else if enumerated {
-		_, err := e.reapplyWorkload(ctx, k, "unset secret", app, envName(env))
-		return err
-	}
-	// envFrom is read only at pod start, so removing a key from the Secret does not roll the
-	// Deployment on its own — bump the restart annotation. A missing workload means nothing is
-	// running yet: not an error, the change lands on the next deploy.
-	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("unset secret %s: rolling workload: %w", app, err)
-	}
-	return nil
+	return e.rollForSecretChange(ctx, k, "unset secret", app, env)
 }
 
 // Status returns the combined control-plane and cluster view of an app: the most recent
@@ -1309,9 +1292,13 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 		}
 		previous = current
 	}
-	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
+	// An attach writes a key the app may never have held, so it rolls through the one helper that
+	// knows whether this app's pod template names its secret keys (ADR-0089 §4). A restart alone
+	// would bring an enumerated app back with the connection string in its Secret, absent from its
+	// environment, and the attach reported successful.
+	if err := e.rollForSecretChange(ctx, k, "attach addon "+string(t), app, targetEnv); err != nil {
 		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
-		return AttachResult{}, fmt.Errorf("attach addon %s for %s: rolling workload: %w", t, app, err)
+		return AttachResult{}, err
 	}
 	e.recordExecution(ctx, auditOpAddonAttach, app, args, nil)
 	return AttachResult{App: app, Addon: t, Environment: targetEnv, SecretKey: key, PreviousSecretKey: previous}, nil
@@ -1421,9 +1408,9 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
 		return fmt.Errorf("detach addon %s for %s: removing %s: %w", t, app, key, err)
 	}
-	if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {
+	if err := e.rollForSecretChange(ctx, k, "detach addon "+string(t), app, targetEnv); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
-		return fmt.Errorf("detach addon %s for %s: rolling workload: %w", t, app, err)
+		return err
 	}
 	if err := e.dbProvisioner.DropAppDatabase(ctx, app, targetEnv); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)

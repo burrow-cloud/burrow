@@ -479,8 +479,10 @@ arguments; both stores are sourced at deploy time.
 
 Secret values traverse the control-plane API, are written straight into the Kubernetes Secret,
 and are never written to Postgres, never logged, and never audited (the audit record carries
-sorted **key names** only). The same Secret is what `burrow app run` injects, so a one-off
-command sees `DATABASE_URL` and everything else exactly as the app does.
+sorted **key names** only). The same Secret is what `burrow app run`, a lifecycle hook and the
+deploy-time dependency check inject, so a one-off command sees `DATABASE_URL` and everything else
+exactly as the app does — including through the same door: a `--no-env` key reaches those Jobs as a
+**file**, not as a variable every child process of the command would inherit.
 
 **A secret key can be mounted as a file** ([ADR-0089](adr/0089-a-secret-can-reach-an-app-as-a-file.md)).
 `burrow app secret mount <app> KEY` projects that one key into a file; `--filename` names it
@@ -505,7 +507,10 @@ failure this exists to avoid.
 wholesale and cannot exclude one key, so the first `--no-env` key on an app switches its Pod template
 to an enumerated `secretKeyRef` per remaining key. On that app, `secret set` of a **new** key
 re-applies the workload rather than bumping the restart annotation — slower, and the key still
-arrives. **An app with no `--no-env` key keeps `envFrom` and its Pod template is unchanged.**
+arrives. Every other path that writes a key into an app's Secret out of band — `addon attach`,
+`addon detach`, a restore cutover — rolls the app the same way, so an attach still lands
+`DATABASE_URL` in the container. **An app with no `--no-env` key keeps `envFrom` and its Pod
+template is unchanged.**
 A key is file-only only while it is mounted: re-mount with `--no-env=false`, or `unmount` it, and the
 variable is back. A mount that does not mention `--no-env` leaves the marking as it is, so renaming a
 file cannot silently return a credential to the environment.

@@ -1222,11 +1222,6 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 	labels := map[string]string{nameLabel: spec.App, managedByLabel: managedByValue}
 	selector := map[string]string{nameLabel: spec.App}
 
-	var env []corev1.EnvVar
-	for _, k := range sortedKeys(spec.Env) { // deterministic order
-		env = append(env, corev1.EnvVar{Name: k, Value: spec.Env[k]})
-	}
-
 	// A positive MetricsPort annotates the pod template so the metrics add-on's scraper (a
 	// vmagent with a Prometheus-style discovery rule) finds and scrapes /metrics on that port
 	// (ADR-0026). Zero adds no annotations, so a deploy without it is unchanged.
@@ -1249,24 +1244,7 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 		podAnnotations[controlplane.ReleaseAnnotation] = spec.ReleaseID
 	}
 
-	// The keys the app asked to receive as FILES (ADR-0089 §1-§3). This is the app PodSpec's first
-	// and only Volumes entry; an app that mounts nothing gets none of it, and its pod template is
-	// what it was before mounts existed.
-	volumes, mounts := secretVolume(spec)
-	if len(mounts) > 0 {
-		// The DIRECTORY reaches the app, and the value never does (§3) — the shape build.go already
-		// uses for its own credentials. It is appended AFTER the app's own config so Burrow's value
-		// wins if a config var of the same name was set: the variable's whole job is to name where
-		// Burrow put the files, and an app pointed at a directory Burrow did not mount would read
-		// nothing and fail at the credential.
-		env = append(env, corev1.EnvVar{Name: controlplane.SecretsDirEnvVar, Value: spec.SecretFiles.Directory()})
-	}
-
-	// And how the Secret reaches the ENVIRONMENT — wholesale, or enumerated around the keys that were
-	// taken out of it (ADR-0089 §4). Resolved after the config vars above because the enumerated form
-	// has to see the names they already took.
-	secretEnv, envFrom := secretEnvironment(spec, env)
-	env = append(env, secretEnv...)
+	env, envFrom, volumes, mounts := appEnvironment(spec.App, spec.Env, spec.SecretFiles, spec.SecretEnvKeys)
 
 	replicas := spec.Replicas
 	dep := &appsv1.Deployment{
@@ -1308,6 +1286,40 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 	return dep
 }
 
+// appEnvironment assembles everything a container gets from the app's config and its per-app Secret:
+// the config vars, how the Secret reaches the environment, and the volume its mounted keys are read
+// as files through.
+//
+// IT IS ONE FUNCTION BECAUSE THE THREE ANSWERS ARE ONE DECISION. `burrow app run`, a lifecycle hook
+// and the deploy-time dependency check all run the app's own image with the app's own environment,
+// and each of them built that environment itself — so a key the app deliberately took OUT of its
+// environment (ADR-0089 §4) came straight back in the one-off Job that runs a shell in the same
+// image, which is the process most likely to hand it to a child. A caller that asks for the app's
+// environment now gets the app's environment, including the parts of it that are files.
+func appEnvironment(app string, cfg map[string]string, files controlplane.SecretMounts, envKeys []string) ([]corev1.EnvVar, []corev1.EnvFromSource, []corev1.Volume, []corev1.VolumeMount) {
+	var env []corev1.EnvVar
+	for _, k := range sortedKeys(cfg) { // deterministic order
+		env = append(env, corev1.EnvVar{Name: k, Value: cfg[k]})
+	}
+	// The keys the app asked to receive as FILES (ADR-0089 §1-§3). This is the app PodSpec's first
+	// and only Volumes entry; an app that mounts nothing gets none of it, and its pod template is
+	// what it was before mounts existed.
+	volumes, mounts := secretVolume(app, files)
+	if len(mounts) > 0 {
+		// The DIRECTORY reaches the app, and the value never does (§3) — the shape build.go already
+		// uses for its own credentials. It is appended AFTER the app's own config so Burrow's value
+		// wins if a config var of the same name was set: the variable's whole job is to name where
+		// Burrow put the files, and an app pointed at a directory Burrow did not mount would read
+		// nothing and fail at the credential.
+		env = append(env, corev1.EnvVar{Name: controlplane.SecretsDirEnvVar, Value: files.Directory()})
+	}
+	// And how the Secret reaches the ENVIRONMENT — wholesale, or enumerated around the keys that were
+	// taken out of it (§4). Resolved after the config vars above because the enumerated form has to
+	// see the names they already took.
+	secretEnv, envFrom := secretEnvironment(app, files, envKeys, env)
+	return append(env, secretEnv...), envFrom, volumes, mounts
+}
+
 // secretEnvironment decides how the app's per-app Secret reaches the container's ENVIRONMENT: the
 // wholesale envFrom that every app had before ADR-0089 §4 existed, or one enumerated secretKeyRef
 // per key that is still an environment variable. It returns exactly one of the two, and taken is the
@@ -1331,15 +1343,15 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 // A key that a config var already named is skipped rather than emitted twice: the kubelet applies
 // envFrom first and lets Env override it, so config beat the Secret under the fast path, and it has
 // to beat it here too or a file-only key would silently change which value an app reads.
-func secretEnvironment(spec controlplane.WorkloadSpec, taken []corev1.EnvVar) ([]corev1.EnvVar, []corev1.EnvFromSource) {
-	if !spec.SecretFiles.AnyFileOnly() {
+func secretEnvironment(app string, files controlplane.SecretMounts, envKeys []string, taken []corev1.EnvVar) ([]corev1.EnvVar, []corev1.EnvFromSource) {
+	if !files.AnyFileOnly() {
 		// Source every key in the app's per-app Secret as an env var (ADR-0028). optional: true so a
 		// workload with no secrets set still applies (the Secret may not exist yet) — the values live
 		// only in the Secret, never inlined here. The name is derived from the app, so a deploy,
 		// rollback, or env reapply all inject the same Secret without it crossing the API.
 		return nil, []corev1.EnvFromSource{{
 			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: controlplane.AppSecretName(spec.App)},
+				LocalObjectReference: corev1.LocalObjectReference{Name: controlplane.AppSecretName(app)},
 				Optional:             boolPtr(true),
 			},
 		}}
@@ -1348,7 +1360,7 @@ func secretEnvironment(spec controlplane.WorkloadSpec, taken []corev1.EnvVar) ([
 	for _, e := range taken {
 		named[e.Name] = true
 	}
-	keys := slices.Clone(spec.SecretEnvKeys)
+	keys := slices.Clone(envKeys)
 	slices.Sort(keys) // the same set of keys always renders the same template, so a reapply rolls nothing
 	out := make([]corev1.EnvVar, 0, len(keys))
 	for _, key := range keys {
@@ -1357,7 +1369,7 @@ func secretEnvironment(spec controlplane.WorkloadSpec, taken []corev1.EnvVar) ([
 		}
 		out = append(out, corev1.EnvVar{Name: key, ValueFrom: &corev1.EnvVarSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: controlplane.AppSecretName(spec.App)},
+				LocalObjectReference: corev1.LocalObjectReference{Name: controlplane.AppSecretName(app)},
 				Key:                  key,
 				Optional:             boolPtr(true),
 			},
@@ -1383,19 +1395,19 @@ func secretEnvironment(spec controlplane.WorkloadSpec, taken []corev1.EnvVar) ([
 //     form of Secret volume the kubelet DOES NOT UPDATE IN PLACE, so a per-key path would silently
 //     trade rotation-without-a-rollout for the ability to name a path. The type this reads carries
 //     one directory for the whole app, so there is no per-key path to build one from.
-func secretVolume(spec controlplane.WorkloadSpec) ([]corev1.Volume, []corev1.VolumeMount) {
-	if !spec.SecretFiles.Any() {
+func secretVolume(app string, files controlplane.SecretMounts) ([]corev1.Volume, []corev1.VolumeMount) {
+	if !files.Any() {
 		return nil, nil
 	}
-	items := make([]corev1.KeyToPath, 0, len(spec.SecretFiles.Mounts))
-	for _, m := range spec.SecretFiles.Mounts {
+	items := make([]corev1.KeyToPath, 0, len(files.Mounts))
+	for _, m := range files.Mounts {
 		items = append(items, corev1.KeyToPath{Key: m.Key, Path: m.Filename})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Key < items[j].Key })
 	volumes := []corev1.Volume{{
 		Name: controlplane.SecretsVolumeName,
 		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName:  controlplane.AppSecretName(spec.App),
+			SecretName:  controlplane.AppSecretName(app),
 			Items:       items,
 			DefaultMode: int32Ptr(0o400),
 			Optional:    boolPtr(true),
@@ -1403,7 +1415,7 @@ func secretVolume(spec controlplane.WorkloadSpec) ([]corev1.Volume, []corev1.Vol
 	}}
 	mounts := []corev1.VolumeMount{{
 		Name:      controlplane.SecretsVolumeName,
-		MountPath: spec.SecretFiles.Directory(),
+		MountPath: files.Directory(),
 		ReadOnly:  true,
 	}}
 	return volumes, mounts

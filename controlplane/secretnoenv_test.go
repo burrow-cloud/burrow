@@ -226,3 +226,34 @@ func TestFileOnlySurvivesARollback(t *testing.T) {
 		t.Errorf("after a rollback the app delivers %v as variables (enumerated=%v); a rollback must not put a credential back in the environment", keys, enumerated)
 	}
 }
+
+// TestRunDoesNotPutAFileOnlyKeyBackInTheEnvironment. A one-off run is the app's own image with the
+// app's own environment (ADR-0048 §2) — and it is where an environment variable is most dangerous,
+// because a run is what starts a shell and a variable is inherited by every child process. A Job that
+// sourced the Secret wholesale would put the credential back exactly where the app took it out of.
+func TestRunDoesNotPutAFileOnlyKeyBackInTheEnvironment(t *testing.T) {
+	ctx := context.Background()
+	e, k := mountedApp(t)
+	if _, err := e.MountSecret(ctx, "web", "", "KUBECONFIG", "", "", boolPtr(true)); err != nil {
+		t.Fatalf("MountSecret --no-env: %v", err)
+	}
+
+	if _, err := e.Run(ctx, cp.RunRequest{App: "web", Command: []string{"sh", "-c", "env"}, Confirm: true}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	runs := k.RunJobs()
+	if len(runs) != 1 {
+		t.Fatalf("run jobs = %d, want one", len(runs))
+	}
+	if slices.Contains(runs[0].SecretEnvKeys, "KUBECONFIG") {
+		t.Errorf("the run Job's environment names %v; a file-only key must not come back as a variable in the one process most likely to hand it to a child",
+			runs[0].SecretEnvKeys)
+	}
+	if !slices.Equal(runs[0].SecretEnvKeys, []string{"DATABASE_URL", "STRIPE_SECRET_KEY"}) {
+		t.Errorf("the run Job's secret environment = %v, want the keys that are still variables — a run sees what the app sees", runs[0].SecretEnvKeys)
+	}
+	// And it reaches the command as the FILE it is, or the credential would be unreachable in a run.
+	if !slices.Equal(runs[0].SecretFiles.Keys(), []string{"KUBECONFIG"}) {
+		t.Errorf("the run Job projects %v as files, want KUBECONFIG", runs[0].SecretFiles.Keys())
+	}
+}

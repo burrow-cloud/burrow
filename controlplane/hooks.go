@@ -435,15 +435,24 @@ func (e *Engine) runHook(ctx context.Context, k Kubernetes, phase HookPhase, app
 	for name, v := range outcome {
 		told[name] = v
 	}
+	// A hook runs the app's image with the app's environment, so it takes the app's secret projection
+	// with it (ADR-0089 §4). A hook Job that sourced the Secret wholesale would hand a key the app
+	// marked file-only to a script and to every process that script starts.
+	files, secretEnv, err := e.secretProjectionFor(ctx, k, app, envName(env))
+	if err != nil {
+		return fmt.Errorf("reading the app's secret projection for the %s hook: %w", phase, err)
+	}
 	// The Job's name derives from this ID, so leading with the phase makes a hook Job identifiable as
 	// one in `kubectl get jobs` without a second lookup.
 	res, runErr := k.RunJob(ctx, RunSpec{
-		App:        app,
-		ID:         string(phase) + "-" + e.ids.NewID(),
-		Image:      image,
-		Command:    command,
-		Env:        hookEnv(cfg, told),
-		TTLSeconds: hookJobTTLSeconds,
+		App:           app,
+		ID:            string(phase) + "-" + e.ids.NewID(),
+		Image:         image,
+		Command:       command,
+		Env:           hookEnv(cfg, told),
+		TTLSeconds:    hookJobTTLSeconds,
+		SecretFiles:   files,
+		SecretEnvKeys: secretEnv,
 	})
 	if runErr == nil && res.ExitCode == 0 {
 		e.recordExecution(ctx, auditOpHook, app, args, nil)

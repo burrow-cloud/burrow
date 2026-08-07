@@ -60,6 +60,10 @@ type Engine struct {
 	// (ErrNotImplemented) when it is not wired — Burrow stays client-build-first, so build is never
 	// required for deploy (ADR-0053 §1).
 	builder Builder
+	// buildLedger reads back the builds that succeeded and were never deployed, so a build whose
+	// caller went away is finished rather than discarded (issue #504). Optional: nil is allowed, and
+	// a stranded build is simply not recovered — the behaviour every build had before this existed.
+	buildLedger BuildLedger
 	// buildRegistry is the in-cluster registry reference host:port that the optional in-cluster
 	// build defaults its push target to when the caller supplies none (ADR-0053 §5). Optional: when
 	// empty, an in-cluster build requires an explicit target and a missing one errors. A
@@ -131,6 +135,11 @@ type Deps struct {
 	// in-cluster build path (ADR-0053). Optional — nil is allowed, and the engine errors cleanly
 	// (ErrNotImplemented) on a build when it is not wired.
 	Builder Builder
+	// BuildLedger reads back successful builds whose deploy never ran, so the build reconciler can
+	// finish them (issue #504). Optional — nil is allowed and the reconciler does nothing. In
+	// production it is the same *kube.BuildAdapter wired as Builder, which records what each build
+	// was for on the build Job itself.
+	BuildLedger BuildLedger
 	// BuildRegistry is the in-cluster registry reference host:port the in-cluster build defaults its
 	// push target to when the caller supplies none — the zero-config default push target for a build
 	// (ADR-0053 §5). Optional — an empty value means a build with no explicit target errors, and a
@@ -191,6 +200,7 @@ func New(d Deps) (*Engine, error) {
 		capacity:            d.CapacityProber,
 		registry:            d.RegistryClient,
 		builder:             d.Builder,
+		buildLedger:         d.BuildLedger,
 		buildRegistry:       d.BuildRegistry,
 		buildPublicRegistry: d.BuildPublicRegistry,
 		appNamespace:        appNamespace,
@@ -252,11 +262,27 @@ type deployProvenance struct {
 	trigger ReleaseTrigger
 	level   AutoDeployLevel // set only for an auto trigger
 	tag     string          // the resolved tag the watcher took, set only for an auto trigger
+	// recovered marks a deploy the control plane drove on behalf of a caller who had already gone —
+	// finishing a build that succeeded after its client disconnected (issue #504). The TRIGGER stays
+	// manual, because the operation was manually triggered and only its completion was not, and
+	// because everything a manual deploy does (the downgrade safety stop above all) is what an
+	// attended run of the same build would have done. What it changes is the audit trail: a row that
+	// says a human was present when they were not is a row that misleads a reviewer.
+	recovered bool
 }
 
 // manualProvenance is the provenance of an explicit CLI or agent deploy — the default for every
 // deploy today (ADR-0052 §5).
 func manualProvenance() deployProvenance { return deployProvenance{trigger: TriggerManual} }
+
+// recoveredProvenance is the provenance of a deploy the control plane finished on behalf of a caller
+// who had already gone — a build that succeeded after its client disconnected (issue #504). It is a
+// MANUAL deploy that nobody was present for, not an unattended update: the operation was triggered
+// by a person or an agent, and every manual-deploy consequence (the downgrade safety stop) is what
+// an attended run of the same build would have had. Only the audit trail tells them apart.
+func recoveredProvenance() deployProvenance {
+	return deployProvenance{trigger: TriggerManual, recovered: true}
+}
 
 // Deploy rolls out an image by reference (ADR-0007). It validates the request, applies
 // the guardrails, records a new release, applies it to the cluster, and records the
@@ -327,6 +353,11 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	if prov.trigger == TriggerAuto {
 		args["auto_level"] = string(prov.level)
 		args["auto_tag"] = prov.tag
+	}
+	// A deploy the control plane finished for a caller who had already gone says so, so a reviewer
+	// reading the trail is never told a human was present when nobody was (issue #504).
+	if prov.recovered {
+		args["recovered"] = "build"
 	}
 	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, GuardrailAppDeploy,
 		pol.evaluateDeploy(GuardrailScope{Env: req.Env, Name: req.App}, replicas, req.Confirm)); err != nil {

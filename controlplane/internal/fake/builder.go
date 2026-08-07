@@ -16,6 +16,10 @@ var _ controlplane.Builder = (*Builder)(nil)
 // end to end without a cluster (issue #503).
 var _ controlplane.ProgressBuilder = (*Builder)(nil)
 
+// The fake records what each build was for like the real adapter does, so a test can assert the
+// intent the engine hands down without a cluster (issue #504).
+var _ controlplane.AttributedBuilder = (*Builder)(nil)
+
 // Builder is an in-memory controlplane.Builder. Tests seed the digest it returns with SetDigest,
 // inject a build failure with SetError, and read back the source ref and target image it was called
 // with (LastSource / LastTarget) plus the call count, so the in-cluster build orchestration can be
@@ -33,6 +37,9 @@ type Builder struct {
 	// progressCalls counts the calls that came in through the reporting seam, so a test can tell the
 	// two entry points apart.
 	progressCalls int
+	// lastIntent is what the engine said the last build was FOR (issue #504), so a test can assert
+	// the app, environment, and deploy reference recorded against the build itself.
+	lastIntent controlplane.BuildIntent
 }
 
 // DefaultDigest is the digest NewBuilder returns until SetDigest overrides it, so a test can assert
@@ -103,8 +110,33 @@ func (b *Builder) ProgressCalls() int {
 	return b.progressCalls
 }
 
+// LastIntent returns what the engine said the last build was FOR — the app, environment, and deploy
+// reference recorded against the build so it can be finished after its caller has gone (issue #504).
+func (b *Builder) LastIntent() controlplane.BuildIntent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastIntent
+}
+
 func (b *Builder) Build(_ context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) (string, error) {
-	return b.build(source, targetImage, insecure, cred, func(string, string) {})
+	return b.build(controlplane.BuildIntent{}, source, targetImage, insecure, cred, func(string, string) {})
+}
+
+// BuildAttributed records the intent alongside everything Build records, then behaves exactly as the
+// entry point matching the caller's reporter would: a nil reporter is a build nobody asked to
+// observe, and it is NOT counted as a progress call — the real adapter takes the same single entry
+// point either way, and what a test is asserting with ProgressCalls is whether anyone asked for a
+// report, not which method was called.
+func (b *Builder) BuildAttributed(_ context.Context, intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, progress func(controlplane.DeployEvent)) (string, error) {
+	if progress == nil {
+		return b.build(intent, source, targetImage, insecure, cred, func(string, string) {})
+	}
+	b.mu.Lock()
+	b.progressCalls++
+	b.mu.Unlock()
+	return b.build(intent, source, targetImage, insecure, cred, func(stage, status string) {
+		progress(controlplane.DeployEvent{Stage: stage, Status: status})
+	})
 }
 
 // BuildWithProgress records the call exactly as Build does and reports the stage sequence the real
@@ -116,7 +148,7 @@ func (b *Builder) BuildWithProgress(_ context.Context, source controlplane.Sourc
 	b.mu.Lock()
 	b.progressCalls++
 	b.mu.Unlock()
-	return b.build(source, targetImage, insecure, cred, func(stage, status string) {
+	return b.build(controlplane.BuildIntent{}, source, targetImage, insecure, cred, func(stage, status string) {
 		progress(controlplane.DeployEvent{Stage: stage, Status: status})
 	})
 }
@@ -126,9 +158,10 @@ func (b *Builder) BuildWithProgress(_ context.Context, source controlplane.Sourc
 // THE LOCK IS RELEASED BEFORE ANY EVENT IS REPORTED. The reporter is the caller's own code, and a
 // reporter that reads back what the builder recorded — which is exactly what a test asserting the
 // call would do — would deadlock on a mutex still held over the callback.
-func (b *Builder) build(source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, event func(stage, status string)) (string, error) {
+func (b *Builder) build(intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, event func(stage, status string)) (string, error) {
 	b.mu.Lock()
 	b.calls++
+	b.lastIntent = intent
 	b.lastSource = source
 	b.lastTarget = targetImage
 	b.lastInsecure = insecure

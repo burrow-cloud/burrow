@@ -25,6 +25,13 @@ func (p *AutoDeployPoller) ReconcileOnceForTest(ctx context.Context) {
 	p.reconcile(ctx)
 }
 
+// ReconcileOnceForTest runs a single stranded-build sweep, so an external test can drive the build
+// reconciler deterministically without the Run loop's timing. It is test-build only; production
+// drives the same sweep from Run on the injected cadence.
+func (r *BuildReconciler) ReconcileOnceForTest(ctx context.Context) {
+	r.reconcile(ctx)
+}
+
 // ObserveOnceForTest runs a single observation sweep, so an external test can drive the observer
 // deterministically without the Run loop's timing. It is test-build only; production drives the same
 // sweep from Run on the injected cadence.

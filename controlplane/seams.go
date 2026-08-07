@@ -178,6 +178,91 @@ type ProgressBuilder interface {
 	BuildWithProgress(ctx context.Context, source SourceRef, targetImage string, insecure bool, cred SourceCredential, progress func(DeployEvent)) (digest string, err error)
 }
 
+// BuildIntent is what a build is FOR. A build outlives the call that started it — the work runs in
+// the cluster, on a Kubernetes object with a life of its own — so the caller's request context is
+// not what decides whether the result is used. Everything a deploy of the finished image needs is
+// therefore recorded ALONGSIDE the build itself, where it survives a dropped connection, a
+// cancelled call, and a restarted control plane (issue #504).
+//
+// It is deliberately the smallest set that makes a finished build finishable by someone who was not
+// there when it started: which app, which environment, and the reference the resulting deploy pins.
+// It carries no confirmation, because a guardrail decision is the caller's to make and cannot be
+// pre-recorded on the caller's behalf.
+type BuildIntent struct {
+	// App is the app the built image is destined for.
+	App string
+	// Env is the environment name the deploy targets, already resolved to a concrete name (never
+	// the empty "use the default" form), so a build recovered later needs no context to interpret.
+	Env string
+	// Image is the reference the resulting deploy pins, WITHOUT its digest — the public-host base
+	// the built digest is appended to (ADR-0054). It is the deploy reference rather than the push
+	// target because those two differ for the default in-cluster path, and it is the one a release
+	// must carry.
+	Image string
+}
+
+// AttributedBuilder is a Builder that records what a build is FOR next to the build itself, so a
+// build that succeeds can still be finished after the call that started it has gone (issue #504).
+//
+// It is a SEPARATE, OPTIONAL interface for the same reason ProgressBuilder is: attribution is not
+// part of what a builder must do, and Builder is public API a separate implementation (the managed
+// product's sandboxed executor, ADR-0053 §6) satisfies. A Builder that records nothing is still a
+// correct Builder — its builds simply cannot be recovered, which is the behaviour every build had
+// before this existed.
+//
+// An implementation that records attribution is expected to implement BuildLedger too: recording
+// what a build was for is only useful to something that can read it back.
+type AttributedBuilder interface {
+	Builder
+	// BuildAttributed is BuildWithProgress, additionally recording intent against the build so a
+	// successful build is finishable without the caller. Its result and its errors are Build's,
+	// exactly. progress MAY be nil, meaning nobody asked to observe this build.
+	BuildAttributed(ctx context.Context, intent BuildIntent, source SourceRef, targetImage string, insecure bool, cred SourceCredential, progress func(DeployEvent)) (digest string, err error)
+}
+
+// StrandedBuild is a build that SUCCEEDED and whose deploy never ran (issue #504). It is the state
+// the control plane notices and finishes: the image exists, the tenant has already paid for it in
+// time and in whatever build budget applies, and the only thing missing is the release.
+type StrandedBuild struct {
+	// ID is the build's cluster-side identity — the implementation's own handle, passed back to
+	// ReapBuild or HoldBuild. It is opaque to the engine.
+	ID string
+	// App, Env, and Image are the intent recorded when the build started (see BuildIntent).
+	App   string
+	Env   string
+	Image string
+	// Digest is the content digest the build produced. It is never empty: an implementation that
+	// cannot read a build's digest has nothing to deploy and must not report the build as stranded.
+	Digest string
+	// CompletedAt is when the build finished, from the cluster's own record of it rather than from
+	// any clock the control plane keeps.
+	CompletedAt time.Time
+}
+
+// BuildLedger is the optional seam that makes a finished build recoverable. It exists because the
+// build Job is the durable thing in the system: it outlives the request, it outlives burrowd, and
+// on its own it has no idea what it was for. Pair it with an AttributedBuilder that records the
+// intent and this seam reads it back.
+//
+// It is OPTIONAL: nil means a stranded build is not recovered, which is what every build did before
+// this existed. A build that succeeds is then still discarded when its caller goes away, so an
+// implementation of Builder that can be strandable should implement this.
+type BuildLedger interface {
+	// StrandedBuilds lists successful builds whose deploy never ran and that finished strictly
+	// before completedBefore — a settling margin the caller supplies, so a build whose original
+	// caller is still driving it to a deploy is not raced. It must not report a build whose digest
+	// cannot be read, and must not report one already marked by HoldBuild.
+	StrandedBuilds(ctx context.Context, completedBefore time.Time) ([]StrandedBuild, error)
+	// ReapBuild discards a build nothing more will be done with — its deploy has landed, or a
+	// release for its image already exists. A build that is already gone is not an error.
+	ReapBuild(ctx context.Context, id string) error
+	// HoldBuild marks a build whose deploy a guardrail held, with a short human-readable reason. The
+	// build is LEFT IN PLACE, not discarded: the image is good and already paid for, so a caller who
+	// re-runs the same build with a confirmation reuses it rather than paying to build it again. A
+	// held build is not reported by StrandedBuilds again, so the hold is recorded once.
+	HoldBuild(ctx context.Context, id, reason string) error
+}
+
 // DatabaseProvisioner is the seam over an installed Postgres add-on instance's admin surface
 // (ADR-0031). burrowd connects to the environment's instance as the superuser and gives each app its
 // own database and login role inside it; the engine calls this on attach/detach. It is an optional

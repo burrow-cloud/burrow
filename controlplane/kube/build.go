@@ -314,15 +314,33 @@ func (b *BuildAdapter) WithBuildPodMutator(fn func(*corev1.PodSpec)) *BuildAdapt
 // caller does NOT touch the deploy path on error (ADR-0053 §4). It blocks until the Job succeeds or
 // fails, or the build timeout elapses.
 func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) (string, error) {
-	return b.BuildWithProgress(ctx, source, targetImage, insecure, cred, func(controlplane.DeployEvent) {})
+	return b.BuildAttributed(ctx, controlplane.BuildIntent{}, source, targetImage, insecure, cred, nil)
 }
 
 // BuildWithProgress is Build, reporting the build's stages as the Job reaches them (issue #503): the
 // clone, then the build, from what the Job's pod actually shows, plus a repeat of the running stage
 // often enough that the response survives a proxy's read timeout. Its result and its errors are
-// Build's, exactly — reporting is beside the build, never part of it. progress must not be nil; Build
-// passes a no-op, and the engine normalises a caller that asked for nothing into one.
+// Build's, exactly — reporting is beside the build, never part of it.
 func (b *BuildAdapter) BuildWithProgress(ctx context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, progress func(controlplane.DeployEvent)) (string, error) {
+	return b.BuildAttributed(ctx, controlplane.BuildIntent{}, source, targetImage, insecure, cred, progress)
+}
+
+// BuildAttributed is BuildWithProgress, additionally recording what the build is FOR on the build Job
+// itself (issue #504) — the app, the environment, and the reference its deploy pins. It is the one
+// implementation the other two entry points delegate to.
+//
+// THE JOB IS WHERE THE INTENT BELONGS, because the Job is what survives. It outlives the request that
+// created it, it outlives the goroutine waiting on it, and it outlives burrowd; the caller's call
+// frame outlives none of those. Recorded here, a build that succeeds after its caller has gone is
+// still finishable by whoever is running when it finishes (see StrandedBuilds). The intent is small,
+// non-secret metadata on an object that was being created anyway — a label and an annotation — and a
+// zero intent records nothing, which is exactly what Build and BuildWithProgress do.
+//
+// progress may be nil, meaning nobody asked to observe this build.
+func (b *BuildAdapter) BuildAttributed(ctx context.Context, intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, progress func(controlplane.DeployEvent)) (string, error) {
+	if progress == nil {
+		progress = func(controlplane.DeployEvent) {}
+	}
 	if err := source.Validate(); err != nil {
 		return "", fmt.Errorf("kube: build: %w: %w", controlplane.ErrInvalid, err)
 	}
@@ -351,7 +369,7 @@ func (b *BuildAdapter) BuildWithProgress(ctx context.Context, source controlplan
 	// and cannot create namespaces or cluster RBAC itself (least privilege) — the same reason
 	// `burrow env add` creates per-environment namespaces kubeconfig-side rather than at runtime.
 	name := buildJobName(source, targetImage)
-	job := b.buildJob(ctx, name, source, targetImage, insecure, cred)
+	job := b.buildJob(ctx, name, intent, source, targetImage, insecure, cred)
 	jobs := b.client.BatchV1().Jobs(b.namespace)
 	created, err := jobs.Create(ctx, job, metav1.CreateOptions{})
 	switch {
@@ -378,6 +396,18 @@ func (b *BuildAdapter) BuildWithProgress(ctx context.Context, source controlplan
 			}
 		} else {
 			created = existing
+			// A reused Job carries whatever intent the run that created it recorded, which may name a
+			// different environment or a different deploy reference. Re-stamp it with this run's, so a
+			// build recovered later is finished for the caller that most recently asked for it — and so
+			// the hold marker a previous unattended attempt left is cleared, because someone asking for
+			// this build again is someone who has not given up on it.
+			//
+			// A FAILURE HERE DOES NOT FAIL THE BUILD. The intent is a recovery aid, not part of
+			// building: the Job already carries the intent recorded when it was created, and the
+			// caller in front of this call is about to drive the build to a deploy itself. Refusing to
+			// build because a metadata patch was refused — an install whose Role predates the patch
+			// verb is exactly that case — would be a worse bug than the one this recovers from.
+			_ = b.stampBuildIntent(ctx, jobs, name, intent)
 		}
 	case err != nil:
 		return "", fmt.Errorf("kube: creating build job %q: %w", name, err)
@@ -486,7 +516,7 @@ func buildJobName(source controlplane.SourceRef, targetImage string) string {
 //
 // ctx is taken for the operational configuration read behind buildJobTTLSeconds, not for a cluster
 // call: this function constructs an object and sends nothing.
-func (b *BuildAdapter) buildJob(ctx context.Context, name string, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) *batchv1.Job {
+func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
 	var backoff int32
 	ttl := buildJobTTLSeconds(ctx, b.limits)
@@ -562,8 +592,24 @@ func (b *BuildAdapter) buildJob(ctx context.Context, name string, source control
 		buildEnv = append(buildEnv, corev1.EnvVar{Name: "REGISTRY_AUTH_FILE", Value: registryAuthPath + "/" + registryAuthFile})
 	}
 
+	// The Job's OWN metadata carries what the build is for; the pod template's labels stay exactly as
+	// they were, because they are how this adapter finds a build's pods and nothing about the deploy
+	// belongs on them. A zero intent adds nothing at all.
+	jobLabels := labels
+	var annotations map[string]string
+	if intentLabels, intentAnnotations := buildIntentMetadata(intent); len(intentLabels) > 0 {
+		jobLabels = make(map[string]string, len(labels)+len(intentLabels))
+		for k, v := range labels {
+			jobLabels[k] = v
+		}
+		for k, v := range intentLabels {
+			jobLabels[k] = v
+		}
+		annotations = intentAnnotations
+	}
+
 	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: jobLabels, Annotations: annotations},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff,
 			// The TTL controller reaps this Job and its pods buildJobTTLSeconds after it finishes,

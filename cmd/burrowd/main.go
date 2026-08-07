@@ -234,10 +234,11 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		return err
 	}
 
-	// The Postgres add-on provisioner connects to the installed instance as the superuser to give
-	// each app its own database and role (ADR-0031). It reads the superuser password from the
-	// per-instance superuser Secret in the add-on namespace, so it is scoped there; which instance a
-	// call reaches is decided per operation by the environment it names (ADR-0067 §1).
+	// The Postgres add-on provisioner gives each app its own database and role on the installed
+	// instance (ADR-0031) by writing CloudNativePG `Database` and `DatabaseRole` objects in the
+	// add-on namespace and letting the operator run the SQL (ADR-0066 §2) — so burrowd holds no
+	// superuser DSN for a provision. Which instance a call reaches is decided per operation by the
+	// environment it names (ADR-0067 §1).
 	//
 	// It is TOLD which instances those are rather than working it out from where it is running
 	// (issue #519). burrowd is the single-tenant control plane and its databases are add-on instances

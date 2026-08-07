@@ -115,7 +115,10 @@ rules:
   # A Postgres instance's superuser Secret lives in this namespace because a pod can only mount a
   # Secret in its own namespace (ADR-0031); there is one per instance, and therefore one per
   # environment (ADR-0067 §1). burrowd creates them, reads them to run admin SQL, and deletes them on
-  # uninstall — the grant is namespace-scoped, so no per-environment RBAC change is needed.
+  # uninstall — the grant is namespace-scoped, so no per-environment RBAC change is needed. It also
+  # covers the per-attachment Secret holding an app role's password, which CloudNativePG reads to
+  # apply that password to the role (ADR-0066 §2): burrowd writes the credential and the operator
+  # spends it, so no generated password ever reaches a statement burrowd issues.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "update", "delete"]
@@ -147,6 +150,18 @@ rules:
   - apiGroups: ["postgresql.cnpg.io"]
     resources: ["clusters"]
     verbs: ["get", "create", "patch", "delete"]
+  # An app's database and login role are a `Database` and a `DatabaseRole`, and CloudNativePG runs
+  # the SQL for them on the instance it already manages (ADR-0066 §2). That is what replaces a
+  # superuser connection on the attach path: burrowd writes an object and reads its status instead of
+  # holding an admin DSN for every instance. GET, CREATE, UPDATE and DELETE, scoped to the add-on
+  # namespace. UPDATE because an attach ADOPTS what is already there — an install that has been
+  # attaching apps since before this existed keeps its databases, and the object is rewritten to
+  # describe them. DELETE because a detach releases the description; it does NOT destroy the data,
+  # which both objects carry a `retain` reclaim policy to guarantee (ADR-0064). No list: an
+  # attachment is addressed by the name its instance and app give it, never discovered by sweeping.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["databases", "databaseroles"]
+    verbs: ["get", "create", "update", "delete"]
   # A physical backup is a `Backup` object and a schedule is a `ScheduledBackup`; burrowd creates them
   # and reads their status, and the operator does the work (ADR-0066 §2). GET and CREATE on backups:
   # one is created per physical backup and read until it settles, and none is ever deleted by burrowd

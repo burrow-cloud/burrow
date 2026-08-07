@@ -170,8 +170,8 @@ func TestAttachWithoutProvisioner(t *testing.T) {
 	}
 }
 
-// TestDetachPostgres asserts detach removes the DATABASE_URL key, drops the database, and rolls the
-// workload, behind the confirm guardrail.
+// TestDetachPostgres asserts detach removes the DATABASE_URL key, releases the database, and rolls
+// the workload, behind the confirm guardrail.
 func TestDetachPostgres(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, prov := newPostgresEngine(t)
@@ -189,10 +189,10 @@ func TestDetachPostgres(t *testing.T) {
 		mustGuardrail(t, err, cp.GuardrailAddonDetach)
 	}
 	if got := prov.Dropped(); len(got) != 0 {
-		t.Errorf("a held detach must not drop anything, got %v", got)
+		t.Errorf("a held detach must not release anything, got %v", got)
 	}
 
-	// With confirm it drops the database and removes the key.
+	// With confirm it releases the database and removes the key.
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", true); err != nil {
 		t.Fatalf("DetachAddon confirmed: %v", err)
 	}

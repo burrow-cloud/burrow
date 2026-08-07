@@ -294,13 +294,20 @@ type BuildLedger interface {
 	HoldBuild(ctx context.Context, id, reason string) error
 }
 
-// DatabaseProvisioner is the seam over an installed Postgres add-on instance's admin surface
-// (ADR-0031). burrowd connects to the environment's instance as the superuser and gives each app its
-// own database and login role inside it; the engine calls this on attach/detach. It is an optional
-// seam — present only when the Postgres add-on path is wired; the engine errors cleanly
-// (ErrNotImplemented) on an attach when it is nil. The connection string it returns is a secret
-// VALUE: it is handed only to SetSecretValue and never logged, audited, returned, or carried over
-// the agent control channel (ADR-0029/0031).
+// DatabaseProvisioner is the seam over an installed Postgres add-on instance's provisioning surface
+// (ADR-0031): each app gets its own database and login role inside the environment's instance, and
+// the engine calls this on attach/detach. It is an optional seam — present only when the Postgres
+// add-on path is wired; the engine errors cleanly (ErrNotImplemented) on an attach when it is nil.
+// The connection string it returns is a secret VALUE: it is handed only to SetSecretValue and never
+// logged, audited, returned, or carried over the agent control channel (ADR-0029/0031).
+//
+// THE SEAM SAYS NOTHING ABOUT HOW THE DATABASE COMES TO EXIST, and that is what let the mechanism
+// change underneath it. The production implementation now writes CloudNativePG `Database` and
+// `DatabaseRole` objects and lets the operator run the SQL (ADR-0066 §2) rather than opening a
+// superuser connection of its own, and the engine did not have to know: the contract was always "the
+// app has a working database and here is its URL". Two consequences do reach a caller, though, and
+// they are stated on the methods: provisioning is ASYNCHRONOUS (an attach waits on somebody else's
+// reconcile, so it can take seconds and can time out), and a detach KEEPS THE DATA.
 //
 // EVERY METHOD TAKES THE ENVIRONMENT, AND IT IS NOT OPTIONAL (ADR-0067 §1). Databases keep their
 // simple names — an app called web has a database called web — so the environment is the only thing
@@ -315,15 +322,25 @@ type DatabaseProvisioner interface {
 	// environment env's own instance and returns the app's DATABASE_URL (a postgres:// connection
 	// string carrying a freshly generated role password). It rotates the role password on every call,
 	// so a re-attach returns a fresh, working URL with no orphaned state. env and app are both
-	// validated against a strict identifier pattern and every SQL identifier is quoted BEFORE any SQL
-	// runs, so neither can carry SQL; an empty env is ErrInvalid, never the default environment. The
-	// returned string is a secret value — the caller writes it straight into the app's Secret and
-	// never logs, audits, or returns it.
+	// validated against a strict identifier pattern and every SQL identifier is quoted BEFORE any
+	// statement runs, so neither can carry SQL; an empty env is ErrInvalid, never the default
+	// environment. The returned string is a secret value — the caller writes it straight into the
+	// app's Secret and never logs, audits, or returns it.
+	//
+	// IT MAY TAKE SECONDS AND IT MAY TIME OUT. Provisioning is reconciled by the database operator
+	// rather than performed inline, so this call waits on somebody else's work and returns only once
+	// the database and the credential are known to be there. A caller that treats it as a fast local
+	// operation will be wrong about how long an attach takes; nothing else about the contract moved.
 	EnsureAppDatabase(ctx context.Context, app, env string) (databaseURL string, err error)
-	// DropAppDatabase removes app's database and login role from environment env's instance — the
-	// destructive side of detach. Dropping a database/role that is already absent is a no-op, not an
-	// error. env and app are validated before any SQL, exactly as in EnsureAppDatabase, so a detach
-	// can no more reach another environment's server than an attach can.
+	// DropAppDatabase releases app's database and login role on environment env's instance — the
+	// teardown side of detach. Releasing something already absent is a no-op, not an error. env and
+	// app are validated first, exactly as in EnsureAppDatabase, so a detach can no more reach another
+	// environment's server than an attach can.
+	//
+	// IT KEEPS THE DATA. The app's credential is destroyed and its database is not: a detached app's
+	// rows are still there and a later attach of the same app adopts them (ADR-0064's default, made
+	// structural by the reclaim policy on the objects that describe the database). The caller's job
+	// is to stop the app seeing the connection string, which the engine does before calling this.
 	DropAppDatabase(ctx context.Context, app, env string) error
 }
 

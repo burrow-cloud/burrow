@@ -725,15 +725,16 @@ func newAddonAttachCmd() *cobra.Command {
 	return cmd
 }
 
-// newAddonDetachCmd is `burrow addon detach postgres <app> [--env]`: drop an app's database and role
-// from the named environment's instance and remove its DATABASE_URL there. It is destructive (it
-// destroys the app's data), so it is held for confirmation by the addon.detach guardrail by default.
+// newAddonDetachCmd is `burrow addon detach postgres <app> [--env]`: release an app's database and
+// role on the named environment's instance and remove its DATABASE_URL there. The DATA IS KEPT
+// (ADR-0064) and a later attach adopts it, but the app loses its access and is rolled, so it is held
+// for confirmation by the addon.detach guardrail by default.
 func newAddonDetachCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "detach <addon> <app>",
-		Short: "Detach an app from an add-on, destroying its data (e.g. drop its Postgres database)",
+		Short: "Detach an app from an add-on, taking away its access (e.g. release its Postgres database; the data is kept)",
 		Args:  exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()

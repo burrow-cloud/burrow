@@ -64,13 +64,11 @@ func TestMetricsCollectorDedupesWhenNamespacesEqual(t *testing.T) {
 }
 
 // TestProvisionerRejectsBadIdentifiers asserts both EnsureAppDatabase and DropAppDatabase reject
-// SQL-injection-shaped and malformed names as ErrInvalid BEFORE any connection/SQL (ADR-0031).
+// SQL-injection-shaped and malformed names as ErrInvalid BEFORE anything is written (ADR-0031).
 func TestProvisionerRejectsBadIdentifiers(t *testing.T) {
 	ctx := context.Background()
-	// No Secret and no database: a rejection must come from validation, before any I/O. (If
-	// validation let a name through, the call would instead fail trying to read the Secret.)
-	client := fake.NewSimpleClientset()
-	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
+	// Nothing provisioned anywhere: a rejection must come from validation, before any I/O.
+	p, _, _ := provisionerFor(t, addonNS)
 
 	bad := []string{"a; DROP DATABASE x", "App", "1x", "", "-web", "web name", "web\"; --", "WEB", "web_db", "web;"}
 	for _, name := range bad {
@@ -83,31 +81,30 @@ func TestProvisionerRejectsBadIdentifiers(t *testing.T) {
 	}
 }
 
-// TestProvisionerAcceptsValidIdentifiers asserts a well-formed app name passes validation (it then
-// fails reaching the absent Secret, which proves validation let it through, not that it connected).
+// TestProvisionerAcceptsValidIdentifiers asserts a well-formed app name passes validation and is
+// provisioned all the way through, which is only observable now that provisioning is objects: the
+// harness applies the status CloudNativePG would.
 func TestProvisionerAcceptsValidIdentifiers(t *testing.T) {
 	ctx := context.Background()
-	client := fake.NewSimpleClientset()
-	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
+	p, dyn, _ := provisionerFor(t, addonNS)
 	for _, name := range []string{"web", "my-app", "a", "web2", "a1b2-c3"} {
-		_, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment)
-		if errors.Is(err, controlplane.ErrInvalid) {
-			t.Errorf("EnsureAppDatabase(%q) was rejected as invalid, want it accepted", name)
+		if _, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment); err != nil {
+			t.Errorf("EnsureAppDatabase(%q): %v", name, err)
+			continue
 		}
-		// It should fail because the superuser Secret is absent — proving validation passed.
-		if !errors.Is(err, controlplane.ErrNotFound) {
-			t.Errorf("EnsureAppDatabase(%q) err = %v, want it to pass validation and fail on the missing secret", name, err)
+		if _, err := dyn.Resource(cnpgDatabaseGVR).Namespace(addonNS).
+			Get(ctx, provisioningObjectName(PostgresSecretName, name), metav1.GetOptions{}); err != nil {
+			t.Errorf("EnsureAppDatabase(%q) wrote no Database object: %v", name, err)
 		}
 	}
 }
 
-// TestQuoteIdentAndLiteral checks the SQL-quoting helpers double embedded quotes.
-func TestQuoteIdentAndLiteral(t *testing.T) {
+// TestQuoteIdent checks the SQL-quoting helper doubles embedded quotes. It is the last quoting
+// helper in the package: no generated password reaches a statement any more, so the literal quoter
+// that existed for `CREATE ROLE ... PASSWORD` went with the statement.
+func TestQuoteIdent(t *testing.T) {
 	if got := quoteIdent(`a"b`); got != `"a""b"` {
 		t.Errorf("quoteIdent = %q", got)
-	}
-	if got := quoteLiteral(`a'b`); got != `'a''b'` {
-		t.Errorf("quoteLiteral = %q", got)
 	}
 }
 
@@ -118,14 +115,13 @@ func TestQuoteIdentAndLiteral(t *testing.T) {
 // silently land on another environment's server.
 func TestProvisionerRequiresAnEnvironment(t *testing.T) {
 	ctx := context.Background()
-	// A Secret for the DEFAULT environment's instance exists, so a call that fell back to it would
-	// get past validation and fail later (on the connection) rather than as ErrInvalid. That is what
-	// distinguishes "refused" from "quietly defaulted".
-	client := fake.NewSimpleClientset(&corev1.Secret{
+	// The DEFAULT environment's instance is fully installed, so a call that fell back to it would get
+	// past validation and provision something rather than being refused. That is what distinguishes
+	// "refused" from "quietly defaulted".
+	p, _, _ := provisionerFor(t, addonNS, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
 		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
 	})
-	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
 
 	for _, env := range []string{"", "Staging", "not a label", "staging/prod"} {
 		if _, err := p.EnsureAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
@@ -141,16 +137,15 @@ func TestProvisionerRequiresAnEnvironment(t *testing.T) {
 }
 
 // TestProvisionerReachesTheEnvironmentsOwnInstance asserts the environment selects the host AND the
-// credential together: the default environment resolves to the instance an existing install already
-// has, and another environment resolves to its own — never to the default's (ADR-0067 §1).
+// objects together: the default environment resolves to the instance an existing install already
+// has, and another environment provisions against its own — never against the default's
+// (ADR-0067 §1).
 func TestProvisionerReachesTheEnvironmentsOwnInstance(t *testing.T) {
 	ctx := context.Background()
-	// Only the DEFAULT environment's instance is installed.
-	client := fake.NewSimpleClientset(&corev1.Secret{
+	p, dyn, _ := provisionerFor(t, addonNS, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
 		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
 	})
-	p := NewPostgresProvisioner(client, AddonInstanceTarget(addonNS))
 
 	defHost, err := p.instanceHost(controlplane.DefaultEnvironment)
 	if err != nil {
@@ -167,14 +162,23 @@ func TestProvisionerReachesTheEnvironmentsOwnInstance(t *testing.T) {
 		t.Fatalf("staging and the default environment dial the same host %q", stgHost)
 	}
 
-	// Staging has no instance installed, so provisioning there fails closed — naming staging's own
-	// Secret — rather than falling back to the instance that does exist.
-	_, err = p.EnsureAppDatabase(ctx, "web", "staging")
-	if !errors.Is(err, controlplane.ErrNotFound) {
-		t.Fatalf("EnsureAppDatabase(web, staging) err = %v, want ErrNotFound for staging's absent instance", err)
+	// Attaching the same app name in staging provisions against STAGING's instance. The objects are
+	// separate objects naming a separate `Cluster`, so there is no state either attach could adopt
+	// from the other.
+	if _, err := p.EnsureAppDatabase(ctx, "web", "staging"); err != nil {
+		t.Fatalf("EnsureAppDatabase(web, staging): %v", err)
 	}
-	if !strings.Contains(err.Error(), "burrow-postgres-staging") {
-		t.Errorf("error %q does not name staging's own instance", err)
+	obj, err := dyn.Resource(cnpgDatabaseGVR).Namespace(addonNS).
+		Get(ctx, provisioningObjectName("burrow-postgres-staging", "web"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("staging's Database object: %v", err)
+	}
+	if got := nestedString(t, obj.Object, "spec", "cluster", "name"); got != "burrow-postgres-staging" {
+		t.Errorf("staging's Database names cluster %q, want staging's own instance", got)
+	}
+	if _, err := dyn.Resource(cnpgDatabaseGVR).Namespace(addonNS).
+		Get(ctx, provisioningObjectName(PostgresSecretName, "web"), metav1.GetOptions{}); err == nil {
+		t.Error("attaching in staging also provisioned against the default environment's instance")
 	}
 }
 
@@ -219,10 +223,10 @@ func TestAddonInstanceTargetIsTheInstanceAnExistingInstallAlreadyHas(t *testing.
 	}
 
 	// And the address the provisioner actually dials is that host on the add-on port.
-	p := NewPostgresProvisioner(fake.NewSimpleClientset(), unconfigured)
-	hostPort, err := p.adminHostPort(controlplane.DefaultEnvironment)
+	p := NewPostgresProvisioner(fake.NewSimpleClientset(), nil, unconfigured)
+	hostPort, err := p.dialHostPort(controlplane.DefaultEnvironment)
 	if err != nil {
-		t.Fatalf("adminHostPort: %v", err)
+		t.Fatalf("dialHostPort: %v", err)
 	}
 	if hostPort != "burrow-postgres.burrow-addons.svc:5432" {
 		t.Errorf("dialed address = %q, want burrow-postgres.burrow-addons.svc:5432", hostPort)
@@ -238,13 +242,13 @@ func TestProvisionerActsOnlyOnTheInstanceItWasGiven(t *testing.T) {
 	ctx := context.Background()
 	// A fully installed default-named instance, in the default add-on namespace — the thing the old
 	// derivation would have found and used.
-	client := fake.NewSimpleClientset(&corev1.Secret{
+	p, dyn, _ := provisionerFor(t, "tenant-addons", &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
 		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
 	})
-	p := NewPostgresProvisioner(client, func(string) (PostgresTarget, error) {
+	p.target = func(string) (PostgresTarget, error) {
 		return PostgresTarget{Instance: "tenant-postgres", Namespace: "tenant-addons"}, nil
-	})
+	}
 
 	host, err := p.instanceHost(controlplane.DefaultEnvironment)
 	if err != nil {
@@ -254,17 +258,22 @@ func TestProvisionerActsOnlyOnTheInstanceItWasGiven(t *testing.T) {
 		t.Errorf("host = %q, want the configured tenant-postgres.tenant-addons.svc", host)
 	}
 
-	// The configured instance is not installed here, so the attach fails closed naming IT — rather
-	// than succeeding against the one that is.
-	_, err = p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment)
-	if !errors.Is(err, controlplane.ErrNotFound) {
-		t.Fatalf("EnsureAppDatabase err = %v, want ErrNotFound for the configured instance", err)
+	// Provisioning lands on the configured instance, in the configured namespace — never on the
+	// default-named one sitting right there in the cluster the client is pointed at.
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
-	if !strings.Contains(err.Error(), "tenant-addons/tenant-postgres") {
-		t.Errorf("error %q does not name the configured instance", err)
+	obj, err := dyn.Resource(cnpgDatabaseGVR).Namespace("tenant-addons").
+		Get(ctx, provisioningObjectName("tenant-postgres", "web"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("the configured instance's Database object: %v", err)
 	}
-	if strings.Contains(err.Error(), addonNS+"/"+PostgresSecretName) {
-		t.Errorf("error %q reached the default-named instance the provisioner was not configured with", err)
+	if got := nestedString(t, obj.Object, "spec", "cluster", "name"); got != "tenant-postgres" {
+		t.Errorf("Database names cluster %q, want the configured tenant-postgres", got)
+	}
+	if _, err := dyn.Resource(cnpgDatabaseGVR).Namespace(addonNS).
+		Get(ctx, provisioningObjectName(PostgresSecretName, "web"), metav1.GetOptions{}); err == nil {
+		t.Error("the provisioner reached the default-named instance it was not configured with")
 	}
 }
 
@@ -274,11 +283,11 @@ func TestProvisionerActsOnlyOnTheInstanceItWasGiven(t *testing.T) {
 // defaulted" are only distinguishable when defaulting would have worked.
 func TestProvisionerWithNoInstanceProvisionsNothing(t *testing.T) {
 	ctx := context.Background()
-	client := fake.NewSimpleClientset(&corev1.Secret{
+	p, _, _ := provisionerFor(t, addonNS, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
 		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
 	})
-	p := NewPostgresProvisioner(client, nil)
+	p.target = nil
 
 	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("EnsureAppDatabase err = %v, want ErrInvalid", err)

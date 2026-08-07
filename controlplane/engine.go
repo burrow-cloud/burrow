@@ -1323,11 +1323,12 @@ func (e *Engine) refuseOccupiedEnvKey(ctx context.Context, k Kubernetes, app, en
 }
 
 // DetachAddon removes the variable app's connection string was written under and, behind the
-// addon.detach confirm guardrail (it destroys data), drops app's database and role from ENVIRONMENT
-// env's Postgres instance (ADR-0031/0067 §1). The audit row records {addon, app, env, key} — names
-// only, never the value. The environment is required for the same reason attach requires it, and the
-// stakes are higher: without it, detaching `web` in staging would have dropped production's `web`
-// database — the same collision as issue #339, with the destructive verb.
+// addon.detach confirm guardrail, releases app's database and role on ENVIRONMENT env's Postgres
+// instance (ADR-0031/0067 §1). The DATA IS KEPT and a later attach adopts it (ADR-0064); what the
+// app loses is its access. The audit row records {addon, app, env, key} — names only, never the
+// value. The environment is required for the same reason attach requires it, and the stakes are
+// higher: without it, detaching `web` in staging would have taken production's `web` away from the
+// app still using it — the same collision as issue #339, on the verb that removes access.
 func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, confirm bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("detach addon: %w: %w", ErrInvalid, err)
@@ -1369,12 +1370,14 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 		// name rather than as a tier of its own; it is named in the message and the audit args
 		// (ADR-0035 phase 2c, ADR-0067 §1).
 		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon detach", GuardrailAddonDetach, confirm,
-			fmt.Sprintf("detaching %q from the %s add-on in environment %s (drops its database and role)", app, t, targetEnv))); err != nil {
+			fmt.Sprintf("detaching %q from the %s add-on in environment %s (removes its credential; the database and its data are kept)", app, t, targetEnv))); err != nil {
 		return err
 	}
 
-	// Remove the connection-string key first (the app stops seeing the credential), then drop the
-	// database/role. Both act in this environment only. A missing key is a no-op.
+	// Remove the connection-string key first (the app stops seeing the credential), then release the
+	// database and role. Both act in this environment only. A missing key is a no-op. The release
+	// keeps the data — the app's rows outlive the attachment (ADR-0064) — so this ordering is about
+	// the credential rather than about a window in which something is destroyed.
 	k := e.k8s.WithNamespace(ns)
 	if err := k.UnsetSecretKey(ctx, app, key); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
@@ -1386,7 +1389,7 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	}
 	// The attachment is gone, so the recorded name describes nothing. Leaving it would have a later
 	// attach of the same app default to a name the app no longer reads. Best-effort: the variable and
-	// the database are already gone, and failing the detach afterwards would report a completed
+	// the attachment are already gone, and failing the detach afterwards would report a completed
 	// teardown as broken — and a stale row only ever names a key a re-attach would then write.
 	if err := e.db.DeleteAddonEnvKey(ctx, string(t), app, targetEnv); err != nil {
 		slog.WarnContext(ctx, "forgetting the attachment's recorded variable name failed", "app", app, "env", targetEnv, "error", err)

@@ -683,9 +683,15 @@ func (e *Engine) appsAttachedInEnvironment(ctx context.Context, ns, targetEnv st
 // instance carries the roles as they were at the RECOVERY TARGET: a password rotated since is not
 // there, and an app attached since has no role at all. The URL an app is holding therefore may simply
 // not authenticate any more, and it would fail at the app's next connection rather than here.
-// EnsureAppDatabase rotates the role's password and creates the database if the rewind went back past
-// its creation, so every app comes out of this with a credential that works against what is actually
-// on the instance now.
+// EnsureAppDatabase rewrites the role's password and waits until the instance actually accepts it, so
+// an app that comes out of this reconnected has a credential that works against what is on the
+// instance now, and one that does not is reported as stranded here rather than discovered later.
+//
+// WHAT IT DOES NOT REPAIR is a database the rewind went back past the creation of. Provisioning is
+// declarative now (ADR-0066 §2), and the operator re-applies an object when its spec changes — which
+// a re-provision of an unchanged attachment does not do. Such an app fails the credential check
+// above and is reported stranded with the re-attach that fixes it, rather than silently reconnected
+// to a database that is not there.
 //
 // A failure is recorded per app rather than aborting. The instance is up and holds the data; stopping
 // at the first app that would not reconnect would leave the rest holding stale credentials with

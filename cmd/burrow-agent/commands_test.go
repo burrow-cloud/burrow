@@ -334,3 +334,26 @@ func TestAddonRemoveStructurallyAbsent(t *testing.T) {
 		}
 	}
 }
+
+// TestSkipHooksStructurallyAbsentFromTheAgent pins ADR-0080 §3 on the binary rather than in prose.
+// The agent can roll back — that is the recovery action, and it is on this surface — but it cannot
+// decide that a safety step does not apply: the blast radius of being wrong is an application serving
+// against a schema nobody verified, which is the judgement ADR-0065 keeps off this surface.
+//
+// The flag has to be ABSENT rather than ignored. A flag the binary accepts and drops would read as
+// having worked, and an agent that believed it had skipped the hook would report a rollback that did
+// not happen.
+func TestSkipHooksStructurallyAbsentFromTheAgent(t *testing.T) {
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"rollback", "web", "--skip-hooks"}, &out, &errb)
+	if err == nil {
+		t.Fatal("`burrow-agent rollback --skip-hooks` succeeded; skipping a hook is an operator's call (ADR-0080 §3)")
+	}
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("error = %v, want an unknown-flag rejection", err)
+	}
+	// And the flag is not merely unregistered on this one path: nothing in the tree defines it.
+	if f := newRollbackCmd().Flags().Lookup("skip-hooks"); f != nil {
+		t.Error("the agent's rollback command defines a skip-hooks flag")
+	}
+}

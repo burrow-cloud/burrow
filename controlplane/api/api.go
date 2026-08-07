@@ -403,9 +403,16 @@ func (s *server) logs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, logsResponse{Lines: lines})
 }
 
+// rollback returns an app to its previous release. Both switches are read as the literal string
+// "true" and nothing else: a safety step is skipped only when a caller asked for it in so many words,
+// so a malformed or absent parameter takes the safe path rather than a truthy interpretation of it
+// (ADR-0080 §1).
 func (s *server) rollback(w http.ResponseWriter, r *http.Request) {
-	confirm := r.URL.Query().Get("confirm") == "true"
-	res, err := s.engine.Rollback(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), confirm)
+	opts := controlplane.RollbackOptions{
+		Confirm:   r.URL.Query().Get("confirm") == "true",
+		SkipHooks: r.URL.Query().Get("skip_hooks") == "true",
+	}
+	res, err := s.engine.Rollback(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), opts)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1692,8 +1699,16 @@ func engineError(err error) (int, errorResponse) {
 	// understood, the guardrail allowed it, and the user's own command exited non-zero, so the deploy
 	// (or rollback) did not happen and the running version is untouched. The phase, the command, the
 	// exit code and the command's own output ride in the error text, which is what makes the failure
-	// diagnosable from the response instead of from a hunt through the cluster. NeedsConfirmation is
-	// deliberately absent — there is nothing to confirm; the command has to be fixed.
+	// diagnosable from the response instead of from a hunt through the cluster.
+	//
+	// NEEDSCONFIRMATION STAYS ABSENT, INCLUDING ON THE ROLLBACK PATH, and that is a decision rather
+	// than an omission. A blocked rollback now has something a caller can do about it — `--skip-hooks`
+	// (ADR-0080 §2) — which looks like the confirm shape and is not it. `needs_confirmation` means "the
+	// same caller may re-issue this request with confirm=true", a confirmation the agent can satisfy
+	// itself; the answer here is "a different caller, on a different binary, runs a different command"
+	// (ADR-0080 §3). Marking it needs_confirmation would tell every agent that has read
+	// `guard`'s confirm flow that it can proceed on its own say-so, which is exactly the authority this
+	// override withholds. The command a human runs rides in the error text instead.
 	if _, ok := controlplane.AsHook(err); ok {
 		return http.StatusUnprocessableEntity, errorResponse{Error: err.Error(), Code: "hook_failed"}
 	}

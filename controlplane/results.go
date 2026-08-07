@@ -268,6 +268,25 @@ type AutoscaleResult struct {
 	Warning          string `json:"warning,omitempty"`
 }
 
+// RollbackOptions carries what the CALLER decided about a rollback, as distinct from what the app's
+// state decides. It is a struct rather than two booleans because the two mean opposite things — one
+// satisfies a guardrail, the other steps around a safety step — and a call site reading
+// `Rollback(ctx, app, env, true, false)` would say neither.
+type RollbackOptions struct {
+	// Confirm satisfies a guardrail whose disposition holds the rollback for confirmation
+	// (ADR-0020). It says nothing about hooks.
+	Confirm bool
+	// SkipHooks rolls back WITHOUT running the app's `pre-rollback` hook (ADR-0080 §2). It exists for
+	// one situation: the hook cannot run — the image will not pull, the Job is unschedulable, the
+	// command has a typo — so the abort it produces is unrelated to the schema it guards, and a
+	// rollback is the one operation where waiting to fix that costs an outage.
+	//
+	// It is NON-DESTRUCTIVE and OPERATOR-ONLY. The hook stays configured, so the next rollback has its
+	// protection intact; and `burrow-agent` compiles no flag that sets this, because deciding a safety
+	// step does not apply is a judgement about the situation rather than a capability (ADR-0080 §3).
+	SkipHooks bool
+}
+
 // RollbackResult reports the outcome of a rollback. A rollback is itself a forward
 // deploy of a prior reference (ADR-0007), so it produces a new Release.
 type RollbackResult struct {
@@ -279,9 +298,10 @@ type RollbackResult struct {
 	// SupersededReleaseID is the release that was running before the rollback.
 	SupersededReleaseID string `json:"superseded_release_id"`
 	// Hints are non-blocking notes about the rollback, in the same shape DeployResult carries them:
-	// today, what the rollback's settle-wait observed and what a `post-deploy` hook made of it
-	// (ADR-0072 §4). They never gate or fail the rollback — it has already happened by the time any
-	// of them exists. Empty when there is nothing to note.
+	// that a `pre-rollback` hook was skipped and which command did not run (ADR-0080 §4), what the
+	// rollback's settle-wait observed, and what a `post-deploy` hook made of it (ADR-0072 §4). They
+	// never gate or fail the rollback — it has already happened by the time any of them exists. Empty
+	// when there is nothing to note.
 	Hints []string `json:"hints,omitempty"`
 }
 

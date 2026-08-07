@@ -804,6 +804,64 @@ func TestRollback(t *testing.T) {
 	}
 }
 
+// TestRollbackSkipHooks covers the operator half of ADR-0080: the flag reaches the control plane only
+// when it is passed, and what came back about the skip is printed rather than swallowed. The second
+// half matters as much as the first — the result type used to carry no hints field at all, so a skip
+// the control plane reported would have been decoded away before anybody saw it.
+func TestRollbackSkipHooks(t *testing.T) {
+	answer := func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"release":                   map[string]any{"id": "r3", "image": "img:1", "status": "deployed"},
+			"rolled_back_to_release_id": "r1", "superseded_release_id": "r2",
+			"hints": []string{`the pre-rollback hook of web in prod was SKIPPED with --skip-hooks: "./migrate down" did not run before the rollback.`},
+		})
+	}
+
+	var query string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		answer(w, r)
+	}, "app", "rollback", "web", "--skip-hooks")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(query, "skip_hooks=true") {
+		t.Errorf("query = %q, want skip_hooks=true", query)
+	}
+	if !strings.Contains(out, "rolled web back to release r1") {
+		t.Errorf("the rollback line is missing; a skip is a note about a rollback that happened: %q", out)
+	}
+	if !strings.Contains(out, "SKIPPED") || !strings.Contains(out, "./migrate down") {
+		t.Errorf("output does not report the skipped hook: %q", out)
+	}
+
+	// Without the flag nothing asks for a skip, so the control plane never sees one.
+	if _, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		answer(w, r)
+	}, "app", "rollback", "web"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(query, "skip_hooks") {
+		t.Errorf("query = %q, want no skip_hooks parameter when the flag was not passed", query)
+	}
+}
+
+// TestDeployHasNoSkipHooksFlag pins the boundary ADR-0080 §2 draws. A deploy can wait for a broken
+// hook to be fixed; an outage cannot, and the same flag on `deploy` would be a way to routinely skip
+// migrations — a different feature with none of this reasoning behind it.
+func TestDeployHasNoSkipHooksFlag(t *testing.T) {
+	_, _, err := runCLI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"release": map[string]any{"id": "r1", "status": "deployed"}})
+	}, "app", "deploy", "web", "--image", "img:1", "--skip-hooks")
+	if err == nil {
+		t.Fatal("`app deploy --skip-hooks` was accepted; the override exists only where the urgency does")
+	}
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("error = %v, want an unknown-flag rejection", err)
+	}
+}
+
 func TestReachabilityCommand(t *testing.T) {
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.URL.Path != "/v1/apps/web/reachability" {

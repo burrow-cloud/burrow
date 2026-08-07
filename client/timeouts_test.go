@@ -74,7 +74,7 @@ func TestRequestBudgetCoversTheControlPlanesOwnBound(t *testing.T) {
 			return err
 		}},
 		{"rollback", controlplane.MaxDeployWait, func(c *Client) error {
-			_, err := c.Rollback(ctx, "app", "", false)
+			_, err := c.Rollback(ctx, "app", "", RollbackOptions{})
 			return err
 		}},
 		{"build", controlplane.MaxBuildWait, func(c *Client) error {

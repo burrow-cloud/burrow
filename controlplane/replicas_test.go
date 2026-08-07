@@ -126,7 +126,7 @@ func TestRollbackResolvesReplicas(t *testing.T) {
 		if _, err := e.Scale(ctx, "web", "", 8, false); err != nil {
 			t.Fatalf("Scale: %v", err)
 		}
-		if _, err := e.Rollback(ctx, "web", "", false); err != nil {
+		if _, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{}); err != nil {
 			t.Fatalf("Rollback: %v", err)
 		}
 		spec, _ := k.Spec("web")
@@ -150,7 +150,7 @@ func TestRollbackResolvesReplicas(t *testing.T) {
 			t.Fatalf("Scale: %v", err)
 		}
 		k.SetAutoscalerActive("web", true)
-		if _, err := e.Rollback(ctx, "web", "", false); err != nil {
+		if _, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{}); err != nil {
 			t.Fatalf("Rollback: %v", err)
 		}
 		spec, _ := k.Spec("web")

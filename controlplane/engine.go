@@ -2502,7 +2502,11 @@ func (e *Engine) SetAutoDeploy(ctx context.Context, app, env string, level AutoD
 // app's level to off with the reason "disabled by rollback", so the pull-based watcher does not fight
 // the deliberate downgrade by re-applying the version just backed away from. Re-enabling is a
 // deliberate human action (`burrow app auto-deploy <app> <level>`).
-func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (RollbackResult, error) {
+//
+// opts.SkipHooks is the operator-only override that rolls back WITHOUT running the app's
+// `pre-rollback` hook (ADR-0080 §2). It changes nothing about the default: a hook that is not skipped
+// runs, and its failure still aborts.
+func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOptions) (RollbackResult, error) {
 	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
@@ -2533,8 +2537,20 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 		return RollbackResult{}, fmt.Errorf("rollback %s: loading guardrail policy: %w", app, err)
 	}
 	args := map[string]string{"image": target.Image, "to_release": target.ID, "env": envName(env)}
+	// A skipped hook is resolved BEFORE the guardrail decision so the FIRST row of the trail already
+	// says one was skipped and which (ADR-0080 §4). "We rolled back around a broken hook" is the fact
+	// somebody needs afterwards, and a reader should find it on the rollback rather than infer it from
+	// the absence of a hook row.
+	var skipped []string
+	if opts.SkipHooks {
+		skipped = e.skippedRollbackHook(ctx, app, env)
+		if len(skipped) > 0 {
+			args["hooks_skipped"] = string(HookPreRollback)
+			args["skipped_command"] = strings.Join(skipped, " ")
+		}
+	}
 	if err := e.recordDecision(ctx, auditOpRollback, app, args, GuardrailRollback,
-		pol.evaluateGuardrail(GuardrailScope{Env: env, Name: app}, "rollback", GuardrailRollback, confirm,
+		pol.evaluateGuardrail(GuardrailScope{Env: env, Name: app}, "rollback", GuardrailRollback, opts.Confirm,
 			fmt.Sprintf("rolling %q back to its previous release %s (image %s)", app, target.ID, target.Image))); err != nil {
 		return RollbackResult{}, err
 	}
@@ -2596,11 +2612,25 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	// rollback, the same rule §3 gives the other pre phase, because letting the older code serve
 	// against a half-stepped-back schema is the outcome the ordering exists to prevent. With no
 	// pre-rollback hook set nothing runs at all, which is the safe forward-only default.
-	if err := e.runHook(ctx, e.k8s.WithNamespace(ns), HookPreRollback, app, env, cur.Image, cfg, nil, noProgress); err != nil {
-		rel.Status = ReleaseFailed
-		_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
-		e.recordExecution(ctx, auditOpRollback, app, args, auditableHookError(err))
-		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
+	//
+	// AN OPERATOR CAN SKIP IT, AND ONLY HERE (ADR-0080 §2). Two different failures arrive as the same
+	// abort — the revert failed, or the hook could not run at all — and only the first is a reason to
+	// stay on the newer image. Since a rollback is what somebody reaches for when a deploy has gone
+	// wrong, an abort it takes a second operation to get past is an extra step on the path that must
+	// not have one. The skip is not "run it and ignore the result": the case it exists for is a hook
+	// that cannot start, where running it again only spends the timeout again.
+	//
+	// What it deliberately is not is silent, lossy, or the agent's to make. It leaves the hook
+	// configured (the escape it replaces was `hook unset`, which deletes it), it says so on the result
+	// and in the audit row, and `--skip-hooks` is absent from `burrow-agent` — a rollback the agent
+	// runs still aborts, with a message naming the command a human runs (ADR-0080 §3).
+	if !opts.SkipHooks {
+		if err := e.runHook(ctx, e.k8s.WithNamespace(ns), HookPreRollback, app, env, cur.Image, cfg, nil, noProgress); err != nil {
+			rel.Status = ReleaseFailed
+			_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
+			e.recordExecution(ctx, auditOpRollback, app, args, auditableHookError(err))
+			return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
+		}
 	}
 
 	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Readiness: readiness, Replicas: replicas, ReleaseID: rel.ID}
@@ -2628,6 +2658,11 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 		return RollbackResult{}, fmt.Errorf("rollback %s: disabling auto-deploy after rollback: %w", app, err)
 	}
 	res := RollbackResult{Release: rel, RolledBackToReleaseID: target.ID, SupersededReleaseID: cur.ID}
+	// The skip is stated on the result, plainly, at the moment it happens (ADR-0080 §4). It leads the
+	// hints because it is the one thing about this rollback that is not ordinary.
+	if len(skipped) > 0 {
+		res.Hints = append(res.Hints, skippedHookNote(app, env, skipped))
+	}
 	// A rollback fires `post-deploy` too, told that the deploy it is reporting on was a rollback
 	// (ADR-0072 §4). "Did this settle and is it serving?" is the same question whichever direction
 	// the image moved, so a separate `post-rollback` phase would be a fourth name for an identical
@@ -2645,6 +2680,27 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, confirm bool) (R
 	rk := e.k8s.WithNamespace(ns)
 	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, rk, app, env, target.Image, rel.ID, DeployKindRollback, cfg, e.settleOnce(ctx, rk, app, envName(env), noProgress), noProgress)...)
 	return res, nil
+}
+
+// skippedRollbackHook reads the `pre-rollback` hook a `--skip-hooks` rollback is about to not run, so
+// the skip can be reported and recorded with the command it skipped (ADR-0080 §4).
+//
+// It returns nil when no hook is set, because skipping nothing is not a skip: an operator who passes
+// the flag on an app with no hook has changed nothing, and a hint or an audit row saying otherwise
+// would be a record of something that did not happen.
+//
+// A READ FAILURE DOES NOT FAIL THE ROLLBACK. This is the incident path, and the flag's whole purpose
+// is to remove a prerequisite from it; refusing to recover because a settings read was briefly
+// unavailable would reinstate exactly the failure mode ADR-0080 exists to remove. The rollback skips
+// the hook either way and the record loses one detail, which is the smaller harm.
+func (e *Engine) skippedRollbackHook(ctx context.Context, app, env string) []string {
+	command, err := e.db.AppHook(ctx, app, envName(env), HookPreRollback)
+	if err != nil {
+		slog.WarnContext(ctx, "reading the pre-rollback hook failed; the rollback skips it either way, but the record cannot name the command",
+			"app", app, "env", envName(env), "error", err)
+		return nil
+	}
+	return command
 }
 
 // AddEnvironment registers a named environment mapping name to namespace (ADR-0035 phase 2). It

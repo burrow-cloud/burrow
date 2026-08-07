@@ -64,6 +64,10 @@ func TestTier1CapabilitiesAreReported(t *testing.T) {
 		"addon remove --delete-data",
 		"addon detach",
 		"addon restore",
+		// The rollback VERB is on the agent surface; only the flag that steps around its
+		// `pre-rollback` hook is not (ADR-0080 §3). An agent that met a blocked rollback and could
+		// not say what closes it would be the dead end ADR-0065 §7 exists to prevent, mid-incident.
+		"rollback --skip-hooks",
 		"guard set",
 		"secret set",
 		"env add",

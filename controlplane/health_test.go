@@ -365,7 +365,7 @@ func TestRollbackKeepsTheCurrentProbe(t *testing.T) {
 		t.Fatalf("SetAppHealth: %v", err)
 	}
 
-	if _, err := e.Rollback(ctx, "web", "", false); err != nil {
+	if _, err := e.Rollback(ctx, "web", "", cp.RollbackOptions{}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	spec, _ := k.Spec("web")

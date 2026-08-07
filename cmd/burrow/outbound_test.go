@@ -69,6 +69,35 @@ func TestLatestReleaseCheckSendsNoBurrowHeaders(t *testing.T) {
 	assertNoBurrowHeaders(t, "the latest-release check", got)
 }
 
+// TestReleaseListSendsNoBurrowHeaders covers the OTHER GitHub read behind `burrow version`: the
+// release list, which is what a CLI on a prerelease is compared against (issue #442). It is the same
+// third party as the check above and needs the same client; being a second, later-added fetch to the
+// same host is exactly how one of them ends up back on the global default.
+func TestReleaseListSendsNoBurrowHeaders(t *testing.T) {
+	poisonDefaultClient(t)
+
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"tag_name":"v9.9.9-rc.1","draft":false},{"tag_name":"v9.9.8","draft":true}]`))
+	}))
+	defer srv.Close()
+
+	orig := releasesURL
+	releasesURL = srv.URL
+	t.Cleanup(func() { releasesURL = orig })
+
+	tags, err := fetchReleaseTags(context.Background())
+	if err != nil {
+		t.Fatalf("fetchReleaseTags: %v", err)
+	}
+	if len(tags) != 1 || tags[0] != "v9.9.9-rc.1" {
+		t.Errorf("tags = %v, want only the published tag v9.9.9-rc.1 (a draft is not something to upgrade to)", tags)
+	}
+	assertNoBurrowHeaders(t, "the release-list check", got)
+}
+
 // TestFetchManifestSendsNoBurrowHeaders covers the URL manifest fetch behind `apply`. The URL comes
 // from the caller and can point anywhere, so this is the path that would hand the control-plane
 // token to an arbitrary host.

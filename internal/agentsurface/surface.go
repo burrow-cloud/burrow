@@ -111,6 +111,26 @@ type GuardReport struct {
 	AbsentCapabilities []Capability `json:"absent_capabilities"`
 }
 
+// AbsentCapabilitiesReport is what `burrow agent capabilities --json` answers: the capabilities the
+// agent binary does not carry, on their own rather than beside a policy they have nothing to do with
+// (issue #445).
+//
+// It carries the same key under the same name as GuardReport.AbsentCapabilities so the two answers
+// cannot drift into two spellings of one list, and it is never omitted when empty for the same
+// reason that field is not: a missing key reads as "unknown" where an empty list reads as "none".
+type AbsentCapabilitiesReport struct {
+	AbsentCapabilities []Capability `json:"absent_capabilities"`
+}
+
+// NewAbsentCapabilitiesReport wraps an absent-capability list for the standalone report,
+// normalizing a nil list to an empty one so the JSON shape is stable.
+func NewAbsentCapabilitiesReport(absent []Capability) AbsentCapabilitiesReport {
+	if absent == nil {
+		absent = []Capability{}
+	}
+	return AbsentCapabilitiesReport{AbsentCapabilities: absent}
+}
+
 // GuardReportScope names the environment and the one app or add-on instance a scoped report answers
 // for (ADR-0085 §1). Both members are omitted when empty, so the global listing carries no scope at
 // all rather than an object of blanks.

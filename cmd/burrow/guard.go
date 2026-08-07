@@ -23,7 +23,8 @@ import (
 // `list --json` also carries the capabilities absent from the agent binary (ADR-0065 §7), which
 // burrow-agent consumes. They are NOT in the human table: a disposition is policy an operator set
 // and can change here, an absent capability is the shape of another binary, and printing the two
-// together as one listing said they were halves of one setting (issue #445).
+// together as one listing said they were halves of one setting (issue #445). The human listing
+// points at `burrow agent capabilities`, which is where that list lives on its own.
 func newGuardCmd() *cobra.Command {
 	parent := &cobra.Command{
 		Use:   "guard",
@@ -105,7 +106,9 @@ func newGuardListCmd() *cobra.Command {
 // addressed to somebody who was not being refused anything.
 //
 // Nothing is lost by not printing it. The agent receives the list over the API at runtime, which is
-// what makes it relay a real refusal, and `--json` still carries every capability in full.
+// what makes it relay a real refusal, `--json` still carries every capability in full, and the list
+// has a command of its own in `burrow agent capabilities`, which this line names. Pointing at
+// `guard list --json` instead would have kept the answer inside the command it does not belong to.
 //
 // No em-dashes: this is user-facing CLI output.
 func writeAbsentCapabilitiesPointer(w io.Writer, absent []agentsurface.Capability) {
@@ -113,7 +116,7 @@ func writeAbsentCapabilitiesPointer(w io.Writer, absent []agentsurface.Capabilit
 		return
 	}
 	fmt.Fprintf(w, "\n%d capabilities are absent from burrow-agent entirely, which no disposition changes.\n", len(absent))
-	fmt.Fprintln(w, "Run `burrow guard list --json` to see them and what to run instead.")
+	fmt.Fprintln(w, "Run `burrow agent capabilities` to see them and what to run instead.")
 }
 
 // guardSourcesReported decides whether the listing carries a SOURCE column, by reading the ANSWER

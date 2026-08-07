@@ -160,8 +160,19 @@ agent runs. Homebrew updates both together:
 brew update && brew upgrade burrow-cloud/tap/burrow
 ```
 
-Name the formula in full. Burrow ships from its own tap, and Homebrew's core repository has an
-unrelated formula called `burrow`, so a bare `brew upgrade burrow` will not update Burrow.
+**Name the formula in full.** Burrow ships from its own tap, and Homebrew's core repository has an
+unrelated formula called `burrow` — a Kafka consumer-lag checker. A bare `brew upgrade burrow`
+resolves to that one, and it does not fail: Homebrew **uninstalls the Burrow CLI and installs the
+other project in its place**, reporting it as an upgrade.
+
+```
+==> Upgraded 1 outdated package
+burrow 0.14.0-rc.11 -> 1.9.6
+```
+
+If that has already happened, `brew uninstall burrow && brew install burrow-cloud/tap/burrow` puts
+it back. A plain `brew upgrade` with no arguments is safe — Homebrew records which tap a formula
+came from and stays on it. It is naming `burrow` on its own that is ambiguous.
 
 Then **restart your agent session** (for example `claude --resume`). A running session keeps
 executing the `burrow-agent` it started with, so it does not pick up the new one until it restarts.

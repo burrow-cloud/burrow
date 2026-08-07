@@ -141,7 +141,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "attach addon", func(localPort int) error {
 		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
 		var aerr error
-		res, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "")
+		res, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "", "")
 		return aerr
 	})
 	if res.SecretKey != "DATABASE_URL" {
@@ -188,7 +188,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "attach addon (staging)", func(localPort int) error {
 		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
 		var aerr error
-		stagingRes, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging")
+		stagingRes, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", "")
 		return aerr
 	})
 	if stagingRes.Environment != "staging" {
@@ -326,7 +326,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 	// Attach the app (an admin-SQL op, so it goes through a port-forward like the other e2e).
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "attach addon", func(localPort int) error {
 		prov.WithAdminEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "")
+		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "", "")
 		return aerr
 	})
 

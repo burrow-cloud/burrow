@@ -118,11 +118,11 @@ func TestAttachInTwoEnvironmentsGetsTwoDatabases(t *testing.T) {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 
-	prodRes, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment)
+	prodRes, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, "")
 	if err != nil {
 		t.Fatalf("AttachAddon(default): %v", err)
 	}
-	stagingRes, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "staging")
+	stagingRes, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "staging", "")
 	if err != nil {
 		t.Fatalf("AttachAddon(staging): %v", err)
 	}
@@ -174,10 +174,10 @@ func TestAttachIsIdempotentWithinOneEnvironment(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := newEnvPostgresEngine(t, "burrow-apps")
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
 		t.Fatalf("re-attach in the same environment should succeed: %v", err)
 	}
 	if dbs := prov.Databases(cp.DefaultEnvironment); len(dbs) != 1 {
@@ -196,7 +196,7 @@ func TestDetachDropsOnlyTheNamedEnvironment(t *testing.T) {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 	for _, env := range []string{cp.DefaultEnvironment, "staging"} {
-		if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", env); err != nil {
+		if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", env, ""); err != nil {
 			t.Fatalf("AttachAddon(%s): %v", env, err)
 		}
 	}
@@ -233,7 +233,7 @@ func TestAttachRefusesWhenTheEnvironmentIsAmbiguous(t *testing.T) {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 
-	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "")
+	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "")
 	if _, ok := cp.AsAmbiguousEnvironment(err); !ok {
 		t.Fatalf("attach with no environment = %v, want an AmbiguousEnvironmentError", err)
 	}
@@ -242,7 +242,7 @@ func TestAttachRefusesWhenTheEnvironmentIsAmbiguous(t *testing.T) {
 	}
 
 	// An unregistered environment is a clear ErrNotFound, again before anything is provisioned.
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "ghost"); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "ghost", ""); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("attach into an unregistered environment = %v, want ErrNotFound", err)
 	}
 	if got := prov.Ensured(); len(got) != 0 {

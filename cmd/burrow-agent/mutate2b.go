@@ -257,29 +257,46 @@ func newAddonInstallCmd() *cobra.Command {
 
 // newAddonAttachCmd gives an app its own database on the installed Postgres add-on and wires it in
 // (ADR-0031). No secret crosses this channel: burrowd generates the connection string server-side and
-// writes it into the app's Secret; the result carries only the KEY name (DATABASE_URL), never the value.
+// writes it into the app's Secret; the result carries only the KEY name, never the value.
 // Attach provisions — it destroys nothing — so it is not guarded.
+//
+// --as IS ON THIS SURFACE, and ADR-0065 §1 is why. It fails neither test. SCOPE: it changes which key
+// of the app's OWN Secret is written, in the environment the attach already targets — the same app the
+// agent was asked about, and nothing beyond it. REVERSIBILITY: the one irreversible thing it could do
+// is overwrite a value nobody can read back, and the control plane refuses a name the app's config or
+// Secret already holds rather than writing over it (issue #462), so what remains is a variable a
+// re-attach can rename again. It is also the agent that knows which variable the app it is deploying
+// actually reads; withholding the name would leave the agent writing a start-up wrapper to copy one
+// variable to another, which is the workaround the flag exists to remove.
 func newAddonAttachCmd() *cobra.Command {
 	o := &connOpts{}
+	var as string
 	cmd := &cobra.Command{
 		Use:   "attach <addon> <app>",
 		Short: "Give an app its own database on the installed Postgres add-on and wire it in",
 		Long: "Give an application its own database on the installed Postgres add-on and wire it in. You supply\n" +
-			"only the add-on type (\"postgres\") and the app name — NO secret. Burrow generates the database,\n" +
-			"role, and connection string server-side and writes it into the app's Secret as DATABASE_URL; the\n" +
-			"value is never returned or shown. Re-attaching rotates the password. The result carries only the\n" +
-			"app, the add-on, the environment, and the KEY name — never the value. Attach is not guarded (it\n" +
-			"destroys nothing). Each environment has its OWN database instance, so --env decides which server\n" +
-			"the app is given a database on; with several environments registered, naming one is required.",
+			"only the add-on type (\"postgres\"), the app name, and optionally the variable name — NO secret.\n" +
+			"Burrow generates the database, role, and connection string server-side and writes it into the\n" +
+			"app's Secret; the value is never returned or shown. Re-attaching rotates the password. The result\n" +
+			"carries only the app, the add-on, the environment, and the KEY name — never the value. Attach is\n" +
+			"not guarded (it destroys nothing). Each environment has its OWN database instance, so --env\n" +
+			"decides which server the app is given a database on; with several environments registered,\n" +
+			"naming one is required.\n\n" +
+			"The variable is DATABASE_URL unless --as names another, so an app that reads DB_URL or PG_DSN\n" +
+			"can be wired to it directly instead of copying one variable to another at start-up. --as on an\n" +
+			"already-attached app MOVES the variable — the result reports the removed name in\n" +
+			"previous_secret_key. A name the app's config or Secret already holds is REFUSED, naming what\n" +
+			"holds it, rather than overwriting a value that cannot be read back.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "addon_attach", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.AttachAddon(ctx, args[0], args[1], env)
+				return c.AttachAddon(ctx, args[0], args[1], env, as)
 			})
 		},
 	}
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVar(&as, "as", "", "environment variable to write the connection string into (default DATABASE_URL, or the name this attachment already uses)")
 	return cmd
 }
 

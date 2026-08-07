@@ -126,7 +126,7 @@ it:
 
 | What Burrow provisioned | What the check does |
 | --- | --- |
-| A database and login role on the environment's Postgres instance (`burrow addon attach postgres`) | Connects with the app's own `DATABASE_URL` and runs `SELECT 1` |
+| A database and login role on the environment's Postgres instance (`burrow addon attach postgres`) | Connects with the app's own connection string — `DATABASE_URL`, or the variable the attach named — and runs `SELECT 1` |
 | A published port (`burrow app publish`) | Requests the app's port through its Service and reports the status code |
 
 **It runs inside the app's own container** — the app's image, filesystem, service account,
@@ -696,7 +696,7 @@ stanza that wrote them.
 §4's restore is now built as `burrow addon restore-instance postgres`: it takes a physical backup of
 the instance's current state first and stops without changing anything if that backup does not reach
 the store, replaces the instance with one CloudNativePG recovers from the repository, waits for it to
-serve, and reissues every attached app's `DATABASE_URL` and restarts it. It is instance-scoped — every
+serve, and reissues every attached app's connection string — each into the variable that app is attached under — and restarts it. It is instance-scoped — every
 database on the instance goes back to the same point together — so it is a separate verb from `addon
 restore <addon> <app>`, is absent from `burrow-agent`, and asks for the instance's name to be typed
 back on a terminal.
@@ -723,8 +723,8 @@ to the existing app namespace (§2–§3).
 | --- | --- | --- |
 | Install | `burrow addon install <type> [--env] [--archive-destination <provider>]` | As above, for one environment — each gets its own instance (ADR-0067 §1). `metrics` additionally needs RBAC the CLI stages client-side first. The result states what the instance does about backups, on the human output and in `--json` as a `backups` object with a closed `state` (`archiving`, `none`, `unknown`) and, for an archiving Postgres instance, a `base_backup` (`present`, `requested`, `none`, `unknown`) — read back off the instance rather than inferred from what the install resolved. Add-on types with no backup path at all say so instead of staying silent. |
 | List | `burrow addon list` / `burrow-agent addons` | Type, mode (`installed`/`connected`), backend, endpoint, capabilities. This is how an app is pointed at `cache` — read the endpoint and set it as config. `burrow addon list` additionally reports the volumes an earlier removal kept, in their own section (`retained_volumes` in `--json`). |
-| Attach an app | `burrow addon attach postgres <app> [--env]` | **Postgres only.** On the named environment's instance, creates role `app_<app>` and database `<app>` owned by it, revokes `CONNECT` from `PUBLIC`, grants it to the role, and writes the generated `DATABASE_URL` into the app's Secret in that environment's namespace, then restarts the workload there. Re-attaching rotates the password. The URL is never returned, logged, or audited. |
-| Detach | `burrow addon detach postgres <app> [--env]` | Removes `DATABASE_URL`, then `DROP DATABASE … WITH (FORCE)` and `DROP ROLE` **on that environment's instance**. Destructive; confirm-gated. |
+| Attach an app | `burrow addon attach postgres <app> [--as <NAME>] [--env]` | **Postgres only.** On the named environment's instance, creates role `app_<app>` and database `<app>` owned by it, revokes `CONNECT` from `PUBLIC`, grants it to the role, and writes the generated connection string into the app's Secret in that environment's namespace, then restarts the workload there. Re-attaching rotates the password. The URL is never returned, logged, or audited. The variable is `DATABASE_URL` unless `--as` names another, and the chosen name is recorded with the attachment, so detach, rotation and a restore's cutover all follow it. `--as` on an already-attached app **moves** the variable — the new name is written and the old one removed, since the rotation leaves it dead — and the result reports the removed name. A name the app's config or Secret already holds is refused, naming what holds it. |
+| Detach | `burrow addon detach postgres <app> [--env]` | Removes the variable the attachment was written under (`DATABASE_URL` unless it named another), then `DROP DATABASE … WITH (FORCE)` and `DROP ROLE` **on that environment's instance**. Destructive; confirm-gated. |
 | Remove | `burrow addon remove <name> [--delete-data] [--skip-final-backup] [--backup-destination <provider>]` | Tears the add-on's workload down and **keeps its data volume** unless `--delete-data` is passed. Confirm-gated by `addon.remove`; the held message names the volume, the attached apps for `postgres`, and whether a final backup is taken first. `--delete-data` additionally requires the add-on's name typed back on a terminal, and refuses off one without `--acknowledge-data-loss`. With an object-storage provider registered it takes a final backup of every attached database first and removes **nothing** if it fails; `--skip-final-backup` destroys the data without one and announces it (ADR-0064 §5). **Operator CLI only** — absent from `burrow-agent` entirely (ADR-0065 §2). |
 | Connect an existing backend | `burrow addon connect <loki\|prometheus> --endpoint <url> [--auth]` | Registers a backend you already run — **deploys nothing**. Only `loki` (logs) and `prometheus` (metrics) are connectable. Operator CLI only. |
 | Query logs | `burrow addon logs [query] [--limit]` / `burrow-agent logs-query` | LogsQL against VictoriaLogs, or LogQL against Loki. Limit clamps to 200 when out of range or unset, capped at 1000. |

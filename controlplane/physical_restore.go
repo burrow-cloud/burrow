@@ -33,12 +33,12 @@ import (
 // reached for should be selected by scope, not by remembering which of "logical" and "physical"
 // means which.
 
-// databaseURLSecretKey is the key `addon attach` writes an app's generated connection string under
-// (ADR-0031). It is a constant rather than a literal at each site because THREE operations now agree
-// about it — attach writes it, detach removes it, and a physical restore rewrites it during the
-// cutover — and an app that a restore silently failed to find is an app left pointing at a database
-// that no longer exists.
-const databaseURLSecretKey = "DATABASE_URL"
+// THE CUTOVER READS EACH APP'S OWN VARIABLE NAME rather than holding a constant of its own. It used
+// to define `databaseURLSecretKey = "DATABASE_URL"`, which agreed with attach and detach only because
+// all three hard-coded the same string; once an attach can name its variable (issue #462), a fourth
+// opinion about the name is a restore that enumerates the wrong apps and rewrites the wrong key.
+// Both sites below go through Database.AddonEnvKey, which answers DATABASE_URL for an attachment that
+// named nothing — so an environment where nobody chose a name behaves exactly as it did.
 
 // RestoreInstanceOptions is everything `addon restore-instance` needs beyond the add-on type and the
 // environment.
@@ -479,6 +479,12 @@ func (e *Engine) appsAttachedInEnvironment(ctx context.Context, ns, targetEnv st
 
 	var attached []string
 	for _, app := range names {
+		// The variable this app's attachment was written under — not a fixed name, since an app that
+		// attached under its own is attached just as much as one that took the default (issue #462).
+		want, err := e.db.AddonEnvKey(ctx, string(AddonPostgres), app, targetEnv)
+		if err != nil {
+			return nil, fmt.Errorf("reading which apps are on this instance: %s: %w", app, err)
+		}
 		keys, err := k.SecretKeys(ctx, app)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
@@ -487,7 +493,7 @@ func (e *Engine) appsAttachedInEnvironment(ctx context.Context, ns, targetEnv st
 			return nil, fmt.Errorf("reading which apps are on this instance: %s: %w", app, err)
 		}
 		for _, key := range keys {
-			if key == databaseURLSecretKey {
+			if key == want {
 				attached = append(attached, app)
 				break
 			}
@@ -518,6 +524,14 @@ func (e *Engine) appsAttachedInEnvironment(ctx context.Context, ns, targetEnv st
 func (e *Engine) cutOverApps(ctx context.Context, t AddonType, targetEnv, ns string, apps []string) (reconnected []string, stranded []StrandedApp) {
 	k := e.k8s.WithNamespace(ns)
 	for _, app := range apps {
+		// The key THIS app is attached under. Writing the default here would leave an app that chose
+		// its own name reading a credential the recovery point no longer honours while a second,
+		// unread variable held the working one (issue #462).
+		key, err := e.db.AddonEnvKey(ctx, string(AddonPostgres), app, targetEnv)
+		if err != nil {
+			stranded = append(stranded, StrandedApp{App: app, Reason: fmt.Sprintf("the variable its connection string is written under could not be read, so nothing was rewritten for it; re-attach it with `burrow addon attach %s %s --env %s`", t, app, targetEnv)})
+			continue
+		}
 		// The returned url is a SECRET value: from here it is handed only to SetSecretValue and never
 		// logged, audited, or returned.
 		url, err := e.dbProvisioner.EnsureAppDatabase(ctx, app, targetEnv)
@@ -525,9 +539,9 @@ func (e *Engine) cutOverApps(ctx context.Context, t AddonType, targetEnv, ns str
 			stranded = append(stranded, StrandedApp{App: app, Reason: fmt.Sprintf("its database and role could not be re-provisioned on the recovered instance; re-attach it with `burrow addon attach %s %s --env %s`", t, app, targetEnv)})
 			continue
 		}
-		if err := k.SetSecretValue(ctx, app, databaseURLSecretKey, url); err != nil {
+		if err := k.SetSecretValue(ctx, app, key, url); err != nil {
 			// The error names the app and key only — never the value.
-			stranded = append(stranded, StrandedApp{App: app, Reason: fmt.Sprintf("its %s could not be written; re-attach it with `burrow addon attach %s %s --env %s`", databaseURLSecretKey, t, app, targetEnv)})
+			stranded = append(stranded, StrandedApp{App: app, Reason: fmt.Sprintf("its %s could not be written; re-attach it with `burrow addon attach %s %s --env %s`", key, t, app, targetEnv)})
 			continue
 		}
 		if err := k.RestartWorkload(ctx, app, e.clock.Now()); err != nil && !errors.Is(err, ErrNotFound) {

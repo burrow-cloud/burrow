@@ -46,6 +46,9 @@ type Database struct {
 	// Whether the deploy-time dependency check runs (ADR-0076 §4), keyed the same way. An absent
 	// entry means ENABLED: the check is Burrow's default, so only a decision against it is recorded.
 	depChecks map[string]bool // "app\x00env" -> the check runs
+	// The variable name each attachment's connection string was written under (issue #462). An
+	// absent entry means DATABASE_URL: the default did not move when the name became a choice.
+	attachments map[string]string // "addon\x00app\x00env" -> env var name
 
 	// The operator-set operational limits (ADR-0068 §1), kept apart from policy above because a
 	// limit carries a value rather than a disposition.
@@ -55,22 +58,23 @@ type Database struct {
 // NewDatabase returns an empty fake database with the default guardrail policy.
 func NewDatabase() *Database {
 	return &Database{
-		byID:       make(map[string]controlplane.Release),
-		order:      make(map[string][]string),
-		providers:  make(map[string]controlplane.Provider),
-		addons:     make(map[string]controlplane.AddonInfo),
-		appEnv:     make(map[string]map[string]string),
-		hooks:      make(map[string]controlplane.Hook),
-		autoDeploy: make(map[string]map[string]controlplane.AutoDeployLevel),
-		reason:     make(map[string]map[string]string),
-		backups:    make(map[string]controlplane.Backup),
-		envs:       make(map[string]controlplane.Environment),
-		errs:       make(map[Op]error),
-		policy:     controlplane.DefaultPolicy(),
-		exposures:  make(map[string]controlplane.Exposure),
-		health:     make(map[string]controlplane.HealthEndpoint),
-		depChecks:  make(map[string]bool),
-		limits:     controlplane.OperationalConfig{Values: map[controlplane.LimitCode]string{}},
+		byID:        make(map[string]controlplane.Release),
+		order:       make(map[string][]string),
+		providers:   make(map[string]controlplane.Provider),
+		addons:      make(map[string]controlplane.AddonInfo),
+		appEnv:      make(map[string]map[string]string),
+		hooks:       make(map[string]controlplane.Hook),
+		autoDeploy:  make(map[string]map[string]controlplane.AutoDeployLevel),
+		reason:      make(map[string]map[string]string),
+		backups:     make(map[string]controlplane.Backup),
+		envs:        make(map[string]controlplane.Environment),
+		errs:        make(map[Op]error),
+		policy:      controlplane.DefaultPolicy(),
+		exposures:   make(map[string]controlplane.Exposure),
+		health:      make(map[string]controlplane.HealthEndpoint),
+		depChecks:   make(map[string]bool),
+		attachments: make(map[string]string),
+		limits:      controlplane.OperationalConfig{Values: map[controlplane.LimitCode]string{}},
 	}
 }
 

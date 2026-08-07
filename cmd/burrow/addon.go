@@ -580,7 +580,7 @@ func restoreInstanceConsequence(ctx context.Context, c *client.Client, instance,
 		"  Every database on it goes back to that point and everything written since is gone.",
 		instance, restoreEnvironment(env), target)
 	if apps := attachedAppsIn(ctx, c, env); len(apps) > 0 {
-		fmt.Fprintf(&b, "\n  On this instance: %s. All of them are rewound together, their DATABASE_URL is\n"+
+		fmt.Fprintf(&b, "\n  On this instance: %s. All of them are rewound together, their connection string is\n"+
 			"  reissued afterwards, and each app is restarted.", pluralApps(apps))
 	}
 	b.WriteString("\n  The instance's current data volume is DESTROYED and rebuilt from the repository.")
@@ -627,6 +627,13 @@ func restoreInstanceSummary(res client.RestoreInstanceResult) string {
 // one environment's instance, so a notice listing another environment's apps would name apps this
 // operation does not touch — and understate or overstate the blast radius in the one message whose
 // job is to state it exactly.
+//
+// It looks for the DEFAULT variable name, which is as far as a client can get: an app may be attached
+// under a name of its own (issue #462) and only the control plane holds the record of which. So an app
+// attached under another name is missing from THIS sentence, and it is missing from a notice rather
+// than from the operation — the server's held guardrail message enumerates the same apps from the
+// recorded names and is the authoritative list the operator confirms against. Closing the gap here
+// needs the attachment listing this file does not add.
 func attachedAppsIn(ctx context.Context, c *client.Client, env string) []string {
 	apps, err := c.Apps(ctx, env)
 	if err != nil {
@@ -649,23 +656,30 @@ func attachedAppsIn(ctx context.Context, c *client.Client, env string) []string 
 	return attached
 }
 
-// newAddonAttachCmd is `burrow addon attach postgres <app> [--env]`: give an app its own database on
-// the named environment's Postgres instance (ADR-0031/0067 §1). The caller supplies the add-on type,
-// the app name, and the environment; burrowd generates the DATABASE_URL server-side and writes it
-// into the app's Secret in that environment's namespace — no secret value is printed, returned, or
-// carried over the agent control channel. Attach provisions and destroys nothing, so it is allowed
-// by default.
+// newAddonAttachCmd is `burrow addon attach postgres <app> [--as NAME] [--env]`: give an app its own
+// database on the named environment's Postgres instance (ADR-0031/0067 §1). The caller supplies the
+// add-on type, the app name, the environment, and optionally the variable to write the connection
+// string into; burrowd generates it server-side and writes it into the app's Secret in that
+// environment's namespace — no secret value is printed, returned, or carried over the agent control
+// channel. Attach provisions and destroys nothing, so it is allowed by default.
 func newAddonAttachCmd() *cobra.Command {
 	o := &commonOpts{}
+	var as string
 	cmd := &cobra.Command{
 		Use:   "attach <addon> <app>",
 		Short: "Attach an app to an add-on (e.g. give it a Postgres database)",
 		Long: "attach gives an app its own database on an environment's Postgres instance: burrowd\n" +
 			"provisions an isolated database and login role, generates the connection string server-side,\n" +
-			"writes it into the app's Secret as DATABASE_URL, and restarts the app. No secret value is\n" +
-			"printed or sent over the agent control channel; only the key name is reported. Re-attaching\n" +
-			"rotates the password. Each environment has its own instance, so --env decides which server the\n" +
-			"app is given a database on; with several environments registered, naming one is required.",
+			"writes it into the app's Secret, and restarts the app. No secret value is printed or sent over\n" +
+			"the agent control channel; only the key name is reported. Re-attaching rotates the password.\n" +
+			"Each environment has its own instance, so --env decides which server the app is given a\n" +
+			"database on; with several environments registered, naming one is required.\n\n" +
+			"The variable is DATABASE_URL unless --as names another (DB_URL, PG_DSN, anything the app\n" +
+			"already reads), so an app that does not follow the convention needs no wrapper copying one\n" +
+			"variable to another at start-up. --as on an already-attached app MOVES the variable: the new\n" +
+			"name is written and the old one removed, because the attach has just rotated the password and\n" +
+			"the old name would otherwise hold a connection string that no longer works. A name something\n" +
+			"else in the app's environment already answers to is refused rather than overwritten.",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -673,17 +687,21 @@ func newAddonAttachCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.AttachAddon(ctx, args[0], args[1], o.env)
+			res, err := c.AttachAddon(ctx, args[0], args[1], o.env, as)
 			if err != nil {
 				return err
 			}
 			human := fmt.Sprintf("attached %q to the %s add-on in environment %s\nwrote the connection string into %s's Secret under key %q (the value is never shown)",
 				res.App, res.Addon, res.Environment, res.App, res.SecretKey)
+			if res.PreviousSecretKey != "" {
+				human += fmt.Sprintf("\nremoved the previous key %q: the password was rotated, so it no longer connected", res.PreviousSecretKey)
+			}
 			return o.emitChange(cmd.OutOrStdout(), res, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVar(&as, "as", "", "environment variable to write the connection string into (default DATABASE_URL, or the name this attachment already uses)")
 	return cmd
 }
 

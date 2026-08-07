@@ -185,6 +185,16 @@ func New(cfg Config) (http.Handler, error) {
 	// to the app's Secret; the response carries the key name only. detach is held by a confirm
 	// guardrail (it drops data).
 	v1.HandleFunc("POST /v1/addons/attach", s.attachAddon)
+	// THE VARIABLE NAME RIDES THE ROUTE, and it is worth saying why, because it narrows nothing: the
+	// database, the instance and the namespace are the same whatever the variable is called. What it
+	// decides is WHICH KEY OF THE APP'S SECRET IS OVERWRITTEN, and that is the same shape of failure
+	// the environment has (issue #485's rule, applied in issue #462). A control plane that predates
+	// this drops the field and writes DATABASE_URL instead — over whatever the app kept there, which
+	// for an app that asked for another name is a value this attach was never aimed at — and answers
+	// 200 with a key name the caller did not ask for. A route it does not serve is refused instead,
+	// with nothing written. There is no body field beside it: no client in the field sends one, so the
+	// route is the only form and there is nothing to stay compatible with.
+	v1.HandleFunc("POST /v1/addons/attach/env-key/{env_key}", s.attachAddon)
 	v1.HandleFunc("POST /v1/addons/detach", s.detachAddon)
 	// The environment rides the route on detach for the reason it does on the app delete: it names
 	// WHICH instance loses the database. A body field was dropped by an older control plane exactly
@@ -1109,15 +1119,20 @@ func (s *server) removeAddonWith(w http.ResponseWriter, r *http.Request, deleteD
 
 // attachAddon gives an app its own database on the installed Postgres add-on and wires it in
 // (ADR-0031). The request carries only the add-on type and app name — NO secret value. burrowd
-// generates the DATABASE_URL server-side and writes it into the app's Secret; the response is the
-// key name only (AttachResult), never the value. The value is never logged, never audited, never
+// generates the connection string server-side and writes it into the app's Secret; the response is
+// the key name only (AttachResult), never the value. The value is never logged, never audited, never
 // stored in Postgres, and never returned — so attach is safe to expose on the agent surface.
+//
+// The variable name comes from the path and only from the path (see the route table). An absent one
+// is not "DATABASE_URL": it is "whatever this attachment already uses", which the engine resolves —
+// so a re-attach of an app that named its own variable rotates the password into that name rather
+// than moving it back to the default (issue #462).
 func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonAttachRequest
 	if !s.decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.AttachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env)
+	res, err := s.engine.AttachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env, r.PathValue("env_key"))
 	if err != nil {
 		writeEngineError(w, err)
 		return

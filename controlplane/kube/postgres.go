@@ -57,13 +57,64 @@ func quoteLiteral(s string) string {
 	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
 }
 
+// PostgresTarget is one Postgres instance a provisioner may act on: the instance's name and the
+// namespace it runs in. Everything the provisioner needs in order to reach a server is composed from
+// this pair — the Service it dials and the Secret it reads that server's superuser password from,
+// both named after the instance (ADR-0067 §1) — so the pair is the whole answer to "which database
+// is this".
+type PostgresTarget struct {
+	// Instance is the add-on instance's name, which is also the name of its Service and of its
+	// superuser Secret.
+	Instance string
+	// Namespace is the namespace that instance runs in, within the cluster the provisioner's
+	// Kubernetes client is pointed at.
+	Namespace string
+}
+
+// Host is the in-cluster DNS name of the target's Postgres Service. It is what goes into the
+// DATABASE_URL of an app attached to this instance: apps are pods and resolve it through cluster DNS.
+func (t PostgresTarget) Host() string {
+	return fmt.Sprintf("%s.%s.svc", t.Instance, t.Namespace)
+}
+
+// PostgresTargetFunc resolves an environment to the instance a provisioner acts on for it. A
+// provisioner is GIVEN one at construction and has no other way to name an instance.
+//
+// That is the point of the seam: A NAME THAT HAS TO BE CONFIGURED CANNOT SILENTLY BE THE WRONG ONE.
+// Deriving the Service name inside the provisioner was correct exactly as long as burrowd and the
+// database it provisions share a cluster, where `burrow-postgres.burrow-addons.svc` has no way to
+// mean anything else. The moment they did not, the same derivation resolved in whatever cluster the
+// caller happened to be running in and reached a DIFFERENT database of that name — with nothing but
+// a password mismatch between it and a write (issue #519). Resolving is not the hazard; resolving a
+// name nobody chose is. A caller whose instance is somewhere else must now say where, and a caller
+// that says nothing at all reaches no instance rather than the nearest one.
+type PostgresTargetFunc func(env string) (PostgresTarget, error)
+
+// AddonInstanceTarget is the target of a single-tenant install — the one an existing install already
+// has, and the value burrowd is wired with: environment env's add-on instance (AddonInstanceName,
+// the single derivation shared with the installer and the registry — ADR-0067 §1) in the add-on
+// namespace burrowd was installed with. An empty namespace means the default one, so an install that
+// never set BURROW_ADDON_NAMESPACE names exactly the instance, Secret, and host it has always used.
+func AddonInstanceTarget(addonNamespace string) PostgresTargetFunc {
+	if addonNamespace == "" {
+		addonNamespace = defaultAddonNamespace
+	}
+	return func(env string) (PostgresTarget, error) {
+		instance, err := postgresSecretName(env)
+		if err != nil {
+			return PostgresTarget{}, err
+		}
+		return PostgresTarget{Instance: instance, Namespace: addonNamespace}, nil
+	}
+}
+
 // PostgresProvisioner is the production controlplane.DatabaseProvisioner: it connects to an
 // environment's Postgres add-on instance as the burrow_admin superuser and gives each app its own
 // database and login role (ADR-0031). It reads that instance's superuser password from the Secret of
-// the same name in the add-on namespace through a Kubernetes client (a pod can only mount a Secret
-// in its own namespace, so the password lives there), and reaches the instance in-cluster at
-// <instance>.<addon-ns>.svc:5432. It holds no long-lived database handle — it opens a short-lived
-// connection per operation so a rotated superuser password is always picked up.
+// the same name in the instance's namespace through a Kubernetes client (a pod can only mount a
+// Secret in its own namespace, so the password lives there), and reaches the instance at its Service
+// on port 5432. It holds no long-lived database handle — it opens a short-lived connection per
+// operation so a rotated superuser password is always picked up.
 //
 // EVERY OPERATION IS SCOPED TO AN ENVIRONMENT (ADR-0067 §1). The provisioner has no notion of "the"
 // instance: the environment argument selects the host and the credential together, so a call cannot
@@ -71,23 +122,29 @@ func quoteLiteral(s string) string {
 // none at all. That is what makes the issue #339 collision unrepresentable rather than merely
 // avoided — `web` in staging and `web` in production are databases with the same name on different
 // servers, and no code path can resolve one to the other.
+//
+// WHICH instances those are is configuration, not derivation (PostgresTargetFunc, issue #519): the
+// environment picks one out of the set the provisioner was given, and the provisioner can name no
+// instance outside it.
 type PostgresProvisioner struct {
-	client         kubernetes.Interface
-	addonNamespace string
+	client kubernetes.Interface
+	// target is the instance set this provisioner acts on, given at construction. There is no
+	// fallback if it is unset — see targetFor.
+	target PostgresTargetFunc
 	// adminEndpoint, when non-empty, overrides the host:port the provisioner DIALS to run admin
 	// SQL. In production it is empty: burrowd is an in-cluster pod and reaches the instance at its
 	// Service DNS name (instanceHost). It exists only so an out-of-cluster test (which cannot
 	// resolve a .svc name) can point the admin connection at a port-forwarded local address. It
-	// never affects the app's DATABASE_URL, which is always the in-cluster Service name.
+	// never affects the app's DATABASE_URL, which is always the target's in-cluster Service name.
 	adminEndpoint string
 }
 
-// NewPostgresProvisioner returns a provisioner over the given clientset and add-on namespace.
-func NewPostgresProvisioner(client kubernetes.Interface, addonNamespace string) *PostgresProvisioner {
-	if addonNamespace == "" {
-		addonNamespace = defaultAddonNamespace
-	}
-	return &PostgresProvisioner{client: client, addonNamespace: addonNamespace}
+// NewPostgresProvisioner returns a provisioner over the given clientset that acts on the instances
+// target names. The target is a required argument rather than something the provisioner works out
+// for itself: there is no value meaning "whichever instance this cluster happens to have"
+// (PostgresTargetFunc). An in-cluster single-tenant install passes AddonInstanceTarget.
+func NewPostgresProvisioner(client kubernetes.Interface, target PostgresTargetFunc) *PostgresProvisioner {
+	return &PostgresProvisioner{client: client, target: target}
 }
 
 // WithAdminEndpoint overrides the host:port the provisioner dials for admin SQL (see adminEndpoint).
@@ -97,26 +154,36 @@ func (p *PostgresProvisioner) WithAdminEndpoint(hostPort string) *PostgresProvis
 	return p
 }
 
-// NewPostgresProvisionerFromConfig builds a provisioner from a REST config.
-func NewPostgresProvisionerFromConfig(cfg *rest.Config, addonNamespace string) (*PostgresProvisioner, error) {
+// NewPostgresProvisionerFromConfig builds a provisioner from a REST config, acting on the instances
+// target names.
+func NewPostgresProvisionerFromConfig(cfg *rest.Config, target PostgresTargetFunc) (*PostgresProvisioner, error) {
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kube: building clientset: %w", err)
 	}
-	return NewPostgresProvisioner(client, addonNamespace), nil
+	return NewPostgresProvisioner(client, target), nil
 }
 
-// instanceHost is the in-cluster host environment env's Postgres instance is reached at. This is
-// what goes into that environment's apps' DATABASE_URLs — apps are pods and resolve it through
-// cluster DNS. The environment is resolved to an instance by AddonInstanceName, the single
-// derivation shared with the installer and the registry (ADR-0067 §1), so the URL an app is handed
-// names the server its own environment runs.
+// targetFor resolves environment env to the instance this provisioner was configured to act on. A
+// provisioner built without a target resolves nothing: it fails closed here rather than falling back
+// to a name derived from wherever it is running, which is the failure this seam exists to remove.
+func (p *PostgresProvisioner) targetFor(env string) (PostgresTarget, error) {
+	if p.target == nil {
+		return PostgresTarget{}, fmt.Errorf("kube: the postgres provisioner was given no instance to act on: %w", controlplane.ErrInvalid)
+	}
+	return p.target(env)
+}
+
+// instanceHost is the host environment env's Postgres instance is reached at. This is what goes into
+// that environment's apps' DATABASE_URLs — apps are pods and resolve it through cluster DNS. The
+// environment selects one of the instances the provisioner was configured with, so the URL an app is
+// handed names the server its own environment runs.
 func (p *PostgresProvisioner) instanceHost(env string) (string, error) {
-	instance, err := postgresSecretName(env)
+	target, err := p.targetFor(env)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s.%s.svc", instance, p.addonNamespace), nil
+	return target.Host(), nil
 }
 
 // adminHostPort is the host:port the provisioner DIALS to run admin SQL for env: the test override
@@ -136,23 +203,26 @@ func (p *PostgresProvisioner) adminHostPort(env string) (string, error) {
 // superuserPassword reads the generated superuser password from environment env's instance Secret.
 // Each instance has its own credential (ADR-0067 §1), so reading it is also how a wrong environment
 // fails closed: an environment with no instance installed has no Secret, and the operation stops
-// with ErrNotFound before any connection is opened. The value is used only to open the admin
-// connection; it is never logged or returned.
+// with ErrNotFound before any connection is opened. The Secret is looked up in the TARGET's
+// namespace under the target's name, so the credential comes from the same place the host does and
+// the two cannot disagree. The value is used only to open the admin connection; it is never logged
+// or returned.
 func (p *PostgresProvisioner) superuserPassword(ctx context.Context, env string) (string, error) {
-	name, err := postgresSecretName(env)
+	target, err := p.targetFor(env)
 	if err != nil {
 		return "", err
 	}
-	s, err := p.client.CoreV1().Secrets(p.addonNamespace).Get(ctx, name, metav1.GetOptions{})
+	ns, name := target.Namespace, target.Instance
+	s, err := p.client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return "", fmt.Errorf("kube: postgres superuser secret %s/%s not found — is the postgres add-on installed in environment %q?: %w", p.addonNamespace, name, env, controlplane.ErrNotFound)
+		return "", fmt.Errorf("kube: postgres superuser secret %s/%s not found — is the postgres add-on installed in environment %q?: %w", ns, name, env, controlplane.ErrNotFound)
 	}
 	if err != nil {
-		return "", fmt.Errorf("kube: reading postgres superuser secret %s/%s: %w", p.addonNamespace, name, err)
+		return "", fmt.Errorf("kube: reading postgres superuser secret %s/%s: %w", ns, name, err)
 	}
 	pw, ok := s.Data[PostgresPasswordKey]
 	if !ok {
-		return "", fmt.Errorf("kube: postgres superuser secret %s/%s has no %q key: %w", p.addonNamespace, name, PostgresPasswordKey, controlplane.ErrNotFound)
+		return "", fmt.Errorf("kube: postgres superuser secret %s/%s has no %q key: %w", ns, name, PostgresPasswordKey, controlplane.ErrNotFound)
 	}
 	return string(pw), nil
 }
@@ -217,7 +287,7 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 	}
 	// The environment is resolved to an instance BEFORE any connection or SQL: an empty or malformed
 	// environment is ErrInvalid here, never a silent fallback to whichever instance exists.
-	instance, err := postgresSecretName(env)
+	target, err := p.targetFor(env)
 	if err != nil {
 		return "", err
 	}
@@ -276,7 +346,7 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 	appURL := &url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(role, password),
-		Host:     fmt.Sprintf("%s.%s.svc:5432", instance, p.addonNamespace),
+		Host:     target.Host() + ":5432",
 		Path:     "/" + app,
 		RawQuery: "sslmode=disable",
 	}
@@ -338,7 +408,7 @@ func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app, env stri
 	if err := validateAppIdentifier(app); err != nil {
 		return err
 	}
-	if _, err := postgresSecretName(env); err != nil {
+	if _, err := p.targetFor(env); err != nil {
 		return err
 	}
 	role := roleName(app)

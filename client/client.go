@@ -1462,6 +1462,21 @@ type RestoreInstanceResult struct {
 	Apps        []string      `json:"apps"`
 	Reconnected []string      `json:"reconnected"`
 	Stranded    []StrandedApp `json:"stranded,omitempty"`
+	// Verification is what the recovered instance was found to hold before any app was reconnected
+	// to it — the answer to "is the data actually there", which is the only question a restore is
+	// asked. A recovery that came up holding none of it is an ERROR rather than a result carrying a
+	// bad status, so what arrives here is confirmed or unknown.
+	Verification RestoreVerification `json:"verification"`
+}
+
+// RestoreVerification is what the recovered instance was found to hold: the status Burrow could
+// establish, the app databases it saw, and the attached apps it did not see one for. Names only —
+// never a row and never a credential.
+type RestoreVerification struct {
+	Status    string   `json:"status"`
+	Databases []string `json:"databases"`
+	Missing   []string `json:"missing,omitempty"`
+	Note      string   `json:"note,omitempty"`
 }
 
 // RestoreInstanceOptions is everything `addon restore-instance` needs beyond the add-on type and the

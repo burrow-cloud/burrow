@@ -1893,6 +1893,14 @@ func engineError(err error) (int, errorResponse) {
 	if _, ok := controlplane.AsMissingPrerequisites(err); ok {
 		return http.StatusUnprocessableEntity, errorResponse{Error: err.Error(), Code: "missing_prerequisites"}
 	}
+	// A restore whose recovered instance came up empty is a structured, actionable outcome rather
+	// than an internal fault: the request was valid, the guardrail was satisfied, the recovery ran,
+	// and what came back holds none of the data. The full account — including the safety backup that
+	// puts the pre-restore state back — rides in the error text, because a restore that recovered
+	// nothing has already changed the cluster and the response is where the way out has to be.
+	if errors.Is(err, controlplane.ErrRestoreNotVerified) {
+		return http.StatusUnprocessableEntity, errorResponse{Error: err.Error(), Code: "restore_not_verified"}
+	}
 	switch {
 	case errors.Is(err, controlplane.ErrNotFound):
 		return http.StatusNotFound, errorResponse{Error: err.Error(), Code: "not_found"}

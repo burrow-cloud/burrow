@@ -775,7 +775,7 @@ Logical `pg_dump` / `pg_restore` backups for the Postgres add-on
 | List backups | `burrow addon backups postgres [<app>]` | Reads the control-plane database, newest first, with a `WHERE` column saying which backups left the cluster. |
 | Backup health | `burrow addon backup-health postgres [<app>]` | Reports what Burrow itself observed: how long ago the last backup completed, how long ago the last one **left the cluster**, the last failure with its closed reason, how many rows are still pending, and whether each registered object-storage destination answers **right now**. Read-only, and computed from Burrow's own `Backup` rows rather than from any backup engine's status fields. |
 | Restore | `burrow addon restore postgres <app> --backup <id> --confirm` | Runs `pg_restore --clean --if-exists` into the app's database, overwriting live contents. The backup must belong to the app **and** to the environment being restored into, and its dump must be on that environment's claim. Confirm-gated by the `addon.restore` guardrail. **Operator CLI only** — absent from `burrow-agent`. |
-| Restore a whole instance | `burrow addon restore-instance postgres (--backup <id> \| --to-time <RFC3339> \| --latest) --confirm` | **Physical.** Takes a base backup of the instance's current state first and stops with nothing changed if it does not reach the store (`--skip-safety-backup` overrides, for an instance too broken to back up); removes the instance and its data volume; creates a `Cluster` with a `bootstrap.recovery` from the repository under the same name, so every consumer resolves it unchanged; waits for it to serve; then reissues each attached app's `DATABASE_URL` and restarts it, because a recovered instance holds the login roles as they were at the recovery point. Exactly one recovery target is required — nothing is assumed. Confirm-gated by `addon.restore_instance`, and on a terminal the **instance's** name is typed back after a notice listing every app by name; off a terminal it refuses without `--acknowledge-data-loss`. **Operator CLI only** — absent from `burrow-agent`. **Never exercised against a real object store.** |
+| Restore a whole instance | `burrow addon restore-instance postgres (--backup <id> \| --to-time <RFC3339> \| --latest) --confirm` | **Physical.** Takes a base backup of the instance's current state first and stops with nothing changed if it does not reach the store (`--skip-safety-backup` overrides, for an instance too broken to back up); removes the instance and its data volume; creates a `Cluster` with a `bootstrap.recovery` from the repository under the same name, so every consumer resolves it unchanged; waits for it to serve; **asks the recovered instance which app databases it actually holds, and fails the restore if it holds none**; then reissues each attached app's `DATABASE_URL` and restarts it, because a recovered instance holds the login roles as they were at the recovery point. Exactly one recovery target is required — nothing is assumed. Confirm-gated by `addon.restore_instance`, and on a terminal the **instance's** name is typed back after a notice listing every app by name; off a terminal it refuses without `--acknowledge-data-loss`. **Operator CLI only** — absent from `burrow-agent`. **Never exercised against a real object store.** |
 
 The limits are as important as the capability:
 
@@ -822,6 +822,18 @@ The limits are as important as the capability:
   the safety backup is taken first and why skipping it is an explicit flag. The recovery path that
   has actually been watched work is still the per-app `pg_dump` / `pg_restore` pair, which recovers
   one app's database to the moment of its dump.
+- **A restore proves the databases came back, not the rows in them.** Before it reconnects
+  anything, a physical restore asks the recovered instance which Burrow-provisioned app databases it
+  holds. An instance that holds **none**, where apps were attached to it, fails the restore
+  outright — that is what recovering from a repository with no base backup for the stanza looks like
+  from the outside, and without the check it reports success over an empty database. No app is cut
+  over on that path, deliberately: re-provisioning would create each app's database fresh and empty
+  under its own name and the apps would start writing into it. What the check **cannot** say is
+  whether the data inside those databases is the data expected — Burrow does not know what an app's
+  rows should look like — so a restore to a point inside the window still needs someone to look at
+  their own data. When the instance will not answer at all, the result says `NOT VERIFIED` rather
+  than passing quietly; when a recovery legitimately predates an app's attachment, that app is named
+  as one whose data did not come back and the restore stands.
 - **The cutover finds an app through its workload or its release history, not through its Secret.**
   A physical restore reissues `DATABASE_URL` to every app it can enumerate in the environment: the
   workloads running there, plus the apps the registry says Burrow has deployed there. An app that

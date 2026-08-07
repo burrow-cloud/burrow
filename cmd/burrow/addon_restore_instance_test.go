@@ -41,6 +41,9 @@ func restoreInstanceServer(t *testing.T, apps, attachedApps []string, calls *[]m
 				"addon": "postgres", "environment": "prod", "instance": "burrow-postgres",
 				"target": "backup b1", "safety_backup": "b9",
 				"apps": attachedApps, "reconnected": attachedApps,
+				// What the recovered instance was found to hold. A restore result without this is a
+				// restore nobody checked, and the summary says so rather than staying quiet.
+				"verification": map[string]any{"status": "confirmed", "databases": attachedApps},
 			})
 		case r.URL.Path == "/v1/apps":
 			rows := make([]map[string]any, 0, len(apps))
@@ -114,6 +117,44 @@ func TestRestoreInstanceNoticeNamesEveryApp(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0]["backup"] != "b1" {
 		t.Fatalf("expected one restore carrying the named backup, got %v", calls)
+	}
+}
+
+// TestRestoreInstanceSummarySaysWhatTheInstanceHolds: the outcome a person reads has to answer "did
+// the data come back", because "rewound the instance" answers only that an object was replaced. A
+// control plane that reports no verification at all is said to be unverified rather than left to read
+// as a success.
+func TestRestoreInstanceSummarySaysWhatTheInstanceHolds(t *testing.T) {
+	var calls []map[string]any
+	srv := restoreInstanceServer(t, []string{"api", "web"}, []string{"api", "web"}, &calls)
+
+	out, errb, err := execRestoreInstance(t, srv.URL, "burrow-postgres\n", true, "postgres", "--backup", "b1", "--confirm")
+	if err != nil {
+		t.Fatalf("addon restore-instance: %v (stderr: %s)", err, errb)
+	}
+	if !strings.Contains(out, "the recovered instance holds 2 database(s) (api, web)") {
+		t.Errorf("the summary does not say what the recovered instance holds:\n%s", out)
+	}
+
+	// And with no verification in the response — an older control plane — the summary says the check
+	// did not happen instead of going quiet.
+	quiet := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/addons/restore-instance" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"addon": "postgres", "environment": "prod", "instance": "burrow-postgres",
+			"target": "the newest state in the repository", "apps": []string{}, "reconnected": []string{},
+		})
+	}))
+	t.Cleanup(quiet.Close)
+	out, errb, err = execRestoreInstance(t, quiet.URL, "burrow-postgres\n", true, "postgres", "--latest", "--confirm")
+	if err != nil {
+		t.Fatalf("addon restore-instance against a control plane that reports no verification: %v (stderr: %s)", err, errb)
+	}
+	if !strings.Contains(out, "NOT VERIFIED") {
+		t.Errorf("a restore nobody checked reads like one that was checked:\n%s", out)
 	}
 }
 

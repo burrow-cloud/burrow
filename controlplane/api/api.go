@@ -55,7 +55,7 @@ func New(cfg Config) (http.Handler, error) {
 	if cfg.Token == "" {
 		return nil, fmt.Errorf("api: New: Token is required (the control plane authenticates its clients)")
 	}
-	s := &server{engine: cfg.Engine}
+	s := &server{engine: cfg.Engine, version: cfg.Version}
 
 	v1 := http.NewServeMux()
 	v1.HandleFunc("GET /v1/apps", s.listApps)
@@ -66,7 +66,14 @@ func New(cfg Config) (http.Handler, error) {
 	// routing and release history — under a line naming another environment (issue #485). The
 	// `?env=` form below stays served for a client already in the field (ADR-0039 §2–§3).
 	v1.HandleFunc("DELETE /v1/apps/{app}/env/{env}", s.deleteApp)
+	// The same rule carries the rest of the per-app WRITES (issue #485). Each of these routes shipped
+	// in v0.1.1–v0.5.0 and the `env` that aims it shipped in v0.7.0, so between those versions a
+	// control plane drops the environment and does the write in the DEFAULT one: production deployed
+	// over, scaled to zero, rolled back, its ingress removed, its Secret written into. The `/env/{env}`
+	// form is what current clients send; the query and body forms below stay served, unchanged, for a
+	// client already in the field (ADR-0039 §2–§3).
 	v1.HandleFunc("POST /v1/apps/{app}/deploy", s.deploy)
+	v1.HandleFunc("POST /v1/apps/{app}/deploy/env/{env}", s.deploy)
 	// build clones a git source and builds the image inside the cluster, then hands the result into
 	// the same guarded deploy path (ADR-0053): only the git ref crosses, never source bytes.
 	v1.HandleFunc("POST /v1/apps/{app}/build", s.build)
@@ -76,6 +83,7 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/apps/{app}/history", s.history)
 	v1.HandleFunc("GET /v1/apps/{app}/logs", s.logs)
 	v1.HandleFunc("POST /v1/apps/{app}/rollback", s.rollback)
+	v1.HandleFunc("POST /v1/apps/{app}/rollback/env/{env}", s.rollback)
 	// auto-deploy: GET reads an app's per-environment auto-deploy level, PUT sets it (ADR-0052 §6).
 	// Setting is a human operator action, so it is exposed on this admin API but never as an agent
 	// verb — burrow-agent may read the level but not change it.
@@ -97,6 +105,7 @@ func New(cfg Config) (http.Handler, error) {
 	// It is read-only guidance the agent applies to its own build; there is no mutating counterpart.
 	v1.HandleFunc("GET /v1/apps/{app}/next-tag", s.nextTag)
 	v1.HandleFunc("POST /v1/apps/{app}/scale", s.scale)
+	v1.HandleFunc("POST /v1/apps/{app}/scale/env/{env}", s.scale)
 	// run executes a one-off command in the app's own current image and environment (ADR-0048).
 	v1.HandleFunc("POST /v1/apps/{app}/run", s.run)
 	// Lifecycle hooks: the command an app runs at a named phase (ADR-0072 §1). One mechanism with the
@@ -111,7 +120,9 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/apps/{app}/autoscale", s.autoscale)
 	v1.HandleFunc("DELETE /v1/apps/{app}/autoscale", s.disableAutoscale)
 	v1.HandleFunc("POST /v1/apps/{app}/expose", s.expose)
+	v1.HandleFunc("POST /v1/apps/{app}/expose/env/{env}", s.expose)
 	v1.HandleFunc("POST /v1/apps/{app}/unexpose", s.unexpose)
+	v1.HandleFunc("POST /v1/apps/{app}/unexpose/env/{env}", s.unexpose)
 	v1.HandleFunc("GET /v1/apps/{app}/reachability", s.reachability)
 	v1.HandleFunc("GET /v1/apps/{app}/config", s.listConfig)
 	v1.HandleFunc("POST /v1/apps/{app}/config", s.setConfig)
@@ -122,9 +133,16 @@ func New(cfg Config) (http.Handler, error) {
 	// value is never logged (the access log records method+path+status only; the path holds no
 	// value), never audited, never stored in Postgres, and never reachable from the agent control
 	// channel — `burrow-agent` has no secret-set command (ADR-0029/0004). list and unset carry no value.
+	//
+	// The two WRITES carry the environment in the route (issue #485): the secrets route is v0.5.0 and
+	// `env` is v0.7.0, so a control plane in between writes the value into — or removes it from — the
+	// DEFAULT environment's app. The LIST does not; it is a read, and the reasoning for that split is
+	// on listSecrets.
 	v1.HandleFunc("POST /v1/apps/{app}/secrets", s.setSecret)
+	v1.HandleFunc("POST /v1/apps/{app}/secrets/env/{env}", s.setSecret)
 	v1.HandleFunc("GET /v1/apps/{app}/secrets", s.listSecrets)
 	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/{key}", s.unsetSecret)
+	v1.HandleFunc("DELETE /v1/apps/{app}/secrets/{key}/env/{env}", s.unsetSecret)
 	v1.HandleFunc("GET /v1/guard", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/{code}", s.guardSet)
 	// The name tier (ADR-0085) is a ROUTE, not a query parameter, because it narrows a write. A
@@ -147,7 +165,20 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("GET /v1/providers", s.listProviders)
 	v1.HandleFunc("POST /v1/domains", s.addDomain)
 	v1.HandleFunc("DELETE /v1/domains/{host}", s.removeDomain)
+	// An install carries TWO narrowings, and both ride the route (issue #485). The route is v0.4.0;
+	// `env` — which environment's instance this becomes — is v0.7.0, and `archive_destination` — the
+	// object store the instance archives its write-ahead log to (ADR-0066 §3) — is v0.14.0-rc.1. A
+	// control plane older than either drops it and reports an instance INSTALLED: in the wrong
+	// environment, or with no archiving at all, which is a Postgres with no way back that reads as a
+	// Postgres with one.
+	//
+	// EACH SEGMENT IS NAMED AFTER THE PARAMETER IT REPLACES, and they appear in a fixed order, so the
+	// combinations are enumerable rather than a grammar. Two narrowings mean three narrowed routes;
+	// the unnarrowed one is the form clients in the field send and keeps its meaning (ADR-0039 §2).
 	v1.HandleFunc("POST /v1/addons", s.installAddon)
+	v1.HandleFunc("POST /v1/addons/env/{env}", s.installAddon)
+	v1.HandleFunc("POST /v1/addons/archive-destination/{destination}", s.installAddon)
+	v1.HandleFunc("POST /v1/addons/env/{env}/archive-destination/{destination}", s.installAddon)
 	v1.HandleFunc("POST /v1/addons/connect", s.connectAddon)
 	// attach/detach give an app its own database on the installed Postgres add-on (ADR-0031).
 	// attach carries NO secret value — burrowd generates the DATABASE_URL server-side and writes it
@@ -156,18 +187,37 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/addons/attach", s.attachAddon)
 	v1.HandleFunc("POST /v1/addons/detach", s.detachAddon)
 	// The environment rides the route on detach for the reason it does on the app delete: it names
-	// WHICH instance loses the database. A body field is dropped by an older control plane exactly
-	// as a query parameter is — `decode` uses a plain json.Decoder — so a detach aimed at staging
-	// would drop production's database instead (issue #485).
+	// WHICH instance loses the database. A body field was dropped by an older control plane exactly
+	// as a query parameter is — every burrowd before this release decoded a body with unknown fields
+	// allowed, and `decode` is where that ends — so a detach aimed at staging would drop production's
+	// database instead (issue #485).
 	v1.HandleFunc("POST /v1/addons/detach/env/{env}", s.detachAddon)
 	// backup/backups/restore manage per-app Postgres backups (ADR-0032). backup and the backups
 	// listing move no secret value (an in-cluster Job does the dump). restore is held by a confirm
 	// guardrail (it overwrites the live database).
+	//
+	// A backup narrows on the environment whose instance is dumped and on the DESTINATION the dump is
+	// written to (ADR-0063 §6), and both ride the route, in the same fixed order the install uses. The
+	// route is v0.6.0 and both parameters are v0.14.0-rc.1: a control plane in between has no object
+	// storage at all, so a backup asked to leave the cluster is written to the in-cluster volume and
+	// recorded as a completed backup. The bytes not being where the operator believes they are is only
+	// discovered when they are needed (issue #485).
 	v1.HandleFunc("POST /v1/addons/backup", s.backupAddon)
+	v1.HandleFunc("POST /v1/addons/backup/env/{env}", s.backupAddon)
+	v1.HandleFunc("POST /v1/addons/backup/destination/{destination}", s.backupAddon)
+	v1.HandleFunc("POST /v1/addons/backup/env/{env}/destination/{destination}", s.backupAddon)
 	// A PHYSICAL backup is a separate route from a logical one rather than a mode of it, because it
-	// acts on a different thing: the whole instance rather than one app's database (ADR-0066 §4).
+	// acts on a different thing: the whole instance rather than one app's database (ADR-0066 §4). Its
+	// `env` and `destination` stay PARAMETERS, and safely: this route and both of them shipped in the
+	// same release (v0.14.0-rc.1), so neither can reach a control plane that does not understand it.
+	// A parameter that cannot outrun its own route needs no protection — the same reason
+	// `skip_final_backup` stays a parameter on the removal. So do the physical restore's, below.
 	v1.HandleFunc("POST /v1/addons/backup-instance", s.backupInstance)
+	// The backups listing is the ONE read in this class that rides the route, because its answer is
+	// an ARGUMENT rather than a display: it is the picker for `addon restore`, and the id it hands
+	// back goes into a call that overwrites a live database. See listBackupsHandler.
 	v1.HandleFunc("GET /v1/addons/backups", s.listBackupsHandler)
+	v1.HandleFunc("GET /v1/addons/backups/env/{env}", s.listBackupsHandler)
 	// backup-health is ADR-0063 §7's status surface: the age of the last successful backup, the age
 	// of the last one that left the cluster, the last failure, and whether each registered
 	// object-storage destination answers right now. Read-only, and it moves no secret — the
@@ -239,6 +289,25 @@ func New(cfg Config) (http.Handler, error) {
 
 type server struct {
 	engine *controlplane.Engine
+	// version is burrowd's own release version (Config.Version), carried so a handler can name it in
+	// a refusal the way the version handshake's middleware does — see decode, which refuses a request
+	// field this control plane is too old to know about. Empty on a local or e2e build.
+	version string
+}
+
+// narrowed returns the value of a narrowing that may ride either the route or the request, and the
+// ROUTE WINS. The route's form is what current clients send and is the whole point of the rule in the
+// route table — a control plane without the route refuses the call rather than performing it wider —
+// while the query or body form is what clients already in the field send and stays honoured, so
+// burrowd remains the compatibility anchor (ADR-0039 §2).
+//
+// They cannot disagree in practice: a client puts the value in one place or the other, never both.
+// If one ever did, taking the route's is taking the narrower, more explicit statement.
+func narrowed(r *http.Request, wildcard, fromRequest string) string {
+	if v := r.PathValue(wildcard); v != "" {
+		return v
+	}
+	return fromRequest
 }
 
 // deleteApp removes an app entirely in one environment. The environment comes from the path where
@@ -265,10 +334,11 @@ func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
 // gets the single JSON object this endpoint has always returned. See deploystream.go.
 func (s *server) deploy(w http.ResponseWriter, r *http.Request) {
 	var req controlplane.DeployRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	req.App = r.PathValue("app") // the path is authoritative for the app name
+	req.Env = narrowed(r, "env", req.Env)
 	if wantsProgressStream(r) {
 		s.deployStream(w, r, req)
 		return
@@ -282,7 +352,7 @@ func (s *server) deploy(w http.ResponseWriter, r *http.Request) {
 // run maps to 422 with needs_confirmation, like the other guarded operations.
 func (s *server) run(w http.ResponseWriter, r *http.Request) {
 	var req controlplane.RunRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	req.App = r.PathValue("app") // the path is authoritative for the app name
@@ -322,7 +392,7 @@ type hookRequest struct {
 // yet — is a 400 rather than a silently-stored setting that never runs (ADR-0009).
 func (s *server) setHook(w http.ResponseWriter, r *http.Request) {
 	var req hookRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	hook, err := s.engine.SetHook(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"),
@@ -412,7 +482,8 @@ func (s *server) rollback(w http.ResponseWriter, r *http.Request) {
 		Confirm:   r.URL.Query().Get("confirm") == "true",
 		SkipHooks: r.URL.Query().Get("skip_hooks") == "true",
 	}
-	res, err := s.engine.Rollback(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), opts)
+	env := narrowed(r, "env", r.URL.Query().Get("env"))
+	res, err := s.engine.Rollback(r.Context(), r.PathValue("app"), env, opts)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -422,10 +493,10 @@ func (s *server) rollback(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) scale(w http.ResponseWriter, r *http.Request) {
 	var req scaleRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.Scale(r.Context(), r.PathValue("app"), req.Env, req.Replicas, req.Confirm)
+	res, err := s.engine.Scale(r.Context(), r.PathValue("app"), narrowed(r, "env", req.Env), req.Replicas, req.Confirm)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -435,7 +506,7 @@ func (s *server) scale(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) autoscale(w http.ResponseWriter, r *http.Request) {
 	var req autoscaleRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	res, err := s.engine.Autoscale(r.Context(), r.PathValue("app"), req.Env, controlplane.AutoscaleSpec{
@@ -462,10 +533,11 @@ func (s *server) disableAutoscale(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) expose(w http.ResponseWriter, r *http.Request) {
 	var req controlplane.ExposeRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	req.App = r.PathValue("app") // the path is authoritative for the app name
+	req.Env = narrowed(r, "env", req.Env)
 	res, err := s.engine.Expose(r.Context(), req)
 	if err != nil {
 		writeEngineError(w, err)
@@ -475,7 +547,7 @@ func (s *server) expose(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) unexpose(w http.ResponseWriter, r *http.Request) {
-	if err := s.engine.Unexpose(r.Context(), r.PathValue("app"), r.URL.Query().Get("env")); err != nil {
+	if err := s.engine.Unexpose(r.Context(), r.PathValue("app"), narrowed(r, "env", r.URL.Query().Get("env"))); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -502,7 +574,7 @@ func (s *server) listConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) setConfig(w http.ResponseWriter, r *http.Request) {
 	var req configSetRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	if err := s.engine.SetConfig(r.Context(), r.PathValue("app"), req.Env, req.Key, req.Value, req.NoRestart); err != nil {
@@ -535,10 +607,10 @@ type configResponse struct {
 // references a secret key and asks the human to set the value, who does so through the CLI or the UI.
 func (s *server) setSecret(w http.ResponseWriter, r *http.Request) {
 	var req secretSetRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
-	if err := s.engine.SetSecret(r.Context(), r.PathValue("app"), req.Env, req.Key, req.Value, req.NoRestart); err != nil {
+	if err := s.engine.SetSecret(r.Context(), r.PathValue("app"), narrowed(r, "env", req.Env), req.Key, req.Value, req.NoRestart); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -546,6 +618,25 @@ func (s *server) setSecret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app"), "key": req.Key})
 }
 
+// listSecrets returns an app's secret KEYS in one environment — never a value (ADR-0028/0004).
+//
+// The environment stays a QUERY PARAMETER, and this is the general shape of the read side of issue
+// #485's rule, stated once here for every read that keeps it: status, logs, the app list,
+// reachability, the config listing, and this one.
+//
+// A dropped narrowing on a READ changes an answer, not the cluster. Against a control plane too old
+// for named environments there is exactly one environment, so what comes back is not another
+// environment's data — it is the only data there is, labelled with a name the server never learned.
+// That misleads a reader, and it is a real defect, but the response is still true about something and
+// nothing has been changed. Refusing it would also cost an operator the commands they would reach for
+// to diagnose the skew, at the moment they are trying to.
+//
+// What makes that acceptable is that the read is not the last line of defence: every write it might
+// lead to — the deploy, the scale, the rollback, the delete, the secret set — names its environment
+// in its own route and is refused on its own. The reader is misinformed; the cluster is not touched.
+//
+// The one read that does NOT get this treatment is the backups listing, because its answer is
+// consumed as an argument rather than read by a person. See listBackupsHandler.
 func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
 	keys, err := s.engine.ListSecrets(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
 	if err != nil {
@@ -558,7 +649,7 @@ func (s *server) listSecrets(w http.ResponseWriter, r *http.Request) {
 func (s *server) unsetSecret(w http.ResponseWriter, r *http.Request) {
 	noRestart := r.URL.Query().Get("no_restart") == "true"
 	key := r.PathValue("key")
-	if err := s.engine.UnsetSecret(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), key, noRestart); err != nil {
+	if err := s.engine.UnsetSecret(r.Context(), r.PathValue("app"), narrowed(r, "env", r.URL.Query().Get("env")), key, noRestart); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -609,7 +700,7 @@ func (s *server) guardList(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 	var req guardSetRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	// The env query scopes the set to a named environment (storing the env-prefixed code) and the
@@ -662,7 +753,7 @@ func (s *server) limitsList(w http.ResponseWriter, r *http.Request) {
 // cluster value (ADR-0068 §3).
 func (s *server) limitSet(w http.ResponseWriter, r *http.Request) {
 	var req limitSetRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	env := r.URL.Query().Get("env")
@@ -713,7 +804,7 @@ func (s *server) getAutoDeploy(w http.ResponseWriter, r *http.Request) {
 // verb for it, so the agent cannot change what deploys unattended (ADR-0038).
 func (s *server) setAutoDeploy(w http.ResponseWriter, r *http.Request) {
 	var req autoDeploySetRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	level, err := controlplane.ParseAutoDeployLevel(req.Level)
@@ -753,7 +844,7 @@ func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
 // invalid, which is ADR-0076 §2 enforced at the boundary rather than trusted.
 func (s *server) setHealth(w http.ResponseWriter, r *http.Request) {
 	var req healthSetRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	rep, err := s.engine.SetAppHealth(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), req.Path, req.Port)
@@ -802,7 +893,7 @@ func (s *server) getChecks(w http.ResponseWriter, r *http.Request) {
 // user-configured.
 func (s *server) setChecks(w http.ResponseWriter, r *http.Request) {
 	var req checksSetRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	rep, err := s.engine.SetAppChecks(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), req.Enabled)
@@ -849,7 +940,7 @@ func envName(env string) string {
 // human/CLI operation; `burrow-agent` has no command that adds a provider or carries a token.
 func (s *server) addProvider(w http.ResponseWriter, r *http.Request) {
 	var req controlplane.AddProviderRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	p, err := s.engine.AddProvider(r.Context(), req)
@@ -877,7 +968,7 @@ type providersResponse struct {
 
 func (s *server) addDomain(w http.ResponseWriter, r *http.Request) {
 	var req controlplane.AddDomainRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	res, err := s.engine.AddDomain(r.Context(), req)
@@ -904,12 +995,12 @@ func (s *server) removeDomain(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonInstallRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
-	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), req.Env, controlplane.InstallAddonOptions{
+	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), narrowed(r, "env", req.Env), controlplane.InstallAddonOptions{
 		Confirm:            req.Confirm,
-		ArchiveDestination: req.ArchiveDestination,
+		ArchiveDestination: narrowed(r, "destination", req.ArchiveDestination),
 	})
 	if err != nil {
 		writeEngineError(w, err)
@@ -926,7 +1017,7 @@ func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 // agent surface carries a token.
 func (s *server) connectAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonConnectRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	info, err := s.engine.ConnectAddon(r.Context(), req.Backend, req.Endpoint, req.SecretKey, req.Token)
@@ -1023,7 +1114,7 @@ func (s *server) removeAddonWith(w http.ResponseWriter, r *http.Request, deleteD
 // stored in Postgres, and never returned — so attach is safe to expose on the agent surface.
 func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonAttachRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	res, err := s.engine.AttachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env)
@@ -1041,7 +1132,7 @@ func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
 // clients already in the field send, and the reason the path form exists is in the route table.
 func (s *server) detachAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonDetachRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	if env := r.PathValue("env"); env != "" {
@@ -1062,10 +1153,11 @@ func (s *server) detachAddon(w http.ResponseWriter, r *http.Request) {
 // the destination credential only from a Job-owned Secret; neither is logged or returned.
 func (s *server) backupAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonBackupRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.BackupAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env, req.Destination)
+	res, err := s.engine.BackupAddon(r.Context(), controlplane.AddonType(req.Addon), req.App,
+		narrowed(r, "env", req.Env), narrowed(r, "destination", req.Destination))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1080,7 +1172,7 @@ func (s *server) backupAddon(w http.ResponseWriter, r *http.Request) {
 // credential is read only to sign the read-back and is never logged or returned.
 func (s *server) backupInstance(w http.ResponseWriter, r *http.Request) {
 	var req addonBackupRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	res, err := s.engine.BackupInstance(r.Context(), controlplane.AddonType(req.Addon), req.Env, req.Destination)
@@ -1092,14 +1184,30 @@ func (s *server) backupInstance(w http.ResponseWriter, r *http.Request) {
 }
 
 // listBackupsHandler lists recorded backups from the control-plane database (ADR-0032). An app query
-// param restricts to one app and an env query param to one environment; absent, they list every
-// app's and every environment's (ADR-0067 §1). Read-only; no secret value.
+// param restricts to one app and the environment to one environment; absent, they list every app's
+// and every environment's (ADR-0067 §1). Read-only; no secret value.
+//
+// THE ENVIRONMENT RIDES THE ROUTE HERE, AND ON NO OTHER READ. This listing is the picker for
+// `addon restore` and `addon restore-instance`: an operator or an agent reads it, chooses a row, and
+// hands the id back to a call that overwrites a live database. So its answer is not a display, it is
+// an ARGUMENT — and an argument taken from the wrong environment's list cannot be caught downstream,
+// because a backup id is an opaque string and the restore has no way to know which listing produced
+// it. Routing the destructive call, which issue #485 already did, does not repair a poisoned input to
+// it; routing the read is what stops the input being produced.
+//
+// The reads that only inform a reader — status, logs, the app list, reachability, the secret KEY
+// list — keep the query parameter. See listSecrets for that side of the split.
+//
+// The `addon` and `app` parameters stay parameters on all of these. Neither narrows a write: `addon`
+// selects which add-on's backups are listed and defaults to postgres, and `app` filters a listing an
+// absent value widens rather than redirects.
 func (s *server) listBackupsHandler(w http.ResponseWriter, r *http.Request) {
 	addon := r.URL.Query().Get("addon")
 	if addon == "" {
 		addon = string(controlplane.AddonPostgres)
 	}
-	backups, err := s.engine.ListBackups(r.Context(), controlplane.AddonType(addon), r.URL.Query().Get("app"), r.URL.Query().Get("env"))
+	env := narrowed(r, "env", r.URL.Query().Get("env"))
+	backups, err := s.engine.ListBackups(r.Context(), controlplane.AddonType(addon), r.URL.Query().Get("app"), env)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1133,7 +1241,7 @@ func (s *server) backupHealthHandler(w http.ResponseWriter, r *http.Request) {
 // detach route above is.
 func (s *server) restoreAddon(w http.ResponseWriter, r *http.Request) {
 	var req addonRestoreRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	if env := r.PathValue("env"); env != "" {
@@ -1157,7 +1265,7 @@ func (s *server) restoreAddon(w http.ResponseWriter, r *http.Request) {
 // either direction; nor does any regenerated connection string.
 func (s *server) restoreInstance(w http.ResponseWriter, r *http.Request) {
 	var req addonRestoreInstanceRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	res, err := s.engine.RestoreInstance(r.Context(), controlplane.AddonType(req.Addon), req.Env, controlplane.RestoreInstanceOptions{
@@ -1300,7 +1408,7 @@ type addonsResponse struct {
 
 func (s *server) queryLogs(w http.ResponseWriter, r *http.Request) {
 	var req logsQueryRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	entries, err := s.engine.QueryLogs(r.Context(), req.Query, req.Limit, req.Backend)
@@ -1325,7 +1433,7 @@ type logsQueryResponse struct {
 
 func (s *server) queryMetrics(w http.ResponseWriter, r *http.Request) {
 	var req metricsQueryRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	samples, err := s.engine.QueryMetrics(r.Context(), req.Query, req.Backend)
@@ -1454,7 +1562,7 @@ func (s *server) capacity(w http.ResponseWriter, r *http.Request) {
 // cannot create namespaces or RBAC itself. It moves no secret value.
 func (s *server) addEnvironment(w http.ResponseWriter, r *http.Request) {
 	var req environmentAddRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	env, err := s.engine.AddEnvironment(r.Context(), req.Name, req.Namespace)
@@ -1616,13 +1724,65 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
-// decode reads a JSON request body into v, writing a 400 and returning false on failure.
-func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error(), "invalid")
+// unknownFieldCode is the machine-readable tag on the refusal below, alongside "unknown_operation",
+// "client_too_old" and "install_mismatch". It is a version-skew code, not a validation code: it says
+// the caller sent a well-formed request this control plane is too old to carry out, so a --json
+// caller and an agent branch on it the way they branch on an unknown route.
+const unknownFieldCode = "unknown_field"
+
+// unknownFieldPrefix is what encoding/json puts in front of the field name it did not recognize. The
+// error is not a distinct type, so the prefix is the only handle on it; a future Go that reworded it
+// would fall through to the ordinary invalid-body path, which is the safe direction to fail in.
+const unknownFieldPrefix = `json: unknown field `
+
+// decode reads a JSON request body into v, writing a structured error and returning false on failure.
+//
+// IT REFUSES A FIELD IT DOES NOT KNOW, rather than dropping it. That is the BODY half of the rule in
+// this file's route table (issue #485): a control plane that silently discards an unrecognised field
+// carries out a request that is not the one that was sent, and answers 200. `env` reached the detach
+// and the restore that way, and so did `archive_destination` and a backup's `destination` — a
+// dropped field is exactly a dropped query parameter, and neither is visible to the ADR-0039
+// handshake, which sees routes.
+//
+// The narrowings that cost data are routes now, and this is what catches the NEXT field: a route can
+// only be added once the field exists, and the field is added by the release that needs it. From
+// here on a control plane too old for a field refuses the call the way it refuses an unknown route —
+// naming both versions and the upgrade, with nothing done — instead of doing something narrower or
+// wider than asked and reporting success.
+//
+// IT CANNOT REPAIR A CONTROL PLANE ALREADY IN THE FIELD, which is why the routes exist as well: a
+// v0.13 burrowd has neither the routes nor this check. It is the guarantee from this release forward,
+// not a retrofit.
+//
+// The other direction is unaffected. An OLDER client sends FEWER fields, never unknown ones, so
+// burrowd stays the compatibility anchor (ADR-0039 §2) and every client in the field keeps working.
+func (s *server) decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	err := d.Decode(v)
+	if err == nil {
+		return true
+	}
+	if field, ok := strings.CutPrefix(err.Error(), unknownFieldPrefix); ok {
+		msg := fmt.Sprintf("this control plane does not recognize the request field %s, so nothing was done", field)
+		if s.version != "" {
+			msg = fmt.Sprintf("this control plane (%s) does not recognize the request field %s, so nothing was done", s.version, field)
+		}
+		if cv := r.Header.Get(clientVersionHeader); cv != "" {
+			name := r.Header.Get(clientNameHeader)
+			if name != burrowCLIBinary && name != burrowAgentBinary {
+				name = "burrow client"
+			}
+			msg += fmt.Sprintf("; if your %s (%s) is newer, ask an operator to run `burrow cluster upgrade` to update the control plane", name, cv)
+		}
+		// The version rides the response structurally as well as in the sentence, for the reason
+		// v1NotFound's does: a client that recognizes the gap as one of ITS features can name the
+		// version to reach without parsing prose.
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: msg, Code: unknownFieldCode, ServerVersion: s.version})
 		return false
 	}
-	return true
+	writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error(), "invalid")
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

@@ -38,7 +38,7 @@ import (
 // the single JSON object this endpoint has always returned.
 func (s *server) build(w http.ResponseWriter, r *http.Request) {
 	var req controlplane.BuildRequest
-	if !decode(w, r, &req) {
+	if !s.decode(w, r, &req) {
 		return
 	}
 	req.App = r.PathValue("app") // the path is authoritative for the app name

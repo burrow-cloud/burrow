@@ -700,15 +700,27 @@ func (c *Client) Capacity(ctx context.Context) (CapacityReport, error) {
 // (issue #480). It changes nothing else: the same endpoint, the same body, the same budget, and the
 // same errors — including a guardrail hold, which still arrives status-coded because the control
 // plane writes the stream's header only once it has committed to doing work.
+// The ENVIRONMENT RIDES THE ROUTE (see narrowing). It was a body field, and a control plane that
+// predates named environments drops a body field it does not know exactly as it drops an unknown
+// query parameter, so a deploy aimed at staging replaces what is RUNNING IN PRODUCTION and reports
+// the release as staging's (issue #485).
 func (c *Client) Deploy(ctx context.Context, app string, req DeployRequest) (DeployResult, error) {
 	var out DeployResult
-	path := c.appPath(app, "deploy")
+	env := req.Env
+	path := narrowing(c.appPath(app, "deploy"), "env", env)
+	req.Env = "" // the route carries it; one place holds the scope, so there is no second copy
+	var err error
 	if req.Progress == nil {
-		return out, c.doWithin(ctx, c.budget.deploy, http.MethodPost, path, req, &out)
+		err = c.doWithin(ctx, c.budget.deploy, http.MethodPost, path, req, &out)
+	} else {
+		err = c.within(ctx, c.budget.deploy, func(ctx context.Context) error {
+			return c.streaming(ctx, path, req, req.Progress, &out)
+		})
 	}
-	err := c.within(ctx, c.budget.deploy, func(ctx context.Context) error {
-		return c.streaming(ctx, path, req, req.Progress, &out)
-	})
+	if err != nil && env != "" {
+		what := fmt.Sprintf("this control plane cannot deploy into a NAMED environment, so nothing was deployed: the same call against it would have deployed %q into the DEFAULT environment rather than into %q, replacing whatever is running there", app, env)
+		return out, scopeRefusal(what, "named environments", err)
+	}
 	return out, err
 }
 
@@ -963,10 +975,32 @@ type InstallAddonOptions struct {
 // InstallAddon installs the vetted backing service for an add-on type (e.g. "logs") in one
 // environment. Each environment gets its own instance (ADR-0067 §1); an empty env targets the
 // default environment `prod`, which keeps the instance an existing install already has.
+//
+// BOTH NARROWINGS RIDE THE ROUTE (see narrowing), because both decide what gets created rather than
+// how the call is answered. Against a control plane that drops the environment, the instance stands
+// up as the DEFAULT environment's — and if one is already there, an install meant to give staging its
+// own Postgres lands on production's. Against one that drops the archive destination, the instance is
+// created with NO write-ahead-log archiving and reported as installed: a database with no way back,
+// indistinguishable from one with a repository behind it until the day it is needed (issue #485).
 func (c *Client) InstallAddon(ctx context.Context, addonType, env string, opts InstallAddonOptions) (Addon, error) {
 	var out Addon
-	body := map[string]any{"type": addonType, "env": env, "confirm": opts.Confirm, "archive_destination": opts.ArchiveDestination}
-	err := c.do(ctx, http.MethodPost, "/v1/addons", body, &out)
+	body := map[string]any{"type": addonType, "env": "", "confirm": opts.Confirm, "archive_destination": ""}
+	path := narrowing(narrowing("/v1/addons", "env", env), "archive-destination", opts.ArchiveDestination)
+	err := c.do(ctx, http.MethodPost, path, body, &out)
+	if err != nil && (env != "" || opts.ArchiveDestination != "") {
+		// The archive destination is named first when both were asked for: an instance in the wrong
+		// environment is visible and removable, an instance with no way back is neither.
+		what := fmt.Sprintf("this control plane cannot install an add-on into a NAMED environment, so nothing was installed: the same call against it would have stood the %s instance up as the DEFAULT environment's rather than %q's", addonType, env)
+		predates := "per-environment add-on instances"
+		if opts.ArchiveDestination != "" {
+			what = fmt.Sprintf("this control plane cannot archive an add-on's write-ahead log to an object store, so nothing was installed: the same call against it would have created the %s instance with NO archiving rather than archiving to %q, and reported it installed", addonType, opts.ArchiveDestination)
+			predates = "archiving an add-on to object storage"
+			if env != "" {
+				what += fmt.Sprintf(" — and as the DEFAULT environment's instance rather than %q's", env)
+			}
+		}
+		return out, scopeRefusal(what, predates, err)
+	}
 	return out, err
 }
 
@@ -1220,10 +1254,29 @@ type BackupResult struct {
 // as completed — so a returned completed backup is one whose bytes actually arrived. destination
 // names the provider to write to; empty resolves it, which works when exactly one is registered. No
 // secret value crosses this API; the result is the recorded backup, never a credential.
+//
+// BOTH NARROWINGS RIDE THE ROUTE (see narrowing). The environment says which instance is dumped; the
+// destination says whether the bytes leave the cluster at all. This route is older than object
+// storage, so a control plane in between drops the destination, writes the dump to the in-cluster
+// volume, and records a COMPLETED backup — a backup that reads as durable and is on the same disk as
+// the database it is insurance against. Nobody finds out until they need it (issue #485).
 func (c *Client) BackupAddon(ctx context.Context, addonType, app, env, destination string) (BackupResult, error) {
 	var out BackupResult
-	body := map[string]any{"addon": addonType, "app": app, "env": env, "destination": destination}
-	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/backup", body, &out)
+	body := map[string]any{"addon": addonType, "app": app, "env": "", "destination": ""}
+	path := narrowing(narrowing("/v1/addons/backup", "env", env), "destination", destination)
+	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, path, body, &out)
+	if err != nil && (env != "" || destination != "") {
+		what := fmt.Sprintf("this control plane cannot back up a NAMED environment's instance, so nothing was backed up: the same call against it would have dumped %q's database from the DEFAULT environment's instance rather than from %q's", app, env)
+		predates := "per-environment add-on instances"
+		if destination != "" {
+			what = fmt.Sprintf("this control plane cannot write a backup to an object store, so nothing was backed up: the same call against it would have left %q's dump on a volume inside the cluster rather than sending it to %q, and recorded it as a completed backup", app, destination)
+			predates = "backups that leave the cluster"
+			if env != "" {
+				what += fmt.Sprintf(" — and taken it from the DEFAULT environment's instance rather than %q's", env)
+			}
+		}
+		return out, scopeRefusal(what, predates, err)
+	}
 	return out, err
 }
 
@@ -1245,18 +1298,29 @@ func (c *Client) BackupInstance(ctx context.Context, addonType, env, destination
 // Backups lists recorded backups from the control-plane database (ADR-0032). An empty app lists
 // every app's backups and an empty env every environment's; a non-empty value restricts to that app
 // or environment (ADR-0067 §1). Read-only; no secret value.
+//
+// THE ENVIRONMENT RIDES THE ROUTE, WHICH IS THE WRITE RULE ON A READ, and this is the only read that
+// gets it. What comes back here is not something a person reads and moves on from: it is the picker
+// for RestoreAddon and RestoreInstance, and the id chosen from it is handed to a call that overwrites
+// a live database. An id chosen from the wrong environment's list cannot be caught at the restore —
+// an id is an opaque string, and the restore has no way to know which listing produced it. So the
+// list itself has to be refused rather than answered one environment out (issue #485).
+//
+// `addon` and `app` stay query parameters: neither aims a write, and an absent one widens a listing
+// rather than pointing it somewhere else.
 func (c *Client) Backups(ctx context.Context, addonType, app, env string) ([]Backup, error) {
 	var out struct {
 		Backups []Backup `json:"backups"`
 	}
-	path := "/v1/addons/backups?addon=" + url.QueryEscape(addonType)
+	path := narrowing("/v1/addons/backups", "env", env) + "?addon=" + url.QueryEscape(addonType)
 	if app != "" {
 		path += "&app=" + url.QueryEscape(app)
 	}
-	if env != "" {
-		path += "&env=" + url.QueryEscape(env)
-	}
 	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	if err != nil && env != "" {
+		what := fmt.Sprintf("this control plane cannot list one environment's backups, so there is nothing to show: what it would answer with is every environment's, and a backup chosen from that list is restored over a live database on the strength of a list that was never %q's", env)
+		return nil, scopeRefusal(what, "per-environment add-on instances", err)
+	}
 	return out.Backups, err
 }
 
@@ -1506,9 +1570,14 @@ type RollbackOptions struct {
 // Rollback returns an app to its previous release. It takes the deploy budget: a rollback runs the
 // `pre-rollback` hook and then waits for the rollout to settle and tells the `post-deploy` hook the
 // same way a deploy does (ADR-0072 §8), so it waits on the same server-side bounds.
+//
+// The ENVIRONMENT RIDES THE ROUTE (see narrowing): a rollback aimed at staging, against a control
+// plane that drops the parameter, replaces what is running in PRODUCTION with production's previous
+// release (issue #485). `confirm` and `skip_hooks` stay parameters — neither decides what the
+// rollback touches, and an ignored `confirm` makes an older server HOLD, never proceed.
 func (c *Client) Rollback(ctx context.Context, app, env string, opts RollbackOptions) (RollbackResult, error) {
 	var out RollbackResult
-	path := c.appPath(app, "rollback")
+	path := narrowing(c.appPath(app, "rollback"), "env", env)
 	var params []string
 	if opts.Confirm {
 		params = append(params, "confirm=true")
@@ -1519,14 +1588,27 @@ func (c *Client) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 	if len(params) > 0 {
 		path += "?" + strings.Join(params, "&")
 	}
-	err := c.doWithin(ctx, c.budget.deploy, http.MethodPost, withEnv(path, env), nil, &out)
+	err := c.doWithin(ctx, c.budget.deploy, http.MethodPost, path, nil, &out)
+	if err != nil && env != "" {
+		what := fmt.Sprintf("this control plane cannot roll an app back in a NAMED environment, so nothing was rolled back: the same call against it would have rolled %q back in the DEFAULT environment rather than in %q, replacing what is running there with its previous release", app, env)
+		return out, scopeRefusal(what, "named environments", err)
+	}
 	return out, err
 }
 
+// Scale sets an app's replica count in one environment.
+//
+// The ENVIRONMENT RIDES THE ROUTE (see narrowing). It was a body field, and against a control plane
+// that drops it a scale aimed at staging resizes PRODUCTION — and a scale to zero stops production
+// serving (issue #485).
 func (c *Client) Scale(ctx context.Context, app, env string, replicas int32, confirm bool) (ScaleResult, error) {
 	var out ScaleResult
-	body := map[string]any{"env": env, "replicas": replicas, "confirm": confirm}
-	err := c.do(ctx, http.MethodPost, c.appPath(app, "scale"), body, &out)
+	body := map[string]any{"env": "", "replicas": replicas, "confirm": confirm}
+	err := c.do(ctx, http.MethodPost, narrowing(c.appPath(app, "scale"), "env", env), body, &out)
+	if err != nil && env != "" {
+		what := fmt.Sprintf("this control plane cannot scale an app in a NAMED environment, so nothing was scaled: the same call against it would have scaled %q in the DEFAULT environment to %d replicas rather than %q's", app, replicas, env)
+		return out, scopeRefusal(what, "named environments", err)
+	}
 	return out, err
 }
 
@@ -1551,15 +1633,33 @@ func (c *Client) DisableAutoscale(ctx context.Context, app, env string, confirm 
 	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
 }
 
+// Expose publishes an app at a hostname in one environment.
+//
+// The ENVIRONMENT RIDES THE ROUTE (see narrowing): against a control plane that drops it, a hostname
+// meant for staging is pointed at PRODUCTION's workload, and a certificate is issued for it
+// (issue #485).
 func (c *Client) Expose(ctx context.Context, app, env, host string, port int32, tls bool, issuer string, confirm bool) (ExposeResult, error) {
 	var out ExposeResult
-	body := map[string]any{"env": env, "host": host, "port": port, "tls": tls, "issuer": issuer, "confirm": confirm}
-	err := c.do(ctx, http.MethodPost, c.appPath(app, "expose"), body, &out)
+	body := map[string]any{"env": "", "host": host, "port": port, "tls": tls, "issuer": issuer, "confirm": confirm}
+	err := c.do(ctx, http.MethodPost, narrowing(c.appPath(app, "expose"), "env", env), body, &out)
+	if err != nil && env != "" {
+		what := fmt.Sprintf("this control plane cannot publish an app in a NAMED environment, so nothing was published: the same call against it would have pointed %q at %q in the DEFAULT environment rather than at %q's", host, app, env)
+		return out, scopeRefusal(what, "named environments", err)
+	}
 	return out, err
 }
 
+// Unexpose withdraws an app's published hostname in one environment.
+//
+// The ENVIRONMENT RIDES THE ROUTE (see narrowing): against a control plane that drops it, unexposing
+// staging takes PRODUCTION's ingress and routing down (issue #485).
 func (c *Client) Unexpose(ctx context.Context, app, env string) error {
-	return c.do(ctx, http.MethodPost, withEnv(c.appPath(app, "unexpose"), env), nil, nil)
+	err := c.do(ctx, http.MethodPost, narrowing(c.appPath(app, "unexpose"), "env", env), nil, nil)
+	if err != nil && env != "" {
+		what := fmt.Sprintf("this control plane cannot unpublish an app in a NAMED environment, so nothing was unpublished: the same call against it would have removed the ingress and routing of %q in the DEFAULT environment rather than in %q", app, env)
+		return scopeRefusal(what, "named environments", err)
+	}
+	return err
 }
 
 // Reachability reports whether an app is reachable at its hostname, link by link, in the target
@@ -1649,9 +1749,20 @@ func (c *Client) Config(ctx context.Context, app, env string) (map[string]string
 // Secret; it is never logged, never stored in Postgres, and is still never carried over MCP (there
 // is no secret-set MCP tool). By default the running workload rolls so it picks the value up; with
 // noRestart the change only persists and lands on the next deploy.
+//
+// The ENVIRONMENT RIDES THE ROUTE (see narrowing). The secrets route is older than named
+// environments, so against a control plane in between, a value meant for staging is written into
+// PRODUCTION's Secret and the production workload is rolled to pick it up — and a secret cannot be
+// unwritten from the place it should never have reached (issue #485). The refusal names the KEY and
+// never the value, like everything else on this path.
 func (c *Client) SetSecret(ctx context.Context, app, env, key, value string, noRestart bool) error {
-	body := map[string]any{"env": env, "key": key, "value": value, "no_restart": noRestart}
-	return c.do(ctx, http.MethodPost, c.appPath(app, "secrets"), body, nil)
+	body := map[string]any{"env": "", "key": key, "value": value, "no_restart": noRestart}
+	err := c.do(ctx, http.MethodPost, narrowing(c.appPath(app, "secrets"), "env", env), body, nil)
+	if err != nil && env != "" {
+		what := fmt.Sprintf("this control plane cannot set a secret in a NAMED environment, so nothing was written: the same call against it would have written %q into %q's Secret in the DEFAULT environment rather than in %q, and rolled that workload to pick it up", key, app, env)
+		return scopeRefusal(what, "named environments", err)
+	}
+	return err
 }
 
 // Secrets returns the KEYS in an app's per-app Secret, never the values (ADR-0028/0004). Secret
@@ -1669,12 +1780,21 @@ func (c *Client) Secrets(ctx context.Context, app, env string) ([]string, error)
 // value, so it is allowed over the API/MCP. By default the running workload rolls so it drops the
 // value; with noRestart the change only persists and lands on the next deploy. env names the target
 // environment (ADR-0035 phase 2b).
+//
+// The ENVIRONMENT RIDES THE ROUTE, for the reason SetSecret's does: against a control plane that
+// drops it, removing staging's key takes the value PRODUCTION is running on out from under it and
+// rolls the workload (issue #485).
 func (c *Client) UnsetSecret(ctx context.Context, app, env, key string, noRestart bool) error {
-	path := "/v1/apps/" + url.PathEscape(app) + "/secrets/" + url.PathEscape(key)
+	path := narrowing("/v1/apps/"+url.PathEscape(app)+"/secrets/"+url.PathEscape(key), "env", env)
 	if noRestart {
 		path += "?no_restart=true"
 	}
-	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
+	err := c.do(ctx, http.MethodDelete, path, nil, nil)
+	if err != nil && env != "" {
+		what := fmt.Sprintf("this control plane cannot remove a secret in a NAMED environment, so nothing was removed: the same call against it would have removed %q from %q's Secret in the DEFAULT environment rather than in %q, and rolled that workload without it", key, app, env)
+		return scopeRefusal(what, "named environments", err)
+	}
+	return err
 }
 
 // Hook is one configured lifecycle command: the phase it fires at and the command it runs, for one
@@ -1721,9 +1841,32 @@ func (c *Client) appPath(app, verb string) string {
 	return "/v1/apps/" + url.PathEscape(app) + "/" + verb
 }
 
+// narrowing appends a narrowing to path as a ROUTE SEGMENT — `/<name>/<value>` — which is where a
+// parameter that decides what a write touches belongs (see guardPath, and issue #485).
+//
+// THE SEGMENT IS NAMED AFTER THE PARAMETER IT REPLACES, so a route reads as the request it carries
+// and a reader can check one against the other. A call with two of them appends them in the order the
+// control plane registers, which is the order they are written here.
+//
+// An EMPTY value narrows nothing: the default environment is one every control plane has, and an
+// unset destination is one the server resolves. So it returns the path unchanged, keeping the wire
+// shape clients have always sent, and the caller raises no refusal for it — there is no wider scope
+// the call could have landed at.
+func narrowing(path, name, value string) string {
+	if value == "" {
+		return path
+	}
+	return path + "/" + name + "/" + url.PathEscape(value)
+}
+
 // withEnv appends an env query parameter to path when env is non-empty, so an operation targets a
 // named environment (ADR-0035 phase 2b). An empty env leaves the path unchanged and the server
 // defaults to the default environment.
+//
+// It is the READ side's form. A write's environment rides the route instead (see narrowing): the
+// difference is that a read answered one scope out misinforms a reader, where a write performed one
+// scope out changes something nobody asked to change. The one read that follows the write rule is
+// Backups, because its answer is an argument to a restore rather than something a person reads.
 func withEnv(path, env string) string {
 	if env == "" {
 		return path
@@ -1799,11 +1942,26 @@ func (c *Client) SetGuardrail(ctx context.Context, scope GuardScope, code, dispo
 // The rule this encodes, for anything added later: A REQUEST PARAMETER THAT NARROWS THE SCOPE OF A
 // WRITE BELONGS IN THE ROUTE. A parameter that selects an existing route's behaviour in a way an
 // older server would honour or reject on its own may stay a parameter. It applies to a BODY field
-// exactly as it applies to a query parameter: `decode` reads the body with a plain json.Decoder, so
-// an older control plane drops a field it does not know just as silently.
+// exactly as it applies to a query parameter: every burrowd released before v0.15 read the body with
+// unknown fields allowed, so it drops a field it does not know just as silently. (A current burrowd
+// refuses one instead — see the control plane's `decode` — but that only helps once the control plane
+// on the other end is a current one, which is exactly what cannot be assumed here.)
 //
-// Issue #485 audited the rest of the API against this rule and found the destructive violations,
-// which now follow it: see RemoveAddon, DeleteApp, DetachAddon and RestoreAddon.
+// Issue #485 audited the rest of the API against this rule. Every write that violated it now follows
+// it: RemoveAddon, DeleteApp, DetachAddon and RestoreAddon, then Deploy, Rollback, Scale, Expose,
+// Unexpose, SetSecret, UnsetSecret, InstallAddon and BackupAddon.
+//
+// THE READS DO NOT, WITH ONE EXCEPTION, and the exception is the test of the rule rather than a hole
+// in it. A read answered one scope out misinforms a reader and changes nothing, and every write it
+// might lead to is refused on its own — so Status, Logs, Apps, Reachability, Config and Secrets keep
+// the query parameter (see withEnv). Backups does not, because its answer is an ARGUMENT: the id it
+// returns is fed to a restore that overwrites a live database, and no later refusal can tell that the
+// id came from the wrong list.
+//
+// A parameter that CANNOT OUTRUN ITS OWN ROUTE needs none of this, whatever it narrows: it can only
+// reach a control plane that shipped no earlier than it did. That is why `skip_final_backup` stays a
+// parameter on the removal, and why the physical backup's and physical restore's `env` and
+// `destination` do — those routes and their parameters shipped in the same release.
 func guardPath(scope GuardScope, code string) string {
 	path := "/v1/guard"
 	if scope.Name != "" {

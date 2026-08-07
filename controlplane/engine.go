@@ -1011,13 +1011,29 @@ func (e *Engine) attachedApps(ctx context.Context, info AddonInfo) (apps []strin
 	if info.Type != AddonPostgres || info.Mode != "installed" {
 		return nil, true
 	}
+	// A registry row written before add-ons were per-environment carries no environment; it is the
+	// default environment's instance by construction, since that is the only one that could exist.
+	return e.appDatabases(ctx, envName(info.Environment))
+}
+
+// appDatabases asks environment env's Postgres instance itself which Burrow-provisioned app databases
+// it holds, sorted, and says whether the question could be put at all.
+//
+// It is factored out of attachedApps because a physical restore asks the same instance the same
+// question for the opposite purpose — not "whose data does this destroy?" but "did the data actually
+// come back?" (verifyRecoveredInstance) — and the two must not drift into two ideas of what a
+// provisioned database is.
+//
+// known=false means the question was never answered: no provisioner implements AppDatabaseLister, or
+// the instance would not answer. It is deliberately distinct from an empty answer, because an
+// instance that says "I hold nothing" and one that says nothing at all are the difference between a
+// fact and a gap, and every caller of this makes a decision that turns on which one it has.
+func (e *Engine) appDatabases(ctx context.Context, env string) (apps []string, known bool) {
 	lister, ok := e.dbProvisioner.(AppDatabaseLister)
 	if !ok {
 		return nil, false
 	}
-	// A registry row written before add-ons were per-environment carries no environment; it is the
-	// default environment's instance by construction, since that is the only one that could exist.
-	found, err := lister.ListAppDatabases(ctx, envName(info.Environment))
+	found, err := lister.ListAppDatabases(ctx, env)
 	if err != nil {
 		return nil, false
 	}

@@ -610,6 +610,25 @@ func restoreInstanceSummary(res client.RestoreInstanceResult) string {
 	if res.SafetyBackupNote != "" {
 		fmt.Fprintf(&b, "%s\n", res.SafetyBackupNote)
 	}
+	// What the recovered instance actually holds, before who was pointed at it — a `Cluster` that came
+	// up is not a restore, and this is the line that says whether one happened. It is printed on every
+	// outcome, including the one where nothing could be established: an unproven restore that reads
+	// like a proven one is the failure this check exists to remove.
+	switch {
+	case res.Verification.Status == string(controlplane.RestoreVerificationConfirmed):
+		fmt.Fprintf(&b, "the recovered instance holds %d database(s) (%s), checked before any app was reconnected\n",
+			len(res.Verification.Databases), strings.Join(res.Verification.Databases, ", "))
+		if len(res.Verification.Missing) > 0 {
+			fmt.Fprintf(&b, "no database came back for: %s — %s\n",
+				strings.Join(res.Verification.Missing, ", "), res.Verification.Note)
+		}
+	case res.Verification.Note != "":
+		fmt.Fprintf(&b, "NOT VERIFIED: %s\n", res.Verification.Note)
+	default:
+		// A control plane older than this check reports no verification at all. Silence would read
+		// as a confirmation, so the absence is what gets said.
+		b.WriteString("NOT VERIFIED: this control plane does not report whether the recovered instance holds the data\n")
+	}
 	if len(res.Reconnected) > 0 {
 		fmt.Fprintf(&b, "%d app(s) (%s) were reissued a DATABASE_URL for the recovered instance and restarted\n",
 			len(res.Reconnected), strings.Join(res.Reconnected, ", "))

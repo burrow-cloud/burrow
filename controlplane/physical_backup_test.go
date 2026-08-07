@@ -25,24 +25,29 @@ import (
 
 // newPhysicalBackupEngine is newBackupDestinationEngine with the object-store FACTORY returned as
 // well, because a physical backup's read-back is verified against what that store actually holds.
-func newPhysicalBackupEngine(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Database, *fake.Credentials, *fake.ObjectStoreFactory) {
+//
+// The PROVISIONER is returned too, because a restore's verification asks the instance which databases
+// it holds and the fake provisioner is what answers: a test that does not seed it is describing an
+// instance that came up empty, which is a state the restore path now has an opinion about.
+func newPhysicalBackupEngine(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Database, *fake.Credentials, *fake.ObjectStoreFactory, *fake.Provisioner) {
 	t.Helper()
 	k := fake.NewKubernetes()
 	d := fake.NewDatabase()
 	d.SetPolicy(permissive())
 	creds := fake.NewCredentials()
 	osf := fake.NewObjectStoreFactory()
+	prov := fake.NewProvisioner()
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Database: d,
 		Clock: fake.NewClock(time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)),
 		IDs:   fake.NewIDs(), Resolver: fake.NewResolver(),
 		Credentials: creds, DNS: fake.NewDNSFactory(),
-		ObjectStore: osf, DatabaseProvisioner: fake.NewProvisioner(),
+		ObjectStore: osf, DatabaseProvisioner: prov,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return e, k, d, creds, osf
+	return e, k, d, creds, osf, prov
 }
 
 // installArchivingPostgres installs a Postgres instance with an object-storage provider registered,
@@ -77,7 +82,7 @@ func seedManifest(t *testing.T, f *fake.ObjectStoreFactory, env, label string) {
 // predicate `--delete-data` and the backup-age signal both stand on.
 func TestBackupInstanceRecordsAPhysicalRow(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	k.SetPhysicalBackupLabel("20260801-020000F")
 	seedManifest(t, osf, cp.DefaultEnvironment, "20260801-020000F")
@@ -116,7 +121,7 @@ func TestBackupInstanceRecordsAPhysicalRow(t *testing.T) {
 // and "the object is there" are two facts.
 func TestBackupInstanceReadsTheBackupBackBeforeCompleting(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	k.SetPhysicalBackupLabel("20260801-020000F")
 	// The manifest is deliberately NOT seeded: CloudNativePG says completed, the store has nothing.
@@ -167,7 +172,7 @@ func TestBackupInstanceRefusesWithoutADestination(t *testing.T) {
 // vocabulary is the existing closed one, so a caller branches instead of parsing.
 func TestBackupInstanceRecordsTheReasonTheBackupObjectGave(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	_ = osf
 	k.SetPhysicalBackupFailure(cp.BackupReasonStoreUnreachable, "the instance's write-ahead log is not reaching the repository")
@@ -195,7 +200,7 @@ func TestBackupInstanceRecordsTheReasonTheBackupObjectGave(t *testing.T) {
 // recent id off a listing.
 func TestRestoreRefusesAPhysicalBackup(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	k.SetPhysicalBackupLabel("20260801-020000F")
 	seedManifest(t, osf, cp.DefaultEnvironment, "20260801-020000F")
@@ -223,7 +228,7 @@ func TestRestoreRefusesAPhysicalBackup(t *testing.T) {
 // a second mechanism arrived.
 func TestBackupHealthCountsAPhysicalBackup(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	k.SetPhysicalBackupLabel("20260801-020000F")
 	seedManifest(t, osf, cp.DefaultEnvironment, "20260801-020000F")

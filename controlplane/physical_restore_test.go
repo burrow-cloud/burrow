@@ -57,10 +57,15 @@ func takePhysicalBackup(t *testing.T, e *cp.Engine, k *fake.Kubernetes, osf *fak
 // and restarted.
 func TestRestoreInstanceRewindsTheInstanceAndReconnectsEveryApp(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, prov := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	seedAttachedApp(t, k, "", "api")
 	seedAttachedApp(t, k, "", "web")
+	// The recovery brings the databases back, which is what makes this the happy path rather than a
+	// `Cluster` that came up empty. It is seeded on the INSTANCE, separately from the apps' Secrets
+	// above, because the two are separate sources on purpose: the Secrets say who was attached, the
+	// instance says what the recovery actually produced.
+	prov.SetAttachedApps(cp.DefaultEnvironment, "api", "web")
 	backup := takePhysicalBackup(t, e, k, osf, cp.DefaultEnvironment, "20260801-020000F")
 
 	res, err := e.RestoreInstance(ctx, cp.AddonPostgres, "", cp.RestoreInstanceOptions{Backup: backup.ID, Confirm: true})
@@ -68,6 +73,17 @@ func TestRestoreInstanceRewindsTheInstanceAndReconnectsEveryApp(t *testing.T) {
 		t.Fatalf("RestoreInstance: %v", err)
 	}
 
+	// The data is confirmed to be on the recovered instance, and that is checked before the cutover —
+	// a `Cluster` that reached Ready is not a restore.
+	if res.Verification.Status != cp.RestoreVerificationConfirmed {
+		t.Errorf("verification = %+v, want the recovered data confirmed", res.Verification)
+	}
+	if got := strings.Join(res.Verification.Databases, ","); got != "api,web" {
+		t.Errorf("verified databases = %q, want both apps' databases", got)
+	}
+	if len(res.Verification.Missing) != 0 {
+		t.Errorf("missing = %v, want none", res.Verification.Missing)
+	}
 	// The blast radius is recorded by NAME, which is the whole reason the result carries a list.
 	if got := strings.Join(res.Apps, ","); got != "api,web" {
 		t.Errorf("apps = %q, want %q", got, "api,web")
@@ -120,8 +136,9 @@ func TestRestoreInstanceRewindsTheInstanceAndReconnectsEveryApp(t *testing.T) {
 // credential under a name it does not read and a dead one under the name it does.
 func TestRestoreInstanceFollowsEachAppsOwnVariable(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, prov := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
+	prov.SetAttachedApps(cp.DefaultEnvironment, "api", "web")
 	seedAttachedApp(t, k, "", "api")
 	// `web` attached under its own name: no DATABASE_URL at all, a recorded PG_DSN instead.
 	if err := k.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Kind: cp.WorkloadDeployment, Image: "img:1", Replicas: 1}); err != nil {
@@ -157,7 +174,7 @@ func TestRestoreInstanceFollowsEachAppsOwnVariable(t *testing.T) {
 // wrong granularity in either direction.
 func TestRestoreInstanceRefusesALogicalBackup(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, _ := newPhysicalBackupEngine(t)
+	e, k, d, creds, _, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	seedAttachedApp(t, k, "", "api")
 
@@ -188,7 +205,7 @@ func TestRestoreInstanceRefusesALogicalBackup(t *testing.T) {
 // staging's, which is the class of incident issue #339 was.
 func TestRestoreInstanceRefusesAnotherEnvironmentsBackup(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, _ := newPhysicalBackupEngine(t)
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
@@ -213,7 +230,7 @@ func TestRestoreInstanceRefusesAnotherEnvironmentsBackup(t *testing.T) {
 // have been decorative.
 func TestRestoreInstanceRefusesAnUnverifiedBackup(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, _ := newPhysicalBackupEngine(t)
+	e, k, d, creds, _, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	// A physical row that never completed: the read-back found nothing at the key.
 	k.SetPhysicalBackupLabel("20260801-020000F")
@@ -236,7 +253,7 @@ func TestRestoreInstanceRefusesAnUnverifiedBackup(t *testing.T) {
 // one because the caller named neither would be the most destructive default in the product.
 func TestRestoreInstanceRefusesWithNoRecoveryTarget(t *testing.T) {
 	ctx := context.Background()
-	e, _, d, creds, _ := newPhysicalBackupEngine(t)
+	e, _, d, creds, _, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 
 	if _, err := e.RestoreInstance(ctx, cp.AddonPostgres, "", cp.RestoreInstanceOptions{Confirm: true}); !errors.Is(err, cp.ErrInvalid) {
@@ -255,7 +272,7 @@ func TestRestoreInstanceRefusesWithNoRecoveryTarget(t *testing.T) {
 // nothing to recover from. The refusal names the per-app path, which DOES have one.
 func TestRestoreInstanceRefusesWithNoObjectStorage(t *testing.T) {
 	ctx := context.Background()
-	e, _, d, _, _ := newPhysicalBackupEngine(t)
+	e, _, d, _, _, _ := newPhysicalBackupEngine(t)
 	d.SetPolicy(permissive())
 	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, cp.DefaultEnvironment, cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
@@ -275,7 +292,7 @@ func TestRestoreInstanceRefusesWithNoObjectStorage(t *testing.T) {
 // repository FIRST, and if it does not get there nothing is destroyed.
 func TestRestoreInstanceAbortsWhenTheSafetyBackupFails(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, _ := newPhysicalBackupEngine(t)
+	e, k, d, creds, _, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	// No manifest is seeded, so the safety backup's read-back finds nothing and the backup fails.
 	k.SetPhysicalBackupLabel("20260801-020000F")
@@ -297,7 +314,7 @@ func TestRestoreInstanceAbortsWhenTheSafetyBackupFails(t *testing.T) {
 // instance that cannot be restored. What it must never do is go quiet about it.
 func TestRestoreInstanceCanSkipTheSafetyBackup(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, _ := newPhysicalBackupEngine(t)
+	e, k, d, creds, _, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	k.SetPhysicalBackupLabel("20260801-020000F") // no manifest seeded: a backup here would fail
 
@@ -321,7 +338,7 @@ func TestRestoreInstanceCanSkipTheSafetyBackup(t *testing.T) {
 // NOT CONSENT — the names are what make somebody stop when one of them should not be on the list.
 func TestRestoreInstanceIsHeldForConfirmationNamingEveryApp(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, _ := newPhysicalBackupEngine(t)
+	e, k, d, creds, _, _ := newPhysicalBackupEngine(t)
 	d.SetPolicy(cp.DefaultPolicy())
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	seedAttachedApp(t, k, "", "api")
@@ -343,9 +360,10 @@ func TestRestoreInstanceIsHeldForConfirmationNamingEveryApp(t *testing.T) {
 // and which apps were affected — the three questions asked after the fact — and no credential.
 func TestRestoreInstanceAuditsTheBlastRadius(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, prov := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	seedAttachedApp(t, k, "", "api")
+	prov.SetAttachedApps(cp.DefaultEnvironment, "api")
 	backup := takePhysicalBackup(t, e, k, osf, cp.DefaultEnvironment, "20260801-020000F")
 
 	if _, err := e.RestoreInstance(ctx, cp.AddonPostgres, "", cp.RestoreInstanceOptions{Backup: backup.ID, Confirm: true}); err != nil {
@@ -383,7 +401,7 @@ func TestRestoreInstanceAuditsTheBlastRadius(t *testing.T) {
 // reconnect would leave the rest holding stale credentials with nothing said about them.
 func TestRestoreInstanceReportsAnAppItCouldNotReconnect(t *testing.T) {
 	ctx := context.Background()
-	_, k, d, creds, _ := newPhysicalBackupEngine(t)
+	_, k, d, creds, _, _ := newPhysicalBackupEngine(t)
 	p := fake.NewProvisioner()
 	e, err := cp.New(cp.Deps{
 		Kubernetes: k, Database: d, Clock: fake.NewClock(time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)), IDs: fake.NewIDs(),
@@ -395,6 +413,8 @@ func TestRestoreInstanceReportsAnAppItCouldNotReconnect(t *testing.T) {
 	}
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	seedAttachedApp(t, k, "", "api")
+	// The recovery brought api's database back; what fails is the re-provisioning on top of it.
+	p.SetAttachedApps(cp.DefaultEnvironment, "api")
 	p.SetEnsureError(errors.New("role could not be created"))
 
 	res, err := e.RestoreInstance(ctx, cp.AddonPostgres, "", cp.RestoreInstanceOptions{Latest: true, SkipSafetyBackup: true, Confirm: true})
@@ -410,6 +430,164 @@ func TestRestoreInstanceReportsAnAppItCouldNotReconnect(t *testing.T) {
 	// And no part of the reason is a connection string.
 	if strings.Contains(res.Stranded[0].Reason, "postgres://") {
 		t.Errorf("a connection string reached the result: %q", res.Stranded[0].Reason)
+	}
+}
+
+// TestRestoreInstanceFailsWhenTheRecoveredInstanceIsEmpty is the property this whole verification
+// exists for, and it is the one failure a restore path cannot afford to be quiet about: the recovery
+// found nothing in the repository, brought up an empty instance, and every signal underneath reads
+// green — the `Cluster` is Ready, the seam returned, the safety backup is recorded. Without the check
+// the restore reports success over a database with nothing in it.
+//
+// The second half of the test is the part that makes the first half survivable. NOTHING IS
+// RECONNECTED: re-provisioning each app onto the empty instance would create its database fresh under
+// its own name and hand it a working credential, so the apps would start writing into a database
+// whose contents this restore was supposed to bring back. They are left holding a credential that does
+// not authenticate, which is loud and reversible.
+func TestRestoreInstanceFailsWhenTheRecoveredInstanceIsEmpty(t *testing.T) {
+	ctx := context.Background()
+	e, k, d, creds, osf, prov := newPhysicalBackupEngine(t)
+	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
+	seedAttachedApp(t, k, "", "api")
+	seedAttachedApp(t, k, "", "web")
+	backup := takePhysicalBackup(t, e, k, osf, cp.DefaultEnvironment, "20260801-020000F")
+	// The instance comes back holding nothing: no databases are seeded on it. This is what recovering
+	// from a repository with no base backup for the stanza produces.
+	prov.SetAttachedApps(cp.DefaultEnvironment)
+
+	_, err := e.RestoreInstance(ctx, cp.AddonPostgres, "", cp.RestoreInstanceOptions{Backup: backup.ID, Confirm: true})
+	if !errors.Is(err, cp.ErrRestoreNotVerified) {
+		t.Fatalf("restore onto an empty instance: got %v, want ErrRestoreNotVerified", err)
+	}
+	// The recovery DID run — this is not a refusal, it is a restore that recovered nothing.
+	if calls := k.RestoreInstances(); len(calls) != 1 {
+		t.Fatalf("RestoreInstance seam calls = %d, want the recovery to have run", len(calls))
+	}
+	// The way back is in the ERROR, because an error path returns no result and the safety backup is
+	// the only thing standing between this operator and a lost database.
+	rows, lerr := d.ListBackups(ctx, "", "")
+	if lerr != nil {
+		t.Fatalf("ListBackups: %v", lerr)
+	}
+	var safety string
+	for _, r := range rows {
+		if r.ID != backup.ID && r.Kind == cp.BackupKindPhysical {
+			safety = r.ID
+		}
+	}
+	if safety == "" {
+		t.Fatal("no safety backup was recorded, so there is nothing for the failure to point at")
+	}
+	if !strings.Contains(err.Error(), safety) {
+		t.Errorf("the failure does not name the backup that puts the pre-restore state back (%s): %v", safety, err)
+	}
+	// No app was touched: no re-provisioning, the old value still in the Secret, no restart.
+	if ensured := prov.Ensured(); len(ensured) != 0 {
+		t.Errorf("the cutover ran on an unverified restore: %+v", ensured)
+	}
+	for _, app := range []string{"api", "web"} {
+		if got, _ := k.SecretValue(app, "DATABASE_URL"); got != "postgres://old" {
+			t.Errorf("%s was reconnected to an empty instance: its variable is now %q", app, got)
+		}
+		if _, ok := k.RestartedAt(app); ok {
+			t.Errorf("%s was restarted onto an empty instance", app)
+		}
+	}
+	// And the audit row says what was established, so the account of an empty recovery survives the
+	// process that reported it.
+	entries, aerr := d.Audit(ctx, cp.AuditFilter{})
+	if aerr != nil {
+		t.Fatalf("Audit: %v", aerr)
+	}
+	var failed *cp.AuditEntry
+	for i := range entries {
+		if entries[i].Operation == "addon_restore_instance" && entries[i].Outcome == cp.AuditFailed {
+			failed = &entries[i]
+		}
+	}
+	if failed == nil {
+		t.Fatal("no failed addon_restore_instance audit row")
+	}
+	if failed.Args["verified"] != string(cp.RestoreVerificationAbsent) {
+		t.Errorf("audit verified = %q, want %q", failed.Args["verified"], cp.RestoreVerificationAbsent)
+	}
+}
+
+// TestRestoreInstanceReportsAppsWhoseDataDidNotComeBack: a recovery that brought SOME of the
+// databases back is a success, not a failure — recovering to a point before an app was attached
+// legitimately comes back without it. What must not happen is that going unsaid, so the app is named.
+func TestRestoreInstanceReportsAppsWhoseDataDidNotComeBack(t *testing.T) {
+	ctx := context.Background()
+	e, k, d, creds, osf, prov := newPhysicalBackupEngine(t)
+	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
+	seedAttachedApp(t, k, "", "api")
+	seedAttachedApp(t, k, "", "web")
+	// `web` was attached after the point being recovered to, so its database is not in the backup.
+	prov.SetAttachedApps(cp.DefaultEnvironment, "api")
+	backup := takePhysicalBackup(t, e, k, osf, cp.DefaultEnvironment, "20260801-020000F")
+
+	res, err := e.RestoreInstance(ctx, cp.AddonPostgres, "", cp.RestoreInstanceOptions{Backup: backup.ID, Confirm: true})
+	if err != nil {
+		t.Fatalf("RestoreInstance: %v", err)
+	}
+	if res.Verification.Status != cp.RestoreVerificationConfirmed {
+		t.Fatalf("verification = %+v, want confirmed: the recovery did bring a database back", res.Verification)
+	}
+	if got := strings.Join(res.Verification.Missing, ","); got != "web" {
+		t.Errorf("missing = %q, want web named as the app whose data did not come back", got)
+	}
+	if res.Verification.Note == "" {
+		t.Error("nothing says why an app has no database on the recovered instance")
+	}
+	// And the cutover still ran: the instance holds data and web needs a database to be created.
+	if got := strings.Join(res.Reconnected, ","); got != "api,web" {
+		t.Errorf("reconnected = %q, want both apps", got)
+	}
+}
+
+// TestRestoreInstanceSaysWhenItCouldNotVerify: an instance that will not answer is reported as
+// UNVERIFIED rather than as verified. It does not fail the restore — the instance is up and may be
+// perfectly good, and a hard failure would send an operator to repeat a rewind — but a restore nobody
+// checked must never read like one that was checked.
+func TestRestoreInstanceSaysWhenItCouldNotVerify(t *testing.T) {
+	ctx := context.Background()
+	e, k, d, creds, osf, prov := newPhysicalBackupEngine(t)
+	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
+	seedAttachedApp(t, k, "", "api")
+	backup := takePhysicalBackup(t, e, k, osf, cp.DefaultEnvironment, "20260801-020000F")
+	prov.SetListError(errors.New("connection refused"))
+
+	res, err := e.RestoreInstance(ctx, cp.AddonPostgres, "", cp.RestoreInstanceOptions{Backup: backup.ID, Confirm: true})
+	if err != nil {
+		t.Fatalf("RestoreInstance: %v", err)
+	}
+	if res.Verification.Status != cp.RestoreVerificationUnknown {
+		t.Errorf("verification = %+v, want unknown when the instance would not answer", res.Verification)
+	}
+	if res.Verification.Note == "" {
+		t.Error("an unverified restore says nothing about being unverified")
+	}
+	// The cutover still ran, and it reports per app what it could not do.
+	if got := strings.Join(res.Reconnected, ","); got != "api" {
+		t.Errorf("reconnected = %q, want the cutover to have gone ahead", got)
+	}
+}
+
+// TestRestoreInstanceWithNoAttachedAppsClaimsNothing: with no app attached there is no
+// Burrow-provisioned database whose return could be checked, so the honest answer is unknown. Calling
+// that a confirmation would make the strongest-looking verification the one backed by the least.
+func TestRestoreInstanceWithNoAttachedAppsClaimsNothing(t *testing.T) {
+	ctx := context.Background()
+	e, k, d, creds, _, _ := newPhysicalBackupEngine(t)
+	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
+	k.SetPhysicalBackupLabel("20260801-020000F")
+
+	res, err := e.RestoreInstance(ctx, cp.AddonPostgres, "", cp.RestoreInstanceOptions{Latest: true, SkipSafetyBackup: true, Confirm: true})
+	if err != nil {
+		t.Fatalf("RestoreInstance: %v", err)
+	}
+	if res.Verification.Status != cp.RestoreVerificationUnknown {
+		t.Errorf("verification = %+v, want unknown: there was nothing to check", res.Verification)
 	}
 }
 
@@ -436,7 +614,7 @@ func TestPgBackRestLabelFromManifestKeyIsTheInverse(t *testing.T) {
 // no copy at all.
 func TestRestoreInstanceNamesTheRepositoryForTheSafetyBackupToo(t *testing.T) {
 	ctx := context.Background()
-	e, k, d, creds, osf := newPhysicalBackupEngine(t)
+	e, k, d, creds, osf, _ := newPhysicalBackupEngine(t)
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	// A second registered destination, which is a supported state (ADR-0063 §6).
 	seedObjectStoreProvider(t, d, creds, "elsewhere")

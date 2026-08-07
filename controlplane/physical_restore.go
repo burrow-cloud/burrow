@@ -141,6 +141,9 @@ type RestoreInstanceResult struct {
 	// DATABASE_URL for an instance that has been rebuilt, so their credential no longer works and the
 	// operator has to re-attach them — which is what the line says.
 	Stranded []StrandedApp `json:"stranded,omitempty"`
+	// Verification is what Burrow found on the recovered instance before it reconnected anything —
+	// the answer to "is the data actually there", which is the only question a restore is asked.
+	Verification RestoreVerification `json:"verification"`
 }
 
 // StrandedApp is one app the DATABASE_URL cutover did not finish for, and why.
@@ -148,6 +151,52 @@ type StrandedApp struct {
 	App    string `json:"app"`
 	Reason string `json:"reason"`
 }
+
+// RestoreVerificationStatus is what Burrow was able to establish about the data on a recovered
+// instance. It is a three-value answer rather than a boolean because "the instance holds nothing" and
+// "the instance was not asked" are different facts, and a restore path that reports the second as the
+// first is exactly the false assurance this verification exists to remove.
+type RestoreVerificationStatus string
+
+const (
+	// RestoreVerificationConfirmed: the recovered instance answered and holds Burrow-provisioned app
+	// databases. The recovery read something out of the repository.
+	RestoreVerificationConfirmed RestoreVerificationStatus = "confirmed"
+	// RestoreVerificationAbsent: the recovered instance answered and holds NONE, where apps attached
+	// to it did. This is a failed restore and is returned as an error, never as a result.
+	RestoreVerificationAbsent RestoreVerificationStatus = "absent"
+	// RestoreVerificationUnknown: nothing could be established — the instance would not answer, or
+	// there was no Burrow-provisioned database whose return could have been checked. The restore
+	// stands and the result says plainly that it is unproven.
+	RestoreVerificationUnknown RestoreVerificationStatus = "unknown"
+)
+
+// RestoreVerification is what the recovered instance was found to hold, before any app was
+// reconnected to it. It carries database NAMES only — never a row, never a credential.
+type RestoreVerification struct {
+	Status RestoreVerificationStatus `json:"status"`
+	// Databases is every Burrow-provisioned app database the recovered instance holds, sorted. It is
+	// the evidence the status is drawn from, reported rather than summarized: an operator reading
+	// "confirmed" wants to see which databases came back.
+	Databases []string `json:"databases"`
+	// Missing is the apps that were attached to the instance and have no database on it now. It is
+	// not on its own a failure — a recovery to a point before an app was attached legitimately comes
+	// back without it — but it is the list of apps whose data this restore did not return.
+	Missing []string `json:"missing,omitempty"`
+	// Note says, in one line, why the status is what it is, when that is not self-evident from the
+	// lists. Empty on a plain confirmation.
+	Note string `json:"note,omitempty"`
+}
+
+// ErrRestoreNotVerified is a restore whose recovered instance came up serving and empty: the
+// `Cluster` reached Ready, and none of the data the repository was supposed to hold is on it.
+//
+// It is its own sentinel rather than ErrInvalid because nothing about the request was wrong — the
+// backup was named correctly, the guardrail was satisfied, the recovery ran — and a caller
+// distinguishing "you asked for the wrong thing" from "what you asked for produced nothing" is
+// making a genuinely different decision. It is also the one restore failure that leaves the cluster
+// changed, which is why the message carries the way back rather than only the diagnosis.
+var ErrRestoreNotVerified = errors.New("the recovered instance holds none of the data it was restored from")
 
 // RestoreInstanceRequest is what the Kubernetes seam is asked to do: recover environment
 // Environment's Postgres instance from its own pgBackRest repository.
@@ -200,10 +249,18 @@ type RestoreInstanceOutcome struct {
 //     to "what is the fate of the old one": its bytes go into the same repository as a backup this
 //     restore names, so a rewind to the wrong point is itself recoverable.
 //  5. The seam replaces the instance and waits for it to serve.
-//  6. Every app is re-provisioned onto the recovered instance and restarted, through the same seam
+//  6. THE RECOVERED INSTANCE IS ASKED WHAT IT ACTUALLY HOLDS, and a restore that recovered nothing
+//     fails here rather than being reported as a success (verifyRecoveredInstance). A `Cluster` that
+//     reached Ready is not a restore; the data being on it is.
+//  7. Every app is re-provisioned onto the recovered instance and restarted, through the same seam
 //     `addon attach` writes. The roles in a recovered instance are as they were at the recovery
 //     target, so an app's old password may simply not exist any more; re-provisioning rotates it and
 //     hands the app a URL that works.
+//
+// STEP 6 COMES BEFORE STEP 7 AND THAT ORDER IS LOAD-BEARING. Re-provisioning CREATES an app's
+// database when it is not there, so a cutover run first would manufacture exactly the databases the
+// verification looks for — the check would pass on an empty instance because the check itself filled
+// it in. Asking first is what makes the answer evidence.
 //
 // It moves no secret value: the repository credential is assembled at call time and handed only to
 // the seam, the regenerated connection strings go only to SetSecretValue, and the audit row records
@@ -309,6 +366,17 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 	}
 	result.DataVolumesDestroyed = emptyIfNil(outcome.VolumesDestroyed)
 
+	// The proof, and it is taken BEFORE the cutover for the reason the doc comment above states: the
+	// cutover creates the databases it cannot find, so a check run after it would be reading its own
+	// handiwork.
+	result.Verification = e.verifyRecoveredInstance(ctx, targetEnv, apps)
+	args["verified"] = string(result.Verification.Status)
+	if result.Verification.Status == RestoreVerificationAbsent {
+		err := emptyRecoveryError(t, targetEnv, instance, result)
+		e.recordExecution(ctx, auditOpAddonRestoreInstance, instance, args, err)
+		return RestoreInstanceResult{}, fmt.Errorf("restore instance %s in environment %s: %w", t, targetEnv, err)
+	}
+
 	// The cutover. A failure here does not fail the restore: the instance is up with the data on it,
 	// and reporting the whole operation as failed would send an operator to repeat the rewind rather
 	// than to re-attach the one app that did not reconnect.
@@ -402,6 +470,107 @@ func (e *Engine) safetyBackup(ctx context.Context, t AddonType, targetEnv, insta
 		return res.Backup.ID, "", nil
 	}
 	return "", "", fmt.Errorf("the instance's current state could not be backed up before rewinding it, so nothing was restored and nothing was destroyed. Fix the backup path and re-run, or pass --skip-safety-backup to rewind WITHOUT a copy of what is there now (for an instance too broken to dump): %w", err)
+}
+
+// verifyRecoveredInstance asks the instance that just came up which Burrow-provisioned app databases
+// it holds, and turns the answer into the one thing a restore is actually asked to prove.
+//
+// THIS EXISTS BECAUSE A RECOVERY THAT RECOVERED NOTHING LOOKS EXACTLY LIKE ONE THAT WORKED. pgBackRest
+// finding no base backup for the stanza is not an error: CloudNativePG initializes an empty instance,
+// the `Cluster` reaches Ready, the seam's wait returns, and every signal Burrow surfaces reads green
+// over a database with nothing in it. A repository the instance never wrote to, a stanza pointed
+// somewhere else, an object lifecycle rule that outran the retention window — each arrives as the
+// same silent success. So the instance is asked, and the answer is the restore's outcome.
+//
+// THE EVIDENCE IS THE DATABASES, NOT THE ROWS, and that limit is stated rather than papered over.
+// Burrow does not know what any app's data should look like, so it cannot check content; what it does
+// know is that `addon attach` created a database owned by an app_<app> role for every attached app,
+// and that a recovered instance carrying those databases read something out of the repository while
+// one carrying none did not. That is a floor, not a proof of completeness — a restore to a point
+// mid-way through the window still needs an operator to look at their own data — and it catches the
+// specific failure that is otherwise invisible.
+//
+// THE EXPECTATION COMES FROM THE APPS' OWN SECRETS, not from a registry row or from the pre-restore
+// instance. It is the same list the guardrail named in its confirmation, gathered by
+// appsAttachedInEnvironment for the same reason: it is available when the instance is gone, which is
+// the case a physical restore exists for.
+func (e *Engine) verifyRecoveredInstance(ctx context.Context, targetEnv string, apps []string) RestoreVerification {
+	found, known := e.appDatabases(ctx, targetEnv)
+	if !known {
+		// An unanswerable instance is NOT reported as verified, for the reason verifyPhysicalBackup
+		// refuses to record a backup it could not read back: an invariant that could not be checked
+		// and is reported as holding is worse than one nobody claimed. It does not fail the restore
+		// either — the instance is up, the cutover will report per app what it could not do, and a
+		// hard failure here would send an operator to repeat a rewind over a recovery that may be
+		// perfectly good.
+		return RestoreVerification{
+			Status:    RestoreVerificationUnknown,
+			Databases: []string{},
+			Note:      "the recovered instance could not be asked which databases it holds, so Burrow cannot say the data came back; check one app's own data before relying on this restore",
+		}
+	}
+	if len(found) > 0 {
+		v := RestoreVerification{Status: RestoreVerificationConfirmed, Databases: found, Missing: missingDatabases(apps, found)}
+		if len(v.Missing) > 0 {
+			v.Note = "these apps were attached to the instance and have no database on it now, which is what a recovery to a point before they were attached looks like — if that is not what was asked for, the data they held is not in this recovery"
+		}
+		return v
+	}
+	if len(apps) == 0 {
+		return RestoreVerification{
+			Status:    RestoreVerificationUnknown,
+			Databases: []string{},
+			Note:      "no app was attached to this instance, so there was no Burrow-provisioned database whose return could be checked; the instance came up serving and nothing more than that is claimed",
+		}
+	}
+	return RestoreVerification{
+		Status:    RestoreVerificationAbsent,
+		Databases: []string{},
+		Missing:   append([]string(nil), apps...),
+	}
+}
+
+// missingDatabases is the attached apps with no database on the recovered instance.
+func missingDatabases(apps, found []string) []string {
+	present := make(map[string]bool, len(found))
+	for _, db := range found {
+		present[db] = true
+	}
+	var missing []string
+	for _, app := range apps {
+		if !present[app] {
+			missing = append(missing, app)
+		}
+	}
+	return missing
+}
+
+// emptyRecoveryError is what a restore that recovered nothing says.
+//
+// IT NAMES THE WAY BACK, because this is the one restore failure that has already changed the
+// cluster: the pre-restore instance and its volume are gone, and an error that only diagnosed the
+// problem would leave an operator holding an empty database with no stated next move. The safety
+// backup taken on the way in is exactly that move, so its id is in the message rather than only in
+// the result — the result is not returned on an error path, and this is the moment its most
+// important field is needed.
+//
+// It also says why no app was reconnected, which is the deliberate part. Re-provisioning every app
+// onto an empty instance would hand each of them a working credential for a database created fresh
+// under its own name, and the apps would start writing into it: a restore that recovered nothing
+// would become a restore that quietly discarded everything. Leaving each app's own connection-string
+// variable alone leaves them failing to authenticate, which is loud, reversible, and true.
+func emptyRecoveryError(t AddonType, targetEnv, instance string, res RestoreInstanceResult) error {
+	back := res.SafetyBackupNote
+	if res.SafetyBackup != "" {
+		back = fmt.Sprintf("the state that was on this instance before the rewind is backup %s: `burrow addon restore-instance %s --backup %s --env %s` puts it back",
+			res.SafetyBackup, t, res.SafetyBackup, targetEnv)
+	}
+	return fmt.Errorf("the %s instance %q was rebuilt and came up serving, and it holds NO database for any of the %d app(s) attached to it (%s). "+
+		"That is what recovering from a repository holding nothing for this instance looks like from the outside: the base backup is not found, an empty instance is initialized, and the recovery reports success over a database with nothing in it. "+
+		"NO APP WAS RECONNECTED, deliberately — re-provisioning them here would create their databases fresh and empty under their own names and the apps would begin writing into them, turning a restore that recovered nothing into one that discarded everything. "+
+		"Each app's connection-string variable is untouched, so they fail to connect rather than quietly finding an empty database. "+
+		"%s. If an instance without these databases is genuinely what was asked for, attach each app with `burrow addon attach %s <app> --env %s`: %w",
+		t, instance, len(res.Apps), strings.Join(res.Apps, ", "), back, t, targetEnv, ErrRestoreNotVerified)
 }
 
 // postgresInstalled reports whether the environment has a Postgres add-on in the registry — the

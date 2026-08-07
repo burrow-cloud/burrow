@@ -175,9 +175,9 @@ serves a `type=LoadBalancer` Service for free
 ([ADR-0043](adr/0043-public-reachability-is-a-loadbalancer.md)); and `cluster ingress install` adopts an
 ingress-nginx controller that is already running rather than installing a second one. (The wider
 decisions those sit under — detecting *any* running controller and binding to its IngressClass
-([ADR-0042](adr/0042-use-existing-ingress-controller.md)), and the one-operation path to a reachable app
-([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md)) — are decided but not yet built; see
-"Decided, not yet built" below.) Bootstrap preflights RAM (a 2GB minimum with a memory breakdown),
+([ADR-0042](adr/0042-use-existing-ingress-controller.md)), and the Service-at-deploy half of the flatter path to a
+reachable app ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md) §1–§2) — are decided but not
+yet built; see "Decided, not yet built" below.) Bootstrap preflights RAM (a 2GB minimum with a memory breakdown),
 Postgres runs lean on small clusters, and the cost framing calls servicelb free. Proven end to end
 by dogfooding on a 2GB droplet.
 
@@ -284,9 +284,11 @@ today?" for each.
   controller that is already running instead of installing a second one. A cluster running
   Traefik or another controller is not yet served.
 - **A flatter path to a reachable app** ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md))
-  — `deploy` has no port and creates no Service, so an app is addressable in-cluster only once it
-  is published; and `publish` creates the Service, Ingress, and TLS request but neither writes DNS
-  nor waits for the certificate, which stay `app domain add` and `app reachability --wait`.
+  — §3's one publish operation is built and is the same operation on both surfaces: it creates the
+  Service and Ingress, writes DNS where a provider is configured, confirms the host reaches the
+  cluster before requesting a certificate, and waits for it. What remains is §1 and §2: `deploy`
+  still has no port and creates no Service, so an app is addressable in-cluster only once it is
+  published.
 
 **The decisions below are tracked as issues.** Per-ADR implementation tracking lives in GitHub
 issues labelled [`adr`](https://github.com/burrow-cloud/burrow/labels/adr), one per decision or per

@@ -442,7 +442,7 @@ func TestWriteIngressDone(t *testing.T) {
 		"Ingress and TLS are set up.",
 		"no --email set",
 		"burrow cluster ingress install --email <you@example.com>",
-		"burrow app publish <app> --host <name> --port <n> --tls",
+		"burrow app publish <app> --host <name> --port <n>",
 		"burrow app reachability <app>",
 	} {
 		if !strings.Contains(s, want) {

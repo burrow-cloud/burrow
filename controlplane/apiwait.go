@@ -71,6 +71,24 @@ const (
 	// completing the handshake, authenticating — and because a wedged instance should be reported as
 	// unreachable rather than spending the whole statement budget getting there.
 	AddonSQLConnectTimeout = 30 * time.Second
+	// PublishAddressTimeout is how long a publish waits for the ingress controller to assign the
+	// exposure an external address (ADR-0041 §3). A cloud LoadBalancer is provisioned when the
+	// first Ingress asks for one, which is the slow case this covers.
+	PublishAddressTimeout = 3 * time.Minute
+
+	// PublishDNSTimeout is how long a publish waits for the host to resolve to that address. A
+	// record Burrow just wrote is visible at the zone's own nameservers in seconds; this bound is
+	// sized for the case Burrow wrote nothing and a human is pointing the record by hand.
+	PublishDNSTimeout = 5 * time.Minute
+
+	// PublishHTTPTimeout is how long a publish waits for the cluster to answer a plain-HTTP request
+	// for the host — the pre-flight that has to pass before a certificate is ever requested.
+	PublishHTTPTimeout = 2 * time.Minute
+
+	// PublishCertTimeout is how long a publish waits for cert-manager to complete the ACME order it
+	// was handed. Giving up on the wait does not cancel the order: the Ingress keeps its annotation
+	// and `burrow app reachability --wait` watches the same certificate.
+	PublishCertTimeout = 5 * time.Minute
 
 	// ObjectStoreCallTimeout bounds ONE HTTP call to an S3-compatible object store (ADR-0063).
 	// Registering an object-storage provider makes several in a row — create the bucket, write,
@@ -124,6 +142,11 @@ const (
 	// MaxAddonSQLWait is the longest one `addon sql` statement can occupy the server: opening the
 	// connection, then the statement at its own configured ceiling (ADR-0087 §7).
 	MaxAddonSQLWait = AddonSQLConnectTimeout + MaxAddonSQLTimeout
+	// MaxPublishWait is the longest a publish can occupy the server: the wait for an external
+	// address, the wait for DNS to point at it, the pre-flight's plain-HTTP wait, and the wait for
+	// the certificate (ADR-0041 §3). Every phase runs at its own ceiling only when each link is at
+	// its slowest; a publish onto a cluster that is already routing answers in seconds.
+	MaxPublishWait = PublishAddressTimeout + PublishDNSTimeout + PublishHTTPTimeout + PublishCertTimeout
 
 	// MaxProviderWait is the longest registering an object-storage provider can occupy the server:
 	// six object-store calls at their own bound — create the bucket, put/get/delete the probe

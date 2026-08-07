@@ -314,8 +314,8 @@ func TestMutatingVerbsPresent(t *testing.T) {
 		{"autoscale", "web"},
 		{"run", "web", "--", "echo", "hi"},
 		// Phase 2b routing verbs.
-		{"expose", "web", "--host", "web.example.com", "--port", "8080"},
-		{"unexpose", "web"},
+		{"publish", "web", "--host", "web.example.com", "--port", "8080"},
+		{"unpublish", "web"},
 		{"domain", "add", "web.example.com", "--address", "203.0.113.5"},
 		{"domain", "remove", "web.example.com"},
 		// Phase 2b add-on operations. `addon remove` is deliberately not here: it is ADR-0065 §2
@@ -391,9 +391,10 @@ func TestDeleteHeldThenConfirm(t *testing.T) {
 	}
 }
 
-// TestExposeHeldThenConfirm covers a guarded routing verb (app.expose_public) end to end: held without
-// --confirm, executed with it. Expose carries confirm in the request body, like the compute verbs.
-func TestExposeHeldThenConfirm(t *testing.T) {
+// TestPublishHeldThenConfirm covers a guarded routing verb (app.expose_public) end to end: held
+// without --confirm, executed with it. Publish carries confirm in the request body, like the compute
+// verbs, and one confirmation covers every link it composes.
+func TestPublishHeldThenConfirm(t *testing.T) {
 	f := newFakeCP(t)
 	f.handler = func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -401,13 +402,13 @@ func TestExposeHeldThenConfirm(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if !body.Confirm {
-			held(w, "expose", "app.expose_public", "exposing \"web\" to the public internet requires confirmation")
+			held(w, "publish", "app.expose_public", "exposing \"web\" to the public internet requires confirmation")
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "host": "web.example.com", "url": "http://web.example.com"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "host": "web.example.com", "reachable": true, "url": "https://web.example.com"})
 	}
 
-	out, code := runMutate(t, f, "expose", "web", "--host", "web.example.com", "--port", "8080")
+	out, code := runMutate(t, f, "publish", "web", "--host", "web.example.com", "--port", "8080")
 	oc := decodeOutcome(t, out)
 	if oc.Outcome != outcomeHeld || oc.Code != "app.expose_public" {
 		t.Fatalf("outcome = %q code = %q, want held_for_confirmation app.expose_public", oc.Outcome, oc.Code)
@@ -416,7 +417,7 @@ func TestExposeHeldThenConfirm(t *testing.T) {
 		t.Errorf("exit code = %d, want %d", code, exitCodeHeld)
 	}
 
-	out, code = runMutate(t, f, "expose", "web", "--host", "web.example.com", "--port", "8080", "--confirm")
+	out, code = runMutate(t, f, "publish", "web", "--host", "web.example.com", "--port", "8080", "--confirm")
 	oc = decodeOutcome(t, out)
 	if oc.Outcome != outcomeExecuted {
 		t.Fatalf("after --confirm, outcome = %q, want executed", oc.Outcome)
@@ -447,7 +448,7 @@ func TestDomainRemoveDenied(t *testing.T) {
 	}
 }
 
-// TestUnguardedVerbsExecute covers the Phase 2b verbs that are NOT guarded — unexpose, addon attach,
+// TestUnguardedVerbsExecute covers the Phase 2b verbs that are NOT guarded — unpublish, addon attach,
 // addon backup, config set/unset, secret unset — each executing straight through the envelope with the
 // result the control plane returns. These carry no --confirm flag by design.
 func TestUnguardedVerbsExecute(t *testing.T) {
@@ -459,7 +460,7 @@ func TestUnguardedVerbsExecute(t *testing.T) {
 		})
 	}
 	cases := [][]string{
-		{"unexpose", "web"},
+		{"unpublish", "web"},
 		{"addon", "attach", "postgres", "web"},
 		{"addon", "backup", "postgres", "web"},
 		{"config", "set", "web", "LOG_LEVEL=debug"},
@@ -475,5 +476,35 @@ func TestUnguardedVerbsExecute(t *testing.T) {
 		if code != exitCodeExecuted {
 			t.Errorf("run(%v) exit code = %d, want 0", args, code)
 		}
+	}
+}
+
+// TestExposeStillReachesPublish pins the alias. `expose` was this surface's routing verb and did
+// strictly less than publish — routing only, reported as executed with an http:// URL that a browser
+// on an HSTS-preloaded domain refuses to open (issue #476). An agent that was told the old verb must
+// land on the whole operation rather than on `unknown command`, which ADR-0065 §5 calls the dead end
+// that invites an agent to route around the control channel.
+func TestExposeStillReachesPublish(t *testing.T) {
+	f := newFakeCP(t)
+	var gotPath string
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "host": "web.example.com", "reachable": true, "url": "https://web.example.com"})
+	}
+
+	out, code := runMutate(t, f, "expose", "web", "--host", "web.example.com", "--port", "8080", "--confirm")
+	if oc := decodeOutcome(t, out); oc.Outcome != outcomeExecuted || oc.Operation != "publish" {
+		t.Fatalf("outcome = %q operation = %q, want executed publish", oc.Outcome, oc.Operation)
+	}
+	if code != exitCodeExecuted {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if gotPath != "/v1/apps/web/publish" {
+		t.Errorf("path = %q, want the publish operation", gotPath)
+	}
+
+	// unexpose is the same story on the removing side.
+	if out, _ := runMutate(t, f, "unexpose", "web"); decodeOutcome(t, out).Operation != "unpublish" {
+		t.Errorf("unexpose ran %q, want unpublish", decodeOutcome(t, out).Operation)
 	}
 }

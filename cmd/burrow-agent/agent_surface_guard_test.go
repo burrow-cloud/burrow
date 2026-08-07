@@ -20,7 +20,7 @@ import (
 //     cluster. A human runs them at their own terminal with their own admin kubeconfig.
 //   - `burrow-agent` (this binary) is the surface an AI agent drives. It carries APP LIFECYCLE
 //     only: deploy, build, scale, rollback, run, logs, metrics, config, secrets, add-ons,
-//     domains, expose. Notably `environments` LISTS and SELECTS environments; it does not create
+//     domains, publish. Notably `environments` LISTS and SELECTS environments; it does not create
 //     one — registering an environment is `burrow env add`, and it creates a namespace.
 //
 // An agent reads untrusted input by its nature — a repository it was pointed at, an error
@@ -274,7 +274,7 @@ func TestAdminVerbFragmentsCatchTheObviousCases(t *testing.T) {
 
 	mustPass := []string{
 		"rollback", "deploy", "build", "scale", "run", "logs", "cluster", "environments",
-		"config set", "secret unset", "expose", "domain add", "next-tag", "reachability",
+		"config set", "secret unset", "publish", "unpublish", "domain add", "next-tag", "reachability",
 	}
 	for _, path := range mustPass {
 		if frag := matchAdminFragment(path); frag != "" {

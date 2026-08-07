@@ -30,6 +30,37 @@ type Resolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
+// AuthoritativeResolver answers a DNS query at the nameservers the zone itself delegates to,
+// rather than at a recursive resolver (ADR-0041 §3). It is the pre-flight's resolver: a record a
+// publish has just written is visible there immediately, while a recursive resolver may still be
+// serving a cached negative answer from the check that ran before the record existed — and holding
+// a publish back on a stale NXDOMAIN is the failure mode that makes an operator retry, which is
+// what burns an ACME rate limit.
+//
+// It is an OPTIONAL seam, separate from Resolver rather than a method on it, so a build that wires
+// only the recursive resolver keeps working: a publish falls back to Resolver and says nothing
+// different, it just verifies against a weaker answer.
+type AuthoritativeResolver interface {
+	// LookupHostAuthoritative returns the addresses host resolves to according to the
+	// authoritative nameservers for its zone, or an error (e.g. no nameserver would answer).
+	LookupHostAuthoritative(ctx context.Context, host string) ([]string, error)
+}
+
+// HTTPProbe makes ONE plain-HTTP request from the control plane to a public URL and reports the
+// status code it came back with (ADR-0041 §3). It exists for the publish pre-flight: before a
+// certificate is requested, the path a certificate authority will take to the ACME challenge is
+// walked once, so a host whose :80 does not reach this cluster never opens an order that cannot
+// complete.
+//
+// Any response is a pass, including a 404 — what is being verified is that the request reached the
+// cluster's ingress for that host, not what the app said. Redirects are NOT followed: a 301 to
+// HTTPS still proves :80 answered.
+type HTTPProbe interface {
+	// ProbeHTTP requests url over plain HTTP and returns the status code, or an error when nothing
+	// answered.
+	ProbeHTTP(ctx context.Context, url string) (int, error)
+}
+
 // LogEntry is one record returned by a logs query.
 type LogEntry struct {
 	Time    string `json:"time,omitempty"`

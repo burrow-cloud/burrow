@@ -906,18 +906,45 @@ func TestReachabilityWaitTimeout(t *testing.T) {
 	}
 }
 
-func TestExposeCommand(t *testing.T) {
+// TestPublishCommand confirms `app publish` calls the one publish operation (ADR-0041 §3) and
+// prints the verdict the control plane returned, rather than a URL of its own composing.
+func TestPublishCommand(t *testing.T) {
+	var body map[string]any
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.URL.Path != "/v1/apps/web/expose" {
+		if r.Method != "POST" || r.URL.Path != "/v1/apps/web/publish" {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "host": "web.example.com", "port": 8080, "url": "http://web.example.com"})
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"app": "web", "host": "web.example.com", "port": 8080, "reachable": true,
+			"url": "https://web.example.com", "summary": "web is live at https://web.example.com.",
+		})
 	}, "app", "publish", "web", "--host", "web.example.com", "--port", "8080")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(out, "published web at web.example.com") {
+	if !strings.Contains(out, "web is live at https://web.example.com") {
 		t.Errorf("output = %q", out)
+	}
+	// TLS is the default, so the request asks for neither no_tls nor skip_dns.
+	if _, ok := body["no_tls"]; ok {
+		t.Errorf("request body = %v, want no no_tls with TLS left at its default", body)
+	}
+}
+
+// TestPublishPlainHTTP confirms --tls=false is what sends no_tls, so the negative field on the wire
+// is only ever set by an explicit ask (the zero request is the complete publish).
+func TestPublishPlainHTTP(t *testing.T) {
+	var body map[string]any
+	_, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "host": "web.example.com", "summary": "ok"})
+	}, "app", "publish", "web", "--host", "web.example.com", "--port", "8080", "--tls=false")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if body["no_tls"] != true {
+		t.Errorf("request body = %v, want no_tls true", body)
 	}
 }
 

@@ -119,6 +119,10 @@ func New(cfg Config) (http.Handler, error) {
 	// autoscale applies (POST) or removes (DELETE) an app's HorizontalPodAutoscaler (ADR-0006).
 	v1.HandleFunc("POST /v1/apps/{app}/autoscale", s.autoscale)
 	v1.HandleFunc("DELETE /v1/apps/{app}/autoscale", s.disableAutoscale)
+	// publish is the whole reachability chain in one call — Service, Ingress, DNS, pre-flight, TLS
+	// (ADR-0041 §3). expose remains as the primitive beneath it, which is what publish composes.
+	v1.HandleFunc("POST /v1/apps/{app}/publish", s.publish)
+	v1.HandleFunc("POST /v1/apps/{app}/publish/env/{env}", s.publish)
 	v1.HandleFunc("POST /v1/apps/{app}/expose", s.expose)
 	v1.HandleFunc("POST /v1/apps/{app}/expose/env/{env}", s.expose)
 	v1.HandleFunc("POST /v1/apps/{app}/unexpose", s.unexpose)
@@ -545,6 +549,21 @@ func (s *server) disableAutoscale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app")})
+}
+
+func (s *server) publish(w http.ResponseWriter, r *http.Request) {
+	var req controlplane.PublishRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	req.App = r.PathValue("app") // the path is authoritative for the app name
+	req.Env = narrowed(r, "env", req.Env)
+	res, err := s.engine.Publish(r.Context(), req)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *server) expose(w http.ResponseWriter, r *http.Request) {

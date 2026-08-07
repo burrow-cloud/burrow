@@ -306,9 +306,9 @@ Released as **v0.13.0** (patched by **v0.13.1**). The full record lives in [ROAD
 database upgrades ([ADR-0055](adr/0055-multi-version-upgrades.md), Proposed — the gate still allows
 one minor step), detecting the cluster's existing ingress controller
 ([ADR-0042](adr/0042-use-existing-ingress-controller.md) — the IngressClass is still the literal
-`nginx`), and the flatter path to a reachable app
-([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md) — no port on `deploy`, and `publish` does
-not touch DNS or wait for the certificate). The full list is in
+`nginx`), and the remainder of the flatter path to a
+reachable app ([ADR-0041](adr/0041-flatten-path-to-a-reachable-app.md) — §3's one publish operation
+is built; §1 and §2 are not, so there is still no port on `deploy` and no Service until a publish). The full list is in
 [ROADMAP.md](ROADMAP.md#decided-not-yet-built) and [CAPABILITIES.md](CAPABILITIES.md).
 
 **Candidates for the theme after v0.13** (unsequenced): **self-hoster day-2

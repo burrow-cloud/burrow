@@ -287,6 +287,10 @@ func TestRemainingScopeRoutesOnAMatchedPair(t *testing.T) {
 			_, err := c.Scale(ctx, "web", "staging", 3, false)
 			return err
 		}, "POST", "/v1/apps/web/scale/env/staging"},
+		{"publish", func() error {
+			_, err := c.Publish(ctx, "web", client.PublishRequest{Env: "staging", Host: "s.example.com", Port: 80})
+			return err
+		}, "POST", "/v1/apps/web/publish/env/staging"},
 		{"expose", func() error {
 			_, err := c.Expose(ctx, "web", "staging", "s.example.com", 80, false, "", false)
 			return err

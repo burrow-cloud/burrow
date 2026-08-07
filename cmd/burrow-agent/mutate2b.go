@@ -16,28 +16,52 @@ import (
 )
 
 // This file adds the remaining agent-exposed mutating verbs (ADR-0049 Phase 2b): the routing verbs
-// (expose/unexpose, domain add/remove), the add-on operations (install/remove/attach/backup), the
+// (publish/unpublish, domain add/remove), the add-on operations (install/remove/attach/backup), the
 // non-secret config writes (config set/unset), the secret-key removal (secret unset), and the guarded
 // destructive delete. Every one funnels through the confirm-flow spine in mutate.go and prints the same
 // outcome envelope, so a held or denied operation is surfaced identically to the Phase 2a compute
 // verbs. Deliberately ABSENT: there is no `secret set` — a secret VALUE never routes through the agent
 // channel (ADR-0029); the human sets secrets with the `burrow` CLI.
 
-// newExposeCmd makes a deployed app reachable from outside the cluster at a hostname (a Service and an
-// Ingress). Public exposure trips the app.expose_public guardrail, held for confirmation by default.
-func newExposeCmd() *cobra.Command {
+// newPublishCmd makes a deployed app reachable at a hostname over HTTPS in ONE operation: the
+// Service and Ingress, the DNS record when a provider is configured, the pre-flight that proves the
+// host reaches this cluster, the certificate, and the wait for it (ADR-0041 §3).
+//
+// It carries the alias `expose`, and that is deliberate rather than tidiness. `expose` used to be
+// this surface's only routing verb and it did strictly less — a Service and an Ingress on port 80,
+// reported as executed with an `http://` URL. On an HSTS-preloaded domain such as `.dev` that URL
+// does not open in any browser, so an agent relayed a success for something unusable (issue #476).
+// Retiring the name outright would answer an agent that had been told to use it with
+// `unknown command`, the dead end ADR-0065 §5 says pushes an agent to route around the control
+// channel; keeping it pointed at the whole operation means an agent that knows the old verb gets
+// the complete result instead of the partial one.
+//
+// Public exposure trips the app.expose_public guardrail and the DNS write trips dns.write, each
+// held for confirmation by default; the operation performs no guardrail evaluation of its own.
+func newPublishCmd() *cobra.Command {
 	o := &connOpts{}
-	var host, issuer string
+	var host, issuer, provider string
 	var port int
-	var tls, confirm bool
+	var tls, noDNS, confirm bool
 	cmd := &cobra.Command{
-		Use:   "expose <app> --host <host> --port <port>",
-		Short: "Make a deployed app reachable from outside the cluster at a hostname",
-		Long: "Make a deployed application reachable from outside the cluster at a hostname, by creating a\n" +
-			"Service and an Ingress. Reachability also needs an ingress controller and DNS pointing the host\n" +
-			"at the cluster (use domain add and reachability). Requesting TLS needs cert-manager.\n\n" +
-			"Public exposure trips the app.expose_public guardrail, held for confirmation by default. When\n" +
-			"held, the outcome says so — relay it and re-run with --confirm ONLY after the human approves.",
+		Use:     "publish <app> --host <host> --port <port>",
+		Aliases: []string{"expose"},
+		Short:   "Make a deployed app reachable at a hostname over HTTPS (routing, DNS, and the certificate)",
+		Long: "Make a deployed application reachable at a hostname, as ONE operation: create its Service and\n" +
+			"Ingress, write the DNS record when a provider is configured, confirm the host actually reaches\n" +
+			"this cluster, request the HTTPS certificate, and wait for it to issue.\n\n" +
+			"TLS IS ON BY DEFAULT. --tls=false publishes plain HTTP and is REFUSED for a host on an\n" +
+			"HSTS-preloaded domain such as .dev, where a browser refuses http:// before it sends a request —\n" +
+			"an http:// URL there is not a working result to report.\n\n" +
+			"The certificate is requested only after the host is confirmed to resolve to this cluster and to\n" +
+			"answer on port 80, so a hostname that is not pointed yet does not consume the certificate\n" +
+			"authority's rate limit on an order that cannot complete.\n\n" +
+			"READ THE RESULT BEFORE REPORTING SUCCESS. `reachable` is the verdict; when it is false the app\n" +
+			"is NOT live yet, `blocked_on` names the link it is waiting on and `next` names the action.\n\n" +
+			"`expose` is an alias for this command and does the same whole operation.\n\n" +
+			"Public exposure trips the app.expose_public guardrail and the DNS write trips dns.write, both\n" +
+			"held for confirmation by default. When held, the outcome says so — relay it and re-run with\n" +
+			"--confirm ONLY after the human approves.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if host == "" {
@@ -46,8 +70,11 @@ func newExposeCmd() *cobra.Command {
 			if port == 0 {
 				return errors.New("--port is required")
 			}
-			return o.mutate(cmd, "expose", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.Expose(ctx, args[0], env, host, int32(port), tls, issuer, confirm)
+			return o.mutate(cmd, "publish", func(ctx context.Context, c *client.Client, env string) (any, error) {
+				return c.Publish(ctx, args[0], client.PublishRequest{
+					Env: env, Host: host, Port: int32(port), NoTLS: !tls, Issuer: issuer,
+					SkipDNS: noDNS, Provider: provider, Confirm: confirm,
+				})
 			})
 		},
 	}
@@ -55,24 +82,31 @@ func newExposeCmd() *cobra.Command {
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&host, "host", "", "external hostname to route to the app (required)")
 	cmd.Flags().IntVar(&port, "port", 0, "the app's container port to forward to (required)")
-	cmd.Flags().BoolVar(&tls, "tls", false, "request an HTTPS certificate for the host via cert-manager")
-	cmd.Flags().StringVar(&issuer, "tls-issuer", "letsencrypt", "cert-manager ClusterIssuer to request the certificate from when --tls is set")
-	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a public exposure a guardrail holds for confirmation (supply only after the human approves)")
+	cmd.Flags().BoolVar(&tls, "tls", true, "request an HTTPS certificate for the host via cert-manager (--tls=false publishes plain HTTP)")
+	cmd.Flags().StringVar(&issuer, "tls-issuer", "letsencrypt", "cert-manager ClusterIssuer to request the certificate from")
+	cmd.Flags().BoolVar(&noDNS, "no-dns", false, "leave DNS alone; publish only routes the host and waits for what already points at the cluster")
+	cmd.Flags().StringVar(&provider, "provider", "", "configured DNS provider to write the record at (default: the only one configured)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a public exposure or DNS write a guardrail holds for confirmation (supply only after the human approves)")
 	return cmd
 }
 
-// newUnexposeCmd removes an app's exposure (its Service and Ingress). It does not affect the running
+// newUnpublishCmd removes an app's routing (its Service and Ingress). It does not affect the running
 // workload and is not guarded, but still prints the outcome envelope for a uniform agent contract.
-func newUnexposeCmd() *cobra.Command {
+// It carries the alias `unexpose` for the same reason publish carries `expose`, and it leaves any
+// DNS record alone — removing one is `domain remove`, guarded separately.
+func newUnpublishCmd() *cobra.Command {
 	o := &connOpts{}
 	cmd := &cobra.Command{
-		Use:   "unexpose <app>",
-		Short: "Remove an app's exposure (its Service and Ingress); the workload keeps running",
-		Long: "Remove an application's exposure — its Service and Ingress — so it is no longer served at its\n" +
-			"hostname. This does not affect the running workload; it stays deployed.",
+		Use:     "unpublish <app>",
+		Aliases: []string{"unexpose"},
+		Short:   "Stop serving an app at its hostname (removes its Service and Ingress); the workload keeps running",
+		Long: "Stop serving an application at its hostname by removing its Service and Ingress. This does not\n" +
+			"affect the running workload; it stays deployed. Any DNS record for the host is left alone —\n" +
+			"remove it with `domain remove`, which is guarded separately.\n\n" +
+			"`unexpose` is an alias for this command.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return o.mutate(cmd, "unexpose", func(ctx context.Context, c *client.Client, env string) (any, error) {
+			return o.mutate(cmd, "unpublish", func(ctx context.Context, c *client.Client, env string) (any, error) {
 				if err := c.Unexpose(ctx, args[0], env); err != nil {
 					return nil, err
 				}

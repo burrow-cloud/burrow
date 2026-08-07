@@ -345,6 +345,44 @@ type ExposeResult struct {
 	URL  string `json:"url"`
 }
 
+// PublishRequest asks the control plane to make an app reachable at a hostname in one operation
+// (ADR-0041 §3). It mirrors controlplane.PublishRequest, including the two NEGATIVE fields: an
+// absent field arrives as its zero value, so the zero request is the complete publish — TLS and the
+// DNS record — and asking for less is something a caller has to say.
+type PublishRequest struct {
+	Env      string `json:"env,omitempty"`
+	Host     string `json:"host"`
+	Port     int32  `json:"port"`
+	NoTLS    bool   `json:"no_tls,omitempty"`
+	Issuer   string `json:"issuer,omitempty"`
+	SkipDNS  bool   `json:"skip_dns,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Confirm  bool   `json:"confirm,omitempty"`
+}
+
+// PublishResult is the converged verdict of a publish: what each link achieved, whether the app is
+// live, and — when it is not — the one link to fix and the action that fixes it.
+type PublishResult struct {
+	App                string `json:"app"`
+	Env                string `json:"env,omitempty"`
+	Host               string `json:"host"`
+	Port               int32  `json:"port"`
+	URL                string `json:"url,omitempty"`
+	Address            string `json:"address,omitempty"`
+	Exposed            bool   `json:"exposed"`
+	DNSProvider        string `json:"dns_provider,omitempty"`
+	DNSRecordType      string `json:"dns_record_type,omitempty"`
+	DNSPointsAtCluster bool   `json:"dns_points_at_cluster"`
+	HTTPVerified       bool   `json:"http_verified"`
+	TLSRequested       bool   `json:"tls_requested"`
+	TLSAttached        bool   `json:"tls_attached"`
+	CertReady          bool   `json:"cert_ready"`
+	Reachable          bool   `json:"reachable"`
+	BlockedOn          string `json:"blocked_on,omitempty"`
+	Next               string `json:"next,omitempty"`
+	Summary            string `json:"summary"`
+}
+
 type ReachabilityResult struct {
 	App                string   `json:"app"`
 	Deployed           bool     `json:"deployed"`
@@ -1737,7 +1775,27 @@ func (c *Client) DisableAutoscale(ctx context.Context, app, env string, confirm 
 	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
 }
 
-// Expose publishes an app at a hostname in one environment.
+// Publish makes an app reachable at a hostname in one call: the Service and Ingress, the DNS record
+// when a provider is configured, the pre-flight that proves the path before a certificate is asked
+// for, and the wait for that certificate (ADR-0041 §3). The result is the converged verdict — a
+// publish that did not end live carries Reachable false with the link it is blocked on, never a
+// bare URL.
+//
+// It waits on the cluster, so it carries the publish budget rather than the default one: the
+// control plane's own bound for the call plus a margin (see timeouts.go).
+func (c *Client) Publish(ctx context.Context, app string, req PublishRequest) (PublishResult, error) {
+	var out PublishResult
+	// The environment is a ROUTE segment, like every other per-app write: it decides WHICH app is
+	// published, and a control plane that did not learn it must refuse rather than publish the
+	// default environment's app at the host (issue #485).
+	path := narrowing(c.appPath(app, "publish"), "env", req.Env)
+	req.Env = "" // the route carries it; one place holds the scope, so there is no second copy
+	err := c.doWithin(ctx, c.budget.publish, http.MethodPost, path, req, &out)
+	return out, err
+}
+
+// Expose publishes an app at a hostname in one environment. It is the primitive beneath Publish —
+// routing only, with no DNS, no pre-flight and no wait — and stays available as one.
 //
 // The ENVIRONMENT RIDES THE ROUTE (see narrowing): against a control plane that drops it, a hostname
 // meant for staging is pointed at PRODUCTION's workload, and a certificate is issued for it

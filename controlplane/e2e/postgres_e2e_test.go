@@ -252,9 +252,13 @@ psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
 	// under a new credential, with the row this test wrote before the detach still in it. This is the
 	// end-to-end statement of the policy: a unit test can assert the field, only a real operator can
 	// be asked whether it honoured it.
+	//
+	// The environment is NAMED here, unlike the first attach at the top of this test: staging has
+	// been registered since, and a mutating operation with more than one environment registered is
+	// refused rather than defaulted (ADR-0067 §1).
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "re-attach addon", func(localPort int) error {
 		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "", "")
+		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, cp.DefaultEnvironment, "")
 		return aerr
 	})
 	runSQLJob(t, ctx, client, appNS, app, "retained",

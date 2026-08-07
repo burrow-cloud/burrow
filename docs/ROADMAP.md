@@ -118,7 +118,7 @@ source-available friction from the license.
   database; restore is confirm-gated. Scheduled backups and retention are a later slice.
 - **Read-only audit MCP tool** — `burrow_audit` lets the agent query the guarded-operation log
   (allowed / held / denied / executed) with the same key-only redaction as `burrow audit`.
-- **Agent-native onboarding** ([ADR-0034](adr/0034-agent-native-onboarding.md)) — `burrow install`
+- **Agent-native onboarding** ([ADR-0034](adr/0034-agent-native-onboarding.md)) — `burrow cluster install`
   detects the cluster's capabilities and burrowd reads them live over one narrow read-only grant;
   `cluster ingress install` provisions the substrate (ingress-nginx, cert-manager, an issuer) on a
   cost-aware confirmation with a LoadBalancer-vs-NodePort choice; and `reachability` converges to a
@@ -147,7 +147,7 @@ active environment, with prod gated while staging stays permissive.
   default**, with `use`, `follow`, `list`, `rename`, and `scan`. The CLI and the agent both resolve
   every operation through the active environment. Retires `burrow context`.
 - **CLI onboarding and organization** ([ADR-0037](adr/0037-cli-onboarding-and-organization.md)):
-  intent-based `--help` groups, an explicit positional `burrow install <context>` that names and
+  intent-based `--help` groups, an explicit positional `burrow cluster install <context>` that names and
   records the environment, a first-run banner, shell completion, and `system` folded into `cluster`.
   **`burrow` no longer needs `kubectl`**: manifests apply through client-go server-side apply, so the
   binary is self-contained.
@@ -187,7 +187,7 @@ Internal groundwork with no new user-facing surface. A **client-version handshak
 ([ADR-0039](adr/0039-cli-control-plane-version-skew.md)): every client sends its version, burrowd
 serves any client within one minor and never hard-blocks on a version difference alone, and it turns
 genuine skew into an actionable error — a client too old is told to `brew upgrade`, and a newer client
-calling a route this control plane lacks is told to `burrow upgrade` — instead of an opaque failure;
+calling a route this control plane lacks is told to `burrow cluster upgrade` — instead of an opaque failure;
 the acting client version is recorded in the audit log next to the principal. And the CLI's
 control-plane transport is extracted into an explicit interface shared by both binaries
 ([ADR-0045](adr/0045-oss-enterprise-boundary.md)), so an alternate transport (for a private managed

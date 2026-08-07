@@ -432,7 +432,7 @@ func TestBuildContainerSecurityContexts(t *testing.T) {
 }
 
 // TestBuildDoesNotCreateBuildNamespace asserts burrowd never creates the build namespace itself.
-// `burrow install` provisions burrow-builds and burrowd's Role in it kubeconfig-side, because burrowd
+// `burrow cluster install` provisions burrow-builds and burrowd's Role in it kubeconfig-side, because burrowd
 // holds only namespaced Roles and cannot create namespaces or cluster RBAC (least privilege, issue
 // #278) — the same reason `burrow env add` creates per-environment namespaces kubeconfig-side. A
 // build that tried to create its own namespace would need a cluster-scoped grant it must not hold.

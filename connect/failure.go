@@ -94,7 +94,7 @@ func connectError(o Options, err error) error {
 	ctxName, _ := TargetContextName(o.Kubeconfig, o.Context)
 	switch {
 	case apierrors.IsNotFound(err):
-		return fmt.Errorf(`burrow is not installed in context %q (namespace %q); run "burrow install"`, ctxName, o.Namespace)
+		return fmt.Errorf(`burrow is not installed in context %q (namespace %q); run "burrow cluster install"`, ctxName, o.Namespace)
 	case isUnreachable(err):
 		return &UnreachableError{Context: ctxName, Reason: FailureReason(err)}
 	default:

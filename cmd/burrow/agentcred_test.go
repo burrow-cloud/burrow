@@ -103,7 +103,7 @@ func TestJoinAgentCredentialForbidden(t *testing.T) {
 
 // TestJoinAgentCredentialAbsent asserts that a cluster with no agent-token Secret (a pre-Phase-1
 // install) yields the errAgentCredentialAbsent sentinel, so tolerant callers (`env list --discover`, the
-// `upgrade` backfill) can skip it rather than fail, and it points the operator at `burrow upgrade`.
+// `upgrade` backfill) can skip it rather than fail, and it points the operator at `burrow cluster upgrade`.
 func TestJoinAgentCredentialAbsent(t *testing.T) {
 	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
 	cs := fake.NewSimpleClientset() // no agent-token Secret
@@ -113,8 +113,8 @@ func TestJoinAgentCredentialAbsent(t *testing.T) {
 	if !errors.Is(err, errAgentCredentialAbsent) {
 		t.Fatalf("an absent credential should wrap errAgentCredentialAbsent, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "burrow upgrade") {
-		t.Errorf("absent-credential error should point at `burrow upgrade`, got: %v", err)
+	if !strings.Contains(err.Error(), "burrow cluster upgrade") {
+		t.Errorf("absent-credential error should point at `burrow cluster upgrade`, got: %v", err)
 	}
 }
 

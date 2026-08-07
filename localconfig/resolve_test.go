@@ -137,7 +137,7 @@ func TestResolvePinnedMissing(t *testing.T) {
 	}
 }
 
-// writeScopedCredential writes a self-contained scoped kubeconfig of the shape `burrow install`
+// writeScopedCredential writes a self-contained scoped kubeconfig of the shape `burrow cluster install`
 // mints (ADR-0038): one cluster, one user, one context, everything needed to reach burrowd without
 // consulting the ambient kubeconfig. It is what makes a stale kube context name harmless.
 func writeScopedCredential(t *testing.T) string {

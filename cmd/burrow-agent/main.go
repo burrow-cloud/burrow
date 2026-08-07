@@ -8,7 +8,7 @@
 // STRUCTURALLY ABSENT, not compiled into this binary, a stronger boundary than a runtime deny list.
 // It authenticates to the control plane with the scoped control-plane credential (ADR-0038) and holds
 // no cluster credentials (ADR-0005): in self-host it reaches the in-cluster control plane through the
-// scoped, burrowd-only agent kubeconfig `burrow install` mints and the Kubernetes API-server proxy
+// scoped, burrowd-only agent kubeconfig `burrow cluster install` mints and the Kubernetes API-server proxy
 // (ADR-0014). Every command prints its result as indented JSON so the agent can pipe, grep, and jq it;
 // a mutating verb prints a structured outcome envelope (executed, held_for_confirmation, denied, or
 // error) the agent can branch on and relay to the human (ADR-0020). Setting

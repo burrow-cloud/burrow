@@ -161,7 +161,7 @@ type clusterRegistryOptions struct {
 	confirm      bool
 }
 
-// newClusterRegistryCmd is a setup command (not part of `burrow install`, ADR-0054): it installs,
+// newClusterRegistryCmd is a setup command (not part of `burrow cluster install`, ADR-0054): it installs,
 // inspects, and removes the OPTIONAL in-cluster image registry (Zot) that gives the in-cluster build a
 // zero-config push target (ADR-0053 §5). Like `burrow cluster ingress install`, it acts with the
 // developer's kubeconfig — it is not an agent operation and does not route through burrowd's guarded
@@ -181,7 +181,7 @@ func newClusterRegistryCmd() *cobra.Command {
 		Long: "registry manages the OPTIONAL in-cluster image registry that runs inside your cluster —\n" +
 			"a lightweight Zot registry that gives the in-cluster build a zero-config push target so a\n" +
 			"self-hosted user needs no external registry account. It is a one-time operator setup you run\n" +
-			"with your kubeconfig, not an agent operation, and it is separate from `burrow install`, which\n" +
+			"with your kubeconfig, not an agent operation, and it is separate from `burrow cluster install`, which\n" +
 			"provisions only the control plane.\n\n" +
 			"It is reachable the same way on any cluster: the build pushes to an internal Service in-cluster\n" +
 			"over plain HTTP, and nodes pull through the cluster ingress over TLS. Because the pull path is\n" +
@@ -742,7 +742,7 @@ func (o clusterRegistryOptions) resolveAppNamespace(ctx context.Context, cs kube
 func setBurrowdEnv(ctx context.Context, cs kubernetes.Interface, namespace, name, value string) error {
 	dep, err := cs.AppsV1().Deployments(namespace).Get(ctx, burrowdDeploymentName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return fmt.Errorf("burrowd is not installed in namespace %q; run `burrow install <context>` first", namespace)
+		return fmt.Errorf("burrowd is not installed in namespace %q; run `burrow cluster install <context>` first", namespace)
 	}
 	if err != nil {
 		return fmt.Errorf("reading the burrowd deployment: %w", err)

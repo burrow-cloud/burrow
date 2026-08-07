@@ -16,7 +16,7 @@ import (
 )
 
 // toClientCaps converts the control-plane capability report (returned by the kubeconfig-side probe
-// in `burrow install`) into the client DTO the summary/render helpers take. The two are
+// in `burrow cluster install`) into the client DTO the summary/render helpers take. The two are
 // structurally identical; this keeps a single set of render helpers for both the install summary
 // and the `burrow cluster` view.
 func toClientCaps(c controlplane.ClusterCapabilities) client.ClusterCapabilities {
@@ -345,7 +345,7 @@ func dnsLine(d client.DNSCapability) string {
 	return "no DNS provider configured"
 }
 
-// capabilitySummary renders the one-line capability summary `burrow install` prints after install
+// capabilitySummary renders the one-line capability summary `burrow cluster install` prints after install
 // (ADR-0034), e.g. "nginx IngressClass · default StorageClass do-block-storage · provider
 // DigitalOcean · cert-manager not installed". It names what is present and flags what is missing,
 // without nagging — a cron-only cluster needs no ingress.

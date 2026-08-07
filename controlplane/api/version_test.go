@@ -94,7 +94,7 @@ func TestUnknownOperationStructured(t *testing.T) {
 	if e.ServerVersion != "v0.9.1" {
 		t.Errorf("server_version = %q, want v0.9.1", e.ServerVersion)
 	}
-	for _, want := range []string{"v0.9.1", "v0.10.0", "burrow upgrade"} {
+	for _, want := range []string{"v0.9.1", "v0.10.0", "burrow cluster upgrade"} {
 		if !strings.Contains(e.Error, want) {
 			t.Errorf("error %q, want substring %q", e.Error, want)
 		}

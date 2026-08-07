@@ -534,7 +534,7 @@ func applyScopedFallback(tgt target, stderr io.Writer) target {
 		return tgt
 	}
 	if _, err := os.Stat(tgt.agentKubeconfig); err != nil {
-		fmt.Fprintf(stderr, "burrow: scoped agent kubeconfig %s is missing; using the ambient kubeconfig (run \"burrow install\" to re-create it)\n", tgt.agentKubeconfig)
+		fmt.Fprintf(stderr, "burrow: scoped agent kubeconfig %s is missing; using the ambient kubeconfig (run \"burrow cluster install\" to re-create it)\n", tgt.agentKubeconfig)
 		tgt.agentKubeconfig = ""
 		tgt.agentContext = ""
 	}

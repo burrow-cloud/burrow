@@ -53,7 +53,7 @@ const File = localconfig.CloudEndpoint + ".json"
 // The two directories, both siblings of ~/.burrow/config so $BURROW_CONFIG keeps a person's whole
 // Burrow state together.
 //
-// The agent's goes under agents/, beside the scoped kubeconfig `burrow install` mints for a cluster
+// The agent's goes under agents/, beside the scoped kubeconfig `burrow cluster install` mints for a cluster
 // (ADR-0038) — the one directory the agent's credential material has ever lived in. The person's
 // goes under credentials/, so the two are never confused for each other and either can be deleted on
 // its own.

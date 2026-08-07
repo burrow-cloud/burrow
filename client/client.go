@@ -1663,7 +1663,7 @@ func (c *Client) SetGuardrail(ctx context.Context, scope GuardScope, code, dispo
 //
 // In the path it is a route, and a route the server does not have is already handled: the
 // ADR-0039 handshake turns an unknown route into a structured "this control plane (vX) does not
-// recognize ...; ask an operator to run `burrow upgrade`" refusal, naming both versions. So the
+// recognize ...; ask an operator to run `burrow cluster upgrade`" refusal, naming both versions. So the
 // scope the server cannot honour is refused by the mechanism that already exists, with nothing
 // written, rather than by a second mechanism that would have to be told about every new parameter.
 //
@@ -1723,7 +1723,7 @@ func guardScopeRefusal(scope GuardScope, code string, err error) error {
 	if api.Code == CodeUnknownOperation {
 		msg += ". The control plane reports: " + api.Message
 	} else {
-		msg += ". It predates per-app guardrails; ask an operator to run `burrow upgrade` to update the control plane, then run this again"
+		msg += ". It predates per-app guardrails; ask an operator to run `burrow cluster upgrade` to update the control plane, then run this again"
 	}
 	return &APIError{
 		StatusCode:    api.StatusCode,

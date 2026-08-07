@@ -38,7 +38,7 @@ import (
 //
 // The same live harness should also exercise the Phase 3 multi-user JOIN (ADR-0038 §4): install as an
 // admin identity, then have a SECOND, restricted identity run the join path (joinAgentCredential /
-// `burrow install <context>` on the already-installed cluster) and assert it reads the existing
+// `burrow cluster install <context>` on the already-installed cluster) and assert it reads the existing
 // burrow-agent-token Secret and writes a WORKING scoped kubeconfig without minting any cluster
 // resources; and assert that a third identity with NO read access to that Secret gets the clear,
 // actionable error (readAgentToken's forbidden message) rather than a silent success. The

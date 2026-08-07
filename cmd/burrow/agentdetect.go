@@ -11,7 +11,7 @@ import (
 )
 
 // Detecting an installed coding agent, and offering to wire it, is the tail of `burrow auth login`
-// and a one-line report in `burrow auth status` (issue #413). `burrow install` already prints the
+// and a one-line report in `burrow auth status` (issue #413). `burrow cluster install` already prints the
 // pointer at the end of the self-hosted path; `auth login` is the symmetric moment on the other
 // path, and it is the first command anyone runs.
 //

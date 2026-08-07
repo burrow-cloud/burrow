@@ -103,8 +103,8 @@ echo "=== build + import the examples/hello image (the app the stranger deploys)
 docker build -t hello:1 examples/hello
 k3d image import hello:1 -c "$CLUSTER"
 
-echo "=== burrow install (waits for the control plane to be ready) ==="
-"$BURROW" install "$CTX" --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
+echo "=== burrow cluster install (waits for the control plane to be ready) ==="
+"$BURROW" cluster install "$CTX" --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
 
 echo "=== burrow app deploy hello --image hello:1 ==="
 "$BURROW" app deploy hello --image hello:1 --kubeconfig "$KCFG"

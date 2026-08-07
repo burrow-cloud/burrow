@@ -89,12 +89,12 @@ echo "=== build + import the burrowd image (ko) ==="
 BURROWD_IMAGE=$(KO_DOCKER_REPO=ko.local ko build ./cmd/burrowd)
 k3d image import "$BURROWD_IMAGE" -c "$CLUSTER"
 
-echo "=== burrow install (waits for the control plane to be ready) ==="
+echo "=== burrow cluster install (waits for the control plane to be ready) ==="
 # install takes the target kube context as a required positional argument (ADR-0037): derive it
-# from the kubeconfig so install targets this k3d cluster explicitly (a bare `burrow install` now
+# from the kubeconfig so install targets this k3d cluster explicitly (a bare `burrow cluster install` now
 # only lists contexts).
 CTX=$(kubectl --kubeconfig "$KCFG" config current-context)
-"$BURROW" install "$CTX" --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
+"$BURROW" cluster install "$CTX" --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
 
 # Past control-plane bring-up: failures from here are real defects in the stack under test, not the
 # infra flakes that setup failures usually are. Classify accordingly (exit 1, not the rerunnable 75).

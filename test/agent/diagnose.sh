@@ -12,7 +12,7 @@
 # Requires: claude (the Claude Code CLI) + ANTHROPIC_API_KEY, k3d, kubectl, ko
 # (https://ko.build — `brew install ko`), docker, jq, go. Mirrors the proven setup in
 # test/e2e/install-and-deploy.sh (the capstone): k3d cluster, ko-built burrowd image,
-# `burrow install` over the API-server proxy.
+# `burrow cluster install` over the API-server proxy.
 #
 # Run:   ANTHROPIC_API_KEY=... bash test/agent/diagnose.sh
 # Debug: KEEP=1 ANTHROPIC_API_KEY=... bash test/agent/diagnose.sh   (keeps the cluster)
@@ -104,11 +104,11 @@ BURROWD_IMAGE=$(KO_DOCKER_REPO=ko.local ko build ./cmd/burrowd)
 k3d image import "$BURROWD_IMAGE" -c "$CLUSTER"
 
 # --- 3. install Burrow + wait for readiness -----------------------------------------------
-echo "=== burrow install (waits for the control plane to be ready) ==="
+echo "=== burrow cluster install (waits for the control plane to be ready) ==="
 # install takes the target kube context as a required positional argument (ADR-0037): derive it
 # from the kubeconfig so install targets this k3d cluster explicitly.
 CTX=$(kubectl --kubeconfig "$KCFG" config current-context)
-"$BURROW" install "$CTX" --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
+"$BURROW" cluster install "$CTX" --burrowd-image "$BURROWD_IMAGE" --kubeconfig "$KCFG"
 
 # --- 4. install the logs add-on -----------------------------------------------------------
 echo "=== addon install logs (VictoriaLogs store + Fluent Bit collector) ==="

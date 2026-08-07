@@ -75,7 +75,7 @@ func runJoin(ctx context.Context, a joinArgs, stdout io.Writer) error {
 	}
 
 	// 1. Record admin access into the kubeconfig so the privileged/governance path
-	// (commonOpts.client(): `burrow guard`, `burrow upgrade`) resolves this cluster the same way it
+	// (commonOpts.client(): `burrow guard`, `burrow cluster upgrade`) resolves this cluster the same way it
 	// resolves any other — by context name in the ambient kubeconfig (ADR-0044). This is the human's
 	// admin credential; it legitimately belongs in the kubeconfig, unlike the scoped agent credential
 	// (ADR-0038), which stays under ~/.burrow.
@@ -193,7 +193,7 @@ func printJoinSummary(stdout io.Writer, name, kubeContext string) {
 	fmt.Fprintf(stdout, "\nJoined the bootstrapped cluster. Everything now runs from here.\n")
 	fmt.Fprintf(stdout, "Environment %q (context %q) is now your current environment.\n", name, kubeContext)
 	fmt.Fprintln(stdout, "Set up locally:")
-	fmt.Fprintln(stdout, "  - admin access for governance (burrow guard, burrow upgrade)")
+	fmt.Fprintln(stdout, "  - admin access for governance (burrow guard, burrow cluster upgrade)")
 	fmt.Fprintln(stdout, "  - the scoped agent credential for day-to-day operations (ADR-0038)")
 	fmt.Fprintf(stdout, "Rename it any time:  burrow env rename %s <new-name>\n\n", name)
 	fmt.Fprint(stdout, postInstallGuidance)

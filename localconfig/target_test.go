@@ -182,7 +182,7 @@ func TestTargetWithoutInstallIDLoads(t *testing.T) {
 	}
 }
 
-// TestSetInstallIDRecordsByContext confirms the id `burrow install` learns is recorded on every
+// TestSetInstallIDRecordsByContext confirms the id `burrow cluster install` learns is recorded on every
 // target that names the context it installed into, and on no other (ADR-0084 §5). The writer knows a
 // context; which targets point at it is this package's business.
 func TestSetInstallIDRecordsByContext(t *testing.T) {

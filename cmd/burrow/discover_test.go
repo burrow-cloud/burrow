@@ -321,7 +321,7 @@ func TestEnvListDiscoverNoneInstalled(t *testing.T) {
 	s := out.String()
 	for _, want := range []string{
 		"No Burrow control plane found in any context.",
-		"burrow install <context>",
+		"burrow cluster install <context>",
 		`probed the "burrow" control-plane namespace`,
 	} {
 		if !strings.Contains(s, want) {

@@ -262,7 +262,7 @@ func v1NotFound(serverVersion string, mux *http.ServeMux) http.Handler {
 			if name != burrowCLIBinary && name != burrowAgentBinary {
 				name = "burrow client"
 			}
-			msg += fmt.Sprintf("; if your %s (%s) is newer, ask an operator to run `burrow upgrade` to update the control plane", name, cv)
+			msg += fmt.Sprintf("; if your %s (%s) is newer, ask an operator to run `burrow cluster upgrade` to update the control plane", name, cv)
 		}
 		// The version rides the response structurally as well as in the sentence, for the same
 		// reason the too-old refusal carries it: a client that recognizes the gap as one of ITS

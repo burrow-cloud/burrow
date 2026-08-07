@@ -161,17 +161,17 @@ func TestUpgradeHints(t *testing.T) {
 	}{
 		{
 			name: "control plane behind", cli: "dev", cp: "v0.7.0", latest: "v0.7.2",
-			wantHas:   []string{"Your control plane is behind. Run `burrow upgrade` to update it to v0.7.2."},
+			wantHas:   []string{"Your control plane is behind. Run `burrow cluster upgrade` to update it to v0.7.2."},
 			wantNotIn: []string{"brew upgrade", "You are on the latest release."},
 		},
 		{
 			name: "cli behind", cli: "v0.7.0", cp: "v0.7.2", latest: "v0.7.2",
 			wantHas:   []string{"A newer burrow (v0.7.2) is available. Run `brew upgrade burrow-cloud/tap/burrow`."},
-			wantNotIn: []string{"burrow upgrade", "You are on the latest release."},
+			wantNotIn: []string{"burrow cluster upgrade", "You are on the latest release."},
 		},
 		{
 			name: "both behind", cli: "v0.7.0", cp: "v0.7.0", latest: "v0.7.2",
-			wantHas: []string{"burrow upgrade", "brew upgrade burrow-cloud/tap/burrow"},
+			wantHas: []string{"burrow cluster upgrade", "brew upgrade burrow-cloud/tap/burrow"},
 		},
 		{
 			name: "both current", cli: "v0.7.2", cp: "v0.7.2", latest: "v0.7.2",
@@ -191,7 +191,7 @@ func TestUpgradeHints(t *testing.T) {
 		{
 			name: "uninstalled control plane is not behind", cli: "dev", cp: "", latest: "v0.7.2",
 			wantHas:   []string{"You are on the latest release."},
-			wantNotIn: []string{"burrow upgrade"},
+			wantNotIn: []string{"burrow cluster upgrade"},
 		},
 		{
 			// Issue #442: an rc ahead of the newest stable release is not "on the latest release",
@@ -269,7 +269,7 @@ func TestLatestReleaseForStaysBestEffort(t *testing.T) {
 }
 
 // TestVersionControlPlaneBehind runs the whole command with a faked cluster on v0.7.0 and a faked
-// latest release of v0.7.2, and confirms the `burrow upgrade` hint names the right target.
+// latest release of v0.7.2, and confirms the `burrow cluster upgrade` hint names the right target.
 func TestVersionControlPlaneBehind(t *testing.T) {
 	stubLatestRelease(t, "v0.7.2", nil)
 	stubAgentVersion(t, "", "", errors.New("not on PATH"))
@@ -288,7 +288,7 @@ func TestVersionControlPlaneBehind(t *testing.T) {
 	for _, want := range []string{
 		"control plane:", "v0.7.0",
 		"latest release:", "v0.7.2",
-		"Your control plane is behind. Run `burrow upgrade` to update it to v0.7.2.",
+		"Your control plane is behind. Run `burrow cluster upgrade` to update it to v0.7.2.",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("version output = %q, want substring %q", s, want)
@@ -340,7 +340,7 @@ func TestVersionFetchErrorSkipsReleaseLines(t *testing.T) {
 	if !strings.Contains(s, "control plane:") || !strings.Contains(s, "v0.7.0") {
 		t.Errorf("version output = %q, want the control-plane line", s)
 	}
-	for _, no := range []string{"latest release:", "burrow upgrade", "brew upgrade", "You are on the latest release."} {
+	for _, no := range []string{"latest release:", "burrow cluster upgrade", "brew upgrade", "You are on the latest release."} {
 		if strings.Contains(s, no) {
 			t.Errorf("version output = %q, should not contain %q when the release check fails", s, no)
 		}

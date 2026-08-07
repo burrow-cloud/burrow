@@ -9,7 +9,7 @@
 // fail-closed rules live somewhere a reader can check them rather than inside a command.
 //
 // It holds no cluster-operating credentials of its own: it reaches the in-cluster control plane
-// through the scoped, burrowd-only agent kubeconfig `burrow install` mints (ADR-0038) and the
+// through the scoped, burrowd-only agent kubeconfig `burrow cluster install` mints (ADR-0038) and the
 // Kubernetes API-server proxy (ADR-0014), and it fails closed — a handle that records a scoped
 // credential whose file is missing is an error, never a silent escalation to the ambient/admin
 // kubeconfig. In strict mode a context with no scoped credential is an error too. The package is
@@ -154,12 +154,12 @@ func scopedAgentKubeconfig(kubeContext string, strict bool, _ io.Writer) (kubeco
 	env, found := lookupByContext(kubeContext)
 	if !found || env.AgentKubeconfig == "" {
 		if strict {
-			return "", "", fmt.Errorf("strict mode is set but no scoped agent credential is available for context %q; run \"burrow install\" to mint one", kubeContext)
+			return "", "", fmt.Errorf("strict mode is set but no scoped agent credential is available for context %q; run \"burrow cluster install\" to mint one", kubeContext)
 		}
 		return "", "", nil
 	}
 	if _, err := os.Stat(env.AgentKubeconfig); err != nil {
-		return "", "", fmt.Errorf("scoped agent kubeconfig %q for environment %q is missing; run \"burrow upgrade\" (or \"burrow install\") to re-mint it. Refusing to fall back to the ambient kubeconfig.", env.AgentKubeconfig, env.Name)
+		return "", "", fmt.Errorf("scoped agent kubeconfig %q for environment %q is missing; run \"burrow cluster upgrade\" (or \"burrow cluster install\") to re-mint it. Refusing to fall back to the ambient kubeconfig.", env.AgentKubeconfig, env.Name)
 	}
 	return env.AgentKubeconfig, env.AgentContext, nil
 }

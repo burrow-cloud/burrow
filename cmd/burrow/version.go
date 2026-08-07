@@ -363,7 +363,7 @@ func cliVersion() string {
 // upgradeHints compares the CLI and control-plane versions against the latest published release and
 // returns the applicable upgrade hint lines. It is pure so the comparison is unit-testable without a
 // cluster or network:
-//   - a control plane on a valid release older than latest gets the `burrow upgrade` hint;
+//   - a control plane on a valid release older than latest gets the `burrow cluster upgrade` hint;
 //   - a CLI on a valid, non-pseudo release older than latest gets the `brew upgrade` hint (a local
 //     dev/pseudo build is exempt, since there is nothing to brew-upgrade). When the newer tag is
 //     itself a prerelease the hint names the prerelease route instead, because the Homebrew tap
@@ -377,7 +377,7 @@ func cliVersion() string {
 func upgradeHints(cliVer, cpVer, latest string) []string {
 	var hints []string
 	if semver.IsValid(cpVer) && semver.Compare(cpVer, latest) < 0 {
-		hints = append(hints, fmt.Sprintf("Your control plane is behind. Run `burrow upgrade` to update it to %s.", latest))
+		hints = append(hints, fmt.Sprintf("Your control plane is behind. Run `burrow cluster upgrade` to update it to %s.", latest))
 	}
 	if semver.IsValid(cliVer) && !module.IsPseudoVersion(cliVer) && semver.Compare(cliVer, latest) < 0 {
 		if isPrerelease(latest) {

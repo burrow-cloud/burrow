@@ -9,7 +9,7 @@ import (
 )
 
 // friendlyName generates a memorable adjective-animal environment name (e.g. "sequestered-pirate")
-// for `burrow install` when no --environment is given (ADR-0036/0037). The name is a human handle,
+// for `burrow cluster install` when no --environment is given (ADR-0036/0037). The name is a human handle,
 // not a security boundary, so ordinary CLI-layer randomness is fine; collisions are caught by
 // localconfig.Add (and the user can rename). The word lists are small and deliberately neutral.
 func friendlyName() string {

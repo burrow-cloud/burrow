@@ -113,7 +113,7 @@ func (o ingressOptions) acmeServer() string {
 	return acmeProductionURL
 }
 
-// newIngressCmd is a setup command (not part of `burrow install`): it provisions the
+// newIngressCmd is a setup command (not part of `burrow cluster install`): it provisions the
 // ingress-nginx controller, cert-manager, and a Let's Encrypt ClusterIssuer, acting with the
 // developer's kubeconfig (ADR-0018). It detects an existing controller or cert-manager and
 // uses it rather than installing a second one. The agent never runs this — installing a

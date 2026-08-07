@@ -24,7 +24,7 @@ import (
 	"github.com/burrow-cloud/burrow/client"
 )
 
-// Defaults for a standard `burrow install`.
+// Defaults for a standard `burrow cluster install`.
 const (
 	DefaultNamespace   = "burrow"
 	DefaultService     = "burrowd"
@@ -33,10 +33,10 @@ const (
 	DefaultTokenKey    = "token"
 	// DefaultInstallConfigMap and DefaultInstallIDKey name where an install records its own id
 	// (ADR-0084 §5): a ConfigMap in the control-plane namespace, holding the random, opaque
-	// identifier `burrow install` generated for it. A ConfigMap and not a Secret on purpose — the id
+	// identifier `burrow cluster install` generated for it. A ConfigMap and not a Secret on purpose — the id
 	// authorises nothing, and a second person joining the install has to be able to read it.
 	//
-	// `burrow upgrade` reads it back and re-renders it rather than minting a new one, exactly as it
+	// `burrow cluster upgrade` reads it back and re-renders it rather than minting a new one, exactly as it
 	// does for the API token and the database password: a regenerated id would make every target
 	// already pointed at this install report a mismatch after a routine upgrade.
 	DefaultInstallConfigMap = "burrow-install"

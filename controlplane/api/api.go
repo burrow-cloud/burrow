@@ -37,7 +37,7 @@ type Config struct {
 	// plane. Optional — empty (a local or e2e build) makes the handshake permissive.
 	Version string
 	// InstallID is this install's own id (ADR-0084 §5): the random, opaque, non-secret identifier
-	// `burrow install` generated for it, recorded in a ConfigMap in the control-plane namespace and
+	// `burrow cluster install` generated for it, recorded in a ConfigMap in the control-plane namespace and
 	// handed to burrowd in its environment. A caller that names a different install is refused, so a
 	// cluster destroyed and recreated under a kube context name a provider generates deterministically
 	// is caught on arrival instead of deployed into. Optional — empty (an install predating ids, or a

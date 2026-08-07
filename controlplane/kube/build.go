@@ -333,7 +333,7 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 		}
 	}
 
-	// The build runs in the dedicated burrow-builds namespace (issue #278), which `burrow install`
+	// The build runs in the dedicated burrow-builds namespace (issue #278), which `burrow cluster install`
 	// provisions kubeconfig-side along with burrowd's Role there. burrowd holds only namespaced Roles
 	// and cannot create namespaces or cluster RBAC itself (least privilege) — the same reason
 	// `burrow env add` creates per-environment namespaces kubeconfig-side rather than at runtime.

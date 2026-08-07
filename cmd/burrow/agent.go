@@ -69,7 +69,7 @@ const (
 	// WORD BOUNDARY: it matches `burrow deploy …` but NOT `burrow-agent …` (there is no space after
 	// `burrow` in `burrow-agent`, so the space cannot match). Deny takes absolute precedence over allow,
 	// which is exactly why two distinct binaries are used — the allow of burrow-agent cannot carve a
-	// hole in this deny. Every DANGEROUS `burrow` invocation takes arguments (`burrow install`,
+	// hole in this deny. Every DANGEROUS `burrow` invocation takes arguments (`burrow cluster install`,
 	// `burrow guard set`, …), so this one rule covers them all. A bare `burrow` (no arguments) is
 	// deliberately NOT denied: it only prints a help screen, and a no-wildcard exact rule like
 	// `Bash(burrow)` is avoided because its match semantics against `burrow-agent` are undocumented and,

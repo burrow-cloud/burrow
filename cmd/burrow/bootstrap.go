@@ -339,7 +339,7 @@ func newBootstrapCmd() *cobra.Command {
 			"IP your laptop connects through, and traefik disabled so Burrow's ingress-nginx owns\n" +
 			"ingress), deploys the Burrow control plane, and prints a `burrow join <token>` line to run\n" +
 			"on your laptop.\n\n" +
-			"Like `burrow install`, bootstrap provisions ONLY the control plane (ADR-0054). Additive\n" +
+			"Like `burrow cluster install`, bootstrap provisions ONLY the control plane (ADR-0054). Additive\n" +
 			"cluster components are separate, opt-in commands you run afterward from your laptop:\n" +
 			"  burrow cluster ingress install    # the public-HTTPS stack (ingress-nginx, cert-manager, TLS)\n" +
 			"  burrow cluster registry install   # the optional in-cluster image registry\n\n" +
@@ -415,7 +415,7 @@ func runBootstrap(ctx context.Context, a bootstrapArgs, stdout, stderr io.Writer
 		return err
 	}
 
-	// Deploy burrowd by REUSING the `burrow install` path against the local k3s admin kubeconfig. This
+	// Deploy burrowd by REUSING the `burrow cluster install` path against the local k3s admin kubeconfig. This
 	// applies the control-plane manifests and, per ADR-0038, mints the scoped burrow-agent credential
 	// that the laptop's `burrow join` later reads — so there is no duplicate install logic here.
 	if err := installBurrowdOnK3s(ctx, a, stdout, stderr); err != nil {
@@ -531,7 +531,7 @@ func ensureK3sInstalled(ctx context.Context, inst k3sInstaller, cmd k3sInstallCo
 }
 
 // installBurrowdOnK3s deploys the control plane into the local k3s by reusing runInstall (the same
-// path `burrow install` drives), targeting the k3s admin kubeconfig's current context.
+// path `burrow cluster install` drives), targeting the k3s admin kubeconfig's current context.
 func installBurrowdOnK3s(ctx context.Context, a bootstrapArgs, stdout, stderr io.Writer) error {
 	kubeContext, err := currentKubeContext(a.kubeconfig)
 	if err != nil {

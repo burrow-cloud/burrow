@@ -220,6 +220,72 @@ func TestObserverResolvesWhatRecovered(t *testing.T) {
 	}
 }
 
+// TestObserverRecordsAKillOnAServingApp is the ledger half of issue #416. An app that is AVAILABLE
+// and serving every replica, whose container was killed for exceeding its memory limit and came
+// back, opens a ledger row naming the limit — and then resolves once it has run without a further
+// kill, rather than staying open forever.
+//
+// It is the case a reliability record must not miss and the one it structurally could: the ledger
+// records the reason the live status surface produced, so a surface that said nothing about a
+// survived kill made the ledger silent about it too. Nothing in the observer needed changing for
+// this to work; the observer was faithfully recording an empty reason.
+func TestObserverRecordsAKillOnAServingApp(t *testing.T) {
+	ctx := context.Background()
+	h := newObserverHarness(t, cp.ObserverConfig{})
+	seedDeployedApp(t, h.db, "web-1", "web")
+	if err := h.k8s.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "ghcr.io/u/web:1", Replicas: 1}); err != nil {
+		t.Fatalf("ApplyWorkload: %v", err)
+	}
+	h.k8s.SetServingIssue("web", cp.IssueEvidence{
+		Reason: cp.ReasonOOMKilled, Container: "web", Detail: "128Mi", Restarts: 3,
+	})
+
+	// The app really is up: this is the state that looked healthy and recorded nothing.
+	ws, err := h.k8s.WorkloadStatus(ctx, "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if !ws.Available {
+		t.Fatalf("status = %+v, want available: the whole point is that a serving app can still be dying", ws)
+	}
+
+	start := h.clock.Now()
+	h.observer.ObserveOnceForTest(ctx)
+
+	f := findFailure(t, activeFailures(t, h.db), cp.FailureApp, "web", cp.ReasonOOMKilled)
+	if !strings.Contains(f.Detail, "128Mi") {
+		t.Errorf("detail = %q, want it to name the memory limit that was exceeded", f.Detail)
+	}
+	if !f.FirstSeen.Equal(start) || f.Occurrences != 1 || !f.Active() {
+		t.Errorf("row = %+v, want one active sighting at %s", f, start)
+	}
+
+	// Repeated kills accumulate on the one row (ADR-0074 §4/§5) rather than opening a row each time.
+	h.clock.Advance(time.Minute)
+	h.observer.ObserveOnceForTest(ctx)
+	rows := activeFailures(t, h.db)
+	if len(rows) != 1 {
+		t.Fatalf("a container being killed repeatedly produced %d rows, want one that counts: %+v", len(rows), rows)
+	}
+	if rows[0].Occurrences != 2 || !rows[0].FirstSeen.Equal(start) {
+		t.Errorf("row = %+v, want two occurrences with first_seen unchanged at %s", rows[0], start)
+	}
+
+	// Once the container has run long enough without another kill, the live surface stops reporting
+	// it and the row closes — the row says "this happened and stopped", not "this is happening".
+	h.k8s.SetServingIssue("web", cp.IssueEvidence{})
+	h.clock.Advance(time.Minute)
+	settled := h.clock.Now()
+	h.observer.ObserveOnceForTest(ctx)
+	if rows := activeFailures(t, h.db); len(rows) != 0 {
+		t.Fatalf("the kills stopped but %d rows are still active: %+v", len(rows), rows)
+	}
+	f = findFailure(t, allFailures(t, h.db), cp.FailureApp, "web", cp.ReasonOOMKilled)
+	if f.ResolvedAt == nil || !f.ResolvedAt.Equal(settled) {
+		t.Errorf("resolved_at = %v, want %s", f.ResolvedAt, settled)
+	}
+}
+
 // TestObserverRecordsIntentVersusCluster covers all four §6 discrepancies in one sweep: each is an
 // ABSENCE, invisible from the cluster side, and each is recorded as a failure in its own right.
 func TestObserverRecordsIntentVersusCluster(t *testing.T) {

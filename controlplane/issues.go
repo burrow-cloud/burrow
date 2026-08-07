@@ -174,6 +174,17 @@ type IssueEvidence struct {
 	// LogTail is a bounded tail of a crash-looping container's PREVIOUS log — application output,
 	// captured verbatim. Message labels it as such; Burrow does not inspect or sanitise it.
 	LogTail string
+	// Restarts is the container's restart count, set ONLY when this evidence is about a container
+	// that was killed and CAME BACK — it is running and serving right now (issue #416). Zero means
+	// the evidence is about a container that is currently blocked, which is what every reason here
+	// originally described.
+	//
+	// Message branches on it, because "it was killed and is serving again" and "it is not serving"
+	// are different sentences and a reader who cannot tell them apart cannot act on either: the
+	// first is a limit to raise before the next kill, the second is an outage. It is a count rather
+	// than a flag so the message can say how many, which is the difference between a one-off and a
+	// container being cycled — the ledger answers that over time, and this answers it in the pod.
+	Restarts int32
 }
 
 // Message renders the actionable explanation for this evidence. An unknown or empty Reason returns
@@ -197,8 +208,8 @@ func (e IssueEvidence) Message() string {
 		return fmt.Sprintf("container %s cannot be created (%s): %s. The key named above is missing from the app's config or its per-app Secret — set it and redeploy",
 			e.container(), e.Reason, e.detail("the kubelet reported no reason"))
 	case ReasonOOMKilled:
-		return fmt.Sprintf("container %s was killed for exceeding its memory limit (%s)%s. Raise the limit or reduce what the app allocates — restarting it alone reproduces the kill",
-			e.container(), e.Reason, e.limit())
+		return fmt.Sprintf("container %s was killed for exceeding its memory limit (%s)%s%s. Raise the limit or reduce what the app allocates — restarting it alone reproduces the kill",
+			e.container(), e.Reason, e.limit(), e.restarted())
 	case ReasonStartError:
 		// Says the command NEVER RAN, because that is the distinction the reader needs and the one
 		// an exit code alone destroys: a container that starts and exits non-zero is the workload
@@ -227,11 +238,33 @@ func (e IssueEvidence) Message() string {
 func (e IssueEvidence) crashLoopMessage() string {
 	msg := fmt.Sprintf("container %s is restarting repeatedly (%s): its previous run exited with code %d",
 		e.container(), e.Reason, e.ExitCode)
+	if e.Restarts > 0 {
+		// Read off a container that is RUNNING at this instant, so it is not sitting in a back-off
+		// now and saying it is would send the reader looking for a pod that is down. What is true is
+		// the count, the code it died with, and that it is serving between the kills.
+		msg = fmt.Sprintf("container %s has restarted %d times and is serving again now (%s): its last run before that exited with code %d",
+			e.container(), e.Restarts, e.Reason, e.ExitCode)
+	}
 	tail := boundLogTail(e.LogTail)
 	if tail == "" {
 		return msg + ". Its previous run produced no output"
 	}
 	return msg + ". Its previous run's last output follows — this is the application's own output, shown as-is:\n" + tail
+}
+
+// restarted renders the clause that says the container CAME BACK, for evidence read off a container
+// that is running now. Without it, "was killed for exceeding its memory limit" sits beside an
+// available workload with nothing to reconcile the two, and the reader is left guessing whether the
+// app is down. It is empty for a container that is still blocked, whose message already describes a
+// thing that is not serving.
+func (e IssueEvidence) restarted() string {
+	if e.Restarts <= 0 {
+		return ""
+	}
+	if e.Restarts == 1 {
+		return ", and restarted — it is serving again now, after 1 restart"
+	}
+	return fmt.Sprintf(", and restarted — it is serving again now, after %d restarts", e.Restarts)
 }
 
 // container renders the container name for a message, quoted when known.

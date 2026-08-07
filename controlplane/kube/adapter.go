@@ -324,7 +324,24 @@ func (a *Adapter) workloadStatus(ctx context.Context, dep *appsv1.Deployment, gr
 		Available:       deploymentAvailable(dep, desired),
 	}
 	if deploymentRolledOut(dep, desired) {
-		return st // the current release is fully rolled out and serving
+		// The current release is fully rolled out and serving. That is not the same as nothing being
+		// wrong with it: a container the kernel kills for exceeding its memory limit is restarted in
+		// place, and the pod that comes back reports Running with a climbing restart count. Every
+		// other inspection in this file reads a container that is currently BLOCKED — waiting in a
+		// back-off, or terminated and staying that way — so a container that was killed and came back
+		// reported nothing at all, on either the status surface or the ledger that reads it
+		// (issue #416).
+		//
+		// It attaches the Issue and DELIBERATELY LEAVES AVAILABILITY ALONE, unlike both branches
+		// below. The workload is serving; ADR-0074 §1 draws the line between the surface that answers
+		// about now and the ledger that records history, and reporting a serving app as unavailable
+		// on the strength of a kill it survived would put history on the wrong side of it. What the
+		// Issue does is stop a bare "available" being read as "nothing is happening" — the same job
+		// it already does for a wedged rollout whose previous release still serves (#307).
+		if issue, reason := a.podRestartIssue(ctx, dep.Name); reason != "" {
+			st.Issue, st.IssueReason = issue, reason
+		}
+		return st
 	}
 	// The newest revision has not completed. A blocking pod condition is the immediate, reliable
 	// signal that the current release is wedged; an exceeded progress deadline is the general one.
@@ -370,6 +387,152 @@ func (a *Adapter) podIssue(ctx context.Context, app string, grace time.Duration)
 		best.LogTail = a.previousLogTail(ctx, bestPod, best.Container)
 	}
 	return best.Message(), best.Reason
+}
+
+// recentRestartWindow is how long after a container came back from a kill that restart is still
+// reported on the LIVE status surface.
+//
+// IT IS THE THRESHOLD, AND THE SHAPE IT USES IS RECENCY RATHER THAN A RESTART COUNT. RestartCount is
+// cumulative over a pod's whole life and carries no time at all: a pod up for three weeks with five
+// restarts and a pod being killed every ninety seconds can report the same number, so a threshold on
+// the count alone would either shout about a kill from last Tuesday or stay silent through a loop —
+// and a surface that shouts about ancient history is as useless as one that says nothing.
+// LastTerminationState.Terminated.FinishedAt is when the app actually died, and "did it die in the
+// last few minutes" is a question about NOW, which is the only question this surface answers
+// (ADR-0074 §1).
+//
+// Ten minutes, chosen from both ends:
+//
+//   - Longer than the observer's sweep interval (controlplane.DefaultObserveInterval, one minute) by
+//     enough margin that a kill cannot fall between two sweeps and be recorded by neither. The window
+//     is what gives a restart — an instant, by nature — a duration for a sampling observer to catch.
+//   - Short enough to still be a statement about the present. A container that has served for ten
+//     minutes since its last kill has demonstrated it can run, and the fact belongs to the ledger from
+//     then on, where its first_seen, its occurrence count and its resolved_at are what make a pattern
+//     legible (ADR-0074 §4).
+//
+// The consequence that matters: a container being killed MORE OFTEN than this is never silent, because
+// every read falls inside the window of the last kill. That is the case issue #416 is about.
+//
+// It is a constant rather than a limits knob (ADR-0068 §2/§6). The unschedulable grace is cluster
+// configuration because how long a pod may sit unschedulable depends on the operator's scheduler and
+// whether they run an autoscaler, which only they know. How long a kill stays news is a property of
+// this surface's own division between now and history, and no fact about a cluster changes it.
+const recentRestartWindow = 10 * time.Minute
+
+// podRestartIssue inspects the app's pods for a container that is RUNNING NOW but was killed and
+// restarted recently.
+//
+// It is a second pass rather than another case inside podIssue, because the two answer different
+// questions and their answers are used differently: podIssue explains a workload that is NOT SERVING
+// and its verdict downgrades availability, and this explains one that IS serving and must not. Only
+// the rolled-out path calls it — during a rollout the release under judgement is the new one, a new
+// pod that is failing is already waiting in a back-off where podIssue reads it, and an old pod's
+// restart is not what the rollout is about. Keeping it off that path is also what stops a restart
+// from failing a deploy: rolloutVerdict treats any IssueReason on an unfinished rollout as the reason
+// it is wedged (rolloutwait.go), and a kill the app survived is not that.
+//
+// It costs ONE pod List per rolled-out app per status read, which a healthy app did not pay before.
+// That is the same call the not-rolled-out path already makes, bounded by the same label selector,
+// and it is what the evidence costs: nothing about a Deployment records that its containers have been
+// dying.
+func (a *Adapter) podRestartIssue(ctx context.Context, app string) (issue, reason string) {
+	best, bestPod, ok := selectPodIssue(ctx, a.client, a.namespace, nameLabel+"="+app, podRestartEvidence)
+	if !ok {
+		return "", "" // best-effort: never fail Status on enrichment
+	}
+	// The killed run's output is the whole diagnosis for a restart that was not an OOM — and it is
+	// only reachable as the PREVIOUS log, which is exactly what the running container no longer has.
+	if best.Reason == controlplane.ReasonCrashLoopBackOff {
+		best.LogTail = a.previousLogTail(ctx, bestPod, best.Container)
+	}
+	return best.Message(), best.Reason
+}
+
+// podRestartEvidence reads one pod for the highest-ranked recent restart any of its containers came
+// back from. It ranks through issueRank like podIssueEvidence does, so a pod whose container was
+// OOM-killed reports the kill rather than the restart it caused — the same choice, for the same
+// reason, on both halves of the surface.
+func podRestartEvidence(pod *corev1.Pod) (controlplane.IssueEvidence, bool) {
+	var best controlplane.IssueEvidence
+	bestRank := 0
+	for _, cs := range pod.Status.ContainerStatuses {
+		ev, ok := restartedContainerEvidence(pod, cs)
+		if !ok {
+			continue
+		}
+		if r := issueRank(ev.Reason); r > bestRank {
+			best, bestRank = ev, r
+		}
+	}
+	return best, bestRank > 0
+}
+
+// restartedContainerEvidence reads one RUNNING container for a kill it recently came back from.
+//
+// A container that is running with a restart count above zero and a last termination has died IN
+// PLACE and been restarted by the kubelet — a pod replaced during a rolling update, evicted, or moved
+// between nodes gets a NEW pod whose containers have neither. So the fact is unambiguous: the
+// application process ended and something restarted it. Burrow authors no liveness probe (ADR-0076
+// §1), so nothing Burrow did caused it.
+//
+// WHAT CROSSES THE LINE DIFFERS BY REASON, and the split is deliberate:
+//
+//   - An OOM kill is reported on ONE occurrence. It names its own fix — the memory limit is a number
+//     the evidence carries — and nothing about the app or the limit changed when the container came
+//     back, so a first kill is a promise of the next. This is also the case that leaves no trace
+//     anywhere else: a crash loop is loud and someone notices it, and a container killed every few
+//     hours that serves fine in between is noticed weeks later, if at all.
+//   - Any other in-place restart needs a PATTERN — two or more. One exit could be a bad request, a
+//     signal, or a node hiccup, and the only word Burrow's closed vocabulary has for a repeatedly
+//     restarting container is CrashLoopBackOff (ADR-0074 §2), which claims a pattern. Reporting a
+//     single exit under that reason would make the surface say something untrue.
+//
+// RestartCount is a floor rather than a rate — it is cumulative, so two restarts may be years apart.
+// The recency gate above is what makes the report about now; the ledger's occurrence count and
+// first_seen are what make the rate legible (ADR-0074 §4). Nothing on a pod object states a rate, and
+// inventing one from a single sample would be a guess.
+func restartedContainerEvidence(pod *corev1.Pod, cs corev1.ContainerStatus) (controlplane.IssueEvidence, bool) {
+	if cs.State.Running == nil || cs.RestartCount == 0 {
+		return controlplane.IssueEvidence{}, false
+	}
+	t := cs.LastTerminationState.Terminated
+	if t == nil || !restartedRecently(t, cs.State.Running) {
+		return controlplane.IssueEvidence{}, false
+	}
+	if t.Reason == controlplane.ReasonOOMKilled {
+		ev := oomEvidence(pod, cs.Name)
+		ev.Restarts = cs.RestartCount
+		return ev, true
+	}
+	if cs.RestartCount < 2 {
+		return controlplane.IssueEvidence{}, false
+	}
+	return controlplane.IssueEvidence{
+		Reason:    controlplane.ReasonCrashLoopBackOff,
+		Container: cs.Name,
+		ExitCode:  t.ExitCode,
+		Restarts:  cs.RestartCount,
+	}, true
+}
+
+// restartedRecently reports whether the container came back from that termination inside
+// recentRestartWindow.
+//
+// FinishedAt is when the application died and is the value that matters. It is an optional field, so
+// a status that carries none falls back to when the CURRENT run started — the same instant to within
+// the kubelet's restart back-off. A termination that carries NEITHER dates nothing, and is not
+// reported: the whole distinction this makes is between a kill that just happened and one that did
+// not, and evidence with no time on it cannot be placed on either side of it.
+func restartedRecently(t *corev1.ContainerStateTerminated, running *corev1.ContainerStateRunning) bool {
+	at := t.FinishedAt.Time
+	if t.FinishedAt.IsZero() {
+		at = running.StartedAt.Time
+	}
+	if at.IsZero() {
+		return false
+	}
+	return time.Since(at) < recentRestartWindow
 }
 
 // selectPodIssue lists the pods matching selector and returns the single highest-ranked piece of
@@ -457,8 +620,13 @@ func podIssueEvidence(pod *corev1.Pod, grace time.Duration) (controlplane.IssueE
 // that is where the kernel's verdict is recorded: the pod's visible state is CrashLoopBackOff and
 // the kill is what names the fix. It is only reported while the container is CURRENTLY blocked —
 // waiting in a back-off, or terminated and not restarting — so a container that was OOM-killed an
-// hour ago and has been serving since is not reported as broken now. That is the criterion applied
+// hour ago and has been serving since is not reported as BROKEN now. That is the criterion applied
 // to a fact that outlives the failure it describes.
+//
+// A container killed and restarted in place is therefore invisible to this function, which is right
+// for it and was wrong for the surface as a whole: a recent kill is real news and reported as such
+// by restartedContainerEvidence, which never touches availability. That is where the split lives —
+// this function explains an app that is DOWN, and that one an app that is up and being killed.
 func containerIssueEvidence(pod *corev1.Pod, cs corev1.ContainerStatus) (controlplane.IssueEvidence, bool) {
 	if ev, ok := waitingContainerIssueEvidence(pod, cs); ok {
 		return ev, true

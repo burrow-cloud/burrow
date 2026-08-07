@@ -1092,6 +1092,180 @@ func TestWorkloadStatusOOMKilledOutranksCrashLoop(t *testing.T) {
 	}
 }
 
+// servingDeployment is a Deployment whose newest revision is fully rolled out and serving — the
+// state deploymentRolledOut tests for, and the one that used to return before a single pod was
+// looked at. It is what makes the restart cases below about a HEALTHY-LOOKING app rather than a
+// wedged rollout.
+func servingDeployment(image string) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns, Generation: 1},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: i32p(1),
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: image}}}},
+		},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			Replicas:           1,
+			ReadyReplicas:      1,
+			UpdatedReplicas:    1,
+			AvailableReplicas:  1,
+			Conditions:         []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue}},
+		},
+	}
+}
+
+// restartedPod is the exact shape issue #416 is about: State.Running is set, the container is Ready
+// and serving, LastTerminationState carries the kill it came back from, and the restart count is
+// above zero. Nothing about it is waiting or terminated, which is why every inspection that reads a
+// currently-blocked container saw nothing here.
+//
+// ago is how long since the kill — the fact the report turns on.
+func restartedPod(reason string, exitCode, restarts int32, ago time.Duration) *corev1.Pod {
+	pod := appPod("web-restarted")
+	pod.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "img:1"}}}
+	at := metav1.NewTime(time.Now().Add(-ago))
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name:         "web",
+			Image:        "img:1",
+			Ready:        true,
+			RestartCount: restarts,
+			State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: at}},
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				Reason: reason, ExitCode: exitCode, FinishedAt: at,
+			}},
+		}},
+	}
+	return pod
+}
+
+// withMemoryLimit sets the limit the OOM message is supposed to name — the single number that is the
+// whole fix, and the reason the evidence reads the pod's own spec rather than saying "OOMKilled".
+func withMemoryLimit(pod *corev1.Pod, limit string) *corev1.Pod {
+	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(limit)},
+	}
+	return pod
+}
+
+// TestWorkloadStatusReportsAKillTheAppSurvived is issue #416. The Deployment is fully rolled out and
+// every replica is serving; the container inside it was killed for exceeding its memory limit four
+// minutes ago and came back. Everything a user could see said Running, and the ledger, which records
+// the reason this surface produces, therefore recorded nothing.
+//
+// It reports the kill AND STAYS AVAILABLE. The app is serving — ADR-0074 §1 makes that the whole
+// question this surface answers — so the Issue is what stops "available" being read as "nothing is
+// happening", exactly as it already is for a wedged rollout whose old release still serves.
+func TestWorkloadStatusReportsAKillTheAppSurvived(t *testing.T) {
+	pod := withMemoryLimit(restartedPod(cp.ReasonOOMKilled, 137, 3, 4*time.Minute), "128Mi")
+	a := kube.New(fake.NewSimpleClientset(servingDeployment("img:1"), pod), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.IssueReason != cp.ReasonOOMKilled {
+		t.Fatalf("issue reason = %q, want %q: a pod killed and restarted reported nothing at all", st.IssueReason, cp.ReasonOOMKilled)
+	}
+	if !st.Available {
+		t.Errorf("status = %+v, want available: the app is serving, and history must not be reported as an outage", st)
+	}
+	for _, want := range []string{
+		`container "web"`,
+		"128Mi",         // the limit is the fix, and the reason the evidence reads the pod spec
+		"serving again", // it came back; a reader must not go looking for a pod that is down
+		"3 restarts",
+	} {
+		if !strings.Contains(st.Issue, want) {
+			t.Errorf("issue = %q, want it to contain %q", st.Issue, want)
+		}
+	}
+}
+
+// TestWorkloadStatusForgetsAnOldIsolatedKill is the other half of the threshold. One OOM kill two
+// hours ago, on an app that has served ever since, is history: the ledger holds it, and a live
+// surface that still shouted about it would train its reader to ignore the field.
+func TestWorkloadStatusForgetsAnOldIsolatedKill(t *testing.T) {
+	pod := withMemoryLimit(restartedPod(cp.ReasonOOMKilled, 137, 1, 2*time.Hour), "128Mi")
+	a := kube.New(fake.NewSimpleClientset(servingDeployment("img:1"), pod), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if !st.Available {
+		t.Errorf("status = %+v, want available", st)
+	}
+	if st.Issue != "" || st.IssueReason != "" {
+		t.Errorf("issue = %q / %q, want empty: a kill two hours ago is not a statement about now", st.Issue, st.IssueReason)
+	}
+}
+
+// TestWorkloadStatusIgnoresAPodThatHasNotRestarted: the healthy case is unchanged. A serving pod with
+// no restarts and no previous termination carries no Issue, and the extra inspection must not invent
+// one.
+func TestWorkloadStatusIgnoresAPodThatHasNotRestarted(t *testing.T) {
+	pod := appPod("web-ok")
+	pod.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "img:1"}}}
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "web", Image: "img:1", Ready: true,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+		}},
+	}
+	a := kube.New(fake.NewSimpleClientset(servingDeployment("img:1"), pod), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if !st.Available || st.Issue != "" || st.IssueReason != "" {
+		t.Errorf("status = %+v, want available with no issue", st)
+	}
+}
+
+// TestWorkloadStatusReportsRepeatedNonOOMRestarts: the blindness was never OOM-specific. A container
+// that keeps exiting and keeps being restarted is invisible in exactly the same way whenever a read
+// lands between two kills rather than during a back-off.
+func TestWorkloadStatusReportsRepeatedNonOOMRestarts(t *testing.T) {
+	a := kube.New(fake.NewSimpleClientset(servingDeployment("img:1"), restartedPod("Error", 1, 4, time.Minute)), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.IssueReason != cp.ReasonCrashLoopBackOff {
+		t.Fatalf("issue reason = %q, want %q", st.IssueReason, cp.ReasonCrashLoopBackOff)
+	}
+	if !st.Available {
+		t.Errorf("status = %+v, want available: it is serving between the restarts", st)
+	}
+	for _, want := range []string{"restarted 4 times", "serving again now", "exited with code 1"} {
+		if !strings.Contains(st.Issue, want) {
+			t.Errorf("issue = %q, want it to contain %q", st.Issue, want)
+		}
+	}
+}
+
+// TestWorkloadStatusDoesNotCallOneExitACrashLoop: a single exit could be a bad request, a signal, or
+// a node hiccup. The only word the closed vocabulary has for a repeatedly restarting container claims
+// a pattern (CrashLoopBackOff), so reporting one restart under it would make the surface say
+// something untrue. An OOM kill is the deliberate exception — see the test above — because it names
+// its own fix and nothing changed when the container came back.
+func TestWorkloadStatusDoesNotCallOneExitACrashLoop(t *testing.T) {
+	a := kube.New(fake.NewSimpleClientset(servingDeployment("img:1"), restartedPod("Error", 1, 1, time.Minute)), ns)
+
+	st, err := a.WorkloadStatus(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("WorkloadStatus: %v", err)
+	}
+	if st.Issue != "" || st.IssueReason != "" {
+		t.Errorf("issue = %q / %q, want empty for a single non-OOM restart", st.Issue, st.IssueReason)
+	}
+}
+
 // TestWorkloadStatusConfigErrorNamesTheKeyNotTheValue: the missing KEY is the actionable part and
 // is safe to print; a value never is (ADR-0074 §9). The kubelet's message carries the key, so this
 // also asserts the value the Secret would hold does not appear.

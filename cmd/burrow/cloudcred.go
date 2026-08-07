@@ -75,5 +75,5 @@ func reportCredentialLocations(out io.Writer, humanPath, agentPath string) {
 	fmt.Fprintf(out, "  yours:           %s\n", humanPath)
 	fmt.Fprintf(out, "  burrow-agent's:  %s\n", agentPath)
 	fmt.Fprintf(out, "\nNeither token was printed. Delete a file to sign that half of this machine out, or revoke\n"+
-		"either credential on its own at https://%s/settings.\n", localconfig.CloudEndpoint)
+		"either credential on its own at https://%s/settings.\n", localconfig.CloudAPIEndpoint)
 }

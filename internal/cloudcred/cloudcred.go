@@ -48,6 +48,11 @@ const (
 
 // File is the credential file's name. It is the endpoint, so a second managed endpoint would be a
 // second file rather than an overwrite, and the extension says what is inside.
+//
+// It is keyed to the product's IDENTITY (localconfig.CloudEndpoint) and deliberately not to the host
+// its API is served on (localconfig.CloudAPIEndpoint): a credential is issued for the product, so
+// the file it lands in must not move when the API's address does. Every credential already on disk
+// is named for the identity, and it keeps loading unchanged.
 const File = localconfig.CloudEndpoint + ".json"
 
 // The two directories, both siblings of ~/.burrow/config so $BURROW_CONFIG keeps a person's whole

@@ -33,8 +33,10 @@ const (
 // (ADR-0038) so the operate path can default to it; both are empty when the handle records none.
 // Target names the ADR-0078 target that decided the cluster, and is empty when no target is
 // selected (the pre-ADR-0078 behaviour, and still the default). Kind is that target's kind, and
-// Endpoint is set only for a Burrow Cloud target: the host to reach it at, in place of the kube
-// context a cluster target resolves to.
+// Endpoint is set only for a Burrow Cloud target: the endpoint the target NAMES, in place of the
+// kube context a cluster target resolves to. For the managed product that is CloudEndpoint, the
+// identity, and the caller turns it into an origin — a step that exists because the identity and the
+// API's address are two different hosts (see CloudAPIEndpoint).
 type Resolved struct {
 	Name                  string
 	Context               string

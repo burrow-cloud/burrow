@@ -22,8 +22,25 @@ const (
 	TargetKindKubernetes TargetKind = "kubernetes"
 )
 
-// CloudEndpoint is the managed product's host, and the name its target carries.
-const CloudEndpoint = "burrow-cloud.dev"
+// The managed product is NAMED by one host and ADDRESSED at another, and the two constants below
+// exist because collapsing them into one is what broke sign-in: the apex serves the marketing
+// website and answers every API path with a 404, so a device flow aimed at it can never start.
+//
+// CloudEndpoint is the IDENTITY. It is the target's Name, the `endpoint` field written into
+// ~/.burrow/config, and the credential filename (internal/cloudcred.File). It is keyed to the
+// product rather than to wherever its API happens to be served, so moving the API does not strand
+// the credentials and targets already on disk — which is why this value must not change.
+//
+// CloudAPIEndpoint is the ADDRESS. It is the console: the host the managed control plane actually
+// answers on, and the only one anything connects to or points a person's browser at. It is derived
+// from CloudEndpoint so the two cannot drift apart.
+//
+// The rule for choosing between them: prose that NAMES the product takes CloudEndpoint; anything
+// somebody or something CONNECTS TO takes CloudAPIEndpoint.
+const (
+	CloudEndpoint    = "burrow-cloud.dev"
+	CloudAPIEndpoint = "console." + CloudEndpoint
+)
 
 // TargetKind distinguishes the two kinds of target (ADR-0078 §1).
 type TargetKind string

@@ -271,9 +271,10 @@ type target struct {
 	// override, which both keep the ambient/admin kubeconfig.
 	agentKubeconfig string
 	agentContext    string
-	// cloudEndpoint is set when the active target is the managed product (ADR-0078 §1): the host its
-	// control plane answers on, in place of the kube context there is none of. It is empty for every
-	// cluster target, so the kubeconfig path is reached exactly as it was.
+	// cloudEndpoint is set when the active target is the managed product (ADR-0078 §1): the endpoint
+	// the target names, in place of the kube context there is none of. It is empty for every cluster
+	// target, so the kubeconfig path is reached exactly as it was. cloudBaseURLFor turns it into the
+	// origin to call, which for the managed product is not the same host.
 	cloudEndpoint string
 	// flagOverride records that a flag on this invocation named something other than what would
 	// otherwise have been resolved: --context or --env on the resolved path, --env on the
@@ -581,6 +582,11 @@ func (o *commonOpts) transport(tgt target) (client.Transport, error) {
 // cloudBaseURLFor is the origin to call for a target's endpoint. The known managed endpoint goes
 // through cloudBaseURL, the same variable the sign-in flow uses, so one seam points every call at
 // the managed product and a test can redirect all of them at once.
+//
+// The comparison is against CloudEndpoint, the IDENTITY, because that is what a recorded target's
+// endpoint field holds — including every target written before the console host existed. What comes
+// back is the console (CloudAPIEndpoint) via cloudBaseURL, which is the whole reason this mapping is
+// a function rather than a "https://" prefix.
 func cloudBaseURLFor(endpoint string) string {
 	if endpoint == localconfig.CloudEndpoint {
 		return cloudBaseURL

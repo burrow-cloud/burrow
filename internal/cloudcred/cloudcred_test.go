@@ -75,6 +75,33 @@ func TestEachBinaryReadsItsOwnCredential(t *testing.T) {
 	}
 }
 
+// TestCredentialFileIsKeyedToTheIdentityNotTheAPIHost. The managed product is named by one host and
+// addressed at another; the filename follows the NAME, so moving the API's address does not orphan
+// every credential already on disk. The name is written out rather than derived from the constant,
+// because a derived assertion would agree with any change to it.
+func TestCredentialFileIsKeyedToTheIdentityNotTheAPIHost(t *testing.T) {
+	if File != "burrow-cloud.dev.json" {
+		t.Errorf("credential file = %q — renaming it strands every credential already stored", File)
+	}
+	// A credential written by hand at that name, the way one already on disk sits, still loads.
+	home := burrowHome(t)
+	dir := filepath.Join(home, "credentials")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := `{"endpoint":"burrow-cloud.dev","kind":"cli","tenantId":"t1","credentialId":"cred-human","token":"` + humanSecret + `"}`
+	if err := os.WriteFile(filepath.Join(dir, "burrow-cloud.dev.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("seed the credential: %v", err)
+	}
+	cred, err := Load(KindCLI)
+	if err != nil {
+		t.Fatalf("a credential stored under the old identity no longer loads: %v", err)
+	}
+	if cred.Token != humanSecret || cred.Endpoint != "burrow-cloud.dev" {
+		t.Errorf("credential = %+v, want the one on disk", cred.CredentialID)
+	}
+}
+
 // TestRevokingOneDoesNotSilentlyPromoteTheOther is the negative half. Deleting the agent's file
 // stands in for revoking the agent's credential and cleaning up after it: the agent must then fail,
 // not quietly fall back to the person's credential, which would make revocation meaningless.

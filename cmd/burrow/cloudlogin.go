@@ -67,7 +67,8 @@ const maxDeviceResponseBytes = 1 << 20
 // The seams a test substitutes, so no test opens a browser, sleeps, or reaches a real
 // burrow-cloud.dev:
 //
-//   - cloudBaseURL is the origin the two endpoints hang off. A test points it at an httptest server.
+//   - cloudBaseURL is the origin the two endpoints hang off — the CONSOLE, not the apex, which
+//     serves the marketing website and 404s every API path. A test points it at an httptest server.
 //   - cloudHTTPClient is the only client this file makes requests through.
 //   - openBrowserFn hands a URL to the desktop's own opener.
 //   - deviceWaitFn is the pause between polls, so a test observes the interval instead of living it.
@@ -77,8 +78,12 @@ const maxDeviceResponseBytes = 1 << 20
 // redemption carries the device code and the PKCE verifier; a redirect off the token endpoint would
 // hand both to whatever it pointed at. There is nothing legitimate for these two endpoints to
 // redirect to, so a redirect is surfaced as the unexpected status it is.
+// defaultCloudBaseURL is what cloudBaseURL ships as. It is named separately because cloudBaseURL is
+// a seam every test overwrites, so the shipped value would otherwise be unassertable.
+const defaultCloudBaseURL = "https://" + localconfig.CloudAPIEndpoint
+
 var (
-	cloudBaseURL    = "https://" + localconfig.CloudEndpoint
+	cloudBaseURL    = defaultCloudBaseURL
 	cloudHTTPClient = &http.Client{
 		Timeout:       30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

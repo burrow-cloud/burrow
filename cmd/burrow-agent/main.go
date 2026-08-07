@@ -226,7 +226,12 @@ func (o *connOpts) nameTarget(cfg *localconfig.Config, resolved localconfig.Reso
 // cloudBaseURL is the origin the managed product answers on, and the one seam a test redirects so no
 // test reaches a real burrow-cloud.dev. It is a variable for that reason only; nothing changes it at
 // runtime.
-var cloudBaseURL = "https://" + localconfig.CloudEndpoint
+//
+// It is the CONSOLE rather than the apex the target is named for: the apex serves the marketing
+// website and answers every API path with a 404 (localconfig.CloudAPIEndpoint).
+const defaultCloudBaseURL = "https://" + localconfig.CloudAPIEndpoint
+
+var cloudBaseURL = defaultCloudBaseURL
 
 // resolveCloud connects through a selected Burrow Cloud target. There is no cluster to resolve: the
 // endpoint is the whole address, --env is sent as written, and the credential is the AGENT's — never
@@ -246,6 +251,8 @@ func (o *connOpts) resolveCloud(ctx context.Context, cfg *localconfig.Config, re
 	if !ok { // unreachable: ActiveTarget resolved it out of this same config
 		return nil, "", targetname.Named{}, fmt.Errorf("the active target %q is not in the targets list", resolved.Target)
 	}
+	// The known managed endpoint goes through cloudBaseURL, which is the console. The comparison is
+	// against CloudEndpoint because that is the identity a recorded target's endpoint field holds.
 	base := cloudBaseURL
 	if resolved.Endpoint != localconfig.CloudEndpoint {
 		base = "https://" + resolved.Endpoint

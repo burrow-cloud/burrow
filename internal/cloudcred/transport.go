@@ -49,5 +49,5 @@ func RejectedMessage(cred Credential) string {
 	}
 	return fmt.Sprintf(
 		"Burrow Cloud did not accept %s. It was most likely revoked — a credential can be revoked at any time from https://%s/settings — or the sign-in it came from no longer exists. Sign in again with \"burrow auth login\"",
-		who, localconfig.CloudEndpoint)
+		who, localconfig.CloudAPIEndpoint)
 }

@@ -62,7 +62,9 @@ func newClusterCmd() *cobra.Command {
 			"infrastructure (ingress-nginx, cert-manager, a Let's Encrypt issuer),\n" +
 			"`burrow cluster registry install` provisions the optional in-cluster image registry, and\n" +
 			"`burrow cluster postgres install` provisions the CloudNativePG operator the Postgres add-on\n" +
-			"runs on; each is a one-time operator setup.\n\n" +
+			"runs on; each is a one-time operator setup. `burrow cluster metrics install` is the one\n" +
+			"exception in kind: metrics-server is a baseline install already ensures, and the command is\n" +
+			"how a cluster that predates the baseline, or opted out of it, gets it after the fact.\n\n" +
 			"`burrow cluster config` is the operational limits Burrow enforces (the replica ceiling and\n" +
 			"its siblings), set for the whole cluster or for one environment. Those are bounds a human\n" +
 			"sets; the agent CLI carries no command that changes them.",
@@ -91,6 +93,7 @@ func newClusterCmd() *cobra.Command {
 	cmd.AddCommand(newIngressCmd())
 	cmd.AddCommand(newClusterRegistryCmd())
 	cmd.AddCommand(newClusterPostgresCmd())
+	cmd.AddCommand(newClusterMetricsCmd())
 	cmd.AddCommand(newBootstrapCmd())
 	cmd.AddCommand(newCapacityCmd())
 	cmd.AddCommand(newClusterConfigCmd())
@@ -255,11 +258,15 @@ func certManagerLine(c client.CertManagerCapability) string {
 	return "not installed"
 }
 
+// metricsServerLine reports the baseline that serves the Metrics API. The absent case names the
+// command that fixes it rather than saying install would have added it: the clusters that read
+// "absent" here are exactly the ones install already ran on without it (issue #524), so pointing at
+// install points at the run that has already happened.
 func metricsServerLine(m client.MetricsServerCapability) string {
 	if m.Present {
 		return "serving the Metrics API (kubectl top, HPA autoscaling, utilization)"
 	}
-	return "not serving the Metrics API (install adds it as a baseline; needed for HPA autoscaling)"
+	return "not serving the Metrics API (needed for HPA autoscaling; burrow cluster metrics install)"
 }
 
 // cloudNativePGLine reports the CloudNativePG operator. The three states it can be in are said

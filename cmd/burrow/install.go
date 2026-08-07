@@ -250,7 +250,7 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&a.database, "database", databaseCNPG,
 		"how the control plane's own database runs: cnpg (a CloudNativePG cluster, with failover and backups) or plain (a single Deployment, with neither)")
 	cmd.Flags().BoolVar(&a.minimal, "minimal", false, "install only the control plane, skipping the detected lightweight baseline (metrics-server)")
-	cmd.Flags().BoolVar(&a.noMetricsServer, "no-metrics-server", false, "do not auto-ensure the metrics-server baseline (needed for HPA autoscaling and `kubectl top`)")
+	cmd.Flags().BoolVar(&a.noMetricsServer, "no-metrics-server", false, "do not auto-ensure the metrics-server baseline (needed for HPA autoscaling and `kubectl top`; add it later with `burrow cluster metrics install`)")
 	return cmd
 }
 

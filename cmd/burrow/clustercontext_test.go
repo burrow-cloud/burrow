@@ -118,16 +118,18 @@ func TestEnvAddKeepsItsThreeStepsOnOneCluster(t *testing.T) {
 	}
 }
 
-// TestLifecycleCommandsTakeAContextFlag. `cluster upgrade` and the three `cluster ... install`
-// provisioners had no --context at all, so there was no per-invocation way to point them at anything
-// but the kubeconfig's current context. `config registry` is in the list because it had the same
-// gap, though it is not a lifecycle command — it follows the target, and the flag is its override.
+// TestLifecycleCommandsTakeAContextFlag. `cluster upgrade` and the `cluster ... install` provisioners
+// had no --context at all, so there was no per-invocation way to point them at anything but the
+// kubeconfig's current context. `config registry` is in the list because it had the same gap, though
+// it is not a lifecycle command — it follows the target, and the flag is its override. Every
+// provisioner added since is expected here too: the flag is the surface, not one command's feature.
 func TestLifecycleCommandsTakeAContextFlag(t *testing.T) {
 	for _, args := range [][]string{
 		{"cluster", "upgrade"},
 		{"cluster", "ingress", "install"},
 		{"cluster", "postgres", "install"},
 		{"cluster", "registry", "install"},
+		{"cluster", "metrics", "install"},
 		{"config", "registry", "list"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {

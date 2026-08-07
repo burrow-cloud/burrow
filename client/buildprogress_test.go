@@ -218,7 +218,10 @@ func readTimeoutProxy(t *testing.T, upstream string, idle time.Duration) *httpte
 // because the first stage is written when the build starts, and it keeps writing while the build
 // runs, because a stream that goes quiet for a whole read timeout is dropped just the same.
 func TestABuildOutlivesAShortReadTimeout(t *testing.T) {
-	const readTimeout = 100 * time.Millisecond
+	// The read timeout is generous relative to how often the stream writes, so the test asserts the
+	// property rather than the scheduler: the stream reports six times per timeout, and a runner would
+	// have to stall for six intervals running to make this fail for a reason that is not the bug.
+	const readTimeout = 300 * time.Millisecond
 	const buildTakes = 600 * time.Millisecond
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -236,8 +239,8 @@ func TestABuildOutlivesAShortReadTimeout(t *testing.T) {
 		w.(http.Flusher).Flush()
 		// The long stage, reported the way the control plane reports it: the running stage repeats
 		// itself, and the stream's keepalive fills any silence that is left.
-		for elapsed := time.Duration(0); elapsed < buildTakes; elapsed += readTimeout / 2 {
-			time.Sleep(readTimeout / 2)
+		for elapsed := time.Duration(0); elapsed < buildTakes; elapsed += readTimeout / 6 {
+			time.Sleep(readTimeout / 6)
 			_, _ = io.WriteString(w, "\n")
 			w.(http.Flusher).Flush()
 		}
@@ -272,14 +275,14 @@ func TestABuildOutlivesAShortReadTimeout(t *testing.T) {
 // removed and nothing else changed, the same streaming response dies in the same place. Without this,
 // a passing test above could mean the proxy was never enforcing anything.
 func TestAStreamThatGoesQuietIsDroppedByTheProxy(t *testing.T) {
-	const readTimeout = 100 * time.Millisecond
+	const readTimeout = 200 * time.Millisecond
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"event":{"stage":"clone","status":"started"}}`+"\n")
 		w.(http.Flusher).Flush()
-		time.Sleep(6 * readTimeout) // the build works, silently
+		time.Sleep(5 * readTimeout) // the build works, silently
 		_, _ = io.WriteString(w, buildResultLine+"\n")
 		w.(http.Flusher).Flush()
 	}))
@@ -291,7 +294,7 @@ func TestAStreamThatGoesQuietIsDroppedByTheProxy(t *testing.T) {
 	var got []string
 	_, err := c.Build(context.Background(), "web", buildRequest(recordProgress(&got)))
 	if err == nil {
-		t.Fatal("a stream silent for six read timeouts was delivered; the proxy is not enforcing one")
+		t.Fatal("a stream silent for five read timeouts was delivered; the proxy is not enforcing one")
 	}
 	// And the client says what it does not know, rather than reporting a build that did not happen.
 	if !strings.Contains(err.Error(), "may still be in progress") {

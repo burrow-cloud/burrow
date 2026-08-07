@@ -905,6 +905,12 @@ They do not expire and there is no refresh: these credentials are **revoked**, n
 about this runs for a Kubernetes target — choosing `Other` needs no account and makes no request to
 the managed product.
 
+The managed product is **named** `burrow-cloud.dev` and **addressed** at
+`console.burrow-cloud.dev`. The name is what the target and the two credential files above are keyed
+to; the console is where the control plane answers, so it is the host the sign-in, every application
+command, and the credential list at `https://console.burrow-cloud.dev/settings` go to. The apex
+serves the website.
+
 With a Burrow Cloud target active, the **application commands act through it**: `burrow app list`,
 `deploy`, `status`, `logs`, `config`, `secret`, `scale`, `rollback` and their `burrow-agent` siblings
 call the managed control plane over HTTPS, authenticated by the credential sign-in stored. There is

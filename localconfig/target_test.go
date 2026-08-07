@@ -159,6 +159,28 @@ func TestCloudTargetDescribes(t *testing.T) {
 	}
 }
 
+// TestCloudIdentityAndAPIHostAreDistinct pins both halves of the split. The identity is what a
+// recorded target and a credential filename are keyed to and must never move; the API host is the
+// console, because the apex serves the marketing website and answers every API path with a 404. The
+// literals are written out rather than derived, so redefining either constant fails here rather than
+// quietly agreeing with itself.
+func TestCloudIdentityAndAPIHostAreDistinct(t *testing.T) {
+	if CloudEndpoint != "burrow-cloud.dev" {
+		t.Errorf("CloudEndpoint = %q — changing the identity strands every credential and target already on disk", CloudEndpoint)
+	}
+	if CloudAPIEndpoint != "console.burrow-cloud.dev" {
+		t.Errorf("CloudAPIEndpoint = %q, want the console the control plane answers on", CloudAPIEndpoint)
+	}
+	if CloudAPIEndpoint == CloudEndpoint {
+		t.Error("the API host is the apex, which serves the marketing site")
+	}
+	// A target still records the identity: that is the name it carries and the endpoint it stores.
+	tgt := CloudTarget()
+	if tgt.Name != CloudEndpoint || tgt.Endpoint != CloudEndpoint {
+		t.Errorf("CloudTarget() = %+v, want both name and endpoint to be %s", tgt, CloudEndpoint)
+	}
+}
+
 // TestTargetWithoutInstallIDLoads is the compatibility property of ADR-0084 §5: every target already
 // on disk carries no install id, and one written by `burrow auth login` carries none either, because
 // that command contacts no cluster. Requiring one would turn every existing config into a load

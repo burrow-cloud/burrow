@@ -60,6 +60,20 @@ func pointCloudAt(t *testing.T, url string) {
 	t.Cleanup(func() { cloudBaseURL = orig })
 }
 
+// TestAgentCallsGoToTheConsoleAndNotTheApex holds the same line as the CLI's own test. The target
+// this binary resolves records the product's IDENTITY (`burrow-cloud.dev`), and the origin it calls
+// has to be the console: the apex serves the marketing website and answers every API path with a
+// 404. The host is written out rather than derived, so redefining the constant fails here.
+func TestAgentCallsGoToTheConsoleAndNotTheApex(t *testing.T) {
+	const want = "https://console.burrow-cloud.dev"
+	if defaultCloudBaseURL != want {
+		t.Errorf("cloud base URL = %q, want %q", defaultCloudBaseURL, want)
+	}
+	if defaultCloudBaseURL == "https://"+localconfig.CloudEndpoint {
+		t.Error("the agent calls the apex, which serves the marketing site")
+	}
+}
+
 // TestAgentSpendsItsOwnCredentialAndNeverThePersons is why sign-in issues two credentials at all
 // (cloud ADR-0028 §2): revoking the agent's must stop the agent without signing the person's
 // terminal out, and revoking the person's must not disarm the agent. That only holds if this binary

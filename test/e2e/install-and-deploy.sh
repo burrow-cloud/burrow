@@ -300,7 +300,9 @@ echo "--- env unset removed the variable from the store ---"
 #   4. `secret unset` removes the key from the Secret.
 # =============================================================================
 echo "=== secret: set a secret on the running app (via burrowd, rolls the Deployment) ==="
-"$BURROW" app secret set web APP_SECRET=s3cr3t --kubeconfig "$KCFG"
+# The value is piped in rather than passed as an argument: it has no argv form at all (issue #425),
+# because an argument lands in shell history and in the process table. This is the scripted path.
+printf '%s' 's3cr3t' | "$BURROW" app secret set web APP_SECRET --stdin --kubeconfig "$KCFG"
 
 echo "=== secret: assert the value landed in the per-app Kubernetes Secret ==="
 # The value lives ONLY in burrow-app-web-secrets in the app namespace — burrowd received it over

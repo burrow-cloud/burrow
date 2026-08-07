@@ -170,15 +170,13 @@ type deployProgress func(DeployEvent)
 // build that requested it, including rollback and the auto-deploy watcher.
 func noProgress(DeployEvent) {}
 
-// started, done and failed are the three things any emit site says, named so the call sites read as
-// the work they bracket. progressing is the fourth, said only by a stage that outlasts a proxy's
-// read timeout (issue #503) and only beside a poll the stage was already making.
+// started, done and failed are the three things any emit site in this package says, named so the call
+// sites read as the work they bracket. DeployProgressing has no helper here because no stage this
+// package runs is long enough to repeat itself: it is said by the in-cluster build's wait loop, which
+// lives behind the Builder seam and reports through the caller's own reporter.
 func (p deployProgress) started(stage string) { p(DeployEvent{Stage: stage, Status: DeployStarted}) }
 func (p deployProgress) done(stage string)    { p(DeployEvent{Stage: stage, Status: DeployDone}) }
 func (p deployProgress) failed(stage string)  { p(DeployEvent{Stage: stage, Status: DeployFailed}) }
-func (p deployProgress) progressing(stage string) {
-	p(DeployEvent{Stage: stage, Status: DeployProgressing})
-}
 
 // finish closes a stage with done or failed, for a site whose outcome is a boolean.
 func (p deployProgress) finish(stage string, ok bool) {

@@ -271,6 +271,14 @@ func newBuildCmd() *cobra.Command {
 					Source:      client.SourceRef{Repo: repo, Ref: ref},
 					TargetImage: image,
 					Confirm:     confirm,
+					// The reporter DISCARDS every stage, and asking for it anyway is the point (issue
+					// #503). An agent composes one JSON outcome envelope and has no use for a stream of
+					// ticks — which is why `burrow-agent deploy` asks for none — but a build runs for
+					// minutes, and a request that carries no bytes for minutes is killed by any proxy in
+					// front of the control plane long before the build finishes. Asking for the stream is
+					// what keeps the response alive; ignoring its contents is what keeps the output one
+					// document.
+					Progress: func(client.DeployProgress) {},
 				})
 			})
 		},

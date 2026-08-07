@@ -56,6 +56,7 @@ func (s *server) buildStream(w http.ResponseWriter, r *http.Request, req control
 		s.buildPlain(w, r, req)
 		return
 	}
+	defer stream.close()
 	req.Progress = stream.progress
 	res, err := s.engine.Build(r.Context(), req)
 	if err != nil {

@@ -778,7 +778,9 @@ func (c *Client) streaming(ctx context.Context, path string, req any, progress f
 				ServerVersion:     line.Error.ServerVersion,
 				ServerInstallID:   line.Error.ServerInstallID,
 			}
-		case len(line.Result) > 0:
+		case len(line.Result) > 0 && !bytes.Equal(line.Result, jsonNull):
+			// A literal null is not a result. Unmarshalling it would leave out untouched and return
+			// success carrying a zero value, which is the one outcome worse than an error here.
 			if err := json.Unmarshal(line.Result, out); err != nil {
 				return fmt.Errorf("decoding the result: %w", err)
 			}
@@ -792,8 +794,11 @@ func (c *Client) streaming(ctx context.Context, path string, req any, progress f
 	return fmt.Errorf("the control plane closed the progress stream without reporting an outcome; the operation may still be in progress — check the app's status before retrying")
 }
 
-// ndjsonMediaType is the content type of the deploy progress stream: one JSON object per line.
+// ndjsonMediaType is the content type of the progress stream: one JSON object per line.
 const ndjsonMediaType = "application/x-ndjson"
+
+// jsonNull is the encoding of a null result, which is not a result. See streaming.
+var jsonNull = []byte("null")
 
 // isNDJSON reports whether a response's Content-Type is the progress stream, ignoring any parameters
 // (a charset, say) the server chose to add.

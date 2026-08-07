@@ -5,9 +5,12 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"mime"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/burrow-cloud/burrow/controlplane"
 )
@@ -70,15 +73,29 @@ func wantsProgressStream(r *http.Request) bool {
 	return false
 }
 
+// streamKeepalive is how long an open stream may stay silent before it writes something to prove the
+// connection is alive. It is chosen against the timeout it exists to survive: ingress-nginx's default
+// proxy read timeout is 60 seconds, measured between two successive reads.
+const streamKeepalive = 20 * time.Second
+
 // progressStream is the ndjson writer both streaming operations share: the lazily-written header, one
-// flushed line per event, and the single terminal line. There is exactly ONE of these because there
-// is exactly one framing — a deploy and a build differ in the work they do and the result they carry,
-// not in how either is put on the wire.
+// flushed line per event, the keepalive, and the single terminal line. There is exactly ONE of these
+// because there is exactly one framing — a deploy and a build differ in the work they do and the
+// result they carry, not in how either is put on the wire.
 type progressStream struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
 	enc     *json.Encoder
-	open    bool
+	// interval is how long this stream may stay silent, held per stream rather than read from the
+	// package so a test can shorten it without a mutable global. It is set before the first write and
+	// never changed after.
+	interval time.Duration
+	// mu guards the writer. The engine reports on the serving goroutine, but the keepalive ticks on
+	// its own, so the two must not write at once.
+	mu     sync.Mutex
+	open   bool
+	closed bool
+	done   chan struct{}
 }
 
 // newProgressStream returns a stream over w, or ok=false when w cannot flush — the caller then serves
@@ -86,20 +103,22 @@ type progressStream struct {
 // gets its answer at the end instead of the stages as they happen. Every writer on the real serving
 // path flushes — the API-server service proxy this travels through streams fine, and no middleware on
 // a matched /v1 route wraps the writer.
+//
+// The caller MUST close the returned stream before its handler returns: writing to a ResponseWriter
+// after that is not allowed, and the keepalive is what would do it.
 func newProgressStream(w http.ResponseWriter) (*progressStream, bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return nil, false
 	}
-	return &progressStream{w: w, flusher: flusher, enc: json.NewEncoder(w)}, true
+	return &progressStream{w: w, flusher: flusher, enc: json.NewEncoder(w), interval: streamKeepalive, done: make(chan struct{})}, true
 }
 
 // write emits one line, writing the response header first if this is the first. Until that happens
 // the handler can still answer with an ordinary status-coded error.
-//
-// The engine calls the reporter synchronously on the serving goroutine, in stage order, so there is
-// no concurrent writer to guard against.
 func (s *progressStream) write(line streamLine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.open {
 		s.open = true
 		s.w.Header().Set("Content-Type", ndjsonMediaType)
@@ -107,9 +126,56 @@ func (s *progressStream) write(line streamLine) {
 		// otherwise part-way through.
 		s.w.Header().Set("X-Content-Type-Options", "nosniff")
 		s.w.WriteHeader(http.StatusOK)
+		// The response is committed, so from here the connection has to be kept alive until the
+		// operation ends.
+		go s.keepalive()
 	}
 	_ = s.enc.Encode(line)
 	s.flusher.Flush()
+}
+
+// keepalive writes a bare newline whenever the stream has gone quiet, so a stage with nothing to
+// report cannot outlive the connection carrying its result.
+//
+// IT IS WHITESPACE, DELIBERATELY, and that is what makes it safe to add to a wire format clients are
+// already reading: ndjson is a sequence of JSON values, a decoder skips the whitespace between them,
+// and a client that predates this cannot tell a keepalive from the line ending it already ignores.
+// An empty object would have been a fourth line shape every reader had to learn.
+//
+// It exists because REPORTING CANNOT COVER EVERY WAIT. A build's stages come from a loop that polls
+// and can therefore repeat itself; the rollout settle a deploy waits on is a single call into the
+// cluster seam, bounded by `deploy.settle_timeout` and capable of running for minutes with nothing to
+// say — and after an in-cluster build it is precisely where the node pulls the large image just
+// built. A transport-level keepalive covers that, and every future stage, without every wait in the
+// engine having to learn about proxies.
+func (s *progressStream) keepalive() {
+	ticker := time.NewTicker(s.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			if !s.closed {
+				_, _ = io.WriteString(s.w, "\n")
+				s.flusher.Flush()
+			}
+			s.mu.Unlock()
+		}
+	}
+}
+
+// close stops the keepalive and forbids any further write. It must be called before the handler
+// returns, and returning under the lock is what guarantees no keepalive is mid-write when it does.
+func (s *progressStream) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.done)
 }
 
 // progress is the reporter handed to the engine.
@@ -137,6 +203,7 @@ func (s *server) deployStream(w http.ResponseWriter, r *http.Request, req contro
 		s.deployPlain(w, r, req)
 		return
 	}
+	defer stream.close()
 	req.Progress = stream.progress
 	res, err := s.engine.Deploy(r.Context(), req)
 	if err != nil {

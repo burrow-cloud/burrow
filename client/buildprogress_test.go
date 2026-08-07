@@ -9,8 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -145,17 +143,83 @@ func TestAHeldBuildIsAnAPIErrorWithProgressSet(t *testing.T) {
 	}
 }
 
+// readTimeoutProxy is a reverse proxy that gives up when the upstream goes quiet, which is what a
+// real one does and what makes issue #503 a bug rather than an inconvenience: nginx's
+// proxy_read_timeout is measured BETWEEN TWO SUCCESSIVE READS, not over the whole response. So it
+// enforces the deadline twice — on the wait for the response header, and on every wait for the next
+// body bytes — and abandons the response mid-flight when either elapses, exactly as a proxy does.
+func readTimeoutProxy(t *testing.T, upstream string, idle time.Duration) *httptest.Server {
+	t.Helper()
+	transport := &http.Transport{ResponseHeaderTimeout: idle}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, upstream+r.URL.Path, r.Body)
+		if err != nil {
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			return
+		}
+		req.Header = r.Header.Clone()
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			http.Error(w, "Gateway Time-out", http.StatusGatewayTimeout)
+			return
+		}
+		defer resp.Body.Close()
+		for k, v := range resp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		w.(http.Flusher).Flush()
+
+		type read struct {
+			b   []byte
+			err error
+		}
+		reads := make(chan read)
+		go func() {
+			defer close(reads)
+			buf := make([]byte, 4096)
+			for {
+				n, err := resp.Body.Read(buf)
+				reads <- read{b: append([]byte(nil), buf[:n]...), err: err}
+				if err != nil {
+					return
+				}
+			}
+		}()
+		for {
+			select {
+			case got, ok := <-reads:
+				if !ok {
+					return
+				}
+				_, _ = w.Write(got.b)
+				w.(http.Flusher).Flush()
+				if got.err != nil {
+					return
+				}
+			case <-time.After(idle):
+				// The upstream said nothing for a whole read timeout. The proxy drops the response
+				// where it stands, which is what leaves the caller with a truncated body.
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // TestABuildOutlivesAShortReadTimeout is the bug, reproduced and fixed in one test. A build is put
 // behind a proxy whose read timeout is far shorter than the build takes — which is every real
 // install, since a build routinely runs for minutes and 60 seconds is ingress-nginx's default.
 //
 // The silent build is what issue #503 hit against a live cluster: the response begins only when the
 // build is over, the proxy gives up long before that, and the caller learns nothing even though the
-// build succeeded. The streaming build answers immediately and finishes normally, because the first
-// stage is written when the build STARTS.
+// build succeeded. The streaming build survives BOTH halves of the timeout — it answers immediately,
+// because the first stage is written when the build starts, and it keeps writing while the build
+// runs, because a stream that goes quiet for a whole read timeout is dropped just the same.
 func TestABuildOutlivesAShortReadTimeout(t *testing.T) {
-	const readTimeout = 50 * time.Millisecond
-	const buildTakes = 500 * time.Millisecond
+	const readTimeout = 100 * time.Millisecond
+	const buildTakes = 600 * time.Millisecond
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.Header.Get("Accept"), "x-ndjson") {
@@ -170,26 +234,19 @@ func TestABuildOutlivesAShortReadTimeout(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"event":{"stage":"clone","status":"started"}}`+"\n")
 		w.(http.Flusher).Flush()
-		time.Sleep(buildTakes)
+		// The long stage, reported the way the control plane reports it: the running stage repeats
+		// itself, and the stream's keepalive fills any silence that is left.
+		for elapsed := time.Duration(0); elapsed < buildTakes; elapsed += readTimeout / 2 {
+			time.Sleep(readTimeout / 2)
+			_, _ = io.WriteString(w, "\n")
+			w.(http.Flusher).Flush()
+		}
 		_, _ = io.WriteString(w, buildResultLine+"\n")
 		w.(http.Flusher).Flush()
 	}))
 	defer backend.Close()
 
-	// A proxy in front of the control plane, with a read timeout an order of magnitude shorter than
-	// the build.
-	target, err := url.Parse(backend.URL)
-	if err != nil {
-		t.Fatalf("parsing the backend URL: %v", err)
-	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = &http.Transport{ResponseHeaderTimeout: readTimeout}
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		http.Error(w, "Gateway Time-out", http.StatusGatewayTimeout)
-	}
-	front := httptest.NewServer(proxy)
-	defer front.Close()
-
+	front := readTimeoutProxy(t, backend.URL, readTimeout)
 	c := client.NewClient(front.URL, "tok")
 
 	// Without progress the caller never hears the answer, however well the build goes.
@@ -208,5 +265,36 @@ func TestABuildOutlivesAShortReadTimeout(t *testing.T) {
 	}
 	if len(got) == 0 {
 		t.Error("the build reported no stages")
+	}
+}
+
+// TestAStreamThatGoesQuietIsDroppedByTheProxy is the control for the test above: with the keepalive
+// removed and nothing else changed, the same streaming response dies in the same place. Without this,
+// a passing test above could mean the proxy was never enforcing anything.
+func TestAStreamThatGoesQuietIsDroppedByTheProxy(t *testing.T) {
+	const readTimeout = 100 * time.Millisecond
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"event":{"stage":"clone","status":"started"}}`+"\n")
+		w.(http.Flusher).Flush()
+		time.Sleep(6 * readTimeout) // the build works, silently
+		_, _ = io.WriteString(w, buildResultLine+"\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer backend.Close()
+
+	front := readTimeoutProxy(t, backend.URL, readTimeout)
+	c := client.NewClient(front.URL, "tok")
+
+	var got []string
+	_, err := c.Build(context.Background(), "web", buildRequest(recordProgress(&got)))
+	if err == nil {
+		t.Fatal("a stream silent for six read timeouts was delivered; the proxy is not enforcing one")
+	}
+	// And the client says what it does not know, rather than reporting a build that did not happen.
+	if !strings.Contains(err.Error(), "may still be in progress") {
+		t.Errorf("err = %v, want it to say the operation may still be running", err)
 	}
 }

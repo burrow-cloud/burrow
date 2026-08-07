@@ -122,21 +122,27 @@ func (b *Builder) BuildWithProgress(_ context.Context, source controlplane.Sourc
 }
 
 // build is what both entry points do: record the call and walk the stages, reporting each to event.
+//
+// THE LOCK IS RELEASED BEFORE ANY EVENT IS REPORTED. The reporter is the caller's own code, and a
+// reporter that reads back what the builder recorded — which is exactly what a test asserting the
+// call would do — would deadlock on a mutex still held over the callback.
 func (b *Builder) build(source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, event func(stage, status string)) (string, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.calls++
 	b.lastSource = source
 	b.lastTarget = targetImage
 	b.lastInsecure = insecure
 	b.lastCred = cred
+	digest, err := b.digest, b.err
+	b.mu.Unlock()
+
 	event(controlplane.StageClone, controlplane.DeployStarted)
 	event(controlplane.StageClone, controlplane.DeployDone)
 	event(controlplane.StageBuild, controlplane.DeployStarted)
-	if b.err != nil {
+	if err != nil {
 		event(controlplane.StageBuild, controlplane.DeployFailed)
-		return "", b.err
+		return "", err
 	}
 	event(controlplane.StageBuild, controlplane.DeployDone)
-	return b.digest, nil
+	return digest, nil
 }

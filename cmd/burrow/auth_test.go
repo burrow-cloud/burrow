@@ -389,8 +389,13 @@ func TestAuthStatusStillReportsEverything(t *testing.T) {
 	}
 	got := out.String()
 	want := []string{
-		"No target is configured",
-		"burrow auth login",
+		// The handle's cluster is a target, derived from the handle because an environment is an
+		// environment UNDER a target and a handle with none above it is a config that does not hold
+		// together (cloud#201). Nothing is SELECTED by that, so status still says commands follow the
+		// kubeconfig — what changes is that there is now something `burrow auth switch` can reach.
+		"do-nyc1-burrow-test-e2e",
+		"No target is active",
+		"burrow auth switch",
 		`Commands target the "prod" environment`,
 		"kube context",
 		"do-nyc1-burrow-test-e2e",

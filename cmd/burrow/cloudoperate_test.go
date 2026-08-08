@@ -329,3 +329,67 @@ func assertNoToken(t *testing.T, streams ...string) {
 		}
 	}
 }
+
+// TestEmptyAppListNamesTheTargetItIsEmptyOn is the smallest part of
+// [cloud#201](https://github.com/burrow-cloud/cloud/issues/201) and the one the maintainer actually
+// read on screen. "No apps deployed." is a true sentence about the target the command reached and a
+// false one about everything the person has: after signing in to the managed product, it replaced a
+// listing of their own cluster's apps and said nothing about having changed clusters, which reads as
+// data loss rather than as a different place.
+func TestEmptyAppListNamesTheTargetItIsEmptyOn(t *testing.T) {
+	signedInToCloud(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"apps":[]}`))
+	}))
+	defer srv.Close()
+	pointCloudAt(t, srv.URL)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"app", "list"}, &out, &errb); err != nil {
+		t.Fatalf("burrow app list: %v\nstderr: %s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), localconfig.CloudEndpoint) {
+		t.Errorf("empty listing = %q, want it to name the target it is empty on", out.String())
+	}
+	if !strings.Contains(out.String(), "burrow app deploy") {
+		t.Errorf("empty listing = %q, want the deploy hint kept", out.String())
+	}
+}
+
+// TestEmptyAppListNamesAClusterTargetToo: the same sentence, on the other kind of target, in the
+// vocabulary the rest of the CLI uses for it — the environment handle's name, not a kube context.
+func TestEmptyAppListNamesAClusterTargetToo(t *testing.T) {
+	tempConfig(t)
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	forbidCloud(t)
+
+	var clusterHit bool
+	cluster := fakeBurrowdCluster(&clusterHit)
+	defer cluster.Close()
+	kubeconfig := writeKubeconfig(t, twoContextConfig(cluster.URL, cluster.URL))
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if err := cfg.Add(localconfig.Environment{Name: "prod", Context: "staging"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.KubernetesTarget("staging")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"app", "list", "--kubeconfig", kubeconfig}, &out, &errb); err != nil {
+		t.Fatalf("burrow app list: %v\nstderr: %s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "No apps deployed on staging") {
+		t.Errorf("empty listing = %q, want it to name the target it is empty on", out.String())
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 // latestReleaseURL is the unauthenticated GitHub API endpoint that returns this repository's
@@ -267,40 +268,55 @@ func newVersionCmd() *cobra.Command {
 			agentPath, agentVer, agentErr := probeAgentVersion(cmd.Context())
 			fmt.Fprintf(tw, "burrow-agent:\t%s\n", agentValue(agentPath, agentVer, agentErr))
 
-			// The cluster read is the one the active target names, like every other command that
-			// reaches a cluster (ADR-0084 §4), resolved by the same function they use so the
-			// precedence cannot drift into a second version of itself here.
-			//
-			// Its errors are swallowed rather than returned, which is the one thing this command does
-			// differently and is deliberate: `burrow version` is what a person runs when something is
-			// already wrong, and a target whose context has been renamed away is exactly such a
-			// moment. Refusing to print the CLI's own version over it would be useless. It degrades
-			// to the kubeconfig and names the context it used either way.
-			kubeContext, ctxErr := (&commonOpts{kubeconfig: kubeconfig, context: kubeContextFlag}).clusterContext(cmd.ErrOrStderr())
-			if ctxErr != nil {
-				kubeContext = kubeContextFlag
-			}
-
-			// Name the targeted context so the control-plane line is legible in both the success and
-			// failure cases. Best effort: a missing or unreadable kubeconfig leaves it empty, which
-			// the failure path below still reports cleanly.
-			ctxName, _ := connect.TargetContextName(kubeconfig, kubeContext)
-
-			ctx, cancel := context.WithTimeout(cmd.Context(), connect.ProbeTimeout)
-			defer cancel()
-
 			// cpVer is the control plane's release version, read from the burrowd image tag on a
-			// successful probe and left empty otherwise (not installed or unreachable). It feeds the
-			// latest-release comparison below.
+			// successful probe and left empty otherwise (not installed, unreachable, or not a cluster
+			// at all). It feeds the latest-release comparison below.
 			var cpVer string
-			cs, err := clientsetForContext(kubeconfig, kubeContext)
-			if err != nil {
-				fmt.Fprintf(tw, "control plane:\t%s\n", controlPlaneValue("", err, ctxName, namespace))
-			} else if img, imgErr := burrowdImage(ctx, cs, namespace); imgErr != nil {
-				fmt.Fprintf(tw, "control plane:\t%s\n", controlPlaneValue(img, imgErr, ctxName, namespace))
+
+			// The managed product is answered here and no cluster is read for it. It owns no cluster,
+			// so there is nothing a kubeconfig could be asked; before this branch existed the read
+			// fell through to whatever context kubectl pointed at and reported on it, which is a fact
+			// about a cluster the reader never named presented as the answer to their question
+			// (cloud#209). An explicit --context is still a person naming a cluster for this one
+			// invocation and still wins, exactly as it does everywhere else (ADR-0078 §4).
+			cloud, onCloud := localconfig.Target{}, false
+			if kubeContextFlag == "" {
+				cloud, onCloud = selectedCloudTarget()
+			}
+			if onCloud {
+				fmt.Fprintf(tw, "control plane:\t%s\n", cloudControlPlaneValue(cloud))
 			} else {
-				fmt.Fprintf(tw, "control plane:\t%s\n", controlPlaneValue(img, nil, ctxName, namespace))
-				cpVer = imageTag(img)
+				// The cluster read is the one the active target names, like every other command that
+				// reaches a cluster (ADR-0084 §4), resolved by the same function they use so the
+				// precedence cannot drift into a second version of itself here.
+				//
+				// Its errors are swallowed rather than returned, which is the one thing this command
+				// does differently and is deliberate: `burrow version` is what a person runs when
+				// something is already wrong, and a target whose context has been renamed away is
+				// exactly such a moment. Refusing to print the CLI's own version over it would be
+				// useless. It degrades to the kubeconfig and names the context it used either way.
+				kubeContext, ctxErr := (&commonOpts{kubeconfig: kubeconfig, context: kubeContextFlag}).clusterContext(cmd.ErrOrStderr())
+				if ctxErr != nil {
+					kubeContext = kubeContextFlag
+				}
+
+				// Name the targeted context so the control-plane line is legible in both the success
+				// and failure cases. Best effort: a missing or unreadable kubeconfig leaves it empty,
+				// which the failure path below still reports cleanly.
+				ctxName, _ := connect.TargetContextName(kubeconfig, kubeContext)
+
+				ctx, cancel := context.WithTimeout(cmd.Context(), connect.ProbeTimeout)
+				defer cancel()
+
+				cs, err := clientsetForContext(kubeconfig, kubeContext)
+				if err != nil {
+					fmt.Fprintf(tw, "control plane:\t%s\n", controlPlaneValue("", err, ctxName, namespace))
+				} else if img, imgErr := burrowdImage(ctx, cs, namespace); imgErr != nil {
+					fmt.Fprintf(tw, "control plane:\t%s\n", controlPlaneValue(img, imgErr, ctxName, namespace))
+				} else {
+					fmt.Fprintf(tw, "control plane:\t%s\n", controlPlaneValue(img, nil, ctxName, namespace))
+					cpVer = imageTag(img)
+				}
 			}
 
 			// Best effort: compare against the latest published release and flag an outdated CLI or
@@ -329,6 +345,22 @@ func newVersionCmd() *cobra.Command {
 	cmd.Flags().StringVar(&kubeContextFlag, "context", "", "kubeconfig context to target (default: the active target, else the current context)")
 	cmd.Flags().StringVar(&namespace, "namespace", connect.DefaultNamespace, "namespace the control plane is installed in")
 	return cmd
+}
+
+// cloudControlPlaneValue renders the "control plane" line for a Burrow Cloud target.
+//
+// It says the line does not apply and names the target it does not apply to, rather than being
+// omitted. Which of those to do is a product call and not a plumbing one, and this is the cheaper
+// mistake of the two: a reader who finds the line missing cannot tell whether Burrow decided it was
+// irrelevant or failed to read it, whereas a reader who finds it stated has been told which target
+// they are on — the very fact that was wrong before (cloud#209) — and can be given a version instead
+// the moment the managed product exposes one.
+//
+// What it must never do is report a number. The managed product's control plane is the operator's
+// and is upgraded by the operator; a tenant has nothing to do about its version, and no route serves
+// it. Printing the tenant's nearest cluster there was the bug.
+func cloudControlPlaneValue(t localconfig.Target) string {
+	return fmt.Sprintf("not applicable: %s runs its own, upgraded for you", t.Describe())
 }
 
 // controlPlaneValue renders the value cell of the "control plane" line from a probe result: the

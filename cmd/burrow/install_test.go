@@ -1013,10 +1013,15 @@ func TestInstallRecordsTheInstallIDOnTheTarget(t *testing.T) {
 	}
 }
 
-// TestInstallWithoutATargetRecordsNothing confirms installing without having run `burrow auth login`
-// first is an ordinary success: there is nowhere to record the id, so nothing is recorded and nothing
-// complains. The id is on the cluster either way, and a target pointed here later picks it up.
-func TestInstallWithoutATargetRecordsNothing(t *testing.T) {
+// TestInstallWithoutATargetRegistersOne confirms the property cloud#201 turns on: installing without
+// having run `burrow auth login` first leaves a target behind. That is what a target IS — a cluster
+// running Burrow and how to reach it — and until an install wrote one, a self-hosted person had none
+// at all, so signing in to the managed product later gave them a single target and nothing to switch
+// back to.
+//
+// It registers WITHOUT selecting. Nothing here says the person wants their next command to go to this
+// cluster, and re-pointing them would be the same silent redirection in reverse.
+func TestInstallWithoutATargetRegistersOne(t *testing.T) {
 	stubInstall(t, twoContexts(), nil)
 
 	var out, errb bytes.Buffer
@@ -1027,11 +1032,115 @@ func TestInstallWithoutATargetRecordsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading config: %v", err)
 	}
-	if len(cfg.Targets) != 0 {
-		t.Errorf("install registered a target it was not asked for: %+v", cfg.Targets)
+	tgt, ok := cfg.LookupTarget("prod")
+	if !ok {
+		t.Fatalf("install registered no target for the cluster it installed into: %+v", cfg.Targets)
+	}
+	if tgt.Kind != localconfig.TargetKindKubernetes || tgt.Context != "prod" {
+		t.Errorf("registered target = %+v, want a kubernetes target on the installed context", tgt)
+	}
+	if cfg.CurrentTarget != "" {
+		t.Errorf("current target = %q; installing registers a target, it does not select one", cfg.CurrentTarget)
+	}
+	// With nothing selected, commands resolve through the environment handle the install just pinned,
+	// which is this cluster — so there is no divergence and nothing to say about targets.
+	if strings.Contains(out.String(), "burrow auth switch") {
+		t.Errorf("install raised a target distinction that has no consequence yet:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), "install id") {
-		t.Errorf("install talked about install ids with no target to record one on:\n%s", out.String())
+		t.Errorf("install talked about install ids, which are machinery nobody reads:\n%s", out.String())
+	}
+}
+
+// TestInstallLeavesADifferentActiveTargetAlone is the other half, and the one the maintainer hit from
+// the far side: somebody signed in to the managed product installs Burrow into a cluster of their
+// own. The install must not quietly re-point them — but it must say that it has not, because "every
+// command still goes to the managed product" is precisely the fact that was invisible (cloud#201).
+func TestInstallLeavesADifferentActiveTargetAlone(t *testing.T) {
+	stubInstall(t, twoContexts(), nil)
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.CloudTarget()); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"install", "prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("install prod: %v\n%s", err, errb.String())
+	}
+
+	cfg, err = localconfig.Load()
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	if cfg.CurrentTarget != localconfig.CloudEndpoint {
+		t.Errorf("current target = %q, want the install to have left the selection alone", cfg.CurrentTarget)
+	}
+	if _, ok := cfg.LookupTarget("prod"); !ok {
+		t.Fatalf("install registered no target for the cluster it installed into: %+v", cfg.Targets)
+	}
+	for _, want := range []string{localconfig.CloudEndpoint, "burrow auth switch prod"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("install did not say commands still go elsewhere (missing %q):\n%s", want, out.String())
+		}
+	}
+}
+
+// TestSignInAndInstallCanSwitchBothWays is cloud#201's acceptance, end to end and in the order the
+// maintainer hit it: a cluster of your own, then a sign-in to the managed product, and a way back
+// that `burrow auth switch` actually lists.
+func TestSignInAndInstallCanSwitchBothWays(t *testing.T) {
+	stubInstall(t, twoContexts(), nil)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"install", "prod", "--burrowd-image", "img:1", "--wait=false"}, &out, &errb); err != nil {
+		t.Fatalf("install prod: %v\n%s", err, errb.String())
+	}
+
+	// Signing in to the managed product, as `burrow auth login --cloud` records it.
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.CloudTarget()); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	// `burrow auth switch` with no name lists what can be reached, and the cluster is in it.
+	out.Reset()
+	errb.Reset()
+	if err := run(context.Background(), []string{"auth", "switch"}, &out, &errb); err != nil {
+		t.Fatalf("auth switch: %v\n%s", err, errb.String())
+	}
+	for _, want := range []string{"prod", localconfig.CloudEndpoint} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("`auth switch` does not list %q, so there is no way back:\n%s", want, out.String())
+		}
+	}
+
+	// And switching back really moves the selection, both ways.
+	for _, name := range []string{"prod", localconfig.CloudEndpoint} {
+		out.Reset()
+		errb.Reset()
+		if err := run(context.Background(), []string{"auth", "switch", name}, &out, &errb); err != nil {
+			t.Fatalf("auth switch %s: %v\n%s", name, err, errb.String())
+		}
+		cfg, err := localconfig.Load()
+		if err != nil {
+			t.Fatalf("loading config: %v", err)
+		}
+		if cfg.CurrentTarget != name {
+			t.Errorf("after `auth switch %s` the active target is %q", name, cfg.CurrentTarget)
+		}
 	}
 }
 

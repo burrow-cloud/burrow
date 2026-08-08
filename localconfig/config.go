@@ -157,6 +157,13 @@ func loadFrom(path string) (*Config, error) {
 	if err := cfg.validateTargets(); err != nil {
 		return nil, fmt.Errorf("localconfig: %s: %w", path, err)
 	}
+	// An environment is one of possibly several environments UNDER a target, so a handle with no
+	// target above it is a config that does not hold together. Deriving the missing target on load
+	// makes that state unrepresentable rather than leaving every reader to cope with it — which is
+	// what left a self-hosted person's own install invisible to `burrow auth status` and unreachable
+	// from `burrow auth switch` (cloud#201). Nothing is selected by it and nothing is written; see
+	// registerEnvironmentTargets.
+	cfg.registerEnvironmentTargets()
 	return cfg, nil
 }
 

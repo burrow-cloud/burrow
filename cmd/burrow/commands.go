@@ -38,7 +38,13 @@ func newAppListCmd() *cobra.Command {
 				return emit(out, true, apps, "")
 			}
 			if len(apps) == 0 {
-				fmt.Fprintln(out, "No apps deployed. Deploy one with `burrow app deploy <app> --image <ref>`.")
+				// Name where it is empty. "No apps deployed." is a true sentence about the target this
+				// command reached and reads as a statement about everything the person has — which is
+				// exactly how it read to somebody who had just signed in to the managed product and
+				// watched their cluster's apps disappear from a listing that never said it had changed
+				// clusters (cloud#201). The clause is the one the rest of the CLI uses for the same
+				// question, so an empty read and a deploy name the same place in the same words.
+				fmt.Fprintf(out, "No apps deployed %s. Deploy one with `burrow app deploy <app> --image <ref>`.\n", o.acted.Clause())
 				return nil
 			}
 			// Size the columns from the data through a tabwriter so a long image reference

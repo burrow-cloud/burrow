@@ -23,30 +23,25 @@ import "fmt"
 // did: through the kubeconfig's current context, chosen by whatever `kubectl config use-context` was
 // last run on.
 //
-// Target names the selected target and is empty when none is, Kind is that target's kind, and
-// Endpoint is set only for a Burrow Cloud target — which names no cluster at all, so its Context is
-// empty for a reason the caller has to decide what to do about.
+// Target names the selected target and is empty when none is, and Kind is that target's kind. There
+// is no Burrow Cloud case: the managed product names no cluster, so it is refused rather than
+// returned (see ResolveCluster).
 //
 // InstallID is the install the target was pointed at (ADR-0084 §5), sent on every request so a
 // control plane that turns out to be a different install refuses rather than acts. It travels with
 // the context because the two answer the halves of one question: the context is how the request gets
-// there, and the id is what says it arrived. It is empty when no target is selected, when the target
-// predates install ids, or when it is the managed product.
+// there, and the id is what says it arrived. It is empty when no target is selected or when the
+// target predates install ids.
 type Cluster struct {
 	Context   string
 	Target    string
 	Kind      TargetKind
-	Endpoint  string
 	InstallID string
 }
 
 // Selected reports whether a configured target decided this cluster. When it is false the caller is
 // in the pre-ADR-0078 world and follows the kubeconfig, which stays the default.
 func (c Cluster) Selected() bool { return c.Target != "" }
-
-// Cloud reports whether the selected target is the managed product. It names no cluster, so a caller
-// that can only act on one has to either refuse or say out loud which cluster it fell back to.
-func (c Cluster) Cloud() bool { return c.Kind == TargetKindCloud }
 
 // ResolveCluster decides which cluster a privileged command acts on, from the selected target alone.
 //
@@ -59,7 +54,18 @@ func (c Cluster) Cloud() bool { return c.Kind == TargetKindCloud }
 //     has gone stale is caught here — where the message can name the target and the context — rather
 //     than at connect time, where it surfaces as a kubeconfig error about a cluster the reader did
 //     not know they were reaching for.
-//   - A Burrow Cloud target. No context, and Cloud reports true. There is no cluster to name.
+//   - A Burrow Cloud target. An ERROR, and it has to be one.
+//
+// The last of those is the whole reason this function was worth changing. It used to hand back a
+// Cluster with an empty Context and no error, on the theory that the caller would notice Cloud() and
+// decide what to do. An empty Context is indistinguishable from "no target selected", which means
+// "follow the kubeconfig's current context" — so every caller that did not check fell through to
+// whatever cluster kubectl happened to point at, and reported on it as though it had been asked
+// about ([cloud#209](https://github.com/burrow-cloud/cloud/issues/209): `burrow version` printing
+// `not installed (context "staging")` at somebody signed in to the managed product). A resolution
+// with two meanings for one value cannot be made safe by asking callers to be careful; the value has
+// to stop having the second meaning. A caller that wants to say something specific about the managed
+// product asks the config about it directly, before it asks which cluster to act on.
 //
 // A pinned environment handle is not consulted in any of the three; see Cluster.
 func ResolveCluster(cfg *Config, kubeconfigPath string) (Cluster, error) {
@@ -72,7 +78,7 @@ func ResolveCluster(cfg *Config, kubeconfigPath string) (Cluster, error) {
 	}
 	switch target.Kind {
 	case TargetKindCloud:
-		return Cluster{Target: target.Name, Kind: target.Kind, Endpoint: target.Endpoint}, nil
+		return Cluster{}, errNeedsKubeconfig(target.Name, target.Endpoint)
 	case TargetKindKubernetes:
 	default:
 		return Cluster{}, fmt.Errorf(

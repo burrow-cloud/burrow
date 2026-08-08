@@ -125,6 +125,12 @@ func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Wri
 	if err != nil {
 		return err
 	}
+	// What this is about to REPLACE, read before it is replaced. Selecting a target re-points every
+	// subsequent command, and until now that happened in silence: somebody with a cluster of their
+	// own who signed in to the managed product watched `burrow app list` go from their apps to "No
+	// apps deployed", with nothing on screen connecting the two (cloud#201).
+	previous, hadPrevious, _ := cfg.ActiveTarget()
+
 	if err := cfg.SetTarget(target); err != nil {
 		return err
 	}
@@ -133,6 +139,10 @@ func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Wri
 	}
 	fmt.Fprintf(out, "\n%s Signed in to %s: %s.\n", okMark(out), target.Name, target.Describe())
 	fmt.Fprintln(out, "It is now your active target. See `burrow auth status`, or change it with `burrow auth switch <name>`.")
+	if hadPrevious && previous.Name != target.Name {
+		fmt.Fprintf(out, "\nYour commands were going to %s. Send them back there with:  burrow auth switch %s\n",
+			previous.Describe(), previous.Name)
+	}
 
 	// The moment a person's setup finishes is when they are asked about their agent. It never fails
 	// the login: the target is recorded above and stays recorded.

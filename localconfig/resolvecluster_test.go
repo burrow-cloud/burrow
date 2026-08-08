@@ -27,8 +27,8 @@ func TestResolveClusterFollowsTheSelectedTarget(t *testing.T) {
 	if !got.Selected() || got.Target != "do-nyc1-nonprod" {
 		t.Errorf("got %+v, want the selected target named", got)
 	}
-	if got.Cloud() {
-		t.Error("a Kubernetes target reported as the managed product")
+	if got.Kind != TargetKindKubernetes {
+		t.Errorf("kind = %q, want a Kubernetes target", got.Kind)
 	}
 }
 
@@ -82,28 +82,40 @@ func TestResolveClusterIgnoresAPinnedHandle(t *testing.T) {
 	}
 }
 
-// TestResolveClusterReportsTheManagedProduct. A Burrow Cloud target names no cluster at all, so it
-// resolves to no context and says which it is, leaving the caller to refuse or to say out loud which
-// cluster it fell back to.
-func TestResolveClusterReportsTheManagedProduct(t *testing.T) {
-	kubeconfig := writeKubeconfig(t)
+// TestResolveClusterRefusesTheManagedProduct is the fix for
+// [cloud#209](https://github.com/burrow-cloud/cloud/issues/209), and the reason it has to be a
+// refusal rather than a reported fact.
+//
+// A Burrow Cloud target names no cluster, so the honest context for it is the empty string — which is
+// also what "no target selected" resolves to, and that means "follow the kubeconfig's current
+// context". One value, two meanings, and every caller that did not think to check the second one
+// silently acted on, or reported about, whatever cluster kubectl happened to point at. The value has
+// to stop carrying the second meaning; asking callers to be careful is what was already being done.
+func TestResolveClusterRefusesTheManagedProduct(t *testing.T) {
+	kubeconfig := writeKubeconfig(t) // current context is do-nyc1-dev
 	cfg := &Config{}
 	if err := cfg.SetTarget(CloudTarget()); err != nil {
 		t.Fatalf("SetTarget: %v", err)
 	}
 
 	got, err := ResolveCluster(cfg, kubeconfig)
-	if err != nil {
-		t.Fatalf("ResolveCluster: %v", err)
-	}
-	if !got.Cloud() || !got.Selected() {
-		t.Errorf("got %+v, want the managed product reported", got)
+	if err == nil {
+		t.Fatalf("the managed product resolved to %+v; a caller reading Context there acts on the ambient kube context", got)
 	}
 	if got.Context != "" {
-		t.Errorf("context = %q, want none: a managed tenant has no cluster", got.Context)
+		t.Errorf("context = %q on the error path, want none", got.Context)
 	}
-	if got.Endpoint != CloudEndpoint {
-		t.Errorf("endpoint = %q, want %q", got.Endpoint, CloudEndpoint)
+	// The message has to name the target and the way out, because the reader's question is "why is
+	// this command refusing" and the answer is a selection they made in another session.
+	for _, want := range []string{CloudEndpoint, "burrow auth switch"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+	// And the negative that names the bug: whatever it says, it must not hand back the kubeconfig's
+	// current context under any name.
+	if strings.Contains(err.Error(), "do-nyc1-dev") {
+		t.Errorf("error = %q, want no mention of the ambient kube context", err)
 	}
 }
 

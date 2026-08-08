@@ -398,12 +398,16 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		go poller.Run(ctx)
 	}
 
-	// Start the failure observer (ADR-0074 §3): it sweeps the workloads the registry says Burrow owns,
-	// compares them against the cluster, and writes what broke to the ledger. It is READ-ONLY against
-	// the cluster and never remediates (§9). A non-positive BURROW_OBSERVE_INTERVAL turns it off
-	// entirely, which leaves burrowd answering questions and recording no history — the state it was
-	// in before this existed. It runs for the life of the process on ctx; a restart interrupts
-	// observation, which is precisely why the ledger records its own coverage.
+	// Start the failure observer (ADR-0074 §3, ADR-0079): it WATCHES the workloads the registry says
+	// Burrow owns and writes what breaks to the ledger when the cluster reports it, holding each
+	// transition for its dwell first so the record is failures rather than flapping. Alongside the
+	// watch it runs a periodic pass on this interval for the comparisons a watch cannot express — a
+	// registered app with no Deployment, a pending backup whose Job is gone (ADR-0074 §6) — and to
+	// keep a standing failure's last_seen moving. It is READ-ONLY against the cluster and never
+	// remediates (§9). A non-positive BURROW_OBSERVE_INTERVAL turns it off entirely, which leaves
+	// burrowd answering questions and recording no history — the state it was in before this existed.
+	// It runs for the life of the process on ctx; a restart interrupts observation, and so does a
+	// dropped watch, which is precisely why the ledger records its own coverage.
 	if observeInterval := observeInterval(); observeInterval < 0 {
 		log.Printf("burrowd: failure observer disabled (BURROW_OBSERVE_INTERVAL <= 0) — no failure history will be recorded")
 	} else {

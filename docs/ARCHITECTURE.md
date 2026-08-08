@@ -203,10 +203,14 @@ Beside it, in separate tables, sits the **failure ledger** (ADR-0074): what the 
 afterwards. burrowd runs a background observer over the objects the registry says it owns and
 records one row per (object, reason) with a first-seen, a last-seen, a resolution and a count —
 so "when did this start" and "has this happened before" are answerable, which they are not from
-the cluster, whose Events expire in an hour. It is deliberately not merged with the audit log:
-that record is append-only and complete, and this one is pruned. Alongside the rows the ledger
-records **its own observation coverage**, so a stretch in which nothing was watching reads as a
-gap rather than as an hour in which nothing broke. Both are read with `burrow failures` (and
+the cluster, whose Events expire in an hour. The observer **watches** those objects rather than
+sampling them, and **latches** each transition on both edges before recording it (ADR-0079): a
+condition must persist for a per-reason dwell to open a row and be clear for one to close it, so
+the ledger holds failures rather than the flapping Kubernetes status is full of. It is deliberately
+not merged with the audit log: that record is append-only and complete, and this one is pruned.
+Alongside the rows the ledger records **its own observation coverage**, so a stretch in which
+nothing was watching — a restart, or a watch that lost its place — reads as a gap rather than as an
+hour in which nothing broke. Both are read with `burrow failures` (and
 `burrow-agent failures`), which groups a cascade by shared reason for a human reader while the
 API returns the rows ungrouped for an agent. Current state is never served from here: `burrow app
 status` stays a live read, because a cache is most stale during the incident it exists to help.

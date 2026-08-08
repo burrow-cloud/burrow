@@ -67,6 +67,21 @@ const (
 	// would get contradictory answers about one pod at one moment.
 	LimitUnschedulableGrace LimitCode = "status.unschedulable_grace"
 
+	// LimitImagePullGrace is how long a pull failure must persist before the failure ledger opens a
+	// row for it (ADR-0079 §3). Cluster-scoped, for the reason the unschedulable grace is: how long a
+	// registry may be unreachable before something is actually wrong is a property of the cluster's
+	// network and the registry it pulls from, not of whether the workload is staging or production.
+	//
+	// It joins the `status.` scheme ADR-0079 §3 puts dwell values in, and it is the second occupant
+	// rather than the first: `status.unschedulable_grace` was already one before the scheme had a
+	// name. The two differ in WHERE the value is spent. The unschedulable grace is applied by the pod
+	// inspection itself, so the live surface and the ledger both honour it; this one is spent only by
+	// the ledger's latch, and the live surface reports a pull failure the moment the cluster does.
+	// That asymmetry is deliberate and is ADR-0079's own consequence restated: a live read answers
+	// about this second, and the ledger is the record that must not fill with registry hiccups that
+	// resolved themselves.
+	LimitImagePullGrace LimitCode = "status.image_pull_grace"
+
 	// LimitDeploySettleTimeout is how long Burrow waits for a rollout to settle before it reports
 	// what it observed to a `post-deploy` hook. ADR-0072 §5 puts it here by name rather than leaving
 	// it a constant, and the reason is the one §5 gives: a rollout does not finish, it either
@@ -225,6 +240,25 @@ var knownLimits = []limitDef{
 		// An hour. A pod the scheduler has refused for an hour is not waiting for a node, and a
 		// grace long enough to hide that is a surface that has stopped reporting.
 		max: int64(time.Hour),
+	},
+	{
+		code:        LimitImagePullGrace,
+		kind:        LimitKindDuration,
+		description: "how long a pull failure must persist before the failure ledger opens a row for it",
+		envScoped:   false,
+		// Fifteen seconds. The kubelet reports ErrImagePull on the first refusal and backs off into
+		// ImagePullBackOff from there, so a registry that was briefly unreachable — a rate limit that
+		// cleared, a credential Secret written a moment after the pod — produces an edge that is gone
+		// before this elapses. It is deliberately the SHORTEST dwell in ADR-0079 §3's table that is
+		// not zero: a pull failure that outlives it is not going to fix itself, because nothing about
+		// waiting supplies a missing tag or a missing credential.
+		def: int64(15 * time.Second),
+		// Zero is permitted and means "record the first refusal". It is right on a cluster pulling
+		// from a registry inside it, where a pull that fails once has really failed.
+		min: 0,
+		// Ten minutes. Longer than that and the ledger is not slow, it is silent: a deploy whose image
+		// cannot be pulled is the most common thing this record is asked about.
+		max: int64(10 * time.Minute),
 	},
 	{
 		code:        LimitDeploySettleTimeout,

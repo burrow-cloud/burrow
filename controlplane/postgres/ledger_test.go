@@ -122,6 +122,56 @@ func TestStoreLedgerConcurrentReasons(t *testing.T) {
 	}
 }
 
+// TestStoreLedgerResolvesOneRowByName: the latch's closing edge names exactly the condition that
+// cleared, and closes only that row (ADR-0079 §2). Every other active row — including another reason
+// on the same object — is left alone, which is what distinguishes this from the resolution pass that
+// decides by absence.
+func TestStoreLedgerResolvesOneRowByName(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	ref := ledgerRef(t, cp.FailureApp, "web")
+	other := ledgerRef(t, cp.FailureApp, "api")
+	at := time.Date(2026, 8, 8, 3, 0, 0, 0, time.UTC)
+	for _, k := range []cp.FailureKey{
+		{Object: ref, Reason: cp.ReasonOOMKilled},
+		{Object: ref, Reason: cp.ReasonUnschedulable},
+		{Object: other, Reason: cp.ReasonOOMKilled},
+	} {
+		if err := s.RecordFailure(ctx, cp.FailureObservation{Object: k.Object, Reason: k.Reason, At: at}); err != nil {
+			t.Fatalf("RecordFailure: %v", err)
+		}
+	}
+
+	cleared := at.Add(time.Minute)
+	if err := s.ResolveFailure(ctx, cleared, cp.FailureKey{Object: ref, Reason: cp.ReasonUnschedulable}); err != nil {
+		t.Fatalf("ResolveFailure: %v", err)
+	}
+
+	rows, err := s.Failures(ctx, cp.FailureFilter{Name: ref.Name})
+	if err != nil {
+		t.Fatalf("Failures: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Reason != cp.ReasonOOMKilled {
+		t.Fatalf("active rows for %s = %+v, want only the OOM kill", ref.Name, rows)
+	}
+	if rows, err := s.Failures(ctx, cp.FailureFilter{Name: other.Name}); err != nil || len(rows) != 1 {
+		t.Errorf("another object's row = %d active (err %v), want 1 untouched", len(rows), err)
+	}
+	all, err := s.Failures(ctx, cp.FailureFilter{Name: ref.Name, Reason: cp.ReasonUnschedulable, IncludeResolved: true})
+	if err != nil || len(all) != 1 {
+		t.Fatalf("the resolved row = %+v (err %v), want one", all, err)
+	}
+	if all[0].ResolvedAt == nil || !all[0].ResolvedAt.Equal(cleared) {
+		t.Errorf("resolved_at = %v, want %s — the instant the condition cleared", all[0].ResolvedAt, cleared)
+	}
+
+	// A key with no active row is a no-op: a clearing edge can arrive after a restart has already
+	// forgotten the latch that opened it.
+	if err := s.ResolveFailure(ctx, cleared, cp.FailureKey{Object: ref, Reason: cp.ReasonUnschedulable}); err != nil {
+		t.Errorf("resolving an already-resolved row errored: %v", err)
+	}
+}
+
 // TestStoreLedgerLeavesUnreadObjectsAlone: an object the sweep could not read keeps its rows. A
 // failure Burrow could not check is not a failure that recovered.
 func TestStoreLedgerLeavesUnreadObjectsAlone(t *testing.T) {

@@ -91,6 +91,25 @@ WHERE resolved_at IS NULL
 	return nil
 }
 
+// ResolveFailure closes the one active row identified by key (ADR-0079 §2). It is named rather than
+// decided by absence, because the latch closing a row knows exactly which condition cleared and when
+// — and expressing that as "resolve everything except this list" would make the observer assemble
+// the whole active set to say one thing about one row.
+//
+// A key with no active row updates nothing and is not an error: a clearing edge can arrive after a
+// restart has already forgotten the latch that opened it.
+func (s *Store) ResolveFailure(ctx context.Context, at time.Time, key controlplane.FailureKey) error {
+	const q = `
+UPDATE failure_ledger SET resolved_at = $1
+WHERE resolved_at IS NULL AND kind = $2 AND object = $3 AND environment = $4 AND reason = $5`
+	_, err := s.db.ExecContext(ctx, q, at,
+		string(key.Object.Kind), key.Object.Name, key.Object.Environment, key.Reason)
+	if err != nil {
+		return fmt.Errorf("postgres: resolving %s on %s: %w", key.Reason, key.Object, err)
+	}
+	return nil
+}
+
 // Failures returns ledger rows matching filter, oldest first — the order ADR-0074 §5 asks for,
 // because the earliest first_seen in a cascade is the likeliest thing to actually fix. The filter
 // clauses are optional and ANDed; the zero filter returns the active rows up to the cap.

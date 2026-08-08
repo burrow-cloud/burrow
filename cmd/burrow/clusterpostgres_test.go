@@ -103,7 +103,7 @@ func TestClusterPostgresInstallApplies(t *testing.T) {
 	applied := recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	if want := kube.CNPGManifestURL(kube.CNPGVersion); *applied != want {
@@ -125,7 +125,7 @@ func TestClusterPostgresInstallRepairsOrphanedCRDs(t *testing.T) {
 	applied := recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	if *applied == "" {
@@ -145,7 +145,7 @@ func TestClusterPostgresInstallSkipsWhenRunning(t *testing.T) {
 	applied := recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	if *applied != "" {
@@ -170,7 +170,7 @@ func TestClusterPostgresInstallIsHonestAboutTheAddon(t *testing.T) {
 	recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	for _, want := range []string{"burrow addon install postgres", "object-storage provider", "is not built yet"} {
@@ -230,7 +230,7 @@ func TestClusterPostgresPlanLeadsWithComponents(t *testing.T) {
 	recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	s := out.String()
@@ -263,7 +263,7 @@ func TestClusterPostgresPlanVerboseShowsManifests(t *testing.T) {
 	recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--verbose"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--verbose", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install --verbose: %v\n%s", err, errb.String())
 	}
 	plan, _, _ := strings.Cut(out.String(), "\nInstalling:")
@@ -286,7 +286,7 @@ func TestClusterPostgresNamesTheBackupPluginBothWays(t *testing.T) {
 	recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	plan, _, _ := strings.Cut(out.String(), "\nInstalling:")
@@ -305,7 +305,7 @@ func TestClusterPostgresProgressTicksUnchanged(t *testing.T) {
 	recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	for _, want := range []string{
@@ -328,7 +328,7 @@ func TestClusterPostgresOrderingReasonSitsWithTheCommands(t *testing.T) {
 	recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	s := out.String()
@@ -361,7 +361,7 @@ func TestClusterPostgresInstallsTheBackupPluginOverARunningOperator(t *testing.T
 	applied := recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	if want := kube.PgBackRestManifestURL(kube.PgBackRestVersion); *applied != want {
@@ -381,7 +381,7 @@ func TestClusterPostgresPlanReportsASkippedBackupPlugin(t *testing.T) {
 	recordAppliedURL(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "postgres", "install", "--wait=false", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster postgres install: %v\n%s", err, errb.String())
 	}
 	plan, _, _ := strings.Cut(out.String(), "\nInstalling:")

@@ -77,10 +77,6 @@ func newClusterPostgresCmd() *cobra.Command {
 		Short: "Install the CloudNativePG operator and pgBackRest plugin (each skipped when already running)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// A cluster-lifecycle command acts on a kubeconfig context rather than the active
-			// target (ADR-0078 §3), so say which context that is whenever the target names another
-			// one — the choice is deliberate, and the person reading it should not have to infer it.
-			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runClusterPostgresInstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -111,6 +107,14 @@ func runClusterPostgresInstall(ctx context.Context, o clusterPostgresOptions, st
 	if o.dryRun {
 		writeClusterPostgresDryRunPlan(stdout, manifest)
 		return nil
+	}
+
+	// Past the dry run this installs cluster-scoped CustomResourceDefinitions, which is as privileged
+	// as this CLI gets, so the cluster has to be one somebody named (cloud ADR-0038 §1).
+	var err error
+	o.kubeContext, err = lifecycleContext(o.kubeconfig, o.kubeContext, stderr)
+	if err != nil {
+		return err
 	}
 
 	cs, err := clusterPostgresClientset(o.kubeconfig, o.kubeContext)

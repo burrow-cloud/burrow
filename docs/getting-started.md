@@ -49,9 +49,14 @@ reports which one you have.
 opt-in commands you run when you want them, each with its own status, install, and uninstall:
 
 ```sh
-burrow cluster ingress install    # ingress-nginx, cert-manager, and a Let's Encrypt issuer (public HTTPS)
-burrow cluster registry install --host registry.example.com   # the optional in-cluster image registry (a zero-config build push target)
+burrow cluster ingress install --context <context>    # ingress-nginx, cert-manager, and a Let's Encrypt issuer (public HTTPS)
+burrow cluster registry install --context <context> --host registry.example.com   # the optional in-cluster image registry (a zero-config build push target)
 ```
+
+Like install, these act on a cluster you named: the one `--context` names, or — once you have done
+step 3 — the cluster your active target points at. With neither, they refuse rather than fall back to
+whatever `kubectl config use-context` last selected, and the refusal names the cluster they would
+have used, so `--context <that>` is the fix.
 
 The in-cluster registry is reachable the same way on any cluster: the build pushes to an internal
 service in-cluster, and nodes pull the image through the cluster ingress over TLS. It therefore needs
@@ -63,10 +68,10 @@ installed. (`burrow cluster registry` manages the registry that runs in your clu
 cluster credentials to pull from an external registry such as GHCR, use `burrow config registry` —
 see Private registries below.)
 
-### 3. Point the CLI at the cluster you mean (optional)
+### 3. Point the CLI at the cluster you mean
 
-If you work with more than one cluster, say which one Burrow talks to instead of relying on whatever
-`kubectl config use-context` last selected:
+Say which cluster Burrow talks to, instead of relying on whatever `kubectl config use-context` last
+selected:
 
 ```sh
 burrow auth login                      # asks where you use Burrow, and lists your kube contexts
@@ -90,6 +95,12 @@ Signing in changes where every command goes, so it tells you what it changed awa
 back. A cluster you installed Burrow into is already a target — installing registers one, whether or
 not you have run `burrow auth login` — so `burrow auth switch` can always reach it, and moving
 between your own cluster and the managed product is one command in either direction.
+
+Selecting a **cluster** target is also what lets the cluster-lifecycle commands — `cluster upgrade`
+and the `cluster ingress` / `cluster registry` / `cluster postgres` / `cluster metrics` provisioners —
+run without `--context`. Each acts on a cluster you named or refuses; with the managed product
+selected, or with nothing selected, `--context <name>` is how you name one, and installing a cluster
+while signed in to the managed product stays perfectly legal.
 
 ## Part 2 - Connect your agent
 
@@ -185,7 +196,8 @@ executing the `burrow-agent` it started with, so it does not pick up the new one
 To roll the in-cluster Burrow forward after a new release:
 
 ```sh
-burrow cluster upgrade
+burrow cluster upgrade                        # the cluster your active target names
+burrow cluster upgrade --context <context>    # or name one for this run
 ```
 
 `burrow version` shows all three at once, so you can see if any of them has fallen behind:

@@ -70,10 +70,6 @@ func newClusterMetricsCmd() *cobra.Command {
 		Short: "Install the metrics-server baseline (skipped when the cluster already serves the Metrics API)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// A cluster-lifecycle command acts on a kubeconfig context rather than the active
-			// target (ADR-0078 §3), so say which context that is whenever the target names another
-			// one — the choice is deliberate, and the person reading it should not have to infer it.
-			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runClusterMetricsInstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -106,6 +102,14 @@ func runClusterMetricsInstall(ctx context.Context, o clusterMetricsOptions, stdo
 	if o.dryRun {
 		fmt.Fprint(stdout, metricsServerManifest)
 		return nil
+	}
+
+	// The real run installs a cluster-wide component, so the cluster has to be one somebody named
+	// (cloud ADR-0038 §1); the dry run above renders a pinned manifest and contacts nothing.
+	var err error
+	o.kubeContext, err = lifecycleContext(o.kubeconfig, o.kubeContext, stderr)
+	if err != nil {
+		return err
 	}
 
 	cs, err := clusterMetricsClientset(o.kubeconfig, o.kubeContext)

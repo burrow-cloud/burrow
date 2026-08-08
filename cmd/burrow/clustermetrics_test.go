@@ -59,7 +59,7 @@ func TestClusterMetricsInstallApplies(t *testing.T) {
 	applied := recordAppliedManifest(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "metrics", "install"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "metrics", "install", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster metrics install: %v\n%s", err, errb.String())
 	}
 	if *applied != metricsServerManifest {
@@ -78,7 +78,7 @@ func TestClusterMetricsInstallLeavesAVendorCopyAlone(t *testing.T) {
 	applied := recordAppliedManifest(t)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "metrics", "install"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "metrics", "install", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster metrics install: %v\n%s", err, errb.String())
 	}
 	if *applied != "" {
@@ -122,7 +122,7 @@ func TestClusterMetricsInstallFailsOnApplyError(t *testing.T) {
 	t.Cleanup(func() { applyFn = orig })
 
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"cluster", "metrics", "install"}, &out, &errb)
+	err := run(context.Background(), []string{"cluster", "metrics", "install", "--context", testCluster}, &out, &errb)
 	if err == nil {
 		t.Fatalf("a failed apply must fail the command:\n%s", out.String())
 	}

@@ -172,6 +172,19 @@ func (c *Config) TargetNames() string {
 	return out
 }
 
+// targetsContext reports whether any recorded Kubernetes target already reaches a kube context. It
+// asks by CONTEXT rather than by name because that is the question — whether this cluster is already
+// registered — and a target's name is only conventionally the context it names, so a hand-edited or
+// renamed entry would otherwise be duplicated rather than recognised.
+func (c *Config) targetsContext(context string) bool {
+	for _, t := range c.Targets {
+		if t.Kind == TargetKindKubernetes && t.Context == context {
+			return true
+		}
+	}
+	return false
+}
+
 // LookupTarget returns the target with the given name, and whether it was found.
 func (c *Config) LookupTarget(name string) (Target, bool) {
 	for _, t := range c.Targets {
@@ -260,6 +273,69 @@ func (c *Config) SetInstallID(context, installID string) bool {
 		}
 	}
 	return updated
+}
+
+// RegisterTarget records a target WITHOUT making it active, and reports whether it was new. The
+// caller Saves.
+//
+// It is the other half of SetTarget, and the distinction is the point. `burrow auth login` is a
+// person saying "point me here", so it selects. An install is a person putting a control plane into
+// a cluster, which says nothing about where their next command should go — they may well have
+// deliberately selected something else, and re-pointing them would be the same silent redirection
+// this whole area exists to stop, just aimed the other way.
+//
+// Registering is what was missing. Nothing an install did wrote a target, so a self-hosted person
+// had none: signing in to the managed product then left them with exactly one target and `burrow
+// auth switch` listing nothing to go back to
+// ([cloud#201](https://github.com/burrow-cloud/cloud/issues/201)). An install now leaves a target
+// behind, so the way back exists before it is needed.
+//
+// A target already recorded under this name is left exactly as it is, and false is returned. That
+// keeps a re-run install idempotent and, more importantly, preserves whatever the existing entry
+// carries — an install id recorded by a previous run is a fact about the cluster, and quietly
+// discarding it here would re-open the mismatch ADR-0084 §5 exists to catch.
+func (c *Config) RegisterTarget(t Target) (bool, error) {
+	if err := t.validate(); err != nil {
+		return false, fmt.Errorf("localconfig: %w", err)
+	}
+	if _, ok := c.LookupTarget(t.Name); ok {
+		return false, nil
+	}
+	c.Targets = append(c.Targets, t)
+	return true, nil
+}
+
+// registerEnvironmentTargets derives a Kubernetes target for every registered environment handle
+// whose kube context no target names yet. It never touches CurrentTarget.
+//
+// This holds the model's invariant rather than migrating anything: a target is a cluster, an
+// environment is one of possibly several environments UNDER a target, so an environment with no
+// target above it is not an old shape to reconcile — it is a config that does not typecheck. Deriving
+// the missing target makes the state unrepresentable instead of leaving every reader to cope with
+// it, which is what produced cloud#201: `burrow auth status` listed targets, the person's own
+// install was not one, and the recovery command the CLI printed named something that did not exist.
+//
+// It runs on load and writes nothing by itself. Nothing is selected, so a person who has never run
+// `burrow auth login` still follows their kubeconfig exactly as before; what changes is that their
+// cluster is now something `burrow auth status` can show and `burrow auth switch` can reach.
+func (c *Config) registerEnvironmentTargets() {
+	for _, e := range c.Environments {
+		if e.Context == "" {
+			continue
+		}
+		if c.targetsContext(e.Context) {
+			continue
+		}
+		target := KubernetesTarget(e.Context)
+		if _, ok := c.LookupTarget(target.Name); ok {
+			continue
+		}
+		// The handle knows which install is behind the context (ADR-0084 §5) and the derived target
+		// reaches the same one, so the check applies to it from the moment it exists rather than
+		// waiting for the next install to record it a second time.
+		target.InstallID = e.InstallID
+		c.Targets = append(c.Targets, target)
+	}
 }
 
 // SwitchTarget makes an already-recorded target active without re-authenticating (ADR-0078 §4). It

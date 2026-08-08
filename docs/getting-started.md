@@ -86,6 +86,11 @@ displayed. From then on the application commands — `burrow app list`, `deploy`
 the rest — act against your Burrow Cloud tenant, with no cluster and no kubeconfig involved.
 Everything below needs none of that — the self-hosted path needs no account.
 
+Signing in changes where every command goes, so it tells you what it changed away from and how to go
+back. A cluster you installed Burrow into is already a target — installing registers one, whether or
+not you have run `burrow auth login` — so `burrow auth switch` can always reach it, and moving
+between your own cluster and the managed product is one command in either direction.
+
 ## Part 2 - Connect your agent
 
 Your AI agent drives Burrow through `burrow-agent`, a single scoped binary already on your PATH

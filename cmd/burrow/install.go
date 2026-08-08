@@ -471,6 +471,7 @@ func recordEnvironment(ctx context.Context, a installArgs, cs kubernetes.Interfa
 	}
 	fmt.Fprintf(stdout, "\nInstalled. Environment %q is now your current environment.\n", name)
 	fmt.Fprintf(stdout, "Rename it any time:  burrow env rename %s <new-name>\n", name)
+	noteRegisteredTarget(a.kubeContext, stdout)
 	return nil
 }
 
@@ -516,10 +517,21 @@ func joinEnvironmentName(cfg *localconfig.Config, kubeContext, explicit string) 
 }
 
 // saveJoinedEnvironment records a joined environment's scoped credential into cfg, pins it as
-// current, and Saves (ADR-0038 §4). It updates an existing handle's credential in place
-// (updateExisting) — keeping the join idempotent — or registers the new handle built by the caller.
-// Shared by a fresh install, install's join-existing path, and `burrow join` (ADR-0044) so all
-// three record a handle the same way.
+// current, registers the cluster as a TARGET, and Saves (ADR-0038 §4, ADR-0078 §1). It updates an
+// existing handle's credential in place (updateExisting) — keeping the join idempotent — or
+// registers the new handle built by the caller. Shared by a fresh install, install's join-existing
+// path, and `burrow join` (ADR-0044) so all three record a handle the same way.
+//
+// The target is the half that was missing. `burrow auth login` wrote targets and nothing else did,
+// so a person whose only Burrow was one they installed themselves had none — and signing in to the
+// managed product then left them with a single target, every command re-pointed at it, and `burrow
+// auth switch` listing nothing to go back to (cloud#201). An install is the act that says a cluster
+// runs Burrow, which is exactly what a target records, so it is the right place to record one.
+//
+// It REGISTERS rather than selects, and the difference is the point: whichever target is active
+// stays active. Repointing somebody who deliberately chose something else is the same silent
+// redirection cloud#201 is about, aimed the other way. What changes is that there is now something
+// to switch to, and noteRegisteredTarget says so when the active target is not this cluster.
 func saveJoinedEnvironment(cfg *localconfig.Config, name string, updateExisting bool, handle localconfig.Environment, agentKubeconfig, agentContext string) error {
 	if updateExisting {
 		cfg.SetAgentCredential(name, agentKubeconfig, agentContext)
@@ -531,7 +543,55 @@ func saveJoinedEnvironment(cfg *localconfig.Config, name string, updateExisting 
 		}
 	}
 	cfg.Current = name
+	// Every caller resolves a context before it gets here — install refuses without one and a join
+	// token carries a validated one — so the guard is for the shape of the code rather than a state
+	// anything reaches: a nameless target would fail validation, and failing the local bookkeeping of
+	// a control plane that is already installed and working is the one outcome worth ruling out.
+	if handle.Context != "" {
+		if _, err := cfg.RegisterTarget(localconfig.KubernetesTarget(handle.Context)); err != nil {
+			return err
+		}
+	}
 	return cfg.Save()
+}
+
+// noteRegisteredTarget says that commands are STILL GOING SOMEWHERE ELSE, when an install has just
+// happened and the active target names a different place.
+//
+// That is the whole message, and it is the one case worth a line. The install registers a target and
+// deliberately does not select one, so somebody signed in to the managed product who installs Burrow
+// into a cluster of their own has just done a large, successful, cluster-changing thing whose effect
+// on their next command is: none. Discovering that from the next `burrow app list` is precisely the
+// shape of cloud#201, only in reverse.
+//
+// It is silent otherwise. With this cluster already selected there is nothing to report, and with
+// nothing selected commands resolve exactly as they did a moment ago — through the environment handle
+// the install just pinned, which is this cluster — so a line about targets would be raising a
+// distinction that has no consequence yet. `burrow auth status` lists the registered target for
+// anybody who wants to see it.
+//
+// It reads the config back rather than being handed one, for the same reason recordInstallID does:
+// it runs after the install has been reported, so the state it describes is the state on disk, and
+// a bookkeeping read that fails is worth nothing more than silence behind a control plane that is
+// installed and working.
+func noteRegisteredTarget(kubeContext string, out io.Writer) {
+	if kubeContext == "" {
+		return
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		return
+	}
+	target, selected, err := cfg.ActiveTarget()
+	if err != nil || !selected {
+		return
+	}
+	if target.Kind == localconfig.TargetKindKubernetes && target.Context == kubeContext {
+		return
+	}
+	fmt.Fprintf(out, "\nThis cluster is registered as the target %q, but it is not the active one: your commands\n"+
+		"still go to %s. Point them at this cluster with:  burrow auth switch %s\n",
+		kubeContext, target.Describe(), kubeContext)
 }
 
 // joinExistingInstall performs the local join of an already-installed cluster (ADR-0038 §4): it reads
@@ -574,6 +634,7 @@ func joinExistingInstall(ctx context.Context, a installArgs, cs kubernetes.Inter
 	fmt.Fprintln(stdout, "This wrote only your local config (~/.burrow); no cluster changes were made.")
 	fmt.Fprintf(stdout, "Environment %q is now your current environment.\n", name)
 	fmt.Fprintf(stdout, "Rename it any time:  burrow env rename %s <new-name>\n", name)
+	noteRegisteredTarget(a.kubeContext, stdout)
 	return nil
 }
 

@@ -76,15 +76,31 @@ import (
 // cluster path exactly as it was, which is the point — this changes what happens with the managed
 // product selected and nothing else.
 func refuseCloudTarget() error {
-	cfg, err := localconfig.Load()
-	if err != nil {
-		return nil
-	}
-	target, selected, err := cfg.ActiveTarget()
-	if err != nil || !selected || target.Kind != localconfig.TargetKindCloud {
+	target, ok := selectedCloudTarget()
+	if !ok {
 		return nil
 	}
 	return errCloudTargetHasNoCluster(target)
+}
+
+// selectedCloudTarget returns the active target when it is the managed product, and false otherwise —
+// including when the config cannot be read, for the reason refuseCloudTarget documents: with an
+// unreadable config nothing can tell there is a target at all.
+//
+// It is separate from refuseCloudTarget because refusing is not the only correct response. `burrow
+// version` REPORTS rather than acts, so the honest thing there is to say what the line is about and
+// which target it does not apply to, not to fail (cloud#209). Both need the same fact, and one place
+// to get it is what keeps the two from disagreeing about when the managed product is selected.
+func selectedCloudTarget() (localconfig.Target, bool) {
+	cfg, err := localconfig.Load()
+	if err != nil {
+		return localconfig.Target{}, false
+	}
+	target, selected, err := cfg.ActiveTarget()
+	if err != nil || !selected || target.Kind != localconfig.TargetKindCloud {
+		return localconfig.Target{}, false
+	}
+	return target, true
 }
 
 // errCloudTargetHasNoCluster names the active target, says plainly why this command cannot use it,

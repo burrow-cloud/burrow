@@ -20,6 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 // stubLatestRelease replaces the fetchLatestRelease seam for one test so `burrow version` makes no
@@ -636,5 +638,117 @@ func TestVersionReportsAMissingAgentBinary(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "burrow-agent:") || !strings.Contains(out.String(), "not found on PATH") {
 		t.Errorf("version output = %q, want the missing-agent line", out.String())
+	}
+}
+
+// TestVersionOnACloudTargetReadsNoCluster is
+// [cloud#209](https://github.com/burrow-cloud/cloud/issues/209), reproduced and then held.
+//
+// Signed in to the managed product, `burrow version` used to print `not installed (context
+// "staging", namespace "burrow")` — a fact about a cluster the reader never named, presented as the
+// answer to their question. The fixture is the reproduction: a kubeconfig whose current context
+// serves a real burrowd Deployment, so a fall-through to the ambient context would be visible in the
+// output and in the hit flag.
+func TestVersionOnACloudTargetReadsNoCluster(t *testing.T) {
+	stubLatestRelease(t, "", errors.New("offline"))
+	stubAgentVersion(t, "", "", errors.New("not on PATH"))
+	tempConfig(t)
+
+	var hit bool
+	cluster := fakeBurrowdDeployment(&hit, "ghcr.io/burrow-cloud/burrowd:v0.7.0")
+	defer cluster.Close()
+	path := writeKubeconfig(t, twoContextConfig(cluster.URL, "https://unused.invalid:6443"))
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.CloudTarget()); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"version", "--kubeconfig", path}, &out, &errb); err != nil {
+		t.Fatalf("version: %v\n%s", err, errb.String())
+	}
+	s := out.String()
+
+	// The bug itself: no cluster is contacted and none is named.
+	if hit {
+		t.Error("`burrow version` read a cluster while the active target was the managed product")
+	}
+	for _, no := range []string{"staging", "not installed", "v0.7.0", "unreachable"} {
+		if strings.Contains(s, no) {
+			t.Errorf("version output = %q, want no report about a cluster the user did not name (found %q)", s, no)
+		}
+	}
+	// The line is still there and says which target it does not apply to. Omitting it would leave a
+	// reader unable to tell a deliberate silence from a failed read.
+	if !strings.Contains(s, "control plane:") {
+		t.Errorf("version output = %q, want the control-plane line kept", s)
+	}
+	for _, want := range []string{"not applicable", localconfig.CloudEndpoint} {
+		if !strings.Contains(s, want) {
+			t.Errorf("version output = %q, want substring %q", s, want)
+		}
+	}
+	// The CLI's own version is what the command is chiefly for, and it prints regardless.
+	if !strings.Contains(s, "burrow (CLI):") {
+		t.Errorf("version output = %q, want the CLI line", s)
+	}
+}
+
+// TestVersionContextFlagOverridesACloudTarget: --context is a person naming a cluster for this one
+// invocation, and ADR-0078 §4 keeps that winning over the selected target. Being signed in to the
+// managed product does not make an explicitly named cluster unreadable.
+func TestVersionContextFlagOverridesACloudTarget(t *testing.T) {
+	stubLatestRelease(t, "", errors.New("offline"))
+	stubAgentVersion(t, "", "", errors.New("not on PATH"))
+	tempConfig(t)
+
+	var stagingHit, prodHit bool
+	staging := fakeBurrowdDeployment(&stagingHit, "ghcr.io/burrow-cloud/burrowd:v0.5.0")
+	prod := fakeBurrowdDeployment(&prodHit, "ghcr.io/burrow-cloud/burrowd:v0.6.0")
+	defer staging.Close()
+	defer prod.Close()
+	path := writeKubeconfig(t, twoContextConfig(staging.URL, prod.URL))
+
+	cfg, err := localconfig.Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if err := cfg.SetTarget(localconfig.CloudTarget()); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"version", "--context", "prod", "--kubeconfig", path}, &out, &errb); err != nil {
+		t.Fatalf("version: %v\n%s", err, errb.String())
+	}
+	if !prodHit {
+		t.Error("--context prod did not reach the named cluster")
+	}
+	if !strings.Contains(out.String(), `v0.6.0 (context "prod", namespace "burrow")`) {
+		t.Errorf("version output = %q, want the named cluster's control plane", out.String())
+	}
+}
+
+// TestCloudControlPlaneValueReportsNoVersion pins the one thing the line must never do. The managed
+// product's control plane is the operator's and is upgraded by the operator; a tenant has nothing to
+// do about its version and no route serves it, so a number here could only have come from somewhere
+// else — which is what the bug was.
+func TestCloudControlPlaneValueReportsNoVersion(t *testing.T) {
+	got := cloudControlPlaneValue(localconfig.CloudTarget())
+	if !strings.Contains(got, localconfig.CloudEndpoint) {
+		t.Errorf("value = %q, want it to name the target", got)
+	}
+	if strings.Contains(got, "v0.") || strings.Contains(got, "context") || strings.Contains(got, "namespace") {
+		t.Errorf("value = %q, want no version and no cluster vocabulary", got)
 	}
 }

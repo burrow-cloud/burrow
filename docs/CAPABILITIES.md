@@ -1012,6 +1012,15 @@ so it is visible before a deploy rather than after one.
 cluster, so the second person to use a cluster brings their own kubeconfig context and installs
 nothing. Installing still names a context explicitly (`burrow cluster install <context>`).
 
+**Installing registers a target, and does not select one.** A cluster you install Burrow into is a
+target by definition, so `burrow cluster install` and `burrow join` record one for the context they
+acted on — which is what makes `burrow auth status` show your own install and `burrow auth switch`
+able to reach it, whether or not you have ever run `burrow auth login`. Whichever target is active
+stays active: installing says a cluster runs Burrow, not that your next command should go there, and
+the install says out loud when commands are still going somewhere else. An environment handle
+registered before any of this carries its cluster as a target too — an environment is an environment
+*under* a target, so there is no state where you have one and not the other.
+
 With a Kubernetes target selected, it decides the cluster your commands act on; a pinned environment
 handle still narrows it when the handle belongs to that same cluster, and a pin left over from a
 different cluster is ignored rather than silently redirecting you. **With no target selected nothing
@@ -1584,7 +1593,7 @@ truth and this one does not restate it.
 | Install the metrics-server baseline | `burrow cluster metrics install` | Applies the same pinned metrics-server baseline `cluster install` and `cluster bootstrap` ensure, for a cluster they did not: one installed before the baseline existed, or one where `--no-metrics-server` was passed and the operator has since changed their mind. Detected first and skipped when the cluster already serves `metrics.k8s.io`, so a vendor's copy (k3s, GKE, AKS) is never installed over; `--dry-run` prints the manifest without contacting the cluster. Without it nothing reports live CPU/memory usage, so `kubectl top`, HPA autoscaling, and the utilization layer of capacity reporting have nothing to read. | [0054](adr/0054-install-is-control-plane-only.md) |
 | Inspect the cluster | `burrow cluster` | Ingress classes, default StorageClass, LoadBalancer support and whether it is free or billable, cert-manager, metrics-server, the CloudNativePG operator (present / running / its release beside the one Burrow targets), which shape the control plane's own database runs in and whether it archives off-cluster, cloud provider, configured DNS providers. | [0034](adr/0034-agent-native-onboarding.md), [0043](adr/0043-public-reachability-is-a-loadbalancer.md) |
 | Scheduling headroom | `burrow cluster capacity` | Per-node and cluster-total allocatable, committed and free CPU/memory and pod counts, top consumers, and whether a build would fit. Computed from node allocatable versus summed Pod requests — no metrics-server needed. | [0054](adr/0054-install-is-control-plane-only.md) |
-| Version | `burrow version` | The CLI version, the installed control plane's image tag, and the latest published release. | [0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md), [0039](adr/0039-cli-control-plane-version-skew.md) |
+| Version | `burrow version` | The CLI version, the `burrow-agent` on your `PATH`, the installed control plane's image tag, and the latest published release. The control-plane line reads the cluster the active target names; with the managed product selected it reports that the line does not apply there rather than reading whichever cluster your kubeconfig happens to point at, since a managed control plane is the operator's to version and upgrade. `--context` names a cluster for the one invocation and still wins. | [0016](adr/0016-cli-distribution-and-upgrade-lifecycle.md), [0039](adr/0039-cli-control-plane-version-skew.md) |
 
 `install` is idempotent and multi-user safe: it applies server-side with `kubectl` nowhere in
 the path, and if Burrow is already installed it does **not** re-mint secrets — it performs a

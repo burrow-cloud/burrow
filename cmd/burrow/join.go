@@ -111,6 +111,7 @@ func runJoin(ctx context.Context, a joinArgs, stdout io.Writer) error {
 	}
 
 	printJoinSummary(stdout, name, tok.ContextName)
+	noteRegisteredTarget(tok.ContextName, stdout)
 	return nil
 }
 

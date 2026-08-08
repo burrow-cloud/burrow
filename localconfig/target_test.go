@@ -337,3 +337,164 @@ func TestResolveFallsBackToTheHandleInstallID(t *testing.T) {
 		t.Errorf("resolved InstallID = %q, want install-1 from the handle", resolved.InstallID)
 	}
 }
+
+// TestRegisterTargetDoesNotSelect is the whole distinction between registering and signing in
+// ([cloud#201](https://github.com/burrow-cloud/cloud/issues/201)). An install says a cluster runs
+// Burrow, which is what a target records; it does not say the person wants their next command to go
+// there, and re-pointing them would be the same silent redirection the record is about, aimed the
+// other way.
+func TestRegisterTargetDoesNotSelect(t *testing.T) {
+	cfg := &Config{}
+	if err := cfg.SetTarget(CloudTarget()); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+
+	added, err := cfg.RegisterTarget(KubernetesTarget("do-nyc1"))
+	if err != nil {
+		t.Fatalf("RegisterTarget: %v", err)
+	}
+	if !added {
+		t.Error("RegisterTarget reported nothing added for a target that was not there")
+	}
+	if cfg.CurrentTarget != CloudEndpoint {
+		t.Errorf("current target = %q, want the selection untouched", cfg.CurrentTarget)
+	}
+	if _, ok := cfg.LookupTarget("do-nyc1"); !ok {
+		t.Errorf("the target was not registered: %+v", cfg.Targets)
+	}
+	// And it is reachable, which is the point: `burrow auth switch` had nothing to offer before.
+	if !strings.Contains(cfg.TargetNames(), "do-nyc1") {
+		t.Errorf("TargetNames() = %q, want the registered cluster listed", cfg.TargetNames())
+	}
+}
+
+// TestRegisterTargetIsIdempotent covers the re-run install and the second person joining. An entry
+// already recorded is left exactly as it is, install id and all — that id is a fact about the cluster
+// and discarding it here would re-open the mismatch ADR-0084 §5 exists to catch.
+func TestRegisterTargetIsIdempotent(t *testing.T) {
+	cfg := &Config{}
+	if err := cfg.SetTarget(KubernetesTarget("do-nyc1")); err != nil {
+		t.Fatalf("SetTarget: %v", err)
+	}
+	if !cfg.SetInstallID("do-nyc1", "abc123") {
+		t.Fatal("SetInstallID recorded nothing")
+	}
+
+	added, err := cfg.RegisterTarget(KubernetesTarget("do-nyc1"))
+	if err != nil {
+		t.Fatalf("RegisterTarget: %v", err)
+	}
+	if added {
+		t.Error("RegisterTarget reported an addition for a target already recorded")
+	}
+	if len(cfg.Targets) != 1 {
+		t.Errorf("targets = %+v, want the one entry", cfg.Targets)
+	}
+	if cfg.Targets[0].InstallID != "abc123" {
+		t.Errorf("install id = %q, want the recorded id preserved", cfg.Targets[0].InstallID)
+	}
+}
+
+// TestLoadDerivesATargetForEveryEnvironment holds the model's invariant: an environment is one of
+// possibly several environments UNDER a target, so a handle with no target above it is a config that
+// does not hold together. That state is what made a self-hosted person's own install invisible to
+// `burrow auth status` and unreachable from `burrow auth switch` (cloud#201).
+//
+// Nothing is SELECTED by it. Somebody who has never run `burrow auth login` still follows their
+// kubeconfig exactly as before.
+func TestLoadDerivesATargetForEveryEnvironment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	saved := &Config{
+		Current: "prod",
+		Environments: []Environment{
+			{Name: "prod", Context: "do-nyc1", InstallID: "abc123"},
+			{Name: "staging", Context: "do-nyc1"}, // a second environment in the SAME cluster
+			{Name: "lab", Context: "kind-lab"},
+		},
+	}
+	if err := saved.saveTo(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.Targets) != 2 {
+		t.Fatalf("targets = %+v, want one per CLUSTER rather than one per handle", cfg.Targets)
+	}
+	tgt, ok := cfg.LookupTarget("do-nyc1")
+	if !ok {
+		t.Fatalf("no target derived for do-nyc1: %+v", cfg.Targets)
+	}
+	if tgt.Kind != TargetKindKubernetes || tgt.Context != "do-nyc1" {
+		t.Errorf("derived target = %+v, want a kubernetes target on the handle's context", tgt)
+	}
+	// The handle knows which install answers there, and the derived target reaches the same one, so
+	// the ADR-0084 §5 check applies from the moment it exists rather than waiting for another install.
+	if tgt.InstallID != "abc123" {
+		t.Errorf("derived install id = %q, want the handle's", tgt.InstallID)
+	}
+	if cfg.CurrentTarget != "" {
+		t.Errorf("current target = %q; deriving a target must not select one", cfg.CurrentTarget)
+	}
+	if _, ok := cfg.LookupTarget("kind-lab"); !ok {
+		t.Errorf("no target derived for kind-lab: %+v", cfg.Targets)
+	}
+}
+
+// TestLoadLeavesRecordedTargetsAlone: the derivation fills a gap and never edits what is written
+// down. A cluster already registered keeps its entry — including an entry deliberately named
+// something other than its context — and a Burrow Cloud target is untouched by any of it.
+func TestLoadLeavesRecordedTargetsAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	saved := &Config{
+		Environments: []Environment{{Name: "prod", Context: "do-nyc1"}},
+		Targets: []Target{
+			{Name: "production", Kind: TargetKindKubernetes, Context: "do-nyc1", InstallID: "abc123"},
+			CloudTarget(),
+		},
+		CurrentTarget: CloudEndpoint,
+	}
+	if err := saved.saveTo(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.Targets) != 2 {
+		t.Fatalf("targets = %+v, want the two recorded entries and no duplicate for do-nyc1", cfg.Targets)
+	}
+	if cfg.CurrentTarget != CloudEndpoint {
+		t.Errorf("current target = %q, want the recorded selection", cfg.CurrentTarget)
+	}
+}
+
+// TestLoadDerivationWritesNothing: it runs in memory. A read has never rewritten ~/.burrow/config and
+// must not start; the derived entry is persisted only when a command that was going to save anyway
+// does so.
+func TestLoadDerivationWritesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	saved := &Config{Environments: []Environment{{Name: "prod", Context: "do-nyc1"}}}
+	if err := saved.saveTo(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if _, err := loadFrom(path); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("loading the config rewrote it:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}

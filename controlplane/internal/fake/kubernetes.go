@@ -66,7 +66,20 @@ type Kubernetes struct {
 	// archiving records which instances have a pgBackRest repository behind them.
 	physicalBackups map[string]bool
 	archiving       map[string]string
-	errs            map[Op]error
+	// watchers are the workload watches WatchWorkloads has established, by namespace (ADR-0079 §1).
+	// A mutator that changes what a workload looks like reports it to the watch over its namespace,
+	// which is what a real cluster does when a pod changes underneath one — so a test arranges the
+	// cluster exactly as it always has and the events follow.
+	watchers map[string]*workloadWatcher
+	errs     map[Op]error
+}
+
+// workloadWatcher is one established watch: where to deliver, and the context that ends it. The
+// context is held rather than watched by a goroutine so a cancelled watch stops delivering at the
+// next emit, with no scheduling for a test to race.
+type workloadWatcher struct {
+	ctx    context.Context
+	events chan<- controlplane.WorkloadEvent
 }
 
 // fakeBaseNamespace is the namespace the fake treats as the default: app resources in it are keyed
@@ -280,6 +293,7 @@ func NewKubernetes() *Kubernetes {
 		physicalLabel:    new(string),
 		physicalReason:   new(controlplane.PhysicalBackupOutcome),
 		instanceRestores: new([]RestoreInstanceCall),
+		watchers:         make(map[string]*workloadWatcher),
 		errs:             make(map[Op]error),
 	}
 }
@@ -665,6 +679,98 @@ func (k *Kubernetes) SetError(op Op, err error) {
 	k.errs[op] = err
 }
 
+// WatchWorkloads establishes the watch over this view's namespace (ADR-0079 §1). The fake's re-list
+// is instantaneous: every workload already there is reported, then the watch says it has a complete
+// picture. From then on every mutator that changes what a workload looks like delivers an event, and
+// a test drives the whole path by arranging the cluster exactly as it always has.
+func (k *Kubernetes) WatchWorkloads(ctx context.Context, events chan<- controlplane.WorkloadEvent) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpWatchWorkloads]; err != nil {
+		return err
+	}
+	k.watchers[k.ns] = &workloadWatcher{ctx: ctx, events: events}
+	apps := make([]string, 0, len(k.deploys))
+	for nk := range k.deploys {
+		if app, ok := k.appInNamespace(nk); ok {
+			apps = append(apps, app)
+		}
+	}
+	sort.Strings(apps)
+	for _, app := range apps {
+		k.notify(app)
+	}
+	k.emit(controlplane.WorkloadEvent{Kind: controlplane.WorkloadSynced, Namespace: k.ns})
+	return nil
+}
+
+// DropWorkloadWatch models this namespace's watch losing its place: the consumer is told, and
+// nothing is delivered until SyncWorkloadWatch says the re-list completed. It is how a test drives
+// ADR-0079 §4 — a gap that shows rather than an observer pretending continuity across it.
+func (k *Kubernetes) DropWorkloadWatch(detail string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.emit(controlplane.WorkloadEvent{Kind: controlplane.WorkloadDropped, Namespace: k.ns, Detail: detail})
+}
+
+// SyncWorkloadWatch models a completed re-list after a drop: current state for every workload in the
+// namespace, then the signal that the picture is complete again. It reports current state and not
+// what happened while the watch was away, which is exactly why the gap has to stay visible.
+func (k *Kubernetes) SyncWorkloadWatch() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	apps := make([]string, 0, len(k.deploys))
+	for nk := range k.deploys {
+		if app, ok := k.appInNamespace(nk); ok {
+			apps = append(apps, app)
+		}
+	}
+	sort.Strings(apps)
+	for _, app := range apps {
+		k.notify(app)
+	}
+	k.emit(controlplane.WorkloadEvent{Kind: controlplane.WorkloadSynced, Namespace: k.ns})
+}
+
+// notify reports app's current derived state to this view's watch. It is called with the lock held
+// by every mutator that changes what a workload looks like.
+func (k *Kubernetes) notify(app string) {
+	d := k.deploys[k.key(app)]
+	if d == nil {
+		k.emit(controlplane.WorkloadEvent{
+			Kind:      controlplane.WorkloadGone,
+			Namespace: k.ns,
+			Status:    controlplane.WorkloadStatus{App: app},
+		})
+		return
+	}
+	k.emit(controlplane.WorkloadEvent{Kind: controlplane.WorkloadChanged, Namespace: k.ns, Status: d.status(app)})
+}
+
+// emit delivers one event to the watch over ev.Namespace, if one is established and its context is
+// still live. A full channel becomes a DROPPED event rather than a discarded one: a silently lost
+// event would leave the consumer's latch believing a condition that has cleared, and the test would
+// then be debugging the fake instead of the observer.
+func (k *Kubernetes) emit(ev controlplane.WorkloadEvent) {
+	w := k.watchers[ev.Namespace]
+	if w == nil || w.ctx.Err() != nil {
+		return
+	}
+	select {
+	case w.events <- ev:
+		return
+	default:
+	}
+	select {
+	case w.events <- controlplane.WorkloadEvent{
+		Kind:      controlplane.WorkloadDropped,
+		Namespace: ev.Namespace,
+		Detail:    "the watch fell behind its consumer and lost its place",
+	}:
+	default:
+	}
+}
+
 // SetReady overrides the ready replica count for app, modelling a partial rollout. It
 // is a no-op if app has no workload.
 func (k *Kubernetes) SetReady(app string, ready int32) {
@@ -672,6 +778,7 @@ func (k *Kubernetes) SetReady(app string, ready int32) {
 	defer k.mu.Unlock()
 	if d := k.deploys[k.key(app)]; d != nil {
 		d.ready = ready
+		k.notify(app)
 	}
 }
 
@@ -696,6 +803,7 @@ func (k *Kubernetes) setImagePullFailure(app, reason, message string) {
 	if d := k.deploys[k.key(app)]; d != nil {
 		d.ready = 0
 		d.issue, d.issueServing = imagePullEvidence(reason, message), false
+		k.notify(app)
 	}
 }
 
@@ -731,9 +839,11 @@ func (k *Kubernetes) SetIssue(app string, ev controlplane.IssueEvidence) {
 	}
 	if !controlplane.IsIssueReason(ev.Reason) {
 		d.issue, d.issueServing = nil, false
+		k.notify(app)
 		return
 	}
 	d.issue, d.issueServing = &ev, false
+	k.notify(app)
 }
 
 // SetServingIssue injects a condition observed on a workload that is STILL SERVING: the shape a
@@ -754,9 +864,11 @@ func (k *Kubernetes) SetServingIssue(app string, ev controlplane.IssueEvidence) 
 	}
 	if !controlplane.IsIssueReason(ev.Reason) {
 		d.issue, d.issueServing = nil, false
+		k.notify(app)
 		return
 	}
 	d.issue, d.issueServing = &ev, true
+	k.notify(app)
 }
 
 // SetWedgedRollout models issue #307: a NEW release whose image cannot be pulled while the
@@ -770,6 +882,7 @@ func (k *Kubernetes) SetWedgedRollout(app, reason string) {
 	defer k.mu.Unlock()
 	if d := k.deploys[k.key(app)]; d != nil {
 		d.issue, d.issueServing = imagePullEvidence(reason, ""), false
+		k.notify(app)
 	}
 }
 
@@ -818,6 +931,7 @@ func (k *Kubernetes) ApplyWorkload(ctx context.Context, spec controlplane.Worklo
 	}
 	d.spec = spec
 	d.ready = spec.Replicas // healthy by default
+	k.notify(spec.App)
 	return nil
 }
 
@@ -930,6 +1044,7 @@ func (k *Kubernetes) ScaleWorkload(ctx context.Context, app string, replicas int
 	}
 	d.spec.Replicas = replicas
 	d.ready = replicas
+	k.notify(app)
 	return nil
 }
 
@@ -1035,6 +1150,7 @@ func (k *Kubernetes) DeleteWorkload(ctx context.Context, app string) error {
 		return fmt.Errorf("kubernetes: workload %q: %w", app, controlplane.ErrNotFound)
 	}
 	delete(k.deploys, nk)
+	k.notify(app)
 	return nil
 }
 

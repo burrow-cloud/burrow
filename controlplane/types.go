@@ -173,6 +173,48 @@ type WorkloadStatus struct {
 	IssueReason string `json:"issue_reason,omitempty"`
 }
 
+// WorkloadEventKind names what a workload watch is reporting (ADR-0079 §1). Two of the four kinds
+// are about the WATCH rather than about a workload, and that is the point: a consumer that cannot
+// tell "nothing broke" from "I stopped looking" is the failure ADR-0074's coverage record exists to
+// prevent, and a watch that reconnects silently produces exactly it.
+type WorkloadEventKind string
+
+const (
+	// WorkloadChanged carries one workload's current observed state. It is the same derivation
+	// ListWorkloads returns — see WatchWorkloads for the one deliberate difference — so a ledger row
+	// and a `burrow app status` answer cannot disagree about one pod.
+	WorkloadChanged WorkloadEventKind = "changed"
+	// WorkloadGone reports that the workload is no longer in the cluster; only Status.App is set. It
+	// is NOT ADR-0074 §6's absence diagnosis, which is a comparison against the registry and stays
+	// the periodic pass's — it is what makes the conditions latched against that workload clear.
+	WorkloadGone WorkloadEventKind = "gone"
+	// WorkloadSynced reports that the watch has delivered a complete current picture of its
+	// namespace: every workload in it has been reported since the watch was established, or since it
+	// last re-listed, so from here an absence of events is an absence of change. It is what RESUMES
+	// coverage (ADR-0079 §4).
+	WorkloadSynced WorkloadEventKind = "synced"
+	// WorkloadDropped reports that the watch lost its place. Between it and the next WorkloadSynced
+	// the observer saw nothing, and a failure that started and ended in that stretch is invisible —
+	// so it ENDS coverage, exactly as a burrowd restart does (ADR-0079 §4).
+	WorkloadDropped WorkloadEventKind = "dropped"
+)
+
+// WorkloadEvent is one thing a workload watch has to say: about a workload, or about itself.
+type WorkloadEvent struct {
+	// Kind is what this event reports.
+	Kind WorkloadEventKind
+	// Namespace is the namespace the watch that produced it covers. It is on the event rather than
+	// implied by the channel because several watches deliver on one channel, and the consumer has to
+	// know which of them just dropped.
+	Namespace string
+	// Status is the workload's observed state on WorkloadChanged, and carries only App on
+	// WorkloadGone. It is unset on the two events that are about the watch.
+	Status WorkloadStatus
+	// Detail is one line saying why a watch dropped, empty on every other kind. It is for a log line,
+	// not for a ledger row.
+	Detail string
+}
+
 // ExposureStatus is the observed state of an app's exposure, for the reachability surface
 // (ADR-0018). Address is the controller-assigned external IP or hostname, read from the
 // Ingress's status; it is empty until an ingress controller assigns one.

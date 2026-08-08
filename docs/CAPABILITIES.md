@@ -1381,6 +1381,7 @@ refusal names the limit, the tier the effective bound came from, and the command
 | `build.job_retention` | how long a finished in-cluster build Job and its pods are kept before Kubernetes reaps them | `72h0m0s` (1m – 8760h) | cluster |
 | `addon.metric_retention` | how long the metrics add-on keeps samples, applied when its instance is created | `744h0m0s` (24h – 87600h) | cluster |
 | `status.unschedulable_grace` | how long a pod must have been unschedulable before Burrow reports it as an Issue | `30s` (0s – 1h) | cluster |
+| `status.image_pull_grace` | how long a pull failure must persist before the failure ledger opens a row for it | `15s` (0s – 10m) | cluster |
 | `deploy.settle_timeout` | how long a deploy waits for its rollout to settle before telling a `post-deploy` hook what it observed | `5m0s` (10s – 30m) | environment or cluster |
 | `addon.sql_timeout` | how long one `addon sql` statement may run before the database aborts it | `30s` (1s – 5m) | environment or cluster |
 | `addon.sql_rows` | the largest number of rows one `addon sql` statement returns before the result is reported as truncated | `500` (1 – 10000) | environment or cluster |
@@ -1421,9 +1422,19 @@ Limits:
   produce a caller that gives up while burrowd is still working.
 - **`status.unschedulable_grace` is ONE value, everywhere.** The live status surface, the Job
   waiters behind `app run` / build / backup / restore, and the failure ledger
-  ([ADR-0074](adr/0074-burrow-observes-what-it-manages.md)) all judge the same pod through the same
-  inspection, so a change to it moves all of them together. Two surfaces disagreeing here would not
-  be a tuning difference — they would hold different definitions of "failure".
+  ([ADR-0074](adr/0074-burrow-observes-what-it-manages.md)) all judge the same pod against the same
+  threshold, so a change to it moves all of them together. Two surfaces disagreeing here would not
+  be a tuning difference — they would hold different definitions of "failure". It is spent **once**
+  on each path: the live surface withholds a scheduling refusal younger than the grace, and the
+  ledger's watch reports the refusal immediately and holds the row for the same grace before opening
+  it ([ADR-0079](adr/0079-the-observer-watches-and-latches.md) §3).
+- **The `status.` limits are the ledger's dwells.** `status.image_pull_grace` is the second one, and
+  unlike the unschedulable grace it is spent only by the ledger: `burrow app status` reports a pull
+  failure the moment the cluster does, because a live read answers about this second, while the
+  ledger is the record that must not fill with registry hiccups that resolved themselves. The
+  reasons that are **already the outcome of waiting** — `OOMKilled`, `CrashLoopBackOff`,
+  `ProgressDeadlineExceeded`, `DeadlineExceeded` — have no dwell at all and are recorded the instant
+  they are reported.
 - **Two of them apply at creation, not retroactively.** `build.job_retention` is written onto each
   build Job as `ttlSecondsAfterFinished`, and `addon.metric_retention` onto the metrics add-on's
   container args, so a change reaches the next build and the next install of the add-on. A running
@@ -1503,11 +1514,24 @@ result and the literal `gaps` between them — stretches in which nothing was ob
 list over a gap is not evidence that nothing broke, and both CLIs say so rather than printing a
 clean list. Sweeps that ran but could not read every object are reported as degraded coverage.
 
+**The observer watches, and latches a transition before recording it**
+([ADR-0079](adr/0079-the-observer-watches-and-latches.md)). A failure is recorded when the cluster
+reports it, not at the next sample — but only once it has **persisted for a dwell**, and its row is
+closed only once the condition has been **clear for one**. The dwell is per reason: a scheduling
+failure waits out `status.unschedulable_grace`, a pull failure `status.image_pull_grace`, and a
+reason that is already the outcome of waiting (`OOMKilled`, `CrashLoopBackOff`, an elapsed deadline)
+waits for nothing. So an app that goes unready for ten seconds during a rolling update leaves no
+rows, and one that has been unschedulable for a minute leaves one that says when it started. A
+**dropped watch is a gap**, treated exactly as a burrowd restart is: coverage ends where the watch
+lost its place and resumes when the re-list completes.
+
 Limits: retention prunes **resolved** rows and elapsed windows after 30 days (an active failure
-is never pruned). The observer **samples** on an interval (one minute by default) rather than
-holding a watch, so a failure shorter than the interval can pass unseen. burrowd **observes and
-never remediates**. **No row carries a secret value** — the detail is one Burrow-authored line,
-and a crash loop's application output stays with the live status surface and `app logs`.
+is never pruned). The ledger deliberately **lags the cluster by the dwell** — it is the record of
+what happened, and `burrow app status` is the place to look for what is happening this second. A
+flap that never exceeds its dwell is **invisible** here, which is correct for the ledger's purpose
+and worth knowing. burrowd **observes and never remediates**. **No row carries a secret value** —
+the detail is one Burrow-authored line, and a crash loop's application output stays with the live
+status surface and `app logs`.
 
 ---
 

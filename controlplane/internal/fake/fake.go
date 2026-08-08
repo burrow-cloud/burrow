@@ -22,6 +22,7 @@ type Op string
 const (
 	OpApply                 Op = "ApplyWorkload"
 	OpStatus                Op = "WorkloadStatus"
+	OpWatchWorkloads        Op = "WatchWorkloads"
 	OpScale                 Op = "ScaleWorkload"
 	OpLogs                  Op = "Logs"
 	OpDelete                Op = "DeleteWorkload"
@@ -96,6 +97,7 @@ const (
 	// The failure ledger and what the observer reads to fill it (ADR-0074 §3–§6).
 	OpRecordFailure           Op = "RecordFailure"
 	OpResolveFailures         Op = "ResolveFailures"
+	OpResolveFailure          Op = "ResolveFailure"
 	OpFailures                Op = "Failures"
 	OpStartObservationWindow  Op = "StartObservationWindow"
 	OpExtendObservationWindow Op = "ExtendObservationWindow"

@@ -85,6 +85,26 @@ func (d *Database) ResolveFailures(ctx context.Context, at time.Time, keep []con
 	return nil
 }
 
+// ResolveFailure closes the one active row identified by key, at the instant the condition actually
+// cleared (ADR-0079 §2). Resolving a row that is not active is a no-op, matching the store.
+func (d *Database) ResolveFailure(ctx context.Context, at time.Time, key controlplane.FailureKey) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpResolveFailure]; err != nil {
+		return err
+	}
+	for i := range d.failures {
+		f := &d.failures[i]
+		if !f.Active() || f.Object != key.Object || f.Reason != key.Reason {
+			continue
+		}
+		t := at
+		f.ResolvedAt = &t
+		return nil
+	}
+	return nil
+}
+
 // Failures returns ledger rows matching filter, oldest first — the order ADR-0074 §5 asks for.
 func (d *Database) Failures(ctx context.Context, filter controlplane.FailureFilter) ([]controlplane.Failure, error) {
 	d.mu.Lock()

@@ -465,6 +465,35 @@ type Kubernetes interface {
 	// ListWorkloads returns the observed state of every Burrow-managed workload in the
 	// namespace (for an apps listing). No workloads is an empty slice, not an error.
 	ListWorkloads(ctx context.Context) ([]WorkloadStatus, error)
+	// WatchWorkloads starts a watch over the Burrow-managed workloads in this seam view's namespace
+	// and delivers what the cluster says about them on events, until ctx is cancelled (ADR-0079 §1).
+	// It returns once the watch is established, so a namespace that cannot be watched at all is an
+	// error the caller can report and retry rather than a goroutine failing forever in a log. It is a
+	// READ and it mutates nothing (ADR-0074 §9).
+	//
+	// THE DERIVATION IS SHARED WITH THE STATUS SURFACE. A WorkloadChanged event carries exactly what
+	// ListWorkloads would have returned for that app, produced by the same function — the property
+	// the sweep this replaces was chosen for, and not the sweep's to keep (ADR-0079 §1).
+	//
+	// WITH ONE DELIBERATE DIFFERENCE: the unschedulable grace is NOT applied. The status surface
+	// withholds a scheduling failure younger than `status.unschedulable_grace` because a live read is
+	// a question about this moment and a scheduler that is merely slow is not an answer to it. A
+	// watch reports the edge and its consumer holds the transition for the dwell (ADR-0079 §2–§3),
+	// which is the SAME value spent once rather than twice — applying it here as well would double
+	// it and blind the ledger to the first thirty seconds of everything, which is precisely the
+	// resolution ADR-0079 exists to recover.
+	//
+	// IT RUNS UNTIL ctx IS CANCELLED AND RE-ESTABLISHES ITSELF. A watch that gave up on the first
+	// disconnect would be a sweep that ran once. What it may not do is reconnect QUIETLY: a lost
+	// place is a WorkloadDropped event and a completed re-list is a WorkloadSynced one, because
+	// between them the consumer saw nothing and that is not the same as nothing having happened
+	// (ADR-0079 §4). A reconnect that resumes from where it left off missed nothing and is therefore
+	// neither.
+	//
+	// Sends BLOCK on a full channel rather than dropping. A dropped event would leave a consumer's
+	// latch believing a condition that has cleared; back-pressure instead stalls the watch, which
+	// the cluster's own watch buffer eventually turns into a re-list — a gap that says so.
+	WatchWorkloads(ctx context.Context, events chan<- WorkloadEvent) error
 
 	// AwaitRollout blocks until app's newest revision has SETTLED — the completion test
 	// `kubectl rollout status` uses, not merely that the write was accepted — or until it can say why
@@ -983,6 +1012,15 @@ type Database interface {
 	// an object that is in neither — one the sweep read and found healthy, or one that has left the
 	// registry entirely — is resolved.
 	ResolveFailures(ctx context.Context, at time.Time, keep []FailureKey, skip []ObjectRef) error
+	// ResolveFailure closes, at time at, the one active row identified by key. It is the LATCH's half
+	// of §4's resolution (ADR-0079 §2): a condition that has been clear for its dwell is closed then,
+	// at the instant it actually stopped, rather than whenever a periodic pass next notices its
+	// absence. Latching only the opening edge would leave the closing one as coarse as the sweep
+	// ADR-0079 replaced, and §2 asks for both.
+	//
+	// Resolving a row that is not active is a no-op, not an error: a clearing edge can arrive after a
+	// restart has already forgotten the latch that opened it.
+	ResolveFailure(ctx context.Context, at time.Time, key FailureKey) error
 	// Failures returns ledger rows matching filter, oldest first. Oldest-first is the order ADR-0074
 	// §5 asks for: when one cause has produced many rows, the earliest first_seen in the cascade is
 	// the likeliest thing to actually fix. No matches yields an empty slice and no error.

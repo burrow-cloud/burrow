@@ -19,6 +19,7 @@ import (
 // ledger back.
 type observerHarness struct {
 	observer *cp.Observer
+	engine   *cp.Engine
 	db       *fake.Database
 	k8s      *fake.Kubernetes
 	clock    *fake.Clock
@@ -36,7 +37,7 @@ func newObserverHarness(t *testing.T, cfg cp.ObserverConfig) *observerHarness {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return &observerHarness{observer: e.NewObserver(cfg), db: d, k8s: k, clock: c}
+	return &observerHarness{observer: e.NewObserver(cfg), engine: e, db: d, k8s: k, clock: c}
 }
 
 // seedDeployedApp records a deployed release, which is what makes an app one the registry says
@@ -68,6 +69,17 @@ func allFailures(t *testing.T, d *fake.Database) []cp.Failure {
 		t.Fatalf("Failures: %v", err)
 	}
 	return rows
+}
+
+// defaultDwell is the built-in value of a dwell limit, read through the same accessor the observer
+// reads it through so a test never hard-codes a number the catalogue owns.
+func defaultDwell(t *testing.T, code cp.LimitCode) time.Duration {
+	t.Helper()
+	d, _ := cp.OperationalConfig{}.Duration("", code)
+	if d <= 0 {
+		t.Fatalf("limit %s has no positive default dwell", code)
+	}
+	return d
 }
 
 // findFailure returns the row for one (object kind, name, reason), or fails the test.
@@ -191,8 +203,13 @@ func TestObserverKeepsConcurrentReasonsApart(t *testing.T) {
 	}
 }
 
-// TestObserverResolvesWhatRecovered: an app whose blocking condition clears has its row resolved by
-// the next sweep — the answer to "did it recover on its own" (ADR-0074 §4).
+// TestObserverResolvesWhatRecovered: an app whose blocking condition clears has its row resolved —
+// the answer to "did it recover on its own" (ADR-0074 §4) — and BOTH edges are latched, so the row
+// opens a dwell after the condition started and closes a dwell after it stopped (ADR-0079 §2).
+//
+// The instants stamped on the row are the condition's own, not the moments Burrow finished being
+// sure: first_seen is when the scheduler first refused and resolved_at is when it stopped refusing.
+// The dwell is how long Burrow waited, not part of what happened.
 func TestObserverResolvesWhatRecovered(t *testing.T) {
 	ctx := context.Background()
 	h := newObserverHarness(t, cp.ObserverConfig{})
@@ -200,21 +217,37 @@ func TestObserverResolvesWhatRecovered(t *testing.T) {
 	if err := h.k8s.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "ghcr.io/u/web:1", Replicas: 1}); err != nil {
 		t.Fatalf("ApplyWorkload: %v", err)
 	}
-	h.k8s.SetIssue("web", cp.IssueEvidence{Reason: cp.ReasonUnschedulable, Detail: "0/3 nodes are available: insufficient cpu"})
+	grace := defaultDwell(t, cp.LimitUnschedulableGrace)
 	h.observer.ObserveOnceForTest(ctx)
-	if rows := activeFailures(t, h.db); len(rows) != 1 {
-		t.Fatalf("expected one active row after the first sweep, got %d", len(rows))
+
+	began := h.clock.Now()
+	h.k8s.SetIssue("web", cp.IssueEvidence{Reason: cp.ReasonUnschedulable, Detail: "0/3 nodes are available: insufficient cpu"})
+	h.observer.DrainForTest(ctx)
+	if rows := activeFailures(t, h.db); len(rows) != 0 {
+		t.Fatalf("a scheduling failure opened a row before its grace elapsed: %+v", rows)
 	}
 
-	h.k8s.SetIssue("web", cp.IssueEvidence{})
+	h.clock.Advance(grace)
+	h.observer.SettleForTest(ctx)
+	f := findFailure(t, activeFailures(t, h.db), cp.FailureApp, "web", cp.ReasonUnschedulable)
+	if !f.FirstSeen.Equal(began) {
+		t.Errorf("first_seen = %s, want %s — the onset, not the moment the dwell expired", f.FirstSeen, began)
+	}
+
 	h.clock.Advance(time.Minute)
 	recovered := h.clock.Now()
-	h.observer.ObserveOnceForTest(ctx)
+	h.k8s.SetIssue("web", cp.IssueEvidence{})
+	h.observer.DrainForTest(ctx)
+	if rows := activeFailures(t, h.db); len(rows) != 1 {
+		t.Fatalf("the row closed the instant the condition cleared; the closing edge is latched too: %+v", rows)
+	}
 
+	h.clock.Advance(grace)
+	h.observer.SettleForTest(ctx)
 	if rows := activeFailures(t, h.db); len(rows) != 0 {
 		t.Fatalf("the failure cleared but %d rows are still active: %+v", len(rows), rows)
 	}
-	f := findFailure(t, allFailures(t, h.db), cp.FailureApp, "web", cp.ReasonUnschedulable)
+	f = findFailure(t, allFailures(t, h.db), cp.FailureApp, "web", cp.ReasonUnschedulable)
 	if f.ResolvedAt == nil || !f.ResolvedAt.Equal(recovered) {
 		t.Errorf("resolved_at = %v, want %s", f.ResolvedAt, recovered)
 	}
@@ -494,7 +527,7 @@ func TestObserverDoesNotClaimCoverageItDoesNotHave(t *testing.T) {
 	if err := h.k8s.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Image: "ghcr.io/u/web:1", Replicas: 1}); err != nil {
 		t.Fatalf("ApplyWorkload: %v", err)
 	}
-	h.k8s.SetIssue("web", cp.IssueEvidence{Reason: cp.ReasonUnschedulable, Detail: "insufficient cpu"})
+	h.k8s.SetIssue("web", cp.IssueEvidence{Reason: cp.ReasonCrashLoopBackOff, Container: "web", ExitCode: 1})
 	h.observer.ObserveOnceForTest(ctx)
 
 	h.db.SetError(fake.OpManagedApps, errors.New("the database is unreachable"))

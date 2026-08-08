@@ -239,6 +239,59 @@ func (o *commonOpts) requireCluster() error {
 	return refuseCloudTarget()
 }
 
+// readClient is client's sibling for a command that READS something the control plane answers over
+// the same API on EITHER kind of target. A cluster target resolves exactly as it does in client —
+// the cluster the selected target names, with no environment handle consulted — and the managed
+// product, which client refuses because it has no cluster, is connected to at the endpoint the
+// target names.
+//
+// The distinction it draws is between a route and a cluster. `burrow guard list`, `burrow cluster
+// config list`, `burrow audit` and `burrow failures` never needed a cluster; they needed burrowd,
+// and a managed tenant has one of those (cloud issue #202). Refusing them was the client not knowing
+// the endpoint existed, not the endpoint being absent.
+//
+// Only reads move here, and only reads whose route the managed product actually serves. Anything
+// that CHANGES a tenant is a product question — what a tenant may create, and what it costs — rather
+// than a plumbing one, and keeps calling client (clusteronly.go).
+func (o *commonOpts) readClient(ctx context.Context, stderr io.Writer) (*client.Client, error) {
+	tgt, cloud, err := o.cloudTargetIfSelected()
+	if err != nil {
+		return nil, err
+	}
+	if cloud {
+		return o.connect(ctx, tgt)
+	}
+	return o.client(ctx, stderr)
+}
+
+// cloudTargetIfSelected builds the managed-product target when that is what is active, and reports
+// false when it is not. It reads the local config and nothing else: ResolveOperate returns a cloud
+// target before it opens a kubeconfig, so nothing on this path touches one.
+//
+// A config that will not load reports false rather than failing, the same tolerance refuseCloudTarget
+// applies and for the same reason: the cluster path is about to load it again, and failing here would
+// replace a legible message with a vaguer one.
+func (o *commonOpts) cloudTargetIfSelected() (target, bool, error) {
+	// --control-plane names the control plane outright, so no target is consulted for it here any
+	// more than in requireCluster or resolveTarget.
+	if o.controlPlane != "" {
+		return target{}, false, nil
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		return target{}, false, nil
+	}
+	resolved, err := localconfig.ResolveOperate(cfg, o.kubeconfig)
+	if err != nil || !resolved.Cloud() {
+		return target{}, false, nil
+	}
+	tgt, err := o.cloudTarget(cfg, resolved)
+	if err != nil {
+		return target{}, false, err
+	}
+	return tgt, true, nil
+}
+
 // clusterClient is client without the cluster-only check, for the one caller that has already
 // established it is acting on a cluster: `burrow cluster registry install`, whose DNS follow-on step
 // talks to the burrowd it just installed alongside. Nothing else should use it.

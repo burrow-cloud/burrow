@@ -71,7 +71,7 @@ func TestResolveStillRefusesACloudTarget(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Resolve accepted a cloud target and returned %+v", got)
 	}
-	for _, want := range []string{CloudEndpoint, "no cluster", "burrow auth switch"} {
+	for _, want := range []string{CloudEndpoint, "the managed product is not reached through one", "burrow auth switch"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %q, want it to mention %q", err, want)
 		}
@@ -80,6 +80,16 @@ func TestResolveStillRefusesACloudTarget(t *testing.T) {
 	// not have.
 	if strings.Contains(err.Error(), "kubeconfig may have moved") {
 		t.Errorf("error = %q, want a message about the target rather than a kubeconfig failure", err)
+	}
+	// Nor may it generalise from "this resolution needs a kubeconfig" to "your tenant does not have
+	// the thing you asked for". It said a tenant has no cluster of its own, which is true, and every
+	// command that hit it borrowed the sentence for whatever it was refusing — `burrow env list`
+	// answered a tenant's real environments with it (cloud issue #202). Whether the managed product
+	// offers an operation is the API's answer to give, not this resolver's.
+	for _, unwanted := range []string{"no cluster of its own", "tenant has no"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("error = %q, want it not to claim %q — it knows only that it needs a kubeconfig", err, unwanted)
+		}
 	}
 }
 

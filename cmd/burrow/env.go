@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/localconfig"
@@ -76,7 +77,7 @@ func newEnvCmd() *cobra.Command {
 			"current kube context.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runEnvList(cmd.Context(), cmd.OutOrStdout(), o)
+			return runEnvList(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), o)
 		},
 	}
 	bindEnvListFlags(cmd.Flags(), o)
@@ -119,10 +120,13 @@ func newEnvListCmd() *cobra.Command {
 			"with --namespace). It prints what it finds, registers a local handle for each installed\n" +
 			"context that does not have one yet, then prints the updated list. Discovery reads clusters\n" +
 			"but changes only ~/.burrow/config (override with $BURROW_CONFIG); it never modifies a cluster.\n" +
-			"To install Burrow into a cluster that has none, use `burrow cluster install`.",
+			"To install Burrow into a cluster that has none, use `burrow cluster install`.\n\n" +
+			"With the managed product as your active target there are no local handles to list: the\n" +
+			"environments belong to your tenant and live in the control plane, so the listing is read\n" +
+			"from there instead. --discover has nothing to walk in that case and is refused.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runEnvList(cmd.Context(), cmd.OutOrStdout(), o)
+			return runEnvList(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), o)
 		},
 	}
 	bindEnvListFlags(cmd.Flags(), o)
@@ -141,7 +145,16 @@ type envListResult struct {
 	Namespace    string                    `json:"namespace"`
 }
 
-func runEnvList(ctx context.Context, w io.Writer, o *envListOpts) error {
+func runEnvList(ctx context.Context, w, stderr io.Writer, o *envListOpts) error {
+	// The managed product has no local handles and no kubeconfig to resolve them against: its
+	// environments belong to the tenant and are held by the control plane, which answers for them
+	// over the same route a self-hosted burrowd does. So the listing is read from there rather than
+	// from ~/.burrow/config (cloud issue #202). Everything below this line is the cluster listing,
+	// unchanged.
+	if resolved, ok := activeCloudTarget(o.kubeconfig); ok {
+		return runEnvListCloud(ctx, w, stderr, o, resolved)
+	}
+
 	// --discover turns list into the networked probe-and-register pass: walk every context, probe
 	// each for an installed Burrow, and register a handle for any installed context without one. The
 	// human form prints the probe report ahead of the list; JSON stays quiet and reflects only the
@@ -184,6 +197,123 @@ func runEnvList(ctx context.Context, w io.Writer, o *envListOpts) error {
 	}
 	writeEnvList(w, cfg.Environments, resolved, missingContexts(cfg.Environments, o.kubeconfig))
 	return nil
+}
+
+// activeCloudTarget is the resolution for the managed product when that is the active target, and
+// false when it is not. It reads the local config only: a cloud target resolves before a kubeconfig
+// is opened, so asking the question costs no cluster access.
+//
+// A config that will not load answers false rather than failing, the same tolerance the rest of this
+// surface applies: the caller is about to load it again and will report the problem properly.
+func activeCloudTarget(kubeconfig string) (localconfig.Resolved, bool) {
+	cfg, err := localconfig.Load()
+	if err != nil {
+		return localconfig.Resolved{}, false
+	}
+	resolved, err := localconfig.ResolveOperate(cfg, kubeconfig)
+	if err != nil || !resolved.Cloud() {
+		return localconfig.Resolved{}, false
+	}
+	return resolved, true
+}
+
+// envListCloudResult is the JSON shape of `burrow env list` against the managed product: the
+// tenant's environments as the control plane reports them, plus the resolved selection. The keys are
+// the cluster form's keys where they mean the same thing — `current` is the environment a command
+// with no --env goes to, `mode` how the target was selected — so a script reading the listing does
+// not need to know which kind of target answered. `context` has no counterpart here and is absent
+// rather than empty: a tenant is not reached through a kube context, and reporting one as "" would
+// invite the reader to think it merely was not set.
+type envListCloudResult struct {
+	Environments []client.Environment `json:"environments"`
+	Current      string               `json:"current"`
+	Mode         string               `json:"mode"`
+	Target       string               `json:"target"`
+}
+
+// runEnvListCloud lists the tenant's environments from the control plane (cloud issue #202). The
+// refusal it replaces was not a stub for something unbuilt: the route has always answered, and the
+// CLI simply reached for a kubeconfig instead of calling it.
+//
+// It lists and nothing else. Whether a managed tenant may CREATE an environment is a question about
+// namespaces and tier limits rather than about plumbing, so `env add` still refuses here and is left
+// for a decision of its own. The remaining subcommands are unaffected either way: `use`, `follow`,
+// `rename` and `remove` act on local handles, which a cloud target has none of and needs none of.
+func runEnvListCloud(ctx context.Context, w, stderr io.Writer, o *envListOpts, resolved localconfig.Resolved) error {
+	// --discover walks the kubeconfig's contexts probing each for an installed Burrow. There is no
+	// kubeconfig in this path and nothing to probe, so it is refused rather than quietly ignored — the
+	// person asked for a scan, and a listing that silently did not scan answers a question they did
+	// not ask.
+	if o.discover {
+		return fmt.Errorf(
+			"--discover probes the clusters in your kubeconfig for an installed Burrow, and the active target %q is the managed product at %s, which is not one of them. Drop the flag to list your tenant's environments, or switch to a cluster target with \"burrow auth switch <name>\"",
+			resolved.Target, resolved.Endpoint)
+	}
+
+	co := &commonOpts{kubeconfig: o.kubeconfig}
+	c, err := co.readClient(ctx, stderr)
+	if err != nil {
+		return err
+	}
+	envs, err := c.ListEnvironments(ctx)
+	if err != nil {
+		return err
+	}
+	current := defaultEnvironmentName(envs)
+	if o.json {
+		return emit(w, true, envListCloudResult{
+			Environments: envs,
+			Current:      current,
+			Mode:         string(resolved.Mode),
+			Target:       resolved.Target,
+		}, "")
+	}
+	writeCloudEnvList(w, envs, current, resolved)
+	return nil
+}
+
+// defaultEnvironmentName is the environment a command with no --env goes to: the one the control
+// plane marks default. It falls back to the first row if none is marked, so a listing from an older
+// control plane still names something rather than marking nothing at all.
+func defaultEnvironmentName(envs []client.Environment) string {
+	for _, e := range envs {
+		if e.Default {
+			return e.Name
+		}
+	}
+	if len(envs) > 0 {
+		return envs[0].Name
+	}
+	return ""
+}
+
+// writeCloudEnvList prints the tenant's environments as a CURRENT/NAME/NAMESPACE table, the cluster
+// listing's columns minus the one that has no meaning here: there is no kube context behind a
+// tenant's environment. The "*" marks the default — the environment a command with no --env goes to
+// — which is what CURRENT means on this side, since nothing is pinned and nothing is followed.
+//
+// The legend says how to reach the others, because --env is the whole of the answer here and the
+// pin/follow vocabulary the cluster listing explains does not apply.
+func writeCloudEnvList(w io.Writer, envs []client.Environment, current string, resolved localconfig.Resolved) {
+	fmt.Fprintf(w, "Environments on %s\n\n", resolved.Render())
+	if len(envs) == 0 {
+		// Not reachable against a control plane that reports its default, and printed rather than
+		// left as an empty table for the one that does not: a bare header reads like a failure.
+		fmt.Fprintf(w, "No environments reported.\n\n%s\n", envFooter)
+		return
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "CURRENT\tNAME\tNAMESPACE")
+	for _, e := range envs {
+		marker := ""
+		if e.Name == current {
+			marker = "*"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", marker, e.Name, e.Namespace)
+	}
+	_ = tw.Flush()
+	fmt.Fprintln(w, "\n* default environment. Commands go here unless you pass --env <name>.")
+	fmt.Fprintf(w, "\n%s\n", envFooter)
 }
 
 // missingContexts is the set of handle contexts that are not in the kubeconfig, so the listing can
@@ -374,9 +504,20 @@ func newEnvFollowCmd() *cobra.Command {
 			if err := cfg.Save(); err != nil {
 				return err
 			}
-			resolved, err := localconfig.Resolve(cfg, kubeconfig)
+			// ResolveOperate rather than Resolve: this only names what the unpinned config now
+			// resolves to, and Resolve refuses the managed product over a kubeconfig this command
+			// never needed. That refusal arrived AFTER the save, so unpinning with the managed product
+			// selected took effect and reported failure (cloud issue #202).
+			resolved, err := localconfig.ResolveOperate(cfg, kubeconfig)
 			if err != nil {
 				return err
+			}
+			if resolved.Cloud() {
+				// The pin never applied to a cloud target — a target that names no cluster is not
+				// narrowed by a handle inside one — so saying commands now "follow the kube context"
+				// would describe a change that did not happen to where they go.
+				fmt.Fprintf(cmd.OutOrStdout(), "Cleared the pinned environment. Commands target %s, which the pin did not apply to; it will follow your kube context again when you switch to a cluster target.\n", resolved.Render())
+				return nil
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Now following the current kube context. Commands target %s.\n", resolved.Render())
 			return nil

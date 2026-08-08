@@ -124,9 +124,17 @@ func ResolveOperate(cfg *Config, kubeconfigPath string) (Resolved, error) {
 // the managed product. It names the target, says why this particular command cannot use it, and
 // gives the one command that changes the answer — rather than failing somewhere further down with a
 // kubeconfig error that sends the reader looking for a cluster problem they do not have.
+//
+// It states the MECHANISM and nothing more: this resolution reads a kubeconfig, and the managed
+// product is not reached through one. What it deliberately no longer says is that a tenant therefore
+// does not have the thing being asked for. It once read "a Burrow Cloud tenant has no cluster of its
+// own", which is true of a cluster and was quietly generalised by every command that hit it — most
+// visibly `burrow env list`, which answered a tenant's perfectly real environments with a sentence
+// implying they did not exist (cloud issue #202). Whether the managed product offers a given
+// operation is the API's answer to give, not this resolver's.
 func errNeedsKubeconfig(name, endpoint string) error {
 	return fmt.Errorf(
-		"localconfig: the active target %q is the managed product at %s, which this command cannot use: it works through a cluster's kubeconfig, and a Burrow Cloud tenant has no cluster of its own. Switch to a cluster target with \"burrow auth switch <name>\" (see \"burrow auth status\")",
+		"localconfig: the active target %q is the managed product at %s, which this command cannot use: it resolves its target out of a cluster's kubeconfig, and the managed product is not reached through one. Switch to a cluster target with \"burrow auth switch <name>\" (see \"burrow auth status\")",
 		name, endpoint)
 }
 

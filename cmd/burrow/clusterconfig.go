@@ -51,7 +51,10 @@ func newClusterConfigListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			// readClient, not client: the effective limits are a read the control plane answers
+			// wherever it runs, and knowing the bounds is what makes them predictable rather than a
+			// surprise (cloud issue #202). `cluster config set` below stays on client.
+			c, err := o.readClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

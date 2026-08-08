@@ -39,6 +39,18 @@ import (
 //   - `burrow auth ...`. It is how a person sees which target is active and changes it, so a refusal
 //     there would leave someone with the managed product selected and no way to read or leave that
 //     state. It reads and writes the local config only and touches no cluster.
+//   - The reads that call commonOpts.readClient instead: `guard list`, `cluster config list`,
+//     `audit`, `failures`, and `env list`. They were refused here because they shared a connection
+//     path with the writes beside them, not because they needed a cluster — each is a GET the managed
+//     control plane answers, and the refusal was the client not knowing the route existed rather than
+//     the route being absent (cloud issue #202). They act on either kind of target now.
+//
+//     A read moves there on that basis alone: the route answers for a tenant, and what it returns is
+//     the tenant's. `cluster` and `cluster capacity` therefore stay refused although their routes
+//     answer, because what they describe is the operator's cluster — its nodes, its headroom, its
+//     top consumers across every tenant — and what a tenant should see of that is a decision nobody
+//     has taken. Anything that CHANGES a tenant stays here for the same kind of reason: it is a
+//     product question, not a plumbing one.
 
 // refuseCloudTarget reports why a cluster-only command cannot run, or nil when it can. It reads the
 // local config and nothing else: no kubeconfig, no network, no credential.

@@ -51,6 +51,63 @@ func validateAppIdentifier(app string) error {
 	return nil
 }
 
+// maxIdentifierLen is PostgreSQL's limit on an identifier: NAMEDATALEN (64) less the terminator.
+// Exceeding it is NOT an error on the server — the name is silently TRUNCATED to this many bytes,
+// which is what turns a length into a correctness problem instead of a cosmetic one.
+const maxIdentifierLen = 63
+
+// The two decorations an attach puts around an app name to derive the roles below. They are named
+// rather than inlined because MaxPostgresAppNameLen is composed from them: a budget written out of
+// the same constants as the names it budgets for cannot drift away from them.
+const (
+	rolePrefix     = "app_"
+	dataRoleSuffix = "_data"
+)
+
+// MaxPostgresAppNameLen is the longest app name that an attach can serve: 63 − len("app_") −
+// len("_data") = 54. It is the length at which EVERY identifier an attach derives still fits inside
+// maxIdentifierLen, so nothing the server is handed is ever truncated.
+//
+// THE BINDING NAME IS THE DATA ROLE, not the database and not the login role. One app name yields a
+// database called <app>, a login role called app_<app>, and a login-less data role called
+// app_<app>_data, and the last is nine bytes longer than the first — so budgeting against either of
+// the other two admits names whose data role silently truncates (issue #534).
+//
+// Truncation there is not a cosmetic clash. Past 58 bytes of app_<app> the suffix is the part that
+// gets cut, and once app_<app> itself reaches 63 the data role's name truncates onto it EXACTLY: the
+// two roles the whole of ADR-0090 §1 rests on become one role, which must then be both able and
+// unable to log in.
+// Whichever disposition the operator reconciles last is the one that sticks, so either the app's
+// credential stops authenticating at attach or the role that holds the data after a detach can log
+// in with the password that detach was supposed to revoke.
+//
+// So the budget FAILS CLOSED and is checked at the point of naming, never worked around by
+// truncating or hashing the derived name. A name that has to be shortened is a collision that
+// depends on how long two names are rather than on what they are, which is materially harder to
+// diagnose than one refused at creation — and shortening only moves the collision, since two apps
+// whose names share a long enough prefix would then share a data role. Refusing is also what keeps
+// the derived names of every name that IS admitted exactly what they have always been.
+const MaxPostgresAppNameLen = maxIdentifierLen - len(rolePrefix) - len(dataRoleSuffix)
+
+// validatePostgresAppName is validateAppIdentifier plus the identifier budget above: the check an
+// app name must pass before a database is provisioned FOR it.
+//
+// It gates the ATTACH PATH ONLY, and that asymmetry is deliberate. An attachment provisioned by an
+// earlier release under a longer name still has its database, its roles and its objects under
+// exactly the names they were created with, and a detach — plain or `--delete-data` — has to be able
+// to reach them. Refusing a length on the teardown path would strand precisely the attachments this
+// check exists to stop anyone from making, with no way left to take them apart.
+func validatePostgresAppName(app string) error {
+	if err := validateAppIdentifier(app); err != nil {
+		return err
+	}
+	if len(app) > MaxPostgresAppNameLen {
+		return fmt.Errorf("app name %q is %d characters, and a postgres attachment can serve at most %d: it derives a login role %s<app> and a login-less %s<app>%s that holds the data across a detach, and PostgreSQL truncates an identifier at %d bytes — past this length those two names truncate onto one role, which cannot be both able and unable to log in. Attach the database to an app with a shorter name: %w",
+			app, len(app), MaxPostgresAppNameLen, rolePrefix, rolePrefix, dataRoleSuffix, maxIdentifierLen, controlplane.ErrInvalid)
+	}
+	return nil
+}
+
 // quoteIdent renders s as a quoted SQL identifier: wrapped in double quotes with any embedded
 // double quote doubled. The caller has already validated s against appIdentifier (which admits no
 // double quote), so this is belt-and-braces — every identifier reaches Postgres quoted.
@@ -374,17 +431,19 @@ func (p *PostgresProvisioner) connectAdmin(ctx context.Context, env, database st
 }
 
 // roleName is the login role for app: app_<app>. app is already validated.
-func roleName(app string) string { return "app_" + app }
+func roleName(app string) string { return rolePrefix + app }
 
 // dataRoleName is the login-less role that OWNS app's data: app_<app>_data. It is derived from the
 // login role's name rather than composed separately, so the pair reads as one app's two roles in a
 // role listing and in ListAppDatabases' ownership query, which matches both.
 //
-// It spends five more characters of PostgreSQL's 63-byte identifier limit than the login role does,
-// which the login role has already been over for app names past 59 characters. Truncation is not a
-// correctness problem — the server truncates the name in the statement the same way it truncated it
-// at creation, and app names admit no underscore, so no two apps can truncate onto each other.
-func dataRoleName(app string) string { return roleName(app) + "_data" }
+// It is the LONGEST identifier an attachment has, five bytes past the login role's, and that is what
+// MaxPostgresAppNameLen is budgeted against — see there for what a truncated one costs. Nothing here
+// shortens: an app name the attach path admits produces a name that fits, and a name that does not
+// fit was refused before any of this was derived. The teardown paths still derive both names for an
+// app the attach path would now refuse, which is the point: they name whatever an earlier release
+// created, and the server truncates it exactly as it did then.
+func dataRoleName(app string) string { return roleName(app) + dataRoleSuffix }
 
 // appDSN composes app's connection string against hostPort. Built with net/url so the password is
 // correctly percent-encoded into the userinfo. This is a SECRET value.
@@ -435,8 +494,14 @@ func appDSN(role, password, hostPort, app string) string {
 // did not fail — it adopted the first environment's database and rotated its password. With the
 // environment selecting the instance, the only database this can find is one on that environment's
 // own server, and adopting it is again exactly what a re-attach should do.
+//
+// A NAME TOO LONG TO SERVE IS REFUSED HERE, before anything is written (MaxPostgresAppNameLen). This
+// is the only place it can be refused honestly: the length is not a property of the app, it is a
+// property of the identifiers an attach derives, so the verb that derives them is the verb that
+// knows. Refusing at detach instead would mean the attach succeeded, the two roles collapsed into
+// one, and the failure surfaced only when the app's access was supposed to end.
 func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env string) (string, error) {
-	if err := validateAppIdentifier(app); err != nil {
+	if err := validatePostgresAppName(app); err != nil {
 		return "", err
 	}
 	// The environment is resolved to an instance BEFORE anything is written: an empty or malformed

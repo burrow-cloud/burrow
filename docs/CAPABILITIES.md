@@ -1062,10 +1062,29 @@ revoked, names the credential's id so you can find the right row in the console,
 `--context`, `--namespace`) name a cluster, so against the managed product they are refused by name
 rather than quietly ignored.
 
-The **cluster and policy commands refuse** while the managed product is selected, naming the target
-and pointing at `burrow auth switch <name>`. They reach a cluster, and a managed tenant has none. The
-refused set is `guard`, `cluster` (its capability view, `capacity`, and `config`), `addon ...`,
-`audit`, `failures`, `app domain ...`, `config provider ...`, `config registry ...` and `env add`.
+The **reads the managed control plane answers act through it too**: `burrow env list`, `burrow guard
+list`, `burrow cluster config list`, `burrow audit` and `burrow failures` call the same routes over
+HTTPS. Each of them once refused, not because a tenant lacked the thing being asked for but because
+the command shared a connection path with a write that needed a kubeconfig
+([cloud #202](https://github.com/burrow-cloud/cloud/issues/202)). `env list` reads the registered
+environments rather than local handles there, and marks the default.
+
+The **rest of the cluster and policy surface refuses** while the managed product is selected, naming
+the target and pointing at `burrow auth switch <name>`. Three distinct reasons, all still true:
+
+- **It acts on a cluster with your kubeconfig.** `config registry ...` writes a pull Secret;
+  `env add` creates a namespace and burrowd's Role in it before it registers anything.
+- **It changes the tenant, and whether a tenant may is a product decision.** `guard set`,
+  `cluster config set`, `addon ...` (install, remove, attach, detach, backup, restore),
+  `config provider add`, `app domain add` / `remove`.
+- **It describes the operator's cluster rather than the tenant.** `cluster` and `cluster capacity`
+  report nodes, headroom, and the top consumers across every tenant. `config provider list` sits
+  here too: the managed product registers no third-party provider, so the listing would only invite
+  a registration that is not offered.
+
+`addon list`, `addon backups` and `addon backup-health` refuse with the rest of `addon`: whether the
+managed product offers tenant add-ons at all is a question about tiers, not a client one.
+`env use` / `follow` / `rename` / `remove` never refuse — they read and write local handles only.
 
 Three things are deliberately **not** refused. The cluster-lifecycle commands — `cluster install`,
 `cluster upgrade`, `cluster bootstrap`, `join`, and the `cluster ingress` / `cluster registry` /
@@ -1136,7 +1155,7 @@ Two distinct things share the name, and conflating them is the usual source of c
 
 | Command | What it does |
 | --- | --- |
-| `burrow env` / `env list` | Lists local handles, marks the active one, and marks any whose kube context is no longer in your kubeconfig. `--discover` probes every kube context for an installed burrowd and registers a handle for each. |
+| `burrow env` / `env list` | Lists local handles, marks the active one, and marks any whose kube context is no longer in your kubeconfig. `--discover` probes every kube context for an installed burrowd and registers a handle for each. With a Burrow Cloud target active there are no local handles: the listing reads the **registered environments** from the control plane instead and marks the default. `--discover` has no kubeconfig to walk there and is refused. |
 | `burrow env add <name>` | Creates the namespace and burrowd's Role/RoleBinding in it, registers the environment with burrowd, and records a local handle. Namespace defaults to `<app-namespace>-<name>`. |
 | `burrow env use <name>` / `env follow` | Pins the active environment, or clears the pin so it follows the current kube context. `env use --context <context>` re-points the handle first, which is what a renamed kube context needs. |
 | `burrow env rename <old> <new>` | Renames a local handle. |
@@ -1718,7 +1737,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Audit-log retention | [0027](adr/0027-audit-log.md) | Not built; deferred in the ADR. |
 | The environment forcing function on the local-handle axis | [0047](adr/0047-agent-environment-safety.md) | Not built (specified for the since-removed MCP layer); the burrowd-registry axis is built. |
 | Registry onboarding via the developer's code-provider registry | [0046](adr/0046-registry-onboarding.md) | Proposed, held deliberately; only the in-cluster registry shipped, via ADR-0054. |
-| Acting on a Burrow Cloud target | [0078](adr/0078-the-cli-points-at-a-target.md) §1 | Mostly built. Signing in is built (`burrow auth login`, cloud ADR-0028's RFC 8628 device flow with PKCE), and the application commands act through a selected cloud target over HTTPS with the stored credential. The cluster and policy surface (`guard`, `cluster`, `addon ...`, `audit`, `failures`, `app domain ...`, `config provider ...`, `config registry ...`, `env add`) does not act through a cloud target and refuses while one is selected, rather than silently using the ambient kubeconfig; the cluster-lifecycle commands and `burrow auth` are exempt. What is not decided is whether that surface should follow a selected CLUSTER target — today it follows the kube context and ignores the target ([#429](https://github.com/burrow-cloud/burrow/issues/429)). |
+| Acting on a Burrow Cloud target | [0078](adr/0078-the-cli-points-at-a-target.md) §1 | Mostly built. Signing in is built (`burrow auth login`, cloud ADR-0028's RFC 8628 device flow with PKCE), and the application commands act through a selected cloud target over HTTPS with the stored credential, as do the reads the managed control plane answers (`env list`, `guard list`, `cluster config list`, `audit`, `failures`). What still refuses while a cloud target is selected, rather than silently using the ambient kubeconfig, is the surface that acts on a cluster with a kubeconfig (`config registry ...`, `env add`), the operations whose availability to a tenant is an open product question (`guard set`, `cluster config set`, the whole of `addon ...`, `config provider add`, `app domain ...`), and the reads that describe the operator's own cluster (`cluster`, `cluster capacity`, `config provider list`); the cluster-lifecycle commands and `burrow auth` are exempt. What is not decided is whether that surface should follow a selected CLUSTER target — today it follows the kube context and ignores the target ([#429](https://github.com/burrow-cloud/burrow/issues/429)). |
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
 | Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Partly built. The destination registration is built: the `s3` provider type and object-storage capability, the credential pair as two keys in `burrow-credentials`, the configuration-time probe write/delete, the recorded globally-unique bucket, lifecycle-versus-retention reconciliation, and `bucket.create` at `confirm` with bucket deletion absent from both CLIs. The backup WRITE path is built too: the dump is shipped to the store and read back before the row says `completed`, retries are for a store that will not answer and never for one that answered and refused, and `burrow addon backup-health postgres` reports destination reachability, the age of the last successful backup, the age of the last one that left the cluster, and the last failure. What is left of §7 is the ALERT: physical backups are now scheduled (ADR-0066 §2), but an instance with no destination and every logical dump still are not, so there is no threshold that would be right for all of them and none is asserted. [#331](https://github.com/burrow-cloud/burrow/issues/331) |

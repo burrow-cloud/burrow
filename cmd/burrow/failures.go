@@ -71,7 +71,7 @@ func newFailuresCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			c, err := o.readClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

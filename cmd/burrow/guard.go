@@ -43,7 +43,11 @@ func newGuardListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			// readClient, not client: reading what binds the agent is the same route on a cluster and
+			// on the managed product, and it is the read a tenant most needs (cloud issue #202).
+			// `guard set` below stays on client — whether a tenant may edit the policy is a product
+			// decision, not this change.
+			c, err := o.readClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

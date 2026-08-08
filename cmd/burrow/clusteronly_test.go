@@ -58,12 +58,26 @@ func unreachableCluster(t *testing.T) string {
 // `cluster install`, `cluster upgrade`, `cluster bootstrap`, `join` and the whole `cluster
 // ingress` / `cluster registry` / `cluster postgres` provisioner surface are deliberately absent:
 // they name the cluster they act on and stay kubeconfig-only by ADR-0078 §3.
+//
+// So are the reads that moved to commonOpts.readClient: they were on this list because they shared a
+// connection path with the writes, not because they needed a cluster, and they now answer against
+// either kind of target (cloudReadCommands below). What is left divides into two honest reasons, and
+// both are still "not through here":
+//
+//   - It acts on a cluster with a kubeconfig. `config registry` writes a pull Secret;
+//     `env add` creates a namespace and RBAC before it registers anything.
+//   - It CHANGES the tenant, and whether a tenant may is a product decision rather than a plumbing
+//     one: `guard set`, `cluster config set`, `addon` installs and attaches, `provider add`,
+//     `domain add`/`remove`, `env add`/`remove`. The managed API answers several of these routes
+//     with a refusal of its own; none of them is turned on by a client change.
+//
+// `cluster` and `cluster capacity` stay for a third reason: the route answers, but what it describes
+// is the operator's cluster — its nodes, its capacity, its top consumers across every tenant — so
+// what a tenant should see there is a decision nobody has taken.
 var clusterOnlyCommands = [][]string{
-	{"guard", "list"},
 	{"guard", "set", "app.delete", "deny"},
 	{"cluster"},
 	{"cluster", "capacity"},
-	{"cluster", "config", "list"},
 	{"cluster", "config", "set", "replicas.max", "5"},
 	{"addon", "list"},
 	{"addon", "install"},
@@ -71,8 +85,6 @@ var clusterOnlyCommands = [][]string{
 	{"addon", "remove", "logs"},
 	{"addon", "attach", "postgres", "web"},
 	{"addon", "backups", "postgres"},
-	{"audit"},
-	{"failures"},
 	{"app", "domain", "add", "example.com", "--address", "203.0.113.1"},
 	{"app", "domain", "remove", "example.com"},
 	{"config", "provider", "list"},
@@ -84,6 +96,173 @@ var clusterOnlyCommands = [][]string{
 	{"config", "registry", "login", "ghcr.io", "-u", "me", "-p", "tok"},
 	{"config", "registry", "logout", "ghcr.io"},
 	{"env", "add", "staging"},
+}
+
+// cloudReadCommands is the other half of the sweep: the reads that were refused on a cloud target
+// because they shared a connection path with the writes, not because they needed a cluster. Each is
+// a GET the managed product already answers, and each now goes there (cloud issue #202). The path is
+// listed with the command so the test asserts WHERE it went and not merely that it did not fail —
+// a read that quietly fell back to a kubeconfig would still print a table.
+var cloudReadCommands = []struct {
+	args []string
+	path string
+}{
+	{[]string{"env", "list"}, "/v1/environments"},
+	{[]string{"guard", "list"}, "/v1/guard"},
+	{[]string{"cluster", "config", "list"}, "/v1/config"},
+	{[]string{"audit"}, "/v1/audit"},
+	{[]string{"failures"}, "/v1/failures"},
+}
+
+// cannedTenantReads answers every route in cloudReadCommands from one body. The keys are disjoint
+// across the five decoders, so each command finds its own and ignores the rest — which keeps the
+// fake a single handler rather than five that could drift apart.
+func cannedTenantReads(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"environments": []map[string]any{{"name": "prod", "namespace": "t-qnu706xej92kkd-run", "default": true}},
+		"guardrails":   []map[string]any{{"code": "app.deploy", "disposition": "allow", "description": "deploy a new release of an application"}},
+		"limits":       []map[string]any{{"code": "replicas.max", "value": "5", "source": "default", "description": "the replica ceiling"}},
+		"entries":      []map[string]any{},
+		"failures":     []map[string]any{},
+	})
+}
+
+// TestCloudTargetServesTheReadsItHasARouteFor is the fix. Each of these refused with a sentence
+// about a tenant having no cluster of its own, against an endpoint that had been answering the whole
+// time: the client was reaching for a kubeconfig instead of calling a route (cloud issue #202).
+//
+// No --kubeconfig is passed and no kubeconfig exists — ambienttest gives the package an empty home —
+// so a command that still resolved through one could not reach anything, and the assertion that the
+// tenant's endpoint was hit is the assertion that it did not try.
+func TestCloudTargetServesTheReadsItHasARouteFor(t *testing.T) {
+	for _, tc := range cloudReadCommands {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			signedInToCloud(t)
+
+			var gotPath, gotAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+				cannedTenantReads(w, r)
+			}))
+			defer srv.Close()
+			pointCloudAt(t, srv.URL)
+
+			var out, errb bytes.Buffer
+			if err := run(context.Background(), tc.args, &out, &errb); err != nil {
+				t.Fatalf("burrow %s against a cloud target: %v\nstderr: %s", strings.Join(tc.args, " "), err, errb.String())
+			}
+			if gotPath != tc.path {
+				t.Errorf("reached %q, want the tenant's %q", gotPath, tc.path)
+			}
+			if gotAuth != "Bearer "+cloudCLIToken {
+				t.Errorf("Authorization = %q, want the stored credential", gotAuth)
+			}
+		})
+	}
+}
+
+// TestEnvListOnACloudTargetShowsTheTenantsEnvironments is the issue's own acceptance: the tenant has
+// one environment, `prod`, and the listing must show it AS the default rather than refuse on the
+// grounds that a tenant has none.
+func TestEnvListOnACloudTargetShowsTheTenantsEnvironments(t *testing.T) {
+	signedInToCloud(t)
+	srv := httptest.NewServer(http.HandlerFunc(cannedTenantReads))
+	defer srv.Close()
+	pointCloudAt(t, srv.URL)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "list"}, &out, &errb); err != nil {
+		t.Fatalf("burrow env list against a cloud target: %v\nstderr: %s", err, errb.String())
+	}
+	for _, want := range []string{"prod", "t-qnu706xej92kkd-run", "* default environment"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout = %q, want it to contain %q", out.String(), want)
+		}
+	}
+	// The cluster listing's vocabulary must not leak in: there is no kube context behind a tenant's
+	// environment and nothing is pinned or followed, so a column or a legend saying otherwise would
+	// be describing a machine that is not there.
+	for _, unwanted := range []string{"CONTEXT", "kube context", "pinned"} {
+		if strings.Contains(out.String(), unwanted) {
+			t.Errorf("stdout = %q, want it not to mention %q", out.String(), unwanted)
+		}
+	}
+}
+
+// TestEnvListJSONOnACloudTargetKeepsTheSharedKeys. A script reading the listing should not have to
+// know which kind of target answered, so `environments`, `current` and `mode` mean the same thing on
+// both sides. `context` is absent rather than empty, because a tenant is not reached through one.
+func TestEnvListJSONOnACloudTargetKeepsTheSharedKeys(t *testing.T) {
+	signedInToCloud(t)
+	srv := httptest.NewServer(http.HandlerFunc(cannedTenantReads))
+	defer srv.Close()
+	pointCloudAt(t, srv.URL)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "list", "--json"}, &out, &errb); err != nil {
+		t.Fatalf("burrow env list --json against a cloud target: %v\nstderr: %s", err, errb.String())
+	}
+	var got struct {
+		Environments []struct {
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+			Default   bool   `json:"default"`
+		} `json:"environments"`
+		Current string `json:"current"`
+		Mode    string `json:"mode"`
+		Target  string `json:"target"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", out.String(), err)
+	}
+	if len(got.Environments) != 1 || got.Environments[0].Name != "prod" || !got.Environments[0].Default {
+		t.Errorf("environments = %+v, want the tenant's default prod", got.Environments)
+	}
+	if got.Current != "prod" {
+		t.Errorf("current = %q, want %q", got.Current, "prod")
+	}
+	if got.Target != localconfig.CloudEndpoint {
+		t.Errorf("target = %q, want %q", got.Target, localconfig.CloudEndpoint)
+	}
+	if strings.Contains(out.String(), `"context"`) {
+		t.Errorf("stdout = %q, want no context key: a tenant is not reached through one", out.String())
+	}
+}
+
+// TestEnvListDiscoverOnACloudTargetRefusesForTheRightReason. --discover probes the clusters in a
+// kubeconfig, and there is no kubeconfig in this path — so it is refused, and refused for what it
+// actually is rather than for the tenant supposedly having no environments.
+func TestEnvListDiscoverOnACloudTargetRefusesForTheRightReason(t *testing.T) {
+	signedInToCloud(t)
+	forbidCloud(t)
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"env", "list", "--discover"}, &out, &errb)
+	if err == nil {
+		t.Fatalf("env list --discover ran against a cloud target\nstdout: %s", out.String())
+	}
+	for _, want := range []string{"--discover", localconfig.CloudEndpoint, "burrow auth switch"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+// TestEnvFollowOnACloudTargetSaysWhatItDid. Unpinning reads no cluster, but it named its result
+// through the kubeconfig-only resolution and so failed AFTER saving: the pin was cleared and the
+// command reported an error. It now succeeds and describes what actually changed.
+func TestEnvFollowOnACloudTargetSaysWhatItDid(t *testing.T) {
+	signedInToCloud(t)
+	forbidCloud(t)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"env", "follow"}, &out, &errb); err != nil {
+		t.Fatalf("burrow env follow against a cloud target: %v\nstderr: %s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "Cleared the pinned environment") || !strings.Contains(out.String(), localconfig.CloudEndpoint) {
+		t.Errorf("stdout = %q, want it to say the pin was cleared and name the active target", out.String())
+	}
 }
 
 // TestCloudTargetRefusesTheClusterOnlyCommands is the change. With the managed product selected,

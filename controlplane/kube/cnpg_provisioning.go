@@ -86,6 +86,22 @@ func dataRoleObjectName(instance, app string) string {
 	return provisioningObjectName(instance, app) + ".data"
 }
 
+// attachmentLabels are the descriptive labels every part of one attachment carries: this add-on, in
+// this environment. They make an attachment's objects legible in a namespace that holds every
+// environment's, and they are composed HERE rather than at each of the four call sites so that
+// something created to perform a step — which is an embedder's object, in an embedder's cluster, but
+// still part of this attachment (PostgresConnectedStep.Labels) — is labelled the same way as the
+// objects it acts on.
+//
+// Deliberately not the selectable `managed-by` label: AddonVolumes uses that one to attribute claims,
+// and nothing should reach these by sweeping.
+func attachmentLabels(env string) map[string]string {
+	return map[string]string{
+		addonLabel:    string(controlplane.AddonPostgres),
+		addonEnvLabel: env,
+	}
+}
+
 // cnpgObjects is the pair of resource interfaces the provisioner writes an attachment through, in
 // the target instance's namespace, or an error when no dynamic client is wired.
 //

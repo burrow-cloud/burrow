@@ -201,6 +201,13 @@ func AddonInstanceTarget(addonNamespace string) PostgresTargetFunc {
 // it answers — whose data is in this volume — is one the objects cannot answer about a database a
 // detach retained.
 //
+// THE TWO THAT PROVISION ARE A SEAM, NOT A REQUIREMENT TO SHARE A NETWORK WITH THE DATABASE (issue
+// #532). Each is described as a PostgresConnectedStep and handed to a runner that by default opens
+// the connection here and that an embedder may replace — so a control plane which reaches its
+// instances only through an API server runs them as a Job inside that cluster, while this file
+// remains the single answer to WHAT an attachment consists of. A self-hosted install configures
+// nothing and is unaffected.
+//
 // EVERY OPERATION IS SCOPED TO AN ENVIRONMENT (ADR-0067 §1). The provisioner has no notion of "the"
 // instance: the environment argument selects the instance and the credential together, so a call
 // cannot reach an instance other than the named environment's, and a call that names no environment
@@ -230,6 +237,10 @@ type PostgresProvisioner struct {
 	// open is how a connection is opened, so a test can substitute one and assert what was run and
 	// as whom. Nil means openPostgres — see connect.
 	open sqlOpenFunc
+	// connected is how the steps that need a SQL connection are performed. Nil — which is every
+	// self-hosted install — means opening one here (runConnectedStep). It is the seam an embedder
+	// whose control plane has no route to the instance substitutes; see WithConnectedStep.
+	connected PostgresConnectedStepFunc
 	// The bounds on waiting for somebody else's work: how long the operator has to apply an object,
 	// how long a rotated password has to reach the running server, and how often each is re-read.
 	// Fields rather than constants so a test does not have to spend them.
@@ -520,13 +531,7 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 		return "", err
 	}
 	name := provisioningObjectName(target.Instance, app)
-	// The descriptive labels an add-on's resources carry, so an attachment's objects are legible in
-	// the namespace as this add-on's, for this environment. Not the selectable `managed-by` one:
-	// AddonVolumes uses that to attribute claims, and nothing should select these by sweeping.
-	labels := map[string]string{
-		addonLabel:    string(controlplane.AddonPostgres),
-		addonEnvLabel: env,
-	}
+	labels := attachmentLabels(env)
 	// The Secret carries one label the objects do not, and it is functional rather than descriptive:
 	// it is what makes CloudNativePG notice a rewritten password.
 	secretLabels := map[string]string{cnpgReloadLabel: "true"}
@@ -559,13 +564,7 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 		return "", fmt.Errorf("kube: provisioning the database for %s in environment %q: %w", app, env, err)
 	}
 
-	// The address this process can actually reach the instance at, which in production is the same
-	// in-cluster Service name the app is handed and out of a test's port-forward is not.
-	dial, err := p.dialHostPort(env)
-	if err != nil {
-		return "", err
-	}
-	if err := p.lockDownDatabase(ctx, appDSN(role, password, dial, app), app, env); err != nil {
+	if err := p.lockDownDatabase(ctx, target, app, env, password); err != nil {
 		return "", err
 	}
 	return appDSN(role, password, target.Host()+":5432", app), nil
@@ -596,25 +595,29 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 // an attach whose completion no `status.applied` covers. So a refusal is retried for a bounded
 // window rather than failed on: a re-attach hands back a URL that has been used, or it fails loudly,
 // and never hands back one that merely ought to work.
-func (p *PostgresProvisioner) lockDownDatabase(ctx context.Context, dsn, app, env string) error {
-	db, err := p.connectAsApp(ctx, dsn, app, env)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
+//
+// IT DESCRIBES THE STEP AND HANDS IT TO A RUNNER rather than opening the connection itself, which is
+// what lets an embedder with no route to the instance perform it somewhere else without owning any
+// of the above (PostgresConnectedStep). The statement, the credential it runs as, and the moment it
+// runs at stay here; only the mechanics move.
+func (p *PostgresProvisioner) lockDownDatabase(ctx context.Context, target PostgresTarget, app, env, password string) error {
 	// Idempotent: re-running it on a database already locked down is a no-op, which is what makes it
 	// safe on every attach rather than only on the first.
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM PUBLIC", quoteIdent(app))); err != nil {
+	step := p.connectedStep(PostgresRevokePublicConnect, target, app, env, password,
+		fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM PUBLIC", quoteIdent(app)))
+	if err := p.runConnectedStep(ctx, step); err != nil {
 		return fmt.Errorf("kube: revoking public connect on %s's database in environment %q: %w", app, env, err)
 	}
 	return nil
 }
 
 // connectAsApp opens a connection with the app's OWN credential, retrying until the server accepts
-// it or credentialTimeout expires. Both callers hold a password they have just written into the
-// Secret CloudNativePG applies to the role, and reaching the server is the only proof it landed —
-// see lockDownDatabase for why no `status.applied` covers that. The DSN is a secret value and
-// appears in no error raised here.
+// it or credentialTimeout expires. It serves the default step runner, and every step it runs holds a
+// password just written into the Secret CloudNativePG applies to the role, so reaching the server is
+// the only proof it landed — see lockDownDatabase for why no `status.applied` covers that. A
+// substituted runner owes the same wait, which is why the step carries the window
+// (PostgresConnectedStep.CredentialTimeout). The DSN is a secret value and appears in no error
+// raised here.
 func (p *PostgresProvisioner) connectAsApp(ctx context.Context, dsn, app, env string) (sqlConn, error) {
 	deadline := time.Now().Add(p.credentialTimeout)
 	for {
@@ -744,10 +747,7 @@ func (p *PostgresProvisioner) RevokeAppDatabase(ctx context.Context, app, env st
 	}
 	name := provisioningObjectName(target.Instance, app)
 	dataName := dataRoleObjectName(target.Instance, app)
-	labels := map[string]string{
-		addonLabel:    string(controlplane.AddonPostgres),
-		addonEnvLabel: env,
-	}
+	labels := attachmentLabels(env)
 	secretLabels := map[string]string{cnpgReloadLabel: "true"}
 	for k, v := range labels {
 		secretLabels[k] = v
@@ -776,11 +776,7 @@ func (p *PostgresProvisioner) RevokeAppDatabase(ctx context.Context, app, env st
 		return fmt.Errorf("kube: handing %s's database in environment %q to the role that keeps it: %w", app, env, err)
 	}
 
-	dial, err := p.dialHostPort(env)
-	if err != nil {
-		return err
-	}
-	if err := p.releaseWhatTheRoleOwns(ctx, appDSN(roleName(app), password, dial, app), app, env); err != nil {
+	if err := p.releaseWhatTheRoleOwns(ctx, target, app, env, password); err != nil {
 		return err
 	}
 	if err := deleteCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, p.applyTimeout, p.pollInterval); err != nil {
@@ -806,20 +802,18 @@ func (p *PostgresProvisioner) RevokeAppDatabase(ctx context.Context, app, env st
 // carries — and it is safe to run second precisely because the first left the role owning nothing:
 // run alone it would DESTROY the tables rather than re-home them. Both are idempotent, so a detach
 // re-run after a failure finishes rather than compounding.
-func (p *PostgresProvisioner) releaseWhatTheRoleOwns(ctx context.Context, dsn, app, env string) error {
-	db, err := p.connectAsApp(ctx, dsn, app, env)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
+//
+// THE ORDER OF THE TWO IS PART OF THE STEP, not of whoever performs it. They are handed over as one
+// step for that reason: an embedder that received them separately would be the one deciding that
+// `DROP OWNED` follows `REASSIGN OWNED`, and getting that wrong destroys the rows a plain detach
+// exists to keep.
+func (p *PostgresProvisioner) releaseWhatTheRoleOwns(ctx context.Context, target PostgresTarget, app, env, password string) error {
 	role, data := quoteIdent(roleName(app)), quoteIdent(dataRoleName(app))
-	for _, stmt := range []string{
+	step := p.connectedStep(PostgresReleaseOwnedObjects, target, app, env, password,
 		fmt.Sprintf("REASSIGN OWNED BY %s TO %s", role, data),
-		fmt.Sprintf("DROP OWNED BY %s", role),
-	} {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("kube: releasing what %s's login role owns in environment %q, so that dropping it keeps the data: %w", app, env, err)
-		}
+		fmt.Sprintf("DROP OWNED BY %s", role))
+	if err := p.runConnectedStep(ctx, step); err != nil {
+		return fmt.Errorf("kube: releasing what %s's login role owns in environment %q, so that dropping it keeps the data: %w", app, env, err)
 	}
 	return nil
 }
@@ -867,10 +861,7 @@ func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app, env stri
 		return err
 	}
 	name := provisioningObjectName(target.Instance, app)
-	labels := map[string]string{
-		addonLabel:    string(controlplane.AddonPostgres),
-		addonEnvLabel: env,
-	}
+	labels := attachmentLabels(env)
 
 	// The role's description first and waited on, because the database below names it as owner: a
 	// `Database` whose owner the operator has not reconciled yet is an object it refuses and retries,

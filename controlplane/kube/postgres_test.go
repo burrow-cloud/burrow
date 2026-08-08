@@ -6,11 +6,13 @@ package kube
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/burrow-cloud/burrow/controlplane"
@@ -306,5 +308,172 @@ func TestProvisionerWithNoInstanceProvisionsNothing(t *testing.T) {
 	}
 	if _, err := p.ListAppDatabases(ctx, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("ListAppDatabases err = %v, want ErrInvalid", err)
+	}
+}
+
+// appNameOfLen builds a legal app name of exactly n characters: a leading letter, as appIdentifier
+// (and DNS-1123) requires, and letters after it.
+func appNameOfLen(n int) string { return "a" + strings.Repeat("b", n-1) }
+
+// truncateIdentifier is what the SERVER does to an identifier longer than 63 bytes: it does not
+// refuse it, it silently keeps the first 63. Every assertion about two role names being distinct has
+// to be made through this, because two names that differ are still one role if they differ only
+// past the cut.
+func truncateIdentifier(s string) string {
+	if len(s) > maxIdentifierLen {
+		return s[:maxIdentifierLen]
+	}
+	return s
+}
+
+// TestNoAttachableAppNameCollapsesItsTwoRoles is issue #534's property, asserted over the whole legal
+// length range rather than for a sampled name: for EVERY app name Burrow will attach a database to,
+// the login role and the login-less data role are two different roles on the server.
+//
+// It walks the length axis because that is the axis the defect lives on — the two names differ as
+// strings at every length, and stop differing as ROLES only once the server's truncation reaches
+// back into the shared prefix. A name at any other length would pass while the boundary was broken.
+//
+// The refusals are pinned too, in both directions. A length the budget admits must attach, and a
+// length it refuses must refuse as ErrInvalid — so widening the budget to admit a name that
+// truncates, or narrowing it until it refuses a name that would have been fine, both fail here.
+func TestNoAttachableAppNameCollapsesItsTwoRoles(t *testing.T) {
+	// The upper bound is the app name's own limit: a DNS-1123 label, so 63 characters
+	// (controlplane.App.Validate). Nothing longer can reach the provisioner as an app at all.
+	for n := 1; n <= 63; n++ {
+		app := appNameOfLen(n)
+		err := validatePostgresAppName(app)
+		if n > MaxPostgresAppNameLen {
+			if !errors.Is(err, controlplane.ErrInvalid) {
+				t.Errorf("an app name of %d characters is over the %d-character budget but validated with err = %v, want ErrInvalid", n, MaxPostgresAppNameLen, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("an app name of %d characters is within the %d-character budget but was refused: %v", n, MaxPostgresAppNameLen, err)
+		}
+		login, data := roleName(app), dataRoleName(app)
+		// Nothing an admitted name derives is truncated at all, which is the strong form of the
+		// property: a name the server never cuts cannot be cut onto another one.
+		if len(login) > maxIdentifierLen {
+			t.Errorf("an app name of %d characters derives a %d-byte login role, past PostgreSQL's %d", n, len(login), maxIdentifierLen)
+		}
+		if len(data) > maxIdentifierLen {
+			t.Errorf("an app name of %d characters derives a %d-byte data role, past PostgreSQL's %d", n, len(data), maxIdentifierLen)
+		}
+		if truncateIdentifier(login) == truncateIdentifier(data) {
+			t.Errorf("an app name of %d characters gives the login role and the data role the same name %q: one role cannot be both able and unable to log in", n, truncateIdentifier(login))
+		}
+	}
+}
+
+// TestTheAppNameBudgetIsExactlyTheDataRole pins the budget to the name that binds it. It is one
+// assertion in two halves: the longest admitted name spends the identifier limit to the last byte,
+// and one character more spills over it. A budget with slack in it would pass the property test
+// above while refusing names it never needed to.
+func TestTheAppNameBudgetIsExactlyTheDataRole(t *testing.T) {
+	longest := appNameOfLen(MaxPostgresAppNameLen)
+	if got := len(dataRoleName(longest)); got != maxIdentifierLen {
+		t.Errorf("the longest admitted app name derives a %d-byte data role, want exactly %d: the budget is meant to be the identifier limit, not less", got, maxIdentifierLen)
+	}
+	if got := len(dataRoleName(appNameOfLen(MaxPostgresAppNameLen + 1))); got <= maxIdentifierLen {
+		t.Errorf("one character past the budget still derives a %d-byte data role, so the budget is not where the limit is", got)
+	}
+}
+
+// TestTheRefusedLengthsCoverTheCollapse names the hazard the budget exists for, so that a later
+// widening of it fails on the reason rather than on the number. At the length where app_<app> first
+// fills the identifier limit, the naive app_<app>_data truncates onto it EXACTLY — the two roles
+// become one — and that length must be refused.
+func TestTheRefusedLengthsCoverTheCollapse(t *testing.T) {
+	// 63 − len("app_") = 59: the shortest app name whose login role already spends the whole limit, so
+	// there is nothing left of it for the suffix to occupy.
+	collapse := maxIdentifierLen - len(rolePrefix)
+	app := appNameOfLen(collapse)
+	if truncateIdentifier(roleName(app)+dataRoleSuffix) != truncateIdentifier(roleName(app)) {
+		t.Fatalf("an app name of %d characters no longer collapses its two roles; this test is asserting about the wrong length", collapse)
+	}
+	if collapse <= MaxPostgresAppNameLen {
+		t.Fatalf("the budget admits %d characters, at which the two role names truncate onto one role", collapse)
+	}
+	if err := validatePostgresAppName(app); !errors.Is(err, controlplane.ErrInvalid) {
+		t.Errorf("validatePostgresAppName(%d characters) err = %v, want ErrInvalid", collapse, err)
+	}
+}
+
+// TestAttachRefusesAnAppNameItCannotServe is the refusal where the acceptance list puts it: at
+// attach, before anything is written. The longest servable name goes all the way through and gets
+// two roles that differ in the one property they exist to differ in; one character more is refused
+// with the limit named, and leaves the instance untouched.
+func TestAttachRefusesAnAppNameItCannotServe(t *testing.T) {
+	ctx := context.Background()
+	p, dyn, _ := provisionerFor(t, addonNS)
+
+	longest := appNameOfLen(MaxPostgresAppNameLen)
+	if _, err := p.EnsureAppDatabase(ctx, longest, controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("the longest servable app name failed to attach: %v", err)
+	}
+	roles := dyn.Resource(cnpgDatabaseRoleGVR).Namespace(addonNS)
+	login, err := roles.Get(ctx, provisioningObjectName(PostgresSecretName, longest), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("the login role object: %v", err)
+	}
+	data, err := roles.Get(ctx, dataRoleObjectName(PostgresSecretName, longest), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("the data role object: %v", err)
+	}
+	// Two objects is not the property; two ROLES is. The names the server is handed must differ, and
+	// they must carry opposite login dispositions — the pair collapsing is exactly one role being
+	// asked for both.
+	loginRole := nestedString(t, login.Object, "spec", "name")
+	dataRole := nestedString(t, data.Object, "spec", "name")
+	if loginRole == dataRole {
+		t.Fatalf("both DatabaseRole objects name the role %q", loginRole)
+	}
+	if can, _, _ := unstructured.NestedBool(login.Object, "spec", "login"); !can {
+		t.Error("the login role is described as unable to log in")
+	}
+	if can, _, _ := unstructured.NestedBool(data.Object, "spec", "login"); can {
+		t.Error("the data role is described as able to log in")
+	}
+
+	// One character more. The count is taken before the call so the assertion is about what THIS
+	// attach wrote, not about the fake being empty.
+	before := len(dyn.Actions())
+	tooLong := appNameOfLen(MaxPostgresAppNameLen + 1)
+	_, err = p.EnsureAppDatabase(ctx, tooLong, controlplane.DefaultEnvironment)
+	if !errors.Is(err, controlplane.ErrInvalid) {
+		t.Fatalf("EnsureAppDatabase(%d characters) err = %v, want ErrInvalid", len(tooLong), err)
+	}
+	// The refusal has to be readable by whoever hit it: the length that failed and the length that
+	// would not have.
+	for _, want := range []string{tooLong, strconv.Itoa(MaxPostgresAppNameLen)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+	if got := len(dyn.Actions()); got != before {
+		t.Errorf("a refused attach performed %d cluster operations, want none: the length is refused before anything is provisioned", got-before)
+	}
+	if secrets, _ := p.client.CoreV1().Secrets(addonNS).List(ctx, metav1.ListOptions{}); len(secrets.Items) != 1 {
+		t.Errorf("a refused attach left %d password secrets, want only the servable app's one", len(secrets.Items))
+	}
+}
+
+// TestDetachStillReachesAnAppNameAttachWouldRefuse is the other side of putting the budget on the
+// attach path alone. An attachment provisioned by an earlier release under a longer name still has
+// its database and its roles under the names it was created with, and both teardown verbs have to be
+// able to take it apart — a length refused here would strand exactly the attachments the budget
+// exists to stop anyone from making.
+func TestDetachStillReachesAnAppNameAttachWouldRefuse(t *testing.T) {
+	ctx := context.Background()
+	p, _, _ := provisionerFor(t, addonNS)
+
+	tooLong := appNameOfLen(MaxPostgresAppNameLen + 1)
+	if err := p.RevokeAppDatabase(ctx, tooLong, controlplane.DefaultEnvironment); err != nil {
+		t.Errorf("a detach of an over-budget app name failed: %v", err)
+	}
+	if err := p.DropAppDatabase(ctx, tooLong, controlplane.DefaultEnvironment); err != nil {
+		t.Errorf("a --delete-data detach of an over-budget app name failed: %v", err)
 	}
 }

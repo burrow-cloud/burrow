@@ -44,6 +44,11 @@ import (
 // And when an explicit flag does send a command somewhere the selected target does not name, that is
 // said out loud rather than left to be discovered, because a silent divergence is the failure this
 // whole record is about.
+//
+// The CLUSTER-LIFECYCLE commands resolve separately, in lifecycleContext below, and the difference
+// between the two resolutions is exactly (4): a lifecycle command has no fall-through at all, not
+// even the pre-target one, because the privileged operation it is about to perform is one nobody
+// should get on a cluster they did not name (cloud ADR-0038 §1).
 
 // clusterContext resolves the kube context a privileged command acts on, per the precedence above,
 // and returns the empty string when nothing has decided one — meaning the kubeconfig's current
@@ -129,56 +134,113 @@ func noteContextOverride(cfg *localconfig.Config, kubeContext string, stderr io.
 		kubeContext, target.Name, target.Context)
 }
 
-// noteLifecycleContext says which cluster a CLUSTER-LIFECYCLE command is about to act on, when that
-// is not the cluster the active target names.
+// lifecycleContext decides which cluster a CLUSTER-LIFECYCLE command acts on, or refuses to let it
+// run (cloud ADR-0038 §1).
 //
-// The lifecycle commands — `cluster install`, `cluster upgrade`, `cluster bootstrap`, `join`, and
-// the `cluster ingress` / `cluster registry` / `cluster postgres` provisioners — deliberately do NOT
-// follow the target. [ADR-0078](../../docs/adr/0078-the-cli-points-at-a-target.md) §3 settles that:
-// they act on a kubeconfig context, because installing into the managed product is not a thing that
-// can be asked for, and an installer that redirected itself to whatever was last selected would be
-// the more dangerous of the two behaviours. What was missing is not target-following; it is that
-// several of them had no `--context` flag at all, so there was no per-invocation way to point them
-// anywhere, and they never said which cluster they had picked.
+// The lifecycle set is the commands that reach a cluster through a kubeconfig alone and take
+// `--context` to say which: `cluster upgrade`, and the `cluster ingress` / `cluster registry` /
+// `cluster postgres` / `cluster metrics` provisioners. `cluster install`, `cluster bootstrap` and
+// `join` are outside it, not by exemption but because none of them CAN run without naming a
+// cluster — install takes a required positional `<context>` and lists the kubeconfig's contexts when
+// it is absent, bootstrap acts on the k3s admin kubeconfig it just wrote, and join on the kubeconfig
+// carried in the token it was handed. Binding the flag is therefore the marker of the set, and
+// bindLifecycleContext is where it is stamped.
 //
-// This is called by exactly those several: `cluster upgrade` and the `cluster ingress` /
-// `cluster registry` / `cluster postgres` provisioners, which gained the flag. The other three name
-// their cluster in the only way that makes sense for what they do — `cluster install` takes a
-// positional `<context>`, `cluster bootstrap` acts on the k3s kubeconfig it just wrote, and `join`
-// on the kubeconfig it is recording access into — so there is nothing here for them to say.
+// Two arms decide it, and the missing third is the change:
 //
-// Silent when no target is selected (the pre-target world, unchanged) and when the target names this
-// very context.
-func noteLifecycleContext(kubeconfig, kubeContext string, stderr io.Writer) {
+//  1. `--context`, a person naming a cluster for this one invocation. It wins over the active target
+//     exactly as it does on the privileged path above, and it is honoured whatever kind the target
+//     is: installing a cluster while the managed product is selected stays legal, because a person
+//     using both is an ordinary state and the flag says which cluster they mean.
+//  2. The active target, when it is a cluster target. A cluster target names a context, which is a
+//     name somebody configured, so acting on it is acting on a cluster somebody chose.
+//
+// The arm that is gone is the one these commands used to end on: the kubeconfig's current context,
+// taken whenever neither of the two above had spoken. They warned about it and proceeded, and the
+// warning was the wrong instrument — it goes to stderr, it is read after the fact if at all, and
+// never in a script, while the consequence is an install or an upgrade on a cluster nobody named. So
+// the fall-through is a refusal now, and it names the cluster it would have acted on, which is the
+// difference between a message and a fix.
+//
+// Scripts that relied on the ambient context break, and naming a context repairs them. That is the
+// accepted cost of the rule rather than an oversight in it: it is the class of breakage that is
+// better loud.
+//
+// The returned context is never empty. That matters mechanically as well as in principle — an empty
+// context is precisely what connect reads as "the kubeconfig's current context", so returning one
+// would reinstate the fall-through underneath the rule.
+func lifecycleContext(kubeconfig, kubeContext string, stderr io.Writer) (string, error) {
+	// An explicit flag wins, and nothing about the target may fail the invocation from here on — the
+	// same tolerance clusterContext applies, for the same reasons. Overriding a target whose context
+	// has gone stale is a legitimate way to keep working, and so is running with a ~/.burrow/config
+	// that will not parse; a config that cannot be read costs the divergence note and nothing else.
+	if kubeContext != "" {
+		if cfg, err := localconfig.Load(); err == nil {
+			noteContextOverride(cfg, kubeContext, stderr)
+		}
+		return kubeContext, nil
+	}
+	// With no flag the config is the only thing left that can name a cluster, so a config that will
+	// not load is not something to fall back FROM here: falling back is the behaviour being removed,
+	// and the file's unreadability is exactly why nothing can name a cluster. The privileged path
+	// tolerates the same file because it has a default to fall back to and this does not.
 	cfg, err := localconfig.Load()
 	if err != nil {
-		return
+		return "", errUnnamedLifecycleCluster(kubeconfig, fmt.Sprintf("the local config could not be read (%v)", err))
 	}
 	target, selected, err := cfg.ActiveTarget()
-	if err != nil || !selected {
-		return
-	}
-	// Resolve the flag (or its absence) to the context this command will really reach, so the note
-	// names a context rather than an empty string. A kubeconfig that cannot be read is not worth
-	// failing on here: the command itself is about to fail on it and will say so far better.
-	acting, err := connect.TargetContextName(kubeconfig, kubeContext)
-	if err != nil || acting == "" {
-		return
-	}
 	switch {
-	case target.Kind == localconfig.TargetKindCloud:
-		fmt.Fprintf(stderr, "burrow: acting on kube context %q. The active target %q is %s, which has no cluster of its own; installing and provisioning always act on a kubeconfig context.\n",
-			acting, target.Name, target.Describe())
-	case target.Kind == localconfig.TargetKindKubernetes && target.Context != acting:
-		fmt.Fprintf(stderr, "burrow: acting on kube context %q, which is not what the active target %q names (kube context %q). Installing and provisioning act on a kubeconfig context rather than the target; pass --context to name one.\n",
-			acting, target.Name, target.Context)
+	case err != nil:
+		return "", errUnnamedLifecycleCluster(kubeconfig, fmt.Sprintf("the active target could not be read (%v)", err))
+	case !selected:
+		return "", errUnnamedLifecycleCluster(kubeconfig, "no target is selected")
+	case target.Kind != localconfig.TargetKindKubernetes:
+		return "", errUnnamedLifecycleCluster(kubeconfig,
+			fmt.Sprintf("the active target %q is %s, which has no cluster of its own", target.Name, target.Describe()))
 	}
+	// The target names a context and ResolveCluster checks it against the kubeconfig, so a target
+	// that has gone stale is caught here — where the message names the target and the context —
+	// rather than at connect time, as a kubeconfig error about a cluster the reader did not know they
+	// were reaching for.
+	cluster, err := localconfig.ResolveCluster(cfg, kubeconfig)
+	if err != nil {
+		return "", err
+	}
+	return cluster.Context, nil
 }
 
-// bindLifecycleContext registers `--context` on a cluster-lifecycle command. The flag's help says
-// what the default is, because the default is the interesting part: these commands follow the
-// kubeconfig and not the target, so a person with a target selected needs to know that naming a
-// context is how they point one somewhere else.
+// errUnnamedLifecycleCluster is the refusal. Its job is to be actionable on one read: what the
+// command needed, why nothing supplied it, which cluster it would have acted on under the old rule,
+// and the two ways to name one.
+//
+// Naming the would-be cluster is the part that turns a refusal into a fix. It is almost always the
+// cluster the person meant — it is the one they would have got — so the correction is a copy of the
+// name out of the message, rather than a hunt through `kubectl config get-contexts` for whichever
+// entry was current.
+//
+// A kubeconfig with no current context, or none at all, leaves nothing to name; the message says the
+// same thing without that clause rather than inventing a cluster.
+func errUnnamedLifecycleCluster(kubeconfig, because string) error {
+	const switchTarget = `select a cluster target with "burrow auth switch <name>" (see "burrow auth status")`
+	would, err := connect.TargetContextName(kubeconfig, "")
+	if err != nil || would == "" {
+		return fmt.Errorf("this command acts on a cluster and nothing names one: %s. Name a cluster with --context <name>, or %s", because, switchTarget)
+	}
+	return fmt.Errorf("this command acts on a cluster and nothing names one: %s. It would have acted on kube context %q, the kubeconfig's current context, which is no longer enough on its own. Act on that one with --context %s, or %s",
+		because, would, would, switchTarget)
+}
+
+// lifecycleContextFlag is the annotation bindLifecycleContext stamps on the `--context` flag it
+// registers, which is what makes the lifecycle set enumerable rather than a list somebody maintains.
+// A test walks the command tree for it and asserts the rule over every command that carries it, so a
+// provisioner added later is covered from the moment it binds the flag.
+const lifecycleContextFlag = "burrow_lifecycle_context"
+
+// bindLifecycleContext registers `--context` on a cluster-lifecycle command. The flag's help states
+// the default because the default is the interesting part: with no cluster target active there is
+// none, and the flag is the whole way to run the command at all.
 func bindLifecycleContext(flags *pflag.FlagSet, kubeContext *string) {
-	flags.StringVar(kubeContext, "context", "", "kubeconfig context to act on (default: the kubeconfig's current context, not the active target)")
+	flags.StringVar(kubeContext, "context", "", "kubeconfig context to act on (default: the active cluster target's; required when no cluster target is active)")
+	// SetAnnotation fails only on a flag that is not registered, which the line above just did.
+	_ = flags.SetAnnotation("context", lifecycleContextFlag, []string{"true"})
 }

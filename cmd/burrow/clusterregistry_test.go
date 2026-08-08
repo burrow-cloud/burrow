@@ -229,7 +229,7 @@ func TestClusterRegistryStatusAbsent(t *testing.T) {
 	stubClusterRegistryClientset(t, fake.NewSimpleClientset())
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "registry"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "registry", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster registry: %v\n%s", err, errb.String())
 	}
 	s := out.String()
@@ -259,7 +259,7 @@ func TestClusterRegistryStatusPresent(t *testing.T) {
 	stubClusterRegistryClientset(t, cs)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "registry"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "registry", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster registry: %v\n%s", err, errb.String())
 	}
 	s := out.String()
@@ -298,7 +298,7 @@ func TestClusterRegistryInstall(t *testing.T) {
 	t.Cleanup(func() { applyFn = origApply })
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host, "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster registry install: %v\n%s", err, errb.String())
 	}
 
@@ -356,7 +356,7 @@ func TestClusterRegistryInstallCondensedOutput(t *testing.T) {
 	t.Cleanup(func() { applyFn = origApply })
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host, "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster registry install: %v\n%s", err, errb.String())
 	}
 	s := out.String()
@@ -397,7 +397,7 @@ func TestClusterRegistryInstallVerbose(t *testing.T) {
 	t.Cleanup(func() { applyFn = origApply })
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host, "--verbose"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host, "--verbose", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster registry install --verbose: %v\n%s", err, errb.String())
 	}
 	s := out.String()
@@ -434,7 +434,7 @@ func TestClusterRegistryInstallCreatesDNSRecord(t *testing.T) {
 	stubRegistryDNSClient(t, dns)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host, "--confirm"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host, "--confirm", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster registry install: %v\n%s", err, errb.String())
 	}
 	if len(dns.added) != 1 {
@@ -467,7 +467,7 @@ func TestClusterRegistryInstallNoProviderManualNote(t *testing.T) {
 	stubRegistryDNSClient(t, dns)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "registry", "install", "--host", host, "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster registry install: %v\n%s", err, errb.String())
 	}
 	if len(dns.added) != 0 {
@@ -486,7 +486,7 @@ func TestClusterRegistryInstallRequiresHost(t *testing.T) {
 	stubClusterRegistryClientset(t, cs)
 
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"cluster", "registry", "install"}, &out, &errb)
+	err := run(context.Background(), []string{"cluster", "registry", "install", "--context", testCluster}, &out, &errb)
 	if err == nil {
 		t.Fatal("install must fail without --host")
 	}
@@ -505,7 +505,7 @@ func TestClusterRegistryInstallRequiresIngress(t *testing.T) {
 	stubClusterIssuerPresent(t, false) // the issuer is missing
 
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"cluster", "registry", "install", "--host", "registry.example.com"}, &out, &errb)
+	err := run(context.Background(), []string{"cluster", "registry", "install", "--host", "registry.example.com", "--context", testCluster}, &out, &errb)
 	if err == nil {
 		t.Fatal("install must fail when the ingress stack is incomplete")
 	}
@@ -525,7 +525,7 @@ func TestClusterRegistryInstallWithoutBurrowd(t *testing.T) {
 	t.Cleanup(func() { applyFn = origApply })
 
 	var out, errb bytes.Buffer
-	err := run(context.Background(), []string{"cluster", "registry", "install", "--host", "registry.example.com"}, &out, &errb)
+	err := run(context.Background(), []string{"cluster", "registry", "install", "--host", "registry.example.com", "--context", testCluster}, &out, &errb)
 	if err == nil {
 		t.Fatal("install must fail when burrowd is not installed")
 	}
@@ -558,7 +558,7 @@ func TestClusterRegistryUninstall(t *testing.T) {
 	stubClusterRegistryClientset(t, cs)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "registry", "uninstall"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "registry", "uninstall", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("cluster registry uninstall: %v\n%s", err, errb.String())
 	}
 
@@ -594,7 +594,7 @@ func TestClusterRegistryUninstallIdempotent(t *testing.T) {
 	stubClusterRegistryClientset(t, cs)
 
 	var out, errb bytes.Buffer
-	if err := run(context.Background(), []string{"cluster", "registry", "uninstall"}, &out, &errb); err != nil {
+	if err := run(context.Background(), []string{"cluster", "registry", "uninstall", "--context", testCluster}, &out, &errb); err != nil {
 		t.Fatalf("uninstall must be idempotent, got: %v\n%s", err, errb.String())
 	}
 }

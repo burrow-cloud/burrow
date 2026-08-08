@@ -47,11 +47,6 @@ func newUpgradeCmd() *cobra.Command {
 		Short: "Upgrade the in-cluster control plane in place (preserves state)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Upgrade acts on a kubeconfig context rather than the active target (ADR-0078 §3), so
-			// say which context that is whenever the target names another one. This is the sharpest
-			// case of the four: without the note, an upgrade rolls whatever the kubeconfig last
-			// pointed at forward and says only which NAMESPACE it touched.
-			noteLifecycleContext(kubeconfig, kubeContext, cmd.ErrOrStderr())
 			return runUpgrade(cmd.Context(), namespace, image, kubeconfig, kubeContext, dryRun, wait, verbose, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -66,12 +61,19 @@ func newUpgradeCmd() *cobra.Command {
 }
 
 func runUpgrade(ctx context.Context, namespace, image, kubeconfig, kubeContext string, dryRun, wait, verbose bool, stdout, stderr io.Writer) error {
+	// Which cluster is asked before anything else, including --dry-run: an upgrade reads the running
+	// install's secrets to render the manifests, so even the dry run contacts a cluster. It is the
+	// sharpest case in the lifecycle set — an upgrade rolls a control plane forward and reports only
+	// which NAMESPACE it touched — and it must be a cluster somebody named (cloud ADR-0038 §1).
+	kubeContext, err := lifecycleContext(kubeconfig, kubeContext, stderr)
+	if err != nil {
+		return err
+	}
 	if image == "" {
 		return errNoBurrowdImage()
 	}
 	// Through the seam install already owns, so an upgrade can be driven end to end against a fake
-	// cluster. An empty kubeContext resolves the kubeconfig's current context, which is what an
-	// upgrade with no --context acts on.
+	// cluster.
 	cs, err := clientsetFn(kubeconfig, kubeContext)
 	if err != nil {
 		return err

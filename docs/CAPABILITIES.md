@@ -1114,13 +1114,15 @@ and the tenant policy holds it at `confirm`, so what it needs is an execution pa
 
 `env use` / `follow` / `rename` / `remove` never refuse — they read and write local handles only.
 
-Three things are deliberately **not** refused. The cluster-lifecycle commands — `cluster install`,
-`cluster upgrade`, `cluster bootstrap`, `join`, and the `cluster ingress` / `cluster registry` /
-`cluster postgres` provisioners — name the cluster they act on and stay kubeconfig-only, because
-installing *into* Burrow Cloud is not a thing that can be asked for
-([ADR-0078](adr/0078-the-cli-points-at-a-target.md) §3). `burrow auth` is how you see and change the
-active target, so refusing there would strand you. And `--control-plane` names a control plane
-outright, so no target is consulted for it.
+Three things are deliberately **not** refused *here*. The cluster-lifecycle commands — `cluster
+install`, `cluster upgrade`, `cluster bootstrap`, `join`, and the `cluster ingress` /
+`cluster registry` / `cluster postgres` / `cluster metrics` provisioners — stay kubeconfig-only,
+because installing *into* Burrow Cloud is not a thing that can be asked for
+([ADR-0078](adr/0078-the-cli-points-at-a-target.md) §3), so installing a cluster while the managed
+product is selected stays legal. They answer to a different rule instead: they refuse unless the
+cluster is one you named (cloud ADR-0038 §1, [below](#which-cluster-a-command-acts-on)). `burrow auth`
+is how you see and change the active target, so refusing there would strand you. And
+`--control-plane` names a control plane outright, so no target is consulted for it.
 
 Only Claude Code has built-in agent wiring, so the detection table's other rows (`~/.codex/`,
 `~/.cursor/`, `~/.codeium/windsurf/`) are recorded but not actionable. And §4 of the ADR — every
@@ -1149,21 +1151,30 @@ The order of precedence, highest first:
 A target naming a context your kubeconfig no longer holds is an error that says so and names the way
 out, rather than quietly falling back to the current context.
 
-The **cluster-lifecycle commands are the exception, deliberately**. `cluster install`,
-`cluster upgrade`, `cluster bootstrap`, `join`, and the `cluster ingress` / `cluster registry` /
-`cluster postgres` provisioners act on a kubeconfig context and not on the target, because installing
-*into* the managed product is not a thing that can be asked for and an installer that redirected
-itself to whatever was last selected would be the more dangerous of the two behaviours
-([ADR-0078](adr/0078-the-cli-points-at-a-target.md) §3).
+The **cluster-lifecycle commands follow a stricter rule**: they act on a cluster you named, or they
+refuse (cloud ADR-0038 §1). `cluster install`, `cluster upgrade`, `cluster bootstrap`, `join`, and the
+`cluster ingress` / `cluster registry` / `cluster postgres` / `cluster metrics` provisioners still
+reach a cluster through a kubeconfig and never through the managed product — installing *into* it is
+not a thing that can be asked for ([ADR-0078](adr/0078-the-cli-points-at-a-target.md) §3) — but none
+of them will infer which cluster from `kubectl`'s current context. Installing while the managed
+product is selected stays possible; doing it without saying which cluster does not.
 
-How each one names its cluster depends on what it does:
+How each one is given its cluster depends on what it does:
 
-| | How it picks a cluster |
+| | How it is given a cluster |
 | --- | --- |
-| `burrow cluster install <context>` | The context you name as an argument. |
+| `burrow cluster install <context>` | The context you name as an argument. With none, it lists your contexts and installs nothing. |
 | `burrow cluster bootstrap` | The single-node cluster it just created, through the k3s kubeconfig it wrote. |
-| `burrow join` | The kubeconfig it is recording admin access into. |
-| `burrow cluster upgrade`, `cluster ingress install`, `cluster registry install/uninstall`, `cluster postgres install` | `--context`, defaulting to the kubeconfig's current context. Each says which context it is acting on whenever the active target names a different cluster, so the choice is visible rather than inferred. |
+| `burrow join` | The kubeconfig it is recording admin access into, carried in the token. |
+| `burrow cluster upgrade`, `cluster ingress install`, `cluster registry` (status/install/uninstall), `cluster postgres install`, `cluster metrics install` | `--context`, else the active target when it is a **cluster** target. With neither, the command refuses, naming the cluster it would have acted on and the flag that would name it. `--context` wins whatever the active target is, and says so when the target names a different cluster. |
+
+A `--dry-run` that only renders (`cluster install`, `cluster postgres install`,
+`cluster metrics install`, `cluster ingress install`) contacts no cluster and so needs no context.
+`cluster upgrade --dry-run` does need one: it reads the running install's secrets to render.
+
+**This breaks scripts** that relied on `kubectl config use-context` deciding for them, and the repair
+is to name a context. That is the intended cost: the alternative was a privileged operation on a
+cluster nobody chose, announced by a warning nothing reads.
 
 ---
 
@@ -1765,7 +1776,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Audit-log retention | [0027](adr/0027-audit-log.md) | Not built; deferred in the ADR. |
 | The environment forcing function on the local-handle axis | [0047](adr/0047-agent-environment-safety.md) | Not built (specified for the since-removed MCP layer); the burrowd-registry axis is built. |
 | Registry onboarding via the developer's code-provider registry | [0046](adr/0046-registry-onboarding.md) | Proposed, held deliberately; only the in-cluster registry shipped, via ADR-0054. |
-| Acting on a Burrow Cloud target | [0078](adr/0078-the-cli-points-at-a-target.md) §1 | Mostly built. Signing in is built (`burrow auth login`, cloud ADR-0028's RFC 8628 device flow with PKCE), and the application commands act through a selected cloud target over HTTPS with the stored credential, as do the reads the managed control plane answers (`env list`, `guard list`, `cluster config list`, `audit`, `failures`, `addon list`, `addon logs`, `addon metrics`). What still refuses while a cloud target is selected, rather than silently using the ambient kubeconfig, is the surface that acts on a cluster with a kubeconfig (`config registry ...`, `env add`), the operations whose availability to a tenant is an open product question (`guard set`, `cluster config set`, `addon install` / `remove` / `connect` / `attach` / `detach` / `backup` / `restore`, `config provider add`, `app domain ...`), the reads that describe the operator's own cluster (`cluster`, `cluster capacity`, `config provider list`), the backup reads whose answer belongs to the platform rather than the tenant (`addon backups`, `addon backup-health`), and `addon sql`, which needs an execution path inside the fleet rather than a different client (cloud ADR-0036 §1); the cluster-lifecycle commands and `burrow auth` are exempt. What is not decided is whether that surface should follow a selected CLUSTER target — today it follows the kube context and ignores the target ([#429](https://github.com/burrow-cloud/burrow/issues/429)). |
+| Acting on a Burrow Cloud target | [0078](adr/0078-the-cli-points-at-a-target.md) §1 | Mostly built. Signing in is built (`burrow auth login`, cloud ADR-0028's RFC 8628 device flow with PKCE), and the application commands act through a selected cloud target over HTTPS with the stored credential, as do the reads the managed control plane answers (`env list`, `guard list`, `cluster config list`, `audit`, `failures`, `addon list`, `addon logs`, `addon metrics`). What still refuses while a cloud target is selected, rather than silently using the ambient kubeconfig, is the surface that acts on a cluster with a kubeconfig (`config registry ...`, `env add`), the operations whose availability to a tenant is an open product question (`guard set`, `cluster config set`, `addon install` / `remove` / `connect` / `attach` / `detach` / `backup` / `restore`, `config provider add`, `app domain ...`), the reads that describe the operator's own cluster (`cluster`, `cluster capacity`, `config provider list`), the backup reads whose answer belongs to the platform rather than the tenant (`addon backups`, `addon backup-health`), and `addon sql`, which needs an execution path inside the fleet rather than a different client (cloud ADR-0036 §1); `burrow auth` is exempt, and the cluster-lifecycle commands are exempt from *that* refusal but carry their own — they refuse unless a cluster is named, by `--context` or by a cluster target (cloud ADR-0038 §1). What is not decided is whether that surface should follow a selected CLUSTER target — today it follows the kube context and ignores the target ([#429](https://github.com/burrow-cloud/burrow/issues/429)). |
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
 | Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Partly built. The destination registration is built: the `s3` provider type and object-storage capability, the credential pair as two keys in `burrow-credentials`, the configuration-time probe write/delete, the recorded globally-unique bucket, lifecycle-versus-retention reconciliation, and `bucket.create` at `confirm` with bucket deletion absent from both CLIs. The backup WRITE path is built too: the dump is shipped to the store and read back before the row says `completed`, retries are for a store that will not answer and never for one that answered and refused, and `burrow addon backup-health postgres` reports destination reachability, the age of the last successful backup, the age of the last one that left the cluster, and the last failure. What is left of §7 is the ALERT: physical backups are now scheduled (ADR-0066 §2), but an instance with no destination and every logical dump still are not, so there is no threshold that would be right for all of them and none is asserted. [#331](https://github.com/burrow-cloud/burrow/issues/331) |

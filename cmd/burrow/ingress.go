@@ -135,10 +135,6 @@ func newIngressCmd() *cobra.Command {
 		Short: "Install ingress-nginx, cert-manager, and a Let's Encrypt issuer (whichever are missing)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// A cluster-lifecycle command acts on a kubeconfig context rather than the active
-			// target (ADR-0078 §3), so say which context that is whenever the target names another
-			// one — the choice is deliberate, and the person reading it should not have to infer it.
-			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runIngressInstall(cmd.Context(), o, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -176,6 +172,14 @@ func runIngressInstall(ctx context.Context, o ingressOptions, stdin io.Reader, s
 	if o.dryRun {
 		writeIngressDryRunPlan(o, issuer, stdout)
 		return nil
+	}
+
+	// Everything past the dry run touches a cluster, so it has to be one somebody named (cloud
+	// ADR-0038 §1). The dry run above is deliberately on the other side of this: it renders a plan
+	// and contacts nothing, so there is no cluster for it to get wrong.
+	o.kubeContext, err = lifecycleContext(o.kubeconfig, o.kubeContext, stderr)
+	if err != nil {
+		return err
 	}
 
 	cs, err := clientsetForContext(o.kubeconfig, o.kubeContext)

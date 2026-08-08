@@ -194,10 +194,7 @@ func newClusterRegistryCmd() *cobra.Command {
 			"runs in your cluster.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Read-only, but it takes the same --context as its siblings and reads whichever cluster
-			// that names, so it says which one for the same reason they do.
-			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
-			return runClusterRegistryStatus(cmd.Context(), o, cmd.OutOrStdout())
+			return runClusterRegistryStatus(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	parent.PersistentFlags().StringVar(&o.namespace, "namespace", connect.DefaultNamespace, "control-plane namespace Burrow is installed in")
@@ -222,10 +219,6 @@ func newClusterRegistryCmd() *cobra.Command {
 			"a Dockerfile, or push the buildpacks image to an external registry).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// A cluster-lifecycle command acts on a kubeconfig context rather than the active
-			// target (ADR-0078 §3), so say which context that is whenever the target names another
-			// one — the choice is deliberate, and the person reading it should not have to infer it.
-			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runClusterRegistryInstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -246,7 +239,6 @@ func newClusterRegistryCmd() *cobra.Command {
 			"reinstall it or point the build at an external registry.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			noteLifecycleContext(o.kubeconfig, o.kubeContext, cmd.ErrOrStderr())
 			return runClusterRegistryUninstall(cmd.Context(), o, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
@@ -272,7 +264,17 @@ func inClusterRegistryPresent(ctx context.Context, cs kubernetes.Interface, name
 // the internal push endpoint, the public pull host, whether the TLS certificate has been issued, and
 // whether the pull credential is present in the app namespace. When it is not, it prints the one-line
 // hint to install it.
-func runClusterRegistryStatus(ctx context.Context, o clusterRegistryOptions, stdout io.Writer) error {
+//
+// Read-only, and it names its cluster anyway (cloud ADR-0038 §1). "Is the registry installed?" is a
+// question about one cluster, and answered off the ambient context it is a true sentence about a
+// cluster the reader did not ask about — which is how somebody installs a second registry, or
+// concludes their build has no push target when it has one.
+func runClusterRegistryStatus(ctx context.Context, o clusterRegistryOptions, stdout, stderr io.Writer) error {
+	var err error
+	o.kubeContext, err = lifecycleContext(o.kubeconfig, o.kubeContext, stderr)
+	if err != nil {
+		return err
+	}
 	cs, err := clusterRegistryClientset(o.kubeconfig, o.kubeContext)
 	if err != nil {
 		return err
@@ -334,6 +336,13 @@ func runClusterRegistryStatus(ctx context.Context, o clusterRegistryOptions, std
 // public endpoint and installs it in the app namespace, and wires burrowd's default build push target
 // (internal endpoint) and public pull host (ADR-0054 §5).
 func runClusterRegistryInstall(ctx context.Context, o clusterRegistryOptions, stdout, stderr io.Writer) error {
+	// Which cluster comes before which hostname: the host is only meaningful once it is settled where
+	// the registry is going, and the cluster has to be one somebody named (cloud ADR-0038 §1).
+	var err error
+	o.kubeContext, err = lifecycleContext(o.kubeconfig, o.kubeContext, stderr)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(o.host) == "" {
 		return fmt.Errorf("the in-cluster registry needs a public hostname for node pulls; pass --host <registry.example.com>")
 	}
@@ -542,6 +551,11 @@ func ingressLoadBalancerAddress(ctx context.Context, cs kubernetes.Interface) (s
 // push target and public pull host. Every step tolerates already-absent pieces so uninstall is
 // idempotent.
 func runClusterRegistryUninstall(ctx context.Context, o clusterRegistryOptions, stdout, stderr io.Writer) error {
+	var err error
+	o.kubeContext, err = lifecycleContext(o.kubeconfig, o.kubeContext, stderr)
+	if err != nil {
+		return err
+	}
 	cs, err := clusterRegistryClientset(o.kubeconfig, o.kubeContext)
 	if err != nil {
 		return err

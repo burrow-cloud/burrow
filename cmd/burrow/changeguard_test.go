@@ -171,7 +171,7 @@ var commandClasses = map[string]commandClass{
 	"addon install":         {class: classChanges, why: "deploys a backing service into the add-on namespace", args: []string{"addon", "install", "logs"}},
 	"addon connect":         {class: classChanges, why: "registers an existing backend as a capability", args: []string{"addon", "connect", "loki", "--endpoint", "loki:3100"}},
 	"addon attach":          {class: classChanges, why: "provisions an app's database and writes its connection string", args: []string{"addon", "attach", "postgres", "web"}},
-	"addon detach":          {class: classChanges, why: "destroys an app's database", args: []string{"addon", "detach", "postgres", "web", "--confirm"}},
+	"addon detach":          {class: classChanges, why: "ends an app's access to its database and drops its role (the database is kept)", args: []string{"addon", "detach", "postgres", "web", "--confirm"}},
 	"addon backup":          {class: classChanges, why: "runs a backup Job and records the backup", args: []string{"addon", "backup", "postgres", "web"}},
 	"addon sql":             {class: classChanges, why: "runs a caller-supplied statement against an app's database, which Burrow deliberately does not classify as a read or a write (ADR-0087 §6), so a verb that may have written names the target it ran against", args: []string{"addon", "sql", "postgres", "web", "-c", "select 1"}},
 	"addon backup-instance": {class: classChanges, why: "asks CloudNativePG for a physical base backup of a whole instance and records it (ADR-0066 §2)", args: []string{"addon", "backup-instance", "postgres"}},

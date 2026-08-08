@@ -303,10 +303,20 @@ var catalogue = []Capability{
 	{
 		Surface: Operator,
 		Path:    "addon detach",
-		What:    "detaches one app from an add-on, dropping its database and role",
-		Why: "destroys the app's data with no way back (ADR-0031); the agent can attach, which " +
-			"provisions and destroys nothing, but the destructive counterpart is a human's call",
+		What:    "detaches one app from an add-on, dropping its login role and keeping its database",
+		Why: "the verb also carries --delete-data, which destroys the database (ADR-0090 §2), and it is " +
+			"the flag rather than the detach that is disqualifying; whether the plain form joins the agent " +
+			"surface now that it keeps the data is a decision ADR-0065 §6 asks to be made in its own right, " +
+			"and ADR-0090 does not make it",
 		Command: "burrow addon detach <addon> <app>",
+	},
+	{
+		Surface: Operator,
+		Path:    "addon detach --delete-data",
+		What:    "detaches one app AND destroys its database",
+		Why: "tier 1 (ADR-0065 §2, ADR-0090 §2): a detach keeps the data precisely so it can be " +
+			"re-attached; destroying it is unrecoverable and is a decision for a human, in those words",
+		Command: "burrow addon detach <addon> <app> --delete-data",
 	},
 	{
 		Surface: Operator,

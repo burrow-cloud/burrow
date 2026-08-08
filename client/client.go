@@ -1246,28 +1246,63 @@ func (c *Client) AttachAddon(ctx context.Context, addonType, app, env, envKey st
 	return out, err
 }
 
-// DetachAddon detaches an app from an add-on, dropping its data (e.g. its Postgres database). It is
-// held for confirmation by a guardrail by default; pass confirm=true to proceed past the hold.
+// DetachAddonOptions is everything a detach carries beyond the add-on and the app. It is a struct
+// rather than two positional booleans because one of them destroys an application's database and the
+// other does not, and a reader of `DetachAddon(ctx, "postgres", "web", "", true, true)` cannot tell
+// which is which.
+type DetachAddonOptions struct {
+	// DeleteData also DESTROYS the app's database, with its rows (ADR-0090 §2). Without it the detach
+	// takes the app's access away and keeps the data, so re-attaching gets it back.
+	DeleteData bool
+	// Confirm satisfies the addon.detach guardrail hold. It is not the data-loss acknowledgement.
+	Confirm bool
+}
+
+// DetachAddon detaches an app from an add-on: it removes the variable the connection string was
+// written under and drops the app's login role, and KEEPS the database (ADR-0090 §1). With
+// opts.DeleteData the database is destroyed as well. It is held for confirmation by a guardrail by
+// default; opts.Confirm proceeds past the hold.
 //
-// The ENVIRONMENT RIDES THE ROUTE (see guardPath). A control plane that predates per-environment
+// WHAT HAPPENS TO THE DATA RIDES THE ROUTE, and both dispositions are routes, because on this call
+// too it is the ABSENCE of the parameter that would destroy. ADR-0090 inverted the default — before
+// it, a detach dropped the database unconditionally — so a current client that says nothing, MEANING
+// KEEP MY DATA, is exactly the request an older control plane answers by destroying it. A query
+// parameter cannot express that: its absence is indistinguishable from a caller that never had it. A
+// control plane that has neither route refuses both detaches with nothing touched (issue #485).
+//
+// The ENVIRONMENT RIDES THE ROUTE too (see guardPath). A control plane that predates per-environment
 // add-ons drops the body field it does not know exactly as it drops an unknown query parameter, so a
 // detach aimed at staging would land on the default environment's instance — production's database,
-// dropped, reported as staging's (issue #485).
-func (c *Client) DetachAddon(ctx context.Context, addonType, app, env string, confirm bool) error {
-	body := map[string]any{"addon": addonType, "app": app, "confirm": confirm}
-	if env == "" {
-		// Nothing was narrowed — the default environment is one every control plane has — so the
-		// unnarrowed route and its unchanged wire shape are exactly right.
-		body["env"] = ""
-		return c.do(ctx, http.MethodPost, "/v1/addons/detach", body, nil)
+// reached, reported as staging's.
+func (c *Client) DetachAddon(ctx context.Context, addonType, app, env string, opts DetachAddonOptions) error {
+	body := map[string]any{"addon": addonType, "app": app, "confirm": opts.Confirm}
+	disposition := "keep"
+	if opts.DeleteData {
+		disposition = "delete"
 	}
-	path := "/v1/addons/detach/env/" + url.PathEscape(env)
-	err := c.do(ctx, http.MethodPost, path, body, nil)
-	if err != nil {
-		what := fmt.Sprintf("this control plane cannot detach an app from an add-on in a NAMED environment, so nothing was detached: the same call against it would have dropped %q's database on the default environment's instance rather than on %q's", app, env)
-		return scopeRefusal(what, "per-environment add-on instances", err)
+	path := narrowing("/v1/addons/detach/data/"+disposition, "env", env)
+	if env == "" {
+		// The environment narrows nothing — the default one is an environment every control plane has
+		// — so the body keeps the shape it has always had for it.
+		body["env"] = ""
+	}
+	if err := c.do(ctx, http.MethodPost, path, body, nil); err != nil {
+		return detachAddonScopeRefusal(app, env, opts.DeleteData, err)
 	}
 	return nil
+}
+
+// detachAddonScopeRefusal names what a control plane without these routes would have done instead. It
+// is different in each direction, and only one of them is recoverable.
+func detachAddonScopeRefusal(app, env string, deleteData bool, err error) error {
+	what := fmt.Sprintf("this control plane cannot be asked to KEEP an app's database, so nothing was detached: it drops the database on every detach, so the same call against it would have destroyed %q's data — which is the opposite of what was asked", app)
+	if deleteData {
+		what = fmt.Sprintf("this control plane cannot be asked to destroy an app's database as a named operation, so nothing was detached: the same call against it would have detached %q on whatever terms it has of its own", app)
+	}
+	if env != "" {
+		what += fmt.Sprintf(", and it cannot detach in a NAMED environment either — it would have acted on the default environment's instance rather than on %q's", env)
+	}
+	return scopeRefusal(what, "the choice of what a detach does to an app's database", err)
 }
 
 // Backup is one recorded per-app database backup (ADR-0032): the control-plane index row for a dump

@@ -40,9 +40,11 @@ type Provisioner struct {
 	// instance holds these databases". Two environments are two maps and can never be one.
 	databases map[string]map[string]bool
 	ensured   []AppDatabase // calls to EnsureAppDatabase, in order
+	revoked   []AppDatabase // calls to RevokeAppDatabase, in order
 	dropped   []AppDatabase // calls to DropAppDatabase, in order
 	attached  map[string][]string
 	ensureErr error
+	revokeErr error
 	dropErr   error
 	listErr   error
 	// statements records every AppStatement the engine handed down, in order, so a test can assert
@@ -65,6 +67,13 @@ func (p *Provisioner) SetEnsureError(err error) {
 	p.ensureErr = err
 }
 
+// SetRevokeError makes RevokeAppDatabase return err (nil clears it).
+func (p *Provisioner) SetRevokeError(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.revokeErr = err
+}
+
 // SetDropError makes DropAppDatabase return err (nil clears it).
 func (p *Provisioner) SetDropError(err error) {
 	p.mu.Lock()
@@ -77,6 +86,13 @@ func (p *Provisioner) Ensured() []AppDatabase {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]AppDatabase(nil), p.ensured...)
+}
+
+// Revoked returns the (app, environment) pairs RevokeAppDatabase was called with, in order.
+func (p *Provisioner) Revoked() []AppDatabase {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]AppDatabase(nil), p.revoked...)
 }
 
 // Dropped returns the (app, environment) pairs DropAppDatabase was called with, in order.
@@ -157,6 +173,22 @@ func (p *Provisioner) ListAppDatabases(_ context.Context, env string) ([]string,
 		return nil, p.listErr
 	}
 	return append([]string(nil), p.attached[env]...), nil
+}
+
+// RevokeAppDatabase records the call and leaves the database in place, which is the property the
+// real one exists to have (ADR-0090 §1): a test that detaches and re-attaches sees the same database
+// still there, so "the data came back" is asserted against the fake's own state rather than assumed.
+func (p *Provisioner) RevokeAppDatabase(_ context.Context, app, env string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := validateProvisionEnv(env); err != nil {
+		return err
+	}
+	if p.revokeErr != nil {
+		return p.revokeErr
+	}
+	p.revoked = append(p.revoked, AppDatabase{App: app, Env: env})
+	return nil
 }
 
 func (p *Provisioner) DropAppDatabase(_ context.Context, app, env string) error {

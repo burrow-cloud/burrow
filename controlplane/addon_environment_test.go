@@ -189,6 +189,10 @@ func TestAttachIsIdempotentWithinOneEnvironment(t *testing.T) {
 // one environment leaves the other environment's database alone. The old signature would have
 // dropped whichever database the single instance held — for `web` in staging, that was production's
 // (ADR-0067 §1).
+//
+// It is driven with --delete-data because that is where the claim bites. A plain detach keeps both
+// databases and a mis-scoped one would be recoverable; this is the disposition where reaching the
+// wrong environment cannot be taken back (ADR-0090 §2).
 func TestDetachDropsOnlyTheNamedEnvironment(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, prov := newEnvPostgresEngine(t, "burrow-apps")
@@ -201,7 +205,7 @@ func TestDetachDropsOnlyTheNamedEnvironment(t *testing.T) {
 		}
 	}
 
-	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "staging", true); err != nil {
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "staging", cp.DetachAddonOptions{DeleteData: true, Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon(staging): %v", err)
 	}
 	if dropped := prov.Dropped(); len(dropped) != 1 || dropped[0] != (fake.AppDatabase{App: "web", Env: "staging"}) {

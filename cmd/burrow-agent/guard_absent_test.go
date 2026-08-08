@@ -49,8 +49,8 @@ func TestGuardReportsAbsentCapabilities(t *testing.T) {
 	}
 	// The capabilities ADR-0065 §2 and issue #337 name explicitly.
 	for _, path := range []string{
-		"addon remove", "addon remove --delete-data", "addon detach", "addon restore",
-		"guard set", "secret set", "env add", "cluster install",
+		"addon remove", "addon remove --delete-data", "addon detach", "addon detach --delete-data",
+		"addon restore", "guard set", "secret set", "env add", "cluster install",
 	} {
 		c, ok := byPath[path]
 		if !ok {

@@ -332,10 +332,24 @@ type DatabaseProvisioner interface {
 	// the database and the credential are known to be there. A caller that treats it as a fast local
 	// operation will be wrong about how long an attach takes; nothing else about the contract moved.
 	EnsureAppDatabase(ctx context.Context, app, env string) (databaseURL string, err error)
-	// DropAppDatabase removes app's database and login role from environment env's instance — the
-	// destructive side of detach. Dropping a database/role that is already absent is a no-op, not an
-	// error. env and app are validated first, exactly as in EnsureAppDatabase, so a detach can no
-	// more reach another environment's server than an attach can.
+	// RevokeAppDatabase ends app's access to its database on environment env's instance and KEEPS the
+	// database, with its rows — what a plain `addon detach` performs (ADR-0090 §1). The app's login
+	// role is DROPPED, so nothing that was issued to it still authenticates; what survives is the
+	// data, not the access. Revoking an app that has no role is a no-op, not an error.
+	//
+	// IT IS THE INVERSE OF EnsureAppDatabase RATHER THAN A PARTIAL DropAppDatabase, and the pair is
+	// meant to round-trip: a re-attach of the same app adopts the database this left behind and hands
+	// it back, which is what makes detach reversible instead of an apology (ADR-0090 §3). An
+	// implementation therefore has to leave the data reachable by a role that does not exist yet.
+	//
+	// env and app are validated first, exactly as in EnsureAppDatabase. Like the attach, this waits on
+	// somebody else's reconcile, so it can take seconds and it can time out.
+	RevokeAppDatabase(ctx context.Context, app, env string) error
+	// DropAppDatabase removes app's database and its roles from environment env's instance — what
+	// `addon detach --delete-data` performs, and the only thing in the seam that destroys data
+	// (ADR-0090 §2). Dropping a database/role that is already absent is a no-op, not an error. env and
+	// app are validated first, exactly as in EnsureAppDatabase, so a detach can no more reach another
+	// environment's server than an attach can.
 	//
 	// THE CALLER MUST HAVE STOPPED THE APP USING IT FIRST. A database with a live session cannot be
 	// dropped, so the engine takes the connection string out of the app's environment and rolls the

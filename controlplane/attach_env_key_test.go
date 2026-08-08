@@ -221,7 +221,7 @@ func TestDetachRemovesTheRecordedKey(t *testing.T) {
 	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL"); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
-	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", true); err != nil {
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon: %v", err)
 	}
 	if _, ok := k.SecretValue("web", "DB_URL"); ok {
@@ -249,11 +249,11 @@ func TestDetachRefusesWhenTheKeyCannotBeRead(t *testing.T) {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	d.SetError(fake.OpAddonEnvKey, errors.New("database unavailable"))
-	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", true); err == nil {
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err == nil {
 		t.Fatal("DetachAddon succeeded with the recorded name unreadable")
 	}
-	if got := prov.Dropped(); len(got) != 0 {
-		t.Errorf("DropAppDatabase called %v; nothing may be dropped when the key is unknown", got)
+	if got := prov.Revoked(); len(got) != 0 {
+		t.Errorf("RevokeAppDatabase called %v; nothing on the instance may be touched when the key is unknown", got)
 	}
 }
 

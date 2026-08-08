@@ -1021,3 +1021,142 @@ func TestHumanBackupScheduleLeavesUnknownCronAlone(t *testing.T) {
 		t.Errorf("humanBackupSchedule(empty) = %q, want empty", got)
 	}
 }
+
+// detachServer is a stub control plane for the detach tests. It records the path of every detach it
+// answers, which is where the data disposition rides (ADR-0090 §2), and answers with the shape the
+// command prints.
+func detachServer(t *testing.T, seen *[]string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*seen = append(*seen, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(map[string]any{"addon": "postgres", "app": "web"})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// execAddonDetach runs `addon detach` against baseURL with stdin and a controllable terminal answer,
+// the way execAddonRemove does for the removal's gate.
+func execAddonDetach(t *testing.T, baseURL, stdin string, terminal bool, args ...string) (string, string, error) {
+	t.Helper()
+	isolateConfig(t)
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return terminal }
+	t.Cleanup(func() { stdinIsTerminal = origTerm })
+
+	var out, errb bytes.Buffer
+	cmd := newAddonDetachCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errb)
+	cmd.SetIn(strings.NewReader(stdin))
+	cmd.SetArgs(append(args, "--control-plane", baseURL, "--token", "tok"))
+	err := cmd.ExecuteContext(context.Background())
+	return out.String(), errb.String(), err
+}
+
+// TestAddonDetachKeepsTheDataAndSaysSo is ADR-0090 §5 on the surface an operator actually reads. A
+// plain detach must take the keeping route AND say the database is kept: a detach that quietly keeps
+// data while its output says it destroyed it is worse than either behaviour on its own.
+func TestAddonDetachKeepsTheDataAndSaysSo(t *testing.T) {
+	var seen []string
+	srv := detachServer(t, &seen)
+
+	out, errb, err := execAddonDetach(t, srv.URL, "", true, "postgres", "web", "--confirm")
+	if err != nil {
+		t.Fatalf("addon detach: %v (stderr: %s)", err, errb)
+	}
+	if len(seen) != 1 || seen[0] != "/v1/addons/detach/data/keep" {
+		t.Fatalf("detach requests = %v, want one on the keep-the-data route", seen)
+	}
+	if !strings.Contains(out, "database is kept") || !strings.Contains(out, "picks the data back up") {
+		t.Errorf("a detach that keeps the data does not say so:\n%s", out)
+	}
+	if strings.Contains(strings.ToLower(out), "destroy") {
+		t.Errorf("a plain detach says something was destroyed:\n%s", out)
+	}
+	// And the help an operator reads before running it agrees with what it does.
+	long := newAddonDetachCmd().Long + "\n" + newAddonDetachCmd().Short
+	if !strings.Contains(long, "keeping its data") || !strings.Contains(long, "DATABASE IS KEPT") {
+		t.Errorf("the detach help does not say the database is kept:\n%s", long)
+	}
+}
+
+// TestAddonDetachDeleteDataTypedNameProceeds asserts the interactive half of the gate ADR-0064 §2
+// established and ADR-0090 §2 reuses: on a terminal, --delete-data prints a warning-styled notice
+// naming the app's database and proceeds once the app's name is typed back.
+func TestAddonDetachDeleteDataTypedNameProceeds(t *testing.T) {
+	var seen []string
+	srv := detachServer(t, &seen)
+
+	out, errb, err := execAddonDetach(t, srv.URL, "web\n", true, "postgres", "web", "--delete-data", "--confirm")
+	if err != nil {
+		t.Fatalf("addon detach --delete-data with the name typed back: %v (stderr: %s)", err, errb)
+	}
+	for _, want := range []string{
+		`--delete-data DESTROYS "web"'s database`,
+		"This cannot be undone",
+		"keeps the database",
+		"Type the app's name (web) to proceed",
+	} {
+		if !strings.Contains(errb, want) {
+			t.Errorf("the --delete-data notice is missing %q:\n%s", want, errb)
+		}
+	}
+	// The notice and the prompt go to stderr, so a --json run keeps a machine-readable stdout.
+	if strings.Contains(out, "Type the app's name") {
+		t.Errorf("the typed-name prompt must not land on stdout:\n%s", out)
+	}
+	if len(seen) != 1 || seen[0] != "/v1/addons/detach/data/delete" {
+		t.Fatalf("detach requests = %v, want one on the destroy-the-data route", seen)
+	}
+	if !strings.Contains(out, "database was destroyed") {
+		t.Errorf("a detach that destroyed the database does not say so:\n%s", out)
+	}
+}
+
+// TestAddonDetachDeleteDataWrongNameRefuses asserts a typed name that is not the app's aborts: the
+// command errors, says nothing was detached, and nothing reaches the API.
+func TestAddonDetachDeleteDataWrongNameRefuses(t *testing.T) {
+	var seen []string
+	srv := detachServer(t, &seen)
+
+	for _, typed := range []string{"api\n", "\n", ""} { // a near-miss, an empty line, and EOF
+		_, _, err := execAddonDetach(t, srv.URL, typed, true, "postgres", "web", "--delete-data", "--confirm")
+		if err == nil {
+			t.Fatalf("typing %q should abort the detach", typed)
+		}
+		if !strings.Contains(err.Error(), "nothing was detached") {
+			t.Errorf("the abort should say nothing was detached, got: %v", err)
+		}
+	}
+	if len(seen) != 0 {
+		t.Errorf("an aborted --delete-data must not reach the API, got %v", seen)
+	}
+}
+
+// TestAddonDetachDeleteDataOffATerminalRefuses: with no terminal to type into it refuses rather than
+// proceeding, and the refusal runs before the control plane is contacted at all — a script that never
+// said it destroys a database cannot reach the detach call.
+func TestAddonDetachDeleteDataOffATerminalRefuses(t *testing.T) {
+	var seen []string
+	srv := detachServer(t, &seen)
+
+	_, _, err := execAddonDetach(t, srv.URL, "", false, "postgres", "web", "--delete-data", "--confirm")
+	if err == nil {
+		t.Fatal("--delete-data proceeded with no terminal to type the app's name into")
+	}
+	if !strings.Contains(err.Error(), dataLossAckFlag) {
+		t.Errorf("the refusal does not name the way to say it in a script: %v", err)
+	}
+	if len(seen) != 0 {
+		t.Errorf("the refusal must run before anything is contacted, got %v", seen)
+	}
+
+	// And with the acknowledgement it proceeds, on the destroying route.
+	if _, errb, err := execAddonDetach(t, srv.URL, "", false, "postgres", "web", "--delete-data", "--"+dataLossAckFlag, "--confirm"); err != nil {
+		t.Fatalf("acknowledged --delete-data off a terminal: %v (stderr: %s)", err, errb)
+	}
+	if len(seen) != 1 || seen[0] != "/v1/addons/detach/data/delete" {
+		t.Fatalf("detach requests = %v, want one on the destroy-the-data route", seen)
+	}
+}

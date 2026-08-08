@@ -225,24 +225,48 @@ psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 7`)
 		`test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t;")" = "1"
 psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
 
-	// Detaching in staging drops staging's database only: the default environment's data survives,
-	// which is the destructive half of the same property. It needs no port-forward — a detach
-	// destroys through the objects and runs no SQL of its own (ADR-0066 §2).
-	if err := engine.DetachAddon(ctx, cp.AddonPostgres, app, "staging", true); err != nil {
-		t.Fatalf("DetachAddon (staging): %v", err)
-	}
-	runSQLJob(t, ctx, client, appNS, app, "survives",
-		`psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
-
-	// AND STAGING'S DATA IS GONE, which is the claim only a real operator can be asked. A unit test
-	// can assert that the object was deleted holding `databaseReclaimPolicy: delete`; whether
-	// CloudNativePG then issued the DROP is this. Re-attaching gives staging a fresh, EMPTY database
-	// — the row written through the previous attachment is not in it.
+	// Detaching in staging reaches staging only: the default environment's data survives, which is the
+	// same isolation property on the verb that can take an app's access away. A plain detach DOES need
+	// a port-forward — it drops the app's login role, and freeing that role of everything it owns is a
+	// statement no custom resource can express, run over the app's own credential (ADR-0090 §1).
 	//
 	// The environment is NAMED on every mutating call from here on: staging has been registered, and
 	// a mutating operation with more than one environment registered is refused rather than defaulted
 	// (ADR-0067 §1).
+	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "detach addon (staging)", func(localPort int) error {
+		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
+		return engine.DetachAddon(ctx, cp.AddonPostgres, app, "staging", cp.DetachAddonOptions{Confirm: true})
+	})
+	runSQLJob(t, ctx, client, appNS, app, "survives",
+		`psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
+
+	// AND STAGING'S DATA IS STILL THERE, which is the claim only a real operator can be asked
+	// (ADR-0090 §1, §3). A unit test can assert the login role's object was deleted holding
+	// `databaseRoleReclaimPolicy: delete` while the database's held `retain`; whether CloudNativePG
+	// then dropped one and kept the other is this. Re-attaching adopts the database that was kept, so
+	// the row written through the PREVIOUS attachment — under a role that no longer exists, and
+	// therefore through a credential that no longer authenticates — reads back through the new one.
 	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "re-attach addon (staging)", func(localPort int) error {
+		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
+		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", "")
+		return aerr
+	})
+	runSQLJob(t, ctx, client, stagingNS, app, "kept",
+		`test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t;")" = "1"
+psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 7`)
+	// And the app can still WRITE to what it got back: the tables a detach parked on the data role are
+	// the app's again through the membership, not merely readable.
+	runSQLJob(t, ctx, client, stagingNS, app, "writable",
+		`psql "$DATABASE_URL" -c "INSERT INTO t VALUES (8);"
+psql "$DATABASE_URL" -c "ALTER TABLE t ADD COLUMN note text;"
+test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t;")" = "2"`)
+
+	// --delete-data is the one way to destroy it, and it still does (ADR-0090 §2). It needs no
+	// port-forward: it destroys through the objects and runs no SQL of its own (ADR-0066 §2).
+	if err := engine.DetachAddon(ctx, cp.AddonPostgres, app, "staging", cp.DetachAddonOptions{DeleteData: true, Confirm: true}); err != nil {
+		t.Fatalf("DetachAddon --delete-data (staging): %v", err)
+	}
+	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "re-attach addon after --delete-data (staging)", func(localPort int) error {
 		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
 		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", "")
 		return aerr
@@ -250,10 +274,12 @@ psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
 	runSQLJob(t, ctx, client, stagingNS, app, "destroyed",
 		`test "$(psql "$DATABASE_URL" -tAc "SELECT to_regclass('public.t') IS NULL;")" = "t"`)
 
-	// Detach: drops the database and role and removes the DATABASE_URL key.
-	if err := engine.DetachAddon(ctx, cp.AddonPostgres, app, cp.DefaultEnvironment, true); err != nil {
-		t.Fatalf("DetachAddon: %v", err)
-	}
+	// Detach in the default environment: removes the DATABASE_URL key and the app's access, keeping
+	// the database.
+	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "detach addon", func(localPort int) error {
+		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
+		return engine.DetachAddon(ctx, cp.AddonPostgres, app, cp.DefaultEnvironment, cp.DetachAddonOptions{Confirm: true})
+	})
 	keys, err := k8s.SecretKeys(ctx, app)
 	if err != nil {
 		t.Fatalf("SecretKeys after detach: %v", err)

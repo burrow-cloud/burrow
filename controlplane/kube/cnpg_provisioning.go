@@ -38,8 +38,10 @@ const (
 	//   - An attach writes `retain`. CloudNativePG's default agrees, and it is spelled anyway — so
 	//     that no accident that removes an object (a namespace teardown, a garbage collector, a
 	//     `kubectl delete` by somebody tidying up) can take an app's data with it.
-	//   - A detach writes `delete`, immediately before deleting the object, because `addon detach` IS
-	//     destructive (ADR-0031) and the user was told so at the confirmation prompt.
+	//   - `delete` is written by exactly two things, immediately before deleting the object it is
+	//     written on: a plain detach writes it on the app's LOGIN ROLE, whose credential is what
+	//     detach revokes (ADR-0090 §1), and `detach --delete-data` writes it on the database as well,
+	//     which is the only path in the product that destroys an app's rows (ADR-0090 §2).
 	//
 	// So destruction is never a side effect of an object going away; it happens only where something
 	// deliberately said so first, which is exactly the distinction ADR-0064 draws for `addon remove`
@@ -74,6 +76,14 @@ const (
 // legal in an object name, which is a DNS-1123 subdomain rather than a label.
 func provisioningObjectName(instance, app string) string { return instance + "." + app }
 
+// dataRoleObjectName is the `DatabaseRole` that provisions app's DATA ROLE on instance. It extends
+// the attachment's name with a suffix rather than composing a second naming rule, so the four
+// objects of one attachment sort together and the injectivity argument above carries over unchanged
+// — an app name admits no dot, so nothing else can produce this string.
+func dataRoleObjectName(instance, app string) string {
+	return provisioningObjectName(instance, app) + ".data"
+}
+
 // cnpgObjects is the pair of resource interfaces the provisioner writes an attachment through, in
 // the target instance's namespace, or an error when no dynamic client is wired.
 //
@@ -87,6 +97,48 @@ func (p *PostgresProvisioner) cnpgObjects(target PostgresTarget) (databases, rol
 	}
 	return p.dynamic.Resource(cnpgDatabaseGVR).Namespace(target.Namespace),
 		p.dynamic.Resource(cnpgDatabaseRoleGVR).Namespace(target.Namespace), nil
+}
+
+// dataRoleSpec is the `DatabaseRole` for app's DATA ROLE: a login-less role that exists to OWN an
+// app's data across the moments when no credential does.
+//
+// IT EXISTS BECAUSE ADR-0090 §1 IS OTHERWISE UNIMPLEMENTABLE, and the reason is PostgreSQL's, not
+// Burrow's. A detach drops the app's login role and keeps its database — but `DROP ROLE` refuses
+// while the role owns anything, and the login role owns the database and every table in it. So a
+// detach hands the ownership to this role first, and `DROP ROLE app_<app>` then succeeds against a
+// role that owns nothing. Without somewhere for the ownership to go, "drop the role, keep the data"
+// is a `DROP ROLE` that fails forever.
+//
+// It is a SECOND role rather than the instance's superuser for two reasons that both bite later. A
+// database whose owner is the superuser is indistinguishable from a maintenance database, so
+// ListAppDatabases — which is how `addon remove --delete-data` names whose data it is about to
+// destroy — would stop seeing exactly the databases a detach retained. And handing ownership back on
+// a re-attach would mean reassigning away from the superuser, which sweeps up anything an operator
+// created by hand in that database. A role named after the app can only ever hold that app's things.
+//
+// It NEVER LOGS IN and carries no password Secret: it is an owner, not a credential, so nothing
+// about it authenticates and the ADR's "what survives is the data, not the access" holds literally.
+// Its reclaim policy is always `retain` — it is dropped only by `--delete-data`, along with the
+// database it holds.
+func dataRoleSpec(target PostgresTarget, app string) map[string]any {
+	return map[string]any{
+		"cluster":                   map[string]any{"name": target.Instance},
+		"name":                      dataRoleName(app),
+		"login":                     false,
+		"databaseRoleReclaimPolicy": cnpgReclaimRetain,
+	}
+}
+
+// dataRoleTeardownSpec is the data role described one last time by `--delete-data`: keep it until
+// this object is deleted, then DROP it. Only the destructive path ever writes this, and only after
+// the database it owns is gone — PostgreSQL will not drop a role that still owns a database.
+func dataRoleTeardownSpec(target PostgresTarget, app string) map[string]any {
+	return map[string]any{
+		"cluster":                   map[string]any{"name": target.Instance},
+		"name":                      dataRoleName(app),
+		"login":                     false,
+		"databaseRoleReclaimPolicy": cnpgReclaimDelete,
+	}
 }
 
 // databaseRoleSpec is the `DatabaseRole` that gives app its login role on the target instance.
@@ -104,21 +156,52 @@ func databaseRoleSpec(target PostgresTarget, app string) map[string]any {
 	return map[string]any{
 		"cluster": map[string]any{"name": target.Instance},
 		"name":    roleName(app),
-		// The role logs in and does nothing else: no superuser, no createdb, no createrole, no role
-		// memberships. An app's role owns its own database and reaches no other (ADR-0031).
+		// The role logs in, and its one membership is the app's own data role. That membership is
+		// load-bearing in both directions and reaches no further than this app: it is what lets a
+		// detach reassign the app's objects to a role that outlives the credential, and — because
+		// PostgreSQL resolves ownership and privilege through INHERIT, which is CloudNativePG's default
+		// — it is what makes a database whose tables a previous detach parked on the data role fully
+		// the app's again on a re-attach, with no ownership handed back. Nothing else: no superuser,
+		// no createdb, no createrole. An app's role reaches its own database and no other (ADR-0031).
 		"login":                     true,
+		"inRoles":                   []any{dataRoleName(app)},
 		"passwordSecret":            map[string]any{"name": provisioningObjectName(target.Instance, app)},
 		"databaseRoleReclaimPolicy": cnpgReclaimRetain,
 	}
 }
 
-// databaseRoleTeardownSpec is the same role, described one last time by a detach: keep it until this
-// object is deleted, then DROP it.
+// databaseRoleRevokeSpec is the login role described one last time by a PLAIN detach: hold this
+// credential for one more connection, then DROP the role when this object is deleted (ADR-0090 §1).
+//
+// IT KEEPS THE PASSWORD SECRET, where the destructive spec below drops it, and that is the whole
+// difference. A detach that keeps the data has one statement left to run — the reassignment that
+// frees the role of everything it owns — and it runs that statement AS THE APP'S OWN ROLE, over the
+// credential this spec rotates into place. An attachment made before declarative provisioning has no
+// working password on file, so the credential is re-established here rather than assumed: without
+// it, exactly the oldest attachments would be the ones a detach could not finish.
+//
+// The membership is restated for the same reason it is written on the attach spec — adoption is
+// total, and a `DatabaseRole` that omits `inRoles` REVOKEs the membership the reassignment depends
+// on.
+func databaseRoleRevokeSpec(target PostgresTarget, app string) map[string]any {
+	return map[string]any{
+		"cluster":                   map[string]any{"name": target.Instance},
+		"name":                      roleName(app),
+		"login":                     true,
+		"inRoles":                   []any{dataRoleName(app)},
+		"passwordSecret":            map[string]any{"name": provisioningObjectName(target.Instance, app)},
+		"databaseRoleReclaimPolicy": cnpgReclaimDelete,
+	}
+}
+
+// databaseRoleTeardownSpec is the same role, described one last time by `--delete-data`: keep it
+// until this object is deleted, then DROP it.
 //
 // It names NO password Secret, and that is not an oversight. The credential is irrelevant to a role
-// about to be dropped, and a reference to a Secret that a half-finished detach already removed —
-// or that an attachment predating declarative provisioning never had — would leave CloudNativePG
-// unable to apply the object at all, which is to say unable to drop the role.
+// about to be dropped alongside its database, and a reference to a Secret that a half-finished
+// detach already removed — or that an attachment predating declarative provisioning never had —
+// would leave CloudNativePG unable to apply the object at all, which is to say unable to drop the
+// role.
 func databaseRoleTeardownSpec(target PostgresTarget, app string) map[string]any {
 	return map[string]any{
 		"cluster":                   map[string]any{"name": target.Instance},
@@ -150,8 +233,33 @@ func databaseSpec(target PostgresTarget, app string) map[string]any {
 	}
 }
 
-// databaseTeardownSpec is the same database, described one last time by a detach: stop accepting
-// connections, and drop when this object is deleted.
+// databaseRetainedSpec is the database as a PLAIN detach leaves it: still there, still accepting
+// connections, still `retain` — and owned by the data role rather than by a login role that is about
+// to stop existing (ADR-0090 §1).
+//
+// THE OWNER IS THE ONLY FIELD THAT MOVES, and it moves through the object rather than through a
+// statement because `ALTER DATABASE ... OWNER TO` is a superuser's to issue and CloudNativePG is
+// already holding that credential. It also has to move BEFORE the app's own objects are reassigned:
+// leave it naming the login role and the operator reconciles the ownership straight back, and the
+// `DROP ROLE` that follows fails on a database the role owns again.
+//
+// `allowConnections` stays true. The database is closed to the app by the role going away and by the
+// `REVOKE CONNECT ... FROM PUBLIC` an attach left on it, so there is nothing left holding a way in —
+// and closing it as well would leave a re-attach to notice and reopen a door nothing shut for a
+// reason.
+func databaseRetainedSpec(target PostgresTarget, app string) map[string]any {
+	return map[string]any{
+		"cluster":               map[string]any{"name": target.Instance},
+		"name":                  app,
+		"owner":                 dataRoleName(app),
+		"ensure":                cnpgEnsurePresent,
+		"allowConnections":      true,
+		"databaseReclaimPolicy": cnpgReclaimRetain,
+	}
+}
+
+// databaseTeardownSpec is the same database, described one last time by `--delete-data`: stop
+// accepting connections, and drop when this object is deleted.
 //
 // `allowConnections: false` is the load-bearing half, and it exists because of a gap between what
 // Burrow used to do and what CloudNativePG does. The admin SQL this replaced dropped the database
@@ -314,6 +422,30 @@ func (p *PostgresProvisioner) ensureRolePasswordSecret(ctx context.Context, targ
 		return fmt.Errorf("kube: updating the role password secret %s/%s: %w", target.Namespace, name, err)
 	}
 	return nil
+}
+
+// destroyCNPGObjectIfPresent describes an object with a `delete` reclaim policy and then deletes it,
+// but ONLY if it is there to begin with — an absent one is nothing to destroy and is left absent.
+//
+// The distinction matters for the data role and only for the data role. Every other object on the
+// teardown path is described before it is destroyed precisely BECAUSE it may be missing: an
+// attachment made before provisioning became declarative has a database and a role that no object
+// names, and describing them first is what makes the destructive path reach them. The data role is
+// the opposite case — it exists only where an object created it, so writing one here would create a
+// PostgreSQL role for the sole purpose of dropping it again.
+func destroyCNPGObjectIfPresent(ctx context.Context, ri dynamic.ResourceInterface, kind, name, namespace string, spec map[string]any, labels map[string]string, timeout, poll time.Duration) error {
+	if _, err := ri.Get(ctx, name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("kube: reading the CloudNativePG %s %q: %w", kind, name, err)
+	}
+	if err := applyCNPGObject(ctx, ri, kind, name, namespace, spec, labels); err != nil {
+		return err
+	}
+	if err := awaitCNPGApplied(ctx, ri, kind, name, timeout, poll); err != nil {
+		return err
+	}
+	return deleteCNPGObject(ctx, ri, kind, name, timeout, poll)
 }
 
 // deleteCNPGObject removes one provisioning object and blocks until it is actually gone. An object

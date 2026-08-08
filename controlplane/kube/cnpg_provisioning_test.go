@@ -839,3 +839,37 @@ func TestRolePasswordSecretInTheWrongShapeIsRefused(t *testing.T) {
 		t.Errorf("error %q carries the Secret's value", err)
 	}
 }
+
+// TestApplySurvivesTheOperatorWritingTheObjectUnderIt pins the collision this code provokes itself.
+// Writing a rotated password into the Secret a `DatabaseRole` references makes CloudNativePG record a
+// password change ON THE ROLE, and the very next write is this one — so the resource version read a
+// moment earlier is stale and the update is rejected. Every attach and every detach performs that
+// sequence, and a caller retrying the whole operation rotates the password again and provokes it
+// again, so this is not something that comes right on its own.
+func TestApplySurvivesTheOperatorWritingTheObjectUnderIt(t *testing.T) {
+	ctx := context.Background()
+	p, dyn, _ := provisionerFor(t, addonNS)
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("seed attach: %v", err)
+	}
+
+	// A controller that writes the object between the read and the update, twice, and then stops —
+	// which is what a bounded re-read has to be able to outlast.
+	var conflicts int
+	dyn.PrependReactor("update", "databaseroles", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if conflicts >= 2 {
+			return false, nil, nil
+		}
+		conflicts++
+		return true, nil, apierrors.NewConflict(
+			cnpgDatabaseRoleGVR.GroupResource(), provisioningObjectName(PostgresSecretName, "web"),
+			errors.New("the object has been modified; please apply your changes to the latest version and try again"))
+	})
+
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("a detach failed on a resource-version conflict it caused itself: %v", err)
+	}
+	if conflicts != 2 {
+		t.Errorf("the conflicting writer was hit %d times, want 2 — the test is not exercising the retry", conflicts)
+	}
+}

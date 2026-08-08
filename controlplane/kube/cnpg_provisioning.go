@@ -13,7 +13,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/burrow-cloud/burrow/controlplane"
 )
@@ -291,7 +293,33 @@ func databaseTeardownSpec(target PostgresTarget, app string) map[string]any {
 //
 // Only `spec` is written. The status is the operator's, and the labels are set on create so a
 // re-attach cannot fight a label somebody added by hand.
+//
+// A CONFLICTING UPDATE IS RE-READ AND RE-APPLIED, because this object has a second writer and THIS
+// CODE IS WHAT WAKES IT. Writing a rotated password into the Secret the role references makes
+// CloudNativePG record a password change on the role — so the write immediately after it, which is
+// this one, races a write it caused itself, and loses on a resource version that went stale in the
+// milliseconds between the read and the update. Every attach and every detach does exactly that
+// sequence, so the collision is ordinary rather than exotic.
+//
+// Replaying is safe because the write is idempotent: the spec is stated whole, so applying it to the
+// latest version is the same request again. The alternative is an attach or a detach failing on a
+// collision that means nothing, and failing repeatedly, because a caller that retries the whole
+// operation rotates the password again and provokes the same write.
 func applyCNPGObject(ctx context.Context, ri dynamic.ResourceInterface, kind, name, namespace string, spec map[string]any, labels map[string]string) error {
+	return retry.RetryOnConflict(cnpgWriteBackoff, func() error {
+		return applyCNPGObjectOnce(ctx, ri, kind, name, namespace, spec, labels)
+	})
+}
+
+// cnpgWriteBackoff bounds the re-reads above. It is more generous than client-go's default (which
+// spends ~50ms) because the writer being raced is a controller reconciling on its own schedule
+// rather than another copy of this process; it still gives up in a couple of seconds, since a
+// conflict that outlasts that is not a race.
+var cnpgWriteBackoff = wait.Backoff{Duration: 100 * time.Millisecond, Factor: 1.5, Jitter: 0.1, Steps: 8}
+
+// applyCNPGObjectOnce is one attempt at the read-modify-write above. Its conflict error is wrapped,
+// which RetryOnConflict still recognises: apierrors.IsConflict unwraps.
+func applyCNPGObjectOnce(ctx context.Context, ri dynamic.ResourceInterface, kind, name, namespace string, spec map[string]any, labels map[string]string) error {
 	existing, err := ri.Get(ctx, name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):

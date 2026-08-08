@@ -246,13 +246,16 @@ func (o *commonOpts) requireCluster() error {
 // target names.
 //
 // The distinction it draws is between a route and a cluster. `burrow guard list`, `burrow cluster
-// config list`, `burrow audit` and `burrow failures` never needed a cluster; they needed burrowd,
-// and a managed tenant has one of those (cloud issue #202). Refusing them was the client not knowing
-// the endpoint existed, not the endpoint being absent.
+// config list`, `burrow audit`, `burrow failures`, `burrow addon list`, `burrow addon logs` and
+// `burrow addon metrics` never needed a cluster; they needed burrowd, and a managed tenant has one
+// of those (cloud issue #202). Refusing them was the client not knowing the endpoint
+// existed, not the endpoint being absent.
 //
-// Only reads move here, and only reads whose route the managed product actually serves. Anything
-// that CHANGES a tenant is a product question — what a tenant may create, and what it costs — rather
-// than a plumbing one, and keeps calling client (clusteronly.go).
+// Only reads move here, and only reads whose route the managed product actually serves. The verb is
+// the transport's, not the test: `logs query` and `metrics query` are POSTs because a query does not
+// fit in a path, and they change nothing. Anything that CHANGES a tenant is a product question —
+// what a tenant may create, and what it costs — rather than a plumbing one, and keeps calling client
+// (clusteronly.go).
 func (o *commonOpts) readClient(ctx context.Context, stderr io.Writer) (*client.Client, error) {
 	tgt, cloud, err := o.cloudTargetIfSelected()
 	if err != nil {

@@ -921,7 +921,11 @@ func newAddonLogsCmd() *cobra.Command {
 			if len(args) == 1 {
 				query = args[0]
 			}
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			// readClient, not client: a logs query is a read the control plane answers wherever it
+			// runs, and on the managed product it is the tenant's OWN logs — the platform registers a
+			// logs backend for every tenant and scopes each query to that tenant's namespaces, which
+			// is the surface the product is built around (cloud issue #202, cloud ADR-0013).
+			c, err := o.readClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -965,7 +969,10 @@ func newAddonMetricsCmd() *cobra.Command {
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			// readClient, for the reason `addon logs` above uses it: the query is a read, and on the
+			// managed product the samples it returns are the tenant's own, scoped to their namespaces
+			// by the platform-registered backend (cloud issue #202, cloud ADR-0013).
+			c, err := o.readClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -1523,6 +1530,13 @@ func ensureAddonRBAC(ctx context.Context, name, kubeconfig, kubeContext, control
 // left behind (ADR-0064 §6). The second half is not decoration: removal keeps the data volume by
 // default, so without a listing the only record of a retained claim is the removal output that
 // created it — and a bill is a worse way to find out than a listing.
+//
+// It reads through readClient, so it answers on either kind of target (cloud issue #202). What the
+// managed control plane returns is the tenant's own registry — the backing services the platform
+// runs FOR that tenant — which is exactly the question this command asks; the refusal it replaces
+// was the client reaching for a kubeconfig, not the route being absent. What differs there is the
+// second half and the empty state, both of which describe a cluster the tenant does not have: see
+// addonListCloudTail.
 func newAddonListCmd() *cobra.Command {
 	o := &commonOpts{}
 	cmd := &cobra.Command{
@@ -1531,7 +1545,8 @@ func newAddonListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			_, cloud := activeCloudTarget(o.kubeconfig)
+			c, err := o.readClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -1544,7 +1559,7 @@ func newAddonListCmd() *cobra.Command {
 				return emit(out, true, listing, "")
 			}
 			if len(listing.Addons) == 0 {
-				fmt.Fprintln(out, "No add-ons installed. Install one with `burrow addon install logs`.")
+				fmt.Fprintln(out, addonListEmpty(cloud))
 			} else {
 				tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 				fmt.Fprintln(tw, "NAME\tTYPE\tMODE\tENDPOINT\tCAPABILITIES")
@@ -1555,11 +1570,31 @@ func newAddonListCmd() *cobra.Command {
 					return err
 				}
 			}
+			// The retained-volume section is a cluster fact and a cluster remedy: a claim in the
+			// add-on namespace, still billed, reclaimed with `kubectl delete pvc`. A managed tenant has
+			// neither the namespace nor the kubectl, and the platform's own claims are not theirs to
+			// read, so the section is omitted there rather than printed empty.
+			if cloud {
+				return nil
+			}
 			return printRetainedVolumes(out, listing.RetainedVolumes)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	return cmd
+}
+
+// addonListEmpty is the empty-state line, which differs by target kind because the way out of it
+// does. On a cluster, installing an add-on is the answer and the command that does it is the useful
+// thing to print. On the managed product it is not: `addon install` refuses there, and a listing
+// that answered "you have none" with a command the tenant cannot run would be the exact failure the
+// managed refusals are worded to avoid. So it states what is true instead — the platform provides
+// the backing services, and an empty listing means it has not registered any for this tenant yet.
+func addonListEmpty(cloud bool) string {
+	if cloud {
+		return "No add-ons registered for your tenant. The platform provides the backing services your apps use; nothing is installed by you."
+	}
+	return "No add-ons installed. Install one with `burrow addon install logs`."
 }
 
 // printRetainedVolumes renders the retained-volume section of `addon list`. It is a SEPARATE table

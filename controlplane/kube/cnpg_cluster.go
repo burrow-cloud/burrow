@@ -159,7 +159,10 @@ func (a *Adapter) deployPostgresCluster(ctx context.Context, spec controlplane.A
 			"namespace": a.addonNamespace,
 			"labels":    toStringMap(labels),
 		},
-		"spec": a.postgresClusterSpec(spec, env, name, labels, archive),
+		// An instance is always created WITHOUT standbys (ADR-0081 §1): install takes no shape flag,
+		// and the count is passed explicitly here rather than defaulted inside the composition so the
+		// one place that decides it is the one place that reads as a decision.
+		"spec": a.postgresClusterSpec(spec, env, name, labels, archive, 0),
 	}}
 	if _, err := clusters.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
@@ -286,12 +289,14 @@ const cnpgSecretUsernameKey = "username"
 // (cnpg_placement_schema.json records the placement subtree of the same artifact), and a key that
 // is not is PRUNED by the API server silently — which is why nothing here is invented and why the
 // placement fragment is produced by the translation ADR-0077 built rather than spelled again.
-func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name string, labels map[string]string, archive *controlplane.ArchiveDestination) map[string]any {
+func (a *Adapter) postgresClusterSpec(spec controlplane.AddonSpec, env, name string, labels map[string]string, archive *controlplane.ArchiveDestination, standbys int) map[string]any {
 	out := map[string]any{
-		// One replica is ADR-0066 §1's default for the small self-hoster ADR-0031 was written for.
-		// Under an operator it is a number rather than a constant of the design, which is the point:
-		// raising it is configuration, not a rewrite.
-		"instances": int64(1),
+		// A primary and `standbys` standbys beside it (ADR-0081). Every install passes zero — the
+		// single pod ADR-0066 §1 chose for the small self-hoster ADR-0031 was written for — and the
+		// parameter exists because raising it is configuration rather than a rewrite: `addon config
+		// postgres standbys` patches THIS field, so the shape an operator reaches by configuring an
+		// instance is the shape composing one at that count would have produced (ADR-0082).
+		"instances": cnpgStandbyToInstances(standbys),
 		"imageName": spec.Image,
 		// The `postgres` superuser stays disabled (CNPG's own default). Burrow connects as
 		// burrow_admin, declared below, so there is no second superuser credential in the cluster

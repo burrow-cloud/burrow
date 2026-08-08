@@ -171,7 +171,16 @@ const (
 	// clause — an email address, a token somebody pasted in — is recorded, and redacting it would
 	// mean parsing the statement, which §6 refuses to do.
 	auditOpAddonSQL = "addon_sql"
-	auditOpRun      = "run"
+	// auditOpAddonConfig is one change to an existing add-on instance's shape (ADR-0082). Its args
+	// carry the setting, the value it came FROM and the value it went TO, against the instance — a row
+	// saying only that an instance was configured would answer none of the questions asked of it
+	// afterwards ("who added the standby that is costing this", "when did the volume double").
+	//
+	// It carries no guardrail decision row of its own, because the verb has no guardrail: ADR-0082 §4
+	// puts it in ADR-0065's tier 1, absent from the agent binary entirely, so the hold on a shrink is
+	// the operator's own confirmation rather than a disposition anything could be set to.
+	auditOpAddonConfig = "addon_config"
+	auditOpRun         = "run"
 	// auditOpHook is one lifecycle hook's execution (ADR-0072). It carries no guardrail decision row
 	// of its own: a hook runs as part of a deploy or a rollback and is gated by that operation's
 	// guardrail, so the decision was already recorded under `deploy` or `rollback`.

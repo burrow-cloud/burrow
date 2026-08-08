@@ -38,15 +38,16 @@ type Provisioner struct {
 	mu sync.Mutex
 	// databases maps environment -> app -> present, the fake's stand-in for "this environment's
 	// instance holds these databases". Two environments are two maps and can never be one.
-	databases map[string]map[string]bool
-	ensured   []AppDatabase // calls to EnsureAppDatabase, in order
-	revoked   []AppDatabase // calls to RevokeAppDatabase, in order
-	dropped   []AppDatabase // calls to DropAppDatabase, in order
-	attached  map[string][]string
-	ensureErr error
-	revokeErr error
-	dropErr   error
-	listErr   error
+	databases  map[string]map[string]bool
+	ensured    []AppDatabase // calls to EnsureAppDatabase, in order
+	revoked    []AppDatabase // calls to RevokeAppDatabase, in order
+	dropped    []AppDatabase // calls to DropAppDatabase, in order
+	attached   map[string][]string
+	ensureErr  error
+	revokeErr  error
+	dropErr    error
+	listErr    error
+	readURLErr error
 	// statements records every AppStatement the engine handed down, in order, so a test can assert
 	// what was run, against which database, and under which bounds — including that the statement
 	// text was passed through UNMODIFIED, which ADR-0087 §6 requires (Burrow parses nothing).
@@ -145,6 +146,45 @@ func (p *Provisioner) EnsureAppDatabase(_ context.Context, app, env string) (str
 	}
 	p.databases[env][app] = true
 	return URLFor(app, env), nil
+}
+
+// ReadURLFor is the deterministic READ address the fake returns for app in env — the `-ro` sibling
+// of URLFor (ADR-0081 §2). It differs from URLFor only in the host, which is the property worth
+// asserting: a read address that named the same endpoint as the write one would be the primary
+// wearing a second name, and the record rejects exactly that.
+func ReadURLFor(app, env string) string {
+	instance, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, env)
+	if err != nil {
+		return "invalid-environment"
+	}
+	return fmt.Sprintf("postgres://app_%s:fakepw@%s-ro.burrow-addons.svc:5432/%s?sslmode=disable", app, instance, app)
+}
+
+// SetReadURLError makes AppReadURL return err (nil clears it), modelling an app whose credential
+// cannot be read — the path where a scale-up succeeds and one app is reported stranded rather than
+// the whole change failing.
+func (p *Provisioner) SetReadURLError(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.readURLErr = err
+}
+
+// AppReadURL returns app's read address on env's instance. It provisions nothing and rotates
+// nothing, exactly as the real one does not: an app that has no database here has no read address
+// either, which is ErrNotFound rather than a plausible string.
+func (p *Provisioner) AppReadURL(_ context.Context, app, env string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := validateProvisionEnv(env); err != nil {
+		return "", err
+	}
+	if p.readURLErr != nil {
+		return "", p.readURLErr
+	}
+	if !p.databases[env][app] {
+		return "", fmt.Errorf("fake: %s has no database in environment %q: %w", app, env, controlplane.ErrNotFound)
+	}
+	return ReadURLFor(app, env), nil
 }
 
 // SetAttachedApps seeds the apps ListAppDatabases reports for env, modelling apps attached to that

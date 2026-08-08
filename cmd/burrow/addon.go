@@ -67,7 +67,7 @@ func newAddonCmd() *cobra.Command {
 			"`addon install logs` stands up log aggregation and registers it as a capability your\n" +
 			"agent can query. Every install/remove is gated by a guardrail.",
 	}
-	cmd.AddCommand(newAddonInstallCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupInstanceCmd(), newAddonBackupsCmd(), newAddonBackupHealthCmd(), newAddonRestoreCmd(), newAddonRestoreInstanceCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonSQLCmd(), newAddonRemoveCmd())
+	cmd.AddCommand(newAddonInstallCmd(), newAddonConfigCmd(), newAddonConnectCmd(), newAddonAttachCmd(), newAddonDetachCmd(), newAddonBackupCmd(), newAddonBackupInstanceCmd(), newAddonBackupsCmd(), newAddonBackupHealthCmd(), newAddonRestoreCmd(), newAddonRestoreInstanceCmd(), newAddonListCmd(), newAddonLogsCmd(), newAddonMetricsCmd(), newAddonSQLCmd(), newAddonRemoveCmd())
 	return cmd
 }
 
@@ -713,6 +713,12 @@ func newAddonAttachCmd() *cobra.Command {
 			}
 			human := fmt.Sprintf("attached %q to the %s add-on in environment %s\nwrote the connection string into %s's Secret under key %q (the value is never shown)",
 				res.App, res.Addon, res.Environment, res.App, res.SecretKey)
+			// The read address only appears where it works, so saying it was written is also saying
+			// the instance has a standby (ADR-0081 §2) — which is the fact a developer needs before
+			// pointing any read at it.
+			if res.ReadSecretKey != "" {
+				human += fmt.Sprintf("\nthis instance has a standby, so a read-only connection string was written into %q as well", res.ReadSecretKey)
+			}
 			if res.PreviousSecretKey != "" {
 				human += fmt.Sprintf("\nremoved the previous key %q: the password was rotated, so it no longer connected", res.PreviousSecretKey)
 			}

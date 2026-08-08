@@ -1215,6 +1215,10 @@ type AttachResult struct {
 	// attach RENAMED it: the connection string moved to SecretKey and this key was removed, because
 	// the attach rotated the password and the old name would otherwise hold a dead one (issue #462).
 	PreviousSecretKey string `json:"previous_secret_key,omitempty"`
+	// ReadSecretKey is the variable the READ ADDRESS was written under, present only when the
+	// instance has a standby for it to point at (ADR-0081 §2). An instance with none has no `-ro`
+	// endpoint, so the variable is absent rather than present and resolving to nothing.
+	ReadSecretKey string `json:"read_secret_key,omitempty"`
 }
 
 // AttachAddon gives an app its own database on ENVIRONMENT env's Postgres instance and wires it in
@@ -1234,6 +1238,77 @@ type AttachResult struct {
 // caller never asked for. That is the failure #485 describes with the target one level in, so it
 // takes the same form: an older control plane refuses a route it does not serve, having written
 // nothing.
+// AddonSetting is one row of `burrow addon config <type>`: a property of an existing instance, what
+// it is set to now, and what changing it does (ADR-0082 §1).
+type AddonSetting struct {
+	Setting     string `json:"setting"`
+	Value       string `json:"value"`
+	Description string `json:"description"`
+	// Consequence is what changing this setting does — that adding a standby restarts every attached
+	// app, that a grown volume never shrinks. It rides the listing rather than living in help text
+	// because the listing is where somebody is deciding whether to change the value.
+	Consequence string `json:"consequence"`
+}
+
+// AddonSettingsResult is what one environment's add-on instance can be told, and what it is set to.
+type AddonSettingsResult struct {
+	Addon       string         `json:"addon"`
+	Environment string         `json:"environment"`
+	Instance    string         `json:"instance"`
+	Settings    []AddonSetting `json:"settings"`
+}
+
+// ReadAddressChange is what a shape change did to ADR-0081 §2's read address: written when the first
+// standby appears, withdrawn when the last one goes, unchanged otherwise. It carries KEY names and
+// app names, never a connection string.
+type ReadAddressChange struct {
+	Action   string        `json:"action"`
+	Apps     []string      `json:"apps"`
+	Stranded []StrandedApp `json:"stranded,omitempty"`
+	Note     string        `json:"note,omitempty"`
+}
+
+// ConfigureAddonResult is what one change to an instance's shape did, with the values either side of
+// it: "standbys is 1" does not say whether anything happened, and "0 -> 1" does.
+type ConfigureAddonResult struct {
+	Addon       string `json:"addon"`
+	Environment string `json:"environment"`
+	Instance    string `json:"instance"`
+	Setting     string `json:"setting"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	// Changed is false when the instance was already in the shape that was asked for; nothing was
+	// written and nothing was restarted.
+	Changed     bool              `json:"changed"`
+	ReadAddress ReadAddressChange `json:"read_address"`
+}
+
+// AddonSettings reports what can be configured on environment env's instance of an add-on and what
+// each setting is currently set to (ADR-0082 §1). Read-only.
+func (c *Client) AddonSettings(ctx context.Context, addonType, env string) (AddonSettingsResult, error) {
+	var out AddonSettingsResult
+	q := url.Values{}
+	q.Set("addon", addonType)
+	if env != "" {
+		q.Set("env", env)
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/addons/settings?"+q.Encode(), nil, &out)
+	return out, err
+}
+
+// ConfigureAddon changes one setting on an add-on instance that already exists (ADR-0082) — its
+// standby count or its volume size.
+//
+// Growing proceeds. A shrink of the standby count is held until confirm is true, and a shrink of the
+// volume is refused whatever confirm says, because a volume cannot shrink: the refusal comes back
+// here rather than being written into a `Cluster` that then sits in a failed state.
+func (c *Client) ConfigureAddon(ctx context.Context, addonType, env, setting, value string, confirm bool) (ConfigureAddonResult, error) {
+	var out ConfigureAddonResult
+	body := map[string]any{"addon": addonType, "env": env, "setting": setting, "value": value, "confirm": confirm}
+	err := c.do(ctx, http.MethodPost, "/v1/addons/config", body, &out)
+	return out, err
+}
+
 func (c *Client) AttachAddon(ctx context.Context, addonType, app, env, envKey string) (AttachResult, error) {
 	var out AttachResult
 	body := map[string]any{"addon": addonType, "app": app, "env": env}

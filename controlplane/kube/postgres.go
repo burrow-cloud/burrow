@@ -143,6 +143,21 @@ func (t PostgresTarget) Host() string {
 	return fmt.Sprintf("%s.%s.svc", t.Instance, t.Namespace)
 }
 
+// ReadHost is the in-cluster DNS name of the target's read-only Service — CloudNativePG's `-ro`,
+// which selects the STANDBYS and nothing else (ADR-0081 §2). It is what goes into the read address
+// of an app attached to an instance that has one.
+//
+// `-ro` rather than `-r`, and the difference is the whole point of splitting reads: `-r` selects any
+// instance, so a query down it may land on the primary. `-ro` resolves to no endpoint at all on a
+// standby-less instance, which is why nothing writes this address unless a standby exists.
+//
+// It is composed from the target rather than from the `Cluster`'s status, so it names a Service in
+// the same namespace, under the same instance name, as Host() does — the two cannot come to describe
+// different servers.
+func (t PostgresTarget) ReadHost() string {
+	return fmt.Sprintf("%s-ro.%s.svc", t.Instance, t.Namespace)
+}
+
 // PostgresTargetFunc resolves an environment to the instance a provisioner acts on for it. A
 // provisioner is GIVEN one at construction and has no other way to name an instance.
 //
@@ -568,6 +583,45 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 		return "", err
 	}
 	return appDSN(role, password, target.Host()+":5432", app), nil
+}
+
+// AppReadURL composes app's READ-ONLY connection string on environment env's instance — ADR-0081
+// §2's read address, pointing at the `-ro` Service that selects standbys and nothing else.
+//
+// IT PROVISIONS NOTHING AND ROTATES NOTHING, which is the difference between it and a second call to
+// EnsureAppDatabase. The role, its password and the database already exist; the only thing that
+// differs from the string the attach handed out is the host. Rotating here would break every running
+// app the moment a standby was added, which is the operation this exists to serve.
+//
+// The password is read back out of the Secret this provisioner wrote for the operator to apply, so
+// there is no second credential and nothing new to keep in step: the read address stops working at
+// exactly the moment the primary one does, which is what it should do. The returned string is a
+// SECRET value and appears in no error raised here.
+//
+// It does not check whether a standby exists. Whether an instance should have a read address is the
+// engine's decision (ADR-0081 §2); an implementation that second-guessed it would be a second
+// opinion about a fact the engine has already read off the `Cluster`.
+func (p *PostgresProvisioner) AppReadURL(ctx context.Context, app, env string) (string, error) {
+	if err := validatePostgresAppName(app); err != nil {
+		return "", err
+	}
+	target, err := p.targetFor(env)
+	if err != nil {
+		return "", err
+	}
+	name := provisioningObjectName(target.Instance, app)
+	s, err := p.client.CoreV1().Secrets(target.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("kube: %s has no provisioned credential on environment %q's instance, so it has no read address either — attach it first: %w", app, env, controlplane.ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("kube: reading the role password secret %s/%s: %w", target.Namespace, name, err)
+	}
+	password, ok := s.Data[PostgresPasswordKey]
+	if !ok {
+		return "", fmt.Errorf("kube: the role password secret %s/%s has no %q key: %w", target.Namespace, name, PostgresPasswordKey, controlplane.ErrNotFound)
+	}
+	return appDSN(roleName(app), string(password), target.ReadHost()+":5432", app), nil
 }
 
 // lockDownDatabase runs the one statement provisioning cannot express as an object:

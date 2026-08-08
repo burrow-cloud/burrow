@@ -1182,6 +1182,12 @@ type AttachResult struct {
 	// a variable the app still reads and that no longer connects. It is reported so the move is
 	// stated rather than inferred from a variable quietly disappearing (issue #462).
 	PreviousSecretKey string `json:"previous_secret_key,omitempty"`
+	// ReadSecretKey is the env-var name the READ ADDRESS was written under, and it is set only when
+	// the instance actually has a standby (ADR-0081 §2). An instance with none has no `-ro` endpoint
+	// for the address to resolve to, so the variable is absent rather than present and dead: an
+	// address that is always there reads as a thing to use, and a developer who wires reads to one
+	// that resolves to nothing finds out at the first query.
+	ReadSecretKey string `json:"read_secret_key,omitempty"`
 }
 
 // AttachAddon gives app its own database on ENVIRONMENT env's Postgres instance and wires it into
@@ -1292,6 +1298,13 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 		}
 		previous = current
 	}
+	// The read address, when this instance has a standby for it to point at (ADR-0081 §2). It is
+	// settled BEFORE the roll below so one restart carries both variables, and it is best-effort by
+	// design — see attachReadAddress.
+	readKey := e.attachReadAddress(ctx, k, t, app, targetEnv, key, previous)
+	if readKey != "" {
+		args["read_key"] = readKey
+	}
 	// An attach writes a key the app may never have held, so it rolls through the one helper that
 	// knows whether this app's pod template names its secret keys (ADR-0089 §4). A restart alone
 	// would bring an enumerated app back with the connection string in its Secret, absent from its
@@ -1301,7 +1314,50 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 		return AttachResult{}, err
 	}
 	e.recordExecution(ctx, auditOpAddonAttach, app, args, nil)
-	return AttachResult{App: app, Addon: t, Environment: targetEnv, SecretKey: key, PreviousSecretKey: previous}, nil
+	return AttachResult{App: app, Addon: t, Environment: targetEnv, SecretKey: key, PreviousSecretKey: previous, ReadSecretKey: readKey}, nil
+}
+
+// attachReadAddress writes app's read address beside its connection string when the instance has a
+// standby, and takes it away when it does not — so an attach leaves the app in the state the
+// instance's CURRENT shape calls for rather than in the state it called for when the app last
+// attached (ADR-0081 §2). It returns the key it wrote, or "" for an instance with no standby.
+//
+// IT IS BEST-EFFORT, AND DELIBERATELY SO. The connection string is already written and recorded by
+// the time this runs; failing the attach because a second, optional variable could not be composed
+// would turn a working attachment into a reported failure, and the operator's next move — re-run the
+// attach — is the same either way. The address is also re-derived by `addon config <type> standbys`,
+// which is the command that makes one relevant in the first place.
+//
+// A RENAME MOVES BOTH NAMES. The read key is derived from the attachment's own key, so a rename that
+// left the old one behind would leave a `PG_DSN` beside a stale `DATABASE_URL_READ` — a variable
+// naming a connection string that is no longer read.
+func (e *Engine) attachReadAddress(ctx context.Context, k Kubernetes, t AddonType, app, targetEnv, key, previous string) string {
+	if previous != "" {
+		_ = k.UnsetSecretKey(ctx, app, readAddressKey(previous))
+	}
+	shape, err := e.k8s.AddonInstanceShape(ctx, t, targetEnv)
+	if err != nil || shape.Standbys == 0 {
+		// No standby, or no answer about whether there is one. Either way the address is removed
+		// rather than left: `-ro` resolves to nothing at a standby-less instance, and an attach that
+		// kept a stale one would hand the app a variable that used to work.
+		_ = k.UnsetSecretKey(ctx, app, readAddressKey(key))
+		return ""
+	}
+	reader, ok := e.dbProvisioner.(AppReadAddresser)
+	if !ok {
+		return ""
+	}
+	// The returned url is a SECRET value: from here it is handed only to SetSecretValue and never
+	// logged, audited, or returned.
+	url, err := reader.AppReadURL(ctx, app, targetEnv)
+	if err != nil {
+		return ""
+	}
+	readKey := readAddressKey(key)
+	if err := k.SetSecretValue(ctx, app, readKey, url); err != nil {
+		return ""
+	}
+	return readKey
 }
 
 // refuseOccupiedEnvKey refuses a requested attachment variable that something else in the app's

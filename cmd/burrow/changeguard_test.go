@@ -129,6 +129,8 @@ var commandClasses = map[string]commandClass{
 	"addon":                 {class: classReads, why: "a group with no action of its own"},
 	"addon backups":         {class: classReads, why: "lists recorded backups"},
 	"addon backup-health":   {class: classReads, why: "reports backup coverage"},
+	"addon config":          {class: classReads, why: "a group with no action of its own"},
+	"addon config postgres": {class: classReads, why: "lists what an environment's Postgres instance can be told and what each setting is set to"},
 	"addon list":            {class: classReads, why: "lists installed add-ons"},
 	"addon logs":            {class: classReads, why: "queries the logs add-on"},
 	"addon metrics":         {class: classReads, why: "queries the metrics add-on"},
@@ -181,9 +183,13 @@ var commandClasses = map[string]commandClass{
 	// working, not a workaround for it.
 	"addon restore-instance": {class: classChanges, why: "rewinds a whole Postgres instance, taking every app's database on it back together (ADR-0066 §4)", args: []string{"addon", "restore-instance", "postgres", "--latest", "--acknowledge-data-loss", "--confirm"}},
 	"addon remove":           {class: classChanges, why: "removes an installed add-on", args: []string{"addon", "remove", "logs", "--confirm"}},
-	"guard set":              {class: classChanges, why: "rewrites the guardrail policy the agent runs under", args: []string{"guard", "set", "app.deploy", "allow"}},
-	"cluster config set":     {class: classChanges, why: "writes an operational limit", args: []string{"cluster", "config", "set", "app.replicas.max", "5"}},
-	"config provider add":    {class: classChanges, why: "registers a provider credential through the control plane", args: []string{"config", "provider", "add", "cloudflare"}},
+	// Both invocations GROW, which is the form that proceeds without a prompt (ADR-0082 §2). The
+	// reduction has a gate of its own and is exercised where that gate is tested, not here.
+	"addon config postgres standbys": {class: classChanges, why: "changes how many standbys an existing Postgres instance runs, which provisions hardware (ADR-0082)", args: []string{"addon", "config", "postgres", "standbys", "1"}},
+	"addon config postgres storage":  {class: classChanges, why: "grows an existing Postgres instance's data volume, which cannot be undone (ADR-0082 §2)", args: []string{"addon", "config", "postgres", "storage", "50Gi"}},
+	"guard set":                      {class: classChanges, why: "rewrites the guardrail policy the agent runs under", args: []string{"guard", "set", "app.deploy", "allow"}},
+	"cluster config set":             {class: classChanges, why: "writes an operational limit", args: []string{"cluster", "config", "set", "app.replicas.max", "5"}},
+	"config provider add":            {class: classChanges, why: "registers a provider credential through the control plane", args: []string{"config", "provider", "add", "cloudflare"}},
 }
 
 // changeGuardRationale is appended to every failure here so the message teaches rather than merely

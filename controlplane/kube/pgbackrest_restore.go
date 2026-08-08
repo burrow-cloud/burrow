@@ -106,11 +106,22 @@ func (a *Adapter) RestoreInstance(ctx context.Context, req controlplane.RestoreI
 		return controlplane.RestoreInstanceOutcome{}, err
 	}
 
+	// THE SHAPE IS READ BEFORE THE INSTANCE IS DESTROYED, because it is about to stop being readable
+	// and the recovered instance has to come back in it (ADR-0082). An instance an operator gave a
+	// standby and a bigger volume would otherwise come back with the catalog's defaults — a restore
+	// that silently undid a configuration change, and for the volume one that asks a storage class to
+	// shrink a claim it cannot shrink. An unreadable shape falls back to the shape an install
+	// produces, which is what a `Cluster` that is already gone can honestly be recovered as.
+	shape, shapeErr := a.AddonInstanceShape(ctx, controlplane.AddonPostgres, req.Environment)
+	if shapeErr != nil {
+		shape = controlplane.AddonShape{}
+	}
+
 	destroyed, err := a.removeInstanceForRecovery(ctx, instance)
 	if err != nil {
 		return controlplane.RestoreInstanceOutcome{}, err
 	}
-	if err := a.createRecoveryCluster(ctx, instance, req); err != nil {
+	if err := a.createRecoveryCluster(ctx, instance, req, shape); err != nil {
 		return controlplane.RestoreInstanceOutcome{}, err
 	}
 	if err := a.awaitRecoveredInstance(ctx, instance); err != nil {
@@ -253,7 +264,7 @@ func (a *Adapter) awaitClaimsGone(ctx context.Context, instance string) error {
 }
 
 // createRecoveryCluster writes the `Cluster` that recovers the instance from its repository.
-func (a *Adapter) createRecoveryCluster(ctx context.Context, instance string, req controlplane.RestoreInstanceRequest) error {
+func (a *Adapter) createRecoveryCluster(ctx context.Context, instance string, req controlplane.RestoreInstanceRequest, shape controlplane.AddonShape) error {
 	spec, ok := controlplane.LookupAddon(controlplane.AddonPostgres)
 	if !ok {
 		return fmt.Errorf("kube: the catalog has no postgres add-on: %w", controlplane.ErrInvalid)
@@ -271,7 +282,7 @@ func (a *Adapter) createRecoveryCluster(ctx context.Context, instance string, re
 			"namespace": a.addonNamespace,
 			"labels":    toStringMap(labels),
 		},
-		"spec": a.postgresRecoveryClusterSpec(spec, req.Environment, instance, labels, req),
+		"spec": a.postgresRecoveryClusterSpec(spec, req.Environment, instance, labels, req, shape),
 	}}
 	if _, err := clusters.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -301,8 +312,15 @@ func (a *Adapter) createRecoveryCluster(ctx context.Context, instance string, re
 // signal saying so. It is safe to archive into the same stanza here because the pre-restore instance
 // is already gone: nothing else is writing to the repository, so there is no window in which two
 // instances archive into one stanza.
-func (a *Adapter) postgresRecoveryClusterSpec(spec controlplane.AddonSpec, env, instance string, labels map[string]string, req controlplane.RestoreInstanceRequest) map[string]any {
-	out := a.postgresClusterSpec(spec, env, instance, labels, req.Archive)
+func (a *Adapter) postgresRecoveryClusterSpec(spec controlplane.AddonSpec, env, instance string, labels map[string]string, req controlplane.RestoreInstanceRequest, shape controlplane.AddonShape) map[string]any {
+	out := a.postgresClusterSpec(spec, env, instance, labels, req.Archive, shape.Standbys)
+	// The volume the instance actually had, not the catalog's default: a grown volume is one-way
+	// (ADR-0082 §2), so recovering into a smaller claim is not a smaller instance, it is a claim the
+	// storage class refuses. An empty size is one that could not be read, and the composition's own
+	// default stands.
+	if shape.Storage != "" {
+		out["storage"] = map[string]any{"size": shape.Storage}
+	}
 	// `bootstrap.initdb` and `bootstrap.recovery` are alternatives, not layers: an instance is either
 	// initialized empty or recovered. So the bootstrap is REPLACED rather than added to.
 	out["bootstrap"] = map[string]any{"recovery": recoveryBootstrap(req)}

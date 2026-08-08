@@ -197,7 +197,10 @@ func composedClusterSpecAsJSON() (any, error) {
 		},
 		RepoPath: controlplane.PgBackRestRepoPath(controlplane.DefaultEnvironment),
 	}
-	install := a.postgresClusterSpec(spec, controlplane.DefaultEnvironment, name, labels, archive)
+	// A STANDBY IS COMPOSED HERE, not the zero an install passes, so `spec.instances` is walked at
+	// the value `addon config postgres standbys` reaches (ADR-0082). A pruned instance count would be
+	// a scale-up that reported success and left one pod running.
+	install := a.postgresClusterSpec(spec, controlplane.DefaultEnvironment, name, labels, archive, 1)
 	recovery := a.postgresRecoveryClusterSpec(spec, controlplane.DefaultEnvironment, name, labels, controlplane.RestoreInstanceRequest{
 		Environment: controlplane.DefaultEnvironment,
 		// A recovery target is FILLED so `bootstrap.recovery.recoveryTarget.backupID` is walked. It is
@@ -206,7 +209,9 @@ func composedClusterSpecAsJSON() (any, error) {
 		// data afterwards.
 		BackupLabel: "20260210-101333F",
 		Archive:     archive,
-	})
+		// The shape the pre-restore instance was in, which a recovery has to come back in rather than
+		// reverting to the catalog's defaults (ADR-0082).
+	}, controlplane.AddonShape{Standbys: 1, Storage: "50Gi"})
 	// The union: the recovery composition already carries everything the install one does apart from
 	// the bootstrap, which is the one key they genuinely disagree about.
 	bootstrap := map[string]any{}

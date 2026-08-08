@@ -56,7 +56,13 @@ type Kubernetes struct {
 	physicalReason *controlplane.PhysicalBackupOutcome // reason/detail RunPhysicalBackup reports
 	// instanceRestores records RestoreInstance calls, in order (ADR-0066 §4).
 	instanceRestores *[]RestoreInstanceCall
-	metricsAvail     *bool // whether metrics-server is reported present
+	// shapes holds each instance's configurable shape by instance name — the standby count and the
+	// volume size an operator changes with `addon config` (ADR-0082). It is seeded by DeployAddon and
+	// rewritten by ConfigureAddonInstance, so a test asserts the change against the fake cluster's own
+	// state rather than against the call it just made.
+	shapes       map[string]controlplane.AddonShape
+	configures   *[]ConfigureInstanceCall
+	metricsAvail *bool // whether metrics-server is reported present
 	// backupJobs records which backups still have a Job in the fake add-on namespace. The real
 	// adapter reads this off the cluster; here a test sets it, because the interesting state is the
 	// one no code path produces on purpose — a Job that is GONE while its row is still pending
@@ -294,6 +300,8 @@ func NewKubernetes() *Kubernetes {
 		physicalReason:   new(controlplane.PhysicalBackupOutcome),
 		instanceRestores: new([]RestoreInstanceCall),
 		watchers:         make(map[string]*workloadWatcher),
+		shapes:           make(map[string]controlplane.AddonShape),
+		configures:       new([]ConfigureInstanceCall),
 		errs:             make(map[Op]error),
 	}
 }
@@ -388,7 +396,100 @@ func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpe
 			Size:  fmt.Sprintf("%dGi", spec.StorageGi),
 		}
 	}
+	// An install creates an instance with NO standby, always (ADR-0081 §1) — there is no shape flag
+	// to say otherwise, and the fake has to start where the real one does or a test could reach a
+	// standby without the verb that adds one. A re-install leaves the shape alone, exactly as the
+	// adapter leaves the running `Cluster`'s instance count alone.
+	if spec.StorageGi > 0 || spec.Type == controlplane.AddonPostgres {
+		if _, ok := k.shapes[name]; !ok {
+			k.shapes[name] = controlplane.AddonShape{Standbys: 0, Storage: fmt.Sprintf("%dGi", spec.StorageGi)}
+		}
+	}
 	return info, nil
+}
+
+// ConfigureInstanceCall records one ConfigureAddonInstance invocation, so a test can assert what the
+// engine asked the cluster for — and, for a change it should have refused, that it asked for nothing.
+type ConfigureInstanceCall struct {
+	Addon       controlplane.AddonType
+	Environment string
+	Standbys    *int
+	Storage     string
+}
+
+// Configures returns the ConfigureAddonInstance calls, in order.
+func (k *Kubernetes) Configures() []ConfigureInstanceCall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]ConfigureInstanceCall(nil), *k.configures...)
+}
+
+// SetAddonShape seeds the shape of the named instance, so a test can start from an instance that
+// already has standbys — the state only `addon config` can produce, and the one a scale-down and a
+// withdrawal of the read address are asserted against.
+func (k *Kubernetes) SetAddonShape(instance string, shape controlplane.AddonShape) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.shapes[instance] = shape
+}
+
+// AddonShape returns the shape the fake cluster currently holds for the named instance — test-only
+// introspection, so "the standby count actually changed" is asserted against state rather than
+// against the result the engine returned.
+func (k *Kubernetes) AddonShape(instance string) (controlplane.AddonShape, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	s, ok := k.shapes[instance]
+	return s, ok
+}
+
+// AddonInstanceShape reports the shape of environment env's instance, or ErrNotFound when this fake
+// cluster holds none — which is what an environment with no add-on installed answers.
+func (k *Kubernetes) AddonInstanceShape(ctx context.Context, t controlplane.AddonType, env string) (controlplane.AddonShape, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpAddonInstanceShape]; err != nil {
+		return controlplane.AddonShape{}, err
+	}
+	name, err := controlplane.AddonInstanceName(t, env)
+	if err != nil {
+		return controlplane.AddonShape{}, err
+	}
+	shape, ok := k.shapes[name]
+	if !ok {
+		return controlplane.AddonShape{}, fmt.Errorf("fake: environment %q has no %s instance %q: %w", env, t, name, controlplane.ErrNotFound)
+	}
+	return shape, nil
+}
+
+// ConfigureAddonInstance changes one property of an instance in this fake cluster and records the
+// call. It applies whatever it is given without re-deciding: every refusal ADR-0082 makes is the
+// engine's, so a fake that argued back would hide an engine that had stopped making one.
+func (k *Kubernetes) ConfigureAddonInstance(ctx context.Context, req controlplane.ConfigureInstanceRequest) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.errs[OpConfigureAddon]; err != nil {
+		return err
+	}
+	name, err := controlplane.AddonInstanceName(req.Addon, req.Environment)
+	if err != nil {
+		return err
+	}
+	shape, ok := k.shapes[name]
+	if !ok {
+		return fmt.Errorf("fake: environment %q has no %s instance %q: %w", req.Environment, req.Addon, name, controlplane.ErrNotFound)
+	}
+	*k.configures = append(*k.configures, ConfigureInstanceCall{
+		Addon: req.Addon, Environment: req.Environment, Standbys: req.Standbys, Storage: req.Storage,
+	})
+	if req.Standbys != nil {
+		shape.Standbys = *req.Standbys
+	}
+	if req.Storage != "" {
+		shape.Storage = req.Storage
+	}
+	k.shapes[name] = shape
+	return nil
 }
 
 // AddonReady reports whether the named add-on was deployed (and thus ready) in this fake

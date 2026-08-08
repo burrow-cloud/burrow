@@ -181,3 +181,42 @@ func TestCopyRowKeepsNullDistinct(t *testing.T) {
 		t.Error("a value did not survive the copy")
 	}
 }
+
+// TestAppReadURLNamesTheStandbyService is ADR-0081 §2's other half in the adapter: the read address
+// points at `-ro`, which selects STANDBYS and nothing else. `-r` would resolve to any instance, so a
+// read down it may land on the primary — which is the whole thing splitting reads is for.
+//
+// It also asserts the credential is the app's own, read back out of the Secret the attach wrote
+// rather than minted here: composing a read address must not rotate a running app's password.
+func TestAppReadURLNamesTheStandbyService(t *testing.T) {
+	instance, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("AddonInstanceName: %v", err)
+	}
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: instance + ".web", Namespace: addonNS},
+		Type:       corev1.SecretTypeBasicAuth,
+		Data:       map[string][]byte{"username": []byte("app_web"), PostgresPasswordKey: []byte("s3cret")},
+	})
+	p := NewPostgresProvisioner(client, nil, AddonInstanceTarget(addonNS))
+
+	url, err := p.AppReadURL(context.Background(), "web", controlplane.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("AppReadURL: %v", err)
+	}
+	want := "postgres://app_web:s3cret@" + instance + "-ro." + addonNS + ".svc:5432/web?sslmode=disable"
+	if url != want {
+		t.Errorf("read address = %q, want %q", url, want)
+	}
+}
+
+// TestAppReadURLIsNotFoundForAnUnattachedApp: an app with no provisioned credential has no read
+// address either, and saying so beats composing a plausible string that will not authenticate.
+func TestAppReadURLIsNotFoundForAnUnattachedApp(t *testing.T) {
+	p := NewPostgresProvisioner(fake.NewSimpleClientset(), nil, AddonInstanceTarget(addonNS))
+
+	_, err := p.AppReadURL(context.Background(), "web", controlplane.DefaultEnvironment)
+	if !errors.Is(err, controlplane.ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+}

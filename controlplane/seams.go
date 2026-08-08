@@ -379,6 +379,30 @@ type AppDatabaseLister interface {
 	ListAppDatabases(ctx context.Context, env string) ([]string, error)
 }
 
+// AppReadAddresser composes the READ-ONLY connection string for an app that is already attached —
+// ADR-0081 §2's read address, which points at the standbys and nothing else.
+//
+// It is a SEPARATE optional interface rather than a method on DatabaseProvisioner, for the reason
+// AppDatabaseLister is: an existing provisioner implementation stays valid unchanged. The engine
+// type-asserts its provisioner to it and, when it is absent, writes no read address and says so in
+// the result rather than failing a scale-up that has already happened.
+//
+// IT PROVISIONS NOTHING AND ROTATES NOTHING. The app's role, its password and its database already
+// exist; all that differs from the string EnsureAppDatabase returned is the host it names. That is
+// why it is not simply a second call to the attach path: re-provisioning to obtain a read address
+// would rotate the password of an app that is running, so adding a standby would break every app it
+// was supposed to help.
+//
+// The returned string is a SECRET value, on exactly the terms EnsureAppDatabase's is: the caller
+// writes it straight into the app's Secret and never logs, audits, or returns it.
+type AppReadAddresser interface {
+	// AppReadURL returns app's read-only connection string on environment env's instance, or
+	// ErrNotFound when the app has no provisioned credential to compose one from. It does not check
+	// that a standby exists: WHETHER an instance should have a read address is the engine's decision
+	// (ADR-0081 §2), and an implementation that second-guessed it would make the two disagree.
+	AppReadURL(ctx context.Context, app, env string) (readURL string, err error)
+}
+
 // DatabaseQuerier runs ONE caller-supplied statement against ONE app's database on an environment's
 // relational add-on instance and returns columns and rows (ADR-0087). It is the seam behind
 // `burrow addon sql`.
@@ -574,6 +598,29 @@ type Kubernetes interface {
 	// still costing money. Deciding which of them are RETAINED is the engine's job. No claims is an
 	// empty slice, not an error.
 	AddonVolumes(ctx context.Context) ([]AddonVolume, error)
+	// AddonInstanceShape reports the configurable shape of environment env's instance of add-on t —
+	// its standby count and its data volume's size (ADR-0082 §1). An environment with no such instance
+	// is ErrNotFound.
+	//
+	// IT READS THE CLUSTER RATHER THAN THE REGISTRY, and the distinction is the reason this is a seam
+	// at all. The registry records that an instance was installed and with what image; the shape is a
+	// property of the object the database operator is reconciling, and it can have been changed since
+	// — by `addon config`, or by somebody with a kubeconfig. A listing that answered from the registry
+	// would report what an install once asked for rather than what is running.
+	AddonInstanceShape(ctx context.Context, t AddonType, env string) (AddonShape, error)
+	// ConfigureAddonInstance changes ONE property of an existing add-on instance in place (ADR-0082).
+	// A missing instance is ErrNotFound.
+	//
+	// It is asked to write, not to decide. Every refusal the change carries — a volume shrink, an
+	// unconfirmed scale-down — is made by the engine against the shape AddonInstanceShape returned,
+	// so an adapter that re-derived them would be a second opinion about a decision already taken and
+	// already audited.
+	//
+	// The change is IN PLACE and touches nothing else: the instance keeps its data, its credential,
+	// its services and its archive wiring. That is the whole of ADR-0082's argument against
+	// remove-and-reinstall, so an implementation that rebuilt the instance to change its shape would
+	// be defeating the record it implements.
+	ConfigureAddonInstance(ctx context.Context, req ConfigureInstanceRequest) error
 	// ScaleWorkload sets the desired replica count for app's workload.
 	ScaleWorkload(ctx context.Context, app string, replicas int32) error
 

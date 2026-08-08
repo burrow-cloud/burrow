@@ -281,6 +281,11 @@ func New(cfg Config) (http.Handler, error) {
 	// environment's instance, and the statement may write (issue #485).
 	v1.HandleFunc("POST /v1/addons/sql", s.addonSQL)
 	v1.HandleFunc("POST /v1/addons/sql/env/{env}", s.addonSQL)
+	// The shape of an instance, and changing it (ADR-0082). The read is a GET; the change is a POST
+	// whose body carries the one setting and the one value, because a change to an instance's shape
+	// is exactly the kind of thing that should not be expressible by fiddling with a URL.
+	v1.HandleFunc("GET /v1/addons/settings", s.addonSettings)
+	v1.HandleFunc("POST /v1/addons/config", s.configureAddon)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	// What the removal does to the DATA is a route, and BOTH dispositions are, because here it is
@@ -1398,6 +1403,59 @@ func (s *server) backupHealthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, health)
+}
+
+// addonSettings answers what can be configured on one environment's add-on instance and what each
+// setting is currently set to (ADR-0082 §1). Read-only, and it reads the cluster rather than the
+// registry: the answer is the shape the instance is in now.
+func (s *server) addonSettings(w http.ResponseWriter, r *http.Request) {
+	addon := r.URL.Query().Get("addon")
+	if addon == "" {
+		addon = string(controlplane.AddonPostgres)
+	}
+	res, err := s.engine.AddonSettings(r.Context(), controlplane.AddonType(addon), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// configureAddon changes one setting on an instance that already exists (ADR-0082): its standby
+// count or its volume size. Growing proceeds; a shrink of the standby count needs `confirm`, and a
+// shrink of the volume is refused outright because a volume cannot shrink.
+//
+// The response names the instance, the setting and the values either side of the change, plus what
+// happened to the read address and to the apps holding it — no secret value. The read address is a
+// connection string and only its KEY name and the apps it reached cross this boundary.
+func (s *server) configureAddon(w http.ResponseWriter, r *http.Request) {
+	var req addonConfigRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	res, err := s.engine.ConfigureAddon(r.Context(), controlplane.AddonType(req.Addon), req.Env,
+		controlplane.AddonSetting(req.Setting), req.Value,
+		controlplane.ConfigureAddonOptions{Confirm: req.Confirm})
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// addonConfigRequest is the body of a shape change: the add-on type, the environment whose instance
+// it acts on, and exactly one setting with its new value. No secret.
+type addonConfigRequest struct {
+	Addon string `json:"addon"`
+	// Env is the environment whose instance is configured (ADR-0067 §1); empty targets the default
+	// environment, and is refused when more than one environment is registered.
+	Env string `json:"env,omitempty"`
+	// Setting is the property being changed — `standbys` or `storage`.
+	Setting string `json:"setting"`
+	// Value is what to set it to, in the setting's own terms: a count, or a Kubernetes quantity.
+	Value string `json:"value"`
+	// Confirm is the operator saying they mean a shrink. Growing never consults it.
+	Confirm bool `json:"confirm,omitempty"`
 }
 
 // restoreAddon restores an app's database from a recorded backup, overwriting its live contents

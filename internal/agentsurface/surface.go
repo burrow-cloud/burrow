@@ -343,6 +343,28 @@ var catalogue = []Capability{
 		Command: "burrow addon restore-instance <addon> --backup <id>",
 	},
 
+	// Changing an instance's shape (ADR-0082 §4). It fails ADR-0065 §1's SCOPE test in a way none of
+	// the entries above do, and the reason is worth naming precisely: this verb does not destroy
+	// anything and it is trivially reversible, so reversibility — the test that puts a capability in
+	// tier 2 rather than tier 1 — says nothing against it. What disqualifies it is that it PROVISIONS
+	// HARDWARE. An agent deploying an image spends nothing; an agent adding a standby or doubling a
+	// volume spends money on infrastructure nobody approved, and the ease of undoing the change does
+	// not make the spend reversible.
+	//
+	// It is reported rather than merely absent because the useful half of the work is one the agent
+	// can still do: an agent that can say "this instance has no standby, and a person can add one with
+	// `burrow addon config postgres standbys 1`" has turned a dead end into a handover (§4).
+	{
+		Surface: Operator,
+		Path:    "addon config",
+		What:    "changes an add-on instance that already exists — its standby count, its volume size",
+		Why: "tier 1 (ADR-0065 §2, ADR-0082 §4): it provisions hardware. A standby is a pod and a " +
+			"volume, the most expensive thing an add-on provisions, and a volume that grows cannot " +
+			"shrink back — so the spend is a decision a human makes, whatever the topology change costs " +
+			"to undo",
+		Command: "burrow addon config postgres standbys <n>",
+	},
+
 	// Object storage. ADR-0063 §5 splits the two bucket operations across two tiers, and the split
 	// is the point of the record. CREATION is tier 3: additive, reversible, part of a legitimate
 	// workflow, so it ships as the `bucket.create` guardrail at `confirm` and a human approves the

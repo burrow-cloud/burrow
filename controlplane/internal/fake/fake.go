@@ -88,6 +88,8 @@ const (
 	OpRunPhysicalBackup     Op = "RunPhysicalBackup"
 	OpPhysicalBackupPresent Op = "PhysicalBackupPresent"
 	OpRestoreInstance       Op = "RestoreInstance"
+	OpAddonInstanceShape    Op = "AddonInstanceShape"
+	OpConfigureAddon        Op = "ConfigureAddonInstance"
 
 	OpCreateEnvironment Op = "CreateEnvironment"
 	OpListEnvironments  Op = "ListEnvironments"

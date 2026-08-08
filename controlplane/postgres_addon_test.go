@@ -170,8 +170,9 @@ func TestAttachWithoutProvisioner(t *testing.T) {
 	}
 }
 
-// TestDetachPostgres asserts detach removes the DATABASE_URL key, drops the database, and rolls the
-// workload, behind the confirm guardrail.
+// TestDetachPostgres asserts a plain detach removes the DATABASE_URL key, ends the app's access, and
+// KEEPS the database (ADR-0090 §1), behind the confirm guardrail. The guardrail still holds it: what
+// it guards is an app losing its access, which is disruptive and worth saying out loud.
 func TestDetachPostgres(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, prov := newPostgresEngine(t)
@@ -183,24 +184,107 @@ func TestDetachPostgres(t *testing.T) {
 	}
 
 	// Without confirm the detach guardrail holds it.
-	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", false); err == nil {
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{}); err == nil {
 		t.Fatal("detach without confirm should be held by the guardrail")
 	} else {
 		mustGuardrail(t, err, cp.GuardrailAddonDetach)
 	}
-	if got := prov.Dropped(); len(got) != 0 {
-		t.Errorf("a held detach must not drop anything, got %v", got)
+	if got := prov.Revoked(); len(got) != 0 {
+		t.Errorf("a held detach must not touch the instance, got %v", got)
 	}
 
-	// With confirm it drops the database and removes the key.
-	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", true); err != nil {
+	// With confirm it revokes the access and removes the key.
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon confirmed: %v", err)
+	}
+	if got := prov.Revoked(); len(got) != 1 || got[0] != (fake.AppDatabase{App: "web", Env: cp.DefaultEnvironment}) {
+		t.Errorf("RevokeAppDatabase called with %v, want [{web default}]", got)
+	}
+	if got := prov.Dropped(); len(got) != 0 {
+		t.Errorf("a plain detach destroyed the database (%v); it keeps it, and only --delete-data destroys it (ADR-0090 §1)", got)
+	}
+	if got := prov.Databases(cp.DefaultEnvironment); len(got) != 1 || got[0] != "web" {
+		t.Errorf("databases on the instance after a detach = %v, want web's still there with its rows", got)
+	}
+	if _, ok := k.SecretValue("web", "DATABASE_URL"); ok {
+		t.Error("DATABASE_URL should be removed after detach")
+	}
+}
+
+// TestDetachKeepsTheDataAndReAttachGetsItBack is the reversibility claim ADR-0090 §3 makes, and the
+// reason §1 is not simply a storage leak with better manners: the database a detach kept is the one a
+// later attach adopts, so the pair round-trips. What the engine has to get right is that it asked for
+// no destruction at all in between.
+func TestDetachKeepsTheDataAndReAttachGetsItBack(t *testing.T) {
+	ctx := context.Background()
+	e, k, _, prov := newPostgresEngine(t)
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+		t.Fatalf("AttachAddon: %v", err)
+	}
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
+		t.Fatalf("DetachAddon: %v", err)
+	}
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+		t.Fatalf("re-attach after a detach: %v", err)
+	}
+	if got := prov.Dropped(); len(got) != 0 {
+		t.Fatalf("the round trip destroyed a database (%v); nothing in it may", got)
+	}
+	if got, ok := k.SecretValue("web", "DATABASE_URL"); !ok || got != fake.URLFor("web", cp.DefaultEnvironment) {
+		t.Errorf("DATABASE_URL after re-attaching = %q (present=%v), want the connection string for the database that was kept", got, ok)
+	}
+}
+
+// TestDetachDeleteDataDestroysTheDatabase is the other disposition, and the only way to ask for it:
+// the same verb, the same guardrail, and a database that is gone afterwards (ADR-0090 §2).
+func TestDetachDeleteDataDestroysTheDatabase(t *testing.T) {
+	ctx := context.Background()
+	e, _, _, prov := newPostgresEngine(t)
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+		t.Fatalf("AttachAddon: %v", err)
+	}
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{DeleteData: true, Confirm: true}); err != nil {
+		t.Fatalf("DetachAddon --delete-data: %v", err)
 	}
 	if got := prov.Dropped(); len(got) != 1 || got[0] != (fake.AppDatabase{App: "web", Env: cp.DefaultEnvironment}) {
 		t.Errorf("DropAppDatabase called with %v, want [{web default}]", got)
 	}
-	if _, ok := k.SecretValue("web", "DATABASE_URL"); ok {
-		t.Error("DATABASE_URL should be removed after detach")
+	if got := prov.Revoked(); len(got) != 0 {
+		t.Errorf("a data-destroying detach also revoked (%v); the two dispositions are separate calls, not a sequence", got)
+	}
+	if got := prov.Databases(cp.DefaultEnvironment); len(got) != 0 {
+		t.Errorf("databases on the instance after --delete-data = %v, want none", got)
+	}
+}
+
+// TestDetachDeleteDataIsRecordedInTheAudit: the audit row says which detach happened. "Took an app's
+// access away" and "destroyed its database" are different events and must not read the same
+// afterwards (ADR-0027).
+func TestDetachDeleteDataIsRecordedInTheAudit(t *testing.T) {
+	ctx := context.Background()
+	e, _, d, _ := newPostgresEngine(t)
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+		t.Fatalf("AttachAddon: %v", err)
+	}
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{DeleteData: true, Confirm: true}); err != nil {
+		t.Fatalf("DetachAddon --delete-data: %v", err)
+	}
+	rows, err := d.Audit(ctx, cp.AuditFilter{})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	var saw bool
+	for _, row := range rows {
+		if row.Operation != "addon_detach" {
+			continue
+		}
+		saw = true
+		if row.Args["delete_data"] != "true" {
+			t.Errorf("the audit row for a data-destroying detach says delete_data=%q; it reads exactly like one that kept the data", row.Args["delete_data"])
+		}
+	}
+	if !saw {
+		t.Error("no addon_detach audit row recorded")
 	}
 }
 
@@ -217,7 +301,7 @@ func TestAttachAuditRedactsURL(t *testing.T) {
 	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
-	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", true); err != nil {
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon: %v", err)
 	}
 
@@ -237,8 +321,8 @@ func TestAttachAuditRedactsURL(t *testing.T) {
 		// Args carry only the allowlist: addon + app + env + key names, nothing resembling a URL or
 		// password.
 		for key, v := range row.Args {
-			if key != "addon" && key != "app" && key != "env" && key != "key" {
-				t.Errorf("audit row %s has unexpected arg key %q (only addon/app/env/key allowed)", row.Operation, key)
+			if key != "addon" && key != "app" && key != "env" && key != "key" && key != "delete_data" {
+				t.Errorf("audit row %s has unexpected arg key %q (only addon/app/env/key/delete_data allowed)", row.Operation, key)
 			}
 			if strings.Contains(v, "postgres://") || strings.Contains(v, "@burrow-postgres") || v == url {
 				t.Errorf("audit arg %q leaks a connection string: %q", key, v)
@@ -268,7 +352,7 @@ func TestAttachDoesNotLogTheURL(t *testing.T) {
 	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
-	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", true); err != nil {
+	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon: %v", err)
 	}
 

@@ -132,23 +132,27 @@ func provisionerFor(t *testing.T, ns string, objects ...runtime.Object) (*Postgr
 // deletionRecorder captures what each provisioning object SAID at the moment it was deleted, and in
 // what order. A teardown's whole effect is carried by the spec the object is holding when it goes —
 // after which there is nothing left to read — so it has to be observed on the way past.
+//
+// It is keyed by NAME as well as by resource, because an attachment has two `DatabaseRole` objects
+// and they are destroyed on different terms: keyed by resource alone, the second would silently
+// overwrite the first and a test would be asserting about whichever went last.
 type deletionRecorder struct {
 	mu    sync.Mutex
-	specs map[schema.GroupVersionResource]map[string]any
+	specs map[schema.GroupVersionResource]map[string]map[string]any
 	order []schema.GroupVersionResource
 }
 
-func (d *deletionRecorder) spec(gvr schema.GroupVersionResource) (map[string]any, bool) {
+func (d *deletionRecorder) spec(gvr schema.GroupVersionResource, name string) (map[string]any, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	s, ok := d.specs[gvr]
+	s, ok := d.specs[gvr][name]
 	return s, ok
 }
 
 // recordDeletions installs a reactor per provisioning resource that reads the object out of the
 // tracker before the delete goes through, then lets the delete proceed.
 func recordDeletions(dyn *dynamicfake.FakeDynamicClient) *deletionRecorder {
-	rec := &deletionRecorder{specs: map[schema.GroupVersionResource]map[string]any{}}
+	rec := &deletionRecorder{specs: map[schema.GroupVersionResource]map[string]map[string]any{}}
 	for gvr := range provisioningGVRs {
 		gvr := gvr
 		dyn.PrependReactor("delete", gvr.Resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -156,7 +160,10 @@ func recordDeletions(dyn *dynamicfake.FakeDynamicClient) *deletionRecorder {
 			if obj, err := dyn.Tracker().Get(gvr, del.GetNamespace(), del.GetName()); err == nil {
 				u := obj.(*unstructured.Unstructured)
 				rec.mu.Lock()
-				rec.specs[gvr] = u.DeepCopy().Object
+				if rec.specs[gvr] == nil {
+					rec.specs[gvr] = map[string]map[string]any{}
+				}
+				rec.specs[gvr][del.GetName()] = u.DeepCopy().Object
 				rec.order = append(rec.order, gvr)
 				rec.mu.Unlock()
 			}
@@ -347,8 +354,8 @@ func TestAttachAdoptsAnExistingInstall(t *testing.T) {
 			deleted++
 		}
 	}
-	if created != 0 || deleted != 0 || updated != 2 {
-		t.Errorf("re-attach performed %d creates, %d updates and %d deletes; it must adopt both objects in place", created, updated, deleted)
+	if created != 0 || deleted != 0 || updated != 3 {
+		t.Errorf("re-attach performed %d creates, %d updates and %d deletes; it must adopt all three objects in place", created, updated, deleted)
 	}
 	if got := nestedString(t, getObject(t, dyn, cnpgDatabaseGVR, addonNS, name).Object, "spec", "name"); got != "web" {
 		t.Errorf("the adopted Database names %q, want the existing web", got)
@@ -456,14 +463,175 @@ func TestAttachLeavesTheDataSafeFromAnObjectGoingAway(t *testing.T) {
 	}
 }
 
-// TestDetachDestroysTheDataThroughTheObjects is the destructive half, and it stays destructive
-// (ADR-0031): the user was told at the confirmation prompt that their data goes. It goes through the
-// objects rather than through admin SQL — each described one last time with a `delete` reclaim
-// policy, then deleted — and the call does not return until the operator has actually finished.
-func TestDetachDestroysTheDataThroughTheObjects(t *testing.T) {
+// TestAttachGivesTheLoginRoleTheDataRole asserts the second role an attach provisions and the
+// membership that binds them (ADR-0090 §1). The data role is what a detach can hand the app's
+// ownership to, and without the membership the detach could not perform the handover and a re-attach
+// could not read what was handed over — so it is written at attach time rather than conjured when a
+// detach needs it.
+func TestAttachGivesTheLoginRoleTheDataRole(t *testing.T) {
+	ctx := context.Background()
+	p, dyn, _ := provisionerFor(t, addonNS)
+
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("EnsureAppDatabase: %v", err)
+	}
+
+	data := getObject(t, dyn, cnpgDatabaseRoleGVR, addonNS, dataRoleObjectName(PostgresSecretName, "web"))
+	if got := nestedString(t, data.Object, "spec", "name"); got != "app_web_data" {
+		t.Errorf("the data role is named %q, want app_web_data", got)
+	}
+	// It is an owner, not a credential: nothing about it authenticates, which is what makes "what
+	// survives is the data, not the access" literally true after a detach.
+	if login, found, _ := unstructured.NestedBool(data.Object, "spec", "login"); !found || login {
+		t.Error("the data role can log in; a role that outlives every credential must not be one")
+	}
+	if _, found, _ := unstructured.NestedMap(data.Object, "spec", "passwordSecret"); found {
+		t.Error("the data role has a password Secret; it is never connected as")
+	}
+	if got := nestedString(t, data.Object, "spec", "databaseRoleReclaimPolicy"); got != cnpgReclaimRetain {
+		t.Errorf("the data role holds reclaim policy %q, want %q — the app's data would go with it", got, cnpgReclaimRetain)
+	}
+
+	role := getObject(t, dyn, cnpgDatabaseRoleGVR, addonNS, provisioningObjectName(PostgresSecretName, "web"))
+	inRoles, found, err := unstructured.NestedStringSlice(role.Object, "spec", "inRoles")
+	if err != nil || !found {
+		t.Fatalf("the login role names no inRoles (%v); a detach could not hand it over and a re-attach could not read it back", err)
+	}
+	if len(inRoles) != 1 || inRoles[0] != "app_web_data" {
+		t.Errorf("the login role's inRoles = %v, want exactly [app_web_data]", inRoles)
+	}
+}
+
+// TestDetachKeepsTheDatabaseAndDropsTheRole is ADR-0090 §1 on the objects: after a plain detach the
+// app's login role is gone and its database is not.
+func TestDetachKeepsTheDatabaseAndDropsTheRole(t *testing.T) {
 	ctx := context.Background()
 	p, dyn, rec := provisionerFor(t, addonNS)
 	name := provisioningObjectName(PostgresSecretName, "web")
+	dataName := dataRoleObjectName(PostgresSecretName, "web")
+
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("EnsureAppDatabase: %v", err)
+	}
+	deleted := recordDeletions(dyn)
+	before := len(rec.statements)
+
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("RevokeAppDatabase: %v", err)
+	}
+
+	// The role's object went, holding the policy that turns that into a DROP ROLE.
+	role, ok := deleted.spec(cnpgDatabaseRoleGVR, name)
+	if !ok {
+		t.Fatal("the login role's object was never deleted, so the credential the app held still works — this is a rename, not a detachment")
+	}
+	if got := nestedString(t, role, "spec", "databaseRoleReclaimPolicy"); got != cnpgReclaimDelete {
+		t.Errorf("the login role was deleted holding %q, want %q — the role would have survived", got, cnpgReclaimDelete)
+	}
+	if _, err := dyn.Resource(cnpgDatabaseRoleGVR).Namespace(addonNS).Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the login role's object survived the detach (err = %v)", err)
+	}
+	if _, err := p.client.CoreV1().Secrets(addonNS).Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the role's password secret survived the detach (err = %v)", err)
+	}
+
+	// And the database did not go, and is not on its way out either: the policy it is holding is what
+	// decides that, so it is read off the object rather than inferred from the object being there.
+	if _, ok := deleted.spec(cnpgDatabaseGVR, name); ok {
+		t.Fatal("a plain detach deleted the Database object; the database and its rows are kept (ADR-0090 §1)")
+	}
+	db := getObject(t, dyn, cnpgDatabaseGVR, addonNS, name)
+	if got := nestedString(t, db.Object, "spec", "databaseReclaimPolicy"); got != cnpgReclaimRetain {
+		t.Errorf("the kept Database holds databaseReclaimPolicy %q, want %q", got, cnpgReclaimRetain)
+	}
+	if allow, found, _ := unstructured.NestedBool(db.Object, "spec", "allowConnections"); !found || !allow {
+		t.Error("a plain detach closed the database to connections; nothing reopens it but a re-attach, and nothing shut it for a reason")
+	}
+	// Owned by the role that outlives the credential — which is the whole reason the DROP ROLE above
+	// can succeed at all.
+	if got := nestedString(t, db.Object, "spec", "owner"); got != "app_web_data" {
+		t.Errorf("the kept Database is owned by %q, want app_web_data; a database owned by a dropped role is a DROP ROLE that fails forever", got)
+	}
+	data := getObject(t, dyn, cnpgDatabaseRoleGVR, addonNS, dataName)
+	if got := nestedString(t, data.Object, "spec", "databaseRoleReclaimPolicy"); got != cnpgReclaimRetain {
+		t.Errorf("the data role holds %q after a detach, want %q", got, cnpgReclaimRetain)
+	}
+
+	// The two statements that free the role, as the app's own role on its own database. A superuser
+	// here would work and would put the whole instance one statement away from a teardown that only
+	// needs one database.
+	ran := rec.statements[before:]
+	want := []string{`REASSIGN OWNED BY "app_web" TO "app_web_data"`, `DROP OWNED BY "app_web"`}
+	if len(ran) != len(want) {
+		t.Fatalf("a detach ran %q, want exactly %q", ran, want)
+	}
+	for i, stmt := range want {
+		if ran[i] != stmt {
+			t.Errorf("statement %d = %q, want %q", i, ran[i], stmt)
+		}
+	}
+	for _, user := range rec.users() {
+		if user != "app_web" {
+			t.Errorf("a detach opened a connection as %q; the only credential it may spend is the app's own", user)
+		}
+	}
+
+	// Detaching twice is a no-op, not an error: a half-finished attach has to be tearable down.
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Errorf("a second detach: %v", err)
+	}
+}
+
+// TestReAttachAfterADetachAdoptsTheKeptDatabase is ADR-0090 §3, and without it §1 is a storage leak
+// with better manners: the database a detach kept is the one the next attach picks up, handed back to
+// a login role that did not exist a moment ago.
+func TestReAttachAfterADetachAdoptsTheKeptDatabase(t *testing.T) {
+	ctx := context.Background()
+	p, dyn, _ := provisionerFor(t, addonNS)
+	name := provisioningObjectName(PostgresSecretName, "web")
+
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("EnsureAppDatabase: %v", err)
+	}
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("RevokeAppDatabase: %v", err)
+	}
+	dyn.ClearActions()
+
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("re-attach after a detach: %v", err)
+	}
+	for _, action := range dyn.Actions() {
+		if action.GetResource() == cnpgDatabaseGVR && action.GetVerb() == "create" {
+			t.Fatal("the re-attach CREATED a Database object; the database is already there and a second one would be a second database")
+		}
+	}
+	db := getObject(t, dyn, cnpgDatabaseGVR, addonNS, name)
+	if got := nestedString(t, db.Object, "spec", "owner"); got != "app_web" {
+		t.Errorf("the re-attached Database is owned by %q, want the new login role app_web", got)
+	}
+	if got := nestedString(t, db.Object, "spec", "databaseReclaimPolicy"); got != cnpgReclaimRetain {
+		t.Errorf("the re-attached Database holds %q, want %q", got, cnpgReclaimRetain)
+	}
+	// The login role is back, and back as a member: the tables the detach parked on the data role are
+	// only the app's again through that membership.
+	role := getObject(t, dyn, cnpgDatabaseRoleGVR, addonNS, name)
+	inRoles, _, _ := unstructured.NestedStringSlice(role.Object, "spec", "inRoles")
+	if len(inRoles) != 1 || inRoles[0] != "app_web_data" {
+		t.Errorf("the re-created login role's inRoles = %v, want [app_web_data]; without it the app cannot reach the data it was handed back", inRoles)
+	}
+}
+
+// TestDetachDeleteDataDestroysTheDataThroughTheObjects is the destructive disposition, and it stays
+// exactly as destructive as detach used to be (ADR-0090 §2): the operator asked for it in those words
+// and typed the app's name back. It goes through the objects rather than through admin SQL — each
+// described one last time with a `delete` reclaim policy, then deleted — and the call does not return
+// until the operator has actually finished.
+func TestDetachDeleteDataDestroysTheDataThroughTheObjects(t *testing.T) {
+	ctx := context.Background()
+	p, dyn, rec := provisionerFor(t, addonNS)
+	name := provisioningObjectName(PostgresSecretName, "web")
+	dataName := dataRoleObjectName(PostgresSecretName, "web")
 
 	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
@@ -478,45 +646,57 @@ func TestDetachDestroysTheDataThroughTheObjects(t *testing.T) {
 		t.Fatalf("DropAppDatabase: %v", err)
 	}
 	if len(rec.statements) != before {
-		t.Errorf("a detach ran %v; it destroys through the objects and runs no SQL of its own", rec.statements[before:])
+		t.Errorf("--delete-data ran %v; it destroys through the objects and runs no SQL of its own", rec.statements[before:])
 	}
 
-	db, ok := deleted.spec(cnpgDatabaseGVR)
+	db, ok := deleted.spec(cnpgDatabaseGVR, name)
 	if !ok {
 		t.Fatal("the Database object was never deleted, so nothing dropped the app's database")
 	}
 	if got := nestedString(t, db, "spec", "databaseReclaimPolicy"); got != cnpgReclaimDelete {
-		t.Errorf("the Database was deleted holding databaseReclaimPolicy %q, want %q — the database would have survived the detach", got, cnpgReclaimDelete)
+		t.Errorf("the Database was deleted holding databaseReclaimPolicy %q, want %q — the database would have survived", got, cnpgReclaimDelete)
 	}
 	// The door is closed before the drop: CloudNativePG issues a plain DROP DATABASE, which one live
 	// session refuses, where the admin SQL this replaced used WITH (FORCE).
 	if allow, found, _ := unstructured.NestedBool(db, "spec", "allowConnections"); !found || allow {
 		t.Error("the database was still accepting connections when it was dropped, so anything reconnecting would have blocked the drop")
 	}
-	role, ok := deleted.spec(cnpgDatabaseRoleGVR)
+	role, ok := deleted.spec(cnpgDatabaseRoleGVR, name)
 	if !ok {
 		t.Fatal("the DatabaseRole object was never deleted, so nothing dropped the app's login role")
 	}
 	if got := nestedString(t, role, "spec", "databaseRoleReclaimPolicy"); got != cnpgReclaimDelete {
 		t.Errorf("the DatabaseRole was deleted holding databaseRoleReclaimPolicy %q, want %q", got, cnpgReclaimDelete)
 	}
+	// The data role goes too, or a `--delete-data` leaves behind the one thing that would still be
+	// holding an app's rows if a previous detach had parked them there.
+	data, ok := deleted.spec(cnpgDatabaseRoleGVR, dataName)
+	if !ok {
+		t.Fatal("the data role's object survived --delete-data, so the role that owns a detached app's tables is still on the instance")
+	}
+	if got := nestedString(t, data, "spec", "databaseRoleReclaimPolicy"); got != cnpgReclaimDelete {
+		t.Errorf("the data role was deleted holding %q, want %q", got, cnpgReclaimDelete)
+	}
 	// PostgreSQL will not drop a role that still owns a database, so the order is not cosmetic.
 	if deleted.order[0] != cnpgDatabaseGVR {
-		t.Error("the login role was deleted before the database it owns; that DROP ROLE fails forever")
+		t.Error("a role was deleted before the database it owns; that DROP ROLE fails forever")
 	}
 
-	for _, gvr := range []schema.GroupVersionResource{cnpgDatabaseGVR, cnpgDatabaseRoleGVR} {
-		if _, err := dyn.Resource(gvr).Namespace(addonNS).Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-			t.Errorf("the %s object survived the detach (err = %v)", gvr.Resource, err)
+	for _, name := range []string{name, dataName} {
+		if _, err := dyn.Resource(cnpgDatabaseRoleGVR).Namespace(addonNS).Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Errorf("the DatabaseRole %q survived --delete-data (err = %v)", name, err)
 		}
 	}
+	if _, err := dyn.Resource(cnpgDatabaseGVR).Namespace(addonNS).Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the Database object survived --delete-data (err = %v)", err)
+	}
 	if _, err := p.client.CoreV1().Secrets(addonNS).Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Errorf("the role's password secret survived the detach (err = %v)", err)
+		t.Errorf("the role's password secret survived --delete-data (err = %v)", err)
 	}
 
-	// Detaching twice is a no-op, not an error: a half-finished attach has to be tearable down.
+	// Running it twice is a no-op, not an error: a half-finished attach has to be tearable down.
 	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
-		t.Errorf("a second detach: %v", err)
+		t.Errorf("a second --delete-data: %v", err)
 	}
 }
 
@@ -529,13 +709,14 @@ func TestDetachDestroysTheDataThroughTheObjects(t *testing.T) {
 func TestDetachDescribesAnAttachmentItNeverProvisioned(t *testing.T) {
 	ctx := context.Background()
 	p, dyn, _ := provisionerFor(t, addonNS)
+	name := provisioningObjectName(PostgresSecretName, "web")
 
 	// No attach: nothing has ever written an object for this app.
 	deleted := recordDeletions(dyn)
 	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
 		t.Fatalf("DropAppDatabase: %v", err)
 	}
-	db, ok := deleted.spec(cnpgDatabaseGVR)
+	db, ok := deleted.spec(cnpgDatabaseGVR, name)
 	if !ok {
 		t.Fatal("detaching an attachment with no objects deleted nothing, so the database was never dropped")
 	}
@@ -547,9 +728,46 @@ func TestDetachDescribesAnAttachmentItNeverProvisioned(t *testing.T) {
 	}
 	// It must not reference a password Secret that does not exist: the operator could not apply the
 	// object at all, which is to say it could not drop the role.
-	role, _ := deleted.spec(cnpgDatabaseRoleGVR)
+	role, _ := deleted.spec(cnpgDatabaseRoleGVR, name)
 	if _, found, _ := unstructured.NestedMap(role, "spec", "passwordSecret"); found {
 		t.Error("the teardown DatabaseRole references a password Secret; an attachment made before this existed has none")
+	}
+	// The data role is the one object it does NOT write. Nothing ever created that role, so describing
+	// it would create a PostgreSQL role for the sole purpose of dropping it again.
+	if _, ok := deleted.spec(cnpgDatabaseRoleGVR, dataRoleObjectName(PostgresSecretName, "web")); ok {
+		t.Error("--delete-data wrote a data role for an attachment that never had one, only to destroy it")
+	}
+}
+
+// TestDetachRevokesAnAttachmentItNeverProvisioned is the same upgrade hole on the keeping
+// disposition, and it fails differently: the oldest attachments have no password Secret on file, so a
+// detach that assumed a working credential could not run the reassignment that lets the role be
+// dropped — and exactly the apps that have been attached longest would be the ones a detach could not
+// finish. The revoke re-establishes the credential rather than assuming it.
+func TestDetachRevokesAnAttachmentItNeverProvisioned(t *testing.T) {
+	ctx := context.Background()
+	p, dyn, rec := provisionerFor(t, addonNS)
+	name := provisioningObjectName(PostgresSecretName, "web")
+
+	deleted := recordDeletions(dyn)
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("RevokeAppDatabase: %v", err)
+	}
+	role, ok := deleted.spec(cnpgDatabaseRoleGVR, name)
+	if !ok {
+		t.Fatal("revoking an attachment with no objects deleted nothing, so the app's role was never dropped")
+	}
+	if got := nestedString(t, role, "spec", "passwordSecret", "name"); got != name {
+		t.Errorf("the revoked login role reads its password from %q, want %s — without a credential the reassignment cannot run", got, name)
+	}
+	if len(rec.statements) != 2 {
+		t.Errorf("statements run = %q, want the reassignment and the release", rec.statements)
+	}
+	// And the database it never had is described rather than skipped, so the ownership lands on the
+	// role that keeps it.
+	db := getObject(t, dyn, cnpgDatabaseGVR, addonNS, name)
+	if got := nestedString(t, db.Object, "spec", "owner"); got != "app_web_data" {
+		t.Errorf("the kept Database is owned by %q, want app_web_data", got)
 	}
 }
 
@@ -586,6 +804,9 @@ func TestProvisionerWithoutADynamicClientProvisionsNothing(t *testing.T) {
 	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("EnsureAppDatabase err = %v, want ErrInvalid", err)
 	}
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+		t.Errorf("RevokeAppDatabase err = %v, want ErrInvalid", err)
+	}
 	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("DropAppDatabase err = %v, want ErrInvalid", err)
 	}
@@ -616,5 +837,39 @@ func TestRolePasswordSecretInTheWrongShapeIsRefused(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "left-behind") {
 		t.Errorf("error %q carries the Secret's value", err)
+	}
+}
+
+// TestApplySurvivesTheOperatorWritingTheObjectUnderIt pins the collision this code provokes itself.
+// Writing a rotated password into the Secret a `DatabaseRole` references makes CloudNativePG record a
+// password change ON THE ROLE, and the very next write is this one — so the resource version read a
+// moment earlier is stale and the update is rejected. Every attach and every detach performs that
+// sequence, and a caller retrying the whole operation rotates the password again and provokes it
+// again, so this is not something that comes right on its own.
+func TestApplySurvivesTheOperatorWritingTheObjectUnderIt(t *testing.T) {
+	ctx := context.Background()
+	p, dyn, _ := provisionerFor(t, addonNS)
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("seed attach: %v", err)
+	}
+
+	// A controller that writes the object between the read and the update, twice, and then stops —
+	// which is what a bounded re-read has to be able to outlast.
+	var conflicts int
+	dyn.PrependReactor("update", "databaseroles", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if conflicts >= 2 {
+			return false, nil, nil
+		}
+		conflicts++
+		return true, nil, apierrors.NewConflict(
+			cnpgDatabaseRoleGVR.GroupResource(), provisioningObjectName(PostgresSecretName, "web"),
+			errors.New("the object has been modified; please apply your changes to the latest version and try again"))
+	})
+
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+		t.Fatalf("a detach failed on a resource-version conflict it caused itself: %v", err)
+	}
+	if conflicts != 2 {
+		t.Errorf("the conflicting writer was hit %d times, want 2 — the test is not exercising the retry", conflicts)
 	}
 }

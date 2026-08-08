@@ -725,33 +725,112 @@ func newAddonAttachCmd() *cobra.Command {
 	return cmd
 }
 
-// newAddonDetachCmd is `burrow addon detach postgres <app> [--env]`: drop an app's database and role
-// from the named environment's instance and remove its DATABASE_URL there. It is destructive (it
-// destroys the app's data), so it is held for confirmation by the addon.detach guardrail by default.
+// newAddonDetachCmd is `burrow addon detach postgres <app> [--env]`: remove the variable the app's
+// connection string was written under and drop the app's login role on the named environment's
+// instance, KEEPING the database (ADR-0090 §1). It is held for confirmation by the addon.detach
+// guardrail by default — what that guards is the app losing access to its data, which is disruptive,
+// rather than the data being destroyed, which the verb no longer does.
+//
+// --delete-data is the separate, explicit ask that destroys the database too, and it lives on the
+// operator CLI only: destroying application data is a human decision, the same line `addon remove
+// --delete-data` already sits on (ADR-0090 §2, ADR-0065 §2). On top of the guardrail it carries its
+// own human gate (ADR-0064 §2): on a terminal the app's name has to be typed back after a notice
+// naming what goes, and off a terminal it refuses unless --acknowledge-data-loss is passed.
+// --confirm satisfies a guardrail; it is not that acknowledgement, because a flag people already
+// reach for reflexively is exactly the habit the gate exists to interrupt.
 func newAddonDetachCmd() *cobra.Command {
 	o := &commonOpts{}
-	var confirm bool
+	var confirm, deleteData, ackDataLoss bool
 	cmd := &cobra.Command{
 		Use:   "detach <addon> <app>",
-		Short: "Detach an app from an add-on, destroying its data (e.g. drop its Postgres database)",
-		Args:  exactArgs(2),
+		Short: "Detach an app from an add-on, keeping its data (e.g. drop its Postgres login role)",
+		Long: "detach removes the variable the attachment was written under from the app's Secret and\n" +
+			"drops the app's login role, so nothing that was issued to it still authenticates. The\n" +
+			"DATABASE IS KEPT, with its rows: attaching the same app again adopts the database that is\n" +
+			"there and hands the data back, which is what makes detach the inverse of attach rather than\n" +
+			"a one-way door. Moving an app between instances, or taking it out of service for a while, is\n" +
+			"a detach and an attach.\n\n" +
+			"A kept database occupies storage nobody is using until someone removes it. `burrow addon sql`\n" +
+			"can list what an instance holds.\n\n" +
+			"Pass --delete-data to destroy the database as well. That prints what it would destroy and\n" +
+			"asks for the app's name to be typed back; with no terminal to type into it refuses rather\n" +
+			"than proceeding, and --acknowledge-data-loss is how a script says it means it.",
+		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			addon, app := args[0], args[1]
+			// The off-terminal refusal runs BEFORE anything is contacted, so a script that never said
+			// it destroys a database cannot reach the detach call at all (ADR-0064 §2).
+			if deleteData && !ackDataLoss && !stdinIsTerminal(cmd.InOrStdin()) {
+				return errDetachDeleteDataNeedsTerminal(app)
+			}
 			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			if err := c.DetachAddon(ctx, args[0], args[1], o.env, confirm); err != nil {
+			// The typed-name gate goes to stderr so a --json run keeps a clean stdout.
+			if deleteData && !ackDataLoss {
+				if err := confirmDetachDeleteData(app, o.env, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
+					return err
+				}
+			}
+			if err := c.DetachAddon(ctx, addon, app, o.env, client.DetachAddonOptions{DeleteData: deleteData, Confirm: confirm}); err != nil {
 				return err
 			}
-			human := fmt.Sprintf("detached %q from the %s add-on", args[1], args[0])
-			return o.emitChange(cmd.OutOrStdout(), map[string]string{"addon": args[0], "app": args[1]}, human)
+			human := fmt.Sprintf("detached %q from the %s add-on\nits database was destroyed, with everything in it", app, addon)
+			if !deleteData {
+				human = fmt.Sprintf("detached %q from the %s add-on\nits database is kept — attaching %q again picks the data back up", app, addon, app)
+			}
+			return o.emitChange(cmd.OutOrStdout(), map[string]any{"addon": addon, "app": app, "data_deleted": deleteData}, human)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	cmd.Flags().BoolVar(&deleteData, "delete-data", false, "also DESTROY the app's database, with every row in it")
+	cmd.Flags().BoolVar(&ackDataLoss, dataLossAckFlag, false, "acknowledge that --delete-data destroys the app's database, so it proceeds without the typed-name prompt (this is how a script asks for it). No shorthand: destroying an app's data should not be a single keystroke.")
 	return cmd
+}
+
+// errDetachDeleteDataNeedsTerminal is the refusal `detach --delete-data` returns off a terminal
+// without the acknowledgement flag (ADR-0064 §2, ADR-0090 §2). It refuses rather than proceeding, and
+// names both ways out: acknowledge the data loss explicitly, or drop the flag and keep the database.
+func errDetachDeleteDataNeedsTerminal(app string) error {
+	return fmt.Errorf("--delete-data destroys %q's database and asks for the app's name to be typed back, "+
+		"which needs an interactive terminal; re-run with --%s to say so explicitly in a script, or drop "+
+		"--delete-data to keep the database", app, dataLossAckFlag)
+}
+
+// confirmDetachDeleteData is `detach --delete-data`'s human gate: it prints what the detach would
+// destroy and requires the app's name to be typed back (ADR-0064 §2). The flag says what the operator
+// intends; the typed name says they read what it would do. Anything else typed, an empty line, or EOF
+// aborts and nothing is detached.
+//
+// THIS PROMPT IS FOR HUMANS AND IS NOT A SECURITY CONTROL. Anything with a shell can type a word, so
+// it adds nothing against an agent: what keeps an agent away from this is that the flag is not
+// compiled into burrow-agent at all (ADR-0090 §2, ADR-0065 §2 tier 1). That structural absence must
+// never be relaxed on the grounds that "there's a confirmation anyway".
+//
+// It names the database and the environment and nothing else, because unlike a removal there is
+// nothing to look up: the blast radius of this flag is one app's database on one instance, and it is
+// already named in the command that was typed.
+func confirmDetachDeleteData(app, env string, in io.Reader, out io.Writer) error {
+	where := "the default environment's instance"
+	if env != "" {
+		where = fmt.Sprintf("environment %s's instance", env)
+	}
+	fmt.Fprintf(out, "%s--delete-data DESTROYS %q's database on %s, with every row in it. This cannot be undone.\n", warning(out), app, where)
+	fmt.Fprintln(out, "  Without it the detach takes the app's access away and keeps the database, so attaching")
+	fmt.Fprintln(out, "  the app again picks the data back up.")
+	fmt.Fprintln(out)
+	typed, err := readLine(in, out, fmt.Sprintf("Type the app's name (%s) to proceed, or anything else to abort: ", app))
+	if err != nil {
+		return err
+	}
+	if typed != app {
+		return fmt.Errorf("aborted: %q is not the app's name (%s); nothing was detached", typed, app)
+	}
+	return nil
 }
 
 func newAddonConnectCmd() *cobra.Command {

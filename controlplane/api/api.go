@@ -200,7 +200,7 @@ func New(cfg Config) (http.Handler, error) {
 	// attach/detach give an app its own database on the installed Postgres add-on (ADR-0031).
 	// attach carries NO secret value — burrowd generates the DATABASE_URL server-side and writes it
 	// to the app's Secret; the response carries the key name only. detach is held by a confirm
-	// guardrail (it drops data).
+	// guardrail (the app loses access to its data).
 	v1.HandleFunc("POST /v1/addons/attach", s.attachAddon)
 	// THE VARIABLE NAME RIDES THE ROUTE, and it is worth saying why, because it narrows nothing: the
 	// database, the instance and the namespace are the same whatever the variable is called. What it
@@ -212,13 +212,29 @@ func New(cfg Config) (http.Handler, error) {
 	// with nothing written. There is no body field beside it: no client in the field sends one, so the
 	// route is the only form and there is nothing to stay compatible with.
 	v1.HandleFunc("POST /v1/addons/attach/env-key/{env_key}", s.attachAddon)
-	v1.HandleFunc("POST /v1/addons/detach", s.detachAddon)
+	// WHAT HAPPENS TO THE DATA RIDES THE ROUTE, and both dispositions are routes, for the reason the
+	// add-on removal's are (see RemoveAddon in the client): ADR-0090 inverted the default, so the
+	// request a current client sends to mean KEEP MY DATA is the one an older control plane answers by
+	// destroying the database. A parameter cannot express that — its absence is indistinguishable from
+	// a caller that never had it — and a route can: a control plane with neither refuses both detaches
+	// with nothing touched (issue #485).
+	v1.HandleFunc("POST /v1/addons/detach/data/keep", s.detachAddonKeepData)
+	v1.HandleFunc("POST /v1/addons/detach/data/delete", s.detachAddonDeleteData)
 	// The environment rides the route on detach for the reason it does on the app delete: it names
-	// WHICH instance loses the database. A body field was dropped by an older control plane exactly
-	// as a query parameter is — every burrowd before this release decoded a body with unknown fields
-	// allowed, and `decode` is where that ends — so a detach aimed at staging would drop production's
-	// database instead (issue #485).
-	v1.HandleFunc("POST /v1/addons/detach/env/{env}", s.detachAddon)
+	// WHICH instance the app loses. A body field was dropped by an older control plane exactly as a
+	// query parameter is — every burrowd before that release decoded a body with unknown fields
+	// allowed, and `decode` is where that ends — so a detach aimed at staging would have reached
+	// production's database instead (issue #485). It composes with the data disposition in the order
+	// the two are registered.
+	v1.HandleFunc("POST /v1/addons/detach/data/keep/env/{env}", s.detachAddonKeepData)
+	v1.HandleFunc("POST /v1/addons/detach/data/delete/env/{env}", s.detachAddonDeleteData)
+	// The legacy routes, kept because burrowd is the compatibility anchor (ADR-0039 §2). A client that
+	// sends them predates ADR-0090 and has told its user that a detach destroys the data, so that is
+	// what they do: the alternative is a CLI whose prompt says the rows are gone while this control
+	// plane quietly keeps them, which is the failure ADR-0090 §5 exists to prevent, arriving by
+	// version skew instead of by wording. No current client can reach them.
+	v1.HandleFunc("POST /v1/addons/detach", s.detachAddonDeleteData)
+	v1.HandleFunc("POST /v1/addons/detach/env/{env}", s.detachAddonDeleteData)
 	// backup/backups/restore manage per-app Postgres backups (ADR-0032). backup and the backups
 	// listing move no secret value (an in-cluster Job does the dump). restore is held by a confirm
 	// guardrail (it overwrites the live database).
@@ -1264,12 +1280,24 @@ func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// detachAddon detaches an app from an add-on, dropping its data (e.g. its Postgres database). It is
-// held by a confirm guardrail by default (ADR-0031).
+// detachAddonKeepData serves the detach that ends an app's access and KEEPS its database, which is
+// the ordinary one (ADR-0090 §1). It is held by a confirm guardrail by default.
+func (s *server) detachAddonKeepData(w http.ResponseWriter, r *http.Request) {
+	s.detachAddonWith(w, r, false)
+}
+
+// detachAddonDeleteData serves the detach that also DESTROYS the app's database (ADR-0090 §2), and
+// the legacy routes, whose callers mean the same thing (see the route table).
+func (s *server) detachAddonDeleteData(w http.ResponseWriter, r *http.Request) {
+	s.detachAddonWith(w, r, true)
+}
+
+// detachAddonWith performs the detach with the data disposition its caller established from the
+// route.
 //
 // The path is authoritative for the environment where the route carries one, the body is the form
-// clients already in the field send, and the reason the path form exists is in the route table.
-func (s *server) detachAddon(w http.ResponseWriter, r *http.Request) {
+// clients already in the field send, and the reason the path forms exist is in the route table.
+func (s *server) detachAddonWith(w http.ResponseWriter, r *http.Request, deleteData bool) {
 	var req addonDetachRequest
 	if !s.decode(w, r, &req) {
 		return
@@ -1277,11 +1305,12 @@ func (s *server) detachAddon(w http.ResponseWriter, r *http.Request) {
 	if env := r.PathValue("env"); env != "" {
 		req.Env = env
 	}
-	if err := s.engine.DetachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env, req.Confirm); err != nil {
+	opts := controlplane.DetachAddonOptions{DeleteData: deleteData, Confirm: req.Confirm}
+	if err := s.engine.DetachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env, opts); err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"addon": req.Addon, "app": req.App})
+	writeJSON(w, http.StatusOK, map[string]any{"addon": req.Addon, "app": req.App, "data_deleted": deleteData})
 }
 
 // backupAddon backs up an app's database on the installed Postgres add-on (ADR-0032, ADR-0063 §7).

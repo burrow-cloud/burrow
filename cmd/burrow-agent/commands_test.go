@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // cannedControlPlane stands up an httptest.Server that answers the read-only control-plane endpoints
@@ -315,8 +317,8 @@ func TestStructuralReduction(t *testing.T) {
 // environment on its one Postgres instance. So this is not "remove an add-on", it is "remove THE
 // add-on for this environment", taking every attached app in it down at once — the scope test in
 // ADR-0065 §1, failed unconditionally, with no agent workflow that legitimately needs it. `addon
-// detach` and `addon restore` are absent for the same reason, and `--delete-data` never existed
-// here.
+// restore` is absent for the same reason, `addon detach` for the one in agentsurface, and
+// `--delete-data` never existed here — see TestDeleteDataStructurallyAbsentFromTheAgent.
 //
 // The verb is fully available to the human operator, with and without `--delete-data`, as
 // `burrow addon remove` run with their own admin kubeconfig.
@@ -331,6 +333,39 @@ func TestAddonRemoveStructurallyAbsent(t *testing.T) {
 	for _, sub := range addon.Commands() {
 		if sub.Name() == "remove" {
 			t.Error("the addon command has a `remove` subcommand; removing an environment's add-on takes every attached app in it offline and is an operator action (ADR-0065 §2)")
+		}
+	}
+}
+
+// TestDeleteDataStructurallyAbsentFromTheAgent pins ADR-0090 §2 the way ADR-0064 §2 asked for its
+// half: the agent cannot ask for an application's data to be destroyed, and it cannot express the
+// request.
+//
+// It is asserted over the WHOLE command tree rather than on the one verb that carries the flag on the
+// operator CLI, because the property is about the binary and not about `addon detach`. ADR-0090 makes
+// a plain detach non-destructive, which reopens the fair question of whether the verb belongs on this
+// surface (ADR-0065 §6) — and the day somebody answers yes, this test is what stops the flag coming
+// with it.
+//
+// The prompt on the operator CLI is not this boundary. Anything with a shell can type a word; the
+// absence below is what keeps the capability away from an agent.
+func TestDeleteDataStructurallyAbsentFromTheAgent(t *testing.T) {
+	var walk func(cmd *cobra.Command, path string)
+	walk = func(cmd *cobra.Command, path string) {
+		if f := cmd.Flags().Lookup("delete-data"); f != nil {
+			t.Errorf("`%s` accepts --delete-data; destroying an application's database is not something the agent surface may express (ADR-0090 §2, ADR-0065 §2 tier 1)", strings.TrimSpace(path))
+		}
+		for _, sub := range cmd.Commands() {
+			walk(sub, path+" "+sub.Name())
+		}
+	}
+	walk(newRootCmd(), "")
+
+	// And the verb that carries it on the operator CLI is not here either, so the flag has nothing to
+	// be attached to in the first place.
+	for _, sub := range newAddonCmd().Commands() {
+		if sub.Name() == "detach" {
+			t.Error("the addon command has a `detach` subcommand; adding one is a decision ADR-0065 §6 asks to be argued in its own right, and it must not bring --delete-data with it")
 		}
 	}
 }

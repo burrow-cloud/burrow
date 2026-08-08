@@ -135,11 +135,14 @@ func AddonInstanceTarget(addonNamespace string) PostgresTargetFunc {
 //   - **Deleting the objects does not destroy the data.** Both carry a `retain` reclaim policy, so a
 //     detach releases the description and keeps the database (ADR-0064).
 //
-// TWO STATEMENTS SURVIVE, both deliberately, and neither is a superuser one on the attach path.
-// A `Database` cannot express a grant, so the `REVOKE CONNECT ... FROM PUBLIC` that keeps one app's
-// role out of another app's database runs on a connection opened as the database's own OWNER
-// (lockDownDatabase). And ListAppDatabases still asks the server, because the question it answers —
-// whose data is in this volume — is one the objects cannot answer about a database a detach retained.
+// A FEW STATEMENTS SURVIVE, all deliberately, and none of them is a superuser one on the attach or
+// the detach path. A `Database` cannot express a grant, so the `REVOKE CONNECT ... FROM PUBLIC` that
+// keeps one app's role out of another app's database runs on a connection opened as the database's
+// own OWNER (lockDownDatabase); and it cannot express who owns the TABLES inside it either, so the
+// reassignment that lets a detach drop the app's role while keeping its rows runs on the same
+// connection (releaseWhatTheRoleOwns). ListAppDatabases still asks the server, because the question
+// it answers — whose data is in this volume — is one the objects cannot answer about a database a
+// detach retained.
 //
 // EVERY OPERATION IS SCOPED TO AN ENVIRONMENT (ADR-0067 §1). The provisioner has no notion of "the"
 // instance: the environment argument selects the instance and the credential together, so a call
@@ -373,6 +376,16 @@ func (p *PostgresProvisioner) connectAdmin(ctx context.Context, env, database st
 // roleName is the login role for app: app_<app>. app is already validated.
 func roleName(app string) string { return "app_" + app }
 
+// dataRoleName is the login-less role that OWNS app's data: app_<app>_data. It is derived from the
+// login role's name rather than composed separately, so the pair reads as one app's two roles in a
+// role listing and in ListAppDatabases' ownership query, which matches both.
+//
+// It spends five more characters of PostgreSQL's 63-byte identifier limit than the login role does,
+// which the login role has already been over for app names past 59 characters. Truncation is not a
+// correctness problem — the server truncates the name in the statement the same way it truncated it
+// at creation, and app names admit no underscore, so no two apps can truncate onto each other.
+func dataRoleName(app string) string { return roleName(app) + "_data" }
+
 // appDSN composes app's connection string against hostPort. Built with net/url so the password is
 // correctly percent-encoded into the userinfo. This is a SECRET value.
 func appDSN(role, password, hostPort, app string) string {
@@ -395,19 +408,27 @@ func appDSN(role, password, hostPort, app string) string {
 // object, and CloudNativePG runs the SQL for them on the instance it already manages (ADR-0066 §2).
 // The password is written into a Secret the operator reads, so it never reaches a statement either.
 //
-// The sequence is four steps and the order is load-bearing:
+// The sequence is five steps and the order is load-bearing:
 //
 //  1. The role's password Secret, BEFORE the role that references it — a `DatabaseRole` pointing at
 //     a Secret that does not exist yet is the operator racing the control plane into a failure.
-//  2. The `DatabaseRole`, before the `Database` that names it as owner.
-//  3. The `Database`.
-//  4. A wait on both, because provisioning is asynchronous now: `status.applied` is the only thing
-//     that says the server has actually got them.
+//  2. The DATA ROLE, before the login role that names it in `inRoles` — a membership can only be
+//     granted in a role the server already has.
+//  3. The login `DatabaseRole`, before the `Database` that names it as owner.
+//  4. The `Database`.
+//  5. A wait on all three, because provisioning is asynchronous now: `status.applied` is the only
+//     thing that says the server has actually got them.
 //
 // AN EXISTING INSTALL IS ADOPTED, NOT RE-PROVISIONED. An app attached before this existed has its
 // database and role already; the objects written here describe them rather than ask for them again,
 // and CloudNativePG reconciles what is there. That is the same idempotence a re-attach has always
 // relied on, moved from an existence check in this function into the operator (applyCNPGObject).
+//
+// A DATABASE A PREVIOUS DETACH RETAINED IS ADOPTED BY THE SAME MECHANISM, which is what makes detach
+// reversible (ADR-0090 §3). That database is there, holding its rows, owned by the data role; this
+// call hands the ownership back to a freshly created login role and the app reads what it left. It
+// does not matter that the old role's tables outlived the old role: they are the data role's now,
+// and the new login role is a member of it, so PostgreSQL resolves every owner check in its favour.
 //
 // Idempotence is what made the missing environment dangerous rather than merely wrong (issue #339):
 // finding an existing database is the NORMAL case of a re-attach, so a second environment's attach
@@ -450,6 +471,15 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 
 	if err := p.ensureRolePasswordSecret(ctx, target, app, password, secretLabels); err != nil {
 		return "", err
+	}
+	dataName := dataRoleObjectName(target.Instance, app)
+	if err := applyCNPGObject(ctx, roles, cnpgDatabaseRoleKind, dataName, target.Namespace, dataRoleSpec(target, app), labels); err != nil {
+		return "", err
+	}
+	// Waited on before the login role is even written: `inRoles` becomes a `GRANT`, and a grant of a
+	// role the server does not have yet is an object the operator refuses and retries.
+	if err := awaitCNPGApplied(ctx, roles, cnpgDatabaseRoleKind, dataName, p.applyTimeout, p.pollInterval); err != nil {
+		return "", fmt.Errorf("kube: provisioning the data role for %s in environment %q: %w", app, env, err)
 	}
 	if err := applyCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, target.Namespace, databaseRoleSpec(target, app), labels); err != nil {
 		return "", err
@@ -502,27 +532,39 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 // window rather than failed on: a re-attach hands back a URL that has been used, or it fails loudly,
 // and never hands back one that merely ought to work.
 func (p *PostgresProvisioner) lockDownDatabase(ctx context.Context, dsn, app, env string) error {
+	db, err := p.connectAsApp(ctx, dsn, app, env)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	// Idempotent: re-running it on a database already locked down is a no-op, which is what makes it
+	// safe on every attach rather than only on the first.
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM PUBLIC", quoteIdent(app))); err != nil {
+		return fmt.Errorf("kube: revoking public connect on %s's database in environment %q: %w", app, env, err)
+	}
+	return nil
+}
+
+// connectAsApp opens a connection with the app's OWN credential, retrying until the server accepts
+// it or credentialTimeout expires. Both callers hold a password they have just written into the
+// Secret CloudNativePG applies to the role, and reaching the server is the only proof it landed —
+// see lockDownDatabase for why no `status.applied` covers that. The DSN is a secret value and
+// appears in no error raised here.
+func (p *PostgresProvisioner) connectAsApp(ctx context.Context, dsn, app, env string) (sqlConn, error) {
 	deadline := time.Now().Add(p.credentialTimeout)
 	for {
 		db, err := p.connect(ctx, dsn)
 		if err == nil {
-			// Idempotent: re-running it on a database already locked down is a no-op, which is what
-			// makes it safe on every attach rather than only on the first.
-			_, execErr := db.ExecContext(ctx, fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM PUBLIC", quoteIdent(app)))
-			db.Close()
-			if execErr != nil {
-				return fmt.Errorf("kube: revoking public connect on %s's database in environment %q: %w", app, env, execErr)
-			}
-			return nil
+			return db, nil
 		}
 		if time.Now().After(deadline) {
 			// The error names the app and the environment; the DSN it could not open appears nowhere.
-			return fmt.Errorf("kube: %s's own credential was not accepted by the %q environment's postgres instance within %s, so the connection string was not handed out — CloudNativePG applies a rewritten password from the Secret it is labelled %s on, and this is where that not happening surfaces: %w",
+			return nil, fmt.Errorf("kube: %s's own credential was not accepted by the %q environment's postgres instance within %s — CloudNativePG applies a rewritten password from the Secret it is labelled %s on, and this is where that not happening surfaces: %w",
 				app, env, p.credentialTimeout, cnpgReloadLabel, err)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(p.pollInterval):
 		}
 	}
@@ -545,9 +587,15 @@ func (p *PostgresProvisioner) lockDownDatabase(ctx context.Context, dsn, app, en
 // last superuser read therefore needs the enumeration itself decided, not just re-plumbed.
 //
 // The set is derived from ownership, not from names: a database whose owner is one of the app_<app>
-// login roles attach creates is a provisioned app database, and its name is the app's name. That
+// roles an attach creates is a provisioned app database, and its name is the app's name. That
 // excludes the maintenance databases (postgres, template0/template1, all owned by the superuser) and
 // anything a human created by hand as the superuser, without needing a naming convention to hold.
+//
+// THE PREFIX MATCHES BOTH OF AN APP'S ROLES, and that is why a database a plain detach retained is
+// still reported. A detach hands the database to the app's DATA role (app_<app>_data) so that the
+// login role can be dropped, and the prefix covers it — which keeps a retained database visible to
+// the confirmation that is about to destroy it. Handing it to the superuser instead would have made
+// exactly the unattached databases invisible here.
 func (p *PostgresProvisioner) ListAppDatabases(ctx context.Context, env string) ([]string, error) {
 	db, err := p.connectAdmin(ctx, env, "postgres")
 	if err != nil {
@@ -582,31 +630,160 @@ ORDER BY d.datname`
 	return apps, nil
 }
 
-// DropAppDatabase drops app's database and login role from environment env's instance (ADR-0031) —
-// the destructive side of detach, and it stays destructive. Dropping something already absent is a
-// no-op, not an error, so a detach of a half-finished attach can still finish.
+// RevokeAppDatabase drops app's login role on environment env's instance and KEEPS its database,
+// with its rows (ADR-0090 §1). It is what a plain `addon detach` performs: the app's access ends and
+// its data does not, so a re-attach adopts what is there (EnsureAppDatabase) and the pair is
+// reversible. Revoking something already absent is a no-op, not an error.
 //
-// IT DESTROYS THE DATA THROUGH THE OBJECTS, WHICH IS THE ONLY THING THAT CHANGED. Both are described
-// one last time with a `delete` reclaim policy and then deleted; CloudNativePG runs the DROPs. There
-// is no superuser connection here any more than there is on the attach path, and no statement of
-// Burrow's at all.
+// WHAT IT HAS TO SOLVE IS AN OWNERSHIP PROBLEM, not a deletion one. `DROP ROLE` refuses while the
+// role owns anything, and the app's login role owns its database and every table in it — so "drop
+// the role, keep the data" is a statement PostgreSQL rejects until somebody else is holding the
+// ownership. The data role (dataRoleSpec) is that somebody, and this is the sequence that hands over:
+//
+//  1. The DATA ROLE, so there is a role to hand the ownership to.
+//  2. The LOGIN ROLE, described one last time with a fresh password and its membership of the data
+//     role restated, holding a `delete` reclaim policy — the credential this call is about to spend,
+//     and the policy that makes step 6 a `DROP ROLE`.
+//  3. The DATABASE, re-owned by the data role and left on `retain`. It goes BEFORE the reassignment
+//     below: leave the object naming the login role and the operator reconciles the ownership
+//     straight back, and the drop in step 6 fails on a database the role owns again.
+//  4. A connection as the app's OWN role — the same credential and the same proof-of-rotation wait
+//     the attach path uses, and the same reason no superuser appears on either.
+//  5. `REASSIGN OWNED` then `DROP OWNED`, which is PostgreSQL's own recipe for emptying a role before
+//     dropping it: the first moves every object the app created to the data role, the second releases
+//     the privileges and default ACLs that a `DROP ROLE` would otherwise still trip over. Both are
+//     run as the app itself, which is permitted because it holds the privileges of both roles — its
+//     own, and the data role's through the membership.
+//  6. The login role's object, deleted and waited on. The finalizer being released is the only
+//     evidence the `DROP ROLE` ran, which is the whole claim this call makes.
+//  7. The password Secret, once there is no role left for it to open anything as.
+//
+// The environment is required and unvalidated values are refused before anything is written, for the
+// reason they always are: a detach that reached another environment's server would take an app's
+// access to a database that is still in use (ADR-0067 §1).
+func (p *PostgresProvisioner) RevokeAppDatabase(ctx context.Context, app, env string) error {
+	if err := validateAppIdentifier(app); err != nil {
+		return err
+	}
+	target, err := p.targetFor(env)
+	if err != nil {
+		return err
+	}
+	databases, roles, err := p.cnpgObjects(target)
+	if err != nil {
+		return err
+	}
+	password, err := generatePassword()
+	if err != nil {
+		return err
+	}
+	name := provisioningObjectName(target.Instance, app)
+	dataName := dataRoleObjectName(target.Instance, app)
+	labels := map[string]string{
+		addonLabel:    string(controlplane.AddonPostgres),
+		addonEnvLabel: env,
+	}
+	secretLabels := map[string]string{cnpgReloadLabel: "true"}
+	for k, v := range labels {
+		secretLabels[k] = v
+	}
+
+	if err := applyCNPGObject(ctx, roles, cnpgDatabaseRoleKind, dataName, target.Namespace, dataRoleSpec(target, app), labels); err != nil {
+		return err
+	}
+	if err := awaitCNPGApplied(ctx, roles, cnpgDatabaseRoleKind, dataName, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: provisioning the role that keeps %s's data in environment %q: %w", app, env, err)
+	}
+	// The Secret before the object that references it, exactly as on the attach path.
+	if err := p.ensureRolePasswordSecret(ctx, target, app, password, secretLabels); err != nil {
+		return err
+	}
+	if err := applyCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, target.Namespace, databaseRoleRevokeSpec(target, app), labels); err != nil {
+		return err
+	}
+	if err := awaitCNPGApplied(ctx, roles, cnpgDatabaseRoleKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: describing %s's login role in environment %q before dropping it: %w", app, env, err)
+	}
+	if err := applyCNPGObject(ctx, databases, cnpgDatabaseKind, name, target.Namespace, databaseRetainedSpec(target, app), labels); err != nil {
+		return err
+	}
+	if err := awaitCNPGApplied(ctx, databases, cnpgDatabaseKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: handing %s's database in environment %q to the role that keeps it: %w", app, env, err)
+	}
+
+	dial, err := p.dialHostPort(env)
+	if err != nil {
+		return err
+	}
+	if err := p.releaseWhatTheRoleOwns(ctx, appDSN(roleName(app), password, dial, app), app, env); err != nil {
+		return err
+	}
+	if err := deleteCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: dropping the login role for %s in environment %q: %w", app, env, err)
+	}
+	if err := p.client.CoreV1().Secrets(target.Namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("kube: deleting the role password secret %s/%s: %w", target.Namespace, name, err)
+	}
+	return nil
+}
+
+// releaseWhatTheRoleOwns empties app's login role so that dropping it succeeds and its data survives
+// — the two statements a plain detach runs, over the app's own credential (ADR-0090 §1).
+//
+// NEITHER IS EXPRESSIBLE AS AN OBJECT. The `Database` CRD carries an owner for the database and
+// nothing at all for the tables inside it, and `DatabaseRole` has no notion of what a role owns. So
+// these run where the `REVOKE CONNECT` runs, as the app's own role, for the same reason: it is the
+// least-privileged credential that can issue them, and the alternative is a superuser DSN on the
+// teardown path that the attach path no longer needs (ADR-0066 §2).
+//
+// `REASSIGN OWNED` moves every object the app created to the data role. `DROP OWNED` then releases
+// what reassignment does not touch — the privileges granted to the role and the default ACLs it
+// carries — and it is safe to run second precisely because the first left the role owning nothing:
+// run alone it would DESTROY the tables rather than re-home them. Both are idempotent, so a detach
+// re-run after a failure finishes rather than compounding.
+func (p *PostgresProvisioner) releaseWhatTheRoleOwns(ctx context.Context, dsn, app, env string) error {
+	db, err := p.connectAsApp(ctx, dsn, app, env)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	role, data := quoteIdent(roleName(app)), quoteIdent(dataRoleName(app))
+	for _, stmt := range []string{
+		fmt.Sprintf("REASSIGN OWNED BY %s TO %s", role, data),
+		fmt.Sprintf("DROP OWNED BY %s", role),
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("kube: releasing what %s's login role owns in environment %q, so that dropping it keeps the data: %w", app, env, err)
+		}
+	}
+	return nil
+}
+
+// DropAppDatabase drops app's database and both of its roles from environment env's instance — what
+// `addon detach --delete-data` performs, and the ONLY path in the product that destroys an app's rows
+// (ADR-0090 §2). Dropping something already absent is a no-op, not an error, so a detach of a
+// half-finished attach can still finish.
+//
+// IT DESTROYS THE DATA THROUGH THE OBJECTS. Each is described one last time with a `delete` reclaim
+// policy and then deleted; CloudNativePG runs the DROPs. There is no superuser connection here any
+// more than there is on the attach path, and no statement of Burrow's at all.
 //
 // The reclaim policy is FLIPPED HERE rather than written at attach, and that asymmetry is the safety
-// property: an object that goes away for any reason other than a detach — a namespace teardown, a
+// property: an object that goes away for any reason other than this call — a namespace teardown, a
 // collector, somebody tidying with kubectl — takes nothing with it, because the policy it is holding
-// at that moment says `retain`. Only a deliberate detach ever writes `delete`, immediately before
-// deleting the thing it wrote it on.
+// at that moment says `retain`. Only an explicit ask to destroy the data ever writes `delete` on the
+// database, immediately before deleting the thing it wrote it on.
 //
 // The objects are ENSURED before they are destroyed, and that is not redundant. An app attached
 // before provisioning became declarative has a database and a role and no objects describing them;
-// without this, detaching it would delete nothing and report success, leaving the data of an app
+// without this, destroying it would delete nothing and report success, leaving the data of an app
 // somebody believed they had scrubbed. Describing it first is what makes the destructive path reach
-// exactly the databases the old one did.
+// exactly the databases the old admin SQL did.
 //
 // THE ORDER IS DICTATED BY POSTGRESQL. `allowConnections: false` goes on before anything is deleted,
 // because the operator issues a plain `DROP DATABASE IF EXISTS` and a single live session refuses it
-// — where the admin SQL this replaced used `WITH (FORCE)`. Then the database, then the role, each
-// waited on: PostgreSQL will not drop a role that still owns a database, so releasing the role's
+// — where the admin SQL this replaced used `WITH (FORCE)`. Then the database, then the roles, each
+// waited on: PostgreSQL will not drop a role that still owns a database, so releasing either role's
 // description before the database is gone is a DROP ROLE that fails forever.
 //
 // The environment is required and unvalidated values are refused before anything is written, for the
@@ -652,6 +829,13 @@ func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app, env stri
 	}
 	if err := deleteCNPGObject(ctx, roles, cnpgDatabaseRoleKind, name, p.applyTimeout, p.pollInterval); err != nil {
 		return fmt.Errorf("kube: dropping the login role for %s in environment %q: %w", app, env, err)
+	}
+	// The data role goes with the database it existed to hold, and only if something ever created it:
+	// an attachment made before it existed has no such role, and writing one here would create a role
+	// for the sole purpose of dropping it. It goes LAST for the same reason the login role does not
+	// go first — a detach may have left it owning the database that has just been dropped.
+	if err := destroyCNPGObjectIfPresent(ctx, roles, cnpgDatabaseRoleKind, dataRoleObjectName(target.Instance, app), target.Namespace, dataRoleTeardownSpec(target, app), labels, p.applyTimeout, p.pollInterval); err != nil {
+		return fmt.Errorf("kube: dropping the role that kept %s's data in environment %q: %w", app, env, err)
 	}
 	// The credential last, once there is nothing left for it to open.
 	if err := p.client.CoreV1().Secrets(target.Namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {

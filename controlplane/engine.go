@@ -1342,13 +1342,36 @@ func (e *Engine) refuseOccupiedEnvKey(ctx context.Context, k Kubernetes, app, en
 	return nil
 }
 
+// DetachAddonOptions is everything a detach carries beyond the add-on and the app. It is a struct
+// rather than a second positional boolean for RemoveAddonOptions' reason: one of these two fields
+// destroys an application's data and the other does not, and `DetachAddon(ctx, t, app, env, true,
+// true)` is not a call anyone can review.
+type DetachAddonOptions struct {
+	// DeleteData destroys the app's database as well as its access to it (ADR-0090 §2). Its absence
+	// is the safe default and the ordinary detach: the credential goes, the rows stay, and a
+	// re-attach gets them back.
+	DeleteData bool
+	// Confirm satisfies the addon.detach guardrail's confirmation hold (ADR-0020). It is NOT the
+	// data-loss acknowledgement DeleteData requires: that gate lives on the operator CLI, because a
+	// flag people already reach for reflexively is exactly the habit it exists to interrupt
+	// (ADR-0064 §2, ADR-0090 §4).
+	Confirm bool
+}
+
 // DetachAddon removes the variable app's connection string was written under and, behind the
-// addon.detach confirm guardrail (it destroys data), drops app's database and role from ENVIRONMENT
-// env's Postgres instance (ADR-0031/0067 §1). The audit row records {addon, app, env, key} — names
-// only, never the value. The environment is required for the same reason attach requires it, and the
-// stakes are higher: without it, detaching `web` in staging would have dropped production's `web`
-// database — the same collision as issue #339, with the destructive verb.
-func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, confirm bool) error {
+// addon.detach confirm guardrail, ends app's access to its database on ENVIRONMENT env's Postgres
+// instance (ADR-0090 §1, ADR-0067 §1). The app's login role is dropped and THE DATABASE IS KEPT, so
+// a later attach of the same app adopts it and the data comes back. With opts.DeleteData the
+// database is destroyed too, which is the only way to ask for that (ADR-0090 §2).
+//
+// The audit row records {addon, app, env, key, delete_data} — names only, never the value, and the
+// disposition alongside the operation so the log distinguishes "took an app's access away" from
+// "destroyed its database" (ADR-0027).
+//
+// The environment is required for the same reason attach requires it, and it still matters most
+// here: without it, detaching `web` in staging would reach production's `web` — the same collision as
+// issue #339, on the verb that can also destroy it.
+func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, opts DetachAddonOptions) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("detach addon: %w: %w", ErrInvalid, err)
 	}
@@ -1383,26 +1406,36 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	if err != nil {
 		return fmt.Errorf("detach addon %s for %s: reading the recorded variable name: %w", t, app, err)
 	}
-	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "key": key}
+	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "key": key, "delete_data": strconv.FormatBool(opts.DeleteData)}
+	// WHAT THE HOLD SAYS FOLLOWS WHAT THE CALL DOES. The guardrail guards losing an app's access to
+	// its data, which is disruptive and worth a confirmation; it is not the gate on destroying the
+	// data, which has its own and reaches this far only when someone asked for it in those words
+	// (ADR-0090 §4). A confirmation describing a consequence the operation no longer has is worse
+	// than no text: it trains an operator to discount the words.
+	consequence := fmt.Sprintf("detaching %q from the %s add-on in environment %s (removes its credential and drops its role; the database and its rows are kept, and re-attaching gets them back)", app, t, targetEnv)
+	if opts.DeleteData {
+		consequence = fmt.Sprintf("detaching %q from the %s add-on in environment %s AND DESTROYING its database, with every row in it; this cannot be undone", app, t, targetEnv)
+	}
 	if err := e.recordDecision(ctx, auditOpAddonDetach, app, args, GuardrailAddonDetach,
 		// addon.* is not EnvScopable, so the environment reaches the lookup through the instance
 		// name rather than as a tier of its own; it is named in the message and the audit args
 		// (ADR-0035 phase 2c, ADR-0067 §1).
-		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon detach", GuardrailAddonDetach, confirm,
-			fmt.Sprintf("detaching %q from the %s add-on in environment %s (removes its credential; the database and its data are kept)", app, t, targetEnv))); err != nil {
+		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon detach", GuardrailAddonDetach, opts.Confirm, consequence)); err != nil {
 		return err
 	}
 
 	// Remove the connection-string key first (the app stops seeing the credential), then ROLL THE APP
-	// OFF IT, and only then drop the database and role. Both act in this environment only. A missing
-	// key, and a missing workload, are each a no-op.
+	// OFF IT, and only then touch the instance. Both act in this environment only. A missing key, and
+	// a missing workload, are each a no-op.
 	//
-	// THE ROLL COMES BEFORE THE DROP, and that ordering is load-bearing rather than tidy. PostgreSQL
-	// refuses to drop a database that anything is still connected to, and an app holding a pool is
-	// exactly that; the pods have to be replaced by ones with no connection string before the drop
-	// can succeed. It also fails in the better direction — a workload that cannot be rolled aborts
-	// the detach with the data still there, rather than destroying it and then reporting that the
-	// app was left running against nothing.
+	// THE ROLL COMES BEFORE THE INSTANCE IS TOUCHED, and that ordering is load-bearing rather than
+	// tidy, on both dispositions for different reasons. Destroying the database needs it because
+	// PostgreSQL refuses to drop a database anything is still connected to, and an app holding a pool
+	// is exactly that. Keeping it needs it because the credential is about to stop working: an app
+	// left running against a role that no longer exists fails on its next connection rather than at a
+	// moment anyone chose. It also fails in the better direction — a workload that cannot be rolled
+	// aborts the detach with the attachment intact, rather than taking it apart and then reporting
+	// that the app was left running against nothing.
 	k := e.k8s.WithNamespace(ns)
 	if err := k.UnsetSecretKey(ctx, app, key); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
@@ -1412,7 +1445,14 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
 		return err
 	}
-	if err := e.dbProvisioner.DropAppDatabase(ctx, app, targetEnv); err != nil {
+	// The one place the two dispositions diverge, and they are separate calls rather than one call
+	// with a flag: the seam that destroys an app's data should not be reachable by passing `false`
+	// somewhere.
+	teardown := e.dbProvisioner.RevokeAppDatabase
+	if opts.DeleteData {
+		teardown = e.dbProvisioner.DropAppDatabase
+	}
+	if err := teardown(ctx, app, targetEnv); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
 		return fmt.Errorf("detach addon %s for %s: %w", t, app, err)
 	}

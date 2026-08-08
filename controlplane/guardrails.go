@@ -66,8 +66,12 @@ const (
 	// side, since dependent apps may rely on it (ADR-0025).
 	GuardrailAddonRemove GuardrailCode = "addon.remove"
 	// GuardrailAddonDetach: the operation would detach an app from an add-on — for Postgres,
-	// dropping the app's database and role and destroying its data (ADR-0031). Held for
-	// confirmation by default. (Attach is not guarded: it provisions, it destroys nothing.)
+	// dropping the app's login role so that nothing it holds still authenticates, and KEEPING the
+	// database (ADR-0090 §1). Held for confirmation by default: what it guards is an app losing
+	// access to its data, which is disruptive and worth stopping to say out loud, rather than the
+	// data being destroyed, which is no longer what the verb does. Destroying it needs
+	// `--delete-data`, which is not reachable from the agent surface and so is not gated here
+	// (ADR-0090 §4). (Attach is not guarded: it provisions, it destroys nothing.)
 	GuardrailAddonDetach GuardrailCode = "addon.detach"
 	// GuardrailAddonRestore: the operation would restore an app's database from a backup,
 	// overwriting its live contents (ADR-0032). Held for confirmation by default, like detach.
@@ -247,7 +251,7 @@ var knownGuardrails = []guardrailDef{
 		reach: "a DNS record is a name at a provider outside the cluster, which no single app or add-on owns, and the record may not be one Burrow created"},
 	{code: GuardrailAddonInstall, description: "install a building-block add-on (backing service) onto the cluster", names: targetAddon},
 	{code: GuardrailAddonRemove, description: "remove an installed add-on from the cluster", names: targetAddon},
-	{code: GuardrailAddonDetach, description: "detach an app from an add-on, destroying its data (e.g. drop its Postgres database)", names: targetAddon},
+	{code: GuardrailAddonDetach, description: "detach an app from an add-on, ending its access to its data (e.g. drop its Postgres login role; the database is kept)", names: targetAddon},
 	{code: GuardrailAddonRestore, description: "restore an app's database from a backup, overwriting its live contents", names: targetAddon},
 	{code: GuardrailAddonRestoreInstance, description: "rewind a whole Postgres instance to a point in its object-storage repository, taking every app's database on it back together", names: targetAddon},
 	{code: GuardrailAddonSQL, description: "run a statement against one app's database on a relational add-on", envScoped: true, names: targetAddon},

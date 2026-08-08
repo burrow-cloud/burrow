@@ -152,14 +152,28 @@ func TestDeleteAppInEnvironmentRefusedRatherThanDeletingProduction(t *testing.T)
 	notReached(t, seen, "DELETE /v1/apps/web")
 }
 
+// TestDetachAddonRefusedRatherThanDestroyingDataItWasAskedToKeep is the add-on removal's case on the
+// smaller verb, and it arrived the same way: ADR-0090 inverted the default, so the request a current
+// client sends to MEAN "KEEP MY DATA" is the empty one — and an older control plane answers the empty
+// one by dropping the app's database. It must end in a refusal with the attachment still standing.
+func TestDetachAddonRefusedRatherThanDestroyingDataItWasAskedToKeep(t *testing.T) {
+	var seen []string
+	srv := preScopeControlPlane(t, &seen)
+
+	err := newerClient(srv.URL).DetachAddon(context.Background(), "postgres", "web", "", client.DetachAddonOptions{Confirm: true})
+	scopeRefused(t, err, "nothing was detached", `"web"`, "KEEP")
+	notReached(t, seen, "POST /v1/addons/detach")
+}
+
 // TestDetachAddonInEnvironmentRefusedRatherThanDroppingProductionsDatabase. The environment is a
-// BODY field here rather than a query parameter, which changes nothing: `decode` reads the body with
-// a plain json.Decoder, so an unknown field is dropped exactly as an unknown parameter is.
+// BODY field on the legacy route rather than a query parameter, which changes nothing: `decode` reads
+// the body with a plain json.Decoder, so an unknown field is dropped exactly as an unknown parameter
+// is. The refusal names both things this control plane cannot be asked for.
 func TestDetachAddonInEnvironmentRefusedRatherThanDroppingProductionsDatabase(t *testing.T) {
 	var seen []string
 	srv := preScopeControlPlane(t, &seen)
 
-	err := newerClient(srv.URL).DetachAddon(context.Background(), "postgres", "web", "staging", true)
+	err := newerClient(srv.URL).DetachAddon(context.Background(), "postgres", "web", "staging", client.DetachAddonOptions{Confirm: true})
 	scopeRefused(t, err, "nothing was detached", `"web"`, `"staging"`)
 	notReached(t, seen, "POST /v1/addons/detach")
 }
@@ -206,9 +220,15 @@ func TestDestructiveScopeRoutesOnAMatchedPair(t *testing.T) {
 		{"delete an app in an environment", func() error {
 			return c.DeleteApp(ctx, "web", "staging", true)
 		}, "DELETE", "/v1/apps/web/env/staging"},
+		{"detach keeping the data", func() error {
+			return c.DetachAddon(ctx, "postgres", "web", "", client.DetachAddonOptions{Confirm: true})
+		}, "POST", "/v1/addons/detach/data/keep"},
+		{"detach destroying the data", func() error {
+			return c.DetachAddon(ctx, "postgres", "web", "", client.DetachAddonOptions{DeleteData: true, Confirm: true})
+		}, "POST", "/v1/addons/detach/data/delete"},
 		{"detach in an environment", func() error {
-			return c.DetachAddon(ctx, "postgres", "web", "staging", true)
-		}, "POST", "/v1/addons/detach/env/staging"},
+			return c.DetachAddon(ctx, "postgres", "web", "staging", client.DetachAddonOptions{Confirm: true})
+		}, "POST", "/v1/addons/detach/data/keep/env/staging"},
 		{"restore in an environment", func() error {
 			return c.RestoreAddon(ctx, "postgres", "web", "backup-1", "staging", true)
 		}, "POST", "/v1/addons/restore/env/staging"},
@@ -240,6 +260,11 @@ func TestDestructiveScopeRoutesOnAMatchedPair(t *testing.T) {
 // TestDestructiveScopeWithNoEnvironmentKeepsTheUnnarrowedRoute keeps the refusal narrow. An empty
 // environment narrows nothing — it means the default environment, which every control plane has — so
 // these calls stay on the routes they have always used and are not turned into a skew error.
+//
+// The detach is NOT among them any more, and that is the distinction rather than an omission: it
+// narrows on the data disposition whether or not an environment was named (see the test above), so
+// there is no unnarrowed form of it left to keep. The add-on removal has been in that position since
+// issue #323 for the same reason.
 func TestDestructiveScopeWithNoEnvironmentKeepsTheUnnarrowedRoute(t *testing.T) {
 	var seen []string
 	srv := preScopeControlPlane(t, &seen)
@@ -249,13 +274,10 @@ func TestDestructiveScopeWithNoEnvironmentKeepsTheUnnarrowedRoute(t *testing.T) 
 	if err := c.DeleteApp(ctx, "web", "", true); err != nil {
 		t.Errorf("delete without an environment: %v", err)
 	}
-	if err := c.DetachAddon(ctx, "postgres", "web", "", true); err != nil {
-		t.Errorf("detach without an environment: %v", err)
-	}
 	if err := c.RestoreAddon(ctx, "postgres", "web", "backup-1", "", true); err != nil {
 		t.Errorf("restore without an environment: %v", err)
 	}
-	for _, want := range []string{"DELETE /v1/apps/web", "POST /v1/addons/detach", "POST /v1/addons/restore"} {
+	for _, want := range []string{"DELETE /v1/apps/web", "POST /v1/addons/restore"} {
 		if !slicesContains(seen, want) {
 			t.Errorf("%q was not sent; requests were %v", want, seen)
 		}

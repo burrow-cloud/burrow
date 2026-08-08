@@ -63,8 +63,8 @@ func TestMetricsCollectorDedupesWhenNamespacesEqual(t *testing.T) {
 	}
 }
 
-// TestProvisionerRejectsBadIdentifiers asserts both EnsureAppDatabase and DropAppDatabase reject
-// SQL-injection-shaped and malformed names as ErrInvalid BEFORE anything is written (ADR-0031).
+// TestProvisionerRejectsBadIdentifiers asserts every provisioning method rejects SQL-injection-shaped
+// and malformed names as ErrInvalid BEFORE anything is written (ADR-0031).
 func TestProvisionerRejectsBadIdentifiers(t *testing.T) {
 	ctx := context.Background()
 	// Nothing provisioned anywhere: a rejection must come from validation, before any I/O.
@@ -74,6 +74,9 @@ func TestProvisionerRejectsBadIdentifiers(t *testing.T) {
 	for _, name := range bad {
 		if _, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("EnsureAppDatabase(%q) err = %v, want ErrInvalid", name, err)
+		}
+		if err := p.RevokeAppDatabase(ctx, name, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+			t.Errorf("RevokeAppDatabase(%q) err = %v, want ErrInvalid", name, err)
 		}
 		if err := p.DropAppDatabase(ctx, name, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("DropAppDatabase(%q) err = %v, want ErrInvalid", name, err)
@@ -126,6 +129,9 @@ func TestProvisionerRequiresAnEnvironment(t *testing.T) {
 	for _, env := range []string{"", "Staging", "not a label", "staging/prod"} {
 		if _, err := p.EnsureAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("EnsureAppDatabase(web, %q) err = %v, want ErrInvalid", env, err)
+		}
+		if err := p.RevokeAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
+			t.Errorf("RevokeAppDatabase(web, %q) err = %v, want ErrInvalid", env, err)
 		}
 		if err := p.DropAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("DropAppDatabase(web, %q) err = %v, want ErrInvalid", env, err)
@@ -291,6 +297,9 @@ func TestProvisionerWithNoInstanceProvisionsNothing(t *testing.T) {
 
 	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("EnsureAppDatabase err = %v, want ErrInvalid", err)
+	}
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+		t.Errorf("RevokeAppDatabase err = %v, want ErrInvalid", err)
 	}
 	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("DropAppDatabase err = %v, want ErrInvalid", err)

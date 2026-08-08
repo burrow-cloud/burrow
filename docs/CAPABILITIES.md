@@ -1063,11 +1063,18 @@ revoked, names the credential's id so you can find the right row in the console,
 rather than quietly ignored.
 
 The **reads the managed control plane answers act through it too**: `burrow env list`, `burrow guard
-list`, `burrow cluster config list`, `burrow audit` and `burrow failures` call the same routes over
-HTTPS. Each of them once refused, not because a tenant lacked the thing being asked for but because
-the command shared a connection path with a write that needed a kubeconfig
+list`, `burrow cluster config list`, `burrow audit`, `burrow failures`, `burrow addon list`,
+`burrow addon logs` and `burrow addon metrics` call the same routes over HTTPS. Each of them once
+refused, not because a tenant lacked the thing being asked for but because the command shared a
+connection path with a write that needed a kubeconfig
 ([cloud #202](https://github.com/burrow-cloud/cloud/issues/202)). `env list` reads the registered
-environments rather than local handles there, and marks the default.
+environments rather than local handles there, and marks the default. `addon list` reads the tenant's
+own registry — the backing services the platform runs for that tenant — and omits the
+retained-volume section, which describes claims in a cluster the tenant does not have.
+
+`addon logs` and `addon metrics` are POSTs, because a query does not fit in a path. The verb is the
+transport, not the test: neither changes anything, and on the managed product both are scoped to the
+tenant's own namespaces by the backend the platform registered for them.
 
 The **rest of the cluster and policy surface refuses** while the managed product is selected, naming
 the target and pointing at `burrow auth switch <name>`. Three distinct reasons, all still true:
@@ -1082,8 +1089,20 @@ the target and pointing at `burrow auth switch <name>`. Three distinct reasons, 
   here too: the managed product registers no third-party provider, so the listing would only invite
   a registration that is not offered.
 
-`addon list`, `addon backups` and `addon backup-health` refuse with the rest of `addon`: whether the
-managed product offers tenant add-ons at all is a question about tiers, not a client one.
+`addon backups` and `addon backup-health` refuse for a reason of their own, and it is neither of the
+first two: their routes answer and what they return is the tenant's, but on the managed product the
+backups are the *platform's*, taken of an instance the tenant does not operate and recorded nowhere
+in the tenant's registry. Both would report, accurately and uselessly, that a managed tenant has no
+backups — and `backups` would point at `burrow addon backup` to make some, which refuses there. What
+a tenant is told about the backups of their database is a product statement.
+
+`addon sql` refuses for a reason that is not about the client at all. The statement runs as the app's
+own database role, so the scoping is already settled
+([ADR-0087](adr/0087-running-sql-against-an-attached-database.md)); what is missing is somewhere to
+run it. The connection is opened *from* burrowd, and the managed control plane runs outside the fleet
+holding its tenants' databases and may not dial into one (cloud ADR-0036 §1). Its route is not absent
+and the tenant policy holds it at `confirm`, so what it needs is an execution path inside the fleet.
+
 `env use` / `follow` / `rename` / `remove` never refuse — they read and write local handles only.
 
 Three things are deliberately **not** refused. The cluster-lifecycle commands — `cluster install`,
@@ -1737,7 +1756,7 @@ is built and what is not, and link the issue tracking the rest where there is on
 | Audit-log retention | [0027](adr/0027-audit-log.md) | Not built; deferred in the ADR. |
 | The environment forcing function on the local-handle axis | [0047](adr/0047-agent-environment-safety.md) | Not built (specified for the since-removed MCP layer); the burrowd-registry axis is built. |
 | Registry onboarding via the developer's code-provider registry | [0046](adr/0046-registry-onboarding.md) | Proposed, held deliberately; only the in-cluster registry shipped, via ADR-0054. |
-| Acting on a Burrow Cloud target | [0078](adr/0078-the-cli-points-at-a-target.md) §1 | Mostly built. Signing in is built (`burrow auth login`, cloud ADR-0028's RFC 8628 device flow with PKCE), and the application commands act through a selected cloud target over HTTPS with the stored credential, as do the reads the managed control plane answers (`env list`, `guard list`, `cluster config list`, `audit`, `failures`). What still refuses while a cloud target is selected, rather than silently using the ambient kubeconfig, is the surface that acts on a cluster with a kubeconfig (`config registry ...`, `env add`), the operations whose availability to a tenant is an open product question (`guard set`, `cluster config set`, the whole of `addon ...`, `config provider add`, `app domain ...`), and the reads that describe the operator's own cluster (`cluster`, `cluster capacity`, `config provider list`); the cluster-lifecycle commands and `burrow auth` are exempt. What is not decided is whether that surface should follow a selected CLUSTER target — today it follows the kube context and ignores the target ([#429](https://github.com/burrow-cloud/burrow/issues/429)). |
+| Acting on a Burrow Cloud target | [0078](adr/0078-the-cli-points-at-a-target.md) §1 | Mostly built. Signing in is built (`burrow auth login`, cloud ADR-0028's RFC 8628 device flow with PKCE), and the application commands act through a selected cloud target over HTTPS with the stored credential, as do the reads the managed control plane answers (`env list`, `guard list`, `cluster config list`, `audit`, `failures`, `addon list`, `addon logs`, `addon metrics`). What still refuses while a cloud target is selected, rather than silently using the ambient kubeconfig, is the surface that acts on a cluster with a kubeconfig (`config registry ...`, `env add`), the operations whose availability to a tenant is an open product question (`guard set`, `cluster config set`, `addon install` / `remove` / `connect` / `attach` / `detach` / `backup` / `restore`, `config provider add`, `app domain ...`), the reads that describe the operator's own cluster (`cluster`, `cluster capacity`, `config provider list`), the backup reads whose answer belongs to the platform rather than the tenant (`addon backups`, `addon backup-health`), and `addon sql`, which needs an execution path inside the fleet rather than a different client (cloud ADR-0036 §1); the cluster-lifecycle commands and `burrow auth` are exempt. What is not decided is whether that surface should follow a selected CLUSTER target — today it follows the kube context and ignores the target ([#429](https://github.com/burrow-cloud/burrow/issues/429)). |
 | An app-runtime API and capability envelopes | [0050](adr/0050-app-runtime-api-and-capability-envelopes.md) | Not built; a captured direction, deferred. |
 | Per-app connection pooling, read replicas, major-version upgrades, or TLS to the database | [0031](adr/0031-postgres-addon.md) | Not built; named as "not yet" in the ADR. |
 | Object storage as a provider type, so a backup can leave the cluster | [0063](adr/0063-object-storage-provider.md) | Partly built. The destination registration is built: the `s3` provider type and object-storage capability, the credential pair as two keys in `burrow-credentials`, the configuration-time probe write/delete, the recorded globally-unique bucket, lifecycle-versus-retention reconciliation, and `bucket.create` at `confirm` with bucket deletion absent from both CLIs. The backup WRITE path is built too: the dump is shipped to the store and read back before the row says `completed`, retries are for a store that will not answer and never for one that answered and refused, and `burrow addon backup-health postgres` reports destination reachability, the age of the last successful backup, the age of the last one that left the cluster, and the last failure. What is left of §7 is the ALERT: physical backups are now scheduled (ADR-0066 §2), but an instance with no destination and every logical dump still are not, so there is no threshold that would be right for all of them and none is asserted. [#331](https://github.com/burrow-cloud/burrow/issues/331) |

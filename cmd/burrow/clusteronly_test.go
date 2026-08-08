@@ -74,17 +74,29 @@ func unreachableCluster(t *testing.T) string {
 // `cluster` and `cluster capacity` stay for a third reason: the route answers, but what it describes
 // is the operator's cluster — its nodes, its capacity, its top consumers across every tenant — so
 // what a tenant should see there is a decision nobody has taken.
+//
+// `addon backups` and `addon backup-health` stay for a fourth: their routes answer and what they
+// return is the tenant's, but on the managed product the backups are the platform's, taken of an
+// instance the tenant does not operate and recorded nowhere in the tenant's registry. Both would
+// report that a managed tenant has no backups, and `backups` would point at `burrow addon backup` to
+// make some — a command that refuses there. What a tenant is told about that is a product statement.
+//
+// `addon sql` stays for a fifth, and it is not a client problem at all: it opens a SQL connection
+// FROM burrowd, and the managed control plane runs outside the fleet holding its tenants' databases
+// and may not dial into one (cloud ADR-0036 §1). Its route is not absent and the tenant policy holds
+// it at `confirm`; what is missing is an execution path inside the fleet.
 var clusterOnlyCommands = [][]string{
 	{"guard", "set", "app.delete", "deny"},
 	{"cluster"},
 	{"cluster", "capacity"},
 	{"cluster", "config", "set", "replicas.max", "5"},
-	{"addon", "list"},
 	{"addon", "install"},
 	{"addon", "install", "logs"},
 	{"addon", "remove", "logs"},
 	{"addon", "attach", "postgres", "web"},
 	{"addon", "backups", "postgres"},
+	{"addon", "backup-health", "postgres"},
+	{"addon", "sql", "postgres", "web", "--statement", "select 1"},
 	{"app", "domain", "add", "example.com", "--address", "203.0.113.1"},
 	{"app", "domain", "remove", "example.com"},
 	{"config", "provider", "list"},
@@ -100,9 +112,12 @@ var clusterOnlyCommands = [][]string{
 
 // cloudReadCommands is the other half of the sweep: the reads that were refused on a cloud target
 // because they shared a connection path with the writes, not because they needed a cluster. Each is
-// a GET the managed product already answers, and each now goes there (cloud issue #202). The path is
-// listed with the command so the test asserts WHERE it went and not merely that it did not fail —
-// a read that quietly fell back to a kubeconfig would still print a table.
+// a route the managed product already answers, and each now goes there (cloud issue #202).
+// The path is listed with the command so the test asserts WHERE it went and not merely that it did
+// not fail — a read that quietly fell back to a kubeconfig would still print a table.
+//
+// The last three are the add-on reads. `logs query` and `metrics query` are POSTs, which is the
+// transport and not the test: a query does not fit in a path, and neither changes anything.
 var cloudReadCommands = []struct {
 	args []string
 	path string
@@ -112,11 +127,18 @@ var cloudReadCommands = []struct {
 	{[]string{"cluster", "config", "list"}, "/v1/config"},
 	{[]string{"audit"}, "/v1/audit"},
 	{[]string{"failures"}, "/v1/failures"},
+	{[]string{"addon", "list"}, "/v1/addons"},
+	{[]string{"addon", "logs"}, "/v1/logs/query"},
+	{[]string{"addon", "metrics", "up"}, "/v1/metrics/query"},
 }
 
 // cannedTenantReads answers every route in cloudReadCommands from one body. The keys are disjoint
-// across the five decoders, so each command finds its own and ignores the rest — which keeps the
-// fake a single handler rather than five that could drift apart.
+// across the decoders, so each command finds its own and ignores the rest — which keeps the fake a
+// single handler rather than one per route that could drift apart.
+//
+// The add-on listing is the tenant's, not a cluster's: the platform registers the backing services
+// it runs for a tenant into that tenant's own registry, which is why the rows read "connected" and
+// carry a platform endpoint (cloud ADR-0013 §4).
 func cannedTenantReads(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -125,6 +147,11 @@ func cannedTenantReads(w http.ResponseWriter, _ *http.Request) {
 		"limits":       []map[string]any{{"code": "replicas.max", "value": "5", "source": "default", "description": "the replica ceiling"}},
 		"entries":      []map[string]any{},
 		"failures":     []map[string]any{},
+		"addons": []map[string]any{
+			{"name": "platform-logs", "type": "logs", "mode": "connected", "endpoint": "http://vlogs.obs.svc:9428", "capabilities": []string{"logs"}},
+			{"name": "platform-metrics", "type": "metrics", "mode": "connected", "endpoint": "http://vmselect.obs.svc:8481/select/1/prometheus", "capabilities": []string{"metrics"}},
+		},
+		"samples": []map[string]any{},
 	})
 }
 
@@ -159,6 +186,66 @@ func TestCloudTargetServesTheReadsItHasARouteFor(t *testing.T) {
 				t.Errorf("Authorization = %q, want the stored credential", gotAuth)
 			}
 		})
+	}
+}
+
+// TestAddonListOnACloudTargetShowsTheTenantsAddons is this sweep's own acceptance, and the command
+// the report started from: signing in to the managed product and running `burrow addon list` gave a
+// sentence about a tenant having no cluster, against a control plane that had been answering
+// GET /v1/addons with the tenant's own registry the whole time.
+//
+// It also pins the two things that are NOT printed there. The retained-volume section describes
+// claims in an add-on namespace and tells the reader to reclaim them with kubectl; a managed tenant
+// has neither, and the claims in the platform's namespace are not theirs to read.
+func TestAddonListOnACloudTargetShowsTheTenantsAddons(t *testing.T) {
+	signedInToCloud(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/addons" {
+			t.Errorf("reached %q, want the tenant's /v1/addons", r.URL.Path)
+		}
+		cannedTenantReads(w, r)
+	}))
+	defer srv.Close()
+	pointCloudAt(t, srv.URL)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "list"}, &out, &errb); err != nil {
+		t.Fatalf("burrow addon list against a cloud target: %v\nstderr: %s", err, errb.String())
+	}
+	for _, want := range []string{"platform-logs", "platform-metrics", "connected", "logs", "metrics"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout = %q, want it to contain %q", out.String(), want)
+		}
+	}
+	for _, unwanted := range []string{"kubectl", "Retained volumes"} {
+		if strings.Contains(out.String(), unwanted) {
+			t.Errorf("stdout = %q, want it not to mention %q", out.String(), unwanted)
+		}
+	}
+}
+
+// TestAddonListEmptyOnACloudTargetNamesNoCommandTheTenantCannotRun. An empty listing has to say
+// something, and on a cluster the useful thing to say is `burrow addon install logs`. That command
+// refuses on the managed product, so printing it there would answer "you have none" with an
+// instruction that cannot be followed — the failure mode the managed refusals are worded to avoid.
+func TestAddonListEmptyOnACloudTargetNamesNoCommandTheTenantCannotRun(t *testing.T) {
+	signedInToCloud(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"addons": []map[string]any{}})
+	}))
+	defer srv.Close()
+	pointCloudAt(t, srv.URL)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "list"}, &out, &errb); err != nil {
+		t.Fatalf("burrow addon list against a cloud target: %v\nstderr: %s", err, errb.String())
+	}
+	if strings.Contains(out.String(), "burrow addon install") {
+		t.Errorf("stdout = %q, want it not to point at a command that refuses on this target", out.String())
+	}
+	if !strings.Contains(out.String(), "No add-ons registered for your tenant") {
+		t.Errorf("stdout = %q, want the tenant-shaped empty state", out.String())
 	}
 }
 

@@ -40,10 +40,11 @@ import (
 //     there would leave someone with the managed product selected and no way to read or leave that
 //     state. It reads and writes the local config only and touches no cluster.
 //   - The reads that call commonOpts.readClient instead: `guard list`, `cluster config list`,
-//     `audit`, `failures`, and `env list`. They were refused here because they shared a connection
-//     path with the writes beside them, not because they needed a cluster — each is a GET the managed
-//     control plane answers, and the refusal was the client not knowing the route existed rather than
-//     the route being absent (cloud issue #202). They act on either kind of target now.
+//     `audit`, `failures`, `env list`, and — added by the sweep of the whole surface — `addon list`,
+//     `addon logs` and `addon metrics`. They were refused here because they shared a connection
+//     path with the writes beside them, not because they needed a cluster — each is a route the
+//     managed control plane answers, and the refusal was the client not knowing it existed rather
+//     than the route being absent (cloud issue #202). They act on either kind of target now.
 //
 //     A read moves there on that basis alone: the route answers for a tenant, and what it returns is
 //     the tenant's. `cluster` and `cluster capacity` therefore stay refused although their routes
@@ -51,6 +52,20 @@ import (
 //     top consumers across every tenant — and what a tenant should see of that is a decision nobody
 //     has taken. Anything that CHANGES a tenant stays here for the same kind of reason: it is a
 //     product question, not a plumbing one.
+//
+//     `addon backups` and `addon backup-health` are reads whose routes answer too, and they stay
+//     refused for a third reason that is neither of those: on the managed product the backups are
+//     the PLATFORM's, taken of an instance the tenant does not operate, and none of them is recorded
+//     in the tenant's own registry. Both commands would therefore report, accurately and uselessly,
+//     that a tenant has no backups — `backups` while pointing at `burrow addon backup`, which
+//     refuses there. What a managed tenant should be told about the backups of their database is a
+//     product statement, and it is not one a client change can make.
+//
+//     `addon sql` is a read in the sense that matters to a person and is NOT one here. It opens a
+//     SQL connection from burrowd, and the managed control plane does not run in the fleet its
+//     tenants' databases are in and may not dial into one (cloud ADR-0036 §1). Its route is not
+//     absent and the tenant guardrail policy holds it at `confirm`, so what it needs is an execution
+//     path inside the fleet, not a different client.
 
 // refuseCloudTarget reports why a cluster-only command cannot run, or nil when it can. It reads the
 // local config and nothing else: no kubeconfig, no network, no credential.

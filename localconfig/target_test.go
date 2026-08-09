@@ -182,9 +182,9 @@ func TestCloudIdentityAndAPIHostAreDistinct(t *testing.T) {
 }
 
 // TestTargetWithoutInstallIDLoads is the compatibility property of ADR-0084 §5: every target already
-// on disk carries no install id, and one written by `burrow auth login` carries none either, because
-// that command contacts no cluster. Requiring one would turn every existing config into a load
-// error, which is the outcome the whole design exists to avoid.
+// on disk carries no install id, and one written by `burrow auth login` carries none whenever that
+// sign-in could not claim the install it reached. Requiring one would turn every existing config
+// into a load error, which is the outcome the whole design exists to avoid.
 func TestTargetWithoutInstallIDLoads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	yaml := "apiVersion: burrow.dev/v1\nkind: Config\ncurrentTarget: do-nyc1-cluster\ntargets:\n  - name: do-nyc1-cluster\n    kind: kubernetes\n    context: do-nyc1-cluster\n"
@@ -282,9 +282,9 @@ func TestResolveCarriesTheInstallIDThroughAPinnedHandle(t *testing.T) {
 
 // TestSetTargetClearsAStaleInstallID pins the behaviour the mismatch message depends on. Re-pointing
 // at a context is exactly what somebody does after rebuilding the cluster behind it, so carrying the
-// old id forward would preserve a mismatch through the act meant to resolve it. Login cannot learn
-// the new id (it contacts no cluster), so it leaves the target unchecked — the state every target
-// was in before ids existed, and one that is served.
+// old id forward would preserve a mismatch through the act meant to resolve it. A sign-in that
+// learned the new id sets it on the target it passes in; one that did not leaves the target
+// unchecked — the state every target was in before ids existed, and one that is served.
 func TestSetTargetClearsAStaleInstallID(t *testing.T) {
 	cfg := &Config{Targets: []Target{
 		{Name: "prod", Kind: TargetKindKubernetes, Context: "do-nyc3-burrow", InstallID: "install-old"},

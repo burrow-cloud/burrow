@@ -48,7 +48,9 @@ const (
 	// classClusterAdmin: a cluster-admin act performed with the operator's own kubeconfig, which
 	// ADR-0078 §3 keeps on a kubeconfig context by design rather than routing through the target.
 	// Install takes the context as an explicit argument; bootstrap and join run where no control
-	// plane exists yet. Naming a selected target on these would assert something untrue.
+	// plane exists yet; signing in uses the kubeconfig once to prove operator-ship of the context it
+	// was given (ADR-0084 §1). Naming a selected target on these would assert something untrue —
+	// each of them is choosing or creating the thing a target would otherwise name.
 	classClusterAdmin
 )
 
@@ -67,7 +69,7 @@ type commandClass struct {
 var commandClasses = map[string]commandClass{
 	// --- Choosing and inspecting the target itself ---
 	"auth":        {class: classReads, why: "a group with no action of its own"},
-	"auth login":  {class: classLocal, why: "records which target is active; it installs nothing and contacts no cluster (ADR-0078 §3)"},
+	"auth login":  {class: classClusterAdmin, why: "records which target is active, and for a cluster asks that Burrow for a credential of the person's own using their kubeconfig against the context they named (ADR-0084 §1); it installs nothing, and it names what it signed in to in the same breath, so there is no selected target for it to assert"},
 	"auth status": {class: classReads, why: "lists the configured targets"},
 	"auth switch": {class: classLocal, why: "changes which recorded target is active; nothing on any target moves"},
 

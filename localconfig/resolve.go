@@ -201,8 +201,9 @@ func resolveWithTarget(cfg *Config, target Target, kubeconfigPath string) (Resol
 			resolved.AgentKubeconfig = env.AgentKubeconfig
 			resolved.AgentContext = env.AgentContext
 			// The target's id wins; the handle's stands in when the target has none. A target
-			// written by `burrow auth login` carries no id (that command contacts no cluster), so
-			// without this the CLI would go unchecked on a cluster the handle knows perfectly well.
+			// written by `burrow auth login` carries an id only when that sign-in could claim the
+			// install (ADR-0084 §1), so without this the CLI would go unchecked on a cluster the
+			// handle knows perfectly well.
 			if resolved.InstallID == "" {
 				resolved.InstallID = env.InstallID
 			}

@@ -970,7 +970,7 @@ an environment handle says which environment inside it.
 
 | Command | What it does |
 | --- | --- |
-| `burrow auth login` | Asks where you use Burrow. `burrow-cloud.dev` is the first entry and the default; `Other` lists the contexts already in your kubeconfig so you pick a cluster by a name you recognise. `--cloud` / `--context <name>` select without a prompt. |
+| `burrow auth login` | Asks where you use Burrow. `burrow-cloud.dev` is the first entry and the default; `Other` lists the contexts already in your kubeconfig so you pick a cluster by a name you recognise. `--cloud` / `--context <name>` select without a prompt. For a cluster it then asks that Burrow for a credential of your own, using your kubeconfig once to prove you are an operator of it, and stores it under `~/.burrow/credentials/`; `--name` records who you are on that install's audit trail. A cluster that is unreachable, has no Burrow, runs a control plane too old for it, or already has an admin leaves the target recorded and your commands on the install's shared token, and says which. |
 | `burrow auth status` | Lists the configured targets, marks the active one, says what each is, and flags a target whose kube context is no longer in your kubeconfig. Local only; contacts no cluster. |
 | `burrow auth switch <name>` | Makes an already-configured target active, without re-authenticating. |
 

@@ -66,6 +66,9 @@ func New(cfg Config) (http.Handler, error) {
 	// carry — so the token they end up with never travels. Both are in identity.go.
 	v1.HandleFunc(invitePath, s.invitePrincipal)
 	v1.HandleFunc(redeemPath, s.redeemInvitation)
+	// The agent's own credential (ADR-0084 §3): the same principal, a different row, revocable on its
+	// own so stopping the agent does not log the person out.
+	v1.HandleFunc(agentCredentialPath, s.issueAgentCredential)
 	v1.HandleFunc("GET /v1/apps", s.listApps)
 	v1.HandleFunc("DELETE /v1/apps/{app}", s.deleteApp)
 	// The environment is a ROUTE on the delete, not a query parameter, because it decides WHICH app

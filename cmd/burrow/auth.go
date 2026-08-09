@@ -195,6 +195,15 @@ func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Wri
 	case signIn.Line != "":
 		fmt.Fprintf(out, "%s%s\n", note(out), signIn.Line)
 	}
+	// The agent's credential is reported on its own, because it succeeds and fails on its own: the
+	// person can be signed in with a credential of their own while burrow-agent falls back to the
+	// install's shared token, and one mark over both would misdescribe whichever went the other way.
+	switch {
+	case signIn.Agent.Issued:
+		fmt.Fprintf(out, "%s %s\n", okMark(out), signIn.Agent.Line)
+	case signIn.Agent.Line != "":
+		fmt.Fprintf(out, "%s%s\n", note(out), signIn.Agent.Line)
+	}
 	fmt.Fprintln(out, "It is now your active target. See `burrow auth status`, or change it with `burrow auth switch <name>`.")
 	if hadPrevious && previous.Name != target.Name {
 		fmt.Fprintf(out, "\nYour commands were going to %s. Send them back there with:  burrow auth switch %s\n",

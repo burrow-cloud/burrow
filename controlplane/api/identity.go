@@ -44,6 +44,11 @@ const invitePath = "POST /v1/auth/invitations"
 // as a second thing the admin does — and it is the only route an invitation may reach.
 const redeemPath = "POST /v1/auth/redeem"
 
+// agentCredentialPath is where a signed-in person's agent gets a credential of its own (ADR-0084
+// §3). It takes no body at all: the principal is the caller's, and the kind is `agent` because that
+// is what this route is — there is nowhere for a request to say otherwise.
+const agentCredentialPath = "POST /v1/auth/agent"
+
 // redeemRoute is redeemPath without its method, for the one comparison that has to be made against a
 // live request rather than against the mux's pattern table. It is derived from the pattern by hand
 // and pinned by a test, so the two cannot drift into a restriction that guards a path nothing
@@ -184,6 +189,33 @@ func (s *server) redeemInvitation(w http.ResponseWriter, r *http.Request) {
 	// The principal that comes back is the one the invitation named, unchanged: an exchange gives
 	// somebody the credential they were invited to hold, and never a different identity.
 	p, issued, err := s.engine.RedeemInvitation(r.Context(), caller)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.credentialResponse(p, issued))
+}
+
+// issueAgentCredential gives the calling person's agent a credential of its own (ADR-0084 §3).
+//
+// It exists as a route of its own rather than as a general "issue me a credential of kind K",
+// because the kind is what a guardrail will one day bind and a route that took one from the request
+// would be a route where the agent chooses which rules apply to it. Here there is nowhere to put a
+// kind: the path is the kind.
+//
+// The shared install token cannot use it. It names nobody, so there is no principal for the agent's
+// credential to belong to, and issuing one against the install rather than against a person would
+// recreate the shared credential this whole record exists to end.
+func (s *server) issueAgentCredential(w http.ResponseWriter, r *http.Request) {
+	caller, ok := controlplane.CallerFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusForbidden,
+			"this request presented the install's shared token, which names nobody, so there is no principal for an agent credential to belong to. "+
+				"Sign in with `burrow auth login --context <cluster>` first",
+			"forbidden")
+		return
+	}
+	p, issued, err := s.engine.IssueAgentCredential(r.Context(), caller)
 	if err != nil {
 		writeEngineError(w, err)
 		return

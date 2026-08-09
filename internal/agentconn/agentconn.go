@@ -26,6 +26,7 @@ import (
 
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
+	"github.com/burrow-cloud/burrow/internal/clustercred"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -125,6 +126,15 @@ func ConnectOptions(kubeContext, kubeconfig, namespace string, strict bool, stde
 	// recorded for a context in the local config no longer describes what is on the other end.
 	if env, ok := lookupByContext(kubeContext); ok {
 		opts.InstallID = env.InstallID
+		// The AGENT's own credential for that install, when one was issued (ADR-0084 §3), and empty
+		// otherwise — which falls back to the install's shared token and is exactly what this binary
+		// presented before there was anything else to present.
+		//
+		// It is the agent's and never the person's. The two are separate files for the reason the
+		// Burrow Cloud pair is: revoking the agent has to stop the agent without signing the person's
+		// terminal out, and a single credential cannot express both. Reading the person's here would
+		// undo that in one line.
+		opts.Token = clustercred.Token(clustercred.KindAgent, opts.InstallID)
 	}
 	agentKubeconfig, agentContext, err := scopedAgentKubeconfig(kubeContext, strict, stderr)
 	if err != nil {

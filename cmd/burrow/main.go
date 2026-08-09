@@ -679,7 +679,7 @@ func (o *commonOpts) connectOptions(tgt target) connect.Options {
 		// issued it, so a renamed context still finds it and a cluster rebuilt under a reused name
 		// does not present the previous install's token to the new one. A target with no install id
 		// looks nothing up, which is correct — there is no install for a credential to belong to.
-		Token: clustercred.Token(tgt.installID),
+		Token: clustercred.Token(clustercred.KindCLI, tgt.installID),
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/burrow-cloud/burrow/internal/clustercred"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -310,5 +311,50 @@ func TestConnectOptionsExplicitKubeconfigSendsNoInstallID(t *testing.T) {
 	}
 	if opts.InstallID != "" {
 		t.Errorf("InstallID = %q, want none under an explicit kubeconfig", opts.InstallID)
+	}
+}
+
+// TestConnectOptionsCarriesTheAgentsOwnCredential confirms the agent presents the credential issued
+// to IT, not the person's, and not the install's shared token (ADR-0084 §3).
+//
+// The distinction is the whole feature: revoking the agent has to stop the agent and leave the
+// person signed in, which is only true while the two are different tokens. Reading the person's file
+// here would be a one-line regression with no other symptom.
+func TestConnectOptionsCarriesTheAgentsOwnCredential(t *testing.T) {
+	installIDConfig(t, "install-abc")
+	if _, err := clustercred.Store(clustercred.KindCLI, clustercred.Credential{
+		InstallID: "install-abc", Token: "the-persons-token",
+	}); err != nil {
+		t.Fatalf("storing the person's credential: %v", err)
+	}
+	if _, err := clustercred.Store(clustercred.KindAgent, clustercred.Credential{
+		InstallID: "install-abc", Kind: "agent", Token: "the-agents-token",
+	}); err != nil {
+		t.Fatalf("storing the agent's credential: %v", err)
+	}
+
+	var errb bytes.Buffer
+	opts, err := ConnectOptions("prod", "", "burrow", false, &errb)
+	if err != nil {
+		t.Fatalf("ConnectOptions: %v", err)
+	}
+	if opts.Token != "the-agents-token" {
+		t.Errorf("Token = %q, want the agent's own", opts.Token)
+	}
+}
+
+// TestConnectOptionsWithoutAnAgentCredentialPresentsNone: an install nobody has signed in to, and
+// every install today, has no agent credential on disk. The agent presents nothing extra and the
+// transport reads the install's shared token exactly as it always has.
+func TestConnectOptionsWithoutAnAgentCredentialPresentsNone(t *testing.T) {
+	installIDConfig(t, "install-abc")
+
+	var errb bytes.Buffer
+	opts, err := ConnectOptions("prod", "", "burrow", false, &errb)
+	if err != nil {
+		t.Fatalf("ConnectOptions: %v", err)
+	}
+	if opts.Token != "" {
+		t.Errorf("Token = %q, want empty: with no credential the shared install token is what gets used", opts.Token)
 	}
 }

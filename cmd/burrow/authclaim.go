@@ -46,6 +46,7 @@ import (
 // It is a package var for the reason listContexts and stdinIsTerminal are: a test substitutes a
 // control plane it can drive, rather than needing a cluster to assert what the CLI does with each
 // answer.
+//
 // token is the credential to present. It is empty on the claim path, which is what makes that path
 // read the shared install token out of the Secret and thereby prove operator-ship. On the invitation
 // path it is the invitation, and the Secret is never read — which is the point: the second person
@@ -69,6 +70,11 @@ type signInResult struct {
 	// Issued is whether a credential was minted and stored. False means the shared install token is
 	// still what this target's commands present.
 	Issued bool
+	// Agent is what happened to burrow-agent's own credential, which a sign-in issues alongside the
+	// person's (ADR-0084 §3). It is reported separately because it succeeds and fails separately: a
+	// person can be signed in with their own credential while the agent falls back to the shared
+	// install token, and saying so under one mark would make one of the two read wrong.
+	Agent agentCredentialResult
 }
 
 // signInToCluster claims this install's first principal, stores the credential it returns, and
@@ -79,7 +85,7 @@ func signInToCluster(ctx context.Context, kubeconfig, name string, tgt *localcon
 	// Whether the credential can be SAVED is checked before one is asked for. burrowd returns a token
 	// once, so a write that fails afterwards destroys a credential that already exists on the server —
 	// and on a first claim that leaves the install claimed by a principal whose only token is gone.
-	if err := clustercred.EnsureWritable(); err != nil {
+	if err := clustercred.EnsureWritable(clustercred.KindCLI); err != nil {
 		return signInResult{Line: fmt.Sprintf(
 			"No credential was requested, because there is nowhere to save one: %s\nNothing was changed on the cluster. Your commands use the install's shared token, which keeps working.",
 			firstLine(err))}
@@ -120,7 +126,7 @@ func signInToCluster(ctx context.Context, kubeconfig, name string, tgt *localcon
 	if cred.Admin {
 		line += "\nYou are this install's admin, so you are the one who gives other people access to it."
 	}
-	return signInResult{Line: line, Issued: true}
+	return signInResult{Line: line, Issued: true, Agent: issueAgentCredential(ctx, kubeconfig, tgt.Context, cred)}
 }
 
 // acceptInvitation is the second person's side of ADR-0084 §2: it exchanges the invitation an admin
@@ -139,7 +145,7 @@ func acceptInvitation(ctx context.Context, kubeconfig, invite string, tgt *local
 	// Probed before the exchange, for the reason the claim probes: burrowd returns the token once,
 	// and an invitation that has been spent cannot be spent again — so a write that fails afterwards
 	// costs this person their way in and an admin a second invitation.
-	if err := clustercred.EnsureWritable(); err != nil {
+	if err := clustercred.EnsureWritable(clustercred.KindCLI); err != nil {
 		return signInResult{}, fmt.Errorf(
 			"the invitation was not exchanged, because there is nowhere to save the credential it would return: %w\n"+
 				"Nothing was used up: the invitation still works once this is fixed", err)
@@ -171,7 +177,7 @@ func acceptInvitation(ctx context.Context, kubeconfig, invite string, tgt *local
 	if cred.Admin {
 		line += "\nYou are an admin of this install, so you can give other people access to it too."
 	}
-	return signInResult{Line: line, Issued: true}, nil
+	return signInResult{Line: line, Issued: true, Agent: issueAgentCredential(ctx, kubeconfig, tgt.Context, cred)}, nil
 }
 
 // invitationRefusal words the ways an exchange is refused. Each one is a different thing to do next,
@@ -196,7 +202,7 @@ func invitationRefusal(err error, kubeContext string) error {
 // credential no later command looks for, and an install id recorded with no credential beside it
 // sends the header and then presents the shared token.
 func storeIssuedCredential(cred client.ClusterCredential, tgt *localconfig.Target) (string, error) {
-	path, err := clustercred.Store(clustercred.Credential{
+	path, err := clustercred.Store(clustercred.KindCLI, clustercred.Credential{
 		InstallID:    cred.InstallID,
 		PrincipalID:  cred.PrincipalID,
 		Principal:    cred.Principal,

@@ -27,19 +27,28 @@ import (
 // stubExchange stands up a control plane that answers the exchange, records the token presented to
 // it, and returns body with status. The transport forwards whatever token the sign-in was given, so
 // the test can assert that the invitation is what travelled.
+// It also answers the agent-credential route the sign-in asks for next, so the second call is the
+// one it is on a real install rather than a 404 the test would have to reason about.
 func stubExchange(t *testing.T, status int, body string) *string {
 	t.Helper()
 	var presented string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		presented = r.Header.Get("X-Burrow-Token")
-		if r.URL.Path != "/v1/auth/redeem" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
 		_, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = w.Write([]byte(body))
+		switch r.URL.Path {
+		case "/v1/auth/redeem":
+			// Recorded here and not for every request: what matters is what was spent on the
+			// exchange, and the call after it deliberately presents something else.
+			presented = r.Header.Get("X-Burrow-Token")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		case "/v1/auth/agent":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"principal_id":"p-2","principal":"ada","credential_id":"c-3",` +
+				`"kind":"agent","install_id":"install-abc","token":"ada-agent-token"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	t.Cleanup(srv.Close)
 
@@ -74,7 +83,7 @@ func TestAcceptingAnInvitationStoresTheCredentialItWasGiven(t *testing.T) {
 	if tgt.InstallID != "install-abc" {
 		t.Errorf("target InstallID = %q, want install-abc — it is what names the credential file", tgt.InstallID)
 	}
-	cred, err := clustercred.Load("install-abc")
+	cred, err := clustercred.Load(clustercred.KindCLI, "install-abc")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -87,6 +96,34 @@ func TestAcceptingAnInvitationStoresTheCredentialItWasGiven(t *testing.T) {
 	if !strings.Contains(got.Line, "ada") || !strings.Contains(got.Line, "spent") {
 		t.Errorf("line = %q, want it to name the principal and say the invitation is spent", got.Line)
 	}
+
+	// And the agent's, which the same sign-in issues (ADR-0084 §3). It is a SEPARATE file, so that
+	// revoking one does not stop the other.
+	if !got.Agent.Issued {
+		t.Fatalf("the agent got no credential of its own; line = %q", got.Agent.Line)
+	}
+	agentCred, err := clustercred.Load(clustercred.KindAgent, "install-abc")
+	if err != nil {
+		t.Fatalf("Load(agent): %v", err)
+	}
+	if agentCred.Token != "ada-agent-token" {
+		t.Errorf("the agent's stored token is %+v, want the one the agent route issued", agentCred)
+	}
+	if agentCred.Token == cred.Token {
+		t.Error("the agent and the person are holding the same token; revoking either would stop both")
+	}
+	if agentPath, _ := clustercred.Path(clustercred.KindAgent, "install-abc"); agentPath == mustPath(t, clustercred.KindCLI, "install-abc") {
+		t.Error("both credentials are in the same file")
+	}
+}
+
+func mustPath(t *testing.T, kind clustercred.Kind, installID string) string {
+	t.Helper()
+	p, err := clustercred.Path(kind, installID)
+	if err != nil {
+		t.Fatalf("Path(%s): %v", kind, err)
+	}
+	return p
 }
 
 // TestAnInvitationThatIsRefusedFailsTheCommand: unlike a claim, there is nothing to fall back to.

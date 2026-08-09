@@ -982,7 +982,9 @@ an environment handle says which environment inside it.
 
 | Command | What it does |
 | --- | --- |
-| `burrow auth login` | Asks where you use Burrow. `burrow-cloud.dev` is the first entry and the default; `Other` lists the contexts already in your kubeconfig so you pick a cluster by a name you recognise. `--cloud` / `--context <name>` select without a prompt. For a cluster it then asks that Burrow for a credential of your own, using your kubeconfig once to prove you are an operator of it, and stores it under `~/.burrow/credentials/`; `--name` records who you are on that install's audit trail. A cluster that is unreachable, has no Burrow, runs a control plane too old for it, or already has an admin leaves the target recorded and your commands on the install's shared token, and says which. |
+| `burrow auth login` | Asks where you use Burrow. `burrow-cloud.dev` is the first entry and the default; `Other` lists the contexts already in your kubeconfig so you pick a cluster by a name you recognise. `--cloud` / `--context <name>` select without a prompt. For a cluster it then asks that Burrow for a credential of your own, using your kubeconfig once to prove you are an operator of it, and stores it under `~/.burrow/credentials/`; `--name` records who you are on that install's audit trail. It issues `burrow-agent` a credential of its own at the same time, under `~/.burrow/agents/`, so revoking the agent does not sign you out. A cluster that is unreachable, has no Burrow, runs a control plane too old for it, or already has an admin leaves the target recorded and your commands on the install's shared token, and says which. |
+| `burrow auth login --invite <invitation>` | Exchanges an invitation an admin issued for a credential of your own, created on your machine by that exchange and never sent anywhere. Needs `--context <cluster>` to say which cluster, and no cluster admin: the invitation is your identity and the kubeconfig is the route. A refused exchange fails the command and records nothing, because there is no shared token for an invited person to fall back on. |
+| `burrow auth invite <name>` | Records somebody on this Burrow and prints an INVITATION for them, which expires after a day, can be exchanged once, and Burrow refuses for anything else. `--admin` lets them invite people in turn. Inviting somebody already recorded issues another invitation and does not change their admin bit. Admin only. |
 | `burrow auth status` | Lists the configured targets, marks the active one, says what each is, and flags a target whose kube context is no longer in your kubeconfig. Local only; contacts no cluster. |
 | `burrow auth switch <name>` | Makes an already-configured target active, without re-authenticating. |
 
@@ -1021,9 +1023,11 @@ naming a context your kubeconfig does not have is refused, by name, rather than 
 somewhere else. `burrow auth status` marks such a target and `burrow env list` marks such a handle,
 so it is visible before a deploy rather than after one.
 
-**Authenticating is not installing.** `burrow auth login` applies no manifests and contacts no
-cluster, so the second person to use a cluster brings their own kubeconfig context and installs
-nothing. Installing still names a context explicitly (`burrow cluster install <context>`).
+**Authenticating is not installing.** `burrow auth login` applies no manifests and changes nothing on
+a cluster, so the second person to use a cluster brings their own kubeconfig context and installs
+nothing. It does talk to the Burrow already running there, to ask for a credential of your own, which
+is authentication rather than installation. Installing still names a context explicitly
+(`burrow cluster install <context>`).
 
 **Installing registers a target, and does not select one.** A cluster you install Burrow into is a
 target by definition, so `burrow cluster install` and `burrow join` record one for the context they

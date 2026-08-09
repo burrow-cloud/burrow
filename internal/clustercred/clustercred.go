@@ -11,6 +11,11 @@
 // the control plane stores only the hash of — and the whole point of ADR-0084 §2 converging on it
 // was to stop having two.
 //
+// SIGNING IN ISSUES A PAIR, exactly as the Burrow Cloud sign-in does (ADR-0084 §3): the person's,
+// which authenticates `burrow`, and the agent's, which authenticates `burrow-agent`. They are two
+// files, in two directories, so that revoking either leaves the other working — an over-eager agent
+// and a lost laptop are different decisions, and one credential cannot express both.
+//
 // IT IS KEYED BY INSTALL ID, NOT BY CONTEXT NAME. A kube context name is a label: it can be renamed,
 // two merged kubeconfigs can share one, and a provider regenerates it deterministically for a
 // rebuilt cluster (ADR-0084 §5). The credential belongs to the Burrow that issued it, so the install
@@ -35,10 +40,32 @@ import (
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
-// dirName is the directory the person's credentials live in, a sibling of ~/.burrow/config so
-// $BURROW_CONFIG keeps a person's whole Burrow state together. It is the same directory the Burrow
-// Cloud credential uses, because it holds the same thing: what `burrow` authenticates with.
-const dirName = "credentials"
+// Kind is which of the pair a credential is. It is stored in the file as well as implied by the
+// directory, so somebody who opens one can see what they are holding, and so a file that ends up in
+// the wrong directory is caught rather than spent.
+//
+// It is the same distinction cloudcred draws, in the same two directories, because it is the same
+// distinction: which BINARY the credential belongs to. What burrowd recorded the credential AS is
+// the Kind field on the stored Credential, which is burrowd's answer and never this one — a client
+// that decided its own kind is exactly what ADR-0084 §3 refuses.
+type Kind string
+
+const (
+	// KindCLI is the person's credential: what `burrow` authenticates with.
+	KindCLI Kind = "cli"
+	// KindAgent is the agent's credential: what `burrow-agent` authenticates with. Revoking it stops
+	// the agent without signing the person's terminal out (ADR-0084 §3).
+	KindAgent Kind = "agent"
+)
+
+// The two directories, both siblings of ~/.burrow/config so $BURROW_CONFIG keeps a person's whole
+// Burrow state together. They are the two the Burrow Cloud pair already uses: the person's beside
+// their cloud credential, the agent's beside the scoped kubeconfig `burrow cluster install` mints
+// for it (ADR-0038), which is the one directory the agent's credential material has ever lived in.
+const (
+	humanDirName = "credentials"
+	agentDirName = "agents"
+)
 
 // filePrefix distinguishes a cluster credential from the managed product's in the same directory.
 // The managed one is named for its endpoint; an install id is opaque, so the prefix is what makes
@@ -76,23 +103,30 @@ type Credential struct {
 	Token string `json:"token"`
 }
 
-// Dir returns the directory cluster credentials live in.
-func Dir() (string, error) {
+// Dir returns the directory cluster credentials of this kind live in.
+func Dir(kind Kind) (string, error) {
 	p, err := localconfig.Path()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Dir(p), dirName), nil
+	switch kind {
+	case KindCLI:
+		return filepath.Join(filepath.Dir(p), humanDirName), nil
+	case KindAgent:
+		return filepath.Join(filepath.Dir(p), agentDirName), nil
+	default:
+		return "", fmt.Errorf("clustercred: unknown credential kind %q", kind)
+	}
 }
 
 // Path returns the file an install's credential is read from and written to. It is the single answer
 // to "where is it", used by both the writer and the reader, so the two cannot drift into writing one
 // place and reading another.
-func Path(installID string) (string, error) {
+func Path(kind Kind, installID string) (string, error) {
 	if err := validInstallID(installID); err != nil {
 		return "", err
 	}
-	dir, err := Dir()
+	dir, err := Dir(kind)
 	if err != nil {
 		return "", err
 	}
@@ -115,8 +149,8 @@ func validInstallID(installID string) error {
 
 // Load reads the credential for an install. Every failure names the path and says how to replace it,
 // and none of them quotes the file's contents.
-func Load(installID string) (Credential, error) {
-	path, err := Path(installID)
+func Load(kind Kind, installID string) (Credential, error) {
+	path, err := Path(kind, installID)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -151,11 +185,11 @@ func Load(installID string) (Credential, error) {
 // deleted, a home directory that cannot be read — all of them mean "present nothing extra" rather
 // than "refuse to connect". A credential that exists and is broken is reported by Load, which is
 // what `burrow auth status` and the sign-in path call.
-func Token(installID string) string {
+func Token(kind Kind, installID string) string {
 	if installID == "" {
 		return ""
 	}
-	c, err := Load(installID)
+	c, err := Load(kind, installID)
 	if err != nil {
 		return ""
 	}
@@ -172,8 +206,8 @@ func Token(installID string) string {
 // that state (a home directory that cannot be written) into a refusal with nothing lost. It cannot
 // rule the state out — a disk can fill between the probe and the write — and it removes the case
 // that actually happens.
-func EnsureWritable() error {
-	dir, err := Dir()
+func EnsureWritable(kind Kind) error {
+	dir, err := Dir(kind)
 	if err != nil {
 		return err
 	}
@@ -193,8 +227,8 @@ func EnsureWritable() error {
 
 // Store writes an install's credential and returns the path it wrote. The file handling — 0600 under
 // a 0700 directory, an O_EXCL temporary and a rename — is internal/credfile's.
-func Store(cred Credential) (string, error) {
-	path, err := Path(cred.InstallID)
+func Store(kind Kind, cred Credential) (string, error) {
+	path, err := Path(kind, cred.InstallID)
 	if err != nil {
 		return "", err
 	}

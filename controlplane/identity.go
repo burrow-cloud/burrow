@@ -145,6 +145,43 @@ func (e *Engine) IssueCredential(ctx context.Context, caller Caller, req IssueCr
 	return e.issue(ctx, req.PrincipalID, req.Kind, req.TTL, false)
 }
 
+// IssueAgentCredential gives the caller's own agent a credential of its own (ADR-0084 §3): a row
+// with `kind = agent`, belonging to the same principal, revocable without touching anything else the
+// person holds.
+//
+// UNTIL NOW THE AGENT PRESENTED WHATEVER THE PERSON DID. `burrow-agent` reaches burrowd through the
+// scoped kubeconfig ADR-0038 mints for it, and then reads the install's shared token out of the
+// Secret and presents that — the same string the operator presents, so revoking the agent meant
+// rotating the install and logging everybody out. With a credential of its own, stopping the agent
+// is one revocation and the person's terminal keeps working.
+//
+// It is not an admin action: this is the one non-admin case the authorizer allows, because the
+// person already holds a credential that reaches burrowd and the agent's is a copy of their own
+// reach under a different name (ADR-0084 §2). Setting up or re-provisioning an agent is routine, and
+// needing an admin for it every time is how people end up sharing one credential again.
+//
+// WHAT IT DOES NOT DO IS BIND THE AGENT TO LESS. The kind is recorded, and recording it is what makes
+// a caller-aware guardrail possible; today `Policy.enforce` takes no caller, so a `deny` binds this
+// credential exactly as hard as it binds the person's. That is ADR-0084 §9's "makes the answer
+// available", and the answer itself is a decision that has not been taken.
+func (e *Engine) IssueAgentCredential(ctx context.Context, caller Caller) (Principal, IssuedCredential, error) {
+	if caller.PrincipalID == "" {
+		return Principal{}, IssuedCredential{}, fmt.Errorf("%w: the request carries no authenticated principal", ErrForbidden)
+	}
+	p, err := e.db.Principal(ctx, caller.PrincipalID)
+	if err != nil {
+		return Principal{}, IssuedCredential{}, fmt.Errorf("reading the principal the agent credential is for: %w", err)
+	}
+	issued, err := e.IssueCredential(ctx, caller, IssueCredentialRequest{
+		PrincipalID: caller.PrincipalID,
+		Kind:        CredentialKindAgent,
+	})
+	if err != nil {
+		return Principal{}, IssuedCredential{}, err
+	}
+	return p, issued, nil
+}
+
 // InvitePrincipal is how a second person is given access to this Burrow without being given access
 // to the cluster (ADR-0084 §2). It records the principal, if they are not recorded already, and
 // issues them an INVITATION: a credential whose only power is to be exchanged, once, for the

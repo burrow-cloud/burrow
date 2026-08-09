@@ -102,3 +102,16 @@ func (c *Client) RedeemInvitation(ctx context.Context) (ClusterCredential, error
 	err := c.do(ctx, http.MethodPost, "/v1/auth/redeem", nil, &out)
 	return out, err
 }
+
+// IssueAgentCredential asks for a credential for the calling person's AGENT (ADR-0084 §3): the same
+// principal, a separate row, revocable on its own — so cutting the agent off does not sign the person
+// out, and the audit trail records which of the two acted.
+//
+// It sends no body. The principal is whoever this client is authenticated as, and the kind is the
+// route's rather than the request's: a caller that could name a kind could ask to be issued the
+// credential whose guardrails suit it.
+func (c *Client) IssueAgentCredential(ctx context.Context) (ClusterCredential, error) {
+	var out ClusterCredential
+	err := c.do(ctx, http.MethodPost, "/v1/auth/agent", nil, &out)
+	return out, err
+}

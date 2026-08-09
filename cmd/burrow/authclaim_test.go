@@ -31,7 +31,7 @@ import (
 // everybody else also presents.
 func TestConnectPresentsTheStoredCredential(t *testing.T) {
 	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
-	if _, err := clustercred.Store(clustercred.Credential{
+	if _, err := clustercred.Store(clustercred.KindCLI, clustercred.Credential{
 		InstallID: "install-abc", Principal: "ada", Token: "ada-token",
 	}); err != nil {
 		t.Fatalf("Store: %v", err)
@@ -73,7 +73,7 @@ func TestConnectFallsBackToTheSharedToken(t *testing.T) {
 // to the new one (ADR-0084 §5).
 func TestTheCredentialIsKeyedByInstallNotContext(t *testing.T) {
 	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
-	if _, err := clustercred.Store(clustercred.Credential{InstallID: "install-old", Token: "old-token"}); err != nil {
+	if _, err := clustercred.Store(clustercred.KindCLI, clustercred.Credential{InstallID: "install-old", Token: "old-token"}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
 	o := &commonOpts{}
@@ -95,14 +95,21 @@ func stubSignInControlPlane(t *testing.T, status int, body string) *[]byte {
 	t.Helper()
 	var asked []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/auth/claim" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		asked, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = w.Write([]byte(body))
+		switch r.URL.Path {
+		case "/v1/auth/claim":
+			asked, _ = io.ReadAll(r.Body)
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		case "/v1/auth/agent":
+			// The sign-in issues a PAIR (ADR-0084 §3), so the stand-in answers the second call the
+			// way an install does rather than 404-ing into the fallback path.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"principal_id":"p-1","principal":"ada","credential_id":"c-9",` +
+				`"kind":"agent","install_id":"install-abc","token":"agent-token"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	t.Cleanup(srv.Close)
 
@@ -132,7 +139,7 @@ func TestSignInStoresTheCredentialAndRecordsTheInstall(t *testing.T) {
 	if tgt.InstallID != "install-abc" {
 		t.Errorf("target InstallID = %q, want install-abc — the credential is filed under it", tgt.InstallID)
 	}
-	cred, err := clustercred.Load("install-abc")
+	cred, err := clustercred.Load(clustercred.KindCLI, "install-abc")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -146,6 +153,22 @@ func TestSignInStoresTheCredentialAndRecordsTheInstall(t *testing.T) {
 	}
 	if !strings.Contains(got.Line, "ada") || !strings.Contains(got.Line, "admin") {
 		t.Errorf("line = %q, want it to name the principal and that they are this install's admin", got.Line)
+	}
+
+	// The same sign-in issues burrow-agent its own (ADR-0084 §3), in its own file, so that revoking
+	// the agent does not sign the person out.
+	if !got.Agent.Issued {
+		t.Fatalf("the agent got no credential of its own; line = %q", got.Agent.Line)
+	}
+	agentCred, err := clustercred.Load(clustercred.KindAgent, "install-abc")
+	if err != nil {
+		t.Fatalf("Load(agent): %v", err)
+	}
+	if agentCred.Token != "agent-token" {
+		t.Errorf("the agent stored %+v, want the credential the agent route issued", agentCred)
+	}
+	if agentCred.Token == cred.Token {
+		t.Error("the agent and the person hold the same token; revoking either would stop both")
 	}
 }
 

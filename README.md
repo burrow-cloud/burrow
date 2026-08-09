@@ -73,7 +73,9 @@ Building something new, or adding a capability? Ask your agent to stand up a bac
 - `Set up logging so I can see what my app is doing`
 - `Add a cache to speed up my site`
 
-Available today: **Postgres** (one instance per environment, a database per app), **logs** (VictoriaLogs), **metrics** (VictoriaMetrics), and **cache** (ValKey).
+Available today: **Postgres** (a database per app, on one shared instance per environment), **logs** (VictoriaLogs), **metrics** (VictoriaMetrics), and **cache** (ValKey).
+
+One database server per environment is the default, not the limit. A service that wants its own — its own blast radius, its own resource ceiling, its own upgrade schedule — gets one with `burrow addon install postgres --name analytics`, and apps attach to it by that name. An app can hold connections to more than one; the second one names the variable it is written into, since `DATABASE_URL` belongs to the first.
 
 Postgres always exports its own metrics, so once you install the metrics addon your database is scraped automatically (connection and transaction health plus `pg_stat_statements` slow-query stats) — install the two in either order. Now when a page feels slow the agent can rule the database in or out instead of guessing.
 

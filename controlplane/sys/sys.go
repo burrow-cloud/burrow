@@ -35,6 +35,7 @@ var publicDNS = []string{"1.1.1.1:53", "8.8.8.8:53"}
 var (
 	_ controlplane.Clock                 = Clock{}
 	_ controlplane.IDSource              = IDs{}
+	_ controlplane.TokenSource           = Tokens{}
 	_ controlplane.Resolver              = Resolver{}
 	_ controlplane.AuthoritativeResolver = AuthoritativeResolver{}
 	_ controlplane.HTTPProbe             = HTTPProbe{}
@@ -169,6 +170,26 @@ func (HTTPProbe) ProbeHTTP(ctx context.Context, url string) (int, error) {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode, nil
+}
+
+// Tokens mints credential tokens from crypto/rand: 256 bits of randomness, hex-encoded (ADR-0084
+// §2). It is the production controlplane.TokenSource.
+//
+// The value it returns IS the credential — burrowd stores only a hash of it and hands the string
+// itself to its holder once — so the entropy is the whole of the security property. 256 bits rather
+// than the 128 an identifier gets, because an identifier only has to be unique and this has to be
+// unguessable.
+type Tokens struct{}
+
+// NewToken returns a fresh credential token. It panics only if the system's secure random source
+// fails, which is unrecoverable: returning a weak or empty token instead would hand out a credential
+// somebody could guess.
+func (Tokens) NewToken() string {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("sys: crypto/rand failed: " + err.Error())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // IDs mints release identifiers from crypto/rand: 128 bits of randomness, hex-encoded.

@@ -24,4 +24,16 @@ var (
 	// (seams.go) return it — possibly wrapped — so engine logic can branch on absence
 	// with errors.Is without depending on a particular adapter.
 	ErrNotFound = errors.New("not found")
+
+	// ErrForbidden marks a request the caller is authenticated for and not permitted to make
+	// (ADR-0084 §2): issuing a credential for somebody else without the admin bit, recording a
+	// second principal, revoking another principal's token. It is distinct from ErrInvalid — the
+	// request is well formed, and re-issuing it unchanged as somebody else would succeed.
+	ErrForbidden = errors.New("forbidden")
+
+	// ErrAlreadyClaimed marks a first-principal claim on an install that already has one
+	// (ADR-0084 §2). The claim is trust-on-first-use with the window closed at install time, so
+	// a second attempt is refused rather than merged: whoever holds the first principal holds
+	// the admin bit, and a second claimant would be a silent second admin.
+	ErrAlreadyClaimed = errors.New("already claimed")
 )

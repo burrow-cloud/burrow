@@ -1111,6 +1111,69 @@ type Database interface {
 	// no such environment is registered. The default environment `prod` is stored here but is never
 	// removed: the engine rejects it before this call (ADR-0067 §2).
 	DeleteEnvironment(ctx context.Context, name string) error
+
+	// ClaimFirstPrincipal records p as the install's first principal together with c, the credential
+	// issued to them, and ONLY when the install has no principal at all. It returns ErrAlreadyClaimed
+	// when one already exists (ADR-0084 §2).
+	//
+	// It is a distinct method from CreatePrincipal plus SaveCredential, rather than a check the
+	// engine performs first, for two reasons. The check and the insert have to be ATOMIC against a
+	// second caller, or two people both become the first admin. And the principal and its credential
+	// have to land TOGETHER, or a failure between them leaves an install that is claimed and whose
+	// claimant holds no token — an install nobody can administer, and one that cannot be claimed
+	// again either.
+	//
+	// Trust-on-first-use has a window between burrowd starting and the first principal being
+	// claimed; this closes the race inside that window, and claiming at install is what closes the
+	// window itself.
+	ClaimFirstPrincipal(ctx context.Context, p Principal, c Credential) error
+	// CreatePrincipal records a principal. It rejects a name already in use with an
+	// ErrInvalid-wrapped error — a name is a handle, and two principals answering to one is an
+	// ambiguity in the audit trail.
+	CreatePrincipal(ctx context.Context, p Principal) error
+	// Principal returns the principal with the given id, or ErrNotFound. A REVOKED principal is
+	// returned, marked: the row survives its access, because the audit rows that name it have to
+	// keep meaning something.
+	Principal(ctx context.Context, id string) (Principal, error)
+	// PrincipalByName returns the principal with the given name, or ErrNotFound.
+	PrincipalByName(ctx context.Context, name string) (Principal, error)
+	// Principals returns every recorded principal, revoked ones included, in name order. None
+	// yields an empty slice and no error.
+	Principals(ctx context.Context) ([]Principal, error)
+	// RevokePrincipal marks the principal retired at `at`, which stops every credential it holds
+	// from authenticating. Revoking an unknown principal returns ErrNotFound; revoking one already
+	// revoked is a no-op that keeps the FIRST timestamp, since that is when the access actually
+	// ended.
+	RevokePrincipal(ctx context.Context, id string, at time.Time) error
+
+	// SaveCredential records an issued credential. It stores c.TokenHash and never a token: the
+	// token is returned to its holder once, at issuance, and burrowd does not see it again
+	// (ADR-0084 §2). It rejects a credential whose principal does not exist.
+	SaveCredential(ctx context.Context, c Credential) error
+	// CredentialByHash returns the credential whose stored hash is hash, or ErrNotFound. This is
+	// the per-request lookup, which is why the hash is unique and indexed. It returns the row as
+	// stored — expired and revoked ones included — and the caller decides: the engine checks
+	// Credential.Live so that "expired" and "no such token" stay distinguishable here.
+	CredentialByHash(ctx context.Context, hash string) (Credential, error)
+	// Credential returns the credential with the given id, or ErrNotFound.
+	Credential(ctx context.Context, id string) (Credential, error)
+	// PrincipalCredentials returns every credential issued to a principal, newest first, revoked
+	// and expired ones included. None yields an empty slice and no error.
+	PrincipalCredentials(ctx context.Context, principalID string) ([]Credential, error)
+	// RevokeCredential marks the credential revoked at `at`. Revoking an unknown id returns
+	// ErrNotFound; revoking one already revoked is a no-op that keeps the first timestamp.
+	RevokeCredential(ctx context.Context, id string, at time.Time) error
+}
+
+// TokenSource mints the secret half of a credential (ADR-0084 §2). It is a seam for the same
+// reason IDSource is: the engine reads no ambient randomness, so a test supplies a predictable
+// token and production supplies a full-entropy random one (ADR-0010).
+//
+// An implementation must return a fresh, unguessable, non-empty string on each call. The value is
+// the credential — anything that returns a predictable one hands out everybody's access.
+type TokenSource interface {
+	// NewToken returns a fresh credential token.
+	NewToken() string
 }
 
 // Credentials is the seam over the one burrow-credentials Secret that holds every vendor

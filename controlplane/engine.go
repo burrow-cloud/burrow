@@ -91,6 +91,16 @@ type Engine struct {
 	// anything moving). It mirrors the kube Adapter's namespace, and it is what
 	// EnsureDefaultEnvironment registers `prod` against.
 	appNamespace string
+	// tokens mints the secret half of a credential (ADR-0084 §2). Optional: nil means this control
+	// plane cannot issue credentials, and an issue errors cleanly (ErrNotImplemented). Everything
+	// else on the identity path — authenticating a presented token, revoking one — works without it,
+	// because only issuance needs new randomness.
+	tokens TokenSource
+	// authz answers "may this caller mint a credential for that principal" (ADR-0084 §2). It is
+	// never nil: New defaults it to the local implementation, which reads the admin column, so a
+	// build that wires nothing still authorizes rather than allowing everything. An SSO or SAML
+	// integration replaces the value and no call site moves.
+	authz CredentialAuthorizer
 	// hookLock serializes the lifecycle hooks of one (app, environment) pair (ADR-0072 §9), so two
 	// pushes in quick succession never run two migration Jobs against one database. It is state, but
 	// not GLOBAL state: it belongs to this engine and is created in New, so two engines in one test
@@ -174,6 +184,15 @@ type Deps struct {
 	// internal push endpoint. burrowd sets it from BURROW_BUILD_PUBLIC_REGISTRY, which
 	// `burrow cluster registry install --host` wires to the registry's public ingress hostname.
 	BuildPublicRegistry string
+	// TokenSource mints the secret half of a credential (ADR-0084 §2). Optional — nil is allowed,
+	// and issuing a credential errors cleanly (ErrNotImplemented) rather than inventing randomness
+	// the engine is not supposed to read. Authenticating and revoking work without it.
+	TokenSource TokenSource
+	// CredentialAuthorizer answers who may mint a credential for whom (ADR-0084 §2). Optional — nil
+	// defaults to the local implementation over the principals table (NewDatabaseAuthorizer), which
+	// is what an SSO or SAML integration later replaces. It never defaults to allowing everything:
+	// the point of the seam is that the answer exists in exactly one place from the first day.
+	CredentialAuthorizer CredentialAuthorizer
 	// AppNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace the
 	// default environment `prod` maps to (ADR-0067 §3). Optional — an empty value defaults to the
 	// Kubernetes namespace "default", matching the kube Adapter. That is a NAMESPACE name and has
@@ -205,6 +224,10 @@ func New(d Deps) (*Engine, error) {
 	if appNamespace == "" {
 		appNamespace = "default"
 	}
+	authz := d.CredentialAuthorizer
+	if authz == nil {
+		authz = NewDatabaseAuthorizer(d.Database)
+	}
 	return &Engine{
 		k8s:                 d.Kubernetes,
 		db:                  d.Database,
@@ -228,6 +251,8 @@ func New(d Deps) (*Engine, error) {
 		buildRegistry:       d.BuildRegistry,
 		buildPublicRegistry: d.BuildPublicRegistry,
 		appNamespace:        appNamespace,
+		tokens:              d.TokenSource,
+		authz:               authz,
 		hookLock:            newHookLock(),
 	}, nil
 }

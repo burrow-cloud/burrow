@@ -287,10 +287,14 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 	// in-cluster.
 	obsHTTP := &http.Client{Timeout: 20 * time.Second}
 	engine, err := controlplane.New(controlplane.Deps{
-		Kubernetes:  k8s,
-		Database:    store,
-		Clock:       sys.Clock{},
-		IDs:         sys.IDs{},
+		Kubernetes: k8s,
+		Database:   store,
+		Clock:      sys.Clock{},
+		IDs:        sys.IDs{},
+		// The secret half of a per-caller credential, from crypto/rand (ADR-0084 §2). Wiring it here
+		// changes nothing an existing install can observe: no route reaches issuance yet, and the
+		// shared install token remains the only way anything authenticates today.
+		TokenSource: sys.Tokens{},
 		Resolver:    sys.Resolver{},
 		Credentials: creds,
 		DNS:         dns.NewFactory(),

@@ -39,6 +39,27 @@ func TestIDsUniqueAndHex(t *testing.T) {
 	}
 }
 
+// TestTokensAreUniqueAndFullEntropy: a credential token is 256 bits of crypto/rand, hex-encoded
+// (ADR-0084 §2). The value IS the credential, so a repeat or a short one would be somebody else's
+// access, which is why this asserts the length and the alphabet rather than trusting the caller.
+func TestTokensAreUniqueAndFullEntropy(t *testing.T) {
+	tokens := Tokens{}
+	seen := make(map[string]bool)
+	for i := 0; i < 1000; i++ {
+		tok := tokens.NewToken()
+		if len(tok) != 64 {
+			t.Fatalf("NewToken() = %q, want 64 hex chars (256 bits)", tok)
+		}
+		if _, err := hex.DecodeString(tok); err != nil {
+			t.Fatalf("NewToken() = %q is not hex: %v", tok, err)
+		}
+		if seen[tok] {
+			t.Fatalf("NewToken() produced a duplicate")
+		}
+		seen[tok] = true
+	}
+}
+
 // TestHTTPProbeReportsTheStatus asserts the pre-flight's probe answers with the status code it got,
 // including a 404 — the pre-flight asks whether the request ARRIVED at the cluster, not what the app
 // made of the challenge path it knows nothing about.

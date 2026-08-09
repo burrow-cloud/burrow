@@ -123,6 +123,19 @@ const (
 	OpAddonEnvKey             Op = "AddonEnvKey"
 	OpSetAddonEnvKey          Op = "SetAddonEnvKey"
 	OpDeleteAddonEnvKey       Op = "DeleteAddonEnvKey"
+
+	// Who Burrow knows and what they hold (ADR-0084 §2, §3).
+	OpClaimFirstPrincipal  Op = "ClaimFirstPrincipal"
+	OpCreatePrincipal      Op = "CreatePrincipal"
+	OpPrincipal            Op = "Principal"
+	OpPrincipalByName      Op = "PrincipalByName"
+	OpPrincipals           Op = "Principals"
+	OpRevokePrincipal      Op = "RevokePrincipal"
+	OpSaveCredential       Op = "SaveCredential"
+	OpCredentialByHash     Op = "CredentialByHash"
+	OpCredential           Op = "Credential"
+	OpPrincipalCredentials Op = "PrincipalCredentials"
+	OpRevokeCredential     Op = "RevokeCredential"
 )
 
 // cloneRelease returns a deep copy of r so a fake never aliases a caller's Env or

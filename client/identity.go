@@ -55,3 +55,63 @@ func (c *Client) ClaimFirstPrincipal(ctx context.Context, name string) (ClusterC
 	err := c.do(ctx, http.MethodPost, "/v1/auth/claim", map[string]string{"name": name}, &out)
 	return out, err
 }
+
+// CodeInvitationNotRedeemed is what burrowd returns when an invitation is presented anywhere but the
+// exchange. It is not a failed authentication: the invitation is real and the identity behind it is
+// known, and what has not happened yet is the one thing it is for.
+const CodeInvitationNotRedeemed = "invitation_not_redeemed"
+
+// CodeUnauthorized is what burrowd returns for a token it did not issue, or one it no longer knows.
+const CodeUnauthorized = "unauthorized"
+
+// CodeCredentialNotLive is what burrowd returns for a credential that WAS real and no longer
+// authenticates: revoked, or expired. It is separate from CodeUnauthorized because the remedy is
+// different — a credential that was never issued means the wrong install or a stale file, and one
+// that has expired means asking for another.
+const CodeCredentialNotLive = "credential_not_live"
+
+// invitation is the body of an invitation request. It is a named type rather than a map because it
+// has a bool in it, and because the field set is the contract: no kind and no lifetime, both of
+// which are burrowd's (ADR-0084 §3).
+type invitation struct {
+	Name  string `json:"name"`
+	Admin bool   `json:"admin,omitempty"`
+}
+
+// InvitePrincipal records a principal on this install, if they are not recorded already, and returns
+// an INVITATION for them: a credential whose only power is to be exchanged, once, for the one they
+// will carry (ADR-0084 §2). It is an admin action.
+//
+// The returned Token is what is handed over. It expires, it is spent on first use, and burrowd
+// refuses it at every route but the exchange — which is what makes handing it over a different act
+// from handing over a working credential.
+func (c *Client) InvitePrincipal(ctx context.Context, name string, admin bool) (ClusterCredential, error) {
+	var out ClusterCredential
+	err := c.do(ctx, http.MethodPost, "/v1/auth/invitations", invitation{Name: name, Admin: admin}, &out)
+	return out, err
+}
+
+// RedeemInvitation exchanges the invitation this client is carrying for the credential its holder
+// will use (ADR-0084 §2). It sends no body: the invitation is on the request, and what it is worth
+// is burrowd's record rather than anything the caller could say about it.
+//
+// THE CREDENTIAL IT RETURNS WAS GENERATED FOR THIS CALL, on this machine, which is why the exchange
+// exists at all.
+func (c *Client) RedeemInvitation(ctx context.Context) (ClusterCredential, error) {
+	var out ClusterCredential
+	err := c.do(ctx, http.MethodPost, "/v1/auth/redeem", nil, &out)
+	return out, err
+}
+
+// IssueAgentCredential asks for a credential for the calling person's AGENT (ADR-0084 §3): the same
+// principal, a separate row, revocable on its own — so cutting the agent off does not sign the person
+// out, and the audit trail records which of the two acted.
+//
+// It sends no body. The principal is whoever this client is authenticated as, and the kind is the
+// route's rather than the request's: a caller that could name a kind could ask to be issued the
+// credential whose guardrails suit it.
+func (c *Client) IssueAgentCredential(ctx context.Context) (ClusterCredential, error) {
+	var out ClusterCredential
+	err := c.do(ctx, http.MethodPost, "/v1/auth/agent", nil, &out)
+	return out, err
+}

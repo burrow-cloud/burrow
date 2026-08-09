@@ -33,11 +33,11 @@ func TestStoreAndLoadRoundTrip(t *testing.T) {
 		CredentialID: "c-1", Kind: "user", Token: theToken,
 	}
 
-	path, err := Store(want)
+	path, err := Store(KindCLI, want)
 	if err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	got, err := Load("install-abc")
+	got, err := Load(KindCLI, "install-abc")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestStoreAndLoadRoundTrip(t *testing.T) {
 // assumed. It is the property internal/credfile exists to hold.
 func TestTheCredentialIsOwnerOnlyUnderAnOwnerOnlyDirectory(t *testing.T) {
 	isolate(t)
-	path, err := Store(Credential{InstallID: "install-abc", Token: theToken})
+	path, err := Store(KindCLI, Credential{InstallID: "install-abc", Token: theToken})
 	if err != nil {
 		t.Fatalf("Store: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestTheCredentialIsOwnerOnlyUnderAnOwnerOnlyDirectory(t *testing.T) {
 // token under permissions nobody chose.
 func TestStoreTightensADirectorySomebodyElseCreated(t *testing.T) {
 	isolate(t)
-	dir, err := Dir()
+	dir, err := Dir(KindCLI)
 	if err != nil {
 		t.Fatalf("Dir: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestStoreTightensADirectorySomebodyElseCreated(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	if _, err := Store(Credential{InstallID: "install-abc", Token: theToken}); err != nil {
+	if _, err := Store(KindCLI, Credential{InstallID: "install-abc", Token: theToken}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
 	di, err := os.Stat(dir)
@@ -106,7 +106,7 @@ func TestStoreTightensADirectorySomebodyElseCreated(t *testing.T) {
 func TestLoadWithNoCredentialIsRecognisable(t *testing.T) {
 	isolate(t)
 
-	_, err := Load("install-abc")
+	_, err := Load(KindCLI, "install-abc")
 	if !errors.Is(err, ErrNoCredential) {
 		t.Fatalf("Load = %v, want ErrNoCredential", err)
 	}
@@ -128,7 +128,7 @@ func TestACredentialFiledUnderTheWrongInstallIsRefused(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	_, err := Load("install-abc")
+	_, err := Load(KindCLI, "install-abc")
 	if err == nil {
 		t.Fatal("Load accepted a credential issued by a different install")
 	}
@@ -151,7 +151,7 @@ func TestNoErrorCarriesTheToken(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	_, err := Load("install-abc")
+	_, err := Load(KindCLI, "install-abc")
 	if err == nil {
 		t.Fatal("Load accepted a truncated file")
 	}
@@ -169,8 +169,8 @@ func TestNoErrorCarriesTheToken(t *testing.T) {
 func TestAnInstallIDCannotNameAFileElsewhere(t *testing.T) {
 	isolate(t)
 	for _, id := range []string{"../../.ssh/id_rsa", "a/b", `a\b`, "..", " ", ""} {
-		if _, err := Path(id); err == nil {
-			t.Errorf("Path(%q) was accepted; a control-plane-supplied id must not escape the credential directory", id)
+		if _, err := Path(KindCLI, id); err == nil {
+			t.Errorf("Path(KindCLI, %q) was accepted; a control-plane-supplied id must not escape the credential directory", id)
 		}
 	}
 }
@@ -182,16 +182,57 @@ func TestAnInstallIDCannotNameAFileElsewhere(t *testing.T) {
 func TestTokenFallsBackToNothing(t *testing.T) {
 	isolate(t)
 
-	if got := Token(""); got != "" {
+	if got := Token(KindCLI, ""); got != "" {
 		t.Errorf("Token(\"\") = %q, want empty: a target with no install id has no credential to find", got)
 	}
-	if got := Token("install-nobody-signed-in-to"); got != "" {
+	if got := Token(KindCLI, "install-nobody-signed-in-to"); got != "" {
 		t.Errorf("Token(absent) = %q, want empty", got)
 	}
-	if _, err := Store(Credential{InstallID: "install-abc", Token: theToken}); err != nil {
+	if _, err := Store(KindCLI, Credential{InstallID: "install-abc", Token: theToken}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	if got := Token("install-abc"); got != theToken {
+	if got := Token(KindCLI, "install-abc"); got != theToken {
 		t.Errorf("Token(stored) did not return the stored token")
+	}
+}
+
+// TestThePairLivesInTwoPlaces: signing in issues the person's credential and the agent's, and they
+// have to be two files. One file would mean one revocation, and revoking the agent would sign the
+// person out — which is the thing having two kinds is for (ADR-0084 §3).
+func TestThePairLivesInTwoPlaces(t *testing.T) {
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+
+	human, err := Path(KindCLI, "install-abc")
+	if err != nil {
+		t.Fatalf("Path(cli): %v", err)
+	}
+	agent, err := Path(KindAgent, "install-abc")
+	if err != nil {
+		t.Fatalf("Path(agent): %v", err)
+	}
+	if human == agent {
+		t.Fatalf("both credentials resolve to %s", human)
+	}
+	if filepath.Base(filepath.Dir(human)) != "credentials" || filepath.Base(filepath.Dir(agent)) != "agents" {
+		t.Errorf("directories are %s and %s, want credentials/ and agents/", filepath.Dir(human), filepath.Dir(agent))
+	}
+
+	if _, err := Store(KindCLI, Credential{InstallID: "install-abc", Token: "person"}); err != nil {
+		t.Fatalf("Store(cli): %v", err)
+	}
+	if _, err := Store(KindAgent, Credential{InstallID: "install-abc", Token: "agent"}); err != nil {
+		t.Fatalf("Store(agent): %v", err)
+	}
+	if got := Token(KindCLI, "install-abc"); got != "person" {
+		t.Errorf("Token(cli) = %q, want the person's", got)
+	}
+	if got := Token(KindAgent, "install-abc"); got != "agent" {
+		t.Errorf("Token(agent) = %q, want the agent's", got)
+	}
+
+	// An unknown kind names no directory rather than defaulting to one of them, so a caller that
+	// invented a kind cannot write a token somewhere nothing reads it from.
+	if _, err := Path(Kind("machine"), "install-abc"); err == nil {
+		t.Error("an unknown kind resolved to a path")
 	}
 }

@@ -96,6 +96,15 @@ type Credential struct {
 	ExpiresAt time.Time
 	// RevokedAt is when the credential was revoked, or the zero time while it is live.
 	RevokedAt time.Time
+	// Enrollment marks an INVITATION rather than a credential anybody operates with: the one thing
+	// it may do is be exchanged, once, for the credential its holder will carry. It is what lets a
+	// second person be given access without a working token travelling through a chat window — the
+	// token they end up with is generated on their own machine and never goes anywhere.
+	//
+	// Everything an install has issued until now is false, which is the column's default and the
+	// right answer: a credential that authenticates is the ordinary case, and an invitation is the
+	// exception that has to say so.
+	Enrollment bool
 }
 
 // Live reports whether the credential authenticates at now: not revoked, and not expired.
@@ -139,6 +148,10 @@ type Caller struct {
 	Kind CredentialKind
 	// CredentialID is which credential presented itself, so a revocation can name it.
 	CredentialID string
+	// Enrollment is whether the presented credential is an invitation — something to be exchanged
+	// once, and not something to operate with. It is read from the stored row like Kind, and the
+	// API layer refuses such a caller everywhere but the exchange.
+	Enrollment bool
 }
 
 // HashToken returns the stored form of a credential token: a hex-encoded SHA-256.

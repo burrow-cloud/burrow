@@ -253,3 +253,53 @@ func TestStoreCredentialHashIsUnique(t *testing.T) {
 		t.Fatal("a second credential with the same hash was accepted")
 	}
 }
+
+// TestStoreCredentialEnrollmentRoundTrip: an invitation is a credential with one column set, and the
+// column has to survive the round trip — every route but the exchange refuses a caller on the
+// strength of it, so a value that did not come back would make an invitation a working credential
+// (ADR-0084 §2, migration 00034).
+func TestStoreCredentialEnrollmentRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	at := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC).UTC()
+	id := principalName(t, "id")
+	name := principalName(t, "ada")
+
+	if err := s.CreatePrincipal(ctx, cp.Principal{ID: id, Name: name, CreatedAt: at}); err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+	invitation := cp.Credential{
+		ID: id + "-invite", PrincipalID: id, Kind: cp.CredentialKindUser,
+		TokenHash: cp.HashToken(name + "-invitation"), CreatedAt: at,
+		ExpiresAt: at.Add(cp.DefaultInvitationTTL), Enrollment: true,
+	}
+	ordinary := cp.Credential{
+		ID: id + "-cred", PrincipalID: id, Kind: cp.CredentialKindUser,
+		TokenHash: cp.HashToken(name + "-credential"), CreatedAt: at,
+	}
+	for _, c := range []cp.Credential{invitation, ordinary} {
+		if err := s.SaveCredential(ctx, c); err != nil {
+			t.Fatalf("SaveCredential %q: %v", c.ID, err)
+		}
+	}
+
+	got, err := s.CredentialByHash(ctx, invitation.TokenHash)
+	if err != nil {
+		t.Fatalf("CredentialByHash: %v", err)
+	}
+	if !got.Enrollment {
+		t.Error("the invitation came back with Enrollment false, so it would authenticate every route")
+	}
+	if !got.ExpiresAt.Equal(invitation.ExpiresAt) {
+		t.Errorf("invitation expires at %v, want %v", got.ExpiresAt, invitation.ExpiresAt)
+	}
+
+	// And the default is the one every credential written before this column existed has.
+	plain, err := s.Credential(ctx, ordinary.ID)
+	if err != nil {
+		t.Fatalf("Credential: %v", err)
+	}
+	if plain.Enrollment {
+		t.Error("an ordinary credential came back marked as an invitation")
+	}
+}

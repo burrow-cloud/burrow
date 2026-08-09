@@ -62,7 +62,7 @@ func newAuthCmd() *cobra.Command {
 			return cmd.Help()
 		},
 	}
-	cmd.AddCommand(newAuthLoginCmd(), newAuthStatusCmd(), newAuthSwitchCmd())
+	cmd.AddCommand(newAuthLoginCmd(), newAuthInviteCmd(), newAuthStatusCmd(), newAuthSwitchCmd())
 	return cmd
 }
 
@@ -79,6 +79,11 @@ type authLoginOpts struct {
 	// it issues, never this string — so it defaults to the environment's idea of who is at the
 	// terminal and is worth overriding only when that is wrong.
 	name string
+	// invite is an invitation an admin of the install issued (ADR-0084 §2): the second person's way
+	// in, exchanged here for a credential of their own. It replaces the claim rather than adding to
+	// it — a claim is how the FIRST person on an install gets a credential, and everybody after them
+	// is invited.
+	invite string
 }
 
 func newAuthLoginCmd() *cobra.Command {
@@ -98,6 +103,11 @@ func newAuthLoginCmd() *cobra.Command {
 			"to prove you are an operator of it. Afterwards your kubeconfig is how the request GETS there and\n" +
 			"the credential is what says who is asking. If the cluster is unreachable, has no Burrow in it, or\n" +
 			"already has an admin, it says so and your commands keep using the install's shared token.\n\n" +
+			"It issues burrow-agent a credential of its own at the same time, so revoking the agent stops the\n" +
+			"agent without signing you out.\n\n" +
+			"If somebody has invited you to their Burrow, pass their invitation with --invite and the cluster\n" +
+			"with --context. That exchanges the invitation for a credential of your own, created on this\n" +
+			"machine, and the invitation is spent. You need no cluster admin and no shared token for it.\n\n" +
 			"It installs nothing. Pass --cloud or --context to select without a prompt.\n\n" +
 			"Afterwards it offers to restrict an installed coding agent to burrow-agent, Burrow's scoped\n" +
 			"control channel. Declining is fine and leaves a working setup; `burrow agent claude install`\n" +
@@ -105,7 +115,9 @@ func newAuthLoginCmd() *cobra.Command {
 		Example: "  # Ask where you use Burrow\n" +
 			"  burrow auth login\n\n" +
 			"  # Point at a cluster you already have a context for, without a prompt\n" +
-			"  burrow auth login --context do-nyc1-cluster",
+			"  burrow auth login --context do-nyc1-cluster\n\n" +
+			"  # Exchange an invitation somebody sent you for a credential of your own\n" +
+			"  burrow auth login --context do-nyc1-cluster --invite <invitation>",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAuthLogin(cmd.Context(), o, cmd.InOrStdin(), cmd.OutOrStdout())
@@ -115,12 +127,16 @@ func newAuthLoginCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.kubeContext, "context", "", "select this kubeconfig context as the target without prompting")
 	cmd.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig the contexts are read from (default: ambient)")
 	cmd.Flags().StringVar(&o.name, "name", "", "the name to record for you on this install's audit trail (default: your username)")
+	cmd.Flags().StringVar(&o.invite, "invite", "", "an invitation from an admin of the cluster, exchanged here for a credential of your own")
 	return cmd
 }
 
 func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Writer) error {
 	if o.cloud && o.kubeContext != "" {
 		return errors.New("--cloud and --context select different targets; pass one of them")
+	}
+	if err := o.checkInvite(); err != nil {
+		return err
 	}
 	interactive := stdinIsTerminal(in)
 	p := newPrompter(in, out)
@@ -135,7 +151,19 @@ func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Wri
 	// SetTarget replaces an entry wholesale, so an id set afterwards would have to be a second write
 	// of a target that had already been saved without one.
 	var signIn signInResult
-	if target.Kind == localconfig.TargetKindKubernetes {
+	switch {
+	case target.Kind != localconfig.TargetKindKubernetes:
+		// Burrow Cloud signs in through its own device flow, which issued the credentials already.
+	case o.invite != "":
+		// An invitation that cannot be exchanged fails the command and records nothing. There is no
+		// fallback for the person holding one: they were given access so that they would NOT need
+		// the install's shared token, so a recorded target they cannot authenticate to is a target
+		// that answers every command with a 401 (ADR-0084 §2).
+		signIn, err = acceptInvitation(ctx, o.kubeconfig, o.invite, &target)
+		if err != nil {
+			return err
+		}
+	default:
 		signIn = signInToCluster(ctx, o.kubeconfig, o.principalName(), &target)
 	}
 
@@ -170,6 +198,15 @@ func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Wri
 		fmt.Fprintf(out, "%s %s\n", okMark(out), signIn.Line)
 	case signIn.Line != "":
 		fmt.Fprintf(out, "%s%s\n", note(out), signIn.Line)
+	}
+	// The agent's credential is reported on its own, because it succeeds and fails on its own: the
+	// person can be signed in with a credential of their own while burrow-agent falls back to the
+	// install's shared token, and one mark over both would misdescribe whichever went the other way.
+	switch {
+	case signIn.Agent.Issued:
+		fmt.Fprintf(out, "%s %s\n", okMark(out), signIn.Agent.Line)
+	case signIn.Agent.Line != "":
+		fmt.Fprintf(out, "%s%s\n", note(out), signIn.Agent.Line)
 	}
 	fmt.Fprintln(out, "It is now your active target. See `burrow auth status`, or change it with `burrow auth switch <name>`.")
 	if hadPrevious && previous.Name != target.Name {

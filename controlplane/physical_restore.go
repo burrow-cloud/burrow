@@ -435,6 +435,18 @@ func (e *Engine) recoveryLabel(ctx context.Context, t AddonType, targetEnv, inst
 		return "", fmt.Errorf("backup %q was taken from environment %q, not %q. Each environment has its own instance and its own repository, so another environment's base backup is not a source this one can recover from: %w",
 			backup.ID, bEnv, targetEnv, ErrInvalid)
 	}
+	// And it must have been taken FROM THIS INSTANCE. The environment above no longer settles that:
+	// an environment may hold more than one instance (ADR-0091 §1), and each keeps its own pgBackRest
+	// stanza, so another instance's base backup would replace this one's live database with another
+	// server's data — issue #339's shape on the most destructive verb there is. The stanza is read
+	// back out of the object key Burrow composed when the backup completed, so the check is exact.
+	//
+	// A key with no stanza in it is not read as a mismatch: it is a row from before the layout
+	// existed, and the environment check above is what covers those.
+	if stanza := PgBackRestStanzaFromManifestKey(backup.ObjectKey); stanza != "" && stanza != instance {
+		return "", fmt.Errorf("backup %q was taken from the instance %q, not %q. Each instance keeps its own repository, so another instance's base backup would replace this one's live databases with that server's data: %w",
+			backup.ID, stanza, instance, ErrInvalid)
+	}
 	if !backup.Durable() {
 		return "", fmt.Errorf("backup %q is recorded as %q, so Burrow never read it back out of the repository and cannot say the bytes are there. Recovering from it would replace a live instance with a backup nothing has verified; pick one `burrow addon backups %s` shows as completed: %w",
 			backup.ID, backup.Status, t, ErrInvalid)

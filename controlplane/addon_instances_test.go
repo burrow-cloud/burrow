@@ -363,3 +363,43 @@ func TestAnInstanceBelongsToExactlyOneEnvironment(t *testing.T) {
 		t.Fatalf("attaching in prod to an instance that only exists in staging = %v, want ErrNotFound", err)
 	}
 }
+
+// TestPhysicalRestoreRefusesAnotherInstancesBaseBackup is §4 on the most destructive verb in the
+// product. Two instances in one environment each keep their own pgBackRest repository, so the
+// environment on a recorded backup no longer says which server it came from — and recovering one
+// instance from the other's base backup would replace a live database with another server's data.
+//
+// The stanza is read back out of the object key Burrow composed when the backup completed, so no
+// column had to be added and every physical backup taken before this record still resolves.
+func TestPhysicalRestoreRefusesAnotherInstancesBaseBackup(t *testing.T) {
+	ctx := context.Background()
+	// An engine with object storage registered, because a physical restore needs a repository to
+	// recover from before it can get as far as looking at the backup.
+	e, _, d, creds := newBackupDestinationEngine(t)
+	seedObjectStoreProvider(t, d, creds, "b2")
+	other := "burrow-postgres-an4lyt"
+
+	// A completed physical backup of ANOTHER instance in the same environment.
+	backup := cp.Backup{
+		ID:          "bk-other",
+		Kind:        cp.BackupKindPhysical,
+		Environment: cp.DefaultEnvironment,
+		Status:      cp.BackupCompleted,
+		Destination: cp.BackupDestinationObjectStore,
+		Provider:    "b2",
+		ObjectKey:   cp.PgBackRestManifestKey("burrow/pgbackrest", other, "20260809-120000F"),
+	}
+	if err := d.RecordBackup(ctx, backup); err != nil {
+		t.Fatalf("RecordBackup: %v", err)
+	}
+
+	_, err := e.RestoreInstance(ctx, cp.AddonPostgres, cp.DefaultEnvironment, cp.RestoreInstanceOptions{
+		Backup: backup.ID, Confirm: true,
+	})
+	if !errors.Is(err, cp.ErrInvalid) {
+		t.Fatalf("recovering the environment's own instance from another instance's base backup = %v, want ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), other) {
+		t.Errorf("refusal %q does not name the instance the backup actually came from", err)
+	}
+}

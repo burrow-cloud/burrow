@@ -128,7 +128,7 @@ var addonCatalog = map[AddonType]AddonSpec{
 		// than what a Burrow-authored PersistentVolumeClaim requests.
 		StorageGi:    10,
 		Capabilities: []string{"database"},
-		Summary:      "PostgreSQL database (one instance per environment, a database and role per app)",
+		Summary:      "PostgreSQL database (a database and role per app, on one instance per environment by default)",
 	},
 }
 
@@ -490,8 +490,13 @@ type AddonRemoval struct {
 // database on the instance — the concrete scope of the consequence, whether that is "these lost their
 // data" or "these are disconnected until it is reinstalled".
 type RemoveAddonResult struct {
+	// Name is the instance's name in the CLUSTER, which is what was actually torn down.
 	Name string    `json:"name"`
 	Type AddonType `json:"type"`
+	// Instance is the LABEL the operator addressed it by (ADR-0091 §1) — the same string for an
+	// environment's first instance, and the readable half for every later one. It is reported so the
+	// result names the thing the operator typed rather than a generated id they have never seen.
+	Instance string `json:"instance,omitempty"`
 	// AddonRemoval is embedded so its fields (namespace, retained volumes) flatten into the JSON the
 	// agent reads — the removal facts are the result, not a nested detail of it.
 	AddonRemoval

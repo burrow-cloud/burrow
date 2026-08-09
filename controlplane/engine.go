@@ -1089,7 +1089,7 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 		return RemoveAddonResult{}, err
 	}
 
-	res := RemoveAddonResult{Name: name, Type: info.Type, AttachedApps: apps}
+	res := RemoveAddonResult{Name: name, Type: info.Type, Instance: instanceLabel(info), AttachedApps: apps}
 	// Everything below this point destroys something, so the final backup goes ABOVE it. A failure
 	// returns here with the add-on, its claim and its registry row all untouched — which is also what
 	// makes a retry safe: there is no partial state to resume from (ADR-0064 §5).

@@ -1158,8 +1158,11 @@ func (c *Client) Addons(ctx context.Context) ([]Addon, error) {
 // this reports the retained volume names — the data volume a reinstall would reuse and the Postgres
 // backup volume, which outlives the database either way (ADR-0025/0031/0032).
 type RemoveAddonResult struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	// Instance is the LABEL the operator addressed the instance by (ADR-0091 §1). Empty from a
+	// control plane that predates labels, where Name is the answer.
+	Instance string `json:"instance,omitempty"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
 	// Namespace is where the add-on's resources, and any retained volume, live.
 	Namespace string `json:"namespace,omitempty"`
 	// DataDeleted reports whether the add-on's data volume was destroyed.

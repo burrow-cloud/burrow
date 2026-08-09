@@ -1313,7 +1313,7 @@ func newAddonInstallCmd() *cobra.Command {
 // install did and where it landed stay in the same breath.
 func addonInstallSummary(w io.Writer, a client.Addon) string {
 	lines := []string{
-		fmt.Sprintf("%s installed the %s add-on %q", okMark(w), a.Type, a.Name),
+		fmt.Sprintf("%s installed the %s add-on %q", okMark(w), a.Type, addonLabel(a)),
 		fmt.Sprintf("%s endpoint: %s", okMark(w), a.Endpoint),
 	}
 	lines = append(lines, addonBackupLines(w, a)...)
@@ -1965,7 +1965,17 @@ func pluralApps(apps []string) string {
 // storage later.
 func removeAddonSummary(res client.RemoveAddonResult) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "removed add-on %q\n", res.Name)
+	// The name the operator typed, not the generated one they have never seen (ADR-0091 §2). The
+	// cluster name follows it when the two differ, because it is what `kubectl` showed.
+	name := res.Instance
+	if name == "" {
+		name = res.Name
+	}
+	if res.Instance != "" && res.Instance != res.Name {
+		fmt.Fprintf(&b, "removed add-on %q (the cluster %s)\n", name, res.Name)
+	} else {
+		fmt.Fprintf(&b, "removed add-on %q\n", name)
+	}
 	switch {
 	case res.DataDeleted:
 		b.WriteString("its data volume was DESTROYED\n")

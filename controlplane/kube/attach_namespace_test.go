@@ -60,7 +60,7 @@ func TestAttachWritesTheAppSecretIntoTheEnvironmentsNamespace(t *testing.T) {
 		t.Fatalf("SaveAddon: %v", err)
 	}
 
-	if _, err := engine.AttachAddon(ctx, cp.AddonPostgres, "shop", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := engine.AttachAddon(ctx, cp.AddonPostgres, "shop", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	secretName := cp.AppSecretName("shop")
@@ -84,7 +84,7 @@ func TestAttachWritesTheAppSecretIntoTheEnvironmentsNamespace(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveAddon(staging): %v", err)
 	}
-	if _, err := engine.AttachAddon(ctx, cp.AddonPostgres, "shop", "staging", cp.AttachAddonOptions{}); err != nil {
+	if _, err := engine.AttachAddon(ctx, cp.AddonPostgres, "shop", "staging", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon(staging): %v", err)
 	}
 	if _, err := client.CoreV1().Secrets("engine-apps-staging").Get(ctx, secretName, metav1.GetOptions{}); err != nil {

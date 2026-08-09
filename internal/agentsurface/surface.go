@@ -229,7 +229,7 @@ var catalogue = []Capability{
 	// below.
 	{Surface: Agent, Path: "addon", What: "group: the add-on operations"},
 	{Surface: Agent, Path: "addon install", What: "deploys a building block for one environment into the existing add-on namespace; creates no namespace and no RBAC"},
-	{Surface: Agent, Path: "addon attach", What: "gives one app a database on its environment's add-on instance; the URL is generated server-side"},
+	{Surface: Agent, Path: "addon attach", What: "gives one app a database on an add-on instance and wires it in, guarded by addon.attach (held for confirmation by default); the URL is generated server-side"},
 	{Surface: Agent, Path: "addon backup", What: "takes a backup of an add-on's data"},
 	{Surface: Agent, Path: "addon backup-health", What: "reads how old the last backup is, how old the last one to leave the cluster is, the last failure, and whether the destination answers; changes nothing"},
 	// ADR-0087 §5 puts `addon sql` in ADR-0065 §3's TIER 2 — compiled in and denied by default —

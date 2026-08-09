@@ -151,6 +151,18 @@ in. Three things bound it, and the third is the one to act on:
 Opening it also means the statement text lands in the audit log, which is what makes it accountable
 and means a literal in a `WHERE` clause is recorded where anyone with audit access sees it.
 
+**Attaching a database is held for confirmation.** `addon.attach` is `confirm` out of the box
+([ADR-0095](adr/0095-attaching-a-database-is-held-for-a-human.md)): an attach puts a database and a
+login role on a server every other app in the environment shares, restarts the app, and on an app
+that is already attached rotates its password — which nothing can undo, so anything else holding the
+old connection string stops working. A held attach provisions nothing and names what it would do.
+Be clear about what a `confirm` is: the caller sets the flag, and nothing verifies a human saw the
+prompt, so it is a raised floor rather than a boundary against an agent that decides to pass
+`--confirm`. It is scoped to the add-on instance and env-scopable, so the shape to reach for is a
+gradient — `burrow guard set --env dev addon.attach allow` for a sandbox, held or denied in
+production. The guardrail also says nothing about how *many* databases exist: it answers whether one
+call proceeds, not whether a tenant has had enough, which is a quota and a different mechanism.
+
 ### Joining an already-installed cluster (multi-user)
 
 A second person on an already-installed cluster does not re-install: `burrow cluster install <context>`

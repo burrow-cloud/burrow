@@ -773,7 +773,7 @@ to the existing app namespace (§2–§3).
 | --- | --- | --- |
 | Install | `burrow addon install <type> [--env] [--name <instance>] [--archive-destination <provider>]` | As above, for one environment — each gets its own instance (ADR-0067 §1). `metrics` additionally needs RBAC the CLI stages client-side first. The result states what the instance does about backups, on the human output and in `--json` as a `backups` object with a closed `state` (`archiving`, `none`, `unknown`) and, for an archiving Postgres instance, a `base_backup` (`present`, `requested`, `none`, `unknown`) — read back off the instance rather than inferred from what the install resolved. Add-on types with no backup path at all say so instead of staying silent. |
 | List | `burrow addon list` / `burrow-agent addons` | Type, mode (`installed`/`connected`), backend, endpoint, capabilities. This is how an app is pointed at `cache` — read the endpoint and set it as config. `burrow addon list` additionally reports the volumes an earlier removal kept, in their own section (`retained_volumes` in `--json`). |
-| Attach an app | `burrow addon attach postgres <app> [--as <NAME>] [--env] [--name <instance>]` | **Postgres only.** On the named environment's instance, writes two CloudNativePG `DatabaseRole` objects — the login role `app_<app>` the app connects as, and the login-less `app_<app>_data` it is a member of, which owns the app's data across a detach ([ADR-0090](adr/0090-a-detach-keeps-the-database.md) §1) — and a `Database` (`<app>`, owned by the login role), then waits for the operator to apply them — burrowd runs no admin SQL and holds no superuser connection string ([ADR-0066](adr/0066-postgres-on-cloudnativepg.md) §2). It then connects **as the app's own role** to revoke `CONNECT` from `PUBLIC` on that database, the one statement no custom resource can express, and writes the generated connection string into the app's Secret in that environment's namespace, then restarts the workload there. Because the operator reconciles it, an attach takes seconds rather than milliseconds and a control plane restarted mid-attach leaves the operator finishing rather than an app half-provisioned. Re-attaching rotates the password. The URL is never returned, logged, or audited. The variable is `DATABASE_URL` unless `--as` names another, and the chosen name is recorded with the attachment, so detach, rotation and a restore's cutover all follow it. `--as` on an already-attached app **moves** the variable — the new name is written and the old one removed, since the rotation leaves it dead — and the result reports the removed name. A name the app's config or Secret already holds is refused, naming what holds it. An **app name longer than 54 characters is refused at attach**, naming the limit: the data role's name is nine bytes longer than the database's and PostgreSQL truncates an identifier at 63, so past that length the two roles above would be one role that has to be both able and unable to log in. The budget is checked only here — a longer attachment made by an earlier release can still be detached. On an instance that has a standby, a read-only connection string is written beside the first, under the attachment's own name with `_READ` on the end ([ADR-0081](adr/0081-a-postgres-instance-may-have-a-standby.md) §2); on a standby-less instance there is nothing for it to resolve to, so it is absent rather than present and dead. |
+| Attach an app | `burrow addon attach postgres <app> [--as <NAME>] [--env] [--name <instance>] [--confirm]` | **Postgres only.** Confirm-gated by `addon.attach` ([ADR-0095](adr/0095-attaching-a-database-is-held-for-a-human.md)), scoped to the instance and env-scopable: the held message names the instance and the variable, and on an app that is already attached it leads with the password rotation, which is the one part of an attach nothing can undo. A held attach provisions nothing. On the named environment's instance, writes two CloudNativePG `DatabaseRole` objects — the login role `app_<app>` the app connects as, and the login-less `app_<app>_data` it is a member of, which owns the app's data across a detach ([ADR-0090](adr/0090-a-detach-keeps-the-database.md) §1) — and a `Database` (`<app>`, owned by the login role), then waits for the operator to apply them — burrowd runs no admin SQL and holds no superuser connection string ([ADR-0066](adr/0066-postgres-on-cloudnativepg.md) §2). It then connects **as the app's own role** to revoke `CONNECT` from `PUBLIC` on that database, the one statement no custom resource can express, and writes the generated connection string into the app's Secret in that environment's namespace, then restarts the workload there. Because the operator reconciles it, an attach takes seconds rather than milliseconds and a control plane restarted mid-attach leaves the operator finishing rather than an app half-provisioned. Re-attaching rotates the password. The URL is never returned, logged, or audited. The variable is `DATABASE_URL` unless `--as` names another, and the chosen name is recorded with the attachment, so detach, rotation and a restore's cutover all follow it. `--as` on an already-attached app **moves** the variable — the new name is written and the old one removed, since the rotation leaves it dead — and the result reports the removed name. A name the app's config or Secret already holds is refused, naming what holds it. An **app name longer than 54 characters is refused at attach**, naming the limit: the data role's name is nine bytes longer than the database's and PostgreSQL truncates an identifier at 63, so past that length the two roles above would be one role that has to be both able and unable to log in. The budget is checked only here — a longer attachment made by an earlier release can still be detached. On an instance that has a standby, a read-only connection string is written beside the first, under the attachment's own name with `_READ` on the end ([ADR-0081](adr/0081-a-postgres-instance-may-have-a-standby.md) §2); on a standby-less instance there is nothing for it to resolve to, so it is absent rather than present and dead. |
 | Detach | `burrow addon detach postgres <app> [--env] [--name <instance>] [--delete-data]` | Removes the variable the attachment was written under (`DATABASE_URL` unless it named another), rolls the app off the database, and **drops the app's login role, keeping the database and its rows** ([ADR-0090](adr/0090-a-detach-keeps-the-database.md) §1) — so nothing that was issued to the app still authenticates, and attaching the same app again adopts the database that is there and hands the data back. Confirm-gated by `addon.detach`, which guards the app losing its access rather than the data being destroyed. `--delete-data` destroys the database as well: it closes it to new connections and deletes the `Database` and both `DatabaseRole` objects with a `delete` reclaim policy, and CloudNativePG runs the `DROP DATABASE` and `DROP ROLE` **on that environment's instance**. That flag additionally requires the app's name typed back on a terminal, refuses off one without `--acknowledge-data-loss`, and is **operator CLI only** — absent from `burrow-agent` (ADR-0090 §2, ADR-0065 §2). |
 | Remove | `burrow addon remove <name> [--env] [--delete-data] [--skip-final-backup] [--backup-destination <provider>]` | Tears the add-on's workload down and **keeps its data volume** unless `--delete-data` is passed. Confirm-gated by `addon.remove`; the held message names the volume, the attached apps for `postgres`, and whether a final backup is taken first. `--delete-data` additionally requires the add-on's name typed back on a terminal, and refuses off one without `--acknowledge-data-loss`. With an object-storage provider registered it takes a final backup of every attached database first and removes **nothing** if it fails; `--skip-final-backup` destroys the data without one and announces it (ADR-0064 §5). **Operator CLI only** — absent from `burrow-agent` entirely (ADR-0065 §2). |
 | Configure an instance | `burrow addon config postgres [<setting> <value>]` | **Postgres only.** Changes an instance that already exists ([ADR-0082](adr/0082-an-addon-instance-is-configured-after-it-exists.md)). Bare, it lists what can be set and what it is set to, read off the `Cluster` rather than the registry. `standbys <n>` patches `spec.instances` (one more than the standby count) — adding the first standby writes a read address into every attached app's Secret beside its connection string, pointing at CloudNativePG's `-ro` service, and restarts them; removing the last one withdraws that address and restarts them again ([ADR-0081](adr/0081-a-postgres-instance-may-have-a-standby.md) §2). `storage <size>` patches `spec.storage.size` and **cannot be undone**: a smaller size than the instance already has is refused at the point of asking rather than written and left to fail in a status field. Growing proceeds; reducing the standby count prints the affected apps by name, asks for the instance's name to be typed back, and refuses off a terminal without `--confirm`. **Operator CLI only** — absent from `burrow-agent`, because it provisions hardware. |
@@ -864,8 +864,9 @@ belongs to exactly one environment (§6).
 
 **Creating an instance stays a person's job.** `addon install --name` is absent from
 `burrow-agent`: it provisions a pod and a volume nobody approved, which is ADR-0065's line.
-Attaching to one that already exists provisions nothing, so `addon attach --name` is on the agent
-surface (§5).
+Attaching to an instance that already exists adds a database and a role rather than a server, which
+is ADR-0065's third tier, so `addon attach --name` is on the agent surface (§5) and held for
+confirmation by `addon.attach` rather than withheld.
 
 Postgres metrics are always on and report connection and transaction health plus
 `pg_stat_statements` slow-query stats. Under CloudNativePG they come from the operator's own
@@ -1316,6 +1317,7 @@ app or the one add-on instance its effect stops at, or nothing where the effect 
 | `dns.delete` | deleting a public DNS record | `deny` | no | — |
 | `addon.install` | installing an add-on | `confirm` | no | add-on instance |
 | `addon.remove` | removing an add-on | `confirm` | no | add-on instance |
+| `addon.attach` | giving an app its own database on an add-on instance and wiring it in (re-attaching rotates its password) | `confirm` | **yes** | add-on instance |
 | `addon.detach` | detaching an app from an add-on, ending its access to its data (the database is kept) | `confirm` | no | add-on instance |
 | `addon.restore` | restoring a database over its live contents | `confirm` | no | add-on instance |
 | `addon.restore_instance` | rewinding a whole Postgres instance, taking every app's database on it back together | `confirm` | no | add-on instance |
@@ -1332,13 +1334,17 @@ guardrail names two things — `addon detach <addon> <app>` reaches one app's da
 ([ADR-0085](adr/0085-a-guardrail-can-name-the-app-it-guards.md) §3). Setting a guardrail for
 something it does not name is refused with a sentence saying how far it does reach.
 
-`addon.sql` is the one `addon.` code that is **env-scopable**, and that is a declaration rather than
-an oversight in the others. An add-on operation names an environment, but its instance name already
-carries it (`burrow-postgres`, `burrow-postgres-staging`), so the `--name` tier already draws the
-per-environment line. What `addon.sql` wants is the gradient
-[ADR-0087](adr/0087-running-sql-against-an-attached-database.md) §5 asks for — `allow` in
-development, `deny` in production — which is a statement about the **environment** rather than about
-one server.
+`addon.sql` and `addon.attach` are the two `addon.` codes that are **env-scopable**, and in both cases
+that is a declaration rather than an oversight in the others. An add-on operation names an
+environment, but its instance label already carries it, so the `--name` tier already draws the
+per-environment line for most of them. What these two want is a gradient — a statement about the
+**environment** rather than about one server. `addon.sql` wants `allow` in development and `deny` in
+production ([ADR-0087](adr/0087-running-sql-against-an-attached-database.md) §5); `addon.attach` wants
+`allow` in a sandbox where an agent building three services should not stop three times, and
+`confirm` in production ([ADR-0095](adr/0095-attaching-a-database-is-held-for-a-human.md) §2). The
+general rule also weakened when an environment gained the ability to hold more than one instance
+([ADR-0091](adr/0091-an-environment-may-hold-more-than-one-postgres-instance.md)): per-instance and
+per-environment stopped being the same statement.
 
 `burrow guard list [--env <name>] [--name <thing>]` shows the effective disposition and, for
 anything narrower than the whole cluster, which tier it came from: set for the named app or add-on
@@ -1396,19 +1402,22 @@ Limits:
 - **Which guardrails can be scoped to an environment is a property each one declares**
   ([ADR-0068](adr/0068-operational-limits-are-configuration.md) §5), not one read off the `app.`
   prefix as it used to be. The app-level codes are scopable because the operations they gate always
-  name an environment. The cluster-level codes (`dns.*`, `addon.*`, `bucket.create`) are not,
-  because their dispositions are looked up with no environment at all; setting one with `--env` is
-  rejected. `dns.delete`'s deny is therefore still all-or-nothing: an operator who wants the agent
+  name an environment, along with `addon.sql` and `addon.attach`. The rest of the cluster-level codes
+  (`dns.*`, the other `addon.*`, `bucket.create`) are not, because their dispositions are looked up
+  with no environment at all; setting one with `--env` is rejected. `dns.delete`'s deny is therefore still all-or-nothing: an operator who wants the agent
   managing DNS in development but not production must pick one answer for both. Widening it is now
   a change to that declaration plus the lookup at its call site rather than a rename.
 - **`app.replica_ceiling` is no longer a guardrail.** It is an operational limit — see
   [Operational limits](#operational-limits) below. Exceeding it is a validation failure, not a
   disposition, and any stored disposition for it was dropped by the schema migration.
 - **Several mutating operations are not guardrailed at all**: `app config set/unset`,
-  `app health set/unset`, `app secret set/unset`, `app unpublish`, `addon attach`, `addon backup`, `addon connect`,
+  `app health set/unset`, `app secret set/unset`, `app unpublish`, `addon backup`, `addon connect`,
   `config provider add`, `app auto-deploy`, `env add/remove`, and `guard set` itself. Some are
-  deliberate (config and secrets destroy nothing; attach provisions rather than destroys);
-  `unpublish` taking an app offline without a gate is worth knowing.
+  deliberate (config and secrets destroy nothing); `unpublish` taking an app offline without a gate
+  is worth knowing. `addon attach` was on this list until
+  [ADR-0095](adr/0095-attaching-a-database-is-held-for-a-human.md): "attach provisions rather than
+  destroys" was true and left out that it provisions on a server every other app shares, restarts the
+  app, and rotates a password on a re-attach.
 - Removing an environment does not cascade to its guardrail overrides; they are orphaned and
   would apply again if the name were reused.
 

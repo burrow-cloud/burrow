@@ -32,7 +32,7 @@ func TestAttachNameIsRefusedByAnOlderControlPlane(t *testing.T) {
 	srv := preSweepControlPlane(t, &seen)
 
 	_, err := client.NewClientVersion(srv.URL, "tok", "v0.15.0").
-		AttachAddon(context.Background(), "postgres", "web", "", "", "PG_DSN")
+		AttachAddon(context.Background(), "postgres", "web", "", client.AttachAddonOptions{EnvKey: "PG_DSN"})
 	if err == nil {
 		t.Fatal("the attach succeeded against a control plane that cannot express the variable it was given")
 	}
@@ -74,7 +74,7 @@ func TestAttachWithNoNameStaysOnTheOldRoute(t *testing.T) {
 	defer srv.Close()
 
 	res, err := client.NewClientVersion(srv.URL, "tok", "v0.15.0").
-		AttachAddon(context.Background(), "postgres", "web", "", "", "")
+		AttachAddon(context.Background(), "postgres", "web", "", client.AttachAddonOptions{})
 	if err != nil {
 		t.Fatalf("an attach that names no variable must still work against any control plane: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestAttachNameRidesThePathAndNotTheBody(t *testing.T) {
 	defer srv.Close()
 
 	if _, err := client.NewClientVersion(srv.URL, "tok", "v0.15.0").
-		AttachAddon(context.Background(), "postgres", "web", "staging", "", "PG_DSN"); err != nil {
+		AttachAddon(context.Background(), "postgres", "web", "staging", client.AttachAddonOptions{EnvKey: "PG_DSN"}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if gotPath != "/v1/addons/attach/env-key/PG_DSN" {

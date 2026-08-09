@@ -51,7 +51,7 @@ func attachApp(t *testing.T, e *cp.Engine, k *fake.Kubernetes, app string) {
 	if err := k.ApplyWorkload(context.Background(), cp.WorkloadSpec{App: app, Kind: cp.WorkloadDeployment, Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("ApplyWorkload %s: %v", app, err)
 	}
-	if _, err := e.AttachAddon(context.Background(), cp.AddonPostgres, app, cp.DefaultEnvironment, cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(context.Background(), cp.AddonPostgres, app, cp.DefaultEnvironment, cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon %s: %v", app, err)
 	}
 }

@@ -118,7 +118,7 @@ func TestRetainedVolumesEmptyWhenNothingWasRemoved(t *testing.T) {
 func TestRetainedBackupVolumeIsReportedSeparately(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := installPostgres(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, "", ""); err != nil {

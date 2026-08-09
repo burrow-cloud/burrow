@@ -146,7 +146,7 @@ func TestAttachWithNoNameIsTheEnvironmentsOwnInstance(t *testing.T) {
 		t.Fatalf("InstallAddon(analytics): %v", err)
 	}
 
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{})
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
@@ -174,11 +174,11 @@ func TestSecondAttachmentMustNameItsOwnVariable(t *testing.T) {
 	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, cp.DefaultEnvironment, cp.InstallAddonOptions{Name: "analytics", Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon(analytics): %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("first AttachAddon: %v", err)
 	}
 
-	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Instance: "analytics"})
+	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, Instance: "analytics"})
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("a second attachment falling back to DATABASE_URL = %v, want ErrInvalid", err)
 	}
@@ -199,10 +199,10 @@ func TestAnAppMayHoldSeveralAttachments(t *testing.T) {
 	}
 	own := mustInstance(t, cp.AddonPostgres, cp.DefaultEnvironment)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("first AttachAddon: %v", err)
 	}
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Instance: "analytics", EnvKey: "ANALYTICS_URL"})
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, Instance: "analytics", EnvKey: "ANALYTICS_URL"})
 	if err != nil {
 		t.Fatalf("second AttachAddon: %v", err)
 	}
@@ -258,10 +258,10 @@ func TestBackupClaimIsPerInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallAddon(analytics): %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Instance: "analytics", EnvKey: "ANALYTICS_URL"}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, Instance: "analytics", EnvKey: "ANALYTICS_URL"}); err != nil {
 		t.Fatalf("AttachAddon(analytics): %v", err)
 	}
 
@@ -358,7 +358,7 @@ func TestAnInstanceBelongsToExactlyOneEnvironment(t *testing.T) {
 	}
 
 	// `analytics` exists in staging and nowhere else, so an attach in production cannot reach it.
-	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, cp.AttachAddonOptions{Instance: "analytics", EnvKey: "ANALYTICS_URL"})
+	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, cp.AttachAddonOptions{Confirm: true, Instance: "analytics", EnvKey: "ANALYTICS_URL"})
 	if !errors.Is(err, cp.ErrNotFound) {
 		t.Fatalf("attaching in prod to an instance that only exists in staging = %v, want ErrNotFound", err)
 	}

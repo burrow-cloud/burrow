@@ -107,7 +107,7 @@ func TestAttachPostgres(t *testing.T) {
 		t.Fatalf("seed workload: %v", err)
 	}
 
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{})
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestAttachPostgres(t *testing.T) {
 func TestAttachPostgresNoWorkload(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon with no workload: %v", err)
 	}
 	if _, ok := k.SecretValue("web", "DATABASE_URL"); !ok {
@@ -154,10 +154,10 @@ func TestAttachPostgresNoWorkload(t *testing.T) {
 func TestAttachRejectsBadInput(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonCache, "web", "", cp.AttachAddonOptions{}); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AttachAddon(ctx, cp.AddonCache, "web", "", cp.AttachAddonOptions{Confirm: true}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("attach non-postgres err = %v, want ErrInvalid", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "Bad_Name", "", cp.AttachAddonOptions{}); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "Bad_Name", "", cp.AttachAddonOptions{Confirm: true}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("attach bad app name err = %v, want ErrInvalid", err)
 	}
 	if got := prov.Ensured(); len(got) != 0 {
@@ -179,7 +179,7 @@ func TestAttachWithoutProvisioner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); !errors.Is(err, cp.ErrNotImplemented) {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); !errors.Is(err, cp.ErrNotImplemented) {
 		t.Errorf("attach without provisioner err = %v, want ErrNotImplemented", err)
 	}
 }
@@ -193,7 +193,7 @@ func TestDetachPostgres(t *testing.T) {
 	if err := k.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Kind: cp.WorkloadDeployment, Image: "busybox", Replicas: 1}); err != nil {
 		t.Fatalf("seed workload: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 
@@ -232,13 +232,13 @@ func TestDetachPostgres(t *testing.T) {
 func TestDetachKeepsTheDataAndReAttachGetsItBack(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, prov := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("re-attach after a detach: %v", err)
 	}
 	if got := prov.Dropped(); len(got) != 0 {
@@ -254,7 +254,7 @@ func TestDetachKeepsTheDataAndReAttachGetsItBack(t *testing.T) {
 func TestDetachDeleteDataDestroysTheDatabase(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{DeleteData: true, Confirm: true}); err != nil {
@@ -277,7 +277,7 @@ func TestDetachDeleteDataDestroysTheDatabase(t *testing.T) {
 func TestDetachDeleteDataIsRecordedInTheAudit(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, _ := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{DeleteData: true, Confirm: true}); err != nil {
@@ -312,7 +312,7 @@ func TestAttachAuditRedactsURL(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
@@ -367,7 +367,7 @@ func TestAttachDoesNotLogTheURL(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	e, _, _, _ := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {

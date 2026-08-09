@@ -78,7 +78,7 @@ func newAddonCmd() *cobra.Command {
 // the API. Backup destroys nothing, so it is allowed by default.
 func newAddonBackupCmd() *cobra.Command {
 	o := &commonOpts{}
-	var destination string
+	var destination, instance string
 	cmd := &cobra.Command{
 		Use:   "backup <addon> <app>",
 		Short: "Back up an app's database (e.g. on the Postgres add-on)",
@@ -96,7 +96,7 @@ func newAddonBackupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.BackupAddon(ctx, args[0], args[1], o.env, destination)
+			res, err := c.BackupAddon(ctx, args[0], args[1], o.env, instance, destination)
 			if err != nil {
 				return err
 			}
@@ -108,6 +108,7 @@ func newAddonBackupCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&destination, "destination", "",
 		"the object-storage `provider` to write this backup to (only needed when more than one is registered)")
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to act on (default: the environment's own instance)")
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	return cmd
@@ -124,7 +125,7 @@ func newAddonBackupCmd() *cobra.Command {
 // `backup-instance` is "the instance is gone".
 func newAddonBackupInstanceCmd() *cobra.Command {
 	o := &commonOpts{}
-	var destination string
+	var destination, instance string
 	cmd := &cobra.Command{
 		Use:   "backup-instance <addon>",
 		Short: "Take a physical base backup of an environment's whole Postgres instance",
@@ -144,7 +145,7 @@ func newAddonBackupInstanceCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.BackupInstance(ctx, args[0], o.env, destination)
+			res, err := c.BackupInstance(ctx, args[0], o.env, instance, destination)
 			if err != nil {
 				return err
 			}
@@ -337,7 +338,7 @@ func backupAge(seconds int64) string {
 // deliberately absent from the agent surface.
 func newAddonRestoreCmd() *cobra.Command {
 	o := &commonOpts{}
-	var backup string
+	var backup, instance string
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "restore <addon> <app> --backup <id>",
@@ -355,7 +356,7 @@ func newAddonRestoreCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.RestoreAddon(ctx, args[0], args[1], backup, o.env, confirm); err != nil {
+			if err := c.RestoreAddon(ctx, args[0], args[1], backup, o.env, instance, confirm); err != nil {
 				return err
 			}
 			human := fmt.Sprintf("restored %q from backup %s", args[1], backup)
@@ -365,6 +366,7 @@ func newAddonRestoreCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&backup, "backup", "", "the backup id to restore (from `burrow addon backups postgres <app>`)")
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to restore into (default: the environment's own instance)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	_ = cmd.MarkFlagRequired("backup")
 	return cmd
@@ -390,7 +392,7 @@ func newAddonRestoreCmd() *cobra.Command {
 // it refuses unless --acknowledge-data-loss is passed.
 func newAddonRestoreInstanceCmd() *cobra.Command {
 	o := &commonOpts{}
-	var backup, toTime, destination string
+	var backup, toTime, destination, instance string
 	var latest, skipSafety, ackDataLoss, confirm bool
 	cmd := &cobra.Command{
 		Use:   "restore-instance <addon>",
@@ -431,14 +433,25 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 					return fmt.Errorf("--to-time %q is not an RFC3339 instant (for example 2026-08-01T14:30:00Z)", toTime)
 				}
 			}
-			instance, err := controlplane.AddonInstanceName(controlplane.AddonType(addon), restoreEnvironment(o.env))
-			if err != nil {
-				return err
+			// THE NAME IN THE PROMPT IS THE LABEL THE OPERATOR TYPES, and it is settled without
+			// contacting anything: --name when one was given, and otherwise the label of the
+			// environment's FIRST instance, which is its own derived name and the one instance whose
+			// label a client can know (ADR-0091 §2). Resolving it from the registry would mean
+			// contacting the control plane before the off-terminal refusal below, and that refusal
+			// exists precisely so a script that never said it destroys the current state cannot get
+			// that far (ADR-0064 §2).
+			label := instance
+			if label == "" {
+				derived, err := controlplane.AddonInstanceName(controlplane.AddonType(addon), restoreEnvironment(o.env))
+				if err != nil {
+					return err
+				}
+				label = derived
 			}
 			// The off-terminal refusal runs BEFORE anything is contacted, so a script that never said
 			// it destroys the current state cannot reach the restore call at all (ADR-0064 §2).
 			if !ackDataLoss && !stdinIsTerminal(cmd.InOrStdin()) {
-				return errRestoreInstanceNeedsTerminal(instance)
+				return errRestoreInstanceNeedsTerminal(label)
 			}
 			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
@@ -446,11 +459,12 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 			}
 			// The typed-name gate goes to stderr so a --json run keeps a clean stdout.
 			if !ackDataLoss {
-				if err := confirmRestoreInstance(ctx, c, instance, o.env, recoveryTargetLabel(backup, toTime), skipSafety, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
+				if err := confirmRestoreInstance(ctx, c, label, o.env, recoveryTargetLabel(backup, toTime), skipSafety, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
 					return err
 				}
 			}
 			res, err := c.RestoreInstance(ctx, addon, o.env, client.RestoreInstanceOptions{
+				Instance:         instance,
 				Backup:           backup,
 				ToTime:           toTime,
 				Latest:           latest,
@@ -470,6 +484,7 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to rewind (default: the environment's own instance)")
 	cmd.Flags().StringVar(&backup, "backup", "", "recover exactly this recorded physical `backup` (from `burrow addon backups postgres`)")
 	cmd.Flags().StringVar(&toTime, "to-time", "", "recover to this RFC3339 `instant` inside the write-ahead-log window (e.g. 2026-08-01T14:30:00Z)")
 	cmd.Flags().BoolVar(&latest, "latest", false, "recover to the newest state the repository holds (the furthest point the archived write-ahead log reaches)")
@@ -684,7 +699,7 @@ func attachedAppsIn(ctx context.Context, c *client.Client, env string) []string 
 // channel. Attach provisions and destroys nothing, so it is allowed by default.
 func newAddonAttachCmd() *cobra.Command {
 	o := &commonOpts{}
-	var as string
+	var as, instance string
 	cmd := &cobra.Command{
 		Use:   "attach <addon> <app>",
 		Short: "Attach an app to an add-on (e.g. give it a Postgres database)",
@@ -707,7 +722,7 @@ func newAddonAttachCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.AttachAddon(ctx, args[0], args[1], o.env, as)
+			res, err := c.AttachAddon(ctx, args[0], args[1], o.env, instance, as)
 			if err != nil {
 				return err
 			}
@@ -728,6 +743,7 @@ func newAddonAttachCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&as, "as", "", "environment variable to write the connection string into (default DATABASE_URL, or the name this attachment already uses)")
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to attach to (default: the environment's own instance)")
 	return cmd
 }
 
@@ -746,6 +762,7 @@ func newAddonAttachCmd() *cobra.Command {
 // reach for reflexively is exactly the habit the gate exists to interrupt.
 func newAddonDetachCmd() *cobra.Command {
 	o := &commonOpts{}
+	var instance string
 	var confirm, deleteData, ackDataLoss bool
 	cmd := &cobra.Command{
 		Use:   "detach <addon> <app>",
@@ -780,7 +797,7 @@ func newAddonDetachCmd() *cobra.Command {
 					return err
 				}
 			}
-			if err := c.DetachAddon(ctx, addon, app, o.env, client.DetachAddonOptions{DeleteData: deleteData, Confirm: confirm}); err != nil {
+			if err := c.DetachAddon(ctx, addon, app, o.env, client.DetachAddonOptions{Instance: instance, DeleteData: deleteData, Confirm: confirm}); err != nil {
 				return err
 			}
 			human := fmt.Sprintf("detached %q from the %s add-on\nits database was destroyed, with everything in it", app, addon)
@@ -794,6 +811,7 @@ func newAddonDetachCmd() *cobra.Command {
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	cmd.Flags().BoolVar(&deleteData, "delete-data", false, "also DESTROY the app's database, with every row in it")
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to detach from (default: the environment's own instance)")
 	cmd.Flags().BoolVar(&ackDataLoss, dataLossAckFlag, false, "acknowledge that --delete-data destroys the app's database, so it proceeds without the typed-name prompt (this is how a script asks for it). No shorthand: destroying an app's data should not be a single keystroke.")
 	return cmd
 }
@@ -1038,7 +1056,7 @@ func metricLabels(labels map[string]string) string {
 // `burrow guard set --env <env> addon.sql allow`.
 func newAddonSQLCmd() *cobra.Command {
 	o := &commonOpts{}
-	var statement, file string
+	var statement, file, instance string
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "sql <addon> <app>",
@@ -1069,7 +1087,7 @@ func newAddonSQLCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.AddonSQL(ctx, args[0], args[1], o.env, stmt, confirm)
+			res, err := c.AddonSQL(ctx, args[0], args[1], o.env, instance, stmt, confirm)
 			if err != nil {
 				return err
 			}
@@ -1084,6 +1102,7 @@ func newAddonSQLCmd() *cobra.Command {
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVarP(&statement, "statement", "c", "", "the `SQL` to run (or use --file, or pipe it on stdin)")
 	cmd.Flags().StringVar(&file, "file", "", "read the statement from a `path` instead of -c or stdin")
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` holding the database (default: the environment's own instance)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a statement a guardrail holds for confirmation (the default disposition is deny, which this does not open)")
 	return cmd
 }
@@ -1196,7 +1215,7 @@ func envOrDefaultName(env string) string {
 func newAddonInstallCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm bool
-	var archiveDestination string
+	var archiveDestination, instance string
 	cmd := &cobra.Command{
 		Use:   "install [<name>]",
 		Short: "Install a vetted backing service (logs, metrics, cache, postgres)",
@@ -1213,7 +1232,13 @@ func newAddonInstallCmd() *cobra.Command {
 			"postgres instance installed before an object-storage provider was registered archives\n" +
 			"nowhere: register one, then re-run this command to wire the instance to it. Re-running is\n" +
 			"safe and leaves the data untouched. An instance whose repository still holds no base backup\n" +
-			"is reported as such; take one with `burrow addon backup-instance postgres`.",
+			"is reported as such; take one with `burrow addon backup-instance postgres`.\n\n" +
+			"An environment gets ONE instance by default and that is the right default — an instance is a\n" +
+			"pod and a volume, and most apps do not need their own. --name stands a SECOND one up beside\n" +
+			"it, for a service that wants its own blast radius, its own resource ceiling, or its own\n" +
+			"upgrade schedule. The name is what you type from then on: `addon attach --name`,\n" +
+			"`addon config --name`, `addon remove <name>`. Installing a name that already exists\n" +
+			"re-applies that instance rather than creating a second one.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -1253,6 +1278,7 @@ func newAddonInstallCmd() *cobra.Command {
 				return err
 			}
 			a, err := c.InstallAddon(ctx, name, o.env, client.InstallAddonOptions{
+				Name:               instance,
 				Confirm:            confirm,
 				ArchiveDestination: archiveDestination,
 			})
@@ -1267,6 +1293,8 @@ func newAddonInstallCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	cmd.Flags().StringVar(&archiveDestination, "archive-destination", "",
 		"the object-storage `provider` a postgres instance archives to (only needed when more than one is registered)")
+	cmd.Flags().StringVar(&instance, "name", "",
+		"stand a SECOND `instance` of this add-on up beside the environment's own, addressed by this name from then on. A separate pod and a separate volume, both billed.")
 	return cmd
 }
 
@@ -1568,9 +1596,13 @@ func newAddonListCmd() *cobra.Command {
 				fmt.Fprintln(out, addonListEmpty(cloud))
 			} else {
 				tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-				fmt.Fprintln(tw, "NAME\tTYPE\tMODE\tENDPOINT\tCAPABILITIES")
+				// NAME is the LABEL, because that is the string every other command takes; CLUSTER is
+				// what the instance is called in Kubernetes. The two are the same for an environment's
+				// first instance and differ for every later one, and this listing is where somebody
+				// holding a generated name off `kubectl get` finds out what it is (ADR-0091 §2).
+				fmt.Fprintln(tw, "NAME\tCLUSTER\tTYPE\tENV\tMODE\tENDPOINT\tCAPABILITIES")
 				for _, a := range listing.Addons {
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", a.Name, a.Type, a.Mode, a.Endpoint, strings.Join(a.Capabilities, ","))
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", addonLabel(a), a.Name, a.Type, addonEnvColumn(a), a.Mode, a.Endpoint, strings.Join(a.Capabilities, ","))
 				}
 				if err := tw.Flush(); err != nil {
 					return err
@@ -1588,6 +1620,26 @@ func newAddonListCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	return cmd
+}
+
+// addonLabel is what an operator addresses an instance by: its label, falling back to its cluster
+// name for a row from a control plane that predates labels — which is the right answer rather than a
+// defensive one, since an environment's first instance is labelled with its own name (ADR-0091 §2).
+func addonLabel(a client.Addon) string {
+	if a.Label != "" {
+		return a.Label
+	}
+	return a.Name
+}
+
+// addonEnvColumn renders the environment an instance serves, with a dash for a row that names none.
+// It is a column rather than something to read off a name: an environment may hold several instances
+// and a name no longer says which environment it belongs to (ADR-0091 §2).
+func addonEnvColumn(a client.Addon) string {
+	if a.Environment == "" {
+		return "-"
+	}
+	return a.Environment
 }
 
 // addonListEmpty is the empty-state line, which differs by target kind because the way out of it
@@ -1712,6 +1764,7 @@ func newAddonRemoveCmd() *cobra.Command {
 				}
 			}
 			res, err := c.RemoveAddon(ctx, name, client.RemoveAddonOptions{
+				Environment:       o.env,
 				DeleteData:        deleteData,
 				SkipFinalBackup:   skipFinalBackup,
 				BackupDestination: backupDestination,
@@ -1724,6 +1777,10 @@ func newAddonRemoveCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	// --env is how a removal that names an instance by its LABEL says which environment's it means: a
+	// label is unique within an environment, not across the cluster (ADR-0091 §2). A removal that names
+	// the registry name outright needs none of it.
+	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
 	cmd.Flags().BoolVar(&deleteData, "delete-data", false, "also DESTROY the add-on's data volume (for postgres: every attached app's database)")
 	cmd.Flags().BoolVar(&ackDataLoss, dataLossAckFlag, false, "acknowledge that --delete-data destroys the add-on's data, so it proceeds without the typed-name prompt (this is how a script asks for it). No shorthand: destroying every attached app's database should not be a single keystroke.")

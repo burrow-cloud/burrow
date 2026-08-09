@@ -44,19 +44,6 @@ const addonEnvLabel = "burrow.cloud/environment"
 // constant, and attributing it by shape would be the name-guessing AddonVolumes exists to avoid.
 const addonVolumeRole = "burrow.cloud/addon-volume"
 
-// addonName is the resource name of an environment's FIRST instance of add-on type t. The derivation
-// lives in the controlplane package (AddonInstanceName) so the engine, the registry, and this adapter
-// cannot drift on what that instance is called; the default environment keeps the unqualified name an
-// existing install already carries, so nothing migrates.
-//
-// IT IS NOT HOW AN OPERATION FINDS ITS INSTANCE ANY MORE (ADR-0091 §2). An environment may hold more
-// than one, so every adapter entry point is GIVEN the instance the engine resolved out of the
-// registry. What is left here are the paths that legitimately mean "this environment's own
-// instance": the superuser Secret of a default install, and nothing else.
-func addonName(t controlplane.AddonType, env string) (string, error) {
-	return controlplane.AddonInstanceName(t, env)
-}
-
 // vmagentServiceAccount is the ServiceAccount the metrics add-on's vmagent scraper runs as. It and
 // its pod-discovery Role/RoleBinding are NOT created by burrowd: burrowd holds only namespaced Roles
 // and is deliberately forbidden from creating RBAC (least privilege). The grant is staged by the CLI
@@ -235,14 +222,10 @@ const PostgresSuperuser = "burrow_admin"
 // The Secret is named after the INSTANCE, so every environment's instance has its own superuser
 // credential and this constant is the default environment's case of that rule (ADR-0067 §1) — which
 // is why an install predating environments keeps the Secret, the volume, and the password it already
-// has. Use postgresSecretName(env) on any path that can serve more than the default environment.
+// has. Every other instance's Secret is named after that instance, and the name comes from the
+// registry rather than from a derivation here (ADR-0091 §2): the engine resolves the instance and
+// hands it down, so this adapter composes no instance name of its own.
 const PostgresSecretName = "burrow-postgres"
-
-// postgresSecretName is the superuser Secret for environment env's Postgres instance: the instance's
-// own name, since the credential that opens a server belongs to that server alone (ADR-0067 §1).
-func postgresSecretName(env string) (string, error) {
-	return addonName(controlplane.AddonPostgres, env)
-}
 
 // PostgresPasswordKey is the key under which the superuser password is stored in PostgresSecretName.
 const PostgresPasswordKey = "password"

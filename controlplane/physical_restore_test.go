@@ -44,7 +44,7 @@ func takePhysicalBackup(t *testing.T, e *cp.Engine, k *fake.Kubernetes, osf *fak
 	t.Helper()
 	k.SetPhysicalBackupLabel(label)
 	seedManifest(t, osf, env, label)
-	res, err := e.BackupInstance(context.Background(), cp.AddonPostgres, env, "")
+	res, err := e.BackupInstance(context.Background(), cp.AddonPostgres, env, "", "")
 	if err != nil {
 		t.Fatalf("BackupInstance: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestRestoreInstanceFollowsEachAppsOwnVariable(t *testing.T) {
 		t.Fatalf("ApplyWorkload web: %v", err)
 	}
 	k.SetSecret("web", "PG_DSN", "postgres://old")
-	if err := d.SetAddonEnvKey(ctx, string(cp.AddonPostgres), "web", cp.DefaultEnvironment, "PG_DSN", time.Now()); err != nil {
+	if err := d.SetAddonEnvKey(ctx, string(cp.AddonPostgres), "web", cp.DefaultEnvironment, defaultInstance(cp.DefaultEnvironment), "PG_DSN", time.Now()); err != nil {
 		t.Fatalf("SetAddonEnvKey: %v", err)
 	}
 	backup := takePhysicalBackup(t, e, k, osf, cp.DefaultEnvironment, "20260801-020000F")
@@ -178,7 +178,7 @@ func TestRestoreInstanceRefusesALogicalBackup(t *testing.T) {
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	seedAttachedApp(t, k, "", "api")
 
-	dump, err := e.BackupAddon(ctx, cp.AddonPostgres, "api", "", "")
+	dump, err := e.BackupAddon(ctx, cp.AddonPostgres, "api", "", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestRestoreInstanceRefusesAnUnverifiedBackup(t *testing.T) {
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	// A physical row that never completed: the read-back found nothing at the key.
 	k.SetPhysicalBackupLabel("20260801-020000F")
-	if _, err := e.BackupInstance(ctx, cp.AddonPostgres, "", ""); err == nil {
+	if _, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "", ""); err == nil {
 		t.Fatal("BackupInstance with no manifest in the store: want a failure")
 	}
 	rows, err := d.ListBackups(ctx, "", "")

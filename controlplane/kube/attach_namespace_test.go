@@ -50,7 +50,17 @@ func TestAttachWritesTheAppSecretIntoTheEnvironmentsNamespace(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if _, err := engine.AttachAddon(ctx, cp.AddonPostgres, "shop", "", ""); err != nil {
+	// The instance an attach acts on is resolved from the registry rather than derived (ADR-0091 §2),
+	// so the default environment's own has to be registered first. Its label is its name, which is
+	// what an environment's first instance carries.
+	if err := db.SaveAddon(ctx, cp.AddonInfo{
+		Name: "burrow-postgres", Label: "burrow-postgres", Type: cp.AddonPostgres,
+		Environment: cp.DefaultEnvironment, Mode: "installed",
+	}); err != nil {
+		t.Fatalf("SaveAddon: %v", err)
+	}
+
+	if _, err := engine.AttachAddon(ctx, cp.AddonPostgres, "shop", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	secretName := cp.AppSecretName("shop")
@@ -68,7 +78,13 @@ func TestAttachWritesTheAppSecretIntoTheEnvironmentsNamespace(t *testing.T) {
 	if err := db.CreateEnvironment(ctx, "staging", "engine-apps-staging"); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
-	if _, err := engine.AttachAddon(ctx, cp.AddonPostgres, "shop", "staging", ""); err != nil {
+	if err := db.SaveAddon(ctx, cp.AddonInfo{
+		Name: "burrow-postgres-staging", Label: "burrow-postgres-staging", Type: cp.AddonPostgres,
+		Environment: "staging", Mode: "installed",
+	}); err != nil {
+		t.Fatalf("SaveAddon(staging): %v", err)
+	}
+	if _, err := engine.AttachAddon(ctx, cp.AddonPostgres, "shop", "staging", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon(staging): %v", err)
 	}
 	if _, err := client.CoreV1().Secrets("engine-apps-staging").Get(ctx, secretName, metav1.GetOptions{}); err != nil {

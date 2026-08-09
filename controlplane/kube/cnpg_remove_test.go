@@ -318,7 +318,7 @@ func TestDeleteAddonReportsThisEnvironmentsBackupClaim(t *testing.T) {
 	ctx := context.Background()
 	name := "burrow-postgres-staging"
 	cluster, claim := cnpgInstance(name, "staging")
-	want, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, "staging")
+	want, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, name)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -59,6 +59,13 @@ func (p *PostgresProvisioner) QueryAppDatabase(ctx context.Context, q controlpla
 	if _, err := p.targetFor(q.Env, q.Instance); err != nil {
 		return controlplane.SQLResult{}, err
 	}
+	// The environment is also checked for SHAPE, which the target no longer does for it: the
+	// instance is given rather than derived from the environment now (ADR-0091 §2), so a malformed
+	// environment would otherwise reach the connection and be discovered there. It names the app's
+	// namespace and the data this statement is about, and neither is a thing to be vague on.
+	if _, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, q.Env); err != nil {
+		return controlplane.SQLResult{}, err
+	}
 	if q.Namespace == "" {
 		return controlplane.SQLResult{}, fmt.Errorf("kube: running a statement for %s needs the namespace its Secret is in: %w", q.App, controlplane.ErrInvalid)
 	}

@@ -49,7 +49,7 @@ func TestRunBackupJobSpecAndSecretRef(t *testing.T) {
 	succeedJobs(client, &created)
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", nil); err != nil {
+	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", nil); err != nil {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
 
@@ -129,7 +129,7 @@ func TestRunRestoreJobSpec(t *testing.T) {
 	succeedJobs(client, &created)
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	if err := a.RunRestoreJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1"); err != nil {
+	if err := a.RunRestoreJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1"); err != nil {
 		t.Fatalf("RunRestoreJob: %v", err)
 	}
 	if len(created) != 1 {
@@ -156,7 +156,7 @@ func TestRunBackupJobRejectsBadApp(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	if _, err := a.RunBackupJob(ctx, "Bad_Name", controlplane.DefaultEnvironment, "bk1", nil); err == nil {
+	if _, err := a.RunBackupJob(ctx, "Bad_Name", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", nil); err == nil {
 		t.Error("RunBackupJob should reject a bad app identifier")
 	}
 	jobs, _ := client.BatchV1().Jobs(addonNS).List(ctx, metav1.ListOptions{})
@@ -187,10 +187,10 @@ func TestBackupJobTargetsTheEnvironmentsInstance(t *testing.T) {
 	succeedJobs(client, &created)
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	if _, err := a.RunBackupJob(ctx, "shop", "staging", "bk-staging", nil); err != nil {
+	if _, err := a.RunBackupJob(ctx, "shop", "staging", testInstance("staging"), "bk-staging", nil); err != nil {
 		t.Fatalf("RunBackupJob(staging): %v", err)
 	}
-	if err := a.RunRestoreJob(ctx, "shop", "staging", "bk-staging"); err != nil {
+	if err := a.RunRestoreJob(ctx, "shop", "staging", testInstance("staging"), "bk-staging"); err != nil {
 		t.Fatalf("RunRestoreJob(staging): %v", err)
 	}
 	if len(created) != 2 {
@@ -219,10 +219,10 @@ func TestBackupJobTargetsTheEnvironmentsInstance(t *testing.T) {
 
 	// No environment, no Job: the instance is settled before anything is created.
 	for _, env := range []string{"", "Staging"} {
-		if _, err := a.RunBackupJob(ctx, "shop", env, "bk2", nil); !errors.Is(err, controlplane.ErrInvalid) {
+		if _, err := a.RunBackupJob(ctx, "shop", env, testInstance(env), "bk2", nil); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("RunBackupJob(shop, %q) err = %v, want ErrInvalid", env, err)
 		}
-		if err := a.RunRestoreJob(ctx, "shop", env, "bk2"); !errors.Is(err, controlplane.ErrInvalid) {
+		if err := a.RunRestoreJob(ctx, "shop", env, testInstance(env), "bk2"); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("RunRestoreJob(shop, %q) err = %v, want ErrInvalid", env, err)
 		}
 	}
@@ -294,10 +294,10 @@ func TestBackupAndRestoreJobsCarryThePlatformMutator(t *testing.T) {
 		pod.NodeSelector = map[string]string{"pool": "platform"}
 	})
 
-	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", nil); err != nil {
+	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", nil); err != nil {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
-	if err := a.RunRestoreJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1"); err != nil {
+	if err := a.RunRestoreJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1"); err != nil {
 		t.Fatalf("RunRestoreJob: %v", err)
 	}
 	if len(created) != 2 {
@@ -411,15 +411,15 @@ func TestBackupAndRestoreMountTheirOwnEnvironmentsClaim(t *testing.T) {
 	var created []*batchv1.Job
 	succeedJobs(client, &created)
 
-	want, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, "staging")
+	want, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, testInstance("staging"))
 	if err != nil {
 		t.Fatalf("BackupVolumeName: %v", err)
 	}
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	if _, err := a.RunBackupJob(ctx, "shop", "staging", "bk1", nil); err != nil {
+	if _, err := a.RunBackupJob(ctx, "shop", "staging", testInstance("staging"), "bk1", nil); err != nil {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
-	if err := a.RunRestoreJob(ctx, "shop", "staging", "bk1"); err != nil {
+	if err := a.RunRestoreJob(ctx, "shop", "staging", testInstance("staging"), "bk1"); err != nil {
 		t.Fatalf("RunRestoreJob: %v", err)
 	}
 

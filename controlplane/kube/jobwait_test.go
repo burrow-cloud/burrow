@@ -148,7 +148,7 @@ func TestRunBackupJobFailsFastOnMissingSecret(t *testing.T) {
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	err := mustReturnWithin(t, "RunBackupJob", func() error {
-		_, e := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", nil)
+		_, e := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", nil)
 		return e
 	})
 	requireBlocked(t, err, controlplane.ReasonCreateContainerConfigError, `secret "burrow-pg-superuser" not found`)
@@ -178,7 +178,7 @@ func TestRunRestoreJobFailsFastOnUnschedulablePod(t *testing.T) {
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	err := mustReturnWithin(t, "RunRestoreJob", func() error {
-		return a.RunRestoreJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1")
+		return a.RunRestoreJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1")
 	})
 	requireBlocked(t, err, controlplane.ReasonUnschedulable, "Insufficient cpu")
 }
@@ -255,7 +255,7 @@ func TestJobWaitKeepsWaitingThroughTransientStates(t *testing.T) {
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	err := mustReturnWithin(t, "RunBackupJob", func() error {
-		_, e := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", nil)
+		_, e := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", nil)
 		return e
 	})
 	if err != nil {

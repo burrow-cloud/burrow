@@ -1849,7 +1849,7 @@ func confirmDeleteData(ctx context.Context, c *client.Client, name string, skipF
 // than dropping the sentence.
 func deleteDataConsequence(ctx context.Context, c *client.Client, name string, skipFinalBackup bool) string {
 	var b strings.Builder
-	addonType, addonEnv := addonInstanceOf(ctx, c, name)
+	addonType, _ := addonInstanceOf(ctx, c, name)
 	fmt.Fprintf(&b, "--delete-data DESTROYS the data volume %q in namespace %s. This cannot be undone.",
 		controlplane.AddonDataVolumeName(controlplane.AddonType(addonType), name), connect.DefaultAddonNamespace)
 	if addonType != string(controlplane.AddonPostgres) {
@@ -1859,11 +1859,13 @@ func deleteDataConsequence(ctx context.Context, c *client.Client, name string, s
 	if apps := attachedApps(ctx, c); len(apps) > 0 {
 		fmt.Fprintf(&b, ": %s", pluralApps(apps))
 	}
-	// This instance's OWN environment names the claim that survives: backups are held one claim per
-	// environment (ADR-0067 §1), and naming another environment's would describe a volume this
-	// removal is not touching. Best-effort like the rest of the notice — an unreadable listing costs
-	// the sentence, never the removal.
-	if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, addonEnv); err == nil {
+	// THIS INSTANCE names the claim that survives: backups are held one claim per INSTANCE
+	// (ADR-0067 §1 through ADR-0091 §4), and naming another instance's would describe a volume this
+	// removal is not touching. It is composed from the instance's own name rather than from its
+	// environment, which is what keeps it right for an environment holding more than one.
+	// Best-effort like the rest of the notice — an unreadable listing costs the sentence, never the
+	// removal.
+	if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, name); err == nil {
 		fmt.Fprintf(&b, ".\n  The backup volume %q is kept — recorded backups outlive the database they came from.", claim)
 	} else {
 		b.WriteString(".\n  This environment's backup volume is kept — recorded backups outlive the database they came from.")

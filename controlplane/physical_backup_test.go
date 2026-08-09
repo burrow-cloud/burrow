@@ -87,7 +87,7 @@ func TestBackupInstanceRecordsAPhysicalRow(t *testing.T) {
 	k.SetPhysicalBackupLabel("20260801-020000F")
 	seedManifest(t, osf, cp.DefaultEnvironment, "20260801-020000F")
 
-	res, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "")
+	res, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "", "")
 	if err != nil {
 		t.Fatalf("BackupInstance: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestBackupInstanceReadsTheBackupBackBeforeCompleting(t *testing.T) {
 	// The manifest is deliberately NOT seeded: CloudNativePG says completed, the store has nothing.
 
 	_ = osf
-	if _, err := e.BackupInstance(ctx, cp.AddonPostgres, "", ""); err == nil {
+	if _, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "", ""); err == nil {
 		t.Fatal("BackupInstance must fail when the backup cannot be read back")
 	}
 	list, err := d.ListBackups(ctx, "", "")
@@ -155,7 +155,7 @@ func TestBackupInstanceRefusesWithoutADestination(t *testing.T) {
 	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, "", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
-	_, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "")
+	_, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "", "")
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("BackupInstance with no provider = %v, want ErrInvalid", err)
 	}
@@ -178,7 +178,7 @@ func TestBackupInstanceRecordsTheReasonTheBackupObjectGave(t *testing.T) {
 	k.SetPhysicalBackupFailure(cp.BackupReasonStoreUnreachable, "the instance's write-ahead log is not reaching the repository")
 	k.SetError(fake.OpRunPhysicalBackup, errors.New("kube: Backup \"burrow-pg-backup-1\" is not archiving"))
 
-	if _, err := e.BackupInstance(ctx, cp.AddonPostgres, "", ""); err == nil {
+	if _, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "", ""); err == nil {
 		t.Fatal("BackupInstance must fail when the Backup object does")
 	}
 	list, err := d.ListBackups(ctx, "", "")
@@ -205,11 +205,11 @@ func TestRestoreRefusesAPhysicalBackup(t *testing.T) {
 	k.SetPhysicalBackupLabel("20260801-020000F")
 	seedManifest(t, osf, cp.DefaultEnvironment, "20260801-020000F")
 
-	res, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "")
+	res, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "", "")
 	if err != nil {
 		t.Fatalf("BackupInstance: %v", err)
 	}
-	err = e.RestoreAddon(ctx, cp.AddonPostgres, "web", res.Backup.ID, "", true)
+	err = e.RestoreAddon(ctx, cp.AddonPostgres, "web", res.Backup.ID, "", "", true)
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("RestoreAddon from a physical backup = %v, want ErrInvalid", err)
 	}
@@ -232,7 +232,7 @@ func TestBackupHealthCountsAPhysicalBackup(t *testing.T) {
 	installArchivingPostgres(t, e, d, creds, cp.DefaultEnvironment)
 	k.SetPhysicalBackupLabel("20260801-020000F")
 	seedManifest(t, osf, cp.DefaultEnvironment, "20260801-020000F")
-	if _, err := e.BackupInstance(ctx, cp.AddonPostgres, "", ""); err != nil {
+	if _, err := e.BackupInstance(ctx, cp.AddonPostgres, "", "", ""); err != nil {
 		t.Fatalf("BackupInstance: %v", err)
 	}
 

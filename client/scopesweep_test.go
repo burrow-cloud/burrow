@@ -177,7 +177,7 @@ func TestRemainingScopeNarrowingsAreRefusedByAnOlderControlPlane(t *testing.T) {
 		{
 			name: "a backup is taken from the wrong environment's instance",
 			call: func(c *client.Client) error {
-				_, err := c.BackupAddon(ctx, "postgres", "web", "staging", "")
+				_, err := c.BackupAddon(ctx, "postgres", "web", "staging", "", "")
 				return err
 			},
 			wider: "POST /v1/addons/backup",
@@ -186,7 +186,7 @@ func TestRemainingScopeNarrowingsAreRefusedByAnOlderControlPlane(t *testing.T) {
 		{
 			name: "a backup never leaves the cluster but is recorded as a completed backup",
 			call: func(c *client.Client) error {
-				_, err := c.BackupAddon(ctx, "postgres", "web", "", "b2")
+				_, err := c.BackupAddon(ctx, "postgres", "web", "", "", "b2")
 				return err
 			},
 			wider: "POST /v1/addons/backup",
@@ -317,15 +317,15 @@ func TestRemainingScopeRoutesOnAMatchedPair(t *testing.T) {
 			return err
 		}, "POST", "/v1/addons/env/staging/archive-destination/b2"},
 		{"backup in an environment", func() error {
-			_, err := c.BackupAddon(ctx, "postgres", "web", "staging", "")
+			_, err := c.BackupAddon(ctx, "postgres", "web", "staging", "", "")
 			return err
 		}, "POST", "/v1/addons/backup/env/staging"},
 		{"backup to a destination", func() error {
-			_, err := c.BackupAddon(ctx, "postgres", "web", "", "b2")
+			_, err := c.BackupAddon(ctx, "postgres", "web", "", "", "b2")
 			return err
 		}, "POST", "/v1/addons/backup/destination/b2"},
 		{"backup with both narrowings", func() error {
-			_, err := c.BackupAddon(ctx, "postgres", "web", "staging", "b2")
+			_, err := c.BackupAddon(ctx, "postgres", "web", "staging", "", "b2")
 			return err
 		}, "POST", "/v1/addons/backup/env/staging/destination/b2"},
 		{"the backups listing", func() error {
@@ -386,7 +386,7 @@ func TestRemainingScopeWithNoNarrowingKeepsTheUnnarrowedRoute(t *testing.T) {
 	if _, err := c.InstallAddon(ctx, "postgres", "", client.InstallAddonOptions{}); err != nil {
 		t.Errorf("addon install with no narrowing: %v", err)
 	}
-	if _, err := c.BackupAddon(ctx, "postgres", "web", "", ""); err != nil {
+	if _, err := c.BackupAddon(ctx, "postgres", "web", "", "", ""); err != nil {
 		t.Errorf("addon backup with no narrowing: %v", err)
 	}
 	if _, err := c.Backups(ctx, "postgres", "web", ""); err != nil {

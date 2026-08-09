@@ -41,6 +41,9 @@ func newBackupDestinationEngine(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fa
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// The instance a dump is taken from has to be registered, because the engine resolves it from
+	// the registry rather than deriving it (ADR-0091 §2).
+	installPostgresIn(t, e, cp.DefaultEnvironment)
 	return e, k, d, creds
 }
 
@@ -88,7 +91,7 @@ func TestBackupAddonFailedWriteLeavesNoCompletedRow(t *testing.T) {
 	k.SetBackupFailure(cp.BackupReasonStoreUnreachable, "the destination did not complete the write after 4 attempts")
 	k.SetError(fake.OpRunBackupJob, errors.New("kube: job \"burrow-pg-backup-1\" failed"))
 
-	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", ""); err == nil {
+	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "", ""); err == nil {
 		t.Fatal("BackupAddon should error when the backup does not reach its destination")
 	}
 
@@ -135,7 +138,7 @@ func TestBackupAddonBlockedJobRecordsItsIssueReason(t *testing.T) {
 	k.SetBackupFailure(cp.ReasonUnschedulable, "no node has room for the backup Job")
 	k.SetError(fake.OpRunBackupJob, errors.New("kube: job blocked"))
 
-	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", ""); err == nil {
+	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "", ""); err == nil {
 		t.Fatal("BackupAddon should error when the Job cannot start")
 	}
 	backups, _ := d.ListBackups(ctx, "web", "")
@@ -159,7 +162,7 @@ func TestBackupAddonWritesToRegisteredDestination(t *testing.T) {
 	seedObjectStoreProvider(t, d, creds, "backups")
 	k.SetBackupSize(4096)
 
-	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "")
+	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
@@ -195,7 +198,7 @@ func TestBackupAddonWithNoDestinationStaysInTheCluster(t *testing.T) {
 	e, k, d, _ := newBackupDestinationEngine(t)
 	k.SetBackupSize(2048)
 
-	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "")
+	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
@@ -226,7 +229,7 @@ func TestBackupAddonRefusesAnAmbiguousDestination(t *testing.T) {
 	seedObjectStoreProvider(t, d, creds, "b2")
 	seedObjectStoreProvider(t, d, creds, "r2")
 
-	_, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "")
+	_, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "", "")
 	if err == nil {
 		t.Fatal("BackupAddon should refuse when it cannot tell which destination holds the backup")
 	}
@@ -258,7 +261,7 @@ func TestBackupAddonNamedDestinationChoosesIt(t *testing.T) {
 	seedObjectStoreProvider(t, d, creds, "b2")
 	seedObjectStoreProvider(t, d, creds, "r2")
 
-	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "r2")
+	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "", "r2")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
@@ -269,7 +272,7 @@ func TestBackupAddonNamedDestinationChoosesIt(t *testing.T) {
 		t.Errorf("BackupJobs = %+v, want the r2 bucket", jobs)
 	}
 
-	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "nope"); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "", "nope"); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("naming an unregistered destination = %v, want ErrNotFound", err)
 	}
 }
@@ -295,7 +298,7 @@ func TestBackupResultCarriesNoCredential(t *testing.T) {
 	e, _, d, creds := newBackupDestinationEngine(t)
 	seedObjectStoreProvider(t, d, creds, "backups")
 
-	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "")
+	res, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}

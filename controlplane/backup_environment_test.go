@@ -28,14 +28,18 @@ import (
 // not only the row. A restore refused on the row alone would still have been reading bytes it should
 // never have been able to reach.
 
-// TestBackupVolumeNamePerEnvironment pins the derivation every layer shares: an environment resolves
-// to a claim, the default environment resolves to the claim an existing install already has, and no
-// two environments — and no environment and instance — can resolve to the same name.
+// TestBackupVolumeNamePerEnvironment pins the derivation every layer shares: an INSTANCE resolves to
+// a claim, the default environment's first instance resolves to the claim an existing install
+// already has, and no two instances — and no instance and claim — can resolve to the same name.
+//
+// It is per instance rather than per environment since ADR-0091 §4, and the property it protects is
+// unchanged one level down: two instances in one environment both holding a database called `web`
+// must not write the same path on one disk.
 func TestBackupVolumeNamePerEnvironment(t *testing.T) {
 	// The default environment's claim is the name that already exists, which is what makes this
 	// change move no bytes: every dump taken before backups were per-environment is on it, and it
 	// keeps being the claim the default environment mounts.
-	def, err := cp.BackupVolumeName(cp.AddonPostgres, cp.DefaultEnvironment)
+	def, err := cp.BackupVolumeName(cp.AddonPostgres, mustInstance(t, cp.AddonPostgres, cp.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("BackupVolumeName(default): %v", err)
 	}
@@ -43,7 +47,7 @@ func TestBackupVolumeNamePerEnvironment(t *testing.T) {
 		t.Errorf("default-environment backup claim = %q, want %q (no existing dump may move)", def, cp.PostgresBackupVolume)
 	}
 
-	staging, err := cp.BackupVolumeName(cp.AddonPostgres, "staging")
+	staging, err := cp.BackupVolumeName(cp.AddonPostgres, mustInstance(t, cp.AddonPostgres, "staging"))
 	if err != nil {
 		t.Fatalf("BackupVolumeName(staging): %v", err)
 	}
@@ -69,7 +73,7 @@ func TestBackupVolumeNamePerEnvironment(t *testing.T) {
 			}
 			seen[instance] = "the " + string(typ) + " instance of " + env
 
-			claim, cerr := cp.BackupVolumeName(typ, env)
+			claim, cerr := cp.BackupVolumeName(typ, instance)
 			if cerr != nil {
 				t.Fatalf("BackupVolumeName(%s, %s): %v", typ, env, cerr)
 			}
@@ -80,14 +84,24 @@ func TestBackupVolumeNamePerEnvironment(t *testing.T) {
 		}
 	}
 
-	// An unnamed environment is an error, not a synonym for the default: a signature that can omit
-	// it is a signature that will omit it, and the claim it would land on holds another
-	// environment's dumps (ADR-0067 §1).
+	// A generated instance gets a claim of its own, so a SECOND instance in one environment cannot
+	// write onto the first one's disk (ADR-0091 §4).
+	second, err := cp.BackupVolumeName(cp.AddonPostgres, "burrow-postgres-an4lyt")
+	if err != nil {
+		t.Fatalf("BackupVolumeName(generated instance): %v", err)
+	}
+	if second == def {
+		t.Errorf("a second instance's claim = %q, the same as the environment's own — two instances would share one disk", second)
+	}
+
+	// An unnamed instance is an error, not a synonym for the environment's own: a signature that can
+	// omit it is a signature that will omit it, and the claim it would land on holds another
+	// instance's dumps (ADR-0067 §1, ADR-0091 §4).
 	if _, err := cp.BackupVolumeName(cp.AddonPostgres, ""); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("BackupVolumeName with no environment = %v, want ErrInvalid", err)
+		t.Errorf("BackupVolumeName with no instance = %v, want ErrInvalid", err)
 	}
 	if _, err := cp.BackupVolumeName(cp.AddonPostgres, "Not A Label"); !errors.Is(err, cp.ErrInvalid) {
-		t.Errorf("BackupVolumeName with a malformed environment = %v, want ErrInvalid", err)
+		t.Errorf("BackupVolumeName with a malformed instance = %v, want ErrInvalid", err)
 	}
 }
 
@@ -138,12 +152,13 @@ func TestBackupsInTwoEnvironmentsLandOnTwoClaims(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 
-	prod, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, "")
+	prod, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon(prod): %v", err)
 	}
-	staging, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "")
+	staging, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon(staging): %v", err)
 	}
@@ -208,12 +223,13 @@ func TestRestoreRefusesAnotherEnvironmentsBackup(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 
-	prod, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, "")
+	prod, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon(prod): %v", err)
 	}
-	staging, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "")
+	staging, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon(staging): %v", err)
 	}
@@ -221,10 +237,10 @@ func TestRestoreRefusesAnotherEnvironmentsBackup(t *testing.T) {
 	// Staging's dump into production, and production's into staging. Neither is a valid source, and
 	// the one that would overwrite live production data is the reason this is refused rather than
 	// warned about.
-	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", staging.Backup.ID, cp.DefaultEnvironment, true); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", staging.Backup.ID, cp.DefaultEnvironment, "", true); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("restoring staging's dump into the default environment = %v, want ErrInvalid", err)
 	}
-	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", prod.Backup.ID, "staging", true); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", prod.Backup.ID, "staging", "", true); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("restoring the default environment's dump into staging = %v, want ErrInvalid", err)
 	}
 	if jobs := k.RestoreJobs(); len(jobs) != 0 {
@@ -232,7 +248,7 @@ func TestRestoreRefusesAnotherEnvironmentsBackup(t *testing.T) {
 	}
 
 	// Each environment can still restore its own, which is the property the refusal must not cost.
-	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", staging.Backup.ID, "staging", true); err != nil {
+	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", staging.Backup.ID, "staging", "", true); err != nil {
 		t.Fatalf("restoring staging's own dump: %v", err)
 	}
 	jobs := k.RestoreJobs()
@@ -255,6 +271,7 @@ func TestRestoreRefusesADumpOnAnotherClaim(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 
 	// A row exactly as the pre-change code would have left it, and as migration 00027 backfills it:
 	// taken in staging, written to the one claim that existed.
@@ -272,7 +289,7 @@ func TestRestoreRefusesADumpOnAnotherClaim(t *testing.T) {
 		t.Fatalf("RecordBackup: %v", err)
 	}
 
-	err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", legacy.ID, "staging", true)
+	err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", legacy.ID, "staging", "", true)
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("restore of a dump on the shared claim = %v, want ErrInvalid", err)
 	}
@@ -293,7 +310,7 @@ func TestRestoreRefusesADumpOnAnotherClaim(t *testing.T) {
 	if err := d.RecordBackup(ctx, kept); err != nil {
 		t.Fatalf("RecordBackup: %v", err)
 	}
-	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", kept.ID, cp.DefaultEnvironment, true); err != nil {
+	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", kept.ID, cp.DefaultEnvironment, "", true); err != nil {
 		t.Fatalf("a backup recorded before this change must still restore: %v", err)
 	}
 }
@@ -307,6 +324,7 @@ func TestRemoveRetainsThisEnvironmentsBackupClaim(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 	instance, err := cp.AddonInstanceName(cp.AddonPostgres, "staging")
 	if err != nil {
 		t.Fatalf("AddonInstanceName: %v", err)
@@ -314,7 +332,7 @@ func TestRemoveRetainsThisEnvironmentsBackupClaim(t *testing.T) {
 	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, "staging", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon: %v", err)
 	}
-	backup, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "")
+	backup, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}

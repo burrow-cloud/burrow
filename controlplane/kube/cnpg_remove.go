@@ -159,7 +159,7 @@ func (a *Adapter) deletePostgresCluster(ctx context.Context, name string, delete
 	// path survivable. It is a claim Burrow creates and owns on the ADR-0032 dump path, unrelated to
 	// the `Cluster`, so nothing above could have reached it — it is reported so the operator knows
 	// the storage is still allocated and can reclaim it deliberately.
-	if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, env); err == nil {
+	if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, name); err == nil {
 		if _, err := a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace).
 			Get(ctx, claim, metav1.GetOptions{}); err == nil {
 			removal.RetainedBackupVolume = claim

@@ -45,7 +45,7 @@ func archivingInstance(t *testing.T) (*kube.Adapter, dynamic.Interface) {
 	t.Helper()
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
-	if _, err := a.DeployAddon(context.Background(), postgresSpec(t), controlplane.DefaultEnvironment,
+	if _, err := a.DeployAddon(context.Background(), postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment),
 		testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestRunPhysicalBackupCreatesTheBackupObject(t *testing.T) {
 	a, dyn := archivingInstance(t)
 	settledBackup(t, dyn, "b1", map[string]any{"phase": "completed", "backupName": "20260801-020000F"})
 
-	out, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1", testArchive(controlplane.DefaultEnvironment, 30))
+	out, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "b1", testArchive(controlplane.DefaultEnvironment, 30))
 	if err != nil {
 		t.Fatalf("RunPhysicalBackup: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestRunPhysicalBackupTellsTheTwoFailuresApart(t *testing.T) {
 			a, dyn := archivingInstance(t)
 			settledBackup(t, dyn, "b1", map[string]any{"phase": tc.phase, "error": "pgbackrest exited 1"})
 
-			out, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1", testArchive(controlplane.DefaultEnvironment, 30))
+			out, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "b1", testArchive(controlplane.DefaultEnvironment, 30))
 			if err == nil {
 				t.Fatalf("RunPhysicalBackup on phase %q must fail", tc.phase)
 			}
@@ -124,11 +124,11 @@ func TestRunPhysicalBackupRefusesAnInstanceThatDoesNotArchive(t *testing.T) {
 	ctx := context.Background()
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
-	_, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1", testArchive(controlplane.DefaultEnvironment, 30))
+	_, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "b1", testArchive(controlplane.DefaultEnvironment, 30))
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("RunPhysicalBackup on a non-archiving instance = %v, want ErrInvalid", err)
 	}
@@ -150,7 +150,7 @@ func TestRunPhysicalBackupRefusesAMissingInstance(t *testing.T) {
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	_, err := a.RunPhysicalBackup(context.Background(), controlplane.DefaultEnvironment, "b1", testArchive(controlplane.DefaultEnvironment, 30))
+	_, err := a.RunPhysicalBackup(context.Background(), controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "b1", testArchive(controlplane.DefaultEnvironment, 30))
 	if !errors.Is(err, controlplane.ErrNotFound) {
 		t.Fatalf("RunPhysicalBackup with no instance = %v, want ErrNotFound", err)
 	}
@@ -195,7 +195,7 @@ func TestRunPhysicalBackupRefusesAMismatchedDestination(t *testing.T) {
 
 	other := testArchive(controlplane.DefaultEnvironment, 30)
 	other.Config.Bucket = "somebody-elses-bucket"
-	_, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, "b1", other)
+	_, err := a.RunPhysicalBackup(ctx, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "b1", other)
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("RunPhysicalBackup against a mismatched destination = %v, want ErrInvalid", err)
 	}

@@ -48,6 +48,11 @@ func newEnvPostgresEngine(t *testing.T, appNamespace string) (*cp.Engine, *fake.
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// The default environment's instance is INSTALLED: every consumer resolves the instance it acts
+	// on from the registry rather than deriving it (ADR-0091 §2), so an environment with no Postgres
+	// registered has no instance to attach to. A test about a second environment installs that one
+	// too.
+	installPostgresIn(t, e, cp.DefaultEnvironment)
 	return e, k, d, prov
 }
 
@@ -117,12 +122,13 @@ func TestAttachInTwoEnvironmentsGetsTwoDatabases(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 
-	prodRes, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, "")
+	prodRes, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", cp.DefaultEnvironment, cp.AttachAddonOptions{})
 	if err != nil {
 		t.Fatalf("AttachAddon(default): %v", err)
 	}
-	stagingRes, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "staging", "")
+	stagingRes, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "staging", cp.AttachAddonOptions{})
 	if err != nil {
 		t.Fatalf("AttachAddon(staging): %v", err)
 	}
@@ -130,8 +136,12 @@ func TestAttachInTwoEnvironmentsGetsTwoDatabases(t *testing.T) {
 		t.Errorf("attach results name environments %q and %q, want default and staging", prodRes.Environment, stagingRes.Environment)
 	}
 
-	// Two provisioning calls, each naming its own environment.
-	want := []fake.AppDatabase{{App: "web", Env: cp.DefaultEnvironment}, {App: "web", Env: "staging"}}
+	// Two provisioning calls, each naming its own environment AND its own instance — the environment
+	// says whose data it is and the instance says which server (ADR-0067 §1, ADR-0091 §4).
+	want := []fake.AppDatabase{
+		{App: "web", Env: cp.DefaultEnvironment, Instance: mustInstance(t, cp.AddonPostgres, cp.DefaultEnvironment)},
+		{App: "web", Env: "staging", Instance: mustInstance(t, cp.AddonPostgres, "staging")},
+	}
 	got := prov.Ensured()
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("EnsureAppDatabase calls = %v, want %v", got, want)
@@ -174,10 +184,10 @@ func TestAttachIsIdempotentWithinOneEnvironment(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := newEnvPostgresEngine(t, "burrow-apps")
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("re-attach in the same environment should succeed: %v", err)
 	}
 	if dbs := prov.Databases(cp.DefaultEnvironment); len(dbs) != 1 {
@@ -199,8 +209,9 @@ func TestDetachDropsOnlyTheNamedEnvironment(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 	for _, env := range []string{cp.DefaultEnvironment, "staging"} {
-		if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", env, ""); err != nil {
+		if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", env, cp.AttachAddonOptions{}); err != nil {
 			t.Fatalf("AttachAddon(%s): %v", env, err)
 		}
 	}
@@ -208,7 +219,8 @@ func TestDetachDropsOnlyTheNamedEnvironment(t *testing.T) {
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "staging", cp.DetachAddonOptions{DeleteData: true, Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon(staging): %v", err)
 	}
-	if dropped := prov.Dropped(); len(dropped) != 1 || dropped[0] != (fake.AppDatabase{App: "web", Env: "staging"}) {
+	wantDropped := fake.AppDatabase{App: "web", Env: "staging", Instance: mustInstance(t, cp.AddonPostgres, "staging")}
+	if dropped := prov.Dropped(); len(dropped) != 1 || dropped[0] != wantDropped {
 		t.Fatalf("DropAppDatabase calls = %v, want one for staging only", dropped)
 	}
 	if dbs := prov.Databases(cp.DefaultEnvironment); len(dbs) != 1 || dbs[0] != "web" {
@@ -236,8 +248,9 @@ func TestAttachRefusesWhenTheEnvironmentIsAmbiguous(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 
-	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "")
+	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{})
 	if _, ok := cp.AsAmbiguousEnvironment(err); !ok {
 		t.Fatalf("attach with no environment = %v, want an AmbiguousEnvironmentError", err)
 	}
@@ -246,7 +259,7 @@ func TestAttachRefusesWhenTheEnvironmentIsAmbiguous(t *testing.T) {
 	}
 
 	// An unregistered environment is a clear ErrNotFound, again before anything is provisioned.
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "ghost", ""); !errors.Is(err, cp.ErrNotFound) {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "ghost", cp.AttachAddonOptions{}); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("attach into an unregistered environment = %v, want ErrNotFound", err)
 	}
 	if got := prov.Ensured(); len(got) != 0 {
@@ -263,6 +276,7 @@ func TestInstallAddonPerEnvironmentStandsUpSeparateInstances(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 
 	def, err := e.InstallAddon(ctx, cp.AddonPostgres, cp.DefaultEnvironment, cp.InstallAddonOptions{Confirm: true})
 	if err != nil {
@@ -319,6 +333,7 @@ func TestRemoveAddonNamesOnlyItsOwnEnvironmentsApps(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, "staging", cp.InstallAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("InstallAddon(staging): %v", err)
 	}
@@ -344,8 +359,9 @@ func TestBackupAndRestoreAreEnvironmentScoped(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
+	installPostgresIn(t, e, "staging")
 
-	stgBackup, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "")
+	stgBackup, err := e.BackupAddon(ctx, cp.AddonPostgres, "web", "staging", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon(staging): %v", err)
 	}
@@ -357,7 +373,7 @@ func TestBackupAndRestoreAreEnvironmentScoped(t *testing.T) {
 	}
 
 	// The dump restores into the environment it came from.
-	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", stgBackup.Backup.ID, "staging", true); err != nil {
+	if err := e.RestoreAddon(ctx, cp.AddonPostgres, "web", stgBackup.Backup.ID, "staging", "", true); err != nil {
 		t.Fatalf("RestoreAddon(staging): %v", err)
 	}
 	if jobs := k.RestoreJobs(); len(jobs) != 1 || jobs[0].Env != "staging" {
@@ -365,7 +381,7 @@ func TestBackupAndRestoreAreEnvironmentScoped(t *testing.T) {
 	}
 
 	// And it is refused as a source for another environment's live database.
-	err = e.RestoreAddon(ctx, cp.AddonPostgres, "web", stgBackup.Backup.ID, cp.DefaultEnvironment, true)
+	err = e.RestoreAddon(ctx, cp.AddonPostgres, "web", stgBackup.Backup.ID, cp.DefaultEnvironment, "", true)
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("restoring staging's dump into the default environment = %v, want ErrInvalid", err)
 	}

@@ -200,7 +200,7 @@ func TestAttachProvisionsThroughObjectsAndOpensNoSuperuserConnection(t *testing.
 	ctx := context.Background()
 	p, dyn, rec := provisionerFor(t, addonNS)
 
-	dsn, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment)
+	dsn, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestAttachRevokesPublicConnectAsTheDatabaseOwner(t *testing.T) {
 	ctx := context.Background()
 	p, _, rec := provisionerFor(t, addonNS)
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
 
@@ -324,13 +324,13 @@ func TestAttachAdoptsAnExistingInstall(t *testing.T) {
 	p, dyn, _ := provisionerFor(t, addonNS)
 	name := provisioningObjectName(PostgresSecretName, "web")
 
-	first, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment)
+	first, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("first attach: %v", err)
 	}
 	dyn.ClearActions()
 
-	second, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment)
+	second, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("re-attach: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestAttachWaitsForTheOperatorAndReportsWhatItSaid(t *testing.T) {
 		return true, u, nil
 	})
 
-	_, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment)
+	_, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err == nil {
 		t.Fatal("EnsureAppDatabase succeeded against an operator that never applied the Database")
 	}
@@ -408,7 +408,7 @@ func TestAttachProvesTheCredentialBeforeHandingItOut(t *testing.T) {
 	p, _, rec := provisionerFor(t, addonNS)
 	rec.refusals = 2
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
 	if len(rec.dsns) != 3 {
@@ -424,7 +424,7 @@ func TestAttachNeverHandsOutACredentialTheServerRefuses(t *testing.T) {
 	p, _, rec := provisionerFor(t, addonNS)
 	rec.refusals = 1 << 30 // never accepted
 
-	_, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment)
+	_, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err == nil {
 		t.Fatal("EnsureAppDatabase returned a connection string the server would not accept")
 	}
@@ -442,7 +442,7 @@ func TestAttachLeavesTheDataSafeFromAnObjectGoingAway(t *testing.T) {
 	p, dyn, _ := provisionerFor(t, addonNS)
 	name := provisioningObjectName(PostgresSecretName, "web")
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
 	// Asserted on the objects themselves, because it is the objects — not this code — that decide
@@ -472,7 +472,7 @@ func TestAttachGivesTheLoginRoleTheDataRole(t *testing.T) {
 	ctx := context.Background()
 	p, dyn, _ := provisionerFor(t, addonNS)
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
 
@@ -510,13 +510,13 @@ func TestDetachKeepsTheDatabaseAndDropsTheRole(t *testing.T) {
 	name := provisioningObjectName(PostgresSecretName, "web")
 	dataName := dataRoleObjectName(PostgresSecretName, "web")
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
 	deleted := recordDeletions(dyn)
 	before := len(rec.statements)
 
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("RevokeAppDatabase: %v", err)
 	}
 
@@ -577,7 +577,7 @@ func TestDetachKeepsTheDatabaseAndDropsTheRole(t *testing.T) {
 	}
 
 	// Detaching twice is a no-op, not an error: a half-finished attach has to be tearable down.
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Errorf("a second detach: %v", err)
 	}
 }
@@ -590,15 +590,15 @@ func TestReAttachAfterADetachAdoptsTheKeptDatabase(t *testing.T) {
 	p, dyn, _ := provisionerFor(t, addonNS)
 	name := provisioningObjectName(PostgresSecretName, "web")
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("RevokeAppDatabase: %v", err)
 	}
 	dyn.ClearActions()
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("re-attach after a detach: %v", err)
 	}
 	for _, action := range dyn.Actions() {
@@ -633,7 +633,7 @@ func TestDetachDeleteDataDestroysTheDataThroughTheObjects(t *testing.T) {
 	name := provisioningObjectName(PostgresSecretName, "web")
 	dataName := dataRoleObjectName(PostgresSecretName, "web")
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
 
@@ -642,7 +642,7 @@ func TestDetachDeleteDataDestroysTheDataThroughTheObjects(t *testing.T) {
 	deleted := recordDeletions(dyn)
 
 	before := len(rec.statements)
-	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("DropAppDatabase: %v", err)
 	}
 	if len(rec.statements) != before {
@@ -695,7 +695,7 @@ func TestDetachDeleteDataDestroysTheDataThroughTheObjects(t *testing.T) {
 	}
 
 	// Running it twice is a no-op, not an error: a half-finished attach has to be tearable down.
-	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Errorf("a second --delete-data: %v", err)
 	}
 }
@@ -713,7 +713,7 @@ func TestDetachDescribesAnAttachmentItNeverProvisioned(t *testing.T) {
 
 	// No attach: nothing has ever written an object for this app.
 	deleted := recordDeletions(dyn)
-	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("DropAppDatabase: %v", err)
 	}
 	db, ok := deleted.spec(cnpgDatabaseGVR, name)
@@ -750,7 +750,7 @@ func TestDetachRevokesAnAttachmentItNeverProvisioned(t *testing.T) {
 	name := provisioningObjectName(PostgresSecretName, "web")
 
 	deleted := recordDeletions(dyn)
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("RevokeAppDatabase: %v", err)
 	}
 	role, ok := deleted.spec(cnpgDatabaseRoleGVR, name)
@@ -801,13 +801,13 @@ func TestProvisionerWithoutADynamicClientProvisionsNothing(t *testing.T) {
 	}), nil, AddonInstanceTarget(addonNS))
 	p.open = rec.open
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("EnsureAppDatabase err = %v, want ErrInvalid", err)
 	}
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("RevokeAppDatabase err = %v, want ErrInvalid", err)
 	}
-	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("DropAppDatabase err = %v, want ErrInvalid", err)
 	}
 	if len(rec.dsns) != 0 {
@@ -828,7 +828,7 @@ func TestRolePasswordSecretInTheWrongShapeIsRefused(t *testing.T) {
 		Data:       map[string][]byte{PostgresPasswordKey: []byte("left-behind")},
 	})
 
-	_, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment)
+	_, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("EnsureAppDatabase err = %v, want ErrInvalid", err)
 	}
@@ -849,7 +849,7 @@ func TestRolePasswordSecretInTheWrongShapeIsRefused(t *testing.T) {
 func TestApplySurvivesTheOperatorWritingTheObjectUnderIt(t *testing.T) {
 	ctx := context.Background()
 	p, dyn, _ := provisionerFor(t, addonNS)
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("seed attach: %v", err)
 	}
 
@@ -866,7 +866,7 @@ func TestApplySurvivesTheOperatorWritingTheObjectUnderIt(t *testing.T) {
 			errors.New("the object has been modified; please apply your changes to the latest version and try again"))
 	})
 
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("a detach failed on a resource-version conflict it caused itself: %v", err)
 	}
 	if conflicts != 2 {

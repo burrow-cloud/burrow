@@ -336,7 +336,7 @@ func (e *Engine) configureStandbys(ctx context.Context, t AddonType, targetEnv, 
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
 
-	if err := e.k8s.ConfigureAddonInstance(ctx, ConfigureInstanceRequest{Addon: t, Environment: targetEnv, Standbys: &to}); err != nil {
+	if err := e.k8s.ConfigureAddonInstance(ctx, ConfigureInstanceRequest{Addon: t, Environment: targetEnv, Instance: inst.Name, Standbys: &to}); err != nil {
 		e.recordExecution(ctx, auditOpAddonConfig, instance, args, err)
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s in environment %s: %w", t, targetEnv, err)
 	}
@@ -402,7 +402,7 @@ func (e *Engine) configureStorage(ctx context.Context, t AddonType, targetEnv st
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
 
-	if err := e.k8s.ConfigureAddonInstance(ctx, ConfigureInstanceRequest{Addon: t, Environment: targetEnv, Storage: value}); err != nil {
+	if err := e.k8s.ConfigureAddonInstance(ctx, ConfigureInstanceRequest{Addon: t, Environment: targetEnv, Instance: inst.Name, Storage: value}); err != nil {
 		e.recordExecution(ctx, auditOpAddonConfig, instance, args, err)
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s in environment %s: %w", t, targetEnv, err)
 	}

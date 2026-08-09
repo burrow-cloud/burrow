@@ -70,7 +70,7 @@ func restorableInstance(t *testing.T) (*kube.Adapter, dynamic.Interface, *k8sfak
 	}
 	client, dyn := recoveringCluster(instanceClaim(instance))
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
-	if _, err := a.DeployAddon(context.Background(), postgresSpec(t), controlplane.DefaultEnvironment,
+	if _, err := a.DeployAddon(context.Background(), postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment),
 		testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
@@ -89,6 +89,7 @@ func TestRestoreInstanceRecoversUnderTheInstancesOwnName(t *testing.T) {
 
 	out, err := a.RestoreInstance(ctx, controlplane.RestoreInstanceRequest{
 		Environment: controlplane.DefaultEnvironment,
+		Instance:    testInstance(controlplane.DefaultEnvironment),
 		BackupLabel: "20260801-020000F",
 		Archive:     testArchive(controlplane.DefaultEnvironment, 30),
 	})
@@ -168,6 +169,7 @@ func TestRestoreInstanceRecoversToATime(t *testing.T) {
 
 	if _, err := a.RestoreInstance(ctx, controlplane.RestoreInstanceRequest{
 		Environment: controlplane.DefaultEnvironment,
+		Instance:    testInstance(controlplane.DefaultEnvironment),
 		TargetTime:  "2026-08-01T14:30:00Z",
 		Archive:     testArchive(controlplane.DefaultEnvironment, 30),
 	}); err != nil {
@@ -191,6 +193,7 @@ func TestRestoreInstanceWithNoTargetRecoversTheNewestState(t *testing.T) {
 
 	if _, err := a.RestoreInstance(ctx, controlplane.RestoreInstanceRequest{
 		Environment: controlplane.DefaultEnvironment,
+		Instance:    testInstance(controlplane.DefaultEnvironment),
 		Archive:     testArchive(controlplane.DefaultEnvironment, 30),
 	}); err != nil {
 		t.Fatalf("RestoreInstance: %v", err)
@@ -214,6 +217,7 @@ func TestRestoreInstanceRefusesAMismatchedStanza(t *testing.T) {
 
 	_, err := a.RestoreInstance(ctx, controlplane.RestoreInstanceRequest{
 		Environment: controlplane.DefaultEnvironment,
+		Instance:    testInstance(controlplane.DefaultEnvironment),
 		Archive:     elsewhere,
 	})
 	if !errors.Is(err, controlplane.ErrInvalid) {
@@ -236,12 +240,13 @@ func TestRestoreInstanceRefusesAnInstanceWithNoRepository(t *testing.T) {
 	ctx := context.Background()
 	client, dyn := recoveringCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
 	_, err := a.RestoreInstance(ctx, controlplane.RestoreInstanceRequest{
 		Environment: controlplane.DefaultEnvironment,
+		Instance:    testInstance(controlplane.DefaultEnvironment),
 		Archive:     testArchive(controlplane.DefaultEnvironment, 30),
 	})
 	if !errors.Is(err, controlplane.ErrNotFound) {
@@ -264,6 +269,7 @@ func TestRestoreInstanceRecoversAnInstanceThatIsGone(t *testing.T) {
 
 	out, err := a.RestoreInstance(ctx, controlplane.RestoreInstanceRequest{
 		Environment: controlplane.DefaultEnvironment,
+		Instance:    testInstance(controlplane.DefaultEnvironment),
 		Archive:     testArchive(controlplane.DefaultEnvironment, 30),
 	})
 	if err != nil {
@@ -290,6 +296,7 @@ func TestRestoreInstanceKeepsTheSuperuserSecret(t *testing.T) {
 
 	if _, err := a.RestoreInstance(ctx, controlplane.RestoreInstanceRequest{
 		Environment: controlplane.DefaultEnvironment,
+		Instance:    testInstance(controlplane.DefaultEnvironment),
 		Archive:     testArchive(controlplane.DefaultEnvironment, 30),
 	}); err != nil {
 		t.Fatalf("RestoreInstance: %v", err)
@@ -313,6 +320,7 @@ func TestRestoreInstanceKeepsTheRepositoryConfiguration(t *testing.T) {
 
 	if _, err := a.RestoreInstance(ctx, controlplane.RestoreInstanceRequest{
 		Environment: controlplane.DefaultEnvironment,
+		Instance:    testInstance(controlplane.DefaultEnvironment),
 		Archive:     testArchive(controlplane.DefaultEnvironment, 30),
 	}); err != nil {
 		t.Fatalf("RestoreInstance: %v", err)

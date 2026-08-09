@@ -162,6 +162,35 @@ func Token(installID string) string {
 	return c.Token
 }
 
+// EnsureWritable checks that a credential could be stored, without storing one. It exists because of
+// the ORDER a sign-in happens in: burrowd mints the token, returns it once, and never produces it
+// again, so a write that fails afterwards has destroyed a credential that already exists on the
+// server. On a first claim that is worse than it sounds — the install is now claimed by a principal
+// whose only token is gone.
+//
+// So the directory is created and probed BEFORE anything is minted, which turns the common cause of
+// that state (a home directory that cannot be written) into a refusal with nothing lost. It cannot
+// rule the state out — a disk can fill between the probe and the write — and it removes the case
+// that actually happens.
+func EnsureWritable() error {
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	// Writing and removing a real file, rather than stat-ing the directory: a read-only filesystem, a
+	// full disk and a directory somebody else owns all pass a stat and fail a write.
+	probe := filepath.Join(dir, ".writable-probe")
+	if err := credfile.Write(probe, nil); err != nil {
+		return err
+	}
+	// An already-removed probe is not a failure: two sign-ins running at once each write and remove
+	// one, and the write is what was being established.
+	if err := os.Remove(probe); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("clustercred: removing %s: %w", probe, err)
+	}
+	return nil
+}
+
 // Store writes an install's credential and returns the path it wrote. The file handling — 0600 under
 // a 0700 directory, an O_EXCL temporary and a rename — is internal/credfile's.
 func Store(cred Credential) (string, error) {

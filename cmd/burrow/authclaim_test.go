@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,6 +167,33 @@ func TestSignInOnAClaimedInstallLeavesAWorkingSetup(t *testing.T) {
 	}
 	if !strings.Contains(got.Line, "admin") || !strings.Contains(got.Line, "shared token") {
 		t.Errorf("line = %q, want it to name the admin and say the shared token still works", got.Line)
+	}
+}
+
+// TestSignInAsksForNothingItCannotSave is the ordering that matters most here. burrowd returns a
+// token once, so a write that fails afterwards destroys a credential that already exists on the
+// server — and on a FIRST claim that leaves the install claimed by a principal whose only token is
+// gone, which no second claim recovers. Nothing may be minted until the write is known to work.
+func TestSignInAsksForNothingItCannotSave(t *testing.T) {
+	// A file where the credentials directory should be: nothing can be created inside it.
+	home := t.TempDir()
+	t.Setenv("BURROW_CONFIG", filepath.Join(home, "config"))
+	if err := os.WriteFile(filepath.Join(home, "credentials"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	asked := stubSignInControlPlane(t, http.StatusOK, `{"principal_id":"p-1","principal":"ada","install_id":"install-abc","token":"ada-token"}`)
+
+	tgt := localconfig.KubernetesTarget("do-nyc1-cluster")
+	got := signInToCluster(context.Background(), "", "ada", &tgt)
+
+	if got.Issued {
+		t.Error("Issued = true when the credential could not have been saved")
+	}
+	if len(*asked) != 0 {
+		t.Errorf("a claim was sent (%s) despite there being nowhere to put the result", *asked)
+	}
+	if !strings.Contains(got.Line, "Nothing was changed on the cluster") {
+		t.Errorf("line = %q, want it to say the cluster was not touched", got.Line)
 	}
 }
 

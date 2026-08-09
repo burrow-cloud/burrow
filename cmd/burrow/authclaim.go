@@ -70,6 +70,15 @@ type signInResult struct {
 // target with both facts on it — a credential recorded against no install would name no file, and an
 // install id recorded with no credential would send the header and present the shared token.
 func signInToCluster(ctx context.Context, kubeconfig, name string, tgt *localconfig.Target) signInResult {
+	// Whether the credential can be SAVED is checked before one is asked for. burrowd returns a token
+	// once, so a write that fails afterwards destroys a credential that already exists on the server —
+	// and on a first claim that leaves the install claimed by a principal whose only token is gone.
+	if err := clustercred.EnsureWritable(); err != nil {
+		return signInResult{Line: fmt.Sprintf(
+			"No credential was requested, because there is nowhere to save one: %s\nNothing was changed on the cluster. Your commands use the install's shared token, which keeps working.",
+			firstLine(err))}
+	}
+
 	c, err := signInTransport(kubeconfig, tgt.Context).Connect(ctx)
 	if err != nil {
 		return signInResult{Line: fmt.Sprintf(
@@ -98,11 +107,15 @@ func signInToCluster(ctx context.Context, kubeconfig, name string, tgt *localcon
 		Token:        cred.Token,
 	})
 	if err != nil {
-		// The credential exists on the server and cannot be written down. Say so plainly: it is not
-		// recoverable — burrowd returns a token once — and the way out is to sign in again.
+		// The write was probed before anything was minted, so reaching here means the filesystem
+		// changed underneath the sign-in. Say what it costs rather than offering a remedy that will
+		// not work: the token is gone for good, this install is now claimed, and a second claim is
+		// refused — so signing in again does NOT hand out another. What still works is the shared
+		// install token, which is exactly what ADR-0084 §8 keeps it for.
 		return signInResult{Line: fmt.Sprintf(
-			"A credential was issued and could not be saved: %s\nIt cannot be shown again. Fix the path and run `burrow auth login --context %s` to be issued another.",
-			firstLine(err), tgt.Context)}
+			"A credential was issued and could not be saved: %s\nIt cannot be shown again, and this install now has an admin, so signing in will not issue another.\n"+
+				"Your commands use the install's shared token, which keeps working and reaches everything it did before.",
+			firstLine(err))}
 	}
 	tgt.InstallID = cred.InstallID
 

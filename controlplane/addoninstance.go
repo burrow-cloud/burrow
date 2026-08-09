@@ -68,16 +68,21 @@ func (e *Engine) noSuchInstance(ctx context.Context, t AddonType, env, label, wa
 		return fmt.Errorf("no %s add-on is installed in environment %s (install one with `burrow addon install %s --env %s`): %w",
 			t, env, t, env, ErrNotFound)
 	}
+	// The way out names the verb AND that a PERSON runs it (ADR-0065 §7, ADR-0091 §5). Creating an
+	// instance provisions a pod and a volume nobody approved, so it is not something the agent can do
+	// for itself — and an agent that relays "a person can add one with this command" has done the
+	// useful half of the work.
+	add := fmt.Sprintf("a person can add one with `burrow addon install %s --name %s --env %s`", t, wanted, env)
 	known, err := e.db.AddonsInEnvironment(ctx, t, env)
 	if err != nil || len(known) == 0 {
-		return fmt.Errorf("environment %s has no %s instance called %q: %w", env, t, wanted, ErrNotFound)
+		return fmt.Errorf("environment %s has no %s instance called %q; %s: %w", env, t, wanted, add, ErrNotFound)
 	}
 	labels := make([]string, 0, len(known))
 	for _, a := range known {
-		labels = append(labels, a.Label)
+		labels = append(labels, instanceLabel(a))
 	}
-	return fmt.Errorf("environment %s has no %s instance called %q; it has %s: %w",
-		env, t, wanted, strings.Join(labels, ", "), ErrNotFound)
+	return fmt.Errorf("environment %s has no %s instance called %q; it has %s, and %s: %w",
+		env, t, wanted, strings.Join(labels, ", "), add, ErrNotFound)
 }
 
 // installTarget decides what an install acts on: the label it is addressed by, and the name the

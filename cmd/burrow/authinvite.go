@@ -113,7 +113,9 @@ func inviteLines(out io.Writer, cred client.ClusterCredential) string {
 	if name == "" {
 		name = "they"
 	}
-	s := fmt.Sprintf("%s invited %s.\n\n", okMark(out), name)
+	// No full stop on the first line: the target clause is appended to it (actedon.go), so it reads
+	// "invited ada on kube context …" rather than breaking mid-sentence.
+	s := fmt.Sprintf("%s invited %s\n\n", okMark(out), name)
 	s += "Send them this, and the command to run:\n\n"
 	s += "  burrow auth login --context <their-kube-context> --invite " + cred.Token + "\n\n"
 	s += "It is an invitation, not a credential: it can be exchanged once, only for a credential of\n" +

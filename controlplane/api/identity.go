@@ -50,9 +50,11 @@ const redeemPath = "POST /v1/auth/redeem"
 const agentCredentialPath = "POST /v1/auth/agent"
 
 // redeemRoute is redeemPath without its method, for the one comparison that has to be made against a
-// live request rather than against the mux's pattern table. It is derived from the pattern by hand
-// and pinned by a test, so the two cannot drift into a restriction that guards a path nothing
-// serves.
+// live request rather than against the mux's pattern table.
+//
+// It is derived from the pattern by hand, and the two cannot silently drift apart: the exchange test
+// drives a real invitation at the real route, so a redeemRoute that named a different path would
+// refuse the one request an invitation is for.
 const redeemRoute = "/v1/auth/redeem"
 
 // authClaimRequest is the body of a first-principal claim: the name to record for the person

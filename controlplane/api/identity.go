@@ -12,7 +12,10 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-// Authenticating a caller, and the one route that mints a credential (ADR-0084 §1, §2).
+// Authenticating a caller, and the routes that mint a credential (ADR-0084 §1, §2, §3): the claim
+// that bootstraps an install's first person, the invitation an admin issues for a second one, the
+// exchange that turns an invitation into a credential on its recipient's own machine, and the
+// agent's own.
 //
 // Until now there was one string. It sat in a Secret on the cluster, everybody who could read it
 // presented it, and burrowd could not tell an operator from an agent from a CI job. That string

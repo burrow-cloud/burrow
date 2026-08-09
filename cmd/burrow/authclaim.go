@@ -29,11 +29,16 @@ import (
 // its own, so requests keep going through the proxy; what changes is that the token in
 // X-Burrow-Token says who is asking (ADR-0084 §2).
 //
-// NOTHING HERE FAILS THE LOGIN. Choosing where you use Burrow has to work against a cluster that is
-// unreachable, that has no Burrow in it yet, that runs a control plane too old to have this route,
-// or that somebody has already claimed. Every one of those leaves the target recorded and the shared
-// install token working, which is what ADR-0084's "existing installs keep working" means in
-// practice, and each says which one it was rather than reporting that signing in broke.
+// NOTHING ON THE CLAIM PATH FAILS THE LOGIN. Choosing where you use Burrow has to work against a
+// cluster that is unreachable, that has no Burrow in it yet, that runs a control plane too old to
+// have this route, or that somebody has already claimed. Every one of those leaves the target
+// recorded and the shared install token working, which is what ADR-0084's "existing installs keep
+// working" means in practice, and each says which one it was rather than reporting that signing in
+// broke.
+//
+// The INVITATION path is the exception, and deliberately so: somebody exchanging one has no shared
+// token to fall back to, so a refusal there fails the command rather than recording a target that
+// answers every subsequent command with a 401 (acceptInvitation).
 
 // signInTransport is how the sign-in reaches the cluster's control plane: the kubeconfig, through
 // the API-server proxy, with the shared install token read from the install Secret. That read is the

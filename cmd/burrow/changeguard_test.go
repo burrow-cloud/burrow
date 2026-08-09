@@ -70,6 +70,7 @@ var commandClasses = map[string]commandClass{
 	// --- Choosing and inspecting the target itself ---
 	"auth":        {class: classReads, why: "a group with no action of its own"},
 	"auth login":  {class: classClusterAdmin, why: "records which target is active, and for a cluster asks that Burrow for a credential of the person's own using their kubeconfig against the context they named (ADR-0084 §1); it installs nothing, and it names what it signed in to in the same breath, so there is no selected target for it to assert"},
+	"auth invite": {class: classChanges, why: "records a principal on the target's control plane and issues them an invitation (ADR-0084 §2); it is a write on whichever Burrow it reached, so it names it", args: []string{"auth", "invite", "ada"}},
 	"auth status": {class: classReads, why: "lists the configured targets"},
 	"auth switch": {class: classLocal, why: "changes which recorded target is active; nothing on any target moves"},
 

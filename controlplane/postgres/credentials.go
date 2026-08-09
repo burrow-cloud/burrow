@@ -25,7 +25,10 @@ import (
 const principalColumns = `id, name, admin, created_at, revoked_at`
 
 // credentialColumns is the credentials projection, likewise.
-const credentialColumns = `id, principal_id, kind, token_hash, created_at, expires_at, revoked_at`
+// enrollment marks an invitation, which is the one credential that authenticates nothing but its
+// own exchange (ADR-0084 §2, migration 00034). It is part of the projection rather than read
+// separately because it is checked on the same per-request lookup the hash is.
+const credentialColumns = `id, principal_id, kind, token_hash, created_at, expires_at, revoked_at, enrollment`
 
 // ClaimFirstPrincipal records p as the install's first principal together with the credential issued
 // to them, and only when the install has none. It returns ErrAlreadyClaimed when one already exists.
@@ -79,9 +82,9 @@ VALUES ($1, $2, $3, $4, NULL)`
 	}
 	const insertCredential = `
 INSERT INTO credentials (` + credentialColumns + `)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 	if _, err := tx.ExecContext(ctx, insertCredential, c.ID, c.PrincipalID, string(c.Kind), c.TokenHash,
-		c.CreatedAt, nullTime(c.ExpiresAt), nullTime(c.RevokedAt)); err != nil {
+		c.CreatedAt, nullTime(c.ExpiresAt), nullTime(c.RevokedAt), c.Enrollment); err != nil {
 		return fmt.Errorf("postgres: claim first principal %q: recording their credential: %w", p.Name, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -209,9 +212,9 @@ func (s *Store) SaveCredential(ctx context.Context, c controlplane.Credential) e
 	}
 	const q = `
 INSERT INTO credentials (` + credentialColumns + `)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 	_, err := s.db.ExecContext(ctx, q, c.ID, c.PrincipalID, string(c.Kind), c.TokenHash,
-		c.CreatedAt, nullTime(c.ExpiresAt), nullTime(c.RevokedAt))
+		c.CreatedAt, nullTime(c.ExpiresAt), nullTime(c.RevokedAt), c.Enrollment)
 	if err != nil {
 		// The message names the credential and its principal and never the hash, let alone the
 		// token: an error string is the likeliest way a credential ends up somewhere it was never
@@ -326,7 +329,7 @@ func scanCredential(sc scanner) (controlplane.Credential, error) {
 		kind             string
 		expires, revoked sql.NullTime
 	)
-	if err := sc.Scan(&c.ID, &c.PrincipalID, &kind, &c.TokenHash, &c.CreatedAt, &expires, &revoked); err != nil {
+	if err := sc.Scan(&c.ID, &c.PrincipalID, &kind, &c.TokenHash, &c.CreatedAt, &expires, &revoked, &c.Enrollment); err != nil {
 		return controlplane.Credential{}, err
 	}
 	c.Kind = controlplane.CredentialKind(kind)

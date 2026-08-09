@@ -34,6 +34,22 @@ import (
 // handshake rather than being a second front door with its own rules.
 const claimPath = "POST /v1/auth/claim"
 
+// invitePath is how an admin gives a second person access to this Burrow (ADR-0084 §2). What it
+// returns is an invitation rather than a working credential, which is what keeps a usable token out
+// of whatever the two of them talk over.
+const invitePath = "POST /v1/auth/invitations"
+
+// redeemPath is where an invitation is exchanged for the credential its holder will carry. It is
+// called from the RECIPIENT's machine — that is the whole reason it exists as a route rather than
+// as a second thing the admin does — and it is the only route an invitation may reach.
+const redeemPath = "POST /v1/auth/redeem"
+
+// redeemRoute is redeemPath without its method, for the one comparison that has to be made against a
+// live request rather than against the mux's pattern table. It is derived from the pattern by hand
+// and pinned by a test, so the two cannot drift into a restriction that guards a path nothing
+// serves.
+const redeemRoute = "/v1/auth/redeem"
+
 // authClaimRequest is the body of a first-principal claim: the name to record for the person
 // claiming. It carries NO KIND. What kind of credential this is, is burrowd's to decide and record —
 // a caller-declared kind would make a `deny` that binds the agent cooperative, and ADR-0020 requires
@@ -42,16 +58,32 @@ type authClaimRequest struct {
 	Name string `json:"name"`
 }
 
-// authClaimResponse is what a claim returns, and the ONLY response in this API that carries a
-// credential in the clear. The token exists nowhere else — burrowd stored a hash of it and will not
-// produce it again — so a caller that drops it has to be issued another.
+// authInviteRequest is the body of an invitation: who it is for, and whether they get the admin bit.
+//
+// It carries NO KIND, for the reason the claim carries none. It also carries no lifetime: an
+// invitation always expires, on a schedule burrowd chooses (controlplane.DefaultInvitationTTL),
+// because the short life is what makes handing one over safe and a field for it is how that gets
+// set to zero.
+type authInviteRequest struct {
+	// Name is the principal to invite. An existing name issues that principal a further invitation
+	// rather than failing, which is what somebody who lost the first one needs.
+	Name string `json:"name"`
+	// Admin grants the admin bit, and only when the principal is being recorded now. Inviting
+	// somebody already recorded never changes it.
+	Admin bool `json:"admin,omitempty"`
+}
+
+// authCredentialResponse is what a claim, an invitation and an exchange each return, and they are
+// the ONLY responses in this API that carry a credential in the clear. The token exists nowhere
+// else — burrowd stored a hash of it and will not produce it again — so a caller that drops it has
+// to be issued another.
 //
 // It carries the INSTALL ID alongside the token, and that is not incidental. A target learns which
 // install it is pointed at from something it did against that install (ADR-0084 §5), and for a
 // second person the only authenticated thing they do before they hold a credential is obtain one.
 // Sending the id here is what lets the credential and the target that spends it be recorded
 // together, in one round trip, rather than leaving the target unchecked until some later command.
-type authClaimResponse struct {
+type authCredentialResponse struct {
 	// PrincipalID is the opaque, stable identity credentials and audit rows reference.
 	PrincipalID string `json:"principal_id"`
 	// Principal is the human-readable handle, as recorded.
@@ -94,7 +126,80 @@ func (s *server) claimFirstPrincipal(w http.ResponseWriter, r *http.Request) {
 		writeEngineError(w, err)
 		return
 	}
-	resp := authClaimResponse{
+	writeJSON(w, http.StatusOK, s.credentialResponse(p, issued))
+}
+
+// invitePrincipal gives a second person access to this Burrow, and hands back an invitation rather
+// than a credential (ADR-0084 §2).
+//
+// This is the route that makes "additional people, without cluster admin" true. The recipient needs
+// no `get` on `burrow-credentials` and no claim of their own: they need a route to burrowd, which
+// their kubeconfig already is, and an identity, which this is how they get.
+//
+// WHAT COMES BACK CANNOT OPERATE ANYTHING. That is the difference between this and an admin issuing
+// a working token and pasting it somewhere — the invitation expires, is spent on first use, and is
+// refused at every route but the exchange, so the interval during which a copy of it is worth
+// something is short and the thing it is worth is small.
+func (s *server) invitePrincipal(w http.ResponseWriter, r *http.Request) {
+	var req authInviteRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	caller, ok := controlplane.CallerFromContext(r.Context())
+	if !ok {
+		// The shared install token names nobody, and inviting somebody is a decision an identity has
+		// to be behind (ADR-0084 §2). The engine's authorizer refuses this too; saying it here says
+		// what to do about it, because the caller holding the shared token is the operator and they
+		// are one command away from being able to.
+		writeError(w, http.StatusForbidden,
+			"this request presented the install's shared token, which names nobody, and giving somebody access is a decision that records who took it. "+
+				"Sign in with `burrow auth login --context <cluster>` and run it again",
+			"forbidden")
+		return
+	}
+	p, issued, err := s.engine.InvitePrincipal(r.Context(), caller, req.Name, req.Admin)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.credentialResponse(p, issued))
+}
+
+// redeemInvitation exchanges the invitation the caller presented for the credential they will carry
+// (ADR-0084 §2). It takes no body: everything it needs is the credential on the request, and a field
+// here would be a field describing a credential whose holder does not get to describe it.
+//
+// It answers on the RECIPIENT's machine, which is the point. The token in the response was generated
+// for this request and has been nowhere else, so what the admin sent them is not what they end up
+// holding.
+func (s *server) redeemInvitation(w http.ResponseWriter, r *http.Request) {
+	caller, ok := controlplane.CallerFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusForbidden,
+			"this request presented the install's shared token rather than an invitation, and there is nothing to exchange. "+
+				"An invitation comes from an admin of this Burrow, who issues one with `burrow auth invite <name>`",
+			"forbidden")
+		return
+	}
+	issued, err := s.engine.RedeemInvitation(r.Context(), caller)
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	// The principal is the one the invitation named, unchanged: an exchange gives somebody the
+	// credential they were invited to hold, and never a different identity.
+	p := controlplane.Principal{ID: caller.PrincipalID, Name: caller.PrincipalName}
+	writeJSON(w, http.StatusOK, s.credentialResponse(p, issued))
+}
+
+// credentialResponse renders an issued credential for the wire. It is shared by the three routes
+// that return one so the install id cannot be attached to some of them and forgotten on the rest —
+// a recipient who is handed a token and not the id of the install that issued it has nowhere to
+// file it (ADR-0084 §5).
+//
+// Admin is read from the principal rather than from anything the request said, like the kind.
+func (s *server) credentialResponse(p controlplane.Principal, issued controlplane.IssuedCredential) authCredentialResponse {
+	resp := authCredentialResponse{
 		PrincipalID:  p.ID,
 		Principal:    p.Name,
 		Admin:        p.Admin,
@@ -106,7 +211,7 @@ func (s *server) claimFirstPrincipal(w http.ResponseWriter, r *http.Request) {
 	if !issued.Credential.ExpiresAt.IsZero() {
 		resp.ExpiresAt = issued.Credential.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp
 }
 
 // authenticate is the /v1 gate: it resolves the presented token to whoever is behind it and refuses
@@ -140,8 +245,26 @@ func authenticate(sharedToken string, engine *controlplane.Engine, next http.Han
 			writeCredentialError(w, err)
 			return
 		}
+		// AN INVITATION REACHES ONE ROUTE. It authenticates, so the request has an identity behind it
+		// and the refusal below can say whose; what it does not have is permission to do anything but
+		// become a credential. Enforcing that here rather than per handler is what makes it true of
+		// every route, including the ones written after this one.
+		if caller.Enrollment && !isRedeem(r) {
+			writeError(w, http.StatusForbidden,
+				"the credential presented is an invitation for "+caller.PrincipalName+", and an invitation can only be exchanged for a credential of your own. "+
+					"Run `burrow auth login --context <cluster> --invite <invitation>` to exchange it",
+				"invitation_not_redeemed")
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(controlplane.ContextWithCaller(r.Context(), caller)))
 	})
+}
+
+// isRedeem reports whether this request is the exchange, and it is deliberately an exact match on
+// the method and the path rather than a prefix: a rule that admitted anything UNDER the path would
+// admit a route somebody adds there later without noticing what it inherited.
+func isRedeem(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == redeemRoute
 }
 
 // writeCredentialError renders a failed authentication. It distinguishes the three cases because

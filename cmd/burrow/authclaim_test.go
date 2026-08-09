@@ -107,7 +107,7 @@ func stubSignInControlPlane(t *testing.T, status int, body string) *[]byte {
 	t.Cleanup(srv.Close)
 
 	orig := signInTransport
-	signInTransport = func(string, string) client.Transport {
+	signInTransport = func(string, string, string) client.Transport {
 		return client.DirectTransport{BaseURL: srv.URL, Token: "shared-install-token", Name: client.ClientNameCLI}
 	}
 	t.Cleanup(func() { signInTransport = orig })
@@ -203,7 +203,7 @@ func TestSignInAsksForNothingItCannotSave(t *testing.T) {
 func TestSignInAgainstAnUnreachableClusterDoesNotFail(t *testing.T) {
 	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
 	orig := signInTransport
-	signInTransport = func(string, string) client.Transport { return failingTransport{} }
+	signInTransport = func(string, string, string) client.Transport { return failingTransport{} }
 	t.Cleanup(func() { signInTransport = orig })
 
 	tgt := localconfig.KubernetesTarget("do-nyc1-cluster")

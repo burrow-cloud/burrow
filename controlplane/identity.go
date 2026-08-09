@@ -23,6 +23,15 @@ import (
 // row somebody has to read in a listing and in an audit trail.
 const maxPrincipalName = 128
 
+// DefaultInvitationTTL is how long an invitation stays exchangeable. It is long enough to survive a
+// working day and a time zone, and short enough that a link somebody pasted into a chat and forgot
+// stops being a way in on its own.
+//
+// It is a constant rather than an option because the short life is the property that makes handing
+// an invitation over safe, and an option is how such a property gets configured away. An invitation
+// that has expired is not a dead end either: an admin issues another, which is one command.
+const DefaultInvitationTTL = 24 * time.Hour
+
 // IssueCredentialRequest asks for one credential.
 type IssueCredentialRequest struct {
 	// PrincipalID is who the credential is for. Issuing for another principal is an admin action.
@@ -64,7 +73,7 @@ func (e *Engine) ClaimFirstPrincipal(ctx context.Context, name string) (Principa
 		Admin:     true,
 		CreatedAt: e.clock.Now(),
 	}
-	issued, err := e.mint(p.ID, CredentialKindUser, 0)
+	issued, err := e.mint(p.ID, CredentialKindUser, 0, false)
 	if err != nil {
 		return Principal{}, IssuedCredential{}, err
 	}
@@ -133,13 +142,105 @@ func (e *Engine) IssueCredential(ctx context.Context, caller Caller, req IssueCr
 	if err := e.authz.AuthorizeIssue(ctx, caller.PrincipalID, req.PrincipalID, req.Kind); err != nil {
 		return IssuedCredential{}, err
 	}
-	return e.issue(ctx, req.PrincipalID, req.Kind, req.TTL)
+	return e.issue(ctx, req.PrincipalID, req.Kind, req.TTL, false)
+}
+
+// InvitePrincipal is how a second person is given access to this Burrow without being given access
+// to the cluster (ADR-0084 §2). It records the principal, if they are not recorded already, and
+// issues them an INVITATION: a credential whose only power is to be exchanged, once, for the
+// credential they will carry.
+//
+// THE CREDENTIAL THEY END UP WITH IS NEVER THE ONE THAT TRAVELS. Issuing them a working token here
+// would mean it reaching them through a chat window, an email or a paste buffer, and a bearer token
+// that has been through any of those may be held by somebody else for as long as it lives. What
+// travels instead expires, is spent on first use, and is refused at every route but the exchange —
+// so an invitation somebody else picks up buys them the ability to become a principal who has been
+// given nothing yet, rather than the ability to act.
+//
+// An invitation ALWAYS expires (DefaultInvitationTTL). There is no parameter for it, because the
+// value of the short life is that nobody has to remember to end it, and a knob is how it gets set
+// to zero.
+//
+// Inviting somebody already recorded issues them a further invitation rather than failing, which is
+// what "they lost the link" needs — and is also why the create and the issue are separate steps
+// here rather than one write. It does NOT change their admin bit: an invitation is a way in, not a
+// way to be promoted, and a re-invite that quietly granted admin would be a promotion nobody typed.
+func (e *Engine) InvitePrincipal(ctx context.Context, caller Caller, name string, admin bool) (Principal, IssuedCredential, error) {
+	name, err := validPrincipalName(name)
+	if err != nil {
+		return Principal{}, IssuedCredential{}, err
+	}
+	if e.tokens == nil {
+		return Principal{}, IssuedCredential{}, fmt.Errorf("%w: this control plane cannot issue credentials (no token source is wired)", ErrNotImplemented)
+	}
+
+	target, err := e.db.PrincipalByName(ctx, name)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		target, err = e.CreatePrincipal(ctx, caller, name, admin)
+		if err != nil {
+			return Principal{}, IssuedCredential{}, err
+		}
+	case err != nil:
+		return Principal{}, IssuedCredential{}, fmt.Errorf("looking up principal %q: %w", name, err)
+	case !target.Active():
+		return Principal{}, IssuedCredential{}, fmt.Errorf(
+			"%w: %s has been revoked, so nothing issued to them would authenticate; record them under a new name to give them access again", ErrInvalid, target.Name)
+	}
+
+	// The kind is `user` because that is what the exchange returns and what this invitation is an
+	// invitation TO. It is the control plane's answer either way: nothing on the wire says it, here
+	// or at the exchange (ADR-0084 §3).
+	if err := e.authz.AuthorizeIssue(ctx, caller.PrincipalID, target.ID, CredentialKindUser); err != nil {
+		return Principal{}, IssuedCredential{}, err
+	}
+	issued, err := e.issue(ctx, target.ID, CredentialKindUser, DefaultInvitationTTL, true)
+	if err != nil {
+		return Principal{}, IssuedCredential{}, err
+	}
+	return target, issued, nil
+}
+
+// RedeemInvitation exchanges the invitation the caller presented for the credential they will
+// actually carry, and is the ONLY thing an invitation may be used for.
+//
+// THE CREDENTIAL IT RETURNS IS GENERATED HERE, FOR THIS REQUEST, and this request comes from the
+// recipient's own machine. That is the whole point of the exchange existing: the token the second
+// person carries has never been anywhere else, so no chat window, mail server or paste buffer has a
+// copy of it (ADR-0084 §2).
+//
+// WHAT AUTHORIZES IT IS THE INVITATION ITSELF, and no seam is consulted. That is not a gap in the
+// authorization model, it is where the decision was already taken: an admin decided this principal
+// may hold a credential when they issued the invitation, and the exchange spends that decision
+// rather than making a second one. Asking the seam here would ask whether the RECIPIENT may issue
+// for themselves, which is the wrong question and one they would rightly be refused.
+//
+// THE INVITATION IS SPENT BEFORE THE CREDENTIAL IS RECORDED, deliberately. The two writes are not
+// one transaction, so one of the orders leaves an invitation that has been used and can be used
+// again, and the other leaves a person who has to ask for a second invitation. The second is the
+// one to be left with.
+func (e *Engine) RedeemInvitation(ctx context.Context, caller Caller) (IssuedCredential, error) {
+	if caller.PrincipalID == "" {
+		return IssuedCredential{}, fmt.Errorf("%w: the request carries no authenticated principal", ErrForbidden)
+	}
+	if !caller.Enrollment {
+		return IssuedCredential{}, fmt.Errorf(
+			"%w: the credential presented is not an invitation, and only an invitation can be exchanged for one; you are already signed in as %s",
+			ErrInvalid, caller.PrincipalName)
+	}
+	if e.tokens == nil {
+		return IssuedCredential{}, fmt.Errorf("%w: this control plane cannot issue credentials (no token source is wired)", ErrNotImplemented)
+	}
+	if err := e.db.RevokeCredential(ctx, caller.CredentialID, e.clock.Now()); err != nil {
+		return IssuedCredential{}, fmt.Errorf("spending the invitation: %w", err)
+	}
+	return e.issue(ctx, caller.PrincipalID, CredentialKindUser, 0, false)
 }
 
 // mint builds a credential and its secret without storing anything: the token comes from the seam,
 // the row carries only its hash. It is separate from the write so the claim can hand the row to the
 // store in the same call that records the principal.
-func (e *Engine) mint(principalID string, kind CredentialKind, ttl time.Duration) (IssuedCredential, error) {
+func (e *Engine) mint(principalID string, kind CredentialKind, ttl time.Duration, enrollment bool) (IssuedCredential, error) {
 	now := e.clock.Now()
 	token := e.tokens.NewToken()
 	if token == "" {
@@ -151,6 +252,7 @@ func (e *Engine) mint(principalID string, kind CredentialKind, ttl time.Duration
 		Kind:        kind,
 		TokenHash:   HashToken(token),
 		CreatedAt:   now,
+		Enrollment:  enrollment,
 	}
 	if ttl > 0 {
 		c.ExpiresAt = now.Add(ttl)
@@ -161,8 +263,8 @@ func (e *Engine) mint(principalID string, kind CredentialKind, ttl time.Duration
 // issue is the unauthorized half: it mints, hashes and stores. Every caller above it has already
 // decided that this may happen — the claim because it is the bootstrap, IssueCredential because the
 // seam said so.
-func (e *Engine) issue(ctx context.Context, principalID string, kind CredentialKind, ttl time.Duration) (IssuedCredential, error) {
-	issued, err := e.mint(principalID, kind, ttl)
+func (e *Engine) issue(ctx context.Context, principalID string, kind CredentialKind, ttl time.Duration, enrollment bool) (IssuedCredential, error) {
+	issued, err := e.mint(principalID, kind, ttl, enrollment)
 	if err != nil {
 		return IssuedCredential{}, err
 	}
@@ -215,6 +317,9 @@ func (e *Engine) AuthenticateCredential(ctx context.Context, token string) (Call
 		PrincipalName: p.Name,
 		Kind:          c.Kind,
 		CredentialID:  c.ID,
+		// Read from the row, like the kind, and for the same reason: how far a credential reaches is
+		// burrowd's record of what it issued, never something the request says about itself.
+		Enrollment: c.Enrollment,
 	}, nil
 }
 

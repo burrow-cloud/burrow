@@ -77,10 +77,10 @@ func (a *Adapter) RestoreInstance(ctx context.Context, req controlplane.RestoreI
 	if req.Archive == nil {
 		return controlplane.RestoreInstanceOutcome{}, fmt.Errorf("kube: a physical restore needs the repository to recover from: %w", controlplane.ErrInvalid)
 	}
-	instance, err := addonName(controlplane.AddonPostgres, req.Environment)
-	if err != nil {
-		return controlplane.RestoreInstanceOutcome{}, err
+	if req.Instance == "" {
+		return controlplane.RestoreInstanceOutcome{}, fmt.Errorf("kube: a physical restore needs the instance to recover: %w", controlplane.ErrInvalid)
 	}
+	instance := req.Instance
 	if err := a.requireCloudNativePG(ctx); err != nil {
 		return controlplane.RestoreInstanceOutcome{}, err
 	}
@@ -112,7 +112,7 @@ func (a *Adapter) RestoreInstance(ctx context.Context, req controlplane.RestoreI
 	// that silently undid a configuration change, and for the volume one that asks a storage class to
 	// shrink a claim it cannot shrink. An unreadable shape falls back to the shape an install
 	// produces, which is what a `Cluster` that is already gone can honestly be recovered as.
-	shape, shapeErr := a.AddonInstanceShape(ctx, controlplane.AddonPostgres, req.Environment)
+	shape, shapeErr := a.AddonInstanceShape(ctx, controlplane.AddonPostgres, req.Environment, instance)
 	if shapeErr != nil {
 		shape = controlplane.AddonShape{}
 	}

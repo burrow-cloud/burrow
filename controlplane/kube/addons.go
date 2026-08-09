@@ -44,11 +44,15 @@ const addonEnvLabel = "burrow.cloud/environment"
 // constant, and attributing it by shape would be the name-guessing AddonVolumes exists to avoid.
 const addonVolumeRole = "burrow.cloud/addon-volume"
 
-// addonName is the deterministic resource name for the instance of add-on type t serving
-// environment env — one instance PER TYPE PER ENVIRONMENT (ADR-0067 §1). The derivation lives in the
-// controlplane package (AddonInstanceName) so the engine, the registry, and this adapter cannot
-// drift on which server an environment means; the default environment keeps the unqualified name an
+// addonName is the resource name of an environment's FIRST instance of add-on type t. The derivation
+// lives in the controlplane package (AddonInstanceName) so the engine, the registry, and this adapter
+// cannot drift on what that instance is called; the default environment keeps the unqualified name an
 // existing install already carries, so nothing migrates.
+//
+// IT IS NOT HOW AN OPERATION FINDS ITS INSTANCE ANY MORE (ADR-0091 §2). An environment may hold more
+// than one, so every adapter entry point is GIVEN the instance the engine resolved out of the
+// registry. What is left here are the paths that legitimately mean "this environment's own
+// instance": the superuser Secret of a default install, and nothing else.
 func addonName(t controlplane.AddonType, env string) (string, error) {
 	return controlplane.AddonInstanceName(t, env)
 }
@@ -61,11 +65,11 @@ func addonName(t controlplane.AddonType, env string) (string, error) {
 // read-only Get before deploying the scraper.
 const vmagentServiceAccount = "burrow-vmagent"
 
-func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
-	name, err := addonName(spec.Type, env)
-	if err != nil {
-		return controlplane.AddonInfo{}, err
+func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env, instance string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
+	if instance == "" {
+		return controlplane.AddonInfo{}, fmt.Errorf("kube: deploying the %s add-on in environment %q: no instance named: %w", spec.Type, env, controlplane.ErrInvalid)
 	}
+	name := instance
 	// Every resource this creates is named after the INSTANCE, not the type, so a second
 	// environment's add-on lands beside the first rather than on top of it (ADR-0067 §1). The
 	// environment label records which environment the instance serves, so the cluster view agrees

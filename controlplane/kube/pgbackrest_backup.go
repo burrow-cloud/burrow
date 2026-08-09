@@ -131,10 +131,9 @@ func cnpgBackupSettled(phase string) bool {
 // carries no pgBackRest plugin has no repository to write a base backup to, and a `Backup` object
 // created against it would sit in `pending` until the wait timed out — ten minutes to learn something
 // a single read answers now, and the refusal can say what to do about it.
-func (a *Adapter) RunPhysicalBackup(ctx context.Context, env, backupID string, archive *controlplane.ArchiveDestination) (controlplane.PhysicalBackupOutcome, error) {
-	instance, err := addonName(controlplane.AddonPostgres, env)
-	if err != nil {
-		return controlplane.PhysicalBackupOutcome{}, err
+func (a *Adapter) RunPhysicalBackup(ctx context.Context, env, instance, backupID string, archive *controlplane.ArchiveDestination) (controlplane.PhysicalBackupOutcome, error) {
+	if instance == "" {
+		return controlplane.PhysicalBackupOutcome{}, fmt.Errorf("kube: taking a base backup in environment %q: no instance named: %w", env, controlplane.ErrInvalid)
 	}
 	repoPath, err := a.requireArchivingInstance(ctx, env, instance, archive)
 	if err != nil {

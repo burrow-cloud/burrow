@@ -56,7 +56,7 @@ func (p *PostgresProvisioner) QueryAppDatabase(ctx context.Context, q controlpla
 	// The environment is resolved to an instance BEFORE anything else, exactly as it is on every
 	// other method here: an empty or malformed environment is ErrInvalid, never a silent fallback to
 	// whichever instance exists (ADR-0067 §1).
-	if _, err := postgresSecretName(q.Env); err != nil {
+	if _, err := p.targetFor(q.Env, q.Instance); err != nil {
 		return controlplane.SQLResult{}, err
 	}
 	if q.Namespace == "" {

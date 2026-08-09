@@ -92,12 +92,12 @@ func backupDumpPath(app, backupID string) string {
 	return controlplane.BackupPath(app, backupID)
 }
 
-// backupVolumeName is the claim environment env's dumps live on — one per environment, the same
-// shape as the instance they came from (ADR-0067 §1, controlplane.BackupVolumeName). It is derived
-// in the controlplane package so the engine's recorded row and the Job's mount cannot disagree about
-// which disk a dump is on.
-func backupVolumeName(env string) (string, error) {
-	return controlplane.BackupVolumeName(controlplane.AddonPostgres, env)
+// backupVolumeName is the claim one instance's dumps live on — one per INSTANCE, the same shape as
+// the instance they came from (ADR-0067 §1 through ADR-0091 §4, controlplane.BackupVolumeName). It is
+// derived in the controlplane package so the engine's recorded row and the Job's mount cannot
+// disagree about which disk a dump is on.
+func backupVolumeName(instance string) (string, error) {
+	return controlplane.BackupVolumeName(controlplane.AddonPostgres, instance)
 }
 
 // ensureBackupPVC creates environment env's backup PVC in the add-on namespace if absent
@@ -135,10 +135,9 @@ func (a *Adapter) ensureBackupPVC(ctx context.Context, env, backupPVCName string
 // environment's Postgres Service (ADR-0067 §1). The Jobs run in-cluster, so they resolve the .svc
 // name directly (no port-forward). A dump is only meaningful against the server it came from, so the
 // environment travels with the Job exactly as it does with the provisioner.
-func (a *Adapter) backupInstanceHost(env string) (string, error) {
-	instance, err := postgresSecretName(env)
-	if err != nil {
-		return "", err
+func (a *Adapter) backupInstanceHost(instance string) (string, error) {
+	if instance == "" {
+		return "", fmt.Errorf("kube: composing a backup Job's host: no instance named: %w", controlplane.ErrInvalid)
 	}
 	return fmt.Sprintf("%s.%s.svc", instance, a.addonNamespace), nil
 }
@@ -165,12 +164,8 @@ func superuserPasswordEnv(instance string) corev1.EnvVar {
 // host, port, user, and database — all non-secret. The password is added separately via
 // secretKeyRef. PGHOST/PGPORT/PGUSER/PGDATABASE are libpq variables, so pg_dump/pg_restore need no
 // host or credential on the command line.
-func (a *Adapter) backupConnEnv(app, env string) ([]corev1.EnvVar, error) {
-	host, err := a.backupInstanceHost(env)
-	if err != nil {
-		return nil, err
-	}
-	instance, err := postgresSecretName(env)
+func (a *Adapter) backupConnEnv(app, instance string) ([]corev1.EnvVar, error) {
+	host, err := a.backupInstanceHost(instance)
 	if err != nil {
 		return nil, err
 	}
@@ -198,19 +193,20 @@ func (a *Adapter) backupConnEnv(app, env string) ([]corev1.EnvVar, error) {
 // A failure returns the closed reason the Job reported alongside the error, so the caller records
 // WHY rather than that it failed: the dump itself, a store that would not answer, a store that
 // answered and refused, or a store that took the write and could not serve it back.
-func (a *Adapter) RunBackupJob(ctx context.Context, app, env, backupID string, dest *controlplane.BackupDestination) (controlplane.BackupJobOutcome, error) {
+func (a *Adapter) RunBackupJob(ctx context.Context, app, env, instance, backupID string, dest *controlplane.BackupDestination) (controlplane.BackupJobOutcome, error) {
 	if err := validateAppIdentifier(app); err != nil {
 		return controlplane.BackupJobOutcome{}, err
 	}
-	// The environment is resolved to an instance before the PVC is touched or a Job is built, so a
-	// dump can never be taken from a server other than the named environment's (ADR-0067 §1).
-	connEnv, err := a.backupConnEnv(app, env)
+	// The instance the engine resolved is what the Job dials, settled before the PVC is touched or a
+	// Job is built — so a dump can never be taken from a server other than the named one (ADR-0067
+	// §1, ADR-0091 §4).
+	connEnv, err := a.backupConnEnv(app, instance)
 	if err != nil {
 		return controlplane.BackupJobOutcome{}, err
 	}
-	// The claim is this environment's, resolved from the same environment that chose the instance —
-	// so a dump taken from staging's server can only land on staging's disk (ADR-0067 §1).
-	claim, err := backupVolumeName(env)
+	// The claim is that same instance's, so a dump taken from one server can only land on that
+	// server's disk.
+	claim, err := backupVolumeName(instance)
 	if err != nil {
 		return controlplane.BackupJobOutcome{}, err
 	}
@@ -253,18 +249,18 @@ func (a *Adapter) BackupJobPresent(ctx context.Context, backupID string) (bool, 
 // RunRestoreJob pg_restores app's dump from the backup PVC into its database via a one-shot Job and
 // waits for it (ADR-0032). --clean --if-exists replaces current contents. Like backup, the command
 // names no host or password.
-func (a *Adapter) RunRestoreJob(ctx context.Context, app, env, backupID string) error {
+func (a *Adapter) RunRestoreJob(ctx context.Context, app, env, instance, backupID string) error {
 	if err := validateAppIdentifier(app); err != nil {
 		return err
 	}
-	connEnv, err := a.backupConnEnv(app, env)
+	connEnv, err := a.backupConnEnv(app, instance)
 	if err != nil {
 		return err
 	}
-	// The restore Job mounts THIS environment's backup claim and no other, so a dump belonging to
-	// another environment is not merely refused by the caller — it is not on a disk this Job can
-	// read (ADR-0067 §1).
-	claim, err := backupVolumeName(env)
+	// The restore Job mounts THIS instance's backup claim and no other, so a dump belonging to
+	// another instance is not merely refused by the caller — it is not on a disk this Job can read
+	// (ADR-0067 §1, ADR-0091 §4).
+	claim, err := backupVolumeName(instance)
 	if err != nil {
 		return err
 	}

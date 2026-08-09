@@ -219,22 +219,34 @@ func (e *Engine) InvitePrincipal(ctx context.Context, caller Caller, name string
 // one transaction, so one of the orders leaves an invitation that has been used and can be used
 // again, and the other leaves a person who has to ask for a second invitation. The second is the
 // one to be left with.
-func (e *Engine) RedeemInvitation(ctx context.Context, caller Caller) (IssuedCredential, error) {
+func (e *Engine) RedeemInvitation(ctx context.Context, caller Caller) (Principal, IssuedCredential, error) {
 	if caller.PrincipalID == "" {
-		return IssuedCredential{}, fmt.Errorf("%w: the request carries no authenticated principal", ErrForbidden)
+		return Principal{}, IssuedCredential{}, fmt.Errorf("%w: the request carries no authenticated principal", ErrForbidden)
 	}
 	if !caller.Enrollment {
-		return IssuedCredential{}, fmt.Errorf(
+		return Principal{}, IssuedCredential{}, fmt.Errorf(
 			"%w: the credential presented is not an invitation, and only an invitation can be exchanged for one; you are already signed in as %s",
 			ErrInvalid, caller.PrincipalName)
 	}
 	if e.tokens == nil {
-		return IssuedCredential{}, fmt.Errorf("%w: this control plane cannot issue credentials (no token source is wired)", ErrNotImplemented)
+		return Principal{}, IssuedCredential{}, fmt.Errorf("%w: this control plane cannot issue credentials (no token source is wired)", ErrNotImplemented)
+	}
+	// The principal is read rather than reconstructed from the Caller, because the Caller
+	// deliberately does not carry the admin bit and the person exchanging an invitation needs to be
+	// told whether they have it: an admin who does not know they are one is an install with nobody
+	// who can add the next person.
+	p, err := e.db.Principal(ctx, caller.PrincipalID)
+	if err != nil {
+		return Principal{}, IssuedCredential{}, fmt.Errorf("reading the principal the invitation was issued to: %w", err)
 	}
 	if err := e.db.RevokeCredential(ctx, caller.CredentialID, e.clock.Now()); err != nil {
-		return IssuedCredential{}, fmt.Errorf("spending the invitation: %w", err)
+		return Principal{}, IssuedCredential{}, fmt.Errorf("spending the invitation: %w", err)
 	}
-	return e.issue(ctx, caller.PrincipalID, CredentialKindUser, 0, false)
+	issued, err := e.issue(ctx, caller.PrincipalID, CredentialKindUser, 0, false)
+	if err != nil {
+		return Principal{}, IssuedCredential{}, err
+	}
+	return p, issued, nil
 }
 
 // mint builds a credential and its secret without storing anything: the token comes from the seam,

@@ -181,14 +181,13 @@ func (s *server) redeemInvitation(w http.ResponseWriter, r *http.Request) {
 			"forbidden")
 		return
 	}
-	issued, err := s.engine.RedeemInvitation(r.Context(), caller)
+	// The principal that comes back is the one the invitation named, unchanged: an exchange gives
+	// somebody the credential they were invited to hold, and never a different identity.
+	p, issued, err := s.engine.RedeemInvitation(r.Context(), caller)
 	if err != nil {
 		writeEngineError(w, err)
 		return
 	}
-	// The principal is the one the invitation named, unchanged: an exchange gives somebody the
-	// credential they were invited to hold, and never a different identity.
-	p := controlplane.Principal{ID: caller.PrincipalID, Name: caller.PrincipalName}
 	writeJSON(w, http.StatusOK, s.credentialResponse(p, issued))
 }
 

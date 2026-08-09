@@ -111,7 +111,7 @@ func TestBuildStreamsOneSequenceThroughToTheDeploy(t *testing.T) {
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
 	}
-	want := []string{"clone:started", "clone:done", "build:started", "build:done", "apply:started", "apply:done"}
+	want := []string{"clone:started", "clone:done", "build:started", "build:done", "apply:started", "apply:done", "settle:started", "settle:done"}
 	if got := buildStageSeq(lines); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("stages = %v, want %v", got, want)
 	}

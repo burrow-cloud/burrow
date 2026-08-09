@@ -3,6 +3,12 @@
 
 package controlplane
 
+import (
+	"context"
+	"log/slog"
+	"strings"
+)
+
 // A rollout does not finish; it either completes, fails, or hangs (ADR-0072 §5). Everything before
 // this file could only answer "was the write accepted" — a release marked deployed meant the API
 // server took the object, which is not the same fact as "the new pods are serving". This is the
@@ -60,6 +66,21 @@ type RolloutOutcome struct {
 	// is told the reason, which is the part it branches on, and the app's own output stays in
 	// `burrow app logs` and `burrow app status`, which still carry it.
 	Detail string
+	// Output is a bounded tail of what the pod that would not become ready was printing — the
+	// APPLICATION's own words, and the only field here that carries any (ADR-0092 §2).
+	//
+	// IT IS NEVER TOLD TO A HOOK. Everything above travels into a `post-deploy` Job's environment,
+	// where it persists in a Kubernetes object for anyone who can read the namespace; that is why
+	// Detail is counts and phases. This field exists for the opposite audience — the caller waiting
+	// on the deploy, which renders it once and discards it, the same contract `burrow app status`'s
+	// Issue already reads under (ADR-0074 §9). hookEnv takes named fields, so a hook cannot acquire
+	// this by accident, and a test holds that line.
+	//
+	// It is filled only where nothing else explains the failure: a pod that is up, running, and
+	// failing its readiness probe reports no blocking condition and no Issue, so the wait can say
+	// only that it waited — while the reason was in the pod's output the whole time, which is
+	// precisely what issue #546 was filed about.
+	Output string
 }
 
 // Failed reports that the wait reached a verdict and the verdict was negative. It is the inverse of
@@ -75,6 +96,66 @@ func (o RolloutOutcome) Outcome() string {
 		return OutcomeSucceeded
 	}
 	return OutcomeFailed
+}
+
+// rolloutReport turns the deploy's rollout observation into the account the CALLER gets back
+// (ADR-0092 §2) — the same verdict the hook is told, plus the diagnosis the hook is deliberately
+// not given.
+//
+// THE DIAGNOSIS IS THE POINT. A rollout that did not settle carries a reason and a line of replica
+// counts, which says that something is wrong and not what. The thing that says what is already
+// built: `burrow app status` ranks the app's pods down to the blocking condition that names the fix
+// — the registry it cannot pull from, the taint no node tolerates, the container's exit code and a
+// tail of its last log. Issue #546's whole complaint is that this information was there the entire
+// time and the deploy never looked, so the deploy looks, through the same seam the status surface
+// reads, and reports what it found. There is no second inspection and no second vocabulary.
+//
+// IT IS BEST EFFORT AND NEVER FAILS THE REPORT. The verdict is already in hand; an unreadable status
+// surface costs the extra sentence and nothing else. A settled rollout is not inspected at all — it
+// is serving, so there is nothing to diagnose and no reason to spend the call.
+func (e *Engine) rolloutReport(ctx context.Context, k Kubernetes, app string, out RolloutOutcome) *RolloutReport {
+	rep := &RolloutReport{Settled: out.Settled, Reason: out.Reason, Detail: out.Detail}
+	if out.Settled {
+		return rep
+	}
+	st, err := k.WorkloadStatus(ctx, app)
+	if err != nil {
+		slog.WarnContext(ctx, "reading the workload status of a rollout that did not settle failed; the deploy reports what the wait observed",
+			"app", app, "error", err)
+		return rep
+	}
+	rep.Issue = st.Issue
+	if rep.Issue == "" {
+		// The status surface found nothing more specific than the wait did, which is the shape of a
+		// pod that is up and failing its readiness probe: no blocking condition, no Issue, nothing but
+		// elapsed time. What the pod itself was printing is then the only thing that explains it.
+		rep.Issue = readinessOutput(out.Output)
+	}
+	return rep
+}
+
+// readinessOutput frames a not-ready pod's captured output as the explanation it is, so a reader is
+// never handed a block of application text with nothing saying whose it is or why it is here.
+func readinessOutput(output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	return "the pod is running and not passing its readiness check; its recent output:\n" + output
+}
+
+// recordedRollout renders a rollout report for the release row (ADR-0092 §4): what was observed, and
+// the reason when it was not good. A nil report is an unobserved rollout — a deploy that declined to
+// wait — and records as the zero value, which reads as unknown rather than as either verdict.
+func recordedRollout(rep *RolloutReport) (ReleaseRollout, string) {
+	switch {
+	case rep == nil:
+		return RolloutUnobserved, ""
+	case rep.Settled:
+		return RolloutSettled, ""
+	default:
+		return RolloutUnsettled, rep.Reason
+	}
 }
 
 // The two values RolloutOutcome.Outcome renders, and therefore the two values a `post-deploy` hook

@@ -71,6 +71,7 @@ func newDeployCmd() *cobra.Command {
 	var replicas int
 	var metricsPort int
 	var confirm bool
+	wait := true
 	cmd := &cobra.Command{
 		Use:   "deploy <app> [-- command args...]",
 		Short: "Deploy an app by image reference (optionally build & push first)",
@@ -80,7 +81,11 @@ func newDeployCmd() *cobra.Command {
 			"  burrow app deploy worker --image myrepo/app:1.2.3 -- ./worker --queue emails\n\n" +
 			"Environment configuration is set separately and is the single source of truth, sourced\n" +
 			"at deploy time, set it with `burrow app config set <app> KEY=VALUE` before deploying a\n" +
-			"release that needs it, so the new release boots with it on first start.",
+			"release that needs it, so the new release boots with it on first start.\n\n" +
+			"Deploy waits for the rollout and reports what it did: it exits non-zero, naming the pod's\n" +
+			"own reason, when the new replicas do not become ready — Kubernetes keeps the previous\n" +
+			"version serving in that case, and nothing is rolled back. Pass --wait=false to return at\n" +
+			"submission instead, which reports that the outcome is unknown rather than that it worked.",
 		// Exactly one positional (the app name) before any --; everything after -- overrides the
 		// container command.
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -125,23 +130,25 @@ func newDeployCmd() *cobra.Command {
 				MetricsPort: int32(metricsPort),
 				Replicas:    int32(replicas),
 				Confirm:     confirm,
+				NoWait:      !wait,
 				Progress:    newDeployProgressPrinter(cmd.ErrOrStderr(), time.Now),
 			})
 			if err != nil {
 				return err
 			}
-			human := fmt.Sprintf("deployed %s as release %s (image %s, %d replica(s), %s)",
-				app, res.Release.ID, res.Release.Image, res.Release.Replicas, res.Release.Status)
-			if res.SupersededReleaseID != "" {
-				human += fmt.Sprintf("; superseded release %s", res.SupersededReleaseID)
-			}
+			human := deployHuman(app, res)
 			// The deploy-time dependency check's result (ADR-0076 §4), printed only when something
 			// did not pass. It follows the deploy line rather than replacing it, because the deploy
 			// succeeded: the check is a report about a live release, not a verdict on it.
 			if deps := deployDependencyHuman(res.Dependencies); deps != "" {
 				human += "\n\n" + deps
 			}
-			return o.emitChange(cmd.OutOrStdout(), res, human)
+			if err := o.emitChange(cmd.OutOrStdout(), res, human); err != nil {
+				return err
+			}
+			// The report is printed; the exit code carries the same verdict for whatever is reading
+			// it as a process rather than as prose (ADR-0092 §2).
+			return deployExitError(app, res.Rollout)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -151,6 +158,7 @@ func newDeployCmd() *cobra.Command {
 	cmd.Flags().IntVar(&metricsPort, "metrics-port", 0, "annotate the pod so the metrics add-on scrapes /metrics on this port")
 	cmd.Flags().StringVar(&build, "build", "", "build and push the image from this directory before deploying")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an operation a guardrail holds for confirmation")
+	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the rollout and report its outcome; --wait=false returns at submission, with the outcome unknown")
 	return cmd
 }
 

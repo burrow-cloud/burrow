@@ -280,3 +280,36 @@ func TestAwaitRolloutRejectsABadApp(t *testing.T) {
 		t.Error("AwaitRollout should reject a bad app identifier")
 	}
 }
+
+// TestAwaitRolloutNamesAPodThatIsRunningAndNotReady is the shape of the live failure in issue #546:
+// the new pod was up, had been for five minutes, was serving nothing, and reported no blocking
+// condition — so nothing classified it and the only thing the wait could say was that it had waited.
+// "Running" is the word a reader takes for good news, so the observation has to say the other half.
+func TestAwaitRolloutNamesAPodThatIsRunningAndNotReady(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	seedDeployment(t, client, rolloutNS, "web", 1, appsv1.DeploymentStatus{
+		ObservedGeneration: 1, Replicas: 2, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1,
+	})
+	seedAppPod(t, client, rolloutNS, "web", "web-new", corev1.PodStatus{
+		Phase:      corev1.PodRunning,
+		Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}},
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "app", Ready: false, Started: ptr(true),
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+		}},
+	})
+
+	out := mustSettleWithin(t, New(client, rolloutNS), "web", 10*time.Millisecond)
+	if out.Settled {
+		t.Fatalf("outcome = %+v, want a failure: no new replica ever became ready", out)
+	}
+	if out.Reason != controlplane.ReasonDeadlineExceeded {
+		t.Errorf("reason = %q, want the backstop %q: nothing blocking was reported", out.Reason, controlplane.ReasonDeadlineExceeded)
+	}
+	if !strings.Contains(out.Detail, `pod "web-new" is Running but not ready`) {
+		t.Errorf("detail = %q, want it to say the pod is up and not ready", out.Detail)
+	}
+}
+
+// ptr returns a pointer to v, for the API's optional bool fields.
+func ptr[T any](v T) *T { return &v }

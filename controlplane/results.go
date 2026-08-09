@@ -32,6 +32,18 @@ type DeployRequest struct {
 	// Confirm acknowledges a guardrail whose disposition is confirm, letting the operation
 	// proceed past it (ADR-0020). It has no effect on a guardrail set to deny.
 	Confirm bool `json:"confirm,omitempty"`
+	// NoWait asks the deploy to answer at submission rather than at outcome: the Deployment is
+	// written and the call returns without observing whether the new pods became ready (ADR-0092 §3).
+	// The result then carries no Rollout, which is what says the outcome is unknown.
+	//
+	// THE DEFAULT IS TO WAIT, and the zero value is the default deliberately. A caller that predates
+	// this field — an older CLI, a script posting the request's old wire shape — sends nothing and
+	// gets the wait, because the report that misled is the one that answered early (issue #546).
+	//
+	// IT DOES NOT SKIP A WAIT SOMETHING ELSE NEEDS. An app with a `post-deploy` hook or a derived
+	// dependency to check still settles, because those features are defined in terms of the rollout's
+	// outcome (ADR-0072 §4, ADR-0076 §4); NoWait only declines to make the observation FOR THE REPORT.
+	NoWait bool `json:"no_wait,omitempty"`
 	// Progress receives the deploy's stage transitions as they happen (issue #480), so a caller can
 	// say what the deploy is doing across the ten to twenty seconds it takes rather than going quiet.
 	// Nil asks for nothing and is the default: the API's JSON decode leaves it nil, so the request's
@@ -62,7 +74,49 @@ type DeployResult struct {
 	// not roll back by itself (ADR-0072 §6). Empty when Burrow provisioned nothing it can check, or
 	// when the check is turned off for this app.
 	Dependencies []DependencyResult `json:"dependencies,omitempty"`
+	// Rollout is what the deploy observed of its own rollout (ADR-0092): whether the new replicas
+	// became ready, and if they did not, why not. It is the field that makes the rest of this result
+	// mean what a reader takes it to mean — Release.Status and SupersededReleaseID describe what
+	// Burrow RECORDED, and until this said so nothing described what the cluster then did with it
+	// (issue #546).
+	//
+	// NIL MEANS UNOBSERVED, never "fine". A deploy asked not to wait (DeployRequest.NoWait) makes no
+	// observation, so there is nothing truthful to put here; a caller renders that as an unknown
+	// outcome and not as a success.
+	Rollout *RolloutReport `json:"rollout,omitempty"`
 }
+
+// RolloutReport is the deploy's own account of its rollout — the answer to "is the image I just
+// deployed actually serving?" (ADR-0092 §2).
+//
+// IT IS NOT RolloutOutcome, and the difference is the audience. RolloutOutcome is what a
+// `post-deploy` hook is told (ADR-0072 §4): it is copied into a Job's environment, where it would
+// persist in a Kubernetes object, so it deliberately carries no application output. This travels
+// back over the API to the caller that is waiting on the answer, is rendered once, and is discarded
+// — the same contract `burrow app status` already reads under, which is why it can carry Issue.
+type RolloutReport struct {
+	// Settled reports that the newest revision finished rolling out and is serving — the completion
+	// test `kubectl rollout status` uses. False is every other verdict and always carries a Reason.
+	Settled bool `json:"settled"`
+	// Reason names why the rollout did not settle, from the closed vocabulary LedgerReasons()
+	// enumerates (ADR-0074 §2), and is empty exactly when Settled is true. ReasonDeadlineExceeded is
+	// its declared backstop and means something different from the rest: the bound ran out with the
+	// rollout still progressing and no pod reporting anything blocking, which is "not yet" rather
+	// than "not going to".
+	Reason string `json:"reason,omitempty"`
+	// Detail is one Burrow-authored line describing what the wait observed — replica counts, a pod's
+	// phase, a container's waiting reason.
+	Detail string `json:"detail,omitempty"`
+	// Issue is the live status surface's actionable explanation of the same wedged workload
+	// (ADR-0074 §2) — the pod's own reason, in the words `burrow app status` would use for it, so a
+	// failed deploy explains itself without a second call. Empty when the surface found nothing more
+	// specific than the wait already reported.
+	Issue string `json:"issue,omitempty"`
+}
+
+// Failed reports that the deploy observed a rollout and the verdict was negative. A nil report is
+// not a failure: it is an unobserved rollout, which is a different thing and reads differently.
+func (r *RolloutReport) Failed() bool { return r != nil && !r.Settled }
 
 // BuildRequest is the code-free description of an in-cluster build-then-deploy (ADR-0053): the app,
 // the git source to clone and build inside the cluster, and the target image reference the built

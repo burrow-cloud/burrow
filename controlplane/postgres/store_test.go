@@ -426,3 +426,45 @@ func TestStoreAppEnvRoundTrip(t *testing.T) {
 	_ = s.UnsetAppEnv(ctx, app, "LOG_LEVEL")
 	_ = s.UnsetAppEnv(ctx, other, "LOG_LEVEL")
 }
+
+// TestStoreReleaseRollout round-trips what the deploy observed of a release's rollout (ADR-0092 §4).
+// It is recorded BESIDE the status, not in it, so this asserts both: a release that Burrow applied
+// and whose pods never came up reads back as deployed AND unsettled, with the reason it did not
+// settle. A deploy that did not wait records neither, which is how an unknown outcome is stored — and
+// is what every row written before the column existed reads as.
+func TestStoreReleaseRollout(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-web"
+
+	wedged := cp.Release{
+		ID: t.Name() + "-r1", App: app, Environment: cp.DefaultEnvironment, Image: "img:2",
+		Status: cp.ReleaseDeployed, Rollout: cp.RolloutUnsettled, RolloutReason: cp.ReasonCrashLoopBackOff,
+	}
+	settled := cp.Release{
+		ID: t.Name() + "-r2", App: app, Environment: cp.DefaultEnvironment, Image: "img:3",
+		Status: cp.ReleaseDeployed, Rollout: cp.RolloutSettled,
+	}
+	unobserved := cp.Release{
+		ID: t.Name() + "-r3", App: app, Environment: cp.DefaultEnvironment, Image: "img:4",
+		Status: cp.ReleaseDeployed,
+	}
+	for _, r := range []cp.Release{wedged, settled, unobserved} {
+		if err := s.SaveRelease(ctx, r); err != nil {
+			t.Fatalf("SaveRelease(%s): %v", r.ID, err)
+		}
+	}
+
+	for _, want := range []cp.Release{wedged, settled, unobserved} {
+		got, err := s.Release(ctx, want.ID)
+		if err != nil {
+			t.Fatalf("Release(%s): %v", want.ID, err)
+		}
+		if got.Rollout != want.Rollout || got.RolloutReason != want.RolloutReason {
+			t.Errorf("%s rollout = (%q, %q), want (%q, %q)", want.ID, got.Rollout, got.RolloutReason, want.Rollout, want.RolloutReason)
+		}
+		if got.Status != cp.ReleaseDeployed {
+			t.Errorf("%s status = %q, want deployed: the rollout observation does not change what was applied", want.ID, got.Status)
+		}
+	}
+}

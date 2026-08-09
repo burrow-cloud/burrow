@@ -242,13 +242,23 @@ func (p *AutoDeployPoller) reconcileOne(ctx context.Context, ref AppEnvRef) {
 	// explicit call runs, distinguished only by its auto provenance (ADR-0052 §1/§5). Replicas 0 so
 	// the deploy preserves the running count and never rescales.
 	req := DeployRequest{App: ref.App, Env: ref.Env, Image: repo + ":" + target}
-	if _, err := p.engine.deploy(ctx, req, deployProvenance{trigger: TriggerAuto, level: level, tag: target}); err != nil {
+	res, err := p.engine.deploy(ctx, req, deployProvenance{trigger: TriggerAuto, level: level, tag: target})
+	if err != nil {
 		st.failedTag = target
 		st.retryTagAt = now.Add(p.backoff)
 		slog.WarnContext(ctx, "auto-deploy failed, holding off this tag", "app", ref.App, "env", ref.Env, "tag", target, "error", err)
 		return
 	}
 	st.failedTag = ""
+	// An unattended deploy has no caller to report to, so the log line IS the report (ADR-0092 §2).
+	// It said "auto-deployed" whatever the rollout then did, which on this path is the reading that
+	// lasts: nobody is watching, and the release record and the audit row are the only other places
+	// the outcome appears.
+	if res.Rollout.Failed() {
+		slog.WarnContext(ctx, "auto-deployed a newer in-scope tag whose rollout did not become ready; the previous version may still be serving and nothing was rolled back",
+			"app", ref.App, "env", ref.Env, "level", level, "tag", target, "reason", res.Rollout.Reason, "detail", res.Rollout.Detail)
+		return
+	}
 	slog.InfoContext(ctx, "auto-deployed newer in-scope tag", "app", ref.App, "env", ref.Env, "level", level, "tag", target)
 }
 

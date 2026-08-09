@@ -33,7 +33,7 @@ var _ controlplane.Database = (*Store)(nil)
 // columns is the releases projection in a stable order shared by the INSERT, the scanner, and every
 // SELECT. `trigger` is a Postgres reserved word, so it is quoted here and everywhere it is read or
 // written (ADR-0052 §5).
-const columns = `id, app, image, digest, env, command, metrics_port, replicas, status, supersedes, created_at, environment, "trigger", auto_level, auto_tag`
+const columns = `id, app, image, digest, env, command, metrics_port, replicas, status, supersedes, created_at, environment, "trigger", auto_level, auto_tag, rollout, rollout_reason`
 
 // Store is a Postgres-backed controlplane.Database.
 type Store struct {
@@ -95,17 +95,18 @@ func (s *Store) SaveRelease(ctx context.Context, r controlplane.Release) error {
 	// stored as jsonb regardless of how the driver encodes a parameter.
 	const q = `
 INSERT INTO releases (` + columns + `)
-VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 ON CONFLICT (id) DO UPDATE SET
     app = EXCLUDED.app, image = EXCLUDED.image, digest = EXCLUDED.digest,
     env = EXCLUDED.env, command = EXCLUDED.command, metrics_port = EXCLUDED.metrics_port,
     replicas = EXCLUDED.replicas, status = EXCLUDED.status, supersedes = EXCLUDED.supersedes,
     created_at = EXCLUDED.created_at, environment = EXCLUDED.environment,
-    "trigger" = EXCLUDED."trigger", auto_level = EXCLUDED.auto_level, auto_tag = EXCLUDED.auto_tag`
+    "trigger" = EXCLUDED."trigger", auto_level = EXCLUDED.auto_level, auto_tag = EXCLUDED.auto_tag,
+    rollout = EXCLUDED.rollout, rollout_reason = EXCLUDED.rollout_reason`
 
 	_, err = s.db.ExecContext(ctx, q,
 		r.ID, r.App, r.Image, r.Digest, string(envJSON), string(cmdJSON), r.MetricsPort, r.Replicas, string(r.Status), r.Supersedes, r.CreatedAt,
-		environment, string(trigger), string(r.AutoLevel), r.AutoTag)
+		environment, string(trigger), string(r.AutoLevel), r.AutoTag, string(r.Rollout), r.RolloutReason)
 	if err != nil {
 		return fmt.Errorf("postgres: save release %s: %w", r.ID, err)
 	}
@@ -684,8 +685,9 @@ func scanRelease(sc scanner) (controlplane.Release, error) {
 		created time.Time
 		trigger string
 		autoLvl string
+		rollout string
 	)
-	if err := sc.Scan(&r.ID, &r.App, &r.Image, &r.Digest, &envJSON, &cmdJSON, &r.MetricsPort, &r.Replicas, &status, &r.Supersedes, &created, &r.Environment, &trigger, &autoLvl, &r.AutoTag); err != nil {
+	if err := sc.Scan(&r.ID, &r.App, &r.Image, &r.Digest, &envJSON, &cmdJSON, &r.MetricsPort, &r.Replicas, &status, &r.Supersedes, &created, &r.Environment, &trigger, &autoLvl, &r.AutoTag, &rollout, &r.RolloutReason); err != nil {
 		return controlplane.Release{}, err
 	}
 	if err := json.Unmarshal(envJSON, &r.Env); err != nil {
@@ -698,5 +700,6 @@ func scanRelease(sc scanner) (controlplane.Release, error) {
 	r.CreatedAt = created
 	r.Trigger = controlplane.ReleaseTrigger(trigger)
 	r.AutoLevel = controlplane.AutoDeployLevel(autoLvl)
+	r.Rollout = controlplane.ReleaseRollout(rollout)
 	return r, nil
 }

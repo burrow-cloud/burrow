@@ -149,6 +149,10 @@ type DeployRequest struct {
 	MetricsPort int32    `json:"metrics_port,omitempty"`
 	Replicas    int32    `json:"replicas"`
 	Confirm     bool     `json:"confirm,omitempty"`
+	// NoWait asks the control plane to answer at submission instead of at outcome (ADR-0092 §3): the
+	// Deployment is written and the deploy returns without observing whether the new pods became
+	// ready, so DeployResult.Rollout is nil. The default — waiting — is the zero value.
+	NoWait bool `json:"no_wait,omitempty"`
 	// Progress receives the deploy's stages as the control plane reports them (issue #480). Setting
 	// it is what asks for them: Deploy then negotiates the streaming response, and a control plane
 	// that does not offer one is handled transparently. Nil — the default, and the shape that goes on
@@ -243,10 +247,16 @@ type Release struct {
 	Supersedes  string            `json:"supersedes,omitempty"`
 	// Trigger is how the deploy was triggered (ADR-0052 §5): "manual" for an explicit CLI or agent
 	// deploy, "auto" for the pull-based passive watcher. AutoLevel and AutoTag are set only for auto.
-	Trigger   string    `json:"trigger,omitempty"`
-	AutoLevel string    `json:"auto_level,omitempty"`
-	AutoTag   string    `json:"auto_tag,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Trigger   string `json:"trigger,omitempty"`
+	AutoLevel string `json:"auto_level,omitempty"`
+	AutoTag   string `json:"auto_tag,omitempty"`
+	// Rollout is what the deploy observed of this release's rollout (ADR-0092 §4): "settled",
+	// "unsettled", or empty when the deploy did not wait. It sits BESIDE Status, which records what
+	// Burrow applied rather than what the cluster then did with it. RolloutReason names why an
+	// unsettled rollout did not settle.
+	Rollout       string    `json:"rollout,omitempty"`
+	RolloutReason string    `json:"rollout_reason,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type WorkloadStatus struct {
@@ -278,7 +288,25 @@ type DeployResult struct {
 	// Burrow provisioned for this app, whether the app could reach it from inside its own container.
 	// A failed entry sits on a SUCCESSFUL deploy — the check is reported, never fatal.
 	Dependencies []DependencyResult `json:"dependencies,omitempty"`
+	// Rollout is what the deploy observed of its own rollout (ADR-0092): whether the new replicas
+	// became ready, and if not, why. NIL MEANS UNOBSERVED and never "fine" — a deploy that was asked
+	// not to wait (DeployRequest.NoWait), or a control plane older than the field.
+	Rollout *RolloutReport `json:"rollout,omitempty"`
 }
+
+// RolloutReport is the deploy's account of its rollout (ADR-0092 §2): the verdict, the reason from
+// the closed set controlplane.LedgerReasons() enumerates when it is negative, one line of what the
+// wait observed, and the live status surface's actionable explanation of the same workload.
+type RolloutReport struct {
+	Settled bool   `json:"settled"`
+	Reason  string `json:"reason,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	Issue   string `json:"issue,omitempty"`
+}
+
+// Failed reports that a rollout was observed and did not settle. A nil report is an unobserved
+// rollout, which is not a failure and does not read as one.
+func (r *RolloutReport) Failed() bool { return r != nil && !r.Settled }
 
 type StatusResult struct {
 	App        string         `json:"app"`

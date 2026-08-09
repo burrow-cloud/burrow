@@ -699,6 +699,12 @@ func attachedAppsIn(ctx context.Context, c *client.Client, env string) []string 
 // channel. It is held for confirmation by the addon.attach guardrail by default (ADR-0095 §1): the
 // held message names the instance, the variable, and — on an app that is already attached — that the
 // password is about to be rotated.
+//
+// It connects through changeClient, so it acts on a Burrow Cloud target as well as a cluster: giving
+// an app a database is what the managed product does for a tenant, over the route every attach on the
+// platform already goes through (cloud issue #215). The hold above is what the two have to say to
+// each other — reaching the managed product is about which credential may ask, and the guardrail is
+// about whether the ask is carried out, so it binds a tenant there exactly as it binds anyone here.
 func newAddonAttachCmd() *cobra.Command {
 	o := &commonOpts{}
 	var as, instance string
@@ -726,7 +732,9 @@ func newAddonAttachCmd() *cobra.Command {
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			// changeClient, not client: the managed control plane serves this route, and it is how a
+			// tenant's database is provisioned there (cloud issue #215).
+			c, err := o.changeClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

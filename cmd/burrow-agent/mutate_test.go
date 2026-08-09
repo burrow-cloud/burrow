@@ -508,3 +508,78 @@ func TestExposeStillReachesPublish(t *testing.T) {
 		t.Errorf("unexpose ran %q, want unpublish", decodeOutcome(t, out).Operation)
 	}
 }
+
+// TestADeployTellsTheAgentWhatTheRolloutDid is issue #546 at the surface that matters most. A human
+// eventually looks at a pod list; the agent has the result and nothing else, so a rollout that never
+// became ready has to be IN the result, structurally, alongside the reason and the pod's own
+// explanation (ADR-0092 §2).
+//
+// The outcome stays `executed`, deliberately. Those four values answer "did the operation run, or
+// did a guardrail stop it" (ADR-0049, ADR-0020), and this operation ran — the same way a
+// `burrow-agent run` whose command exits non-zero is an executed run with the exit code in its
+// result. Folding a rollout verdict into that vocabulary would make a guardrail hold and a wedged
+// rollout the same kind of answer, which they are not.
+func TestADeployTellsTheAgentWhatTheRolloutDid(t *testing.T) {
+	f := newFakeCP(t)
+	f.handler = func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"release": map[string]any{"id": "r1", "app": "web", "image": "img:2", "status": "deployed"},
+			"rollout": map[string]any{
+				"settled": false,
+				"reason":  "CrashLoopBackOff",
+				"detail":  "0 of 1 replicas updated, 0 ready",
+				"issue":   `container "web" is crash-looping (exit 1): listing tenants is forbidden`,
+			},
+		})
+	}
+	out, _ := runMutate(t, f, "deploy", "web", "--image", "img:2")
+
+	var envelope struct {
+		Outcome string `json:"outcome"`
+		Result  struct {
+			Rollout *struct {
+				Settled bool   `json:"settled"`
+				Reason  string `json:"reason"`
+				Issue   string `json:"issue"`
+			} `json:"rollout"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+		t.Fatalf("outcome is not valid JSON: %v (%q)", err, out)
+	}
+	if envelope.Outcome != outcomeExecuted {
+		t.Errorf("outcome = %q, want executed: the operation ran, and the rollout's verdict is in the result", envelope.Outcome)
+	}
+	if envelope.Result.Rollout == nil {
+		t.Fatalf("the result carries no rollout, so nothing in this envelope says the image is not serving: %s", out)
+	}
+	if envelope.Result.Rollout.Settled {
+		t.Error("rollout reads as settled")
+	}
+	if envelope.Result.Rollout.Reason != "CrashLoopBackOff" {
+		t.Errorf("reason = %q, want CrashLoopBackOff", envelope.Result.Rollout.Reason)
+	}
+	if !strings.Contains(envelope.Result.Rollout.Issue, "listing tenants is forbidden") {
+		t.Errorf("issue = %q, want the pod's own reason", envelope.Result.Rollout.Issue)
+	}
+}
+
+// TestTheAgentCannotDeclineToWait keeps the escape hatch off the agent surface (ADR-0092 §3). The
+// agent's whole exposure here is being told an operation worked when it did not, so the flag that
+// restores that answer is one only a human runs — the same line ADR-0080 §3 draws around
+// `--skip-hooks`.
+func TestTheAgentCannotDeclineToWait(t *testing.T) {
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"deploy", "web", "--image", "img:1", "--wait=false"}, &out, &errb)
+	if err == nil {
+		t.Fatal("`burrow-agent deploy --wait=false` succeeded; answering before the rollout is a human's call")
+	}
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("error = %v, want an unknown-flag rejection", err)
+	}
+	// Absent rather than ignored, for the reason the same rule gives for --skip-hooks: a flag the
+	// binary accepts and drops reads as having worked.
+	if f := newDeployCmd().Flags().Lookup("wait"); f != nil {
+		t.Error("the agent's deploy command defines a wait flag")
+	}
+}

@@ -9,14 +9,15 @@
 [ADR-0067](0067-one-database-instance-per-environment.md) §1 puts one Postgres instance in each
 environment. Right default, wrong maximum. Make it a default.
 
-- **Second instance is asked for by name.** `addon install postgres --instance analytics`. No flag,
+- **Second instance is asked for by name.** `addon install postgres --name analytics`. No flag,
   no change: the environment's one instance, exactly as today.
 - **Instance names stop being derived.** `AddonInstanceName(type, env)` has no answer for a second
   one, and a third component brings back the ambiguity [cloud ADR-0029](https://github.com/burrow-cloud/cloud/blob/main/docs/adr/0029-database-names-use-a-generated-id.md)
   removed: `burrow-postgres-staging-x` is both `(staging, x)` and `(staging-x, default)`.
 - **The registry is the mapping.** Each environment's first instance keeps the name it already has,
-  so nothing moves. Every later one gets a generated ID, and the operator never types it.
-- **Attach picks one.** `--instance` selects it; without it, the environment's default. An app may
+  and that name is also its label — so nothing moves and no key an operator has already typed
+  changes. Every later one gets a generated cluster name, and the operator never types it.
+- **Attach picks one.** `--name` selects it; without it, the environment's default. An app may
   hold several attachments, and a second one must name its own variable — `DATABASE_URL` is taken,
   and Burrow refuses rather than inventing `DATABASE_URL_2`.
 - **Per-instance, not per-environment**, for everything that names an instance: the backup claim,
@@ -109,20 +110,29 @@ which admits no dot, so the instance name cannot carry one either.
 ### 1. The environment's one instance stays the default, and a second is asked for by name
 
 ```
-burrow addon install postgres                          # the environment's instance, as today
-burrow addon install postgres --instance analytics     # a second one beside it
+burrow addon install postgres                      # the environment's instance, as today
+burrow addon install postgres --name analytics     # a second one beside it
 ```
 
-Without `--instance`, every add-on command means what it means today: the environment's default
+Without `--name`, every add-on command means what it means today: the environment's default
 instance. A single-instance operator never types the flag, and no existing command changes shape.
+
+**The flag is `--name`, which is the flag the accepted records already name.**
+[ADR-0082](0082-an-addon-instance-is-configured-after-it-exists.md) §1 decided the selector is a
+flag rather than a positional — a positional would be ambiguous against `addon config`'s setting
+subcommands — and declined to add it while it could only ever take one value.
+[ADR-0085](0085-a-guardrail-can-name-the-app-it-guards.md) §1 then wrote it down as
+`burrow addon config postgres --name <instance>`, beside its own `guard set --name`. Introducing
+`--instance` here would be a second word for the thing those two records already select by, on
+commands that sit next to each other.
 
 **The shared instance stays the default because an instance is a pod and a volume**, and most apps
 do not need their own. ADR-0031's density argument is unchanged by this record; what changes is that
 the argument is now a default with an exit rather than a wall.
 
-**`--instance` names a label, not a resource.** It is what a person types and what every listing
-shows. What the cluster calls the instance is §2's business, and the two are deliberately not the
-same value.
+**`--name` takes a label, not a resource name.** It is what a person types, what every listing
+shows, and what a guardrail key holds. What the *cluster* calls the instance is §2's business, and
+for anything past an environment's first instance the two are deliberately not the same value.
 
 ### 2. An instance name is looked up, not derived
 
@@ -134,10 +144,17 @@ the only mapping. Nothing recovers an environment or a label by splitting a name
   creation, so an install that predates this record gains a row describing the instance, the volume
   and the superuser Secret it already has. Nothing moves, which is ADR-0067 §3's exemption surviving
   intact.
-- **Every additional instance gets a short generated ID** from `[a-z0-9]`, named
-  `burrow-postgres-<id>`. The ID is generated, not derived: not a hash of the label, not an encoding
-  of the environment. Uniqueness is enforced by the registry rather than assumed from entropy.
-- **`AddonInstanceName` stops being a lookup and becomes a name generator** used at creation time
+- **And its label is that same name.** An environment's first instance is labelled
+  `burrow-postgres`, not `default` or `primary`. That is deliberate rather than incidental: the
+  label is what a guardrail key holds and what `addon remove` takes, and those are strings an
+  operator may already have typed. Choosing a prettier label would silently stop
+  `prod.burrow-postgres.addon.remove` from matching the instance it was written for — a disposition
+  that reads as protection and is not.
+- **Every additional instance gets a short generated ID** from `[a-z0-9]` as its **cluster name**,
+  `burrow-postgres-<id>`, while its label is whatever the operator asked for. The ID is generated,
+  not derived: not a hash of the label, not an encoding of the environment. Uniqueness is enforced
+  by the registry rather than assumed from entropy.
+- **`AddonInstanceName` stops being the answer and becomes a name generator** used at creation time
   only. Every consumer resolves the instance from the registry.
 
 **The alphabet is forced rather than chosen**, for cloud ADR-0029's reason: the same ID has to be
@@ -157,16 +174,19 @@ cost paid at every boundary between them.
 
 ```
 burrow addon attach postgres web                          # the environment's default instance
-burrow addon attach postgres web --instance analytics --as ANALYTICS_URL
+burrow addon attach postgres web --name analytics --as ANALYTICS_URL
 ```
 
-- **Without `--instance`, attach uses the environment's default instance**, so today's command means
+- **Without `--name`, attach uses the environment's default instance**, so today's command means
   today's thing.
 - **An app may hold several attachments.** The attachment record is keyed by `(addon, app,
   environment, instance)` rather than by `(addon, app, environment)`.
 - **A second attachment must name a free variable.** The first attachment defaults to
   `DATABASE_URL`; a second cannot, because the name is taken, and the refusal that says so by name
   already exists. Burrow does not fall back to a derived second name.
+- **The read address follows the same rule.** [ADR-0081](0081-a-postgres-instance-may-have-a-standby.md)
+  §2's read variable belongs to one attachment, so an app attached twice has one per attachment and
+  the second one is named the same way the second connection string is.
 - **Detach names the instance too**, and detaching one attachment leaves the other's variable, role
   and database untouched.
 
@@ -193,24 +213,31 @@ Relaxing the ceiling without this would reproduce ADR-0067's collision one level
   it is what says which namespace an app's Secret is in and which environment's data this is — and
   the instance is what selects the server. Neither is optional, for ADR-0067 §1's reason: a
   signature that can omit it is a signature that will omit it.
-- **Guardrails need no change.** ADR-0085 already scopes a disposition by instance name, so denying
-  `addon.remove` for one instance while leaving another alone already works and already means the
-  right thing.
+- **A guardrail scopes by the LABEL, not the cluster name.** ADR-0085 §1 already makes a disposition
+  instance-level — it says so, and it says it is "instance-level from the start" precisely so that
+  this record does not need a fourth tier — so denying `addon.remove` for one instance while leaving
+  another alone already means the right thing. What changes is which string goes in the key. Today
+  the engine passes `AddonInstanceName`'s output as `GuardrailScope.Name`; under §2 that is a
+  generated ID for every instance past the first, and a key nobody can read is a key nobody will
+  write. The label goes in instead, and **the ambiguity §2 fights does not arise here**: ADR-0085's
+  key is `<env>.<name>.<code>`, so the environment is already a separate component and
+  `prod.analytics.addon.remove` needs no parsing. Because §2 makes an existing instance's label
+  equal to its current name, every disposition already written keeps matching.
 
 ### 5. Creating an instance is the operator's; attaching to one is the agent's
 
-**`addon install --instance` is operator-only**, absent from `burrow-agent`, which is where `addon
+**`addon install --name` is operator-only**, absent from `burrow-agent`, which is where `addon
 install` already sits. It provisions hardware: a pod and a volume nobody approved, and the ease of
 removing it does not make the spend reversible. That is [ADR-0065](0065-what-belongs-on-the-agent-surface.md)'s
 criterion and the same answer ADR-0082 §4 reaches for a shape change.
 
-**`addon attach --instance` stays on the agent surface.** Attaching to an instance that already
+**`addon attach --name` stays on the agent surface.** Attaching to an instance that already
 exists provisions nothing and destroys nothing, which is why attach is ungated today; naming which
 existing instance to attach to does not change either property.
 
 The refusal names the verb and that a person runs it (ADR-0065 §7). An agent that can say *"this
 environment has one Postgres instance, and a person can add another with `burrow addon install
-postgres --instance analytics`"* is doing the useful half of the work.
+postgres --name analytics`"* is doing the useful half of the work.
 
 ### 6. An instance still belongs to exactly one environment
 
@@ -234,8 +261,18 @@ instance isolates.
 - **Instance names in the cluster become opaque for every instance after the first**, and this is
   the real cost. Somebody reading `kubectl get cluster` sees `burrow-postgres-k9f3m2` and cannot
   tell what it is for without the registry. It is cloud ADR-0029's debt, and it is repaid the same
-  way: every surface that shows an instance resolves it back to its label, and `addon list` is where
-  a person holding a name from a log finds out what it is.
+  way: every surface Burrow owns resolves the name back to its label, and `addon list` is where a
+  person holding a name from a log finds out what it is. The debt is **smaller here than in the
+  managed product**, because Burrow controls every string an operator types — the label reaches the
+  registry, the guardrail key and the CLI intact, and the generated name is confined to the
+  Kubernetes object and whatever the operator reads off `kubectl`. It is not zero, and `kubectl` is
+  exactly where somebody looks during an incident.
+- **Two columns and one key change, and no new table.** `addons.name` is a primary key with no
+  `(type, environment)` constraint above it, so the registry can *already* hold two rows for one
+  environment — what it cannot do is say which label either row answers to, or which of them an
+  attachment means. So the add-on row gains a label beside its name, and the attachment key grows
+  the instance it is against. The label-to-name mapping is a column, not a table, because there is
+  exactly one instance per row.
 - **A pure function becomes a lookup, in twenty-two places.** Two of them are in the CLI binaries and
   will have to ask burrowd rather than composing the name themselves. Nothing about this is subtle,
   and all of it is a prerequisite.
@@ -245,7 +282,7 @@ instance isolates.
   ID is not built — `internal/tenantdb/names.go` still composes `t-<tenant>-<app>` — so whichever
   implementation goes first sets the pattern the other follows.
 - **The default is unchanged for everybody who does not want this.** No existing command grows a
-  required flag, no name in an existing install moves, and an operator who never types `--instance`
+  required flag, no name in an existing install moves, and an operator who never types `--name`
   cannot tell this record was accepted.
 
 ## Rejected alternatives

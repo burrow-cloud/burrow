@@ -98,27 +98,46 @@ type AuditFilter struct {
 	Limit int
 }
 
-// auditCaller is the coarse caller identity recorded until an authentication model exists
-// (ADR-0027). The control plane authenticates with a single API token today, so every guarded
-// operation is attributed to the control-plane boundary; the schema reserves room to enrich
-// this without a migration of meaning.
+// auditCaller is the coarse caller identity recorded for a request that carries no per-caller
+// credential (ADR-0027): the shared install token, or an internal code path with no request behind
+// it at all. Everything reaching burrowd that way is attributed to the control-plane boundary,
+// because the boundary is genuinely all that is known about it.
 const auditCaller = "control-plane"
 
-// auditPrincipal is the acting identity recorded until per-user identities exist (ADR-0038).
-// All agents share one `burrow-agent` ServiceAccount today, so every guarded operation is
-// attributed to this shared-agent constant; the principal seam (principalFromContext) is where
-// a later TokenReview→SSO mapping fills in a real per-user value.
+// auditPrincipal is the acting identity recorded for the same requests, for the same reason. The
+// shared install token is one string that every person, every agent and every CI job presents, so
+// there is no per-caller answer to give and the constant says so rather than inventing one.
 const auditPrincipal = "shared-agent"
 
-// principalFromContext is the caller-identity seam (ADR-0038): it resolves the acting principal
-// (the actor) from the request context. Today it returns the shared-agent constant, because all
-// agents share one ServiceAccount and there is no auth model to key an identity on. This is the
-// single point where a future TokenReview→SSO identity resolution plugs in: middleware in the
-// API layer would put the resolved SSO identity on the request context (see the note in
-// controlplane/api/api.go), and this seam would read and return it. Kept a package var so a test
-// or the managed product can substitute a resolver without touching call sites.
+// principalFromContext is the caller-identity seam (ADR-0084 §9): it resolves the acting principal
+// from the request context. The API layer authenticates the presented credential and puts the
+// resulting Caller on the context (ContextWithCaller); this reads it back, and falls through to the
+// shared-agent constant when there is none — the shared install token, which keeps working
+// unchanged, and an internal reconcile, which has no caller by construction.
+//
+// Kept a package var so a test or the managed product can substitute a resolver without touching
+// call sites.
 var principalFromContext = func(ctx context.Context) string {
+	if c, ok := CallerFromContext(ctx); ok && c.PrincipalName != "" {
+		return c.PrincipalName
+	}
 	return auditPrincipal
+}
+
+// callerFromRequest resolves the CALLER column: what kind of credential acted, rather than who held
+// it. It is a function of the request rather than a constant because the answer differs per request
+// the moment credentials do — an operator at a terminal, that person's agent and a CI job are three
+// different callers, and a trail that recorded one word for all three answers none of the questions
+// asked of it afterwards (ADR-0084 §3, §9).
+//
+// The kind comes from the STORED credential row, never from anything the request said about itself.
+// A request with no per-caller credential records the control-plane boundary, exactly as every
+// request did before credentials existed.
+func callerFromRequest(ctx context.Context) string {
+	if c, ok := CallerFromContext(ctx); ok && c.Kind != "" {
+		return string(c.Kind)
+	}
+	return auditCaller
 }
 
 // clientVersionContextKey keys the acting client's version on a request context. It is an unexported
@@ -213,7 +232,7 @@ func (e *Engine) Audit(ctx context.Context, filter AuditFilter) ([]AuditEntry, e
 func (e *Engine) recordAudit(ctx context.Context, entry AuditEntry) {
 	entry.Timestamp = e.clock.Now()
 	if entry.Caller == "" {
-		entry.Caller = auditCaller
+		entry.Caller = callerFromRequest(ctx)
 	}
 	if entry.Principal == "" {
 		entry.Principal = principalFromContext(ctx)

@@ -35,6 +35,26 @@ import (
 // install token working, which is what ADR-0084's "existing installs keep working" means in
 // practice, and each says which one it was rather than reporting that signing in broke.
 
+// signInTransport is how the sign-in reaches the cluster's control plane: the kubeconfig, through
+// the API-server proxy, with the shared install token read from the install Secret. That read is the
+// proof of operator-ship this whole exchange rests on, so it is deliberately the ordinary transport
+// and not a special one.
+//
+// NO INSTALL ID IS SENT. This call is how the id is LEARNED, so asserting one here would refuse
+// exactly the case the exchange exists to establish (ADR-0084 §5).
+//
+// It is a package var for the reason listContexts and stdinIsTerminal are: a test substitutes a
+// control plane it can drive, rather than needing a cluster to assert what the CLI does with each
+// answer.
+var signInTransport = func(kubeconfig, kubeContext string) client.Transport {
+	return connect.KubeconfigTransport{Options: connect.Options{
+		Kubeconfig:    kubeconfig,
+		Context:       kubeContext,
+		ClientName:    client.ClientNameCLI,
+		ClientVersion: cliVersion(),
+	}}
+}
+
 // signInResult is what the sign-in attempt has to say afterwards: the line to print, and whether a
 // credential was actually issued. The caller prints; this function decides.
 type signInResult struct {
@@ -50,15 +70,7 @@ type signInResult struct {
 // target with both facts on it — a credential recorded against no install would name no file, and an
 // install id recorded with no credential would send the header and present the shared token.
 func signInToCluster(ctx context.Context, kubeconfig, name string, tgt *localconfig.Target) signInResult {
-	// No install id is sent. This call is how the id is LEARNED, so asserting one here would refuse
-	// exactly the case the whole exchange exists to establish (ADR-0084 §5).
-	transport := connect.KubeconfigTransport{Options: connect.Options{
-		Kubeconfig:    kubeconfig,
-		Context:       tgt.Context,
-		ClientName:    client.ClientNameCLI,
-		ClientVersion: cliVersion(),
-	}}
-	c, err := transport.Connect(ctx)
+	c, err := signInTransport(kubeconfig, tgt.Context).Connect(ctx)
 	if err != nil {
 		return signInResult{Line: fmt.Sprintf(
 			"No credential of your own was issued: %s\nYour commands use the install's shared token, which keeps working. Run `burrow auth login --context %s` again once the cluster answers.",

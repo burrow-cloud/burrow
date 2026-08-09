@@ -4,15 +4,19 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/internal/clustercred"
+	"github.com/burrow-cloud/burrow/localconfig"
 )
 
 // The CLI side of signing in to a self-hosted install (ADR-0084 §1). What is asserted here is the
@@ -80,6 +84,118 @@ func TestTheCredentialIsKeyedByInstallNotContext(t *testing.T) {
 	if got := o.connectOptions(target{context: "do-nyc3-burrow", installID: "install-new"}).Token; got != "" {
 		t.Errorf("Token = %q, want empty: the previous install's credential must not be presented to a new one", got)
 	}
+}
+
+// stubSignInControlPlane points the sign-in at an HTTP control plane the test drives, so what the
+// CLI does with each answer is asserted without a cluster. The returned recorder captures the claim
+// request's body, because "what did the CLI ask for" is half of what is being pinned.
+func stubSignInControlPlane(t *testing.T, status int, body string) *[]byte {
+	t.Helper()
+	var asked []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/claim" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		asked, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	orig := signInTransport
+	signInTransport = func(string, string) client.Transport {
+		return client.DirectTransport{BaseURL: srv.URL, Token: "shared-install-token", Name: client.ClientNameCLI}
+	}
+	t.Cleanup(func() { signInTransport = orig })
+	return &asked
+}
+
+// TestSignInStoresTheCredentialAndRecordsTheInstall is the sign-in path from the CLI's side: the
+// token comes back once, lands in a file only its owner can read, and the install that issued it is
+// recorded on the target so the next command can find it again.
+func TestSignInStoresTheCredentialAndRecordsTheInstall(t *testing.T) {
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+	asked := stubSignInControlPlane(t, http.StatusOK, `{
+		"principal_id":"p-1","principal":"ada","admin":true,
+		"credential_id":"c-1","kind":"user","install_id":"install-abc","token":"ada-token"}`)
+
+	tgt := localconfig.KubernetesTarget("do-nyc1-cluster")
+	got := signInToCluster(context.Background(), "", "ada", &tgt)
+
+	if !got.Issued {
+		t.Fatalf("Issued = false, want true; line = %q", got.Line)
+	}
+	if tgt.InstallID != "install-abc" {
+		t.Errorf("target InstallID = %q, want install-abc — the credential is filed under it", tgt.InstallID)
+	}
+	cred, err := clustercred.Load("install-abc")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cred.Token != "ada-token" || cred.Principal != "ada" || cred.CredentialID != "c-1" {
+		t.Errorf("stored %+v, want the issued credential", cred)
+	}
+	// The claim asks for a name and nothing else. A kind in the body would let the caller choose
+	// which guardrails bind it (ADR-0084 §3).
+	if strings.Contains(string(*asked), "kind") {
+		t.Errorf("claim body = %s, want only the name", *asked)
+	}
+	if !strings.Contains(got.Line, "ada") || !strings.Contains(got.Line, "admin") {
+		t.Errorf("line = %q, want it to name the principal and that they are this install's admin", got.Line)
+	}
+}
+
+// TestSignInOnAClaimedInstallLeavesAWorkingSetup: the ordinary answer for the second person onwards.
+// The target is still recorded, no credential is written, and the line says what to do — the shared
+// install token keeps working, which is ADR-0084's "existing installs keep working".
+func TestSignInOnAClaimedInstallLeavesAWorkingSetup(t *testing.T) {
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+	stubSignInControlPlane(t, http.StatusConflict, `{"error":"already claimed","code":"already_claimed"}`)
+
+	tgt := localconfig.KubernetesTarget("do-nyc1-cluster")
+	got := signInToCluster(context.Background(), "", "grace", &tgt)
+
+	if got.Issued {
+		t.Error("Issued = true on an install that already has an admin")
+	}
+	if tgt.InstallID != "" {
+		t.Errorf("target InstallID = %q, want empty: no id was learned, so the target stays unchecked", tgt.InstallID)
+	}
+	if !strings.Contains(got.Line, "admin") || !strings.Contains(got.Line, "shared token") {
+		t.Errorf("line = %q, want it to name the admin and say the shared token still works", got.Line)
+	}
+}
+
+// TestSignInAgainstAnUnreachableClusterDoesNotFail: choosing where you use Burrow has to work
+// against a cluster that is down or has no Burrow in it. The sign-in reports and returns; the
+// caller records the target either way.
+func TestSignInAgainstAnUnreachableClusterDoesNotFail(t *testing.T) {
+	t.Setenv("BURROW_CONFIG", filepath.Join(t.TempDir(), "config"))
+	orig := signInTransport
+	signInTransport = func(string, string) client.Transport { return failingTransport{} }
+	t.Cleanup(func() { signInTransport = orig })
+
+	tgt := localconfig.KubernetesTarget("do-nyc1-cluster")
+	got := signInToCluster(context.Background(), "", "ada", &tgt)
+
+	if got.Issued {
+		t.Error("Issued = true against a cluster that never answered")
+	}
+	if !strings.Contains(got.Line, "shared token") {
+		t.Errorf("line = %q, want it to say the shared token keeps working", got.Line)
+	}
+	if !strings.Contains(got.Line, "do-nyc1-cluster") {
+		t.Errorf("line = %q, want it to name the context to try again against", got.Line)
+	}
+}
+
+// failingTransport is a control plane that cannot be reached at all.
+type failingTransport struct{}
+
+func (failingTransport) Connect(context.Context) (*client.Client, error) {
+	return nil, errors.New("the cluster is unreachable")
 }
 
 // TestClaimRefusalNamesTheNextStep: each way burrowd can decline has a different next step, and a

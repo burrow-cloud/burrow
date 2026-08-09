@@ -252,12 +252,45 @@ func (o *commonOpts) requireCluster() error {
 // of those (cloud issue #202). Refusing them was the client not knowing the endpoint
 // existed, not the endpoint being absent.
 //
-// Only reads move here, and only reads whose route the managed product actually serves. The verb is
-// the transport's, not the test: `logs query` and `metrics query` are POSTs because a query does not
-// fit in a path, and they change nothing. Anything that CHANGES a tenant is a product question —
-// what a tenant may create, and what it costs — rather than a plumbing one, and keeps calling client
-// (clusteronly.go).
+// A read moves here when the managed product actually serves its route. The verb is the transport's,
+// not the test: `logs query` and `metrics query` are POSTs because a query does not fit in a path,
+// and they change nothing. A command that CHANGES a tenant needs an answer to a further question —
+// whether a tenant may — and moves to changeClient once that answer exists, or keeps calling client
+// while it does not (clusteronly.go).
 func (o *commonOpts) readClient(ctx context.Context, stderr io.Writer) (*client.Client, error) {
+	return o.eitherTargetClient(ctx, stderr)
+}
+
+// changeClient is readClient for a command that CHANGES something, and it is a strictly higher bar:
+// the route answering is necessary and not sufficient, because every person-side refusal in this file
+// is a client-side convention rather than an enforced boundary. `tenantguard.PersonPolicy` in the
+// managed control plane allows every guardrail on a person's credential, so the routes the CLI
+// refuses would be served to the same person's bearer token by anything that spoke HTTP (cloud issue
+// #208). What the refusal buys is therefore that the product has not said yes yet — not protection.
+//
+// So a command moves here when the product HAS said yes, and `addon attach` is the first: the managed
+// product provisions a tenant's database through POST /v1/addons/attach, that route is what every
+// attach on the platform has gone through, and the result is the `DATABASE_URL` a tenant's app reads
+// (cloud issue #215). Refusing it in the client left a tenant with a documented command that could
+// not do the documented thing, and left their AGENT — the surface ADR-0065 keeps deliberately
+// narrower than the human's — able to attach a database the human's own CLI would not.
+//
+// Whether an attach should then be held for a human is a separate question with its own answer
+// (ADR-0095): the guardrail belongs in the control plane, where it binds every caller, rather than in
+// a client that only binds the one that happens to be this binary.
+//
+// The rest of the add-on writes — `install`, `connect`, `remove`, `backup`, `restore` — stay on
+// client. Each is a question about what a managed tenant may do to an instance the platform operates
+// and pays for, and none has been answered.
+func (o *commonOpts) changeClient(ctx context.Context, stderr io.Writer) (*client.Client, error) {
+	return o.eitherTargetClient(ctx, stderr)
+}
+
+// eitherTargetClient is the shared body of readClient and changeClient: the managed product is
+// connected to at the endpoint the target names, and anything else resolves through client exactly as
+// it did. Which commands may call it is the whole of the difference between the two, and it is
+// documented on them rather than decided here.
+func (o *commonOpts) eitherTargetClient(ctx context.Context, stderr io.Writer) (*client.Client, error) {
 	tgt, cloud, err := o.cloudTargetIfSelected()
 	if err != nil {
 		return nil, err

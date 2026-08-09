@@ -66,10 +66,16 @@ func unreachableCluster(t *testing.T) string {
 //
 //   - It acts on a cluster with a kubeconfig. `config registry` writes a pull Secret;
 //     `env add` creates a namespace and RBAC before it registers anything.
+//
 //   - It CHANGES the tenant, and whether a tenant may is a product decision rather than a plumbing
-//     one: `guard set`, `cluster config set`, `addon` installs and attaches, `provider add`,
-//     `domain add`/`remove`, `env add`/`remove`. The managed API answers several of these routes
-//     with a refusal of its own; none of them is turned on by a client change.
+//     one: `guard set`, `cluster config set`, `addon` installs, `provider add`, `domain
+//     add`/`remove`, `env add`/`remove`. The managed API answers several of these routes with a
+//     refusal of its own; none of them is turned on by a client change.
+//
+//     `addon attach` was on this list and is not any more (cloudChangeCommands below): the product
+//     decision it was waiting on had already been taken everywhere except the client, since
+//     provisioning a tenant's database over POST /v1/addons/attach is what the managed product does
+//     (cloud issue #215).
 //
 // `cluster` and `cluster capacity` stay for a third reason: the route answers, but what it describes
 // is the operator's cluster — its nodes, its capacity, its top consumers across every tenant — so
@@ -93,7 +99,6 @@ var clusterOnlyCommands = [][]string{
 	{"addon", "install"},
 	{"addon", "install", "logs"},
 	{"addon", "remove", "logs"},
-	{"addon", "attach", "postgres", "web"},
 	{"addon", "backups", "postgres"},
 	{"addon", "backup-health", "postgres"},
 	{"addon", "sql", "postgres", "web", "--statement", "select 1"},
@@ -130,6 +135,23 @@ var cloudReadCommands = []struct {
 	{[]string{"addon", "list"}, "/v1/addons"},
 	{[]string{"addon", "logs"}, "/v1/logs/query"},
 	{[]string{"addon", "metrics", "up"}, "/v1/metrics/query"},
+}
+
+// cloudChangeCommands is the third part: the commands that CHANGE a tenant and are allowed to, so
+// they go to the managed product rather than refusing. A route that answers is not enough to put a
+// command here — every route the refusals above cover answers too, since the managed control plane
+// allows every guardrail on a person's credential (cloud issue #208). What puts one here is the
+// product having decided a tenant may.
+//
+// `addon attach` is the first and, today, the only one. Provisioning a tenant's database is what the
+// managed product does; POST /v1/addons/attach is how, and it is the route every attach on the
+// platform has gone through (cloud issue #215).
+var cloudChangeCommands = []struct {
+	args   []string
+	method string
+	path   string
+}{
+	{[]string{"addon", "attach", "postgres", "web"}, http.MethodPost, "/v1/addons/attach"},
 }
 
 // cannedTenantReads answers every route in cloudReadCommands from one body. The keys are disjoint
@@ -186,6 +208,151 @@ func TestCloudTargetServesTheReadsItHasARouteFor(t *testing.T) {
 				t.Errorf("Authorization = %q, want the stored credential", gotAuth)
 			}
 		})
+	}
+}
+
+// cannedAttach answers POST /v1/addons/attach the way the managed control plane does: the app, the
+// add-on, the tenant's environment, and the KEY the connection string was written under. Never the
+// value — an attach's result carries a name and no secret, on either kind of target.
+func cannedAttach(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"app": "web", "addon": "postgres", "environment": "prod", "secret_key": "DATABASE_URL",
+	})
+}
+
+// TestCloudTargetServesTheChangesTheProductHasDecided is the sibling of the reads test for the
+// commands that change something. Same assertion and same reason: no --kubeconfig is passed and the
+// package has an empty home, so a command that still resolved through one could reach nothing at all,
+// and hitting the tenant's endpoint with the stored credential is the proof it did not try.
+func TestCloudTargetServesTheChangesTheProductHasDecided(t *testing.T) {
+	for _, tc := range cloudChangeCommands {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			signedInToCloud(t)
+
+			var gotMethod, gotPath, gotAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+				cannedAttach(w, r)
+			}))
+			defer srv.Close()
+			pointCloudAt(t, srv.URL)
+
+			var out, errb bytes.Buffer
+			if err := run(context.Background(), tc.args, &out, &errb); err != nil {
+				t.Fatalf("burrow %s against a cloud target: %v\nstderr: %s", strings.Join(tc.args, " "), err, errb.String())
+			}
+			if gotMethod != tc.method || gotPath != tc.path {
+				t.Errorf("reached %s %q, want the tenant's %s %q", gotMethod, gotPath, tc.method, tc.path)
+			}
+			if gotAuth != "Bearer "+cloudCLIToken {
+				t.Errorf("Authorization = %q, want the stored credential", gotAuth)
+			}
+		})
+	}
+}
+
+// TestAddonAttachOnACloudTargetGivesTheAppItsDatabase is cloud issue #215's acceptance. A managed
+// tenant asks for a database the documented way and gets one: the command reaches the route the
+// platform provisions through, and reports the variable the app will read its connection string from.
+//
+// Before this it refused with a sentence about a tenant having no cluster of its own, against a
+// control plane that provisions exactly this for exactly this tenant — and against a `burrow-agent`
+// that could already ask for it, which made the human surface the narrower of the two.
+func TestAddonAttachOnACloudTargetGivesTheAppItsDatabase(t *testing.T) {
+	signedInToCloud(t)
+
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/addons/attach" {
+			t.Errorf("reached %q, want the tenant's /v1/addons/attach", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		cannedAttach(w, r)
+	}))
+	defer srv.Close()
+	pointCloudAt(t, srv.URL)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "attach", "postgres", "web"}, &out, &errb); err != nil {
+		t.Fatalf("burrow addon attach against a cloud target: %v\nstderr: %s", err, errb.String())
+	}
+	if gotBody["app"] != "web" || gotBody["addon"] != "postgres" {
+		t.Errorf("body = %v, want the app and add-on the command names", gotBody)
+	}
+	for _, want := range []string{"web", "postgres", "DATABASE_URL", "never shown"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout = %q, want it to contain %q", out.String(), want)
+		}
+	}
+	// A change says where it happened, once (ADR-0078 §4). On the managed product that is the target,
+	// not a kube context — naming one here would be describing a machine the tenant does not have.
+	if !strings.Contains(out.String(), localconfig.CloudEndpoint) {
+		t.Errorf("stdout = %q, want the result to name the managed target it acted on", out.String())
+	}
+	assertNoToken(t, out.String(), errb.String())
+}
+
+// TestAddonAttachOnACloudTargetPassesTheVariableName. `--as` is the one narrowing on this route that
+// aims a KEY rather than a scope, and it rides in the path. A managed tenant whose app reads PG_DSN
+// has to be able to say so, or the attach writes DATABASE_URL over whatever is there.
+func TestAddonAttachOnACloudTargetPassesTheVariableName(t *testing.T) {
+	signedInToCloud(t)
+
+	var gotURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL = r.URL.String()
+		cannedAttach(w, r)
+	}))
+	defer srv.Close()
+	pointCloudAt(t, srv.URL)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"addon", "attach", "postgres", "web", "--as", "PG_DSN"}, &out, &errb); err != nil {
+		t.Fatalf("burrow addon attach --as against a cloud target: %v\nstderr: %s", err, errb.String())
+	}
+	if !strings.Contains(gotURL, "PG_DSN") {
+		t.Errorf("reached %q, want the chosen variable name carried on the route", gotURL)
+	}
+}
+
+// TestAddonAttachStillRefusesAKubeconfigFlagOnACloudTarget. Reaching the managed product does not
+// make the kubeconfig-shaped flags mean something there: --context picks a cluster out of a
+// kubeconfig, and honouring it silently would run the attach somewhere nobody asked for. The refusal
+// is the one cloudTarget already gives, naming the flag.
+func TestAddonAttachStillRefusesAKubeconfigFlagOnACloudTarget(t *testing.T) {
+	signedInToCloud(t)
+	forbidCloud(t)
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"addon", "attach", "postgres", "web", "--context", "staging"}, &out, &errb)
+	if err == nil {
+		t.Fatalf("addon attach --context ran against a cloud target\nstdout: %s", out.String())
+	}
+	for _, want := range []string{"--context", localconfig.CloudEndpoint, "burrow auth switch"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+// TestAddonDetachStillRefusesOnACloudTarget. Attach moved and detach did not, so the pair is asserted
+// rather than assumed. Detach is not the same question: `--delete-data` destroys an application's
+// database from this binary, its guardrail is at `confirm`, and what a managed tenant may do to an
+// instance the platform operates is undecided. What keeps that from being a one-way door is that
+// nothing about attaching is irreversible — the platform detaches, and the database survives a detach
+// by ADR-0090 §1 either way.
+func TestAddonDetachStillRefusesOnACloudTarget(t *testing.T) {
+	signedInToCloud(t)
+	forbidCloud(t)
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"addon", "detach", "postgres", "web", "--kubeconfig", unreachableCluster(t)}, &out, &errb)
+	if err == nil {
+		t.Fatalf("addon detach ran against a cloud target\nstdout: %s", out.String())
+	}
+	if !strings.Contains(err.Error(), "no cluster of its own") {
+		t.Errorf("error = %q, want the cluster-only refusal", err)
 	}
 }
 

@@ -56,8 +56,20 @@ import (
 //     the tenant's. `cluster` and `cluster capacity` therefore stay refused although their routes
 //     answer, because what they describe is the operator's cluster — its nodes, its headroom, its
 //     top consumers across every tenant — and what a tenant should see of that is a decision nobody
-//     has taken. Anything that CHANGES a tenant stays here for the same kind of reason: it is a
-//     product question, not a plumbing one.
+//     has taken.
+//   - `addon attach`, on commonOpts.changeClient. A command that CHANGES a tenant needs more than a
+//     route that answers: it needs the product to have said a tenant may. For attach it has —
+//     provisioning a tenant's database over POST /v1/addons/attach is what the managed product does,
+//     and it is the route every attach on the platform has gone through (cloud issue #215). The rest
+//     of the add-on writes stay here because that second question is still open for them.
+//
+//     Worth being exact about what the refusal was worth, because it is easy to read it as a control
+//     it never was: `tenantguard.PersonPolicy` allows every guardrail on a person's credential, so
+//     each command refused here would have been served to the same person's bearer token over plain
+//     HTTP (cloud issue #208). These refusals are a convention about what the product offers, not a
+//     boundary — and for attach, they were also inverted, since a tenant's `burrow-agent` could
+//     attach a database their own `burrow` refused. Where an attach genuinely needs holding, that is
+//     a guardrail in the control plane, which binds every caller (ADR-0095).
 //
 //     `addon backups` and `addon backup-health` are reads whose routes answer too, and they stay
 //     refused for a third reason that is neither of those: on the managed product the backups are

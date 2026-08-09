@@ -358,7 +358,13 @@ type AutoscaleResult struct {
 type RollbackResult struct {
 	Release               Release `json:"release"`
 	RolledBackToReleaseID string  `json:"rolled_back_to_release_id"`
-	SupersededReleaseID   string  `json:"superseded_release_id"`
+	// SupersededReleaseID is the release being rolled back AWAY FROM, which is the one still serving
+	// when the rollback's rollout does not become ready (ADR-0093 §2).
+	SupersededReleaseID string `json:"superseded_release_id"`
+	// Rollout is what the rollback observed of its own rollout (ADR-0093 §1): whether the restored
+	// image's replicas became ready, and if not, why. NIL MEANS UNOBSERVED and never "fine" — a
+	// rollback asked not to wait (RollbackOptions.NoWait), or a control plane older than the field.
+	Rollout *RolloutReport `json:"rollout,omitempty"`
 	// Hints are the control plane's non-blocking notes about the rollback: that a `pre-rollback` hook
 	// was skipped and which command did not run (ADR-0080 §4), and what a `post-deploy` hook made of
 	// the rollout (ADR-0072 §4). The field must exist here or the notes are decoded away before any
@@ -1845,11 +1851,17 @@ type RollbackOptions struct {
 	// and the control plane records the skip. It is set by the operator CLI's `--skip-hooks` and by
 	// nothing on the agent surface (ADR-0080 §3).
 	SkipHooks bool
+	// NoWait returns at submission instead of waiting for the restored image's rollout, and reports
+	// the outcome as unknown rather than as good (ADR-0093 §2). The zero value waits, so a caller that
+	// does not set it gets the report; it is set by the operator CLI's `--wait=false` and by nothing
+	// on the agent surface.
+	NoWait bool
 }
 
 // Rollback returns an app to its previous release. It takes the deploy budget: a rollback runs the
-// `pre-rollback` hook and then waits for the rollout to settle and tells the `post-deploy` hook the
-// same way a deploy does (ADR-0072 §8), so it waits on the same server-side bounds.
+// `pre-rollback` hook and then waits for the rollout to settle, reports what it observed, and tells
+// the `post-deploy` hook the same way a deploy does (ADR-0072 §8, ADR-0093 §1), so it waits on the
+// same server-side bounds.
 //
 // The ENVIRONMENT RIDES THE ROUTE (see narrowing): a rollback aimed at staging, against a control
 // plane that drops the parameter, replaces what is running in PRODUCTION with production's previous
@@ -1864,6 +1876,13 @@ func (c *Client) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 	}
 	if opts.SkipHooks {
 		params = append(params, "skip_hooks=true")
+	}
+	// Sent only when it is asked for, so the wait is what an unmodified call gets and what an older
+	// control plane that ignores the parameter does (ADR-0093 §2). A control plane too old to know the
+	// parameter answers at submission and returns no rollout, which the caller renders as unknown —
+	// the same thing this flag asks for.
+	if opts.NoWait {
+		params = append(params, "no_wait=true")
 	}
 	if len(params) > 0 {
 		path += "?" + strings.Join(params, "&")

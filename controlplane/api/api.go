@@ -536,14 +536,16 @@ func (s *server) logs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, logsResponse{Lines: lines})
 }
 
-// rollback returns an app to its previous release. Both switches are read as the literal string
+// rollback returns an app to its previous release. All three switches are read as the literal string
 // "true" and nothing else: a safety step is skipped only when a caller asked for it in so many words,
 // so a malformed or absent parameter takes the safe path rather than a truthy interpretation of it
-// (ADR-0080 §1).
+// (ADR-0080 §1). For `no_wait` the safe path is the wait, which is why the parameter is the negative
+// one — an absent or misspelled parameter waits and reports the outcome (ADR-0093 §2).
 func (s *server) rollback(w http.ResponseWriter, r *http.Request) {
 	opts := controlplane.RollbackOptions{
 		Confirm:   r.URL.Query().Get("confirm") == "true",
 		SkipHooks: r.URL.Query().Get("skip_hooks") == "true",
+		NoWait:    r.URL.Query().Get("no_wait") == "true",
 	}
 	env := narrowed(r, "env", r.URL.Query().Get("env"))
 	res, err := s.engine.Rollback(r.Context(), r.PathValue("app"), env, opts)

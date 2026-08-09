@@ -1402,19 +1402,22 @@ Limits:
 - **Which guardrails can be scoped to an environment is a property each one declares**
   ([ADR-0068](adr/0068-operational-limits-are-configuration.md) §5), not one read off the `app.`
   prefix as it used to be. The app-level codes are scopable because the operations they gate always
-  name an environment. The cluster-level codes (`dns.*`, `addon.*`, `bucket.create`) are not,
-  because their dispositions are looked up with no environment at all; setting one with `--env` is
-  rejected. `dns.delete`'s deny is therefore still all-or-nothing: an operator who wants the agent
+  name an environment, along with `addon.sql` and `addon.attach`. The rest of the cluster-level codes
+  (`dns.*`, the other `addon.*`, `bucket.create`) are not, because their dispositions are looked up
+  with no environment at all; setting one with `--env` is rejected. `dns.delete`'s deny is therefore still all-or-nothing: an operator who wants the agent
   managing DNS in development but not production must pick one answer for both. Widening it is now
   a change to that declaration plus the lookup at its call site rather than a rename.
 - **`app.replica_ceiling` is no longer a guardrail.** It is an operational limit — see
   [Operational limits](#operational-limits) below. Exceeding it is a validation failure, not a
   disposition, and any stored disposition for it was dropped by the schema migration.
 - **Several mutating operations are not guardrailed at all**: `app config set/unset`,
-  `app health set/unset`, `app secret set/unset`, `app unpublish`, `addon attach`, `addon backup`, `addon connect`,
+  `app health set/unset`, `app secret set/unset`, `app unpublish`, `addon backup`, `addon connect`,
   `config provider add`, `app auto-deploy`, `env add/remove`, and `guard set` itself. Some are
-  deliberate (config and secrets destroy nothing; attach provisions rather than destroys);
-  `unpublish` taking an app offline without a gate is worth knowing.
+  deliberate (config and secrets destroy nothing); `unpublish` taking an app offline without a gate
+  is worth knowing. `addon attach` was on this list until
+  [ADR-0095](adr/0095-attaching-a-database-is-held-for-a-human.md): "attach provisions rather than
+  destroys" was true and left out that it provisions on a server every other app shares, restarts the
+  app, and rotates a password on a re-attach.
 - Removing an environment does not cascade to its guardrail overrides; they are orphaned and
   would apply again if the name were reused.
 

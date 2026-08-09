@@ -103,6 +103,8 @@ func newAuthLoginCmd() *cobra.Command {
 			"to prove you are an operator of it. Afterwards your kubeconfig is how the request GETS there and\n" +
 			"the credential is what says who is asking. If the cluster is unreachable, has no Burrow in it, or\n" +
 			"already has an admin, it says so and your commands keep using the install's shared token.\n\n" +
+			"It issues burrow-agent a credential of its own at the same time, so revoking the agent stops the\n" +
+			"agent without signing you out.\n\n" +
 			"If somebody has invited you to their Burrow, pass their invitation with --invite and the cluster\n" +
 			"with --context. That exchanges the invitation for a credential of your own, created on this\n" +
 			"machine, and the invitation is spent. You need no cluster admin and no shared token for it.\n\n" +
@@ -113,7 +115,9 @@ func newAuthLoginCmd() *cobra.Command {
 		Example: "  # Ask where you use Burrow\n" +
 			"  burrow auth login\n\n" +
 			"  # Point at a cluster you already have a context for, without a prompt\n" +
-			"  burrow auth login --context do-nyc1-cluster",
+			"  burrow auth login --context do-nyc1-cluster\n\n" +
+			"  # Exchange an invitation somebody sent you for a credential of your own\n" +
+			"  burrow auth login --context do-nyc1-cluster --invite <invitation>",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAuthLogin(cmd.Context(), o, cmd.InOrStdin(), cmd.OutOrStdout())

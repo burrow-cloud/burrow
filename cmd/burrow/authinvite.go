@@ -66,8 +66,11 @@ func newAuthInviteCmd() *cobra.Command {
 		},
 	}
 	bindCommon(cmd.Flags(), o)
+	// It says only what an admin can do TODAY. Revoking somebody else's credential is an admin act in
+	// the control plane and has no command yet, so naming it here would describe a lever that is not
+	// on the CLI.
 	cmd.Flags().BoolVar(&admin, "admin", false,
-		"let them invite other people and revoke credentials, as well as use this Burrow")
+		"let them invite other people too, as well as use this Burrow")
 	return cmd
 }
 

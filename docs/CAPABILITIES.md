@@ -48,6 +48,7 @@ This file is the place both questions get answered together.
 | Set replicas | `--replicas N` on deploy, or `burrow app scale <app> <n>` | `scale` issues a replicas-only patch and records no release. `--replicas 0` on a deploy means "keep the current count". | [0020](adr/0020-guardrails-as-configurable-policy.md) |
 | Autoscale | `burrow app autoscale <app> --min --max --cpu [--memory]` | Creates an `autoscaling/v2` HorizontalPodAutoscaler targeting the Deployment. Defaults: min 1, max 10, CPU 80%, memory off. `burrow app autoscale <app> off` deletes it. | [0020](adr/0020-guardrails-as-configurable-policy.md) |
 | Roll back | `burrow app rollback <app>` | Re-applies the release the current one supersedes — **exactly one step back**; there is no "roll back to release X". A failed `pre-rollback` hook aborts it; `--skip-hooks` (operator CLI only) rolls back without running the hook, leaves it configured, and records the skip. See [Lifecycle hooks](#lifecycle-hooks). | [0007](adr/0007-explicit-deploy-by-image-reference.md), [0080](adr/0080-a-rollback-is-not-blocked-by-its-own-hook.md) |
+| Wait for the rollback's rollout | on by default; `--wait=false` to opt out | The rollback waits for the restored image to become ready, on the same `deploy.settle_timeout` a deploy waits on. One that does not become ready exits non-zero, names the reason and the pod's own explanation, and says two things a failed deploy does not: the release being rolled back **away from** may still be serving, and rolling back **again returns to that same release** — so the way out is a release picked from `burrow app history` and deployed. | [0093](adr/0093-a-rollback-reports-its-rollout.md) |
 | Release history | `burrow app history <app>` | Lists releases newest-first from the control-plane database. A release Burrow applied whose pods never became ready reads as `deployed (not ready: <reason>)` — the status records what was applied, the qualifier what the rollout did. | [0012](adr/0012-in-cluster-postgres.md), [0092](adr/0092-a-deploy-reports-its-rollout.md) |
 | Status | `burrow app status <app>`, `burrow app list` | Live workload state: desired/ready/updated replicas, availability, and — when the app is blocked — an actionable issue naming the fix, plus a machine-usable reason from a closed set: `ImagePullBackOff`, `ErrImagePull`, `Unschedulable`, `VolumeUnavailable`, `CrashLoopBackOff`, `CreateContainerConfigError`, `OOMKilled`, `ProgressDeadlineExceeded`, `DeadlineExceeded`. Conditions that resolve on their own (`ContainerCreating`, `PodInitializing`) are deliberately not reported. An app that is **serving** can still carry an issue: a container killed and restarted in place reports the kill for the ten minutes after it, so a pod being OOM-killed and coming back is not read as healthy, and its availability is left as reported because it really is serving. A crash loop carries a bounded tail of the container's own output; a missing config or secret **key** is named, a value never is. `status` also carries the app's recent failure history from the ledger (last 24h, up to 10 rows, resolved episodes included) and the observation coverage over that window. | [0011](adr/0011-kubernetes-integration.md), [0074](adr/0074-burrow-observes-what-it-manages.md) |
 | What is broken, cluster-wide | `burrow failures`, `burrow-agent failures` | Lists the ledger's failures across every managed object. See [Failure ledger](#failure-ledger). | [0074](adr/0074-burrow-observes-what-it-manages.md) |
@@ -64,7 +65,10 @@ Every verb above except `auto-deploy` and `hook` also exists on `burrow-agent` (
 the deploy-time dependency check off are deliberately operator actions: each is standing
 authority for something that happens with nobody watching. `rollback` is on both CLIs; its
 `--skip-hooks` flag is on the operator CLI only, and `burrow-agent guard` reports it as a capability
-the agent does not have, so an agent that meets a blocked rollback can say who closes it.
+the agent does not have, so an agent that meets a blocked rollback can say who closes it. The
+`--wait=false` opt-out on `deploy` and `rollback` is operator-only for a related reason: being told
+an operation worked when it did not is the agent's exposure, so the flag that restores that answer
+is a human's to reach for.
 Declaring a health endpoint deliberately is not, because the agent is the only party that can
 write one into the application's code.
 
@@ -281,7 +285,8 @@ read live and discarded that is an accepted trade, and it is not one for a value
 environment where it would sit in a Kubernetes object. The hook gets the reason and Burrow's own
 replica summary; the app's output stays in `burrow app logs`.
 
-**The deploy waits, so a slow verdict is a slow deploy call.** The wait is bounded by
+**The deploy waits, so a slow verdict is a slow deploy call** — and the same is true of a rollback,
+which waits on the same bound. The wait is bounded by
 `deploy.settle_timeout` (5m by default) and ends early on any blocking condition, but a rollout
 wedged for a reason no pod reports takes the whole bound. Both clients wait it out: the bound each
 call gets is derived from the bound the control plane declares for that call, so a client can no
@@ -321,30 +326,36 @@ Limits worth knowing: setting a hook is an **operator action** — `burrow app h
 every deploy. **Burrow does not understand migrations** — it runs your command, and versioning,
 ordering, and idempotency stay your tool's job. A hook shares `burrow app run`'s **ten-minute**
 bound, so a migration slower than that is reported as a failure. The audit log records the phase,
-the command, the image, and the exit code, and **never the command's output**. A `post-deploy` hook
-makes a deploy of that app **wait for its rollout to settle** before returning, bounded by
-`deploy.settle_timeout` (see [Operational limits](#operational-limits)). A deploy-time dependency
-check makes it wait for the same reason, so a hook is not the only way to get the wait. An app with
-both waits **once**: the deploy makes one observation of the rollout and hands it to the check and
-the hook alike, so they can never report differently on the same rollout and the bound is spent at
-most once per deploy.
+the command, the image, and the exit code, and **never the command's output**. Every deploy and every
+rollback already **waits for its rollout to settle** before returning, bounded by
+`deploy.settle_timeout` (see [Operational limits](#operational-limits)), so a `post-deploy` hook adds
+no wait — and neither does a deploy-time dependency check. One observation is made and handed to
+every party that wants it, so they can never report differently on the same rollout and the bound is
+spent at most once per operation.
 
-### Deploy does not wait for the rollout, unless it has something to wait for
+### Deploy and rollback wait for the rollout and report what it did
 
-`deploy` returns once the Kubernetes API server accepts the Deployment write. A release marked
-`deployed` means "the object was accepted", not "the Pods are healthy". There is no readiness
-gate on the deploy call, and **no automatic rollback on a failed rollout** — a bad release is
-surfaced afterwards by `burrow app status` (which reports the pull error or the stalled progress
-condition) and rolled back by an explicit `burrow app rollback`.
+Both wait for the rollout before they answer, bounded by `deploy.settle_timeout` and ending early on
+any blocking condition ([ADR-0092](adr/0092-a-deploy-reports-its-rollout.md),
+[ADR-0093](adr/0093-a-rollback-reports-its-rollout.md)). A rollout that does not become ready is
+reported as such, names the reason from the closed set and the pod's own explanation, and exits
+non-zero. `--wait=false` returns at submission and reports the outcome as **unknown** — never as
+good; it is on the operator CLI only.
 
-The exception is an app the deploy has something to report on. That is an app with a **`post-deploy`
-hook** ([Lifecycle hooks](#lifecycle-hooks)), and it is also an app Burrow **derived a dependency**
-for — an attached Postgres add-on or a published port ([Deploy-time dependency
-checks](#deploy-time-dependency-checks)), which is most apps anyone actually runs. In both cases the
-deploy waits for the rollout to settle — bounded by `deploy.settle_timeout`, ending early on any
-blocking condition — so the hook can be told how it went and the check reaches the release that was
-just deployed rather than the one it replaced. The deploy still does not fail on a failed rollout and
-still nothing rolls back: the hook is told, and the caller gets a hint.
+The **release status is not the rollout**. `deployed` records that Burrow applied the release, and
+it is what a rollback walks back from; whether its Pods came up is recorded beside it and shown by
+`burrow app history` as `deployed (not ready: <reason>)`.
+
+**Nothing rolls back by itself.** A rollout that does not become ready leaves the previous ReplicaSet
+serving, which is Kubernetes behaving correctly; the report says which release that is, and the
+remedy is an explicit `burrow app rollback` or a deploy of a release chosen from the history. For a
+rollback that itself does not come up, the release still serving is the one being rolled back *away
+from*, and rolling back again returns to that same release — so the way out is picking a release from
+`burrow app history` and deploying its image.
+
+An app with a **`post-deploy` hook** ([Lifecycle hooks](#lifecycle-hooks)) or a **derived dependency**
+([Deploy-time dependency checks](#deploy-time-dependency-checks)) adds no second wait: one
+observation of the rollout is made and handed to every party that wants it.
 
 Release history is unbounded: releases are never pruned, only deleted wholesale when the app is.
 

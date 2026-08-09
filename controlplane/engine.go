@@ -2902,11 +2902,17 @@ func (e *Engine) SetAutoDeploy(ctx context.Context, app, env string, level AutoD
 // opts.SkipHooks is the operator-only override that rolls back WITHOUT running the app's
 // `pre-rollback` hook (ADR-0080 §2). It changes nothing about the default: a hook that is not skipped
 // runs, and its failure still aborts.
+//
+// LIKE A DEPLOY, IT WAITS FOR THE ROLLOUT AND REPORTS WHAT HAPPENED (ADR-0093 §1). It used to answer
+// at submission, and the sentence it answered with named the release being rolled back FROM as
+// superseded — which, when the older image never became ready, is the release Kubernetes is still
+// running. opts.NoWait declines the wait and reports the outcome as unknown.
 func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOptions) (RollbackResult, error) {
 	ns, err := e.resolveMutatingNamespace(ctx, env)
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
 	}
+	k := e.k8s.WithNamespace(ns)
 	releases, err := e.db.Releases(ctx, app, envName(env))
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: reading release history: %w", app, err)
@@ -2962,7 +2968,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 	// A rollback restores the prior image and command but must not reset the replica count to the
 	// target release's: resolve with no explicit request so the running count is preserved (or the
 	// HPA left to own it), exactly as a redeploy does.
-	replicas, err := e.resolveReplicas(ctx, e.k8s.WithNamespace(ns), app, 0)
+	replicas, err := e.resolveReplicas(ctx, k, app, 0)
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
 	}
@@ -3021,7 +3027,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 	// and in the audit row, and `--skip-hooks` is absent from `burrow-agent` — a rollback the agent
 	// runs still aborts, with a message naming the command a human runs (ADR-0080 §3).
 	if !opts.SkipHooks {
-		if err := e.runHook(ctx, e.k8s.WithNamespace(ns), HookPreRollback, app, env, cur.Image, cfg, nil, noProgress); err != nil {
+		if err := e.runHook(ctx, k, HookPreRollback, app, env, cur.Image, cfg, nil, noProgress); err != nil {
 			rel.Status = ReleaseFailed
 			_ = e.db.SaveRelease(ctx, rel) // best effort: record the failure
 			e.recordExecution(ctx, auditOpRollback, app, args, auditableHookError(err))
@@ -3033,26 +3039,57 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 	// is delivered to whatever code is running, so a rollback to a release cut BEFORE the mount
 	// existed keeps the file (ADR-0089 §5). Were this a release property, the incident escape hatch
 	// would take the credential with it.
-	mounts, secretEnv, err := e.secretProjectionFor(ctx, e.k8s.WithNamespace(ns), app, envName(env))
+	mounts, secretEnv, err := e.secretProjectionFor(ctx, k, app, envName(env))
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: %w", app, err)
 	}
 
 	spec := WorkloadSpec{App: app, Kind: WorkloadDeployment, Image: target.Image, Env: cfg, Command: target.Command, MetricsPort: target.MetricsPort, Readiness: readiness, Replicas: replicas, SecretFiles: mounts, SecretEnvKeys: secretEnv, ReleaseID: rel.ID}
-	if err := e.k8s.WithNamespace(ns).ApplyWorkload(ctx, spec); err != nil {
+	if err := k.ApplyWorkload(ctx, spec); err != nil {
 		rel.Status = ReleaseFailed
 		_ = e.db.SaveRelease(ctx, rel)
 		e.recordExecution(ctx, auditOpRollback, app, args, err)
 		return RollbackResult{}, fmt.Errorf("rollback %s: applying to cluster: %w", app, err)
 	}
 
+	// THE OLDER IMAGE IS APPLIED. Whether it is SERVING is the question a rollback exists to answer,
+	// and until ADR-0093 §1 nothing here asked it: the sentence below was written the moment the API
+	// server took the object, and it named the release being rolled back FROM as superseded. When the
+	// older image does not come up, that release is the one Kubernetes is still running — the broken
+	// one the operator was fleeing — so the report was pointing away from the only pod worth looking
+	// at, in the middle of an incident.
+	//
+	// So the rollback waits here, before it records or reports anything. The observation is the same
+	// sync.OnceValue the `post-deploy` hook below takes, so the settle bound is spent at most once
+	// however many parties want to know how it went (issue #407) and the report and the hook cannot
+	// disagree about one rollout. What changed is that the rollback is now a consumer itself: it used
+	// to observe only when a hook had been configured to be told.
+	settle := e.settleOnce(ctx, k, app, envName(env), noProgress)
+	var rollout *RolloutReport
+	if !opts.NoWait {
+		rollout = e.rolloutReport(ctx, k, app, settle())
+	}
+
+	// THE STATUS STILL SAYS `deployed` WHEN THE ROLLOUT DID NOT SETTLE, for the reason ADR-0092 §4
+	// gives and one more this record adds (ADR-0093 §3). Status is what a rollback walks back from, so
+	// demoting this row moves the handle; and marking it `failed` while superseding the release it
+	// replaces would leave the app with no `deployed` release at all, which is the state in which
+	// rollback stops working — reached by the operator who is already recovering.
 	rel.Status = ReleaseDeployed
+	rel.Rollout, rel.RolloutReason = recordedRollout(rollout)
 	if err := e.db.SaveRelease(ctx, rel); err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: recording successful release: %w", app, err)
 	}
 	cur.Status = ReleaseSuperseded
 	if err := e.db.SaveRelease(ctx, cur); err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: superseding release %s: %w", app, cur.ID, err)
+	}
+	// The audit row records the rollout beside the operation, the way a deploy's does (ADR-0027), so
+	// a reviewer reading the trail afterwards is told whether the recovery this row is about ever
+	// served — the question that matters most about a rollback and least about anything else.
+	args["rollout"] = string(rel.Rollout)
+	if rel.RolloutReason != "" {
+		args["rollout_reason"] = rel.RolloutReason
 	}
 	e.recordExecution(ctx, auditOpRollback, app, args, nil)
 
@@ -3062,7 +3099,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 	if err := e.db.DisableAutoDeploy(ctx, app, envName(env), reasonDisabledByRollback); err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: disabling auto-deploy after rollback: %w", app, err)
 	}
-	res := RollbackResult{Release: rel, RolledBackToReleaseID: target.ID, SupersededReleaseID: cur.ID}
+	res := RollbackResult{Release: rel, RolledBackToReleaseID: target.ID, SupersededReleaseID: cur.ID, Rollout: rollout}
 	// The skip is stated on the result, plainly, at the moment it happens (ADR-0080 §4). It leads the
 	// hints because it is the one thing about this rollback that is not ordinary.
 	if len(skipped) > 0 {
@@ -3076,14 +3113,16 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 	// It runs from the image now serving, target.Image: the post phase reports on what IS running,
 	// where `pre-rollback` ran from the image being left behind (§8).
 	//
-	// A rollback runs no dependency check, so it has only one consumer for the settle and gets its own
-	// (issue #407); the hook is still the only thing that can cause a wait here.
+	// IT TAKES THE SETTLE THE ROLLBACK'S OWN REPORT TOOK. A rollback runs no dependency check, so the
+	// hook is the only other consumer, and both read one observation of one rollout (issue #407). On
+	// the ordinary path it is already made by the time the hook asks; a rollback that declined the
+	// wait (NoWait) still settles here if a hook is set, because the phase is defined in terms of the
+	// outcome.
 	//
 	// It reports NO PROGRESS. Issue #480 is about the silence of a deploy; a rollback reaches the
 	// same two functions, and widening the reported surface to a second operation is a separate
 	// change with its own client and CLI half.
-	rk := e.k8s.WithNamespace(ns)
-	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, rk, app, env, target.Image, rel.ID, DeployKindRollback, cfg, e.settleOnce(ctx, rk, app, envName(env), noProgress), noProgress)...)
+	res.Hints = append(res.Hints, e.runPostDeployHook(ctx, k, app, env, target.Image, rel.ID, DeployKindRollback, cfg, settle, noProgress)...)
 	return res, nil
 }
 

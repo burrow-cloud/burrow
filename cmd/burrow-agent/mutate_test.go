@@ -583,3 +583,77 @@ func TestTheAgentCannotDeclineToWait(t *testing.T) {
 		t.Error("the agent's deploy command defines a wait flag")
 	}
 }
+
+// TestARollbackTellsTheAgentWhatTheRolloutDid is issue #548 at the surface that matters most. The
+// agent has the result and nothing else, and a rollback is the operation where being told it worked
+// when it did not costs the most: the release still serving is the one the rollback was moving away
+// from (ADR-0093 §2).
+//
+// The outcome stays `executed` for the reason the deploy's does — the operation ran, and the
+// rollout's verdict belongs in the result rather than in the four values that answer whether a
+// guardrail stopped it.
+func TestARollbackTellsTheAgentWhatTheRolloutDid(t *testing.T) {
+	f := newFakeCP(t)
+	f.handler = func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"release":                   map[string]any{"id": "r3", "app": "web", "image": "img:1", "status": "deployed"},
+			"rolled_back_to_release_id": "r1",
+			"superseded_release_id":     "r2",
+			"rollout": map[string]any{
+				"settled": false,
+				"reason":  "CrashLoopBackOff",
+				"issue":   `container "web" is crash-looping (exit 1): migration 0041 is already applied`,
+			},
+		})
+	}
+	out, _ := runMutate(t, f, "rollback", "web")
+
+	var envelope struct {
+		Outcome string `json:"outcome"`
+		Result  struct {
+			SupersededReleaseID string `json:"superseded_release_id"`
+			Rollout             *struct {
+				Settled bool   `json:"settled"`
+				Reason  string `json:"reason"`
+				Issue   string `json:"issue"`
+			} `json:"rollout"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+		t.Fatalf("outcome is not valid JSON: %v (%q)", err, out)
+	}
+	if envelope.Outcome != outcomeExecuted {
+		t.Errorf("outcome = %q, want executed: the operation ran, and the rollout's verdict is in the result", envelope.Outcome)
+	}
+	if envelope.Result.Rollout == nil {
+		t.Fatalf("the result carries no rollout, so nothing in this envelope says the recovery did not take: %s", out)
+	}
+	if envelope.Result.Rollout.Settled || envelope.Result.Rollout.Reason != "CrashLoopBackOff" {
+		t.Errorf("rollout = %+v, want the unsettled observation", envelope.Result.Rollout)
+	}
+	if !strings.Contains(envelope.Result.Rollout.Issue, "migration 0041 is already applied") {
+		t.Errorf("issue = %q, want the pod's own reason", envelope.Result.Rollout.Issue)
+	}
+	// The release still serving. Without it the agent cannot say which image is up, and rolling back
+	// again would return to exactly this release.
+	if envelope.Result.SupersededReleaseID != "r2" {
+		t.Errorf("superseded_release_id = %q, want r2 — the release the rollback was moving away from", envelope.Result.SupersededReleaseID)
+	}
+}
+
+// TestTheAgentCannotDeclineToWaitOnARollback keeps the escape hatch off the agent surface for the
+// rollback too (ADR-0093 §2). It is the same line ADR-0092 §3 draws around the deploy's flag and
+// ADR-0080 §3 draws around `--skip-hooks`.
+func TestTheAgentCannotDeclineToWaitOnARollback(t *testing.T) {
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"rollback", "web", "--wait=false"}, &out, &errb)
+	if err == nil {
+		t.Fatal("`burrow-agent rollback --wait=false` succeeded; answering before the rollout is a human's call")
+	}
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("error = %v, want an unknown-flag rejection", err)
+	}
+	if f := newRollbackCmd().Flags().Lookup("wait"); f != nil {
+		t.Error("the agent's rollback command defines a wait flag")
+	}
+}

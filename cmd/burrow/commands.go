@@ -148,7 +148,7 @@ func newDeployCmd() *cobra.Command {
 			}
 			// The report is printed; the exit code carries the same verdict for whatever is reading
 			// it as a process rather than as prose (ADR-0092 §2).
-			return deployExitError(app, res.Rollout)
+			return rolloutExitError(app, res.Rollout)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -241,6 +241,7 @@ func newLogsCmd() *cobra.Command {
 func newRollbackCmd() *cobra.Command {
 	o := &commonOpts{}
 	var confirm, skipHooks bool
+	wait := true
 	cmd := &cobra.Command{
 		Use:   "rollback <app>",
 		Short: "Roll an app back to its previous release",
@@ -249,7 +250,12 @@ func newRollbackCmd() *cobra.Command {
 			"a half-reverted schema is what the hook's ordering exists to prevent. When the hook failed\n" +
 			"for a reason that has nothing to do with the schema — it could not pull, could not schedule,\n" +
 			"or the command is wrong — --skip-hooks rolls back without running it. The hook stays\n" +
-			"configured, the skip is stated in the output, and it is recorded in the audit log.",
+			"configured, the skip is stated in the output, and it is recorded in the audit log.\n\n" +
+			"Rollback waits for the rollout and reports what it did: it exits non-zero, naming the pod's\n" +
+			"own reason, when the restored image does not become ready — Kubernetes keeps the release you\n" +
+			"are rolling away from serving in that case, so nothing has changed except the record. Pass\n" +
+			"--wait=false to return at submission instead, which reports that the outcome is unknown\n" +
+			"rather than that it worked.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -257,18 +263,22 @@ func newRollbackCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Rollback(ctx, args[0], env, client.RollbackOptions{Confirm: confirm, SkipHooks: skipHooks})
+			res, err := c.Rollback(ctx, args[0], env, client.RollbackOptions{Confirm: confirm, SkipHooks: skipHooks, NoWait: !wait})
 			if err != nil {
 				return err
 			}
-			human := fmt.Sprintf("rolled %s back to release %s (image %s) as release %s; superseded release %s",
-				args[0], res.RolledBackToReleaseID, res.Release.Image, res.Release.ID, res.SupersededReleaseID)
+			human := rollbackHuman(args[0], res)
 			// The hints follow the result line rather than replacing it, because the rollback happened:
 			// a skipped hook is a fact about how it happened, not a verdict on whether it did.
 			for _, hint := range res.Hints {
 				human += "\n\n" + hint
 			}
-			return o.emitChange(cmd.OutOrStdout(), res, human)
+			if err := o.emitChange(cmd.OutOrStdout(), res, human); err != nil {
+				return err
+			}
+			// The report is printed; the exit code carries the same verdict for whatever is reading it
+			// as a process rather than as prose (ADR-0093 §2).
+			return rolloutExitError(args[0], res.Rollout)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -276,6 +286,7 @@ func newRollbackCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a rollback a guardrail holds for confirmation")
 	cmd.Flags().BoolVar(&skipHooks, "skip-hooks", false,
 		"roll back without running the app's pre-rollback hook, for a hook that is broken or cannot run; the hook stays configured and the skip is recorded")
+	cmd.Flags().BoolVar(&wait, "wait", true, "wait for the rollout and report its outcome; --wait=false returns at submission, with the outcome unknown")
 	return cmd
 }
 

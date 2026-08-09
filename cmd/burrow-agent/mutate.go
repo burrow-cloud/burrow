@@ -306,7 +306,14 @@ func newRollbackCmd() *cobra.Command {
 			"If the app has a pre-rollback hook and it fails, the rollback aborts and the outcome names the\n" +
 			"command a human runs to roll back around it (`burrow app rollback <app> --skip-hooks`). That\n" +
 			"flag is not on this binary: skipping a safety step is an operator's judgement. Relay the\n" +
-			"outcome rather than retrying.",
+			"outcome rather than retrying.\n\n" +
+			"The rollback waits for the restored image's rollout and the result carries what it observed in\n" +
+			"`rollout`: `settled` false means the older image did NOT become ready, `reason` names why, and\n" +
+			"`issue` carries the pod's own explanation. Read it — the operation ran, so the outcome is\n" +
+			"`executed` either way. When it did not settle, the release named in `superseded_release_id` is\n" +
+			"the one still serving, and ROLLING BACK AGAIN RETURNS TO THAT SAME RELEASE rather than going\n" +
+			"further back. Do not retry: relay the reason, and deploy a release chosen from the app's\n" +
+			"history instead.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "rollback", func(ctx context.Context, c *client.Client, env string) (any, error) {

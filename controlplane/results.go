@@ -339,6 +339,18 @@ type RollbackOptions struct {
 	// protection intact; and `burrow-agent` compiles no flag that sets this, because deciding a safety
 	// step does not apply is a judgement about the situation rather than a capability (ADR-0080 §3).
 	SkipHooks bool
+	// NoWait returns the rollback at submission instead of waiting for its rollout, and reports the
+	// outcome as UNKNOWN rather than as good (ADR-0093 §2, ADR-0092 §3).
+	//
+	// IT IS A NEGATIVE FIELD ON PURPOSE. The zero value is the wait, so a caller that has never heard
+	// of this — an older CLI, a script calling the route without the parameter — gets the wait, which
+	// is the behaviour that stops the report misleading. Like `--wait=false` on a deploy it is absent
+	// from `burrow-agent`: being told an operation worked when it did not is the agent's whole problem
+	// here, and a flag that restores that is not one it should reach for.
+	//
+	// It does not skip a wait something else needs: an app with a `post-deploy` hook still settles,
+	// because that phase is defined in terms of the rollout's outcome (ADR-0072 §4).
+	NoWait bool
 }
 
 // RollbackResult reports the outcome of a rollback. A rollback is itself a forward
@@ -349,8 +361,16 @@ type RollbackResult struct {
 	Release Release `json:"release"`
 	// RolledBackToReleaseID is the prior release whose reference was restored.
 	RolledBackToReleaseID string `json:"rolled_back_to_release_id"`
-	// SupersededReleaseID is the release that was running before the rollback.
+	// SupersededReleaseID is the release that was running before the rollback — the one being rolled
+	// back AWAY FROM, and therefore the one still serving when the rollback's own rollout does not
+	// become ready (ADR-0093 §2).
 	SupersededReleaseID string `json:"superseded_release_id"`
+	// Rollout is what the rollback observed of its own rollout (ADR-0093 §1): whether the restored
+	// image's replicas became ready, and if they did not, why not.
+	//
+	// NIL MEANS UNOBSERVED, never "fine" (RollbackOptions.NoWait, or a control plane older than the
+	// field). A caller renders that as an unknown outcome and not as a recovery that worked.
+	Rollout *RolloutReport `json:"rollout,omitempty"`
 	// Hints are non-blocking notes about the rollback, in the same shape DeployResult carries them:
 	// that a `pre-rollback` hook was skipped and which command did not run (ADR-0080 §4), what the
 	// rollback's settle-wait observed, and what a `post-deploy` hook made of it (ADR-0072 §4). They

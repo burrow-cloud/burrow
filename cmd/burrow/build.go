@@ -82,7 +82,7 @@ func newBuildCmd() *cobra.Command {
 			if err := o.emitChange(cmd.OutOrStdout(), res, human); err != nil {
 				return err
 			}
-			return deployExitError(app, res.Deploy.Rollout)
+			return rolloutExitError(app, res.Deploy.Rollout)
 		},
 	}
 	bindCommon(cmd.Flags(), o)

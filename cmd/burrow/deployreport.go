@@ -106,11 +106,12 @@ func indentContinuation(s string) string {
 	return strings.ReplaceAll(strings.TrimRight(s, "\n"), "\n", "\n  ")
 }
 
-// deployExitError is the error a deploy returns when its rollout did not settle: the CLI has already
-// printed (or emitted as JSON) the full report, so this is one short line for main's "burrow: ..."
-// prefix and, above all, a non-zero exit code. Nil for every other outcome, including an unobserved
-// rollout — declining to wait is a choice the caller made, not a failure.
-func deployExitError(app string, out *client.RolloutReport) error {
+// rolloutExitError is the error a deploy — or a rollback (ADR-0093 §2) — returns when its rollout did
+// not settle: the CLI has already printed (or emitted as JSON) the full report, so this is one short
+// line for main's "burrow: ..." prefix and, above all, a non-zero exit code. Nil for every other
+// outcome, including an unobserved rollout — declining to wait is a choice the caller made, not a
+// failure.
+func rolloutExitError(app string, out *client.RolloutReport) error {
 	if !out.Failed() {
 		return nil
 	}
@@ -119,5 +120,6 @@ func deployExitError(app string, out *client.RolloutReport) error {
 
 // errRolloutNotReady is what a failed rollout's error unwraps to, so a test — and any caller
 // composing these commands — can tell "the deploy could not be made" from "the deploy was made and
-// the rollout did not come up".
+// the rollout did not come up". A rollback whose restored image did not come up is the same fact
+// about a different operation and unwraps to the same sentinel.
 var errRolloutNotReady = errors.New("rollout did not become ready")

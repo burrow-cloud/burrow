@@ -25,7 +25,7 @@ func TestAttachDefaultKeyUnchanged(t *testing.T) {
 	ctx := context.Background()
 	e, k, d, _ := newPostgresEngine(t)
 
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{})
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestAttachWritesNamedKey(t *testing.T) {
 	ctx := context.Background()
 	e, k, d, _ := newPostgresEngine(t)
 
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "PG_DSN"})
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "PG_DSN"})
 	if err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
@@ -91,10 +91,10 @@ func TestReattachKeepsTheChosenName(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("first AttachAddon: %v", err)
 	}
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{})
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true})
 	if err != nil {
 		t.Fatalf("re-AttachAddon: %v", err)
 	}
@@ -113,10 +113,10 @@ func TestAttachRenameMovesTheVariable(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("first AttachAddon: %v", err)
 	}
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"})
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"})
 	if err != nil {
 		t.Fatalf("renaming AttachAddon: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestAttachRefusesOccupiedSecretKey(t *testing.T) {
 	if err := k.SetSecretValue(ctx, "web", "DB_URL", "postgres://elsewhere/db"); err != nil {
 		t.Fatalf("seed secret: %v", err)
 	}
-	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"})
+	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"})
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("AttachAddon over an existing secret = %v, want ErrInvalid", err)
 	}
@@ -172,7 +172,7 @@ func TestAttachRefusesOccupiedConfigKey(t *testing.T) {
 	if err := d.SetAppEnv(ctx, "web", "DB_URL", "postgres://elsewhere/db"); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"})
+	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"})
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("AttachAddon over an existing config var = %v, want ErrInvalid", err)
 	}
@@ -187,10 +187,10 @@ func TestAttachOwnKeyIsNotAConflict(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("first AttachAddon: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("re-AttachAddon under the same name: %v", err)
 	}
 }
@@ -202,7 +202,7 @@ func TestAttachRejectsMalformedKey(t *testing.T) {
 	e, _, _, prov := newPostgresEngine(t)
 
 	for _, bad := range []string{"9LIVES", "has-a-dash", "has space", "has=equals"} {
-		if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: bad}); !errors.Is(err, cp.ErrInvalid) {
+		if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: bad}); !errors.Is(err, cp.ErrInvalid) {
 			t.Errorf("AttachAddon(--as %q) = %v, want ErrInvalid", bad, err)
 		}
 	}
@@ -218,7 +218,7 @@ func TestDetachRemovesTheRecordedKey(t *testing.T) {
 	ctx := context.Background()
 	e, k, d, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
@@ -245,7 +245,7 @@ func TestDetachRefusesWhenTheKeyCannotBeRead(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, prov := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	d.SetError(fake.OpAddonEnvKey, errors.New("database unavailable"))
@@ -268,7 +268,7 @@ func TestAppChecksProbeTheNamedKey(t *testing.T) {
 	installPostgresAddon(t, d, cp.DefaultEnvironment)
 	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	rep, err := e.AppChecks(ctx, "web", "")

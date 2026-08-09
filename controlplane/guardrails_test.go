@@ -188,10 +188,13 @@ func TestGuardrailsForMarksSource(t *testing.T) {
 }
 
 // TestEnvScopable confirms which guardrails can be scoped to an environment: the app-level ones,
-// whose operations always carry an environment, and not the cluster-level ones (addon.*, dns.*),
-// whose dispositions are looked up with no environment at all (ADR-0035 phase 2c).
+// whose operations always carry an environment, and not the cluster-level ones (dns.*, bucket.*, and
+// most of addon.*), whose dispositions are looked up with no environment at all (ADR-0035 phase 2c).
+//
+// addon.sql and addon.attach are the two declared exceptions among the add-on codes: both are set as
+// a gradient across environments rather than per server (ADR-0087 §5, ADR-0095 §2).
 func TestEnvScopable(t *testing.T) {
-	scopable := []GuardrailCode{GuardrailAppDeploy, GuardrailAppDelete, GuardrailRollback, GuardrailExposePublic, GuardrailScaleToZero, GuardrailAppRun, GuardrailAutoscale}
+	scopable := []GuardrailCode{GuardrailAppDeploy, GuardrailAppDelete, GuardrailRollback, GuardrailExposePublic, GuardrailScaleToZero, GuardrailAppRun, GuardrailAutoscale, GuardrailAddonSQL, GuardrailAddonAttach}
 	global := []GuardrailCode{GuardrailDNSWrite, GuardrailDNSDelete, GuardrailAddonInstall, GuardrailAddonRemove, GuardrailAddonDetach, GuardrailAddonRestore, GuardrailBucketCreate}
 	for _, c := range scopable {
 		if !EnvScopable(c) {
@@ -420,6 +423,7 @@ func TestNameScopableIsDeclaredNotInferred(t *testing.T) {
 		GuardrailAppRun:               "app",
 		GuardrailAddonInstall:         "add-on instance",
 		GuardrailAddonRemove:          "add-on instance",
+		GuardrailAddonAttach:          "add-on instance",
 		GuardrailAddonDetach:          "add-on instance",
 		GuardrailAddonRestore:         "add-on instance",
 		GuardrailAddonRestoreInstance: "add-on instance",

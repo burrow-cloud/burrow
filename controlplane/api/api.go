@@ -221,8 +221,9 @@ func New(cfg Config) (http.Handler, error) {
 	v1.HandleFunc("POST /v1/addons/connect", s.connectAddon)
 	// attach/detach give an app its own database on the installed Postgres add-on (ADR-0031).
 	// attach carries NO secret value — burrowd generates the DATABASE_URL server-side and writes it
-	// to the app's Secret; the response carries the key name only. detach is held by a confirm
-	// guardrail (the app loses access to its data).
+	// to the app's Secret; the response carries the key name only. Both are held by a confirm
+	// guardrail: attach because it provisions on a shared server, restarts the app, and rotates a
+	// password on a re-attach (ADR-0095), detach because the app loses access to its data.
 	v1.HandleFunc("POST /v1/addons/attach", s.attachAddon)
 	// WHICH INSTANCE rides the route, because an environment may hold more than one (ADR-0091 §3) and
 	// a control plane that drops the selector attaches the app to the environment's DEFAULT instance:
@@ -1348,6 +1349,9 @@ func (s *server) removeAddonWith(w http.ResponseWriter, r *http.Request, deleteD
 // the key name only (AttachResult), never the value. The value is never logged, never audited, never
 // stored in Postgres, and never returned — so attach is safe to expose on the agent surface.
 //
+// It is held by the addon.attach confirm guardrail by default (ADR-0095): a held attach maps to 422
+// with needs_confirmation, like the other guarded operations, and nothing is provisioned.
+//
 // The variable name comes from the path and only from the path (see the route table). An absent one
 // is not "DATABASE_URL": it is "whatever this attachment already uses", which the engine resolves —
 // so a re-attach of an app that named its own variable rotates the password into that name rather
@@ -1358,7 +1362,7 @@ func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.engine.AttachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env,
-		controlplane.AttachAddonOptions{Instance: r.PathValue("instance"), EnvKey: r.PathValue("env_key")})
+		controlplane.AttachAddonOptions{Instance: r.PathValue("instance"), EnvKey: r.PathValue("env_key"), Confirm: req.Confirm})
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1716,6 +1720,16 @@ type addonAttachRequest struct {
 	// namespace the DATABASE_URL Secret lands in (ADR-0067 §1). Empty targets the default
 	// environment, and is refused when more than one environment is registered (ADR-0047 §1).
 	Env string `json:"env,omitempty"`
+	// Confirm satisfies the addon.attach guardrail's confirmation hold (ADR-0095 §1).
+	//
+	// IT IS A BODY FIELD RATHER THAN A ROUTE, and the #485 rule is why that is safe here rather than
+	// an exception to it. A narrowing rides the route when a control plane that drops it does
+	// something DIFFERENT from what was asked — attaches to the wrong instance, overwrites the wrong
+	// key. A control plane that drops this one has no addon.attach guardrail to satisfy, so it does
+	// exactly what it did before the field existed. The skew in the other direction is a client too
+	// old to send it meeting a burrowd that holds: refused with the reason, nothing provisioned,
+	// which is the acceptable half of the ADR-0039 §2 trade.
+	Confirm bool `json:"confirm,omitempty"`
 }
 
 // addonDetachRequest is the body of an addon detach: the add-on type, the app, the environment, and

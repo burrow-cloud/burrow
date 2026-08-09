@@ -65,13 +65,42 @@ const (
 	// GuardrailAddonRemove: the operation would remove an installed add-on — the destructive
 	// side, since dependent apps may rely on it (ADR-0025).
 	GuardrailAddonRemove GuardrailCode = "addon.remove"
+	// GuardrailAddonAttach: the operation would give an app its own database on an add-on instance
+	// and wire it in (ADR-0031, ADR-0095). Held for confirmation by default — ADR-0065's THIRD tier,
+	// the one bucket.create sits in, and for the same sentence: additive, reversible, part of a
+	// legitimate workflow, and it spends somebody's disk.
+	//
+	// Attach was ungated until ADR-0095, on the grounds that it "provisions and destroys nothing".
+	// That is true and it is not the whole of what the verb does: it creates a database and a login
+	// role on a server every other app in the environment shares, writes a credential into the app's
+	// Secret, RESTARTS the app, and on an app that is already attached ROTATES the role's password —
+	// which nothing can undo, because the connection string is generated server-side and never
+	// returned, so anything else holding the old one (a pooler, a sibling service, a CI migration
+	// runner) simply stops connecting.
+	//
+	// Confirm rather than deny, and the difference from app.delete is reversibility. A wrong attach
+	// is undoable by a human: detach removes the credential and drops the role, and the database it
+	// leaves behind goes with `detach --delete-data` (ADR-0090). Confirm rather than allow because
+	// the confirmation here CAN be an informed one — "give web its own database on burrow-postgres in
+	// prod, writing the connection string into DATABASE_URL" is a sentence a reader can act on, which
+	// is the test ADR-0087 §5 set when it refused confirm for addon.sql.
+	//
+	// It is env-scopable, unlike almost every other addon.* code — see knownGuardrails. The expected
+	// shape is a gradient: `guard set --env dev addon.attach allow` for a sandbox where the agent
+	// building three services should not stop three times, confirm or deny in production.
+	//
+	// The disposition binds every caller, including the operator. The setting most operators will
+	// want is `guard set --binds agent addon.attach deny`, and that axis arrives with ADR-0094; this
+	// default is the correct one either way, since a built-in default binds every kind (ADR-0094 §3).
+	GuardrailAddonAttach GuardrailCode = "addon.attach"
 	// GuardrailAddonDetach: the operation would detach an app from an add-on — for Postgres,
 	// dropping the app's login role so that nothing it holds still authenticates, and KEEPING the
 	// database (ADR-0090 §1). Held for confirmation by default: what it guards is an app losing
 	// access to its data, which is disruptive and worth stopping to say out loud, rather than the
 	// data being destroyed, which is no longer what the verb does. Destroying it needs
 	// `--delete-data`, which is not reachable from the agent surface and so is not gated here
-	// (ADR-0090 §4). (Attach is not guarded: it provisions, it destroys nothing.)
+	// (ADR-0090 §4). Attach is guarded too, by addon.attach above (ADR-0095), so the pair reads
+	// symmetrically: one hold for creating an app's access to a database, one for ending it.
 	GuardrailAddonDetach GuardrailCode = "addon.detach"
 	// GuardrailAddonRestore: the operation would restore an app's database from a backup,
 	// overwriting its live contents (ADR-0032). Held for confirmation by default, like detach.
@@ -201,13 +230,20 @@ type GuardrailScope struct {
 // environment — strict prod, permissive staging. dns.* has no environment at all, so declaring it
 // env-scopable would promise an override that is never read.
 //
-// The addon.* codes are nearly all NOT env-scoped, and not because of their prefix: an add-on
+// The addon.* codes are mostly NOT env-scoped, and not because of their prefix: an add-on
 // operation does name an environment, but the instance it acts on is unique within one and its label
 // is what the name tier holds (ADR-0091 §4), so the name tier already draws the per-instance line and
-// an env tier over the top of it would be a second way to say the same thing. `addon.sql` is the exception, and it is a DECLARED one: ADR-0087 §5 asks for a gradient set
-// with `guard set --env <env> addon.sql …` — allow in development, deny in production — which is a
-// statement about the ENVIRONMENT rather than about one server, and an operator who added a second
-// Postgres instance to an environment should not have to repeat the disposition on it.
+// an env tier over the top of it would be a second way to say the same thing.
+//
+// `addon.sql` and `addon.attach` are the exceptions, and both are DECLARED ones. ADR-0087 §5 asks for
+// a gradient set with `guard set --env <env> addon.sql …` — allow in development, deny in production
+// — which is a statement about the ENVIRONMENT rather than about one server, and an operator who
+// added a second Postgres instance to an environment should not have to repeat the disposition on it.
+// `addon.attach` has that want more strongly (ADR-0095 §2): the env tier is what makes its confirm
+// default affordable, since without one the only relief from a sandbox's friction is a cluster-wide
+// `allow` that relaxes production to unblock development. ADR-0091 is also what weakened the general
+// rule — once an environment may hold several instances, per-instance and per-environment stopped
+// being the same statement.
 //
 // names asserts that the operation acts on exactly ONE thing whose name bounds its effect, and says
 // which kind of thing that is — an application or an add-on instance. It is what `--name` refers
@@ -253,6 +289,7 @@ var knownGuardrails = []guardrailDef{
 		reach: "a DNS record is a name at a provider outside the cluster, which no single app or add-on owns, and the record may not be one Burrow created"},
 	{code: GuardrailAddonInstall, description: "install a building-block add-on (backing service) onto the cluster", names: targetAddon},
 	{code: GuardrailAddonRemove, description: "remove an installed add-on from the cluster", names: targetAddon},
+	{code: GuardrailAddonAttach, description: "give an app its own database on an add-on instance and wire it in (re-attaching rotates its password)", envScoped: true, names: targetAddon},
 	{code: GuardrailAddonDetach, description: "detach an app from an add-on, ending its access to its data (e.g. drop its Postgres login role; the database is kept)", names: targetAddon},
 	{code: GuardrailAddonRestore, description: "restore an app's database from a backup, overwriting its live contents", names: targetAddon},
 	{code: GuardrailAddonRestoreInstance, description: "rewind a whole Postgres instance to a point in its object-storage repository, taking every app's database on it back together", names: targetAddon},

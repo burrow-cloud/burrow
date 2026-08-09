@@ -371,7 +371,13 @@ func newAddonInstallCmd() *cobra.Command {
 // newAddonAttachCmd gives an app its own database on the installed Postgres add-on and wires it in
 // (ADR-0031). No secret crosses this channel: burrowd generates the connection string server-side and
 // writes it into the app's Secret; the result carries only the KEY name, never the value.
-// Attach provisions — it destroys nothing — so it is not guarded.
+//
+// IT IS ADR-0065 TIER 3 — present on this surface and held for confirmation by the addon.attach
+// guardrail (ADR-0095 §1). It passes the scope test, since the reach beyond the app is a database and
+// a role on a server that already holds one per attached app, and passes reversibility for the case
+// that dominates, since a detach undoes it and keeps the data (ADR-0090). It is not tier 3 for being
+// harmless: it restarts the app, and on an app that is already attached it rotates a password nothing
+// can restore.
 //
 // --as IS ON THIS SURFACE, and ADR-0065 §1 is why. It fails neither test. SCOPE: it changes which key
 // of the app's OWN Secret is written, in the environment the attach already targets — the same app the
@@ -385,6 +391,7 @@ func newAddonAttachCmd() *cobra.Command {
 	o := &connOpts{}
 	var as string
 	var instance string
+	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "attach <addon> <app>",
 		Short: "Give an app its own database on the installed Postgres add-on and wire it in",
@@ -392,10 +399,16 @@ func newAddonAttachCmd() *cobra.Command {
 			"only the add-on type (\"postgres\"), the app name, and optionally the variable name — NO secret.\n" +
 			"Burrow generates the database, role, and connection string server-side and writes it into the\n" +
 			"app's Secret; the value is never returned or shown. Re-attaching rotates the password. The result\n" +
-			"carries only the app, the add-on, the environment, and the KEY name — never the value. Attach is\n" +
-			"not guarded (it destroys nothing). Each environment has its OWN database instance, so --env\n" +
-			"decides which server the app is given a database on; with several environments registered,\n" +
-			"naming one is required.\n\n" +
+			"carries only the app, the add-on, the environment, and the KEY name — never the value. Each\n" +
+			"environment has its OWN database instance, so --env decides which server the app is given a\n" +
+			"database on; with several environments registered, naming one is required.\n\n" +
+			"Attaching is HELD FOR CONFIRMATION by the addon.attach guardrail by default: it puts a database\n" +
+			"on a server every other app in the environment shares, restarts the app, and on an app that is\n" +
+			"already attached rotates its password, which nothing can undo. A held attach provisions nothing\n" +
+			"and comes back naming what it would do — surface that to a human, and re-run with --confirm\n" +
+			"once they approve. Do not pass --confirm on your own account. `guard` reports the disposition\n" +
+			"ahead of time, and a person can relax it for one environment with\n" +
+			"`burrow guard set --env <env> addon.attach allow`.\n\n" +
 			"The variable is DATABASE_URL unless --as names another, so an app that reads DB_URL or PG_DSN\n" +
 			"can be wired to it directly instead of copying one variable to another at start-up. --as on an\n" +
 			"already-attached app MOVES the variable — the result reports the removed name in\n" +
@@ -410,7 +423,7 @@ func newAddonAttachCmd() *cobra.Command {
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "addon_attach", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.AttachAddon(ctx, args[0], args[1], env, instance, as)
+				return c.AttachAddon(ctx, args[0], args[1], env, client.AttachAddonOptions{Instance: instance, EnvKey: as, Confirm: confirm})
 			})
 		},
 	}
@@ -418,6 +431,7 @@ func newAddonAttachCmd() *cobra.Command {
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&as, "as", "", "environment variable to write the connection string into (default DATABASE_URL, or the name this attachment already uses)")
 	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to attach to (default: the environment's own instance)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an attach a guardrail holds for confirmation (supply only after the human approves)")
 	return cmd
 }
 

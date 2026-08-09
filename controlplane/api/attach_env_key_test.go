@@ -21,7 +21,7 @@ import (
 func TestAttachRouteCarriesTheVariableName(t *testing.T) {
 	h, _ := newProvisionedAPI(t)
 
-	rr := do(h, "POST", "/v1/addons/attach/env-key/PG_DSN", token, `{"addon":"postgres","app":"web"}`)
+	rr := do(h, "POST", "/v1/addons/attach/env-key/PG_DSN", token, `{"addon":"postgres","app":"web","confirm":true}`)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("attach via the route = %d %s", rr.Code, rr.Body.String())
 	}
@@ -35,7 +35,7 @@ func TestAttachRouteCarriesTheVariableName(t *testing.T) {
 func TestAttachUnnarrowedRouteStillMeansDatabaseURL(t *testing.T) {
 	h, _ := newProvisionedAPI(t)
 
-	rr := do(h, "POST", "/v1/addons/attach", token, `{"addon":"postgres","app":"web"}`)
+	rr := do(h, "POST", "/v1/addons/attach", token, `{"addon":"postgres","app":"web","confirm":true}`)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("attach on the unnarrowed route = %d %s", rr.Code, rr.Body.String())
 	}

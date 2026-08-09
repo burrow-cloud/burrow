@@ -63,7 +63,7 @@ func TestAttachReachesAnEnumeratedAppsEnvironment(t *testing.T) {
 		t.Fatalf("MountSecret --no-env: %v", err)
 	}
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	spec, ok := k.Spec("web")
@@ -90,7 +90,7 @@ func TestAttachOnTheFastPathIsUnchanged(t *testing.T) {
 		t.Fatalf("deploy: %v", err)
 	}
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if _, rolled := k.RestartedAt("web"); !rolled {

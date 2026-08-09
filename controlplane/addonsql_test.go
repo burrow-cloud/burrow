@@ -30,7 +30,7 @@ func sqlEngine(t *testing.T) (*cp.Engine, *fake.Database, *fake.Provisioner) {
 	}); err != nil {
 		t.Fatalf("seed add-on: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	return e, d, prov
@@ -97,7 +97,7 @@ func TestAddonSQLGuardrailIsEnvScopable(t *testing.T) {
 	if err := d.SaveAddon(ctx, cp.AddonInfo{Name: instance, Type: cp.AddonPostgres, Environment: "dev", Mode: "installed"}); err != nil {
 		t.Fatalf("seed dev add-on: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "dev", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "dev", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon in dev: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestAddonSQLTargetsOneAppsDatabase(t *testing.T) {
 	allowSQL(t, d)
 	// A second attached app on the SAME instance, so "it reached web's database" is a claim with
 	// something to be wrong about.
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "api", "", cp.AttachAddonOptions{}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "api", "", cp.AttachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("AttachAddon api: %v", err)
 	}
 
@@ -195,7 +195,7 @@ func TestAddonSQLFollowsTheAttachmentsVariableName(t *testing.T) {
 	ctx := context.Background()
 	e, d, prov := sqlEngine(t)
 	allowSQL(t, d)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("AttachAddon --as DB_URL: %v", err)
 	}
 

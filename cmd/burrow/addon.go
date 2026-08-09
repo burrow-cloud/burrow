@@ -696,10 +696,13 @@ func attachedAppsIn(ctx context.Context, c *client.Client, env string) []string 
 // add-on type, the app name, the environment, and optionally the variable to write the connection
 // string into; burrowd generates it server-side and writes it into the app's Secret in that
 // environment's namespace — no secret value is printed, returned, or carried over the agent control
-// channel. Attach provisions and destroys nothing, so it is allowed by default.
+// channel. It is held for confirmation by the addon.attach guardrail by default (ADR-0095 §1): the
+// held message names the instance, the variable, and — on an app that is already attached — that the
+// password is about to be rotated.
 func newAddonAttachCmd() *cobra.Command {
 	o := &commonOpts{}
 	var as, instance string
+	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "attach <addon> <app>",
 		Short: "Attach an app to an add-on (e.g. give it a Postgres database)",
@@ -714,7 +717,12 @@ func newAddonAttachCmd() *cobra.Command {
 			"variable to another at start-up. --as on an already-attached app MOVES the variable: the new\n" +
 			"name is written and the old one removed, because the attach has just rotated the password and\n" +
 			"the old name would otherwise hold a connection string that no longer works. A name something\n" +
-			"else in the app's environment already answers to is refused rather than overwritten.",
+			"else in the app's environment already answers to is refused rather than overwritten.\n\n" +
+			"Attaching is held for confirmation by the addon.attach guardrail: it puts a database on a\n" +
+			"server every other app in the environment shares, restarts the app, and on an app that is\n" +
+			"already attached rotates its password, which nothing can undo. Re-run with --confirm to\n" +
+			"proceed. An operator who wants it unattended in one environment can set\n" +
+			"`burrow guard set --env <env> addon.attach allow`, which leaves the others held.",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -722,7 +730,7 @@ func newAddonAttachCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.AttachAddon(ctx, args[0], args[1], o.env, instance, as)
+			res, err := c.AttachAddon(ctx, args[0], args[1], o.env, client.AttachAddonOptions{Instance: instance, EnvKey: as, Confirm: confirm})
 			if err != nil {
 				return err
 			}
@@ -744,6 +752,7 @@ func newAddonAttachCmd() *cobra.Command {
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&as, "as", "", "environment variable to write the connection string into (default DATABASE_URL, or the name this attachment already uses)")
 	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to attach to (default: the environment's own instance)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm an attach the addon.attach guardrail holds for confirmation")
 	return cmd
 }
 

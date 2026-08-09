@@ -1296,16 +1296,52 @@ type AttachAddonOptions struct {
 	// attach is refused with the conflict named rather than handed a derived `DATABASE_URL_2` the
 	// application does not read (ADR-0091 §3).
 	EnvKey string
+	// Confirm satisfies the addon.attach guardrail's confirmation hold (ADR-0095 §1). It is the
+	// caller asserting that a human approved the operation the held message described; nothing here
+	// verifies that, which is what makes a confirm a raised floor rather than a boundary.
+	Confirm bool
+}
+
+// attachConsequence is the sentence the addon.attach hold prints, and it says which of the two
+// things this call is doing (ADR-0095 §4). A first attach creates; a re-attach ROTATES, which is the
+// one part of an attach nothing can undo — the connection string is generated server-side and never
+// returned, so the previous password is gone the moment provisioning runs, and any holder of it
+// other than the app itself simply stops connecting.
+//
+// Following what the call does rather than what the verb is called is ADR-0090 §5's rule: a
+// confirmation describing a consequence the operation does not have trains the reader to discount
+// the words.
+//
+// BURROW TELLS THE TWO APART BY THE RECORDED ATTACHMENT, the same row detach reads, so an attachment
+// made before the variable name was recorded (issue #462) reads as a first attach and gets the
+// understating message. That gap is left deliberately: the alternative is a live query against the
+// instance's catalogue on the path of a prompt, and a first attach wrongly described as a rotation
+// would train the reader to discount the words in the other direction.
+func attachConsequence(t AddonType, app, env, instance, key, current string, recorded bool) string {
+	if !recorded {
+		return fmt.Sprintf("attaching %q to the %s instance %q in environment %s (creates a database and a login role on it, writes the connection string into %s, and restarts the app)",
+			app, t, instance, env, key)
+	}
+	what := fmt.Sprintf("re-attaching %q to the %s instance %q in environment %s ROTATES ITS PASSWORD: %s is given the new connection string in %s, and any other holder of the old one stops connecting",
+		app, t, instance, env, app, key)
+	if key != current {
+		what += fmt.Sprintf(", and %s is removed, so anything reading that name finds nothing", current)
+	}
+	return what
 }
 
 // AttachAddon gives app its own database on one of ENVIRONMENT env's Postgres instances and wires it
 // into the app (ADR-0031). burrowd provisions an isolated database + login role on that environment's
 // instance, generates the DATABASE_URL server-side, writes it into the app's per-app Secret in that
 // environment's namespace via the SetSecretValue path (ADR-0029), and restarts the app so envFrom
-// picks it up. Attach provisions and destroys nothing, so it is allowed by default (no guardrail)
-// and is safe over the agent control channel: no secret value crosses it — the agent supplies only
-// the app name; burrowd generates the value and never returns it. The audit row records
-// {addon, app, env} only — never the URL.
+// picks it up. No secret value crosses the agent control channel — the agent supplies only the app
+// name; burrowd generates the value and never returns it. The audit row records
+// {addon, app, env, instance, key} only — never the URL.
+//
+// It is HELD FOR CONFIRMATION by the addon.attach guardrail by default (ADR-0095 §1), scoped to the
+// add-on instance the database lands on and to the environment. Attach was ungated until that record
+// on the grounds that it destroys nothing; what that reading missed is that it provisions on a shared
+// server, restarts the app, and on a re-attach rotates a password nothing can restore.
 //
 // The environment is not optional and is resolved before anything is provisioned (ADR-0067 §1). It
 // is the whole of the fix for issue #339: databases keep their simple names, so with one instance
@@ -1392,6 +1428,27 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env string, 
 	// which database the app was given (ADR-0027); the key name says where the app reads it, and a
 	// key NAME is not a secret (ADR-0028) — it is already in every error on this path.
 	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "instance": instanceLabel(inst), "key": key}
+
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return AttachResult{}, fmt.Errorf("attach addon %s: loading guardrail policy: %w", t, err)
+	}
+	// THE GUARDRAIL RUNS LAST AMONG THE CHECKS AND FIRST AMONG THE EFFECTS. Everything above it reads
+	// and validates — the environment, the instance, the variable name, whether that name is free —
+	// so the held message can name the exact instance and the exact key, and nothing has been
+	// provisioned when it holds.
+	//
+	// The disposition is scoped by the INSTANCE, as every other two-target add-on verb's is
+	// (ADR-0085 §1, ADR-0095 §2): the database and the role land on that one server, and protecting
+	// one app by name would leave the identical verb free to put a database on the same instance for
+	// the next, which reads as protection and is not. Unlike the other addon.* codes this one is also
+	// env-scopable, so the environment reaches the lookup as a tier of its own as well as through the
+	// instance (ADR-0095 §2).
+	if err := e.recordDecision(ctx, auditOpAddonAttach, app, args, GuardrailAddonAttach,
+		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instanceLabel(inst)}, "addon attach", GuardrailAddonAttach, opts.Confirm,
+			attachConsequence(t, app, targetEnv, instanceLabel(inst), key, current, recorded))); err != nil {
+		return AttachResult{}, err
+	}
 
 	// Provision the database/role on THIS instance and compose the connection string. The returned
 	// url is a SECRET value: from here it is handed only to SetSecretValue and never logged, audited,

@@ -1280,23 +1280,6 @@ type AttachResult struct {
 	ReadSecretKey string `json:"read_secret_key,omitempty"`
 }
 
-// AttachAddon gives an app its own database on ENVIRONMENT env's Postgres instance and wires it in
-// (ADR-0031/0067 §1). The caller supplies only the add-on type, app name, and environment; burrowd
-// generates the connection string server-side and writes it into the app's Secret in that
-// environment's namespace — no secret value crosses this API or the agent control channel. The result
-// carries the environment and the KEY name, never the value.
-//
-// envKey names the environment variable to write it under. EMPTY IS NOT "DATABASE_URL" — it is
-// "whatever this attachment already uses", which burrowd resolves, so omitting it keeps today's
-// behaviour for an app that never named one and does not move the variable of an app that did.
-//
-// THE NAME RIDES THE ROUTE (see narrowing), and it is the one narrowing here that does not narrow
-// scope: the same database on the same instance in the same namespace, whatever the variable is
-// called. What it aims is the KEY, and a control plane that predates it drops the field and writes
-// DATABASE_URL — over whatever the app was keeping there — then answers 200 reporting a name the
-// caller never asked for. That is the failure #485 describes with the target one level in, so it
-// takes the same form: an older control plane refuses a route it does not serve, having written
-// nothing.
 // AddonSetting is one row of `burrow addon config <type>`: a property of an existing instance, what
 // it is set to now, and what changing it does (ADR-0082 §1).
 type AddonSetting struct {
@@ -1379,9 +1362,47 @@ func (c *Client) ConfigureAddon(ctx context.Context, addonType, env, instance, s
 	return out, err
 }
 
-func (c *Client) AttachAddon(ctx context.Context, addonType, app, env, instance, envKey string) (AttachResult, error) {
+// AttachAddonOptions is everything an attach carries beyond the add-on, the app and the environment.
+// It is a struct for DetachAddonOptions' reason: two of these three narrow what the call reaches and
+// the third satisfies a guardrail, and a reader of `AttachAddon(ctx, "postgres", "web", "",
+// "analytics", "", true)` cannot tell which is which.
+type AttachAddonOptions struct {
+	// Instance is the LABEL of the add-on instance to attach to. Empty is the environment's own
+	// instance (ADR-0091 §3).
+	Instance string
+	// EnvKey names the environment variable to write the connection string under.
+	EnvKey string
+	// Confirm satisfies the addon.attach guardrail's confirmation hold (ADR-0095 §1). It travels in
+	// the body rather than the route because a control plane that drops it has no such guardrail and
+	// so behaves exactly as it did before the field existed — unlike Instance and EnvKey, where a
+	// dropped value means a database on the wrong server or a value written over the wrong key.
+	Confirm bool
+}
+
+// AttachAddon gives an app its own database on ENVIRONMENT env's Postgres instance and wires it in
+// (ADR-0031/0067 §1). The caller supplies only the add-on type, app name, and environment; burrowd
+// generates the connection string server-side and writes it into the app's Secret in that
+// environment's namespace — no secret value crosses this API or the agent control channel. The result
+// carries the environment and the KEY name, never the value.
+//
+// It is held by the addon.attach confirm guardrail by default (ADR-0095), so an unconfirmed attach
+// comes back as a guardrail hold with nothing provisioned; opts.Confirm re-issues it.
+//
+// opts.EnvKey names the environment variable to write it under. EMPTY IS NOT "DATABASE_URL" — it is
+// "whatever this attachment already uses", which burrowd resolves, so omitting it keeps today's
+// behaviour for an app that never named one and does not move the variable of an app that did.
+//
+// THE NAME RIDES THE ROUTE (see narrowing), and it is the one narrowing here that does not narrow
+// scope: the same database on the same instance in the same namespace, whatever the variable is
+// called. What it aims is the KEY, and a control plane that predates it drops the field and writes
+// DATABASE_URL — over whatever the app was keeping there — then answers 200 reporting a name the
+// caller never asked for. That is the failure #485 describes with the target one level in, so it
+// takes the same form: an older control plane refuses a route it does not serve, having written
+// nothing.
+func (c *Client) AttachAddon(ctx context.Context, addonType, app, env string, opts AttachAddonOptions) (AttachResult, error) {
 	var out AttachResult
-	body := map[string]any{"addon": addonType, "app": app, "env": env}
+	instance, envKey := opts.Instance, opts.EnvKey
+	body := map[string]any{"addon": addonType, "app": app, "env": env, "confirm": opts.Confirm}
 	path := narrowing(narrowing("/v1/addons/attach", "instance", instance), "env-key", envKey)
 	err := c.do(ctx, http.MethodPost, path, body, &out)
 	if err != nil && instance != "" {

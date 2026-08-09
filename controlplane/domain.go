@@ -315,6 +315,18 @@ func DefaultPolicy() Policy {
 			GuardrailDNSWrite:     DispositionConfirm,
 			GuardrailAddonInstall: DispositionConfirm,
 			GuardrailAddonRemove:  DispositionConfirm,
+			// Attaching is held for confirmation, which is ADR-0065's THIRD tier and a change from
+			// having no guardrail at all (ADR-0095 §1). Attach passes the scope test — the reach beyond
+			// the app is a database and a role on a server that already holds one per attached app —
+			// and passes reversibility for the case that dominates, since a detach undoes it and keeps
+			// the data (ADR-0090). What it does that the old "provisions nothing destructive" reading
+			// missed is restart the app and, on a re-attach, rotate a password nothing can restore.
+			//
+			// The hold binds the operator as well as the agent until ADR-0094's caller-kind axis
+			// exists; a built-in default binds every kind in both worlds, so this row is unaffected
+			// when it lands. addon.attach is env-scopable, so the expected relief from the friction is
+			// `guard set --env dev addon.attach allow` rather than a cluster-wide one.
+			GuardrailAddonAttach:  DispositionConfirm,
 			GuardrailAddonDetach:  DispositionConfirm,
 			GuardrailAddonRestore: DispositionConfirm,
 			// Rewinding a whole instance is held for confirmation rather than denied, and the choice

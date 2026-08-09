@@ -75,13 +75,14 @@ func newBuildCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rel := res.Deploy.Release
-			human := fmt.Sprintf("built %s (digest %s) and deployed as release %s (image %s, %d replica(s), %s)",
-				app, res.Digest, rel.ID, rel.Image, rel.Replicas, rel.Status)
-			if res.Deploy.SupersededReleaseID != "" {
-				human += fmt.Sprintf("; superseded release %s", res.Deploy.SupersededReleaseID)
+			// A build ends in a deploy, so it reports the deploy's outcome in the deploy's words —
+			// including a rollout that did not become ready, which a build is no less likely to
+			// produce than an explicit deploy (ADR-0092 §2). The build's own result leads the line.
+			human := fmt.Sprintf("built %s (digest %s); %s", app, res.Digest, deployHuman(app, res.Deploy))
+			if err := o.emitChange(cmd.OutOrStdout(), res, human); err != nil {
+				return err
 			}
-			return o.emitChange(cmd.OutOrStdout(), res, human)
+			return deployExitError(app, res.Deploy.Rollout)
 		},
 	}
 	bindCommon(cmd.Flags(), o)

@@ -3,6 +3,11 @@
 
 package controlplane
 
+import (
+	"context"
+	"log/slog"
+)
+
 // A rollout does not finish; it either completes, fails, or hangs (ADR-0072 §5). Everything before
 // this file could only answer "was the write accepted" — a release marked deployed meant the API
 // server took the object, which is not the same fact as "the new pods are serving". This is the
@@ -75,6 +80,50 @@ func (o RolloutOutcome) Outcome() string {
 		return OutcomeSucceeded
 	}
 	return OutcomeFailed
+}
+
+// rolloutReport turns the deploy's rollout observation into the account the CALLER gets back
+// (ADR-0092 §2) — the same verdict the hook is told, plus the diagnosis the hook is deliberately
+// not given.
+//
+// THE DIAGNOSIS IS THE POINT. A rollout that did not settle carries a reason and a line of replica
+// counts, which says that something is wrong and not what. The thing that says what is already
+// built: `burrow app status` ranks the app's pods down to the blocking condition that names the fix
+// — the registry it cannot pull from, the taint no node tolerates, the container's exit code and a
+// tail of its last log. Issue #546's whole complaint is that this information was there the entire
+// time and the deploy never looked, so the deploy looks, through the same seam the status surface
+// reads, and reports what it found. There is no second inspection and no second vocabulary.
+//
+// IT IS BEST EFFORT AND NEVER FAILS THE REPORT. The verdict is already in hand; an unreadable status
+// surface costs the extra sentence and nothing else. A settled rollout is not inspected at all — it
+// is serving, so there is nothing to diagnose and no reason to spend the call.
+func (e *Engine) rolloutReport(ctx context.Context, k Kubernetes, app string, out RolloutOutcome) *RolloutReport {
+	rep := &RolloutReport{Settled: out.Settled, Reason: out.Reason, Detail: out.Detail}
+	if out.Settled {
+		return rep
+	}
+	st, err := k.WorkloadStatus(ctx, app)
+	if err != nil {
+		slog.WarnContext(ctx, "reading the workload status of a rollout that did not settle failed; the deploy reports what the wait observed",
+			"app", app, "error", err)
+		return rep
+	}
+	rep.Issue = st.Issue
+	return rep
+}
+
+// recordedRollout renders a rollout report for the release row (ADR-0092 §4): what was observed, and
+// the reason when it was not good. A nil report is an unobserved rollout — a deploy that declined to
+// wait — and records as the zero value, which reads as unknown rather than as either verdict.
+func recordedRollout(rep *RolloutReport) (ReleaseRollout, string) {
+	switch {
+	case rep == nil:
+		return RolloutUnobserved, ""
+	case rep.Settled:
+		return RolloutSettled, ""
+	default:
+		return RolloutUnsettled, rep.Reason
+	}
 }
 
 // The two values RolloutOutcome.Outcome renders, and therefore the two values a `post-deploy` hook

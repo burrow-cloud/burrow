@@ -504,12 +504,47 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	}
 	progress.done(StageApply)
 
+	// THE WRITE WAS ACCEPTED. That is not the deploy's outcome, and reporting it as one is what
+	// issue #546 was filed about: a rollout whose new pod never passed its readiness probe was
+	// reported as `deployed`, with the release that was still serving every request reported as
+	// `superseded`. Kubernetes had behaved correctly and kept the old ReplicaSet up; only the report
+	// was wrong, and it is the report an agent has instead of a pod list.
+	//
+	// So the deploy waits here, before it says anything (ADR-0092 §1). The observation is the one
+	// settleOnce already made for the `post-deploy` hook and the dependency check — the same
+	// sync.OnceValue handed to both further down, so an app with either still settles exactly once
+	// (issue #407) and the three cannot report differently on one rollout. What changed is that
+	// nothing has to ASK any more: the deploy itself is a consumer, so every deploy waits.
+	//
+	// A caller may decline the wait with NoWait, and then the report says the outcome is unknown
+	// rather than saying it went well.
+	settle := e.settleOnce(ctx, k, req.App, envName(req.Env), progress)
+	var rollout *RolloutReport
+	if !req.NoWait {
+		rollout = e.rolloutReport(ctx, k, req.App, settle())
+	}
+
 	// The cluster is updated. From here a SaveRelease failure leaves the record behind
 	// the cluster (the release stays Pending though the new image is live) — a drift
 	// the reconcile loop closes in a later phase. v0.1 surfaces the error honestly.
+	//
+	// THE STATUS STILL SAYS `deployed` WHEN THE ROLLOUT DID NOT SETTLE, and the rollout columns
+	// beside it say what actually happened (ADR-0092 §4). Status is the registry's record of which
+	// release Burrow applied and which one a rollback returns to: `burrow app rollback` takes the
+	// newest `deployed` release and re-applies what THAT superseded, so demoting a wedged release to
+	// `failed` would silently move the rollback handle one release further back — landing an image
+	// nobody asked for at the moment somebody is recovering from a bad deploy.
 	rel.Status = ReleaseDeployed
+	rel.Rollout, rel.RolloutReason = recordedRollout(rollout)
 	if err := e.db.SaveRelease(ctx, rel); err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: recording successful release: %w", req.App, err)
+	}
+	// The audit row records the rollout too, so the trail a reviewer reads afterwards says whether
+	// the image this row is about ever served (ADR-0027). args is the same map the decision row was
+	// written from, extended before the execution row the way env_keys already is.
+	args["rollout"] = string(rel.Rollout)
+	if rel.RolloutReason != "" {
+		args["rollout_reason"] = rel.RolloutReason
 	}
 
 	superseded := ""
@@ -532,7 +567,7 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 			return DeployResult{}, fmt.Errorf("deploy %s: disabling auto-deploy after downgrade: %w", req.App, err)
 		}
 	}
-	res := DeployResult{Release: rel, SupersededReleaseID: superseded}
+	res := DeployResult{Release: rel, SupersededReleaseID: superseded, Rollout: rollout}
 	// Nudge toward semver when the deployed tag cannot be classified for auto-update (ADR-0052 §8).
 	// This is a non-blocking hint on an otherwise-successful deploy, not a gate: the deploy has
 	// already landed. An auto deploy always carries a semver tag, so only a manual non-semver deploy
@@ -561,12 +596,13 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	// (ADR-0076 §6). It waits for the rollout to settle first, which is what ADR-0072 §4's
 	// `post-deploy` phase means by when it fires.
 	//
-	// BOTH TAKE THE SAME settle. It is one deferred observation of this rollout, made by whichever of
-	// them asks first and handed unchanged to the other, so the deploy waits out the settle bound at
-	// most once however many things want to know how it went (issue #407) — and the check and the
-	// hook cannot report differently on the same rollout. It stays deferred, so an app with neither
-	// feature waits for nothing at all.
-	settle := e.settleOnce(ctx, k, req.App, envName(req.Env), progress)
+	// BOTH TAKE THE SAME settle THE DEPLOY'S OWN REPORT TOOK. It is one observation of this rollout,
+	// made by whichever party asks first and handed unchanged to the rest, so the deploy waits out
+	// the settle bound at most once however many things want to know how it went (issue #407) — and
+	// the report, the check, and the hook cannot say different things about one rollout. Since
+	// ADR-0092 the deploy itself asks, so on the ordinary path the observation is already made and
+	// these two read it; a deploy that declined the wait (NoWait) still settles here if it has a
+	// dependency to check or a hook to tell, because those are defined in terms of the outcome.
 	res.Dependencies = e.runDependencyChecks(ctx, k, req.App, envName(req.Env), ns, req.Image, env, settle, progress)
 	for _, d := range res.Dependencies {
 		if d.Failed() {

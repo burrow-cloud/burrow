@@ -141,6 +141,43 @@ func (s ReleaseStatus) Valid() bool {
 	}
 }
 
+// ReleaseRollout is what the deploy OBSERVED of a release's rollout, recorded beside the release's
+// status because the two answer different questions and one cannot answer both (ADR-0092 §4).
+//
+// Status is the REGISTRY's record: which release Burrow applied, and which one a rollback returns
+// to. This is the CLUSTER's answer at the moment the deploy ended: did the new replicas become
+// ready. A release can be `deployed` and `unsettled` at once, and that pair is not a contradiction —
+// it is exactly the state issue #546 was filed about, where the Deployment carried the new image and
+// the old pods were still serving every request.
+//
+// IT IS AN OBSERVATION AND NOT A LIVE FACT, so it does not go stale. It says what the deploy saw
+// when it stopped waiting, which stays true afterwards however the rollout ends. What is true NOW is
+// `burrow app status`, which reads the cluster.
+type ReleaseRollout string
+
+const (
+	// RolloutUnobserved is a release whose rollout the deploy did not wait for — a deploy that asked
+	// not to (DeployRequest.NoWait), or a row written before this was recorded. It is the zero value,
+	// and it means the outcome is unknown, never that it went well.
+	RolloutUnobserved ReleaseRollout = ""
+	// RolloutSettled is a release whose new replicas became ready inside the bound: the image is
+	// serving.
+	RolloutSettled ReleaseRollout = "settled"
+	// RolloutUnsettled is a release whose rollout had not become ready when the deploy stopped
+	// waiting. RolloutReason names why.
+	RolloutUnsettled ReleaseRollout = "unsettled"
+)
+
+// Valid reports whether r is a known ReleaseRollout.
+func (r ReleaseRollout) Valid() bool {
+	switch r {
+	case RolloutUnobserved, RolloutSettled, RolloutUnsettled:
+		return true
+	default:
+		return false
+	}
+}
+
 // ReleaseTrigger records how a deploy was triggered — its provenance (ADR-0052 §5), so the
 // deploy record and audit log distinguish an explicit deploy from an unattended auto-update.
 type ReleaseTrigger string
@@ -201,6 +238,12 @@ type Release struct {
 	// Supersedes is the ID of the release this one replaced, if any — the chain that
 	// lets rollback walk back to a prior known-good release.
 	Supersedes string `json:"supersedes,omitempty"`
+	// Rollout is what the deploy observed of this release's rollout (ADR-0092 §4). Empty on a deploy
+	// that did not wait and on every row written before the deploy waited at all.
+	Rollout ReleaseRollout `json:"rollout,omitempty"`
+	// RolloutReason names why the rollout did not settle, from the closed vocabulary ADR-0074 §2
+	// enumerates. Set only with RolloutUnsettled.
+	RolloutReason string `json:"rollout_reason,omitempty"`
 	// Trigger is how this deploy was triggered (ADR-0052 §5): "manual" for an explicit CLI or
 	// agent deploy — the default for every deploy today — or "auto" for the pull-based passive
 	// watcher (Phase 4b). Empty on rows written before provenance existed.
@@ -231,6 +274,9 @@ func (r Release) Validate() error {
 	}
 	if r.Status != "" && !r.Status.Valid() {
 		return fmt.Errorf("release status %q is not valid", r.Status)
+	}
+	if !r.Rollout.Valid() {
+		return fmt.Errorf("release rollout %q is not valid", r.Rollout)
 	}
 	return nil
 }

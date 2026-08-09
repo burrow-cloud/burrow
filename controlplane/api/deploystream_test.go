@@ -77,7 +77,7 @@ func TestDeployStreamsItsStagesThenTheResult(t *testing.T) {
 		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
 	}
 	// A bare app: nothing waits, so nothing but the apply is reported.
-	want := []string{"apply:started", "apply:done"}
+	want := []string{"apply:started", "apply:done", "settle:started", "settle:done"}
 	got := stages(lines)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("stages = %v, want %v", got, want)

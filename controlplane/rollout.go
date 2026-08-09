@@ -6,6 +6,7 @@ package controlplane
 import (
 	"context"
 	"log/slog"
+	"strings"
 )
 
 // A rollout does not finish; it either completes, fails, or hangs (ADR-0072 §5). Everything before
@@ -65,6 +66,21 @@ type RolloutOutcome struct {
 	// is told the reason, which is the part it branches on, and the app's own output stays in
 	// `burrow app logs` and `burrow app status`, which still carry it.
 	Detail string
+	// Output is a bounded tail of what the pod that would not become ready was printing — the
+	// APPLICATION's own words, and the only field here that carries any (ADR-0092 §2).
+	//
+	// IT IS NEVER TOLD TO A HOOK. Everything above travels into a `post-deploy` Job's environment,
+	// where it persists in a Kubernetes object for anyone who can read the namespace; that is why
+	// Detail is counts and phases. This field exists for the opposite audience — the caller waiting
+	// on the deploy, which renders it once and discards it, the same contract `burrow app status`'s
+	// Issue already reads under (ADR-0074 §9). hookEnv takes named fields, so a hook cannot acquire
+	// this by accident, and a test holds that line.
+	//
+	// It is filled only where nothing else explains the failure: a pod that is up, running, and
+	// failing its readiness probe reports no blocking condition and no Issue, so the wait can say
+	// only that it waited — while the reason was in the pod's output the whole time, which is
+	// precisely what issue #546 was filed about.
+	Output string
 }
 
 // Failed reports that the wait reached a verdict and the verdict was negative. It is the inverse of
@@ -109,7 +125,23 @@ func (e *Engine) rolloutReport(ctx context.Context, k Kubernetes, app string, ou
 		return rep
 	}
 	rep.Issue = st.Issue
+	if rep.Issue == "" {
+		// The status surface found nothing more specific than the wait did, which is the shape of a
+		// pod that is up and failing its readiness probe: no blocking condition, no Issue, nothing but
+		// elapsed time. What the pod itself was printing is then the only thing that explains it.
+		rep.Issue = readinessOutput(out.Output)
+	}
 	return rep
+}
+
+// readinessOutput frames a not-ready pod's captured output as the explanation it is, so a reader is
+// never handed a block of application text with nothing saying whose it is or why it is here.
+func readinessOutput(output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	return "the pod is running and not passing its readiness check; its recent output:\n" + output
 }
 
 // recordedRollout renders a rollout report for the release row (ADR-0092 §4): what was observed, and

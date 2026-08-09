@@ -788,13 +788,24 @@ func isVolumeUnavailable(message string) bool {
 // whose previous log has already been rotated away, or a cluster that refuses the read, yields "",
 // and the Issue still names the exit code.
 func (a *Adapter) previousLogTail(ctx context.Context, pod, container string) string {
+	return a.logTail(ctx, pod, container, true)
+}
+
+// logTail captures the last lines of one container's output, from its current run or from its
+// previous one. It is the read previousLogTail has always made, with the run to read from as a
+// parameter: a crash-looping container's failure is in the PREVIOUS run, while a container that is
+// up and refusing to pass its readiness probe is printing the reason right now (ADR-0092 §2).
+//
+// Bounded twice, by tailLines at the API server and by a LimitReader here, because the line bound
+// alone bounds nothing when one line of application output can be megabytes.
+func (a *Adapter) logTail(ctx context.Context, pod, container string, previous bool) string {
 	if pod == "" {
 		return ""
 	}
 	lines := int64(controlplane.IssueLogTailLines)
 	stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod, &corev1.PodLogOptions{
 		Container: container,
-		Previous:  true,
+		Previous:  previous,
 		TailLines: &lines,
 	}).Stream(ctx)
 	if err != nil {

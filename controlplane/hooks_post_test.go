@@ -236,10 +236,13 @@ func TestPostDeployWaitsWithTheConfiguredBound(t *testing.T) {
 	}
 }
 
-// TestNoPostDeployHookWaitsForNothing is the cost boundary: unset means no hook and today's
-// behaviour exactly (ADR-0072 §1), so a deploy nobody asked to be told about must not pay for a
-// settle wait it would then have nothing to do with.
-func TestNoPostDeployHookWaitsForNothing(t *testing.T) {
+// TestNoPostDeployHookStillSettlesOnce is the cost boundary as ADR-0092 §1 redrew it. The settle was
+// once the hook's alone, so an app with no hook waited for nothing; the deploy now needs the same
+// observation for its OWN report, because answering at submission is what let a rollout that never
+// became ready be reported as a success (issue #546). What must still hold is that the deploy makes
+// ONE observation however many parties want it (issue #407) — the hook adds no second wait, and adds
+// no wait at all here, because the deploy has already made it.
+func TestNoPostDeployHookStillSettlesOnce(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newEngine(t, permissive())
 	setHook(ctx, t, e, "web", "", cp.HookPreDeploy, "./migrate")
@@ -247,11 +250,33 @@ func TestNoPostDeployHookWaitsForNothing(t *testing.T) {
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
-	if waits := k.Rollouts(); len(waits) != 0 {
-		t.Fatalf("AwaitRollout calls = %d, want 0 with no post-deploy hook set", len(waits))
+	if waits := k.Rollouts(); len(waits) != 1 {
+		t.Fatalf("AwaitRollout calls = %d, want exactly 1: the deploy's own report is a consumer of the settle, and there is only ever one observation", len(waits))
 	}
 	if runs := k.RunJobs(); len(runs) != 1 || runs[0].Command[0] != "./migrate" {
 		t.Fatalf("RunJobs = %+v, want only the pre-deploy hook", runs)
+	}
+}
+
+// TestNoWaitObservesNothing is the escape hatch ADR-0092 §3 keeps: a caller may still have the
+// answer at submission, and what it then gets is an UNKNOWN outcome rather than a claimed one. The
+// release records no observation either, so nothing downstream reads the absence as a success.
+func TestNoWaitObservesNothing(t *testing.T) {
+	ctx := context.Background()
+	e, k, _, _ := newEngine(t, permissive())
+
+	res, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, NoWait: true})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if waits := k.Rollouts(); len(waits) != 0 {
+		t.Fatalf("AwaitRollout calls = %d, want 0 for a deploy that declined to wait", len(waits))
+	}
+	if res.Rollout != nil {
+		t.Errorf("Rollout = %+v, want nil: an unobserved rollout has nothing truthful to report", res.Rollout)
+	}
+	if res.Release.Rollout != cp.RolloutUnobserved {
+		t.Errorf("release rollout = %q, want %q", res.Release.Rollout, cp.RolloutUnobserved)
 	}
 }
 

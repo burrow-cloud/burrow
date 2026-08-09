@@ -56,6 +56,7 @@ func TestDeploy(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"release":               map[string]any{"id": "r1", "app": "web", "image": "img:1", "status": "deployed", "replicas": 2},
 			"superseded_release_id": "r0",
+			"rollout":               map[string]any{"settled": true},
 		})
 	}, "app", "deploy", "web", "--image", "img:1", "--replicas", "2")
 	if err != nil {
@@ -78,6 +79,7 @@ func TestBuild(t *testing.T) {
 			"deploy": map[string]any{
 				"release":               map[string]any{"id": "r1", "app": "web", "image": "img:1@sha256:abc", "status": "deployed", "replicas": 2},
 				"superseded_release_id": "r0",
+				"rollout":               map[string]any{"settled": true},
 			},
 		})
 	}, "app", "build", "web", "--source", "https://github.com/acme/web", "--ref", "v1.2.3", "--image", "img:1")

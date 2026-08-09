@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -127,16 +128,24 @@ func rolloutVerdict(ctx context.Context, a *Adapter, dep *appsv1.Deployment) (co
 // deliberately excludes them (ADR-0074 §2): they are a pod getting on with it, so they are never an
 // Issue, and they are exactly what a rollout that timed out without an Issue is doing.
 func rolloutDeadlineOutcome(ctx context.Context, a *Adapter, app string, timeout time.Duration, unread string) controlplane.RolloutOutcome {
+	out := controlplane.RolloutOutcome{Reason: controlplane.ReasonDeadlineExceeded}
 	detail := fmt.Sprintf("waited %s", timeout)
 	switch {
 	case unread != "":
 		detail += "; " + unread
 	default:
-		if observed := observeAppPods(ctx, a, app); observed != "" {
+		observed, notReady := observeAppPods(ctx, a, app)
+		if observed != "" {
 			detail += "; " + observed
 		}
+		// A pod that is Running and not Ready is the case nothing else can explain: it reports no
+		// blocking condition, so it raises no Issue, and the wait can say only that it waited. What it
+		// is printing is the explanation (ADR-0092 §2), so it is captured here and reported separately
+		// from Detail — this is the application's own output and Detail goes into a hook's environment.
+		out.Output = a.logTail(ctx, notReady, "", false)
 	}
-	return controlplane.RolloutOutcome{Reason: controlplane.ReasonDeadlineExceeded, Detail: detail}
+	out.Detail = detail
+	return out
 }
 
 // rolloutReplicaSummary describes a rollout's progress in one Burrow-authored line. Every value in it
@@ -150,24 +159,52 @@ func rolloutReplicaSummary(st controlplane.WorkloadStatus, desired int32) string
 // same nameLabel the workload sets. Best-effort — an unreadable pod list yields "", and the detail
 // still names the bound.
 //
-// It carries container WAITING REASONS and pod phases only. Both are Kubernetes' own short reason
-// strings, never a message and never anything the container printed.
-func observeAppPods(ctx context.Context, a *Adapter, app string) string {
+// It carries container WAITING REASONS, pod phases, and readiness. All three are Kubernetes' own
+// short strings, never a message and never anything the container printed.
+//
+// READINESS IS SAID OUT LOUD, because "pod is Running" was the whole report on the deploy that
+// produced issue #546 — where the pod was Running, had been for five minutes, was serving nothing,
+// and Running is the word a reader takes for good news. A pod that is up and not passing its
+// readiness check is a different state from a pod that is up, and the line now distinguishes them.
+//
+// It also returns the name of one such pod: running, not ready, and therefore the pod whose own
+// output explains a rollout that nothing else can. The newest is chosen — a rollout replaces pods,
+// so the one that has not come up is the one that started last.
+func observeAppPods(ctx context.Context, a *Adapter, app string) (observed, notReadyPod string) {
 	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: nameLabel + "=" + app})
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	if len(pods.Items) == 0 {
-		return "the Deployment has no pods"
+		return "the Deployment has no pods", ""
 	}
 	var parts []string
+	var newest time.Time
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		desc := fmt.Sprintf("pod %q is %s", pod.Name, pod.Status.Phase)
+		if pod.Status.Phase == corev1.PodRunning && !podReady(pod) {
+			desc += " but not ready"
+			if started := pod.CreationTimestamp.Time; notReadyPod == "" || started.After(newest) {
+				notReadyPod, newest = pod.Name, started
+			}
+		}
 		if states := containerWaitStates(pod); states != "" {
 			desc += " (" + states + ")"
 		}
 		parts = append(parts, desc)
 	}
-	return strings.Join(parts, "; ")
+	return strings.Join(parts, "; "), notReadyPod
+}
+
+// podReady reports whether the pod's Ready condition is true — the condition the endpoint controller
+// and the Deployment's own availability both read, so it is the same notion of ready that decided
+// this rollout did not complete.
+func podReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }

@@ -37,6 +37,7 @@ func TestBuildReportsItsStagesThenTheDeploys(t *testing.T) {
 		"clone:started", "clone:done",
 		"build:started", "build:done",
 		"apply:started", "apply:done",
+		"settle:started", "settle:done",
 	})
 	if res.Digest != fake.DefaultDigest {
 		t.Errorf("digest = %q, want %q", res.Digest, fake.DefaultDigest)
@@ -159,7 +160,7 @@ func TestABuilderThatCannotReportIsBracketedAsOneStage(t *testing.T) {
 		{
 			name:    "a build that succeeds",
 			builder: silentBuilder{digest: "sha256:abc"},
-			want:    []string{"build:started", "build:done", "apply:started", "apply:done"},
+			want:    []string{"build:started", "build:done", "apply:started", "apply:done", "settle:started", "settle:done"},
 		},
 		{
 			name:    "a build that fails",

@@ -104,15 +104,30 @@ func TestBuildStagesAreTheBuildsThenTheDeploys(t *testing.T) {
 	}
 }
 
-// TestBareDeployReportsOnlyTheApply is the case the feature must not spoil. An app with no hook and
-// nothing Burrow provisioned waits for nothing at all — the settle stays lazy and unobserved — so
-// the deploy reports the single thing it did. A settle stage here would mean the reporting had
-// started forcing a wait nobody asked for.
-func TestBareDeployReportsOnlyTheApply(t *testing.T) {
+// TestBareDeployReportsTheApplyAndTheSettle is what every deploy reports since ADR-0092: it writes
+// the Deployment and then waits to see what the cluster did with it. The settle was once reported
+// only when a hook or a dependency check asked for the observation, and a deploy with neither said
+// nothing about its rollout because it never looked — which is how a rollout that never became ready
+// came to be reported as a success (issue #546).
+func TestBareDeployReportsTheApplyAndTheSettle(t *testing.T) {
 	e, _, _, _ := newEngine(t, permissive())
 	var got []string
 	if _, err := e.Deploy(context.Background(), cp.DeployRequest{
 		App: "web", Image: "img:1", Replicas: 1, Progress: recordStages(&got),
+	}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	wantStages(t, got, []string{"apply:started", "apply:done", "settle:started", "settle:done"})
+}
+
+// TestADeployToldNotToWaitReportsOnlyTheApply is the other side of it: --wait=false declines the
+// observation, so the stage that reports the observation does not appear. A settle stage here would
+// mean the deploy waited after being told not to.
+func TestADeployToldNotToWaitReportsOnlyTheApply(t *testing.T) {
+	e, _, _, _ := newEngine(t, permissive())
+	var got []string
+	if _, err := e.Deploy(context.Background(), cp.DeployRequest{
+		App: "web", Image: "img:1", Replicas: 1, NoWait: true, Progress: recordStages(&got),
 	}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -152,7 +167,7 @@ func TestDeployReportsBothHooks(t *testing.T) {
 	}{
 		{
 			name: "no hooks at all",
-			want: []string{"apply:started", "apply:done"},
+			want: []string{"apply:started", "apply:done", "settle:started", "settle:done"},
 		},
 		{
 			name:  "a pre-deploy hook only",
@@ -160,10 +175,11 @@ func TestDeployReportsBothHooks(t *testing.T) {
 			want: []string{
 				"pre-deploy-hook:started", "pre-deploy-hook:done",
 				"apply:started", "apply:done",
+				"settle:started", "settle:done",
 			},
 		},
 		{
-			name:  "a post-deploy hook only, which is what forces the settle",
+			name:  "a post-deploy hook only, which adds no second settle",
 			hooks: []cp.HookPhase{cp.HookPostDeploy},
 			want: []string{
 				"apply:started", "apply:done",

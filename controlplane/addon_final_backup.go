@@ -40,6 +40,15 @@ import (
 // rather than a run of positional booleans because this is the most destructive operation in the
 // product and `RemoveAddon(ctx, name, true, false, true)` is not a call anyone can review.
 type RemoveAddonOptions struct {
+	// Environment scopes which environment's instance the removal's argument names, for the case the
+	// argument is a LABEL rather than a registry name (ADR-0091 §2): a label is unique within an
+	// environment, so `analytics` needs to know which one.
+	//
+	// It is optional and stays that way. `addon remove burrow-postgres-staging` names a row outright
+	// and has never needed an environment, so a removal that resolves by name is unaffected; the
+	// environment is only resolved when the argument is not a registry name. Naming BOTH, and naming
+	// them inconsistently, is a refusal rather than a silent preference for one of them.
+	Environment string
 	// DeleteData destroys the add-on's data volume as well as its workload — for Postgres, every
 	// attached app's database. Its absence is the safe default (ADR-0064 §1).
 	DeleteData bool
@@ -200,7 +209,7 @@ func (e *Engine) finalBackupBeforeDataDeletion(ctx context.Context, info AddonIn
 	env := envName(info.Environment)
 	backups := make([]Backup, 0, len(apps))
 	for _, app := range apps {
-		backup, outcome, err := e.backupApp(ctx, app, env, plan.provider)
+		backup, outcome, err := e.backupApp(ctx, app, env, info, plan.provider)
 		if err != nil {
 			return nil, finalBackupRefusal(info, app, outcome.Reason, outcome.Detail, err)
 		}

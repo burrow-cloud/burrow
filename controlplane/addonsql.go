@@ -5,7 +5,6 @@ package controlplane
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 )
@@ -29,6 +28,10 @@ type SQLRequest struct {
 	// Env is the environment whose instance holds it (ADR-0067 §1): empty targets the default
 	// environment, and is refused when more than one environment is registered.
 	Env string `json:"env,omitempty"`
+	// Instance is the LABEL of the instance to run against (ADR-0091 §4). Empty is the environment's
+	// default instance; an environment may hold more than one, and an app attached to two of them has
+	// two databases the statement could mean.
+	Instance string `json:"instance,omitempty"`
 	// Statement is the caller's SQL, verbatim. Burrow does not parse it, does not branch on its
 	// leading keyword, and does not report it as a read or a write (ADR-0087 §6).
 	Statement string `json:"statement"`
@@ -45,11 +48,13 @@ type SQLRequest struct {
 // the number of rows it affected instead, so "it worked, and it changed three rows" is expressible
 // without an empty table standing in for it.
 type SQLResult struct {
-	// Addon, App and Environment name the database the statement ran against, so a result read on its
-	// own says which one it is about.
+	// Addon, App, Environment and Instance name the database the statement ran against, so a result
+	// read on its own says which one it is about — and with several instances in an environment, the
+	// first three no longer say it alone.
 	Addon       string `json:"addon"`
 	App         string `json:"app"`
 	Environment string `json:"environment"`
+	Instance    string `json:"instance,omitempty"`
 	// Columns are the result's column names in order, empty for a statement that returned no row set.
 	Columns []string `json:"columns"`
 	// Rows are the result's rows, each aligned with Columns. A value is rendered in Postgres's own
@@ -165,25 +170,19 @@ func (e *Engine) AddonSQL(ctx context.Context, req SQLRequest) (SQLResult, error
 	if !ok {
 		return SQLResult{}, fmt.Errorf("addon sql %s for %s: this control plane cannot run statements against an add-on database: %w", req.Addon, req.App, ErrNotImplemented)
 	}
-	instance, err := AddonInstanceName(req.Addon, targetEnv)
+	// The instance has to exist in this environment before the guardrail is evaluated, so a typo'd
+	// environment or label reads as ErrNotFound rather than as a refusal the caller might try to get
+	// relaxed (mirrors RestoreAddon resolving the backup first).
+	inst, err := e.resolveInstance(ctx, req.Addon, targetEnv, req.Instance)
 	if err != nil {
 		return SQLResult{}, fmt.Errorf("addon sql %s for %s: %w", req.Addon, req.App, err)
 	}
-	// The add-on has to be installed in this environment before the guardrail is evaluated, so a
-	// typo'd environment reads as ErrNotFound rather than as a refusal the caller might try to get
-	// relaxed (mirrors RestoreAddon resolving the backup first).
-	if _, err := e.db.Addon(ctx, instance); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return SQLResult{}, fmt.Errorf("addon sql %s for %s: no %s add-on is installed in environment %s (install one with `burrow addon install %s --env %s`): %w",
-				req.Addon, req.App, req.Addon, targetEnv, req.Addon, targetEnv, ErrNotFound)
-		}
-		return SQLResult{}, fmt.Errorf("addon sql %s for %s: reading the %s add-on: %w", req.Addon, req.App, instance, err)
-	}
+	instance := instanceLabel(inst)
 	// The variable the attachment was written under. WHETHER a database is attached is derived from
 	// the instance; what the variable is CALLED is recorded, because no derivation can produce a name
 	// somebody chose (issue #462), and a statement has to follow the same name detach, rotation and a
 	// restore's cutover follow.
-	key, err := e.db.AddonEnvKey(ctx, string(req.Addon), req.App, targetEnv)
+	key, err := e.attachmentKey(ctx, req.Addon, req.App, targetEnv, inst)
 	if err != nil {
 		return SQLResult{}, fmt.Errorf("addon sql %s for %s: reading the attachment's variable name: %w", req.Addon, req.App, err)
 	}
@@ -194,13 +193,13 @@ func (e *Engine) AddonSQL(ctx context.Context, req SQLRequest) (SQLResult, error
 	}
 	// The audit args carry the STATEMENT (ADR-0087's stated cost) and never a credential: the
 	// connection string is read inside the adapter and never reaches here at all.
-	args := map[string]string{"addon": string(req.Addon), "app": req.App, "env": targetEnv, "statement": statement}
+	args := map[string]string{"addon": string(req.Addon), "app": req.App, "env": targetEnv, "instance": instance, "statement": statement}
 	if err := e.recordDecision(ctx, auditOpAddonSQL, req.App, args, GuardrailAddonSQL,
 		// Scoped by the INSTANCE like every other addon.* code, and by the ENVIRONMENT as well, which
 		// this one alone declares — ADR-0087 §5 asks for the gradient (allow in development, deny in
 		// production) that the environment tier is what expresses.
 		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon sql", GuardrailAddonSQL, req.Confirm,
-			fmt.Sprintf("running a statement against %q's database in environment %s", req.App, targetEnv))); err != nil {
+			fmt.Sprintf("running a statement against %q's database on the %s instance %q in environment %s", req.App, req.Addon, instance, targetEnv))); err != nil {
 		return SQLResult{}, err
 	}
 
@@ -216,6 +215,7 @@ func (e *Engine) AddonSQL(ctx context.Context, req SQLRequest) (SQLResult, error
 	res, err := querier.QueryAppDatabase(ctx, AppStatement{
 		App:       req.App,
 		Env:       targetEnv,
+		Instance:  inst.Name,
 		Namespace: ns,
 		SecretKey: key,
 		Statement: statement,
@@ -226,7 +226,7 @@ func (e *Engine) AddonSQL(ctx context.Context, req SQLRequest) (SQLResult, error
 		e.recordExecution(ctx, auditOpAddonSQL, req.App, args, err)
 		return SQLResult{}, fmt.Errorf("addon sql %s for %s: %w", req.Addon, req.App, err)
 	}
-	res.Addon, res.App, res.Environment = string(req.Addon), req.App, targetEnv
+	res.Addon, res.App, res.Environment, res.Instance = string(req.Addon), req.App, targetEnv, instance
 	res.RowLimit = int(maxRows)
 	// A statement the database refused RAN — the connection opened, the server read it, and the
 	// server answered. The execution row records that, with the SQLSTATE so the trail says which

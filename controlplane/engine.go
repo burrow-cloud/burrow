@@ -862,12 +862,17 @@ func (e *Engine) ListApps(ctx context.Context, env string) ([]WorkloadStatus, er
 // InstallAddon deploys the vetted backing service for the named add-on type INTO ONE ENVIRONMENT and
 // registers it as a queryable capability (ADR-0025/0026). It is guarded by addon.install.
 //
-// Each environment gets its own instance (ADR-0067 §1): the registry key and the cluster resource
-// names come from AddonInstanceName, so installing into the default environment lands on exactly the
-// names an existing install already has — nothing migrates — and installing into `staging` stands a
-// separate instance up beside it. The environment is resolved the same way a deploy's is, so an
-// install that names none while several environments are registered is refused rather than landing
-// on whichever one happens to be first (ADR-0047 §1).
+// Each environment gets its own instance (ADR-0067 §1), and one per environment is the DEFAULT
+// rather than the maximum (ADR-0091 §1): with no opts.Name the install lands on the environment's own
+// instance under exactly the names an existing install already has — nothing migrates — and with one
+// it stands a SECOND instance up beside it, under a generated cluster name the operator never types.
+// The environment is resolved the same way a deploy's is, so an install that names none while several
+// environments are registered is refused rather than landing on whichever one happens to be first
+// (ADR-0047 §1).
+//
+// INSTALLING A LABEL THAT ALREADY EXISTS IS A RE-INSTALL OF THAT INSTANCE, not a second one. An
+// instance's identity is its label, `addon install` has always been idempotent, and the alternative —
+// a second `Cluster` for a label somebody typed twice — is a pod and a volume nobody asked for.
 func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, opts InstallAddonOptions) (AddonInfo, error) {
 	spec, ok := LookupAddon(t)
 	if !ok {
@@ -881,22 +886,25 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, opts
 	if err != nil {
 		return AddonInfo{}, fmt.Errorf("install addon %s: loading guardrail policy: %w", t, err)
 	}
-	// The INSTANCE this install would create, named before the guardrail because it is what scopes
-	// the disposition (ADR-0085 §1): an operator can deny standing up one particular instance
-	// without denying every add-on on the cluster. The name is derived from the type and the
-	// environment, so it is known before anything is created.
-	instance, err := AddonInstanceName(t, targetEnv)
+	// The INSTANCE this install would act on, settled before the guardrail because its LABEL is what
+	// scopes the disposition (ADR-0085 §1, ADR-0091 §4): an operator can deny standing up one
+	// particular instance without denying every add-on on the cluster.
+	label, instance, err := e.installTarget(ctx, t, targetEnv, opts.Name)
 	if err != nil {
 		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
 	}
-	args := map[string]string{"type": string(t), "image": spec.Image, "env": targetEnv}
+	args := map[string]string{"type": string(t), "image": spec.Image, "env": targetEnv, "instance": label}
 	if err := e.recordDecision(ctx, auditOpAddonInstall, string(t), args, GuardrailAddonInstall,
 		// addon.* is not EnvScopable (ADR-0035 phase 2c), so an environment on its own cannot relax
-		// or tighten it — the instance name carries the environment instead. The environment still
+		// or tighten it — the instance carries the environment instead. The environment still
 		// appears in the message and the audit args, because which environment an add-on operation
 		// lands in is exactly what the operator is being asked to approve (ADR-0067 §1).
-		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon install", GuardrailAddonInstall, opts.Confirm,
-			fmt.Sprintf("installing the %s add-on (%s) in environment %s", t, spec.Image, targetEnv))); err != nil {
+		//
+		// The scope name is the LABEL, never the generated cluster name: a key nobody can read is a
+		// key nobody will write, and because an environment's first instance is labelled with its own
+		// name, every disposition already written keeps matching (ADR-0091 §4).
+		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: label}, "addon install", GuardrailAddonInstall, opts.Confirm,
+			installConsequence(t, spec.Image, targetEnv, label))); err != nil {
 		return AddonInfo{}, err
 	}
 	// Resolved AFTER the guardrail and before the first object is written. It is the pgBackRest
@@ -918,13 +926,18 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, opts
 			args["archive"] = archive.Provider
 		}
 	}
-	info, err := e.k8s.DeployAddon(ctx, spec, targetEnv, archive)
+	info, err := e.k8s.DeployAddon(ctx, spec, targetEnv, instance, archive)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonInstall, string(t), args, err)
 		return AddonInfo{}, fmt.Errorf("install addon %s: %w", t, err)
 	}
 	// Record the add-on in the registry — the DB is the source of truth for what add-ons exist
 	// (ADR-0025), like the provider registry. Readiness is never stored; it is probed live.
+	//
+	// THE ROW IS THE MAPPING between the label and the cluster name, and it is the only one
+	// (ADR-0091 §2). Written here, after the objects exist, so a registry that says an instance is
+	// called something is a registry describing something that is there.
+	info.Label = label
 	info.CreatedAt = e.clock.Now()
 	if err := e.db.SaveAddon(ctx, info); err != nil {
 		e.recordExecution(ctx, auditOpAddonInstall, string(t), args, err)
@@ -1037,10 +1050,13 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 	// guardrail so an unknown name is a plain ErrNotFound rather than a held confirmation for an
 	// add-on that does not exist, and so the confirmation message can describe what is actually
 	// there — its type, its volume, and who is attached to it.
-	info, err := e.db.Addon(ctx, name)
+	info, err := e.removalTarget(ctx, name, opts.Environment)
 	if err != nil {
 		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, err)
 	}
+	// From here the removal acts on the instance the registry named, never on the caller's string:
+	// a label and a cluster name are the same value only for an environment's first instance.
+	name = info.Name
 	apps, appsKnown := e.attachedApps(ctx, info)
 
 	// Planned before the guardrail so the held confirmation says whether a copy will be made, and
@@ -1064,7 +1080,11 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 		args["attached_apps"] = strings.Join(apps, ",")
 	}
 	if err := e.recordDecision(ctx, auditOpAddonRemove, name, args, GuardrailAddonRemove,
-		pol.evaluateGuardrail(GuardrailScope{Env: info.Environment, Name: name}, "addon remove", GuardrailAddonRemove, opts.Confirm,
+		// Scoped by the instance's LABEL, not by its cluster name (ADR-0091 §4). For every instance
+		// that existed before that record the two are the same string, so a disposition already
+		// written keeps matching; for a later one the label is the only readable half, and a key
+		// nobody can read is a key nobody will write.
+		pol.evaluateGuardrail(GuardrailScope{Env: info.Environment, Name: instanceLabel(info)}, "addon remove", GuardrailAddonRemove, opts.Confirm,
 			removalConsequence(info, opts.DeleteData, apps, plan))); err != nil {
 		return RemoveAddonResult{}, err
 	}
@@ -1128,11 +1148,15 @@ func (e *Engine) attachedApps(ctx context.Context, info AddonInfo) (apps []strin
 	}
 	// A registry row written before add-ons were per-environment carries no environment; it is the
 	// default environment's instance by construction, since that is the only one that could exist.
-	return e.appDatabases(ctx, envName(info.Environment))
+	// The INSTANCE comes off the row rather than being derived from the environment, because an
+	// environment may hold more than one and the question is only ever about this one (ADR-0091 §4).
+	return e.appDatabases(ctx, envName(info.Environment), info.Name)
 }
 
-// appDatabases asks environment env's Postgres instance itself which Burrow-provisioned app databases
-// it holds, sorted, and says whether the question could be put at all.
+// appDatabases asks ONE Postgres instance in environment env which Burrow-provisioned app databases
+// it holds, sorted, and says whether the question could be put at all. The instance is named rather
+// than derived from the environment: an environment may hold several, and "who is attached?" is only
+// ever true of one of them (ADR-0091 §4).
 //
 // It is factored out of attachedApps because a physical restore asks the same instance the same
 // question for the opposite purpose — not "whose data does this destroy?" but "did the data actually
@@ -1143,12 +1167,12 @@ func (e *Engine) attachedApps(ctx context.Context, info AddonInfo) (apps []strin
 // the instance would not answer. It is deliberately distinct from an empty answer, because an
 // instance that says "I hold nothing" and one that says nothing at all are the difference between a
 // fact and a gap, and every caller of this makes a decision that turns on which one it has.
-func (e *Engine) appDatabases(ctx context.Context, env string) (apps []string, known bool) {
+func (e *Engine) appDatabases(ctx context.Context, env, instance string) (apps []string, known bool) {
 	lister, ok := e.dbProvisioner.(AppDatabaseLister)
 	if !ok {
 		return nil, false
 	}
-	found, err := lister.ListAppDatabases(ctx, env)
+	found, err := lister.ListAppDatabases(ctx, env, instance)
 	if err != nil {
 		return nil, false
 	}
@@ -1186,7 +1210,7 @@ func removalConsequence(info AddonInfo, deleteData bool, apps []string, plan fin
 			// This environment's backup claim, not the compiled-in one: with a claim per environment
 			// (ADR-0067 §1) naming the wrong one would tell the operator that a volume they are not
 			// touching is what survives.
-			if claim, err := BackupVolumeName(AddonPostgres, envName(info.Environment)); err == nil {
+			if claim, err := BackupVolumeName(AddonPostgres, info.Name); err == nil {
 				what += fmt.Sprintf(" (the backup volume %q is kept)", claim)
 			}
 		}
@@ -1233,12 +1257,16 @@ type AttachResult struct {
 	// database the app just got (ADR-0067 §1) — an attach result that named only the app would read
 	// identically for two environments holding entirely separate data.
 	Environment string `json:"environment,omitempty"`
+	// Instance is the LABEL of the instance the database was provisioned on (ADR-0091 §1). An
+	// environment may hold more than one, so the environment on its own no longer says which server
+	// the app was given — and an app may hold several attachments, which read identically without it.
+	Instance string `json:"instance,omitempty"`
 	// SecretKey is the env-var name under which the generated connection string was written into
 	// the app's per-app Secret. The value is never returned (ADR-0029/0031).
 	SecretKey string `json:"secret_key"`
 	// PreviousSecretKey is the name this attachment used BEFORE this call, set only when the attach
-	// renamed it. One app has one database per environment, so a rename MOVES the variable rather
-	// than adding a second: the connection string is written under the new name and the old name is
+	// renamed it. One app has one database per INSTANCE, so a rename MOVES that attachment's variable
+	// rather than adding a second: the connection string is written under the new name and the old name is
 	// removed, because the old one would otherwise hold a password this attach has already rotated —
 	// a variable the app still reads and that no longer connects. It is reported so the move is
 	// stated rather than inferred from a variable quietly disappearing (issue #462).
@@ -1251,8 +1279,27 @@ type AttachResult struct {
 	ReadSecretKey string `json:"read_secret_key,omitempty"`
 }
 
-// AttachAddon gives app its own database on ENVIRONMENT env's Postgres instance and wires it into
-// the app (ADR-0031). burrowd provisions an isolated database + login role on that environment's
+// AttachAddonOptions is everything an attach carries beyond the add-on, the app and the environment.
+// It is a struct rather than two trailing strings for DetachAddonOptions' reason: `AttachAddon(ctx,
+// t, app, env, "", "analytics")` is not a call anyone can review.
+type AttachAddonOptions struct {
+	// Instance is the LABEL of the instance to attach to (ADR-0091 §3). Empty is the environment's
+	// default instance, so today's command means today's thing; a label selects one of the several an
+	// environment may hold.
+	Instance string
+	// EnvKey NAMES THE VARIABLE the connection string is written under, and EMPTY IS NOT A SYNONYM
+	// FOR "DATABASE_URL" (issue #462). Empty means "whatever this attachment already uses", which is
+	// DATABASE_URL for every app that never chose otherwise and the chosen name for one that did.
+	//
+	// A SECOND ATTACHMENT HAS TO NAME ONE. An app attached to a second instance has no name it
+	// already uses, and the name it would fall back to belongs to the first attachment — so the
+	// attach is refused with the conflict named rather than handed a derived `DATABASE_URL_2` the
+	// application does not read (ADR-0091 §3).
+	EnvKey string
+}
+
+// AttachAddon gives app its own database on one of ENVIRONMENT env's Postgres instances and wires it
+// into the app (ADR-0031). burrowd provisions an isolated database + login role on that environment's
 // instance, generates the DATABASE_URL server-side, writes it into the app's per-app Secret in that
 // environment's namespace via the SetSecretValue path (ADR-0029), and restarts the app so envFrom
 // picks it up. Attach provisions and destroys nothing, so it is allowed by default (no guardrail)
@@ -1273,7 +1320,8 @@ type AttachResult struct {
 // DATABASE_URL for every app that never chose otherwise and the chosen name for one that did — so
 // omitting it keeps today's behaviour exactly, and a re-attach of a renamed attachment rotates the
 // password into the name it is actually read under instead of quietly moving it back to the default.
-func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey string) (AttachResult, error) {
+func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env string, opts AttachAddonOptions) (AttachResult, error) {
+	envKey := opts.EnvKey
 	if err := (App{Name: app}).Validate(); err != nil {
 		return AttachResult{}, fmt.Errorf("attach addon: %w: %w", ErrInvalid, err)
 	}
@@ -1292,25 +1340,50 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 	if err != nil {
 		return AttachResult{}, fmt.Errorf("attach addon %s for %s: %w", t, app, err)
 	}
-	// The name this attachment uses today: the recorded one, or DATABASE_URL for an attachment made
-	// before the name was a choice. It is both the default for this call and the key a rename has to
-	// clean up afterwards.
-	current, err := e.db.AddonEnvKey(ctx, string(t), app, targetEnv)
+	// WHICH INSTANCE, resolved from the registry before anything is provisioned (ADR-0091 §3). No
+	// opts.Instance is the environment's default instance, so today's command means today's thing;
+	// naming one selects it, and naming one that does not exist is a refusal rather than a database
+	// on the wrong server.
+	inst, err := e.resolveInstance(ctx, t, targetEnv, opts.Instance)
+	if err != nil {
+		return AttachResult{}, fmt.Errorf("attach addon %s for %s: %w", t, app, err)
+	}
+	// The name THIS attachment uses today, which is the recorded one — or DATABASE_URL for an
+	// attachment made before the name was a choice, and only on the environment's default instance,
+	// because that is the only instance such an attachment can be against. It is both the default for
+	// this call and the key a rename has to clean up afterwards.
+	//
+	// AN UNRECORDED ATTACHMENT TO A SECOND INSTANCE OWNS NOTHING, and that distinction is what keeps
+	// a second attach from overwriting the first one's connection string: without it the second
+	// attach would believe it already holds `DATABASE_URL` and skip the check that refuses it
+	// (ADR-0091 §3).
+	current, recorded, err := e.db.AddonEnvKey(ctx, string(t), app, targetEnv, inst.Name)
 	if err != nil {
 		return AttachResult{}, fmt.Errorf("attach addon %s for %s: reading the recorded variable name: %w", t, app, err)
+	}
+	if !recorded && isDefaultInstance(inst) {
+		current = AppDatabaseURLKey
 	}
 	key := current
 	if envKey != "" {
 		key = envKey
 	}
+	if key == "" {
+		key = AppDatabaseURLKey
+	}
 	k := e.k8s.WithNamespace(ns)
 	// A NAME THIS ATTACHMENT DOES NOT ALREADY OWN MUST BE FREE. Attach writes a value nobody can read
-	// back, so writing over an app's existing API token or a config var would destroy it with no way
-	// to recover it and no way to notice — and it is exactly what a plausible-looking name would do.
-	// Checked only for an explicitly named key: the attachment's own name is its to overwrite, which
-	// is what a re-attach rotating the password does.
-	if envKey != "" && envKey != current {
-		if err := e.refuseOccupiedEnvKey(ctx, k, app, targetEnv, envKey); err != nil {
+	// back, so writing over an app's existing API token, a config var, or ANOTHER ATTACHMENT'S
+	// connection string would destroy it with no way to recover it and no way to notice.
+	//
+	// The attachment's own name is its to overwrite, which is what a re-attach rotating the password
+	// does; everything else is checked. That is also how a second attachment is refused a variable
+	// rather than handed a derived one: the first attachment holds `DATABASE_URL`, so the second one
+	// is told the name is taken and asked to name its own (ADR-0091 §3). Burrow does not invent
+	// `DATABASE_URL_2` — a generated name is a name the application was never told to read, and the
+	// attach would report success while the app found nothing.
+	if key != current {
+		if err := e.refuseOccupiedEnvKey(ctx, k, app, targetEnv, key); err != nil {
 			return AttachResult{}, fmt.Errorf("attach addon %s for %s: %w", t, app, err)
 		}
 	}
@@ -1318,12 +1391,12 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 	// generated URL (ADR-0031). The environment is salient, non-secret metadata: it is what says
 	// which database the app was given (ADR-0027); the key name says where the app reads it, and a
 	// key NAME is not a secret (ADR-0028) — it is already in every error on this path.
-	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "key": key}
+	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "instance": instanceLabel(inst), "key": key}
 
-	// Provision the database/role on THIS environment's instance and compose the connection string.
-	// The returned url is a SECRET value: from here it is handed only to SetSecretValue and never
-	// logged, audited, or returned.
-	url, err := e.dbProvisioner.EnsureAppDatabase(ctx, app, targetEnv)
+	// Provision the database/role on THIS instance and compose the connection string. The returned
+	// url is a SECRET value: from here it is handed only to SetSecretValue and never logged, audited,
+	// or returned.
+	url, err := e.dbProvisioner.EnsureAppDatabase(ctx, app, targetEnv, inst.Name)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
 		// EnsureAppDatabase's error names the app/environment identifier only, never the URL.
@@ -1343,7 +1416,7 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 	// where the Secret holds a name the record does not know is the window where a detach would leave
 	// a live credential behind. A failure here is reported rather than swallowed, and re-running the
 	// same attach closes it.
-	if err := e.db.SetAddonEnvKey(ctx, string(t), app, targetEnv, key, e.clock.Now()); err != nil {
+	if err := e.db.SetAddonEnvKey(ctx, string(t), app, targetEnv, inst.Name, key, e.clock.Now()); err != nil {
 		e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
 		return AttachResult{}, fmt.Errorf("attach addon %s for %s: the connection string was written into %s but the name could not be recorded, so re-run this attach: %w", t, app, key, err)
 	}
@@ -1352,7 +1425,7 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 	// two database variables, one of them silently dead, which is worse than the single name this
 	// replaces. Removing an absent key is a no-op.
 	previous := ""
-	if key != current {
+	if current != "" && key != current {
 		if err := k.UnsetSecretKey(ctx, app, current); err != nil {
 			e.recordExecution(ctx, auditOpAddonAttach, app, args, err)
 			return AttachResult{}, fmt.Errorf("attach addon %s for %s: the connection string was written into %s but the previous %s could not be removed, so the app still holds a stale one: %w", t, app, key, current, err)
@@ -1362,7 +1435,7 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 	// The read address, when this instance has a standby for it to point at (ADR-0081 §2). It is
 	// settled BEFORE the roll below so one restart carries both variables, and it is best-effort by
 	// design — see attachReadAddress.
-	readKey := e.attachReadAddress(ctx, k, t, app, targetEnv, key, previous)
+	readKey := e.attachReadAddress(ctx, k, t, app, targetEnv, inst.Name, key, previous)
 	if readKey != "" {
 		args["read_key"] = readKey
 	}
@@ -1375,7 +1448,7 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 		return AttachResult{}, err
 	}
 	e.recordExecution(ctx, auditOpAddonAttach, app, args, nil)
-	return AttachResult{App: app, Addon: t, Environment: targetEnv, SecretKey: key, PreviousSecretKey: previous, ReadSecretKey: readKey}, nil
+	return AttachResult{App: app, Addon: t, Environment: targetEnv, Instance: instanceLabel(inst), SecretKey: key, PreviousSecretKey: previous, ReadSecretKey: readKey}, nil
 }
 
 // attachReadAddress writes app's read address beside its connection string when the instance has a
@@ -1392,11 +1465,11 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env, envKey 
 // A RENAME MOVES BOTH NAMES. The read key is derived from the attachment's own key, so a rename that
 // left the old one behind would leave a `PG_DSN` beside a stale `DATABASE_URL_READ` — a variable
 // naming a connection string that is no longer read.
-func (e *Engine) attachReadAddress(ctx context.Context, k Kubernetes, t AddonType, app, targetEnv, key, previous string) string {
+func (e *Engine) attachReadAddress(ctx context.Context, k Kubernetes, t AddonType, app, targetEnv, instance, key, previous string) string {
 	if previous != "" {
 		_ = k.UnsetSecretKey(ctx, app, readAddressKey(previous))
 	}
-	shape, err := e.k8s.AddonInstanceShape(ctx, t, targetEnv)
+	shape, err := e.k8s.AddonInstanceShape(ctx, t, targetEnv, instance)
 	if err != nil || shape.Standbys == 0 {
 		// No standby, or no answer about whether there is one. Either way the address is removed
 		// rather than left: `-ro` resolves to nothing at a standby-less instance, and an attach that
@@ -1410,7 +1483,7 @@ func (e *Engine) attachReadAddress(ctx context.Context, k Kubernetes, t AddonTyp
 	}
 	// The returned url is a SECRET value: from here it is handed only to SetSecretValue and never
 	// logged, audited, or returned.
-	url, err := reader.AppReadURL(ctx, app, targetEnv)
+	url, err := reader.AppReadURL(ctx, app, targetEnv, instance)
 	if err != nil {
 		return ""
 	}
@@ -1464,6 +1537,10 @@ func (e *Engine) refuseOccupiedEnvKey(ctx context.Context, k Kubernetes, app, en
 // destroys an application's data and the other does not, and `DetachAddon(ctx, t, app, env, true,
 // true)` is not a call anyone can review.
 type DetachAddonOptions struct {
+	// Instance is the LABEL of the instance to detach from (ADR-0091 §3). Empty is the environment's
+	// default instance. Detaching one attachment leaves every other attachment of the same app — its
+	// variable, its role and its database — untouched.
+	Instance string
 	// DeleteData destroys the app's database as well as its access to it (ADR-0090 §2). Its absence
 	// is the safe default and the ordinary detach: the credential goes, the rows stay, and a
 	// re-attach gets them back.
@@ -1510,34 +1587,45 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	// INSTANCE (ADR-0085 §1). That is where the data lives and where the reach stops: every database
 	// this verb can drop sits on this one instance, so protecting one app by name would leave the
 	// same verb free to wipe the next, which reads as protection and is not.
-	instance, err := AddonInstanceName(t, targetEnv)
+	//
+	// WHICH instance is a registry lookup rather than a derivation (ADR-0091 §2): no opts.Instance is
+	// the environment's default, which is what this command has always meant.
+	inst, err := e.resolveInstance(ctx, t, targetEnv, opts.Instance)
 	if err != nil {
 		return fmt.Errorf("detach addon %s for %s: %w", t, app, err)
 	}
 	// THE KEY IS READ, NOT ASSUMED. Detach removes the variable this attachment was written under,
 	// which is the recorded name — DATABASE_URL only for an attachment that never chose another
-	// (issue #462). Reading it here, before the guardrail, means a detach that cannot find out what to
-	// remove refuses rather than removing the default and leaving a live credential in the app's
-	// environment pointing at a database this call is about to drop.
-	key, err := e.db.AddonEnvKey(ctx, string(t), app, targetEnv)
+	// (issue #462), and only on the environment's default instance, since that is the only instance
+	// an unrecorded attachment can be against. Reading it here, before the guardrail, means a detach
+	// that cannot find out what to remove refuses rather than removing the default and leaving a live
+	// credential in the app's environment pointing at a database this call is about to drop.
+	key, recorded, err := e.db.AddonEnvKey(ctx, string(t), app, targetEnv, inst.Name)
 	if err != nil {
 		return fmt.Errorf("detach addon %s for %s: reading the recorded variable name: %w", t, app, err)
 	}
-	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "key": key, "delete_data": strconv.FormatBool(opts.DeleteData)}
+	if !recorded {
+		if !isDefaultInstance(inst) {
+			return fmt.Errorf("detach addon %s for %s: %q holds no attachment for %s in environment %s: %w",
+				t, app, instanceLabel(inst), app, targetEnv, ErrNotFound)
+		}
+		key = AppDatabaseURLKey
+	}
+	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "instance": instanceLabel(inst), "key": key, "delete_data": strconv.FormatBool(opts.DeleteData)}
 	// WHAT THE HOLD SAYS FOLLOWS WHAT THE CALL DOES. The guardrail guards losing an app's access to
 	// its data, which is disruptive and worth a confirmation; it is not the gate on destroying the
 	// data, which has its own and reaches this far only when someone asked for it in those words
 	// (ADR-0090 §4). A confirmation describing a consequence the operation no longer has is worse
 	// than no text: it trains an operator to discount the words.
-	consequence := fmt.Sprintf("detaching %q from the %s add-on in environment %s (removes its credential and drops its role; the database and its rows are kept, and re-attaching gets them back)", app, t, targetEnv)
+	consequence := fmt.Sprintf("detaching %q from the %s instance %q in environment %s (removes its credential and drops its role; the database and its rows are kept, and re-attaching gets them back)", app, t, instanceLabel(inst), targetEnv)
 	if opts.DeleteData {
-		consequence = fmt.Sprintf("detaching %q from the %s add-on in environment %s AND DESTROYING its database, with every row in it; this cannot be undone", app, t, targetEnv)
+		consequence = fmt.Sprintf("detaching %q from the %s instance %q in environment %s AND DESTROYING its database, with every row in it; this cannot be undone", app, t, instanceLabel(inst), targetEnv)
 	}
 	if err := e.recordDecision(ctx, auditOpAddonDetach, app, args, GuardrailAddonDetach,
 		// addon.* is not EnvScopable, so the environment reaches the lookup through the instance
 		// name rather than as a tier of its own; it is named in the message and the audit args
 		// (ADR-0035 phase 2c, ADR-0067 §1).
-		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon detach", GuardrailAddonDetach, opts.Confirm, consequence)); err != nil {
+		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instanceLabel(inst)}, "addon detach", GuardrailAddonDetach, opts.Confirm, consequence)); err != nil {
 		return err
 	}
 
@@ -1569,7 +1657,7 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	if opts.DeleteData {
 		teardown = e.dbProvisioner.DropAppDatabase
 	}
-	if err := teardown(ctx, app, targetEnv); err != nil {
+	if err := teardown(ctx, app, targetEnv, inst.Name); err != nil {
 		e.recordExecution(ctx, auditOpAddonDetach, app, args, err)
 		return fmt.Errorf("detach addon %s for %s: %w", t, app, err)
 	}
@@ -1577,8 +1665,8 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 	// attach of the same app default to a name the app no longer reads. Best-effort: the variable and
 	// the attachment are already gone, and failing the detach afterwards would report a completed
 	// teardown as broken — and a stale row only ever names a key a re-attach would then write.
-	if err := e.db.DeleteAddonEnvKey(ctx, string(t), app, targetEnv); err != nil {
-		slog.WarnContext(ctx, "forgetting the attachment's recorded variable name failed", "app", app, "env", targetEnv, "error", err)
+	if err := e.db.DeleteAddonEnvKey(ctx, string(t), app, targetEnv, inst.Name); err != nil {
+		slog.WarnContext(ctx, "forgetting the attachment's recorded variable name failed", "app", app, "env", targetEnv, "instance", inst.Name, "error", err)
 	}
 	e.recordExecution(ctx, auditOpAddonDetach, app, args, nil)
 	return nil
@@ -1609,7 +1697,7 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 // the returned result name the add-on, app, backup id, path, destination, and size — never a
 // credential. Backup is allowed by default (it destroys nothing) and safe over the agent control
 // channel.
-func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, destination string) (BackupResult, error) {
+func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, instance, destination string) (BackupResult, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return BackupResult{}, fmt.Errorf("backup addon: %w: %w", ErrInvalid, err)
 	}
@@ -1623,7 +1711,14 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, destina
 	if err != nil {
 		return BackupResult{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
 	}
-	backup, _, err := e.backupApp(ctx, app, targetEnv, destination)
+	// WHICH instance holds the database being dumped. An environment may hold more than one, and two
+	// of them may each hold a database called `web` (ADR-0091 §4), so the instance is what selects the
+	// server and the claim the dump lands on.
+	inst, err := e.resolveInstance(ctx, t, targetEnv, instance)
+	if err != nil {
+		return BackupResult{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
+	}
+	backup, _, err := e.backupApp(ctx, app, targetEnv, inst, destination)
 	if err != nil {
 		return BackupResult{}, err
 	}
@@ -1641,12 +1736,12 @@ func (e *Engine) BackupAddon(ctx context.Context, t AddonType, app, env, destina
 //
 // The invariant BackupAddon documents is this function's: no path leaves a row that says completed
 // for bytes that did not arrive, and no known failure leaves a row pending.
-func (e *Engine) backupApp(ctx context.Context, app, targetEnv, destination string) (Backup, BackupJobOutcome, error) {
+func (e *Engine) backupApp(ctx context.Context, app, targetEnv string, inst AddonInfo, destination string) (Backup, BackupJobOutcome, error) {
 	const t = AddonPostgres
 	backupID := e.ids.NewID()
-	// The redacted audit args carry the add-on, app, environment, backup, and destination NAMES only
-	// — never a credential (ADR-0032, ADR-0063 §1).
-	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "backup": backupID}
+	// The redacted audit args carry the add-on, app, environment, instance, backup, and destination
+	// NAMES only — never a credential (ADR-0032, ADR-0063 §1).
+	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "instance": instanceLabel(inst), "backup": backupID}
 
 	// Resolved BEFORE the row is written, so an ambiguous or misnamed destination fails without
 	// leaving a pending backup behind that nothing will ever finish.
@@ -1656,9 +1751,9 @@ func (e *Engine) backupApp(ctx context.Context, app, targetEnv, destination stri
 		return Backup{}, BackupJobOutcome{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
 	}
 
-	// The claim is resolved before the row is written, from the SAME environment that chose the
-	// instance, so a row can never say a dump is on a volume the Job did not mount (ADR-0067 §1).
-	claim, err := BackupVolumeName(t, targetEnv)
+	// The claim is resolved before the row is written, from the SAME instance the dump is taken from,
+	// so a row can never say a dump is on a volume the Job did not mount (ADR-0067 §1, ADR-0091 §4).
+	claim, err := BackupVolumeName(t, inst.Name)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonBackup, app, args, err)
 		return Backup{}, BackupJobOutcome{}, fmt.Errorf("backup addon %s for %s: %w", t, app, err)
@@ -1687,7 +1782,7 @@ func (e *Engine) backupApp(ctx context.Context, app, targetEnv, destination stri
 		return Backup{}, BackupJobOutcome{}, fmt.Errorf("backup addon %s for %s: recording backup: %w", t, app, err)
 	}
 
-	outcome, err := e.k8s.RunBackupJob(ctx, app, targetEnv, backupID, dest)
+	outcome, err := e.k8s.RunBackupJob(ctx, app, targetEnv, inst.Name, backupID, dest)
 	if err != nil {
 		// Best-effort, and deliberately not gated on succeeding: a failed status write leaves the row
 		// pending, which still does not read as a successful backup anywhere.
@@ -1751,8 +1846,8 @@ func (e *Engine) ListBackups(ctx context.Context, t AddonType, app, env string) 
 //
 // A row with no volume recorded is read as the shared claim, which is the only one it can be: the
 // column was backfilled to it and nothing else has ever held a dump.
-func checkBackupVolume(t AddonType, b Backup, targetEnv string) error {
-	want, err := BackupVolumeName(t, targetEnv)
+func checkBackupVolume(t AddonType, b Backup, targetEnv, instance string) error {
+	want, err := BackupVolumeName(t, instance)
 	if err != nil {
 		return err
 	}
@@ -1778,7 +1873,7 @@ func checkBackupVolume(t AddonType, b Backup, targetEnv string) error {
 // Environments have separate instances holding separate data, so a dump taken from one is not a
 // valid source for another: restoring staging's dump into production would overwrite live production
 // data with staging's, which is the same class of incident as issue #339 pointed the other way.
-func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, env string, confirm bool) error {
+func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, env, instance string, confirm bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("restore addon: %w: %w", ErrInvalid, err)
 	}
@@ -1789,6 +1884,13 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, e
 		return fmt.Errorf("restore addon %s: a backup id is required: %w", t, ErrInvalid)
 	}
 	targetEnv, _, err := e.resolveMutatingEnvironment(ctx, env)
+	if err != nil {
+		return fmt.Errorf("restore addon %s for %s: %w", t, app, err)
+	}
+	// WHICH instance the dump goes back into. An environment may hold more than one, and restoring
+	// into the wrong one overwrites a live database with another server's data — issue #339's shape
+	// one level down (ADR-0091 §4).
+	inst, err := e.resolveInstance(ctx, t, targetEnv, instance)
 	if err != nil {
 		return fmt.Errorf("restore addon %s for %s: %w", t, app, err)
 	}
@@ -1825,7 +1927,7 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, e
 	// would mean mounting a volume holding every other environment's dumps into this environment's
 	// Job, which is the isolation this closed — so it is refused, naming where the dump actually is
 	// rather than letting the Job fail on a file that is not there.
-	if err := checkBackupVolume(t, backup, targetEnv); err != nil {
+	if err := checkBackupVolume(t, backup, targetEnv, inst.Name); err != nil {
 		return fmt.Errorf("restore addon %s for %s: %w", t, app, err)
 	}
 
@@ -1833,22 +1935,19 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, e
 	if err != nil {
 		return fmt.Errorf("restore addon %s: loading guardrail policy: %w", t, err)
 	}
-	// Scoped by the INSTANCE, for the reason a detach is: the databases this verb overwrites all
-	// live on one instance (ADR-0085 §1).
-	instance, err := AddonInstanceName(t, targetEnv)
-	if err != nil {
-		return fmt.Errorf("restore addon %s for %s: %w", t, app, err)
-	}
-	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "backup": backupID}
+	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "instance": instanceLabel(inst), "backup": backupID}
 	if err := e.recordDecision(ctx, auditOpAddonRestore, app, args, GuardrailAddonRestore,
-		// addon.* is not EnvScopable, so the environment reaches the lookup through the instance
-		// name rather than as a tier of its own (ADR-0035 phase 2c, ADR-0067 §1).
-		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon restore", GuardrailAddonRestore, confirm,
-			fmt.Sprintf("restoring %q in environment %s from backup %s (overwrites its live database)", app, targetEnv, backupID))); err != nil {
+		// Scoped by the INSTANCE, for the reason a detach is: the databases this verb overwrites all
+		// live on one instance (ADR-0085 §1), and by its LABEL, which is the half an operator can read
+		// and write a disposition against (ADR-0091 §4). addon.* is not EnvScopable, so the
+		// environment reaches the lookup through the instance rather than as a tier of its own
+		// (ADR-0035 phase 2c, ADR-0067 §1).
+		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instanceLabel(inst)}, "addon restore", GuardrailAddonRestore, confirm,
+			fmt.Sprintf("restoring %q on the %s instance %q in environment %s from backup %s (overwrites its live database)", app, t, instanceLabel(inst), targetEnv, backupID))); err != nil {
 		return err
 	}
 
-	if err := e.k8s.RunRestoreJob(ctx, app, targetEnv, backupID); err != nil {
+	if err := e.k8s.RunRestoreJob(ctx, app, targetEnv, inst.Name, backupID); err != nil {
 		e.recordExecution(ctx, auditOpAddonRestore, app, args, err)
 		return fmt.Errorf("restore addon %s for %s: %w", t, app, err)
 	}

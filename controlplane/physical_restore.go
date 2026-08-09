@@ -48,6 +48,10 @@ import (
 // radius, and a restore that picked one because the operator named neither would be the most
 // destructive default in the product.
 type RestoreInstanceOptions struct {
+	// Instance is the LABEL of the instance to rewind (ADR-0091 §4). Empty is the environment's
+	// default instance, which is the only one this command could name before an environment could
+	// hold more than one.
+	Instance string
 	// Backup names a recorded PHYSICAL backup to recover exactly. The instance comes back as that
 	// base backup was, with no write-ahead log replayed past it.
 	Backup string
@@ -205,9 +209,15 @@ var ErrRestoreNotVerified = errors.New("the recovered instance holds none of the
 // is an internal in-memory shape only — no JSON tags, never returned over the control-plane API,
 // never audited, never logged, never placed in an error.
 type RestoreInstanceRequest struct {
-	// Environment selects the instance, its repository path and its credential together, exactly as
-	// it does on every other add-on path (ADR-0067 §1).
+	// Environment says whose data this is, exactly as it does on every other add-on path (ADR-0067
+	// §1). It no longer selects a server on its own — an environment may hold more than one instance
+	// (ADR-0091 §1) — so Instance is what says which one.
 	Environment string
+	// Instance is the instance's name IN THE CLUSTER, resolved from the registry by the engine
+	// (ADR-0091 §2). It selects the `Cluster`, its repository path and its credential together, and
+	// it is required: an adapter that composed the name itself would be the derivation that record
+	// removed.
+	Instance string
 	// BackupLabel is pgBackRest's own label for the base backup to recover — the handle the
 	// repository knows it by. Empty unless a recorded backup was named.
 	BackupLabel string
@@ -280,10 +290,14 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 	if err != nil {
 		return RestoreInstanceResult{}, fmt.Errorf("restore instance %s: %w", t, err)
 	}
-	instance, err := AddonInstanceName(t, targetEnv)
+	// WHICH instance, from the registry rather than from a derivation (ADR-0091 §2). No opts.Instance
+	// is the environment's default, so a command typed before that record rewinds exactly what it
+	// always did.
+	inst, err := e.resolveInstance(ctx, t, targetEnv, opts.Instance)
 	if err != nil {
 		return RestoreInstanceResult{}, fmt.Errorf("restore instance %s: %w", t, err)
 	}
+	instance := instanceLabel(inst)
 
 	// The redacted audit args carry NAMES only: the add-on, the environment, the instance and the
 	// recovery target. The apps and the safety backup are added below as they become known, so a row
@@ -302,13 +316,13 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 	}
 	args["repository"] = archive.Provider
 
-	label, err := e.recoveryLabel(ctx, t, targetEnv, opts)
+	label, err := e.recoveryLabel(ctx, t, targetEnv, inst.Name, opts)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonRestoreInstance, instance, args, err)
 		return RestoreInstanceResult{}, fmt.Errorf("restore instance %s: %w", t, err)
 	}
 
-	apps, err := e.appsAttachedInEnvironment(ctx, ns, targetEnv)
+	apps, err := e.appsAttachedInEnvironment(ctx, ns, targetEnv, inst)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonRestoreInstance, instance, args, err)
 		return RestoreInstanceResult{}, fmt.Errorf("restore instance %s: %w", t, err)
@@ -344,7 +358,7 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 	}
 
 	// The safety backup, before anything is destroyed (ADR-0064 §5's ordering).
-	safety, note, err := e.safetyBackup(ctx, t, targetEnv, instance, archive.Provider, opts)
+	safety, note, err := e.safetyBackup(ctx, t, targetEnv, inst, archive.Provider, opts)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonRestoreInstance, instance, args, err)
 		return RestoreInstanceResult{}, fmt.Errorf("restore instance %s: %w", t, err)
@@ -356,6 +370,7 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 
 	outcome, err := e.k8s.RestoreInstance(ctx, RestoreInstanceRequest{
 		Environment: targetEnv,
+		Instance:    inst.Name,
 		BackupLabel: label,
 		TargetTime:  opts.ToTime,
 		Archive:     archive,
@@ -369,7 +384,7 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 	// The proof, and it is taken BEFORE the cutover for the reason the doc comment above states: the
 	// cutover creates the databases it cannot find, so a check run after it would be reading its own
 	// handiwork.
-	result.Verification = e.verifyRecoveredInstance(ctx, targetEnv, apps)
+	result.Verification = e.verifyRecoveredInstance(ctx, targetEnv, inst.Name, apps)
 	args["verified"] = string(result.Verification.Status)
 	if result.Verification.Status == RestoreVerificationAbsent {
 		err := emptyRecoveryError(t, targetEnv, instance, result)
@@ -380,7 +395,7 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 	// The cutover. A failure here does not fail the restore: the instance is up with the data on it,
 	// and reporting the whole operation as failed would send an operator to repeat the rewind rather
 	// than to re-attach the one app that did not reconnect.
-	reconnected, stranded := e.cutOverApps(ctx, t, targetEnv, ns, apps)
+	reconnected, stranded := e.cutOverApps(ctx, t, targetEnv, ns, inst, apps)
 	result.Reconnected, result.Stranded = emptyIfNil(reconnected), stranded
 	if len(result.Stranded) > 0 {
 		args["stranded"] = strings.Join(strandedNames(result.Stranded), ",")
@@ -404,7 +419,7 @@ func (e *Engine) RestoreInstance(ctx context.Context, t AddonType, env string, o
 //   - It must have COMPLETED at the object store. A row that is pending or failed is a backup Burrow
 //     could not read back, and recovering from bytes that were never verified is the failure ADR-0063
 //     §7 exists to prevent, arriving at the one moment it cannot be corrected.
-func (e *Engine) recoveryLabel(ctx context.Context, t AddonType, targetEnv string, opts RestoreInstanceOptions) (string, error) {
+func (e *Engine) recoveryLabel(ctx context.Context, t AddonType, targetEnv, instance string, opts RestoreInstanceOptions) (string, error) {
 	if opts.Backup == "" {
 		return "", nil
 	}
@@ -445,7 +460,7 @@ func (e *Engine) recoveryLabel(ctx context.Context, t AddonType, targetEnv strin
 // SkipSafetyBackup exists for the same reason `--skip-final-backup` does: the instance is often being
 // restored BECAUSE it is broken, and an instance that cannot take a base backup would otherwise be
 // the one instance that cannot be restored. It is reported in the result rather than left implicit.
-func (e *Engine) safetyBackup(ctx context.Context, t AddonType, targetEnv, instance, provider string, opts RestoreInstanceOptions) (id, note string, err error) {
+func (e *Engine) safetyBackup(ctx context.Context, t AddonType, targetEnv string, inst AddonInfo, provider string, opts RestoreInstanceOptions) (id, note string, err error) {
 	if opts.SkipSafetyBackup {
 		return "", "no backup of the pre-restore state was taken (--skip-safety-backup): the state that was on this instance before the rewind is gone", nil
 	}
@@ -454,7 +469,7 @@ func (e *Engine) safetyBackup(ctx context.Context, t AddonType, targetEnv, insta
 	// instance" and "the instance would not produce a backup" arrive as the same ErrNotFound once the
 	// read-back is involved, and reading the second as the first is how a rewind proceeds with no copy
 	// while reporting that none was needed.
-	installed, err := e.postgresInstalled(ctx, targetEnv, instance)
+	installed, err := e.postgresInstalled(ctx, inst)
 	if err != nil {
 		return "", "", err
 	}
@@ -465,7 +480,7 @@ func (e *Engine) safetyBackup(ctx context.Context, t AddonType, targetEnv, insta
 	// for ambiguity on a cluster with several providers registered — and the refusal's own advice is
 	// --skip-safety-backup, so a spurious failure here would push an operator into rewinding with no
 	// copy at all.
-	res, err := e.BackupInstance(ctx, t, targetEnv, provider)
+	res, err := e.BackupInstance(ctx, t, targetEnv, instanceLabel(inst), provider)
 	if err == nil {
 		return res.Backup.ID, "", nil
 	}
@@ -494,8 +509,8 @@ func (e *Engine) safetyBackup(ctx context.Context, t AddonType, targetEnv, insta
 // instance. It is the same list the guardrail named in its confirmation, gathered by
 // appsAttachedInEnvironment for the same reason: it is available when the instance is gone, which is
 // the case a physical restore exists for.
-func (e *Engine) verifyRecoveredInstance(ctx context.Context, targetEnv string, apps []string) RestoreVerification {
-	found, known := e.appDatabases(ctx, targetEnv)
+func (e *Engine) verifyRecoveredInstance(ctx context.Context, targetEnv, instance string, apps []string) RestoreVerification {
+	found, known := e.appDatabases(ctx, targetEnv, instance)
 	if !known {
 		// An unanswerable instance is NOT reported as verified, for the reason verifyPhysicalBackup
 		// refuses to record a backup it could not read back: an invariant that could not be checked
@@ -573,27 +588,28 @@ func emptyRecoveryError(t AddonType, targetEnv, instance string, res RestoreInst
 		t, instance, len(res.Apps), strings.Join(res.Apps, ", "), back, t, targetEnv, ErrRestoreNotVerified)
 }
 
-// postgresInstalled reports whether the environment has a Postgres add-on in the registry — the
-// question "is there a current state for a safety backup to copy". The registry is the source of
-// truth for what add-ons exist (ADR-0025), so this is one read rather than a cluster probe.
-func (e *Engine) postgresInstalled(ctx context.Context, targetEnv, instance string) (bool, error) {
-	addons, err := e.db.Addons(ctx)
-	if err != nil {
-		return false, fmt.Errorf("reading the add-on registry: %w", err)
-	}
-	for _, a := range addons {
-		// A row written before add-ons were per-environment is the default environment's, since that
-		// is the only instance that could have existed then (ADR-0067 §3).
-		if a.Type == AddonPostgres && a.Mode == "installed" && envName(a.Environment) == targetEnv {
+// postgresInstalled reports whether THIS instance is registered — the question "is there a current
+// state for a safety backup to copy". The registry is the source of truth for what add-ons exist
+// (ADR-0025), so this is one read rather than a cluster probe.
+//
+// It is asked of the instance rather than of the environment (ADR-0091 §4): an environment holding a
+// second Postgres says nothing about whether the one being rewound has anything on it.
+func (e *Engine) postgresInstalled(ctx context.Context, inst AddonInfo) (bool, error) {
+	registered, err := e.db.Addon(ctx, inst.Name)
+	switch {
+	case err == nil:
+		if registered.Type == AddonPostgres && registered.Mode == "installed" {
 			return true, nil
 		}
+	case !errors.Is(err, ErrNotFound):
+		return false, fmt.Errorf("reading the add-on registry: %w", err)
 	}
 	// The registry saying no is not the end of it, because the two can disagree in one direction that
 	// matters: a row deleted by hand over a database that is still running. Skipping the safety backup
 	// there would destroy a live instance while reporting there was nothing to copy. A cluster that
 	// answers "an instance is serving" therefore overrides the registry; a cluster that will not answer
 	// leaves the registry's answer standing, since a restore must stay possible when nothing responds.
-	if ready, err := e.k8s.AddonReady(ctx, instance); err == nil && ready {
+	if ready, err := e.k8s.AddonReady(ctx, inst.Name); err == nil && ready {
 		return true, nil
 	}
 	return false, nil
@@ -621,7 +637,7 @@ func (e *Engine) postgresInstalled(ctx context.Context, targetEnv, instance stri
 // app that was attached and NEVER deployed appears in neither, so it keeps a connection string the
 // recovered instance no longer honours until someone re-attaches it. Closing that needs a seam that
 // lists Secrets in a namespace, which this does not add.
-func (e *Engine) appsAttachedInEnvironment(ctx context.Context, ns, targetEnv string) ([]string, error) {
+func (e *Engine) appsAttachedInEnvironment(ctx context.Context, ns, targetEnv string, inst AddonInfo) ([]string, error) {
 	k := e.k8s.WithNamespace(ns)
 	workloads, err := k.ListWorkloads(ctx)
 	if err != nil {
@@ -650,7 +666,12 @@ func (e *Engine) appsAttachedInEnvironment(ctx context.Context, ns, targetEnv st
 	for _, app := range names {
 		// The variable this app's attachment was written under — not a fixed name, since an app that
 		// attached under its own is attached just as much as one that took the default (issue #462).
-		want, err := e.db.AddonEnvKey(ctx, string(AddonPostgres), app, targetEnv)
+		want, err := e.attachmentKey(ctx, AddonPostgres, app, targetEnv, inst)
+		if errors.Is(err, ErrNotFound) {
+			// Not attached to THIS instance. An app with a database on another instance in the same
+			// environment is somebody else's to reconnect (ADR-0091 §4).
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("reading which apps are on this instance: %s: %w", app, err)
 		}
@@ -696,20 +717,20 @@ func (e *Engine) appsAttachedInEnvironment(ctx context.Context, ns, targetEnv st
 // A failure is recorded per app rather than aborting. The instance is up and holds the data; stopping
 // at the first app that would not reconnect would leave the rest holding stale credentials with
 // nothing reported about them.
-func (e *Engine) cutOverApps(ctx context.Context, t AddonType, targetEnv, ns string, apps []string) (reconnected []string, stranded []StrandedApp) {
+func (e *Engine) cutOverApps(ctx context.Context, t AddonType, targetEnv, ns string, inst AddonInfo, apps []string) (reconnected []string, stranded []StrandedApp) {
 	k := e.k8s.WithNamespace(ns)
 	for _, app := range apps {
 		// The key THIS app is attached under. Writing the default here would leave an app that chose
 		// its own name reading a credential the recovery point no longer honours while a second,
 		// unread variable held the working one (issue #462).
-		key, err := e.db.AddonEnvKey(ctx, string(AddonPostgres), app, targetEnv)
+		key, err := e.attachmentKey(ctx, AddonPostgres, app, targetEnv, inst)
 		if err != nil {
 			stranded = append(stranded, StrandedApp{App: app, Reason: fmt.Sprintf("the variable its connection string is written under could not be read, so nothing was rewritten for it; re-attach it with `burrow addon attach %s %s --env %s`", t, app, targetEnv)})
 			continue
 		}
 		// The returned url is a SECRET value: from here it is handed only to SetSecretValue and never
 		// logged, audited, or returned.
-		url, err := e.dbProvisioner.EnsureAppDatabase(ctx, app, targetEnv)
+		url, err := e.dbProvisioner.EnsureAppDatabase(ctx, app, targetEnv, inst.Name)
 		if err != nil {
 			stranded = append(stranded, StrandedApp{App: app, Reason: fmt.Sprintf("its database and role could not be re-provisioned on the recovered instance; re-attach it with `burrow addon attach %s %s --env %s`", t, app, targetEnv)})
 			continue

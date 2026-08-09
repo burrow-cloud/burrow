@@ -48,7 +48,7 @@ import (
 // It moves no secret value: the credential is read at call time to sign one read-back request, and
 // the audit row and the returned result name the add-on, environment, backup id, provider and object
 // key — never a credential. Backup destroys nothing and is allowed by default.
-func (e *Engine) BackupInstance(ctx context.Context, t AddonType, env, destination string) (BackupResult, error) {
+func (e *Engine) BackupInstance(ctx context.Context, t AddonType, env, instance, destination string) (BackupResult, error) {
 	if t != AddonPostgres {
 		return BackupResult{}, fmt.Errorf("backup instance %s: only the postgres add-on has physical backups: %w", t, ErrInvalid)
 	}
@@ -60,10 +60,18 @@ func (e *Engine) BackupInstance(ctx context.Context, t AddonType, env, destinati
 	if err != nil {
 		return BackupResult{}, fmt.Errorf("backup instance %s: %w", t, err)
 	}
+	// WHICH instance's repository this base backup goes into. An environment may hold more than one
+	// (ADR-0091 §1), and each keeps the repository it was created against, so the instance is what
+	// selects the stanza.
+	inst, err := e.resolveInstance(ctx, t, targetEnv, instance)
+	if err != nil {
+		return BackupResult{}, fmt.Errorf("backup instance %s: %w", t, err)
+	}
 
 	backupID := e.ids.NewID()
-	// The redacted audit args carry the add-on, environment, backup and destination NAMES only.
-	args := map[string]string{"addon": string(t), "env": targetEnv, "backup": backupID, "kind": string(BackupKindPhysical)}
+	// The redacted audit args carry the add-on, environment, instance, backup and destination NAMES
+	// only.
+	args := map[string]string{"addon": string(t), "env": targetEnv, "instance": instanceLabel(inst), "backup": backupID, "kind": string(BackupKindPhysical)}
 
 	// Resolved BEFORE the row is written, so an ambiguous or misnamed destination fails without
 	// leaving a pending backup nothing will finish.
@@ -96,7 +104,7 @@ func (e *Engine) BackupInstance(ctx context.Context, t AddonType, env, destinati
 		return BackupResult{}, fmt.Errorf("backup instance %s: recording backup: %w", t, err)
 	}
 
-	outcome, err := e.k8s.RunPhysicalBackup(ctx, targetEnv, backupID, archive)
+	outcome, err := e.k8s.RunPhysicalBackup(ctx, targetEnv, inst.Name, backupID, archive)
 	if err != nil {
 		// Best-effort, and not gated on succeeding: a failed status write leaves the row pending,
 		// which still reads as a successful backup nowhere. An empty reason is left empty rather than

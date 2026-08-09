@@ -86,7 +86,8 @@ cluster, gated by cluster RBAC, and it is how you get in when the front door is 
 leftover to be tidied away.
 
 Revoking a credential is a burrowd operation, so a lost laptop is answered by revoking that
-credential, not by rotating the install.
+credential rather than by rotating the install — but note the honest limit below: the revocation is
+in the control plane and has no command on the CLI yet.
 
 ### A second person, and the agent, each carry their own
 
@@ -112,6 +113,12 @@ from giving them access to the cluster.
 agent presented the install's shared token, so cutting it off meant rotating the install and logging
 everybody out; now it is one revocation, and the person's terminal keeps working. The audit trail
 also stops conflating them: a row says whether the person or their agent acted.
+
+**Revocation has no command yet.** The control plane revokes one credential without touching another,
+and that is what makes the separate rows worth having — but nothing on the `burrow` CLI reaches it,
+and nothing lists what a principal holds. Until it does, the lever for a compromised agent is still
+rotating the install, and the separate credential is buying attribution rather than a faster answer.
+Plan for that when you decide how much to rely on it.
 
 **What this does not yet give you.** The kind is recorded and read from the stored row, never from
 the request — but `Policy.enforce` still takes no caller, so a `deny` binds the agent and the person

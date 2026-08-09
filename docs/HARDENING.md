@@ -42,13 +42,53 @@ to the credential it carries, what that lets it do, and what it cannot:
 burrowd (touching the cluster directly). The guardrails are the policy for what is allowed through
 burrowd. Different mechanisms; you need both.
 
-**One honest limitation, stated plainly.** Inside burrowd, authorization today is a single shared API
-token the agent can read, so the scoped credential confines the agent to burrowd but does not by
-itself enforce which burrowd operation it may call. The guardrails and the `burrow-agent` verb
-surface do that (and the guard verb is read-only). Per-principal authorization inside burrowd, so an agent identity
-is denied specific endpoints regardless of tooling, is future work, and the `principal` seam added in
-ADR-0038 is the groundwork for it. A hardening-conscious operator should lean on the guardrails plus
-environment isolation, not assume the scope alone is a per-operation boundary.
+**One honest limitation, stated plainly.** Inside burrowd, the guardrails and the `burrow-agent` verb
+surface are what decide which operation may be called (and the guard verb is read-only). The scoped
+credential confines the agent to burrowd; it does not by itself enforce which burrowd operation the
+agent may call. Per-caller *authorization* — a guardrail that binds the agent and leaves the human
+alone — is future work
+([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §9), and the per-caller
+*identity* below is the groundwork it needs. A hardening-conscious operator should lean on the
+guardrails plus environment isolation, not assume the scope alone is a per-operation boundary.
+
+### Route and identity are separate, and both are required
+
+Signing in with `burrow auth login --context <cluster>` asks that Burrow for a **credential of your
+own** ([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §1): a random token
+burrowd generates, hands back once, and stores only the hash of, under `~/.burrow/credentials/` with
+the same 0600-under-0700 handling as the Burrow Cloud credential. No Kubernetes object is created, so
+burrowd needs no authority to mint ServiceAccounts and nothing new from your cluster.
+
+Afterwards two different things carry a request, and **neither is sufficient alone**:
+
+| | What proves it | What it gets you |
+|---|---|---|
+| **Route** | the kubeconfig you already have | reaching burrowd through the API-server proxy — burrowd has no address of its own |
+| **Identity** | the Burrow token, in `X-Burrow-Token` | being someone in particular |
+
+Cluster access without a Burrow token does nothing. A Burrow token without cluster access cannot
+reach burrowd. Reaching burrowd's pod address directly still gets nothing, exactly as before, so **no
+NetworkPolicy is load-bearing** in this design.
+
+What changes for hardening is that your kubeconfig stops being *how burrowd knows who you are*. A
+caller carrying their own credential no longer needs `get` on `burrow-credentials`, and burrowd
+records **who acted and what kind of credential they held** on every audited operation instead of one
+literal on every row.
+
+**The shared install token still works, deliberately.** An install nobody has signed in to behaves
+exactly as it did, and the shared token is checked first, so a person who never runs `burrow auth
+login` is not broken by any of this. It is also the **break-glass**
+([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §8): if burrowd cannot
+serve, it cannot check a minted token either, and the original path — kubeconfig, the
+`burrowd-api-token` Secret, the API-server proxy — is the recovery route. That is a real credential
+with real power, so treat it as one: reading `burrow-credentials` is an administrative act on the
+cluster, gated by cluster RBAC, and it is how you get in when the front door is broken. It is not a
+leftover to be tidied away.
+
+Two limits worth knowing before you rely on this. Signing in issues a credential only to the
+**first** person on an install — thereafter an admin issues one, which is not yet built, so a second
+person keeps using the shared token. And revoking a credential is a burrowd operation, so a lost
+laptop is answered by revoking that credential, not by rotating the install.
 
 **One verb reaches application DATA, and it is closed until you open it.** `burrow-agent addon sql`
 runs a statement against one app's database ([ADR-0087](adr/0087-running-sql-against-an-attached-database.md)).

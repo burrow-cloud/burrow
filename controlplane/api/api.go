@@ -12,7 +12,6 @@
 package api
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,9 +54,13 @@ func New(cfg Config) (http.Handler, error) {
 	if cfg.Token == "" {
 		return nil, fmt.Errorf("api: New: Token is required (the control plane authenticates its clients)")
 	}
-	s := &server{engine: cfg.Engine, version: cfg.Version}
+	s := &server{engine: cfg.Engine, version: cfg.Version, installID: cfg.InstallID}
 
 	v1 := http.NewServeMux()
+	// Signing in (ADR-0084 §1): the one route that mints a credential, in identity.go. It is under
+	// /v1 so it inherits authentication, the install check and the version handshake — the proof it
+	// rests on is that reaching burrowd at all took cluster access, so it needs no gate of its own.
+	v1.HandleFunc(claimPath, s.claimFirstPrincipal)
 	v1.HandleFunc("GET /v1/apps", s.listApps)
 	v1.HandleFunc("DELETE /v1/apps/{app}", s.deleteApp)
 	// The environment is a ROUTE on the delete, not a query parameter, because it decides WHICH app
@@ -336,7 +339,7 @@ func New(cfg Config) (http.Handler, error) {
 	// The install check precedes the version handshake deliberately. A caller that has reached the
 	// wrong Burrow needs to hear that; telling them instead to upgrade a client, against a control
 	// plane they never meant to talk to, is a remedy for the wrong problem.
-	root.Handle("/v1/", requireToken(cfg.Token, installGate(cfg.InstallID, versionGate(cfg.Version, clientVersionContext(v1NotFound(cfg.Version, v1))))))
+	root.Handle("/v1/", authenticate(cfg.Token, cfg.Engine, installGate(cfg.InstallID, versionGate(cfg.Version, clientVersionContext(v1NotFound(cfg.Version, v1))))))
 	root.HandleFunc("GET /healthz", health)
 	return root, nil
 }
@@ -347,6 +350,12 @@ type server struct {
 	// a refusal the way the version handshake's middleware does — see decode, which refuses a request
 	// field this control plane is too old to know about. Empty on a local or e2e build.
 	version string
+	// installID is this install's own id (Config.InstallID), carried so the claim route can hand it
+	// back beside the credential it issues (ADR-0084 §5). A caller that has just been given a token
+	// by this install is exactly the caller who needs to record which install issued it, and this is
+	// the one authenticated exchange they make before they hold one. Empty on an install that
+	// predates ids, which is served as it always was.
+	installID string
 }
 
 // narrowed returns the value of a narrowing that may ride either the route or the request, and the
@@ -1973,18 +1982,9 @@ type logsResponse struct {
 	Lines []controlplane.LogLine `json:"lines"`
 }
 
-// requireToken rejects any request whose bearer token does not match, in constant time.
-func requireToken(token string, next http.Handler) http.Handler {
-	want := []byte(token)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := presentedToken(r)
-		if got == "" || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
-			writeError(w, http.StatusUnauthorized, "missing or invalid token", "unauthorized")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
+// The /v1 gate is authenticate, in identity.go. It still checks the shared install token first and
+// in constant time — an install where nobody has signed in behaves and costs exactly what it did —
+// and then resolves a token this Burrow issued to the principal behind it (ADR-0084 §2).
 
 // presentedToken reads the API token from X-Burrow-Token (the header that survives the
 // Kubernetes API-server proxy, since the kubeconfig transport owns Authorization there —
@@ -2167,7 +2167,20 @@ func engineError(err error) (int, errorResponse) {
 	if errors.Is(err, controlplane.ErrRestoreNotVerified) {
 		return http.StatusUnprocessableEntity, errorResponse{Error: err.Error(), Code: "restore_not_verified"}
 	}
+	// A claim on an install that already has a principal is a conflict, not a fault: the request was
+	// valid and the install is simply already claimed (ADR-0084 §2). The code is what a client
+	// branches on to say "ask an admin for a credential" rather than reporting a failure, and the
+	// caller's existing access — the shared install token — is untouched.
+	if errors.Is(err, controlplane.ErrAlreadyClaimed) {
+		return http.StatusConflict, errorResponse{Error: err.Error(), Code: "already_claimed"}
+	}
 	switch {
+	// The caller is authenticated and not permitted (ADR-0084 §2): issuing for somebody else without
+	// the admin bit, recording a second principal, revoking another principal's token. It is 403 and
+	// deliberately not 401 — re-authenticating as the same person changes nothing, and telling
+	// somebody to sign in again when their credential is working is a remedy for the wrong problem.
+	case errors.Is(err, controlplane.ErrForbidden):
+		return http.StatusForbidden, errorResponse{Error: err.Error(), Code: "forbidden"}
 	case errors.Is(err, controlplane.ErrNotFound):
 		return http.StatusNotFound, errorResponse{Error: err.Error(), Code: "not_found"}
 	case errors.Is(err, controlplane.ErrInvalid):

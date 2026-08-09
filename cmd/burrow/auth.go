@@ -74,6 +74,11 @@ type authLoginOpts struct {
 	cloud       bool
 	kubeContext string
 	kubeconfig  string
+	// name is the principal to record for a cluster sign-in (ADR-0084 §1). It is the handle an audit
+	// row and a listing read as, not an authentication of anybody — burrowd authenticates the token
+	// it issues, never this string — so it defaults to the environment's idea of who is at the
+	// terminal and is worth overriding only when that is wrong.
+	name string
 }
 
 func newAuthLoginCmd() *cobra.Command {
@@ -87,10 +92,13 @@ func newAuthLoginCmd() *cobra.Command {
 			"credentials are issued — yours and burrow-agent's — and both are written to files only you can\n" +
 			"read. Neither is displayed. With no browser to open, the URL is printed to visit yourself.\n\n" +
 			"Choosing \"Other\" lists the contexts already in your kubeconfig, so you pick a cluster by a name\n" +
-			"you recognise rather than typing a server URL. Only the context NAME is stored; your credential\n" +
-			"stays in the kubeconfig, and nothing about that path needs an account.\n\n" +
-			"It installs nothing and contacts no cluster. Pass --cloud or --context to select without a\n" +
-			"prompt.\n\n" +
+			"you recognise rather than typing a server URL. Only the context NAME is stored; nothing about\n" +
+			"that path needs an account.\n\n" +
+			"For a cluster it then asks that Burrow for a credential of your own, using your kubeconfig once\n" +
+			"to prove you are an operator of it. Afterwards your kubeconfig is how the request GETS there and\n" +
+			"the credential is what says who is asking. If the cluster is unreachable, has no Burrow in it, or\n" +
+			"already has an admin, it says so and your commands keep using the install's shared token.\n\n" +
+			"It installs nothing. Pass --cloud or --context to select without a prompt.\n\n" +
 			"Afterwards it offers to restrict an installed coding agent to burrow-agent, Burrow's scoped\n" +
 			"control channel. Declining is fine and leaves a working setup; `burrow agent claude install`\n" +
 			"does it later.",
@@ -106,6 +114,7 @@ func newAuthLoginCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.cloud, "cloud", false, "select "+localconfig.CloudEndpoint+" without prompting")
 	cmd.Flags().StringVar(&o.kubeContext, "context", "", "select this kubeconfig context as the target without prompting")
 	cmd.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig the contexts are read from (default: ambient)")
+	cmd.Flags().StringVar(&o.name, "name", "", "the name to record for you on this install's audit trail (default: your username)")
 	return cmd
 }
 
@@ -121,6 +130,15 @@ func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Wri
 		return err
 	}
 
+	// A cluster target now asks that Burrow for a credential of the person's own (ADR-0084 §1). It
+	// runs BEFORE the target is written so the install id it learns is recorded on the same entry:
+	// SetTarget replaces an entry wholesale, so an id set afterwards would have to be a second write
+	// of a target that had already been saved without one.
+	var signIn signInResult
+	if target.Kind == localconfig.TargetKindKubernetes {
+		signIn = signInToCluster(ctx, o.kubeconfig, o.principalName(), &target)
+	}
+
 	cfg, err := localconfig.Load()
 	if err != nil {
 		return err
@@ -134,10 +152,25 @@ func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Wri
 	if err := cfg.SetTarget(target); err != nil {
 		return err
 	}
+	// Every local record naming this kube context reaches the install that just answered, so they all
+	// learn its id — a handle left behind would make the mismatch check fire on which record happened
+	// to be selected rather than on the cluster having actually changed (ADR-0084 §5).
+	if target.InstallID != "" {
+		cfg.SetInstallID(target.Context, target.InstallID)
+	}
 	if err := cfg.Save(); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "\n%s Signed in to %s: %s.\n", okMark(out), target.Name, target.Describe())
+	// A credential that WAS issued is part of what just succeeded; one that was not is a caveat about
+	// a setup that works anyway. Marking them the same would either dress a caveat as an achievement
+	// or make signing in successfully read like something went wrong.
+	switch {
+	case signIn.Issued:
+		fmt.Fprintf(out, "%s %s\n", okMark(out), signIn.Line)
+	case signIn.Line != "":
+		fmt.Fprintf(out, "%s%s\n", note(out), signIn.Line)
+	}
 	fmt.Fprintln(out, "It is now your active target. See `burrow auth status`, or change it with `burrow auth switch <name>`.")
 	if hadPrevious && previous.Name != target.Name {
 		fmt.Fprintf(out, "\nYour commands were going to %s. Send them back there with:  burrow auth switch %s\n",

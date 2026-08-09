@@ -72,9 +72,9 @@ type Target struct {
 	// it is not.
 	//
 	// It is optional, and validate deliberately does not require it. Every target recorded before
-	// this field existed has none, targets are written by `burrow auth login`, which contacts no
-	// cluster and so has nothing to learn an id from, and a target with no id is served exactly as it
-	// was — the check is a refinement of an existing relationship, not a new precondition on it.
+	// this field existed has none, `burrow auth login` learns one only when it can claim the install
+	// it reached (ADR-0084 §1) and records none otherwise, and a target with no id is served exactly
+	// as it was — the check is a refinement of an existing relationship, not a new precondition on it.
 	InstallID string `yaml:"install_id,omitempty"`
 }
 
@@ -107,9 +107,9 @@ func (t Target) Describe() string {
 // than a confusing failure several commands later (ADR-0078 "Consequences").
 //
 // InstallID is not checked. It is additive (ADR-0084 §5): every target written before it existed
-// carries none, and one written by `burrow auth login` carries none either, because that command
-// contacts no cluster and so has nothing to read an id from. Requiring it here would turn every
-// config already on disk into a load error — the one outcome the whole design is arranged to avoid.
+// carries none, and one written by `burrow auth login` carries none whenever that sign-in could not
+// claim the install it reached. Requiring it here would turn every config already on disk into a
+// load error — the one outcome the whole design is arranged to avoid.
 func (t Target) validate() error {
 	if t.Name == "" {
 		return fmt.Errorf("a target is missing its name")
@@ -215,12 +215,13 @@ func (c *Config) ActiveTarget() (Target, bool, error) {
 // (re-authenticating against a target you already have is an ordinary thing to do). The caller
 // Saves.
 //
-// Replacing the entry wholesale CLEARS any install id it carried, and that is correct rather than an
-// oversight. Re-pointing at a context is exactly what somebody does after rebuilding the cluster
-// behind it, so carrying the old id forward would preserve a mismatch through the act meant to
-// resolve it. This command contacts no cluster and cannot learn the new id, so it leaves the target
-// unchecked until an install or a join records one — unchecked is the state every target was in
-// before ids existed, and it is served.
+// Replacing the entry wholesale CLEARS any install id the OLD entry carried, and that is correct
+// rather than an oversight. Re-pointing at a context is exactly what somebody does after rebuilding
+// the cluster behind it, so carrying the old id forward would preserve a mismatch through the act
+// meant to resolve it. What survives is whatever t itself carries: `burrow auth login` sets the id
+// on the target it passes here when its sign-in learned one from the install that answered
+// (ADR-0084 §1), and passes none when it did not — leaving the target unchecked until an install or
+// a join records one, which is the state every target was in before ids existed, and is served.
 func (c *Config) SetTarget(t Target) error {
 	if err := t.validate(); err != nil {
 		return fmt.Errorf("localconfig: %w", err)

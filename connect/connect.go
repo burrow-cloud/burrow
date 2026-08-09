@@ -104,6 +104,17 @@ type Options struct {
 	// how the request gets there; this is what says it arrived. Empty omits the header, which is what
 	// a target recorded before install ids existed sends.
 	InstallID string
+	// Token is the credential to present in X-Burrow-Token, when the caller already holds one
+	// (ADR-0084 §1). Empty — the default, and every existing caller — reads the shared install token
+	// out of the install Secret exactly as before.
+	//
+	// SUPPLYING IT SKIPS THE SECRET READ ENTIRELY, and that is the point rather than an optimisation.
+	// The kubeconfig keeps its remaining job, the ROUTE: burrowd has no address of its own and the
+	// API-server proxy is how a laptop reaches a ClusterIP service. What it stops being is how burrowd
+	// knows who is calling — so a person carrying their own credential needs no `get` on
+	// `burrow-credentials`, which is what makes it possible to give somebody access to Burrow without
+	// giving them a read of the install's shared secret (ADR-0084 §2).
+	Token string
 }
 
 func (o *Options) setDefaults() {
@@ -152,12 +163,18 @@ func Client(ctx context.Context, o Options) (*client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect: building clientset: %w", err)
 	}
-	token, err := readToken(ctx, cs, o.Namespace, o.TokenSecret, o.TokenKey)
-	if err != nil {
-		// Translate the raw Kubernetes error into an actionable, context-named message: a
-		// missing token Secret means burrowd is not installed, a dial error means the cluster
-		// is unreachable. Every command that connects goes through here, so they all benefit.
-		return nil, connectError(o, err)
+	// The caller's own credential wins over the install's shared one when they hold one, and reading
+	// the Secret is skipped rather than done and discarded — the read is a cluster permission this
+	// path deliberately stops needing (ADR-0084 §1, §2).
+	token := o.Token
+	if token == "" {
+		token, err = readToken(ctx, cs, o.Namespace, o.TokenSecret, o.TokenKey)
+		if err != nil {
+			// Translate the raw Kubernetes error into an actionable, context-named message: a
+			// missing token Secret means burrowd is not installed, a dial error means the cluster
+			// is unreachable. Every command that connects goes through here, so they all benefit.
+			return nil, connectError(o, err)
+		}
 	}
 	rt, err := rest.TransportFor(cfg)
 	if err != nil {

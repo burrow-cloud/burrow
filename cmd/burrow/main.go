@@ -24,6 +24,7 @@ import (
 	"github.com/burrow-cloud/burrow/client"
 	"github.com/burrow-cloud/burrow/connect"
 	"github.com/burrow-cloud/burrow/internal/cloudcred"
+	"github.com/burrow-cloud/burrow/internal/clustercred"
 	"github.com/burrow-cloud/burrow/internal/targetname"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
@@ -670,6 +671,15 @@ func (o *commonOpts) connectOptions(tgt target) connect.Options {
 		ClientName:    client.ClientNameCLI,
 		ClientVersion: cliVersion(),
 		InstallID:     tgt.installID,
+		// The person's own credential for this install when they have signed in to it, and empty
+		// otherwise — which falls back to the install's shared token and is what keeps an install
+		// nobody has signed in to behaving exactly as it did (ADR-0084 §1).
+		//
+		// It is keyed by the INSTALL, not by the context: the credential belongs to the Burrow that
+		// issued it, so a renamed context still finds it and a cluster rebuilt under a reused name
+		// does not present the previous install's token to the new one. A target with no install id
+		// looks nothing up, which is correct — there is no install for a credential to belong to.
+		Token: clustercred.Token(tgt.installID),
 	}
 }
 

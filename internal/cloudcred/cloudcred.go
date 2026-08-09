@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/burrow-cloud/burrow/internal/credfile"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -156,9 +157,9 @@ func describe(k Kind) string {
 	}
 }
 
-// Store writes one credential to its kind's path, 0600 under a 0700 directory, and returns the path
-// it wrote. MkdirAll only applies its mode on creation, so an existing directory is tightened
-// explicitly rather than trusted.
+// Store writes one credential to its kind's path and returns the path it wrote. The file handling —
+// 0600 under a 0700 directory, an O_EXCL temporary and a rename — is internal/credfile's, shared
+// with every other credential Burrow keeps on disk so the discipline cannot drift between them.
 func Store(kind Kind, cred Credential) (string, error) {
 	path, err := Path(kind)
 	if err != nil {
@@ -168,32 +169,8 @@ func Store(kind Kind, cred Credential) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encoding the %s credential: %w", describe(kind), err)
 	}
-	data = append(data, '\n')
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("creating %s: %w", dir, err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", fmt.Errorf("restricting %s to its owner: %w", dir, err)
-	}
-
-	// os.CreateTemp opens 0600 with O_EXCL, which is exactly the mode and the exclusivity wanted here.
-	tmp, err := os.CreateTemp(dir, ".credential-*")
-	if err != nil {
-		return "", fmt.Errorf("creating a temporary file in %s: %w", dir, err)
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }() // a no-op once the rename below has succeeded
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return "", fmt.Errorf("writing the credential to %s: %w", tmp.Name(), err)
-	}
-	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("closing %s: %w", tmp.Name(), err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return "", fmt.Errorf("moving the credential into place at %s: %w", path, err)
+	if err := credfile.Write(path, append(data, '\n')); err != nil {
+		return "", err
 	}
 	return path, nil
 }

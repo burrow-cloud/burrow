@@ -72,7 +72,7 @@ func TestDeployAddonOnCloudNativePGCreatesTheCluster(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 	spec := postgresSpec(t)
 
-	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil)
+	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), nil)
 	if err != nil {
 		t.Fatalf("DeployAddon on CloudNativePG: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestCloudNativePGClusterDoesNotInheritTheManagedByLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), "staging", nil); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), "staging", testInstanceOf(postgresSpec(t), "staging"), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -198,7 +198,7 @@ func TestCloudNativePGSuperuserSecretIsBasicAuthAndNeverInTheCluster(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 
@@ -238,7 +238,7 @@ func TestDeployAddonOnCloudNativePGRefusesWithoutTheOperator(t *testing.T) {
 		map[schema.GroupVersionResource]string{cnpgClusterGVR: "ClusterList"})
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil)
+	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), nil)
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("DeployAddon error = %v, want ErrInvalid", err)
 	}
@@ -273,7 +273,7 @@ func TestDeployAddonOnCloudNativePGRefusesOrphanedCRDs(t *testing.T) {
 		map[schema.GroupVersionResource]string{cnpgClusterGVR: "ClusterList"})
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil)
+	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), nil)
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("DeployAddon error = %v, want ErrInvalid on a cluster with CRDs and no controller", err)
 	}
@@ -302,7 +302,7 @@ func TestDeployAddonOnCloudNativePGRefusesADeploymentEraSuperuserSecret(t *testi
 	})
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	_, err = a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil)
+	_, err = a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), nil)
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("DeployAddon error = %v, want ErrInvalid", err)
 	}
@@ -320,7 +320,7 @@ func TestDeployAddonOnCloudNativePGIsIdempotent(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 	spec := postgresSpec(t)
 
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	instance, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
@@ -332,7 +332,7 @@ func TestDeployAddonOnCloudNativePGIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("re-install: %v", err)
 	}
 	again, err := client.CoreV1().Secrets(cnpgTestNamespace).Get(ctx, instance, metav1.GetOptions{})
@@ -427,7 +427,7 @@ func TestControllerPlacementReachesTheCluster(t *testing.T) {
 		t.Fatalf("WithControllerPodPlacement: %v", err)
 	}
 
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	u := getCluster(t, dyn, "burrow-postgres")

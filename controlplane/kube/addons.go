@@ -44,15 +44,6 @@ const addonEnvLabel = "burrow.cloud/environment"
 // constant, and attributing it by shape would be the name-guessing AddonVolumes exists to avoid.
 const addonVolumeRole = "burrow.cloud/addon-volume"
 
-// addonName is the deterministic resource name for the instance of add-on type t serving
-// environment env — one instance PER TYPE PER ENVIRONMENT (ADR-0067 §1). The derivation lives in the
-// controlplane package (AddonInstanceName) so the engine, the registry, and this adapter cannot
-// drift on which server an environment means; the default environment keeps the unqualified name an
-// existing install already carries, so nothing migrates.
-func addonName(t controlplane.AddonType, env string) (string, error) {
-	return controlplane.AddonInstanceName(t, env)
-}
-
 // vmagentServiceAccount is the ServiceAccount the metrics add-on's vmagent scraper runs as. It and
 // its pod-discovery Role/RoleBinding are NOT created by burrowd: burrowd holds only namespaced Roles
 // and is deliberately forbidden from creating RBAC (least privilege). The grant is staged by the CLI
@@ -61,11 +52,11 @@ func addonName(t controlplane.AddonType, env string) (string, error) {
 // read-only Get before deploying the scraper.
 const vmagentServiceAccount = "burrow-vmagent"
 
-func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
-	name, err := addonName(spec.Type, env)
-	if err != nil {
-		return controlplane.AddonInfo{}, err
+func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env, instance string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
+	if instance == "" {
+		return controlplane.AddonInfo{}, fmt.Errorf("kube: deploying the %s add-on in environment %q: no instance named: %w", spec.Type, env, controlplane.ErrInvalid)
 	}
+	name := instance
 	// Every resource this creates is named after the INSTANCE, not the type, so a second
 	// environment's add-on lands beside the first rather than on top of it (ADR-0067 §1). The
 	// environment label records which environment the instance serves, so the cluster view agrees
@@ -231,14 +222,10 @@ const PostgresSuperuser = "burrow_admin"
 // The Secret is named after the INSTANCE, so every environment's instance has its own superuser
 // credential and this constant is the default environment's case of that rule (ADR-0067 §1) — which
 // is why an install predating environments keeps the Secret, the volume, and the password it already
-// has. Use postgresSecretName(env) on any path that can serve more than the default environment.
+// has. Every other instance's Secret is named after that instance, and the name comes from the
+// registry rather than from a derivation here (ADR-0091 §2): the engine resolves the instance and
+// hands it down, so this adapter composes no instance name of its own.
 const PostgresSecretName = "burrow-postgres"
-
-// postgresSecretName is the superuser Secret for environment env's Postgres instance: the instance's
-// own name, since the credential that opens a server belongs to that server alone (ADR-0067 §1).
-func postgresSecretName(env string) (string, error) {
-	return addonName(controlplane.AddonPostgres, env)
-}
 
 // PostgresPasswordKey is the key under which the superuser password is stored in PostgresSecretName.
 const PostgresPasswordKey = "password"

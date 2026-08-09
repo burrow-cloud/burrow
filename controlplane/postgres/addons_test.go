@@ -115,3 +115,84 @@ func TestStoreAddonsRoundTripAndUpsert(t *testing.T) {
 		t.Errorf("missing addon err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestAddonLabelLookup is ADR-0091 §2's mapping, against a real Postgres: an instance's name in the
+// cluster is LOOKED UP by the label a person types, the label is unique within an environment, and a
+// row saved without one is labelled with its own name — which is what every row written before the
+// column existed was backfilled to.
+func TestAddonLabelLookup(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	staging := envLabel(t, "staging")
+	own := t.Name() + "-postgres"
+	second := t.Name() + "-postgres-an4lyt"
+
+	// Saved with no label: the row is addressable by its own name, which is an environment's first
+	// instance and every row that predates the column.
+	if err := s.SaveAddon(ctx, cp.AddonInfo{
+		Name: own, Type: cp.AddonPostgres, Environment: cp.DefaultEnvironment, Mode: "installed",
+	}); err != nil {
+		t.Fatalf("SaveAddon(own): %v", err)
+	}
+	got, err := s.AddonByLabel(ctx, cp.DefaultEnvironment, own)
+	if err != nil {
+		t.Fatalf("AddonByLabel(own): %v", err)
+	}
+	if got.Name != own || got.Label != own {
+		t.Errorf("row = %s/%s, want both %s — an instance saved without a label is addressed by its name", got.Name, got.Label, own)
+	}
+
+	// A second instance in the SAME environment, under a label the operator chose and a cluster name
+	// they never type.
+	if err := s.SaveAddon(ctx, cp.AddonInfo{
+		Name: second, Label: "analytics", Type: cp.AddonPostgres, Environment: cp.DefaultEnvironment, Mode: "installed",
+	}); err != nil {
+		t.Fatalf("SaveAddon(second): %v", err)
+	}
+	got, err = s.AddonByLabel(ctx, cp.DefaultEnvironment, "analytics")
+	if err != nil {
+		t.Fatalf("AddonByLabel(analytics): %v", err)
+	}
+	if got.Name != second {
+		t.Errorf("analytics resolved to %q, want %q", got.Name, second)
+	}
+
+	// The label is unique WITHIN an environment and not across the cluster, which is the granularity
+	// ADR-0085's `<env>.<name>.<code>` guardrail key already assumes.
+	if _, err := s.AddonByLabel(ctx, staging, "analytics"); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("AddonByLabel(staging, analytics) = %v, want ErrNotFound — a label answers in one environment", err)
+	}
+
+	// And the set an environment holds is a listing, because "the instance of this type here" is a
+	// question about a set now (ADR-0091 §1).
+	instances, err := s.AddonsInEnvironment(ctx, cp.AddonPostgres, cp.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("AddonsInEnvironment: %v", err)
+	}
+	found := map[string]bool{}
+	for _, i := range instances {
+		found[i.Name] = true
+	}
+	if !found[own] || !found[second] {
+		t.Errorf("the environment's postgres instances = %v, want both %s and %s", instances, own, second)
+	}
+}
+
+// TestAddonLabelIsUniqueWithinAnEnvironment: the registry enforces it, not a check somewhere else
+// that can be raced. Two instances answering to one guardrail key would make a disposition ambiguous.
+func TestAddonLabelIsUniqueWithinAnEnvironment(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+
+	if err := s.SaveAddon(ctx, cp.AddonInfo{
+		Name: t.Name() + "-a", Label: "reports", Type: cp.AddonPostgres, Environment: cp.DefaultEnvironment, Mode: "installed",
+	}); err != nil {
+		t.Fatalf("SaveAddon(first): %v", err)
+	}
+	err := s.SaveAddon(ctx, cp.AddonInfo{
+		Name: t.Name() + "-b", Label: "reports", Type: cp.AddonPostgres, Environment: cp.DefaultEnvironment, Mode: "installed",
+	})
+	if err == nil {
+		t.Fatal("two instances took the same label in one environment; a guardrail key would name both")
+	}
+}

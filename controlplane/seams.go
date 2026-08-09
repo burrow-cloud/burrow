@@ -313,10 +313,21 @@ type BuildLedger interface {
 // simple names — an app called web has a database called web — so the environment is the only thing
 // that distinguishes web-in-staging from web-in-production. Without it, provisioning web a second
 // time found the first one, and because provisioning is IDEMPOTENT it did not fail: it rotated the
-// role password and handed back a URL pointing at the other environment's data (issue #339). The
-// environment selects the INSTANCE, so an implementation cannot reach another environment's server
-// at all; an empty environment is rejected before any SQL, because "a signature that can omit it is
-// a signature that will omit it".
+// role password and handed back a URL pointing at the other environment's data (issue #339). An
+// empty environment is rejected before any SQL, because "a signature that can omit it is a signature
+// that will omit it".
+//
+// EVERY METHOD ALSO TAKES THE INSTANCE, AND IT IS NOT OPTIONAL EITHER (ADR-0091 §4). An environment
+// may hold more than one instance, so the environment no longer selects a server on its own: the
+// instance is what says WHICH server, and the environment is what says which namespace the app's
+// Secret is in and whose data this is. Relaxing the ceiling without this argument would reproduce
+// issue #339's collision one level down — two instances in one environment both holding a database
+// called `web`, and a provision that reached whichever one the derivation named. Neither value is
+// optional, for the same reason: a signature that can omit it is a signature that will omit it.
+//
+// The instance is the name it carries IN THE CLUSTER, resolved from the registry by the engine
+// (ADR-0091 §2) — never a label, and never derived here. An implementation that composed the name
+// itself would be the derivation this record removed.
 type DatabaseProvisioner interface {
 	// EnsureAppDatabase idempotently provisions an isolated database and login role for app on
 	// environment env's own instance and returns the app's DATABASE_URL (a postgres:// connection
@@ -331,7 +342,7 @@ type DatabaseProvisioner interface {
 	// rather than performed inline, so this call waits on somebody else's work and returns only once
 	// the database and the credential are known to be there. A caller that treats it as a fast local
 	// operation will be wrong about how long an attach takes; nothing else about the contract moved.
-	EnsureAppDatabase(ctx context.Context, app, env string) (databaseURL string, err error)
+	EnsureAppDatabase(ctx context.Context, app, env, instance string) (databaseURL string, err error)
 	// RevokeAppDatabase ends app's access to its database on environment env's instance and KEEPS the
 	// database, with its rows — what a plain `addon detach` performs (ADR-0090 §1). The app's login
 	// role is DROPPED, so nothing that was issued to it still authenticates; what survives is the
@@ -344,7 +355,7 @@ type DatabaseProvisioner interface {
 	//
 	// env and app are validated first, exactly as in EnsureAppDatabase. Like the attach, this waits on
 	// somebody else's reconcile, so it can take seconds and it can time out.
-	RevokeAppDatabase(ctx context.Context, app, env string) error
+	RevokeAppDatabase(ctx context.Context, app, env, instance string) error
 	// DropAppDatabase removes app's database and its roles from environment env's instance — what
 	// `addon detach --delete-data` performs, and the only thing in the seam that destroys data
 	// (ADR-0090 §2). Dropping a database/role that is already absent is a no-op, not an error. env and
@@ -356,7 +367,7 @@ type DatabaseProvisioner interface {
 	// workload before calling this; an implementation is entitled to fail rather than to force the
 	// sessions off. Like the attach, this waits on the removal actually happening rather than on
 	// having asked for it, so it can take seconds and it can time out.
-	DropAppDatabase(ctx context.Context, app, env string) error
+	DropAppDatabase(ctx context.Context, app, env, instance string) error
 }
 
 // AppDatabaseLister enumerates the apps that hold a Burrow-provisioned database on one environment's
@@ -376,7 +387,7 @@ type AppDatabaseLister interface {
 	// instance, sorted. None yields an empty slice and no error. env is required for the same reason
 	// it is on DatabaseProvisioner: the answer to "who is attached?" is only true of one instance,
 	// and a removal names the apps it is about to affect (ADR-0067 §1).
-	ListAppDatabases(ctx context.Context, env string) ([]string, error)
+	ListAppDatabases(ctx context.Context, env, instance string) ([]string, error)
 }
 
 // AppReadAddresser composes the READ-ONLY connection string for an app that is already attached —
@@ -400,7 +411,7 @@ type AppReadAddresser interface {
 	// ErrNotFound when the app has no provisioned credential to compose one from. It does not check
 	// that a standby exists: WHETHER an instance should have a read address is the engine's decision
 	// (ADR-0081 §2), and an implementation that second-guessed it would make the two disagree.
-	AppReadURL(ctx context.Context, app, env string) (readURL string, err error)
+	AppReadURL(ctx context.Context, app, env, instance string) (readURL string, err error)
 }
 
 // DatabaseQuerier runs ONE caller-supplied statement against ONE app's database on an environment's
@@ -450,9 +461,14 @@ type AppStatement struct {
 	// name (ADR-0031).
 	App string
 	// Env is the environment whose instance holds it. It is required for the reason every
-	// DatabaseProvisioner method's is: the environment selects the instance, and there is no value
-	// meaning "whichever instance is there" (ADR-0067 §1).
+	// DatabaseProvisioner method's is: it says whose data this is and which namespace the app's
+	// Secret is in, and there is no value meaning "whichever environment" (ADR-0067 §1).
 	Env string
+	// Instance is the name IN THE CLUSTER of the instance holding the database, resolved from the
+	// registry by the engine (ADR-0091 §2). It is required for the same reason Env is: an
+	// environment may hold more than one instance, so the environment alone no longer selects a
+	// server, and an app attached to two of them has two databases a statement could mean.
+	Instance string
 	// Namespace is where the app's per-app Secret lives — the environment's app namespace, resolved
 	// by the engine, since that mapping is the engine's (ADR-0035 phase 2b).
 	Namespace string
@@ -545,10 +561,12 @@ type Kubernetes interface {
 	// the instance's connection info (ADR-0025). Installing an already-installed add-on is
 	// idempotent.
 	//
-	// env is required and names which environment's instance this is (ADR-0067 §1): the resources are
-	// named by AddonInstanceName, so the default environment lands on exactly the names an existing
-	// install already has and any other environment gets its own instance beside it — its own pod,
-	// its own volume, and for Postgres its own superuser credential.
+	// env is required and names which environment this instance serves (ADR-0067 §1). instance is
+	// required and is what every resource is NAMED after — the engine resolves it out of the registry
+	// and hands it down (ADR-0091 §2), so an environment's first instance lands on exactly the names
+	// an existing install already has, another environment gets its own instance beside it, and a
+	// second instance in one environment gets a generated name of its own. Each has its own pod, its
+	// own volume, and for Postgres its own superuser credential.
 	//
 	// The add-on's TYPE decides what is written. Postgres is a CloudNativePG `Cluster` — one custom
 	// resource, from which the operator composes the workload, the volume and the services (ADR-0066
@@ -563,7 +581,7 @@ type Kubernetes interface {
 	// created is a normal sequence and not a reason to rebuild the database. Like BackupDestination
 	// it carries a credential PAIR and therefore never crosses an API boundary — the adapter puts it
 	// in a Secret the plugin's sidecar reads by reference and nowhere else.
-	DeployAddon(ctx context.Context, spec AddonSpec, env string, archive *ArchiveDestination) (AddonInfo, error)
+	DeployAddon(ctx context.Context, spec AddonSpec, env, instance string, archive *ArchiveDestination) (AddonInfo, error)
 	// AddonReady reports whether the named add-on's backing workload is available. It is a cheap
 	// single-object readiness probe — readiness is a live property, not stored in the registry — and
 	// a missing workload is reported as not ready (false, nil), not an error.
@@ -607,7 +625,7 @@ type Kubernetes interface {
 	// property of the object the database operator is reconciling, and it can have been changed since
 	// — by `addon config`, or by somebody with a kubeconfig. A listing that answered from the registry
 	// would report what an install once asked for rather than what is running.
-	AddonInstanceShape(ctx context.Context, t AddonType, env string) (AddonShape, error)
+	AddonInstanceShape(ctx context.Context, t AddonType, env, instance string) (AddonShape, error)
 	// ConfigureAddonInstance changes ONE property of an existing add-on instance in place (ADR-0082).
 	// A missing instance is ErrNotFound.
 	//
@@ -709,7 +727,11 @@ type Kubernetes interface {
 	// error path, the closed reason the Job reported for its failure, so the caller can record WHY a
 	// backup failed rather than that it did. A non-nil error always accompanies a failure reason;
 	// the outcome is still returned so the caller does not have to parse the error to record it.
-	RunBackupJob(ctx context.Context, app, env, backupID string, dest *BackupDestination) (BackupJobOutcome, error)
+	//
+	// instance is the instance's name IN THE CLUSTER, resolved from the registry by the engine
+	// (ADR-0091 §2), and it selects the server, the superuser Secret and the backup claim together —
+	// an environment may hold more than one, and two of them may each hold a database called `web`.
+	RunBackupJob(ctx context.Context, app, env, instance, backupID string, dest *BackupDestination) (BackupJobOutcome, error)
 	// RunRestoreJob runs a one-shot Job in the add-on namespace that pg_restores
 	// /<backup-pvc>/<app>/<backupID>.dump into app's database on environment env's instance (--clean
 	// --if-exists, so it replaces current contents). Like RunBackupJob it reads the superuser password
@@ -717,7 +739,8 @@ type Kubernetes interface {
 	// the Job on success. env and app are validated before any Job is built — restoring is the one
 	// operation where reaching the wrong environment's server overwrites live data with another
 	// environment's.
-	RunRestoreJob(ctx context.Context, app, env, backupID string) error
+	// instance selects the server and the claim, on the same terms as RunBackupJob's.
+	RunRestoreJob(ctx context.Context, app, env, instance, backupID string) error
 
 	// RunPhysicalBackup asks CloudNativePG for a base backup of environment env's whole instance and
 	// waits for the answer (ADR-0066 §2). It CREATES A CUSTOM RESOURCE and reads `.status`: a
@@ -740,7 +763,9 @@ type Kubernetes interface {
 	// different reasons, because they are different problems (ADR-0063 §7). A non-nil error always
 	// accompanies a failure reason; the outcome is returned either way so the caller records WHY
 	// without parsing the error.
-	RunPhysicalBackup(ctx context.Context, env, backupID string, archive *ArchiveDestination) (PhysicalBackupOutcome, error)
+	//
+	// instance is the instance's name in the cluster, for RunBackupJob's reason.
+	RunPhysicalBackup(ctx context.Context, env, instance, backupID string, archive *ArchiveDestination) (PhysicalBackupOutcome, error)
 	// PhysicalBackupPresent reports whether the `Backup` object for the given backup id still exists
 	// in the add-on namespace — BackupJobPresent's question for a physical backup, and it exists for
 	// the same reason (ADR-0074 §6): a row left `pending` by a burrowd that restarted mid-backup is
@@ -752,7 +777,7 @@ type Kubernetes interface {
 	//
 	// IT REPLACES THE INSTANCE UNDER ITS OWN NAME. CloudNativePG never recovers in place — a recovery
 	// bootstraps a new `Cluster` — but the name every consumer of a Postgres instance resolves
-	// (AddonInstanceName: the Service, the superuser Secret, every DATABASE_URL) is not a detail a
+	// (req.Instance: the Service, the superuser Secret, every DATABASE_URL) is not a detail a
 	// restore may move. So the pre-restore `Cluster` and its data claims are removed and the recovered
 	// one comes up under the same name, rather than a differently-named instance being stood up beside
 	// it and every derivation in Burrow being asked to follow.
@@ -892,8 +917,17 @@ type Database interface {
 	// registry entry — type, mode, backend, endpoint, and capabilities — never the live
 	// readiness, which is probed from the cluster.
 	SaveAddon(ctx context.Context, a AddonInfo) error
-	// Addon returns the add-on with the given name, or ErrNotFound.
+	// Addon returns the add-on with the given name — the instance's name in the CLUSTER, which is
+	// the registry key — or ErrNotFound.
 	Addon(ctx context.Context, name string) (AddonInfo, error)
+	// AddonByLabel returns the instance labelled label in environment env, or ErrNotFound. It is the
+	// lookup that replaced a derivation (ADR-0091 §2): an instance's cluster name is a registry fact,
+	// and the label is the string a person types. A label is unique within an environment.
+	AddonByLabel(ctx context.Context, env, label string) (AddonInfo, error)
+	// AddonsInEnvironment returns the registered instances of add-on type t serving env, label
+	// order. None yields an empty slice and no error — an environment may hold more than one
+	// (ADR-0091 §1), so "the instance of this type here" is a question about a set.
+	AddonsInEnvironment(ctx context.Context, t AddonType, env string) ([]AddonInfo, error)
 	// Addons returns all registered add-ons, name order. None yields an empty slice and no
 	// error. The returned entries carry no live readiness.
 	Addons(ctx context.Context) ([]AddonInfo, error)
@@ -1019,22 +1053,30 @@ type Database interface {
 	// never recorded one is a no-op.
 	DeleteDependencyCheckSettings(ctx context.Context, app string) error
 
-	// AddonEnvKey returns the environment variable name app's attachment to addon in env was written
-	// under (ADR-0031, issue #462) — the one fact about an attachment that cannot be derived, since a
-	// derivation can only ever produce the name nobody chose.
+	// AddonEnvKey returns the environment variable name app's attachment to addon's INSTANCE in env
+	// was written under (ADR-0031, issue #462) — the one fact about an attachment that cannot be
+	// derived, since a derivation can only ever produce the name nobody chose — and whether a row was
+	// recorded at all.
 	//
-	// It answers AppDatabaseURLKey when nothing was recorded. Every attachment made before the name
-	// was a choice is unrecorded and was written there, so a missing row is the answer rather than an
-	// error, and detach, the dependency derivation and the restore cutover all read this instead of
-	// each holding their own copy of the constant.
-	AddonEnvKey(ctx context.Context, addon, app, env string) (string, error)
-	// SetAddonEnvKey records the variable name app's attachment to addon in env is written under.
-	// The attach calls it AFTER the value is written, so the recorded name is never one the Secret
-	// does not hold.
-	SetAddonEnvKey(ctx context.Context, addon, app, env, key string, at time.Time) error
+	// THE SECOND RETURN IS NOT A CONVENIENCE. An unrecorded attachment means AppDatabaseURLKey for
+	// the environment's DEFAULT instance, because every attachment made before the name was a choice
+	// was written there and against that instance. For any other instance an unrecorded attachment
+	// means there is no attachment, and a store that defaulted anyway would tell a second attach it
+	// already owns `DATABASE_URL` — which is the one variable ADR-0091 §3 refuses to let it take.
+	// The engine, which knows which instance is the environment's default, resolves the two.
+	AddonEnvKey(ctx context.Context, addon, app, env, instance string) (key string, recorded bool, err error)
+	// SetAddonEnvKey records the variable name app's attachment to addon's instance in env is written
+	// under. The attach calls it AFTER the value is written, so the recorded name is never one the
+	// Secret does not hold.
+	SetAddonEnvKey(ctx context.Context, addon, app, env, instance, key string, at time.Time) error
 	// DeleteAddonEnvKey forgets one attachment's recorded name, which a detach does once it has
-	// removed the variable. Deleting an unrecorded attachment is a no-op.
-	DeleteAddonEnvKey(ctx context.Context, addon, app, env string) error
+	// removed the variable. Deleting an unrecorded attachment is a no-op, and detaching one
+	// attachment leaves every other attachment of the same app alone (ADR-0091 §3).
+	DeleteAddonEnvKey(ctx context.Context, addon, app, env, instance string) error
+	// AppAttachments returns every recorded attachment app holds to addon in env, instance order.
+	// An app may hold several (ADR-0091 §3), so an operation that has to act on all of an app's
+	// databases reads the set rather than assuming one. None yields an empty slice and no error.
+	AppAttachments(ctx context.Context, addon, app, env string) ([]AddonAttachment, error)
 	// DeleteAppAttachments forgets every recorded name for app — the durable side of an app
 	// teardown, alongside DeleteHealthEndpoints.
 	DeleteAppAttachments(ctx context.Context, app string) error

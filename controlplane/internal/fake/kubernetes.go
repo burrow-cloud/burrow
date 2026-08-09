@@ -159,8 +159,13 @@ func fakeEnvName(env string) string {
 // backup that named only the app could not be told apart from one taken against another
 // environment's server.
 type backupCall struct {
-	App      string
-	Env      string
+	App string
+	Env string
+	// Instance is the instance the Job was pointed at — the second half of the same argument, once an
+	// environment may hold more than one (ADR-0091 §4). Two instances in one environment may each
+	// hold a database called `web`, so a call recording only the environment could not tell which
+	// server the dump came from.
+	Instance string
 	BackupID string
 	// Dest is the object-storage destination the engine resolved for this backup, nil when none is
 	// registered. A test asserts on it because "which destination did this backup go to" is the
@@ -348,28 +353,26 @@ func (k *Kubernetes) RestartedAt(app string) (time.Time, bool) {
 	return d.restartedAt, true
 }
 
-// DeployAddon models installing one add-on instance FOR ONE ENVIRONMENT: the instance is named by
-// controlplane.AddonInstanceName, so the default environment lands on the unqualified name an
-// existing install already has and any other environment gets a separate instance beside it
-// (ADR-0067 §1). Two environments therefore occupy two entries in this fake cluster, never one.
-func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
+// DeployAddon models installing one add-on instance: the instance is NAMED BY THE CALLER, which is
+// the engine handing down what it resolved out of the registry (ADR-0091 §2). Two environments
+// therefore occupy two entries in this fake cluster and never one, and so do two instances in one
+// environment.
+func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env, instance string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if instance == "" {
+		return controlplane.AddonInfo{}, fmt.Errorf("fake: deploying the %s add-on in environment %q: no instance named: %w", spec.Type, env, controlplane.ErrInvalid)
+	}
+	name := instance
 	// Whether the instance archives is remembered, because it is what decides whether a physical
 	// backup of it is possible at all (ADR-0066 §3) — the fake cluster has to be able to be in both
 	// states, since an install with no object-storage provider registered is the ordinary one.
 	if spec.Type == controlplane.AddonPostgres {
-		if n, err := controlplane.AddonInstanceName(spec.Type, env); err == nil {
-			if archive != nil {
-				k.archiving[n] = archive.Provider
-			} else if _, ok := k.archiving[n]; !ok {
-				k.archiving[n] = ""
-			}
+		if archive != nil {
+			k.archiving[name] = archive.Provider
+		} else if _, ok := k.archiving[name]; !ok {
+			k.archiving[name] = ""
 		}
-	}
-	name, err := controlplane.AddonInstanceName(spec.Type, env)
-	if err != nil {
-		return controlplane.AddonInfo{}, err
 	}
 	info := controlplane.AddonInfo{
 		Name:         name,
@@ -445,16 +448,16 @@ func (k *Kubernetes) AddonShape(instance string) (controlplane.AddonShape, bool)
 
 // AddonInstanceShape reports the shape of environment env's instance, or ErrNotFound when this fake
 // cluster holds none — which is what an environment with no add-on installed answers.
-func (k *Kubernetes) AddonInstanceShape(ctx context.Context, t controlplane.AddonType, env string) (controlplane.AddonShape, error) {
+func (k *Kubernetes) AddonInstanceShape(ctx context.Context, t controlplane.AddonType, env, instance string) (controlplane.AddonShape, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.errs[OpAddonInstanceShape]; err != nil {
 		return controlplane.AddonShape{}, err
 	}
-	name, err := controlplane.AddonInstanceName(t, env)
-	if err != nil {
-		return controlplane.AddonShape{}, err
+	if instance == "" {
+		return controlplane.AddonShape{}, fmt.Errorf("fake: reading the shape of a %s instance in environment %q: no instance named: %w", t, env, controlplane.ErrInvalid)
 	}
+	name := instance
 	shape, ok := k.shapes[name]
 	if !ok {
 		return controlplane.AddonShape{}, fmt.Errorf("fake: environment %q has no %s instance %q: %w", env, t, name, controlplane.ErrNotFound)
@@ -471,10 +474,10 @@ func (k *Kubernetes) ConfigureAddonInstance(ctx context.Context, req controlplan
 	if err := k.errs[OpConfigureAddon]; err != nil {
 		return err
 	}
-	name, err := controlplane.AddonInstanceName(req.Addon, req.Environment)
-	if err != nil {
-		return err
+	if req.Instance == "" {
+		return fmt.Errorf("fake: configuring a %s instance in environment %q: no instance named: %w", req.Addon, req.Environment, controlplane.ErrInvalid)
 	}
+	name := req.Instance
 	shape, ok := k.shapes[name]
 	if !ok {
 		return fmt.Errorf("fake: environment %q has no %s instance %q: %w", req.Environment, req.Addon, name, controlplane.ErrNotFound)
@@ -571,7 +574,7 @@ func (k *Kubernetes) DeleteAddon(ctx context.Context, name string, t controlplan
 	// claim (ADR-0067 §1). It exists in this fake only once a backup has been taken in that
 	// environment, exactly as the adapter creates it on first backup.
 	if info.Type == controlplane.AddonPostgres {
-		if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, fakeEnvName(info.Environment)); err == nil {
+		if claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, info.Name); err == nil {
 			if _, ok := k.volumes[claim]; ok {
 				removal.RetainedBackupVolume = claim
 			}
@@ -678,17 +681,17 @@ func (k *Kubernetes) PhysicalBackups() []backupCall {
 // RunPhysicalBackup models asking CloudNativePG for a base backup of one environment's instance. It
 // refuses an instance that does not archive, exactly as the adapter does: a `Backup` object against a
 // `Cluster` with no plugin has nowhere to write.
-func (k *Kubernetes) RunPhysicalBackup(ctx context.Context, env, backupID string, archive *controlplane.ArchiveDestination) (controlplane.PhysicalBackupOutcome, error) {
+func (k *Kubernetes) RunPhysicalBackup(ctx context.Context, env, instance, backupID string, archive *controlplane.ArchiveDestination) (controlplane.PhysicalBackupOutcome, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	*k.physicals = append(*k.physicals, backupCall{Env: env, BackupID: backupID})
+	*k.physicals = append(*k.physicals, backupCall{Env: env, Instance: instance, BackupID: backupID})
 	if err := k.errs[OpRunPhysicalBackup]; err != nil {
 		return *k.physicalReason, err
 	}
-	name, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, fakeEnvName(env))
-	if err != nil {
-		return controlplane.PhysicalBackupOutcome{}, err
+	if instance == "" {
+		return controlplane.PhysicalBackupOutcome{}, fmt.Errorf("fake: taking a base backup in environment %q: no instance named: %w", env, controlplane.ErrInvalid)
 	}
+	name := instance
 	provider, installed := k.archiving[name]
 	if !installed {
 		return controlplane.PhysicalBackupOutcome{}, fmt.Errorf("fake: environment %q has no postgres instance to back up: %w", env, controlplane.ErrNotFound)
@@ -709,7 +712,10 @@ func (k *Kubernetes) RunPhysicalBackup(ctx context.Context, env, backupID string
 // It deliberately does NOT record the ArchiveDestination: that value carries a credential, and a
 // fake that stored one would be a fixture holding a secret (ADR-0063 §1).
 type RestoreInstanceCall struct {
-	Env         string
+	Env string
+	// Instance is the instance the engine asked to recover, resolved out of the registry rather than
+	// derived from the environment (ADR-0091 §2).
+	Instance    string
 	BackupLabel string
 	TargetTime  string
 	Provider    string
@@ -734,15 +740,15 @@ func (k *Kubernetes) RestoreInstance(ctx context.Context, req controlplane.Resto
 		provider = req.Archive.Provider
 	}
 	*k.instanceRestores = append(*k.instanceRestores, RestoreInstanceCall{
-		Env: req.Environment, BackupLabel: req.BackupLabel, TargetTime: req.TargetTime, Provider: provider,
+		Env: req.Environment, Instance: req.Instance, BackupLabel: req.BackupLabel, TargetTime: req.TargetTime, Provider: provider,
 	})
 	if err := k.errs[OpRestoreInstance]; err != nil {
 		return controlplane.RestoreInstanceOutcome{}, err
 	}
-	name, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, fakeEnvName(req.Environment))
-	if err != nil {
-		return controlplane.RestoreInstanceOutcome{}, err
+	if req.Instance == "" {
+		return controlplane.RestoreInstanceOutcome{}, fmt.Errorf("fake: recovering an instance in environment %q: no instance named: %w", req.Environment, controlplane.ErrInvalid)
 	}
+	name := req.Instance
 	if k.archiving[name] == "" {
 		return controlplane.RestoreInstanceOutcome{}, fmt.Errorf("fake: the postgres instance %q has no pgBackRest repository to recover from: %w", name, controlplane.ErrNotFound)
 	}
@@ -1364,20 +1370,20 @@ func (k *Kubernetes) SetBackupFailure(reason, detail string) {
 	*k.backupReason = controlplane.BackupJobOutcome{Reason: reason, Detail: detail}
 }
 
-func (k *Kubernetes) RunBackupJob(ctx context.Context, app, env, backupID string, dest *controlplane.BackupDestination) (controlplane.BackupJobOutcome, error) {
+func (k *Kubernetes) RunBackupJob(ctx context.Context, app, env, instance, backupID string, dest *controlplane.BackupDestination) (controlplane.BackupJobOutcome, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	*k.backups = append(*k.backups, backupCall{App: app, Env: env, BackupID: backupID, Dest: dest})
+	*k.backups = append(*k.backups, backupCall{App: app, Env: env, Instance: instance, BackupID: backupID, Dest: dest})
 	if err := k.errs[OpRunBackupJob]; err != nil {
 		// The call is recorded BEFORE the injected failure so a test can assert what the engine asked
 		// for even on the path where the Job fails — which is the path this issue is about.
 		return *k.backupReason, err
 	}
 	// The backup claim is created on first backup, exactly as the adapter creates it (ADR-0032) —
-	// one per ENVIRONMENT (ADR-0067 §1), so a backup taken in staging creates staging's claim and
-	// leaves production's alone. From then on it is a claim in the add-on namespace like any other,
-	// including after the add-on that filled it is gone.
-	claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, fakeEnvName(env))
+	// one per INSTANCE (ADR-0067 §1, ADR-0091 §4), so a backup taken from staging's server creates
+	// staging's claim and leaves every other one alone. From then on it is a claim in the add-on
+	// namespace like any other, including after the add-on that filled it is gone.
+	claim, err := controlplane.BackupVolumeName(controlplane.AddonPostgres, instance)
 	if err != nil {
 		return controlplane.BackupJobOutcome{}, err
 	}
@@ -1390,13 +1396,13 @@ func (k *Kubernetes) RunBackupJob(ctx context.Context, app, env, backupID string
 	return controlplane.BackupJobOutcome{SizeBytes: *k.backupSiz}, nil
 }
 
-func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, env, backupID string) error {
+func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, env, instance, backupID string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if err := k.errs[OpRunRestoreJob]; err != nil {
 		return err
 	}
-	*k.restores = append(*k.restores, backupCall{App: app, Env: env, BackupID: backupID})
+	*k.restores = append(*k.restores, backupCall{App: app, Env: env, Instance: instance, BackupID: backupID})
 	return nil
 }
 

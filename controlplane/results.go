@@ -797,6 +797,36 @@ func PgBackRestLabelFromManifestKey(key string) string {
 	return trimmed[i+1:]
 }
 
+// PgBackRestStanzaFromManifestKey reads the STANZA — the instance the backup was taken from — back
+// out of a manifest key PgBackRestManifestKey composed, and returns "" for anything that is not one.
+//
+// It exists because an environment may hold more than one instance (ADR-0091 §1), so a recorded
+// physical backup's environment no longer says which server it came from. Recovering instance A from
+// instance B's base backup would replace a live database with another server's data — issue #339's
+// shape on the most destructive verb in the product — and the answer is already on the row: the
+// object key names the stanza, and Burrow composed the key itself, so the derivation is exact rather
+// than a guess at somebody else's layout.
+//
+// It is the INVERSE of PgBackRestManifestKey and lives beside it so the two cannot drift.
+func PgBackRestStanzaFromManifestKey(key string) string {
+	const suffix = "/backup.manifest"
+	if !strings.HasSuffix(key, suffix) {
+		return ""
+	}
+	trimmed := strings.TrimSuffix(key, suffix)
+	i := strings.LastIndex(trimmed, "/")
+	if i < 0 {
+		return ""
+	}
+	// Everything up to the label, then the last segment of that: `<repoPath>/backup/<stanza>`.
+	upToStanza := trimmed[:i]
+	j := strings.LastIndex(upToStanza, "/")
+	if j < 0 {
+		return ""
+	}
+	return upToStanza[j+1:]
+}
+
 // pgBackRestObjectPrefix is where every pgBackRest repository Burrow configures lives in the bucket.
 // It is a sibling of backupObjectPrefix rather than the same prefix: the logical dumps are Burrow's
 // own object layout and the repository underneath this one is pgBackRest's, and letting a lifecycle

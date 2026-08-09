@@ -548,8 +548,71 @@ func (d *Database) SaveAddon(ctx context.Context, a controlplane.AddonInfo) erro
 		return fmt.Errorf("database: save addon: empty name")
 	}
 	a.Ready = false // readiness is never stored
+	// A row always carries a label, and a caller that names none is addressing the instance by its
+	// own name — which is what an environment's first instance is (ADR-0091 §2), and what every row
+	// written before labels existed was backfilled to.
+	if a.Label == "" {
+		a.Label = a.Name
+	}
 	d.addons[a.Name] = cloneAddon(a)
 	return nil
+}
+
+// AddonByLabel returns the instance labelled label in environment env, or ErrNotFound. A label is
+// unique within an environment (ADR-0091 §2), which is what makes this a single-row answer.
+func (d *Database) AddonByLabel(ctx context.Context, env, label string) (controlplane.AddonInfo, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAddon]; err != nil {
+		return controlplane.AddonInfo{}, err
+	}
+	if env == "" {
+		env = controlplane.DefaultEnvironment
+	}
+	for _, a := range d.addons {
+		if addonEnv(a) == env && addonLabel(a) == label {
+			return cloneAddon(a), nil
+		}
+	}
+	return controlplane.AddonInfo{}, fmt.Errorf("database: addon %q in environment %q: %w", label, env, controlplane.ErrNotFound)
+}
+
+// AddonsInEnvironment returns the registered instances of type t serving env, label order.
+func (d *Database) AddonsInEnvironment(ctx context.Context, t controlplane.AddonType, env string) ([]controlplane.AddonInfo, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpAddons]; err != nil {
+		return nil, err
+	}
+	if env == "" {
+		env = controlplane.DefaultEnvironment
+	}
+	out := []controlplane.AddonInfo{}
+	for _, a := range d.addons {
+		if a.Type == t && addonEnv(a) == env {
+			out = append(out, cloneAddon(a))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return addonLabel(out[i]) < addonLabel(out[j]) })
+	return out, nil
+}
+
+// addonEnv is the environment a stored row serves, with a row written before add-ons were
+// per-environment reading as the default one — the only environment it could have been.
+func addonEnv(a controlplane.AddonInfo) string {
+	if a.Environment == "" {
+		return controlplane.DefaultEnvironment
+	}
+	return a.Environment
+}
+
+// addonLabel is what an operator addresses a stored row by, falling back to its cluster name for a
+// row written before labels existed.
+func addonLabel(a controlplane.AddonInfo) string {
+	if a.Label == "" {
+		return a.Name
+	}
+	return a.Label
 }
 
 func (d *Database) Addon(ctx context.Context, name string) (controlplane.AddonInfo, error) {

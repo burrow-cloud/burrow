@@ -338,7 +338,7 @@ func exerciseBackupJob(t *testing.T) corev1.PodSpec {
 	client := fake.NewSimpleClientset()
 	var jobs []*batchv1.Job
 	succeedJobs(client, &jobs)
-	if _, err := markedAdapter(client).RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", nil); err != nil {
+	if _, err := markedAdapter(client).RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", nil); err != nil {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
 	return onlyJob(t, jobs).Spec.Template.Spec
@@ -350,7 +350,7 @@ func exerciseRestoreJob(t *testing.T) corev1.PodSpec {
 	client := fake.NewSimpleClientset()
 	var jobs []*batchv1.Job
 	succeedJobs(client, &jobs)
-	if err := markedAdapter(client).RunRestoreJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1"); err != nil {
+	if err := markedAdapter(client).RunRestoreJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1"); err != nil {
 		t.Fatalf("RunRestoreJob: %v", err)
 	}
 	return onlyJob(t, jobs).Spec.Template.Spec
@@ -361,7 +361,7 @@ func exerciseAddonInstance(t *testing.T) corev1.PodSpec {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
 	spec := controlplane.AddonSpec{Type: controlplane.AddonCache, Backend: "valkey", Image: "valkey:test", Port: 6379}
-	if _, err := markedAdapter(client).DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := markedAdapter(client).DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	dep, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-cache", metav1.GetOptions{})
@@ -376,7 +376,7 @@ func exerciseLogsCollector(t *testing.T) corev1.PodSpec {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
 	spec := controlplane.AddonSpec{Type: controlplane.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428}
-	if _, err := markedAdapter(client).DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := markedAdapter(client).DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	ds, err := client.AppsV1().DaemonSets(addonNS).Get(ctx, "burrow-logs-collector", metav1.GetOptions{})
@@ -395,7 +395,7 @@ func exerciseMetricsCollector(t *testing.T) corev1.PodSpec {
 		ObjectMeta: metav1.ObjectMeta{Name: vmagentServiceAccount, Namespace: addonNS},
 	})
 	spec := controlplane.AddonSpec{Type: controlplane.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428}
-	if _, err := markedAdapter(client).DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := markedAdapter(client).DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	dep, err := client.AppsV1().Deployments(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})

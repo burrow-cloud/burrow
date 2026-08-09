@@ -203,16 +203,34 @@ func New(cfg Config) (http.Handler, error) {
 	// EACH SEGMENT IS NAMED AFTER THE PARAMETER IT REPLACES, and they appear in a fixed order, so the
 	// combinations are enumerable rather than a grammar. Two narrowings mean three narrowed routes;
 	// the unnarrowed one is the form clients in the field send and keeps its meaning (ADR-0039 §2).
+	//
+	// THE INSTANCE RIDES THE ROUTE TOO, and for a sharper version of the same reason (ADR-0091 §1,
+	// issue #485's rule). `--name analytics` asks for a SECOND instance beside the environment's own;
+	// a control plane that drops the field installs the environment's own instead — re-applying the
+	// `Cluster` of a database that is already serving, with whatever the catalog's current defaults
+	// are, on an operator who asked for a new one. It goes after the environment and before the
+	// destination, so the segments stay in a fixed order.
 	v1.HandleFunc("POST /v1/addons", s.installAddon)
 	v1.HandleFunc("POST /v1/addons/env/{env}", s.installAddon)
+	v1.HandleFunc("POST /v1/addons/instance/{instance}", s.installAddon)
+	v1.HandleFunc("POST /v1/addons/env/{env}/instance/{instance}", s.installAddon)
 	v1.HandleFunc("POST /v1/addons/archive-destination/{destination}", s.installAddon)
 	v1.HandleFunc("POST /v1/addons/env/{env}/archive-destination/{destination}", s.installAddon)
+	v1.HandleFunc("POST /v1/addons/instance/{instance}/archive-destination/{destination}", s.installAddon)
+	v1.HandleFunc("POST /v1/addons/env/{env}/instance/{instance}/archive-destination/{destination}", s.installAddon)
 	v1.HandleFunc("POST /v1/addons/connect", s.connectAddon)
 	// attach/detach give an app its own database on the installed Postgres add-on (ADR-0031).
 	// attach carries NO secret value — burrowd generates the DATABASE_URL server-side and writes it
 	// to the app's Secret; the response carries the key name only. detach is held by a confirm
 	// guardrail (the app loses access to its data).
 	v1.HandleFunc("POST /v1/addons/attach", s.attachAddon)
+	// WHICH INSTANCE rides the route, because an environment may hold more than one (ADR-0091 §3) and
+	// a control plane that drops the selector attaches the app to the environment's DEFAULT instance:
+	// it provisions a database on the wrong server, rotates a password, and answers 200. The app then
+	// reads from a database that is not the one anybody asked for. It is the env-key's argument with
+	// data behind it.
+	v1.HandleFunc("POST /v1/addons/attach/instance/{instance}", s.attachAddon)
+	v1.HandleFunc("POST /v1/addons/attach/instance/{instance}/env-key/{env_key}", s.attachAddon)
 	// THE VARIABLE NAME RIDES THE ROUTE, and it is worth saying why, because it narrows nothing: the
 	// database, the instance and the namespace are the same whatever the variable is called. What it
 	// decides is WHICH KEY OF THE APP'S SECRET IS OVERWRITTEN, and that is the same shape of failure
@@ -239,6 +257,13 @@ func New(cfg Config) (http.Handler, error) {
 	// the two are registered.
 	v1.HandleFunc("POST /v1/addons/detach/data/keep/env/{env}", s.detachAddonKeepData)
 	v1.HandleFunc("POST /v1/addons/detach/data/delete/env/{env}", s.detachAddonDeleteData)
+	// And the instance, for the environment's reason one level down: with two instances in one
+	// environment, a dropped selector detaches the app from the wrong one — and on the deleting
+	// disposition it drops the wrong database (ADR-0091 §3).
+	v1.HandleFunc("POST /v1/addons/detach/data/keep/instance/{instance}", s.detachAddonKeepData)
+	v1.HandleFunc("POST /v1/addons/detach/data/delete/instance/{instance}", s.detachAddonDeleteData)
+	v1.HandleFunc("POST /v1/addons/detach/data/keep/env/{env}/instance/{instance}", s.detachAddonKeepData)
+	v1.HandleFunc("POST /v1/addons/detach/data/delete/env/{env}/instance/{instance}", s.detachAddonDeleteData)
 	// The legacy routes, kept because burrowd is the compatibility anchor (ADR-0039 §2). A client that
 	// sends them predates ADR-0090 and has told its user that a detach destroys the data, so that is
 	// what they do: the alternative is a CLI whose prompt says the rows are gone while this control
@@ -258,8 +283,12 @@ func New(cfg Config) (http.Handler, error) {
 	// discovered when they are needed (issue #485).
 	v1.HandleFunc("POST /v1/addons/backup", s.backupAddon)
 	v1.HandleFunc("POST /v1/addons/backup/env/{env}", s.backupAddon)
+	v1.HandleFunc("POST /v1/addons/backup/instance/{instance}", s.backupAddon)
+	v1.HandleFunc("POST /v1/addons/backup/env/{env}/instance/{instance}", s.backupAddon)
 	v1.HandleFunc("POST /v1/addons/backup/destination/{destination}", s.backupAddon)
 	v1.HandleFunc("POST /v1/addons/backup/env/{env}/destination/{destination}", s.backupAddon)
+	v1.HandleFunc("POST /v1/addons/backup/instance/{instance}/destination/{destination}", s.backupAddon)
+	v1.HandleFunc("POST /v1/addons/backup/env/{env}/instance/{instance}/destination/{destination}", s.backupAddon)
 	// A PHYSICAL backup is a separate route from a logical one rather than a mode of it, because it
 	// acts on a different thing: the whole instance rather than one app's database (ADR-0066 §4). Its
 	// `env` and `destination` stay PARAMETERS, and safely: this route and both of them shipped in the
@@ -267,6 +296,11 @@ func New(cfg Config) (http.Handler, error) {
 	// A parameter that cannot outrun its own route needs no protection — the same reason
 	// `skip_final_backup` stays a parameter on the removal. So do the physical restore's, below.
 	v1.HandleFunc("POST /v1/addons/backup-instance", s.backupInstance)
+	// Its INSTANCE does ride the route, unlike its env and destination, and the difference is the one
+	// the paragraph above draws: those two shipped with this route and cannot outrun it, while the
+	// selector is newer than both (ADR-0091). Dropped, it takes a base backup of the environment's
+	// default instance and records it as this one's.
+	v1.HandleFunc("POST /v1/addons/backup-instance/instance/{instance}", s.backupInstance)
 	// The backups listing is the ONE read in this class that rides the route, because its answer is
 	// an ARGUMENT rather than a display: it is the picker for `addon restore`, and the id it hands
 	// back goes into a call that overwrites a live database. See listBackupsHandler.
@@ -281,22 +315,40 @@ func New(cfg Config) (http.Handler, error) {
 	// And on the restore, which overwrites a live database rather than dropping one: an environment
 	// the server ignores puts the dump into production's instance (issue #485).
 	v1.HandleFunc("POST /v1/addons/restore/env/{env}", s.restoreAddon)
+	// And on the instance, which is the same sentence with the environment held constant: a dropped
+	// selector writes the dump into the default instance's database of that name (ADR-0091 §4).
+	v1.HandleFunc("POST /v1/addons/restore/instance/{instance}", s.restoreAddon)
+	v1.HandleFunc("POST /v1/addons/restore/env/{env}/instance/{instance}", s.restoreAddon)
 	// A PHYSICAL restore is a separate route from the per-app one, not a flag on it. The two act on
 	// different things — one app's database against the whole instance — and a single endpoint whose
 	// blast radius depended on which fields were populated would be one decode away from rewinding an
 	// environment somebody meant to restore one app of (ADR-0066 §4).
 	v1.HandleFunc("POST /v1/addons/restore-instance", s.restoreInstance)
+	// Its instance rides the route for backup-instance's reason, and this is the operation where the
+	// consequence of dropping it is worst: a rewind aimed at a second instance would rewind the
+	// environment's main one instead.
+	v1.HandleFunc("POST /v1/addons/restore-instance/instance/{instance}", s.restoreInstance)
 	// A statement against one app's database (ADR-0087). The environment RIDES THE ROUTE for the
 	// reason detach's and restore's do, and it is if anything sharper here: an environment a server
 	// drops sends a statement written for staging to the app of that name on the default
 	// environment's instance, and the statement may write (issue #485).
 	v1.HandleFunc("POST /v1/addons/sql", s.addonSQL)
 	v1.HandleFunc("POST /v1/addons/sql/env/{env}", s.addonSQL)
+	// And the instance, for the same reason with the environment held constant: an app attached to
+	// two instances has two databases of its own name, and a dropped selector runs the statement —
+	// which may write — against the other one.
+	v1.HandleFunc("POST /v1/addons/sql/instance/{instance}", s.addonSQL)
+	v1.HandleFunc("POST /v1/addons/sql/env/{env}/instance/{instance}", s.addonSQL)
 	// The shape of an instance, and changing it (ADR-0082). The read is a GET; the change is a POST
 	// whose body carries the one setting and the one value, because a change to an instance's shape
 	// is exactly the kind of thing that should not be expressible by fiddling with a URL.
 	v1.HandleFunc("GET /v1/addons/settings", s.addonSettings)
 	v1.HandleFunc("POST /v1/addons/config", s.configureAddon)
+	// The instance rides the route on the CHANGE and stays a query parameter on the READ. The change
+	// grows a volume that can never shrink and restarts every attached app; aimed at a second
+	// instance and dropped, it does both to the environment's main one (ADR-0091 §4). The read
+	// displays a shape and decides nothing.
+	v1.HandleFunc("POST /v1/addons/config/instance/{instance}", s.configureAddon)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	// What the removal does to the DATA is a route, and BOTH dispositions are, because here it is
@@ -310,6 +362,13 @@ func New(cfg Config) (http.Handler, error) {
 	// these two is a route at all: a typo must 404, never fall through to a default that acts.
 	v1.HandleFunc("DELETE /v1/addons/{name}/data/keep", s.removeAddonKeepData)
 	v1.HandleFunc("DELETE /v1/addons/{name}/data/delete", s.removeAddonDeleteData)
+	// The ENVIRONMENT rides the route on a removal that names an instance by its LABEL rather than by
+	// its registry name (ADR-0091 §2). A label is unique within an environment and not across the
+	// cluster, so a dropped environment resolves `analytics` in whichever environment happens to hold
+	// one — and this verb destroys. A removal that names a registry name outright needs none of this
+	// and keeps working unchanged; the older routes stay exactly as they are.
+	v1.HandleFunc("DELETE /v1/addons/{name}/env/{env}/data/keep", s.removeAddonKeepData)
+	v1.HandleFunc("DELETE /v1/addons/{name}/env/{env}/data/delete", s.removeAddonDeleteData)
 	v1.HandleFunc("POST /v1/logs/query", s.queryLogs)
 	v1.HandleFunc("POST /v1/metrics/query", s.queryMetrics)
 	v1.HandleFunc("GET /v1/audit", s.audit)
@@ -1173,6 +1232,7 @@ func (s *server) installAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, err := s.engine.InstallAddon(r.Context(), controlplane.AddonType(req.Type), narrowed(r, "env", req.Env), controlplane.InstallAddonOptions{
+		Name:               r.PathValue("instance"),
 		Confirm:            req.Confirm,
 		ArchiveDestination: narrowed(r, "destination", req.ArchiveDestination),
 	})
@@ -1268,6 +1328,7 @@ func (s *server) removeAddonDeleteData(w http.ResponseWriter, r *http.Request) {
 func (s *server) removeAddonWith(w http.ResponseWriter, r *http.Request, deleteData bool) {
 	q := r.URL.Query()
 	opts := controlplane.RemoveAddonOptions{
+		Environment:       r.PathValue("env"),
 		DeleteData:        deleteData,
 		SkipFinalBackup:   q.Get("skip_final_backup") == "true",
 		BackupDestination: q.Get("backup_destination"),
@@ -1296,7 +1357,8 @@ func (s *server) attachAddon(w http.ResponseWriter, r *http.Request) {
 	if !s.decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.AttachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env, r.PathValue("env_key"))
+	res, err := s.engine.AttachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env,
+		controlplane.AttachAddonOptions{Instance: r.PathValue("instance"), EnvKey: r.PathValue("env_key")})
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1329,7 +1391,7 @@ func (s *server) detachAddonWith(w http.ResponseWriter, r *http.Request, deleteD
 	if env := r.PathValue("env"); env != "" {
 		req.Env = env
 	}
-	opts := controlplane.DetachAddonOptions{DeleteData: deleteData, Confirm: req.Confirm}
+	opts := controlplane.DetachAddonOptions{Instance: r.PathValue("instance"), DeleteData: deleteData, Confirm: req.Confirm}
 	if err := s.engine.DetachAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Env, opts); err != nil {
 		writeEngineError(w, err)
 		return
@@ -1349,7 +1411,7 @@ func (s *server) backupAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.engine.BackupAddon(r.Context(), controlplane.AddonType(req.Addon), req.App,
-		narrowed(r, "env", req.Env), narrowed(r, "destination", req.Destination))
+		narrowed(r, "env", req.Env), r.PathValue("instance"), narrowed(r, "destination", req.Destination))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1367,7 +1429,7 @@ func (s *server) backupInstance(w http.ResponseWriter, r *http.Request) {
 	if !s.decode(w, r, &req) {
 		return
 	}
-	res, err := s.engine.BackupInstance(r.Context(), controlplane.AddonType(req.Addon), req.Env, req.Destination)
+	res, err := s.engine.BackupInstance(r.Context(), controlplane.AddonType(req.Addon), req.Env, r.PathValue("instance"), req.Destination)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1432,7 +1494,7 @@ func (s *server) addonSettings(w http.ResponseWriter, r *http.Request) {
 	if addon == "" {
 		addon = string(controlplane.AddonPostgres)
 	}
-	res, err := s.engine.AddonSettings(r.Context(), controlplane.AddonType(addon), r.URL.Query().Get("env"))
+	res, err := s.engine.AddonSettings(r.Context(), controlplane.AddonType(addon), r.URL.Query().Get("env"), r.URL.Query().Get("instance"))
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1454,7 +1516,7 @@ func (s *server) configureAddon(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.engine.ConfigureAddon(r.Context(), controlplane.AddonType(req.Addon), req.Env,
 		controlplane.AddonSetting(req.Setting), req.Value,
-		controlplane.ConfigureAddonOptions{Confirm: req.Confirm})
+		controlplane.ConfigureAddonOptions{Instance: r.PathValue("instance"), Confirm: req.Confirm})
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -1492,7 +1554,7 @@ func (s *server) restoreAddon(w http.ResponseWriter, r *http.Request) {
 	if env := r.PathValue("env"); env != "" {
 		req.Env = env
 	}
-	if err := s.engine.RestoreAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Backup, req.Env, req.Confirm); err != nil {
+	if err := s.engine.RestoreAddon(r.Context(), controlplane.AddonType(req.Addon), req.App, req.Backup, req.Env, r.PathValue("instance"), req.Confirm); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -1526,6 +1588,7 @@ func (s *server) addonSQL(w http.ResponseWriter, r *http.Request) {
 		Addon:     controlplane.AddonType(req.Addon),
 		App:       req.App,
 		Env:       req.Env,
+		Instance:  r.PathValue("instance"),
 		Statement: req.Statement,
 		Confirm:   req.Confirm,
 	})
@@ -1551,6 +1614,7 @@ func (s *server) restoreInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.engine.RestoreInstance(r.Context(), controlplane.AddonType(req.Addon), req.Env, controlplane.RestoreInstanceOptions{
+		Instance:         r.PathValue("instance"),
 		Backup:           req.Backup,
 		ToTime:           req.ToTime,
 		Latest:           req.Latest,

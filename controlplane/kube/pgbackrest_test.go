@@ -123,7 +123,7 @@ func TestDeployAddonWiresTheArchive(t *testing.T) {
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
 		t.Fatalf("DeployAddon with an archive: %v", err)
 	}
 	instance, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
@@ -173,7 +173,7 @@ func TestStanzaCarriesTheCredentialByReference(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 	archive := testArchive(controlplane.DefaultEnvironment, 30)
 
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, archive); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), archive); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	instance, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
@@ -220,7 +220,7 @@ func TestStanzaRetentionIsBurrowsWindow(t *testing.T) {
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
@@ -249,7 +249,7 @@ func TestStanzaWithNoRetentionDeclaresNone(t *testing.T) {
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 0)); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 0)); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
@@ -268,7 +268,7 @@ func TestArchiveIsIsolatedPerEnvironment(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
 	for _, env := range []string{controlplane.DefaultEnvironment, "staging"} {
-		if _, err := a.DeployAddon(ctx, postgresSpec(t), env, testArchive(env, 30)); err != nil {
+		if _, err := a.DeployAddon(ctx, postgresSpec(t), env, testInstanceOf(postgresSpec(t), env), testArchive(env, 30)); err != nil {
 			t.Fatalf("DeployAddon in %s: %v", env, err)
 		}
 	}
@@ -303,7 +303,7 @@ func TestDeployAddonWithoutAnArchiveWritesNoPlugin(t *testing.T) {
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
@@ -328,10 +328,10 @@ func TestReinstallAttachesTheArchiveToAnExistingCluster(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 	spec := postgresSpec(t)
 
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("first DeployAddon: %v", err)
 	}
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
 		t.Fatalf("second DeployAddon: %v", err)
 	}
 	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
@@ -351,7 +351,7 @@ func TestArchiveRefusesAPlaintextEndpoint(t *testing.T) {
 	archive := testArchive(controlplane.DefaultEnvironment, 30)
 	archive.Config.Endpoint = "http://minio.example.invalid:9000"
 
-	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, archive)
+	_, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), archive)
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("DeployAddon with a plaintext endpoint = %v, want ErrInvalid", err)
 	}
@@ -369,7 +369,7 @@ func TestArchiveSkippedWithoutThePluginIsStatedNotRefused(t *testing.T) {
 	client, dyn := cnpgReadyCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30))
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 30))
 	if err != nil {
 		t.Fatalf("DeployAddon without the plugin must succeed: %v", err)
 	}
@@ -399,12 +399,12 @@ func TestArchiveRefusesARepointedDestination(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 	spec := postgresSpec(t)
 
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
 		t.Fatalf("first DeployAddon: %v", err)
 	}
 	other := testArchive(controlplane.DefaultEnvironment, 30)
 	other.Config.Bucket = "a-different-bucket"
-	_, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, other)
+	_, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), other)
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("re-installing against a different bucket = %v, want ErrInvalid", err)
 	}
@@ -420,7 +420,7 @@ func TestRemovalTakesTheArchiveConfigurationAndNoBackup(t *testing.T) {
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
+	if _, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 30)); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
@@ -519,7 +519,7 @@ func TestNewInstanceAsksForItsBaseBackupImmediately(t *testing.T) {
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30))
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 30))
 	if err != nil {
 		t.Fatalf("DeployAddon with an archive: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestInstallReportsTheArchiveItActuallyWired(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
 	archive := testArchive(controlplane.DefaultEnvironment, 45)
-	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, archive)
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), archive)
 	if err != nil {
 		t.Fatalf("DeployAddon with an archive: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestInstallWithNoArchiveWarnsAndNamesTheFix(t *testing.T) {
 	client, dyn := archivingCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, nil)
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), nil)
 	if err != nil {
 		t.Fatalf("DeployAddon with no destination: %v", err)
 	}
@@ -603,7 +603,7 @@ func TestInstallWithoutThePluginReportsNoArchiving(t *testing.T) {
 	client, dyn := cnpgReadyCluster()
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 
-	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30))
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 30))
 	if err != nil {
 		t.Fatalf("DeployAddon without the plugin must succeed: %v", err)
 	}
@@ -625,13 +625,13 @@ func TestReinstallDoesNotClaimABaseBackupItCouldNotAskFor(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 	spec, archive := postgresSpec(t), testArchive(controlplane.DefaultEnvironment, 30)
 
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, archive); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), archive); err != nil {
 		t.Fatalf("first DeployAddon: %v", err)
 	}
 	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
 	setStanzaBackupCount(t, dyn, instance, 0)
 
-	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, archive)
+	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), archive)
 	if err != nil {
 		t.Fatalf("re-running DeployAddon: %v", err)
 	}
@@ -651,13 +651,13 @@ func TestBaseBackupIsReportedPresentFromTheRepository(t *testing.T) {
 	a := kube.New(client, "burrow").WithDynamicClient(dyn)
 	spec, archive := postgresSpec(t), testArchive(controlplane.DefaultEnvironment, 30)
 
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, archive); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), archive); err != nil {
 		t.Fatalf("first DeployAddon: %v", err)
 	}
 	instance, _ := controlplane.AddonInstanceName(controlplane.AddonPostgres, controlplane.DefaultEnvironment)
 	setStanzaBackupCount(t, dyn, instance, 3)
 
-	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, archive)
+	info, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), archive)
 	if err != nil {
 		t.Fatalf("re-running DeployAddon: %v", err)
 	}
@@ -682,7 +682,7 @@ func TestBackupsAreNotClaimedWhenTheWiringCannotBeRead(t *testing.T) {
 			return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: kube.CNPGAPIGroup, Resource: "clusters"}, "", errors.New("no grant"))
 		})
 
-	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testArchive(controlplane.DefaultEnvironment, 30))
+	info, err := a.DeployAddon(ctx, postgresSpec(t), controlplane.DefaultEnvironment, testInstanceOf(postgresSpec(t), controlplane.DefaultEnvironment), testArchive(controlplane.DefaultEnvironment, 30))
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}

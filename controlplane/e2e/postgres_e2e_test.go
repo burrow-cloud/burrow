@@ -147,7 +147,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "attach addon", func(localPort int) error {
 		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
 		var aerr error
-		res, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "", "")
+		res, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "", cp.AttachAddonOptions{})
 		return aerr
 	})
 	if res.SecretKey != "DATABASE_URL" {
@@ -194,7 +194,7 @@ func TestPostgresAddonE2E(t *testing.T) {
 	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "attach addon (staging)", func(localPort int) error {
 		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
 		var aerr error
-		stagingRes, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", "")
+		stagingRes, aerr = engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", cp.AttachAddonOptions{})
 		return aerr
 	})
 	if stagingRes.Environment != "staging" {
@@ -248,7 +248,7 @@ psql "$DATABASE_URL" -tAc "SELECT id FROM t;" | grep -q 42`)
 	// therefore through a credential that no longer authenticates — reads back through the new one.
 	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "re-attach addon (staging)", func(localPort int) error {
 		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", "")
+		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", cp.AttachAddonOptions{})
 		return aerr
 	})
 	runSQLJob(t, ctx, client, stagingNS, app, "kept",
@@ -268,7 +268,7 @@ test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t;")" = "2"`)
 	}
 	withPortForward(t, cfg, client, addonNS, stagingSelector, 5432, "re-attach addon after --delete-data (staging)", func(localPort int) error {
 		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", "")
+		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "staging", cp.AttachAddonOptions{})
 		return aerr
 	})
 	runSQLJob(t, ctx, client, stagingNS, app, "destroyed",
@@ -372,7 +372,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 	// Attach the app (an admin-SQL op, so it goes through a port-forward like the other e2e).
 	withPortForward(t, cfg, client, addonNS, pgSelector, 5432, "attach addon", func(localPort int) error {
 		prov.WithInstanceEndpoint(fmt.Sprintf("127.0.0.1:%d", localPort))
-		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "", "")
+		_, aerr := engine.AttachAddon(ctx, cp.AddonPostgres, app, "", cp.AttachAddonOptions{})
 		return aerr
 	})
 
@@ -382,7 +382,7 @@ func TestPostgresBackupRestoreE2E(t *testing.T) {
 psql "$DATABASE_URL" -c "INSERT INTO t VALUES (7);"`)
 
 	// Back up: burrowd creates an in-cluster pg_dump Job — NO port-forward needed.
-	res, err := engine.BackupAddon(ctx, cp.AddonPostgres, app, "", "")
+	res, err := engine.BackupAddon(ctx, cp.AddonPostgres, app, "", "", "")
 	if err != nil {
 		t.Fatalf("BackupAddon: %v", err)
 	}
@@ -396,7 +396,7 @@ psql "$DATABASE_URL" -c "INSERT INTO t VALUES (7);"`)
 test "$(psql "$DATABASE_URL" -tAc "SELECT count(*) FROM t WHERE id = 7;")" = "0"`)
 
 	// Restore: burrowd creates an in-cluster pg_restore Job — again NO port-forward.
-	if err := engine.RestoreAddon(ctx, cp.AddonPostgres, app, res.Backup.ID, "", true); err != nil {
+	if err := engine.RestoreAddon(ctx, cp.AddonPostgres, app, res.Backup.ID, "", "", true); err != nil {
 		t.Fatalf("RestoreAddon: %v", err)
 	}
 

@@ -214,7 +214,7 @@ func TestAddonDeployListDelete(t *testing.T) {
 	a := kube.New(client, ns).WithAddonNamespace(addonNS)
 
 	spec := cp.AddonSpec{Type: cp.AddonLogs, Backend: "victorialogs", Image: "victoria-logs:test", Port: 9428, StorageGi: 5, Capabilities: []string{"logs"}}
-	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, nil)
+	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, testInstanceOf(spec, cp.DefaultEnvironment), nil)
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestAddonMetricsDeployDelete(t *testing.T) {
 	a := kube.New(client, ns).WithAddonNamespace(addonNS)
 
 	spec := cp.AddonSpec{Type: cp.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428, StorageGi: 10, Capabilities: []string{"metrics"}}
-	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, nil)
+	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, testInstanceOf(spec, cp.DefaultEnvironment), nil)
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestAddonMetricsRequiresVmagentServiceAccount(t *testing.T) {
 	a := kube.New(client, ns).WithAddonNamespace(addonNS)
 
 	spec := cp.AddonSpec{Type: cp.AddonMetrics, Backend: "victoriametrics", Image: "victoria-metrics:test", Port: 8428, StorageGi: 10, Capabilities: []string{"metrics"}}
-	_, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, nil)
+	_, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, testInstanceOf(spec, cp.DefaultEnvironment), nil)
 	if err == nil {
 		t.Fatal("DeployAddon should fail when the vmagent ServiceAccount is absent")
 	}
@@ -383,7 +383,7 @@ func TestAddonCacheDeployDelete(t *testing.T) {
 
 	// A cache is ephemeral (StorageGi 0) and has no collector — the generic deploy path.
 	spec := cp.AddonSpec{Type: cp.AddonCache, Backend: "valkey", Image: "valkey:test", Port: 6379, StorageGi: 0, Capabilities: []string{"cache"}}
-	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, nil)
+	info, err := a.DeployAddon(ctx, spec, cp.DefaultEnvironment, testInstanceOf(spec, cp.DefaultEnvironment), nil)
 	if err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}

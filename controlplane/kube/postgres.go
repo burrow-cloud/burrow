@@ -169,21 +169,34 @@ func (t PostgresTarget) ReadHost() string {
 // a password mismatch between it and a write (issue #519). Resolving is not the hazard; resolving a
 // name nobody chose is. A caller whose instance is somewhere else must now say where, and a caller
 // that says nothing at all reaches no instance rather than the nearest one.
-type PostgresTargetFunc func(env string) (PostgresTarget, error)
+//
+// IT TAKES THE INSTANCE AS WELL AS THE ENVIRONMENT (ADR-0091 §4). An environment may hold more than
+// one instance, so the environment alone no longer picks a server: the instance is the name the
+// registry holds for the one this operation acts on, and the environment is what says whose data it
+// is. Both are required.
+type PostgresTargetFunc func(env, instance string) (PostgresTarget, error)
 
 // AddonInstanceTarget is the target of a single-tenant install — the one an existing install already
-// has, and the value burrowd is wired with: environment env's add-on instance (AddonInstanceName,
-// the single derivation shared with the installer and the registry — ADR-0067 §1) in the add-on
-// namespace burrowd was installed with. An empty namespace means the default one, so an install that
-// never set BURROW_ADDON_NAMESPACE names exactly the instance, Secret, and host it has always used.
+// has, and the value burrowd is wired with: the named instance, in the add-on namespace burrowd was
+// installed with. An empty namespace means the default one, so an install that never set
+// BURROW_ADDON_NAMESPACE names exactly the instance, Secret, and host it has always used.
+//
+// It composes NO name of its own. The instance arrives from the caller, which resolved it out of the
+// registry (ADR-0091 §2); what this adds is the namespace, which is configuration rather than
+// derivation (issue #519).
 func AddonInstanceTarget(addonNamespace string) PostgresTargetFunc {
 	if addonNamespace == "" {
 		addonNamespace = defaultAddonNamespace
 	}
-	return func(env string) (PostgresTarget, error) {
-		instance, err := postgresSecretName(env)
-		if err != nil {
-			return PostgresTarget{}, err
+	return func(env, instance string) (PostgresTarget, error) {
+		if env == "" {
+			return PostgresTarget{}, fmt.Errorf("kube: postgres target: no environment named: %w", controlplane.ErrInvalid)
+		}
+		// The INSTANCE is given, not derived. It is the name the registry holds (ADR-0091 §2), and a
+		// caller that names none reaches no instance rather than the one a derivation would have
+		// picked — which is the same failure issue #519 closed, one level down.
+		if instance == "" {
+			return PostgresTarget{}, fmt.Errorf("kube: postgres target for environment %q: no instance named: %w", env, controlplane.ErrInvalid)
 		}
 		return PostgresTarget{Instance: instance, Namespace: addonNamespace}, nil
 	}
@@ -318,19 +331,19 @@ func NewPostgresProvisionerFromConfig(cfg *rest.Config, target PostgresTargetFun
 // targetFor resolves environment env to the instance this provisioner was configured to act on. A
 // provisioner built without a target resolves nothing: it fails closed here rather than falling back
 // to a name derived from wherever it is running, which is the failure this seam exists to remove.
-func (p *PostgresProvisioner) targetFor(env string) (PostgresTarget, error) {
+func (p *PostgresProvisioner) targetFor(env, instance string) (PostgresTarget, error) {
 	if p.target == nil {
 		return PostgresTarget{}, fmt.Errorf("kube: the postgres provisioner was given no instance to act on: %w", controlplane.ErrInvalid)
 	}
-	return p.target(env)
+	return p.target(env, instance)
 }
 
 // instanceHost is the host environment env's Postgres instance is reached at. This is what goes into
 // that environment's apps' DATABASE_URLs — apps are pods and resolve it through cluster DNS. The
 // environment selects one of the instances the provisioner was configured with, so the URL an app is
 // handed names the server its own environment runs.
-func (p *PostgresProvisioner) instanceHost(env string) (string, error) {
-	target, err := p.targetFor(env)
+func (p *PostgresProvisioner) instanceHost(env, instance string) (string, error) {
+	target, err := p.targetFor(env, instance)
 	if err != nil {
 		return "", err
 	}
@@ -340,11 +353,11 @@ func (p *PostgresProvisioner) instanceHost(env string) (string, error) {
 // dialHostPort is the host:port the provisioner DIALS for env: the test override if set, otherwise
 // the in-cluster Service address. Distinct from instanceHost so the override never leaks into an
 // app's DATABASE_URL.
-func (p *PostgresProvisioner) dialHostPort(env string) (string, error) {
+func (p *PostgresProvisioner) dialHostPort(env, instance string) (string, error) {
 	if p.instanceEndpoint != "" {
 		return p.instanceEndpoint, nil
 	}
-	host, err := p.instanceHost(env)
+	host, err := p.instanceHost(env, instance)
 	if err != nil {
 		return "", err
 	}
@@ -399,8 +412,8 @@ func (p *PostgresProvisioner) connect(ctx context.Context, dsn string) (sqlConn,
 // namespace under the target's name, so the credential comes from the same place the host does and
 // the two cannot disagree. The value is used only to open the admin connection; it is never logged
 // or returned.
-func (p *PostgresProvisioner) superuserPassword(ctx context.Context, env string) (string, error) {
-	target, err := p.targetFor(env)
+func (p *PostgresProvisioner) superuserPassword(ctx context.Context, env, instance string) (string, error) {
+	target, err := p.targetFor(env, instance)
 	if err != nil {
 		return "", err
 	}
@@ -439,12 +452,12 @@ func (p *PostgresProvisioner) adminDSN(password, database, hostPort string) stri
 // EXACTLY ONE CALLER REMAINS: ListAppDatabases. Provisioning does not use it any more (ADR-0066 §2),
 // and a second caller appearing here is worth arguing about rather than adding — every one of them
 // is a superuser DSN burrowd holds.
-func (p *PostgresProvisioner) connectAdmin(ctx context.Context, env, database string) (sqlConn, error) {
-	hostPort, err := p.dialHostPort(env)
+func (p *PostgresProvisioner) connectAdmin(ctx context.Context, env, instance, database string) (sqlConn, error) {
+	hostPort, err := p.dialHostPort(env, instance)
 	if err != nil {
 		return nil, err
 	}
-	pw, err := p.superuserPassword(ctx, env)
+	pw, err := p.superuserPassword(ctx, env, instance)
 	if err != nil {
 		return nil, err
 	}
@@ -526,13 +539,13 @@ func appDSN(role, password, hostPort, app string) string {
 // property of the identifiers an attach derives, so the verb that derives them is the verb that
 // knows. Refusing at detach instead would mean the attach succeeded, the two roles collapsed into
 // one, and the failure surfaced only when the app's access was supposed to end.
-func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env string) (string, error) {
+func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env, instance string) (string, error) {
 	if err := validatePostgresAppName(app); err != nil {
 		return "", err
 	}
 	// The environment is resolved to an instance BEFORE anything is written: an empty or malformed
 	// environment is ErrInvalid here, never a silent fallback to whichever instance exists.
-	target, err := p.targetFor(env)
+	target, err := p.targetFor(env, instance)
 	if err != nil {
 		return "", err
 	}
@@ -601,11 +614,11 @@ func (p *PostgresProvisioner) EnsureAppDatabase(ctx context.Context, app, env st
 // It does not check whether a standby exists. Whether an instance should have a read address is the
 // engine's decision (ADR-0081 §2); an implementation that second-guessed it would be a second
 // opinion about a fact the engine has already read off the `Cluster`.
-func (p *PostgresProvisioner) AppReadURL(ctx context.Context, app, env string) (string, error) {
+func (p *PostgresProvisioner) AppReadURL(ctx context.Context, app, env, instance string) (string, error) {
 	if err := validatePostgresAppName(app); err != nil {
 		return "", err
 	}
-	target, err := p.targetFor(env)
+	target, err := p.targetFor(env, instance)
 	if err != nil {
 		return "", err
 	}
@@ -718,8 +731,8 @@ func (p *PostgresProvisioner) connectAsApp(ctx context.Context, dsn, app, env st
 // login role can be dropped, and the prefix covers it — which keeps a retained database visible to
 // the confirmation that is about to destroy it. Handing it to the superuser instead would have made
 // exactly the unattached databases invisible here.
-func (p *PostgresProvisioner) ListAppDatabases(ctx context.Context, env string) ([]string, error) {
-	db, err := p.connectAdmin(ctx, env, "postgres")
+func (p *PostgresProvisioner) ListAppDatabases(ctx context.Context, env, instance string) ([]string, error) {
+	db, err := p.connectAdmin(ctx, env, instance, "postgres")
 	if err != nil {
 		return nil, err
 	}
@@ -783,11 +796,11 @@ ORDER BY d.datname`
 // The environment is required and unvalidated values are refused before anything is written, for the
 // reason they always are: a detach that reached another environment's server would take an app's
 // access to a database that is still in use (ADR-0067 §1).
-func (p *PostgresProvisioner) RevokeAppDatabase(ctx context.Context, app, env string) error {
+func (p *PostgresProvisioner) RevokeAppDatabase(ctx context.Context, app, env, instance string) error {
 	if err := validateAppIdentifier(app); err != nil {
 		return err
 	}
-	target, err := p.targetFor(env)
+	target, err := p.targetFor(env, instance)
 	if err != nil {
 		return err
 	}
@@ -902,11 +915,11 @@ func (p *PostgresProvisioner) releaseWhatTheRoleOwns(ctx context.Context, target
 // The environment is required and unvalidated values are refused before anything is written, for the
 // reason they always were: this is the destructive half of the pair, so reaching another
 // environment's server here would drop a database that is still in use (ADR-0067 §1).
-func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app, env string) error {
+func (p *PostgresProvisioner) DropAppDatabase(ctx context.Context, app, env, instance string) error {
 	if err := validateAppIdentifier(app); err != nil {
 		return err
 	}
-	target, err := p.targetFor(env)
+	target, err := p.targetFor(env, instance)
 	if err != nil {
 		return err
 	}

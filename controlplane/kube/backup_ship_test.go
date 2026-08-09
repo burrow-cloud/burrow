@@ -49,7 +49,7 @@ func TestBackupJobWithDestinationDumpsThenShips(t *testing.T) {
 	succeedJobs(client, &created)
 
 	a := New(client, "apps").WithAddonNamespace(addonNS).WithShipperImage("ghcr.io/burrow-cloud/burrowd:v9.9.9")
-	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", testDestination()); err != nil {
+	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", testDestination()); err != nil {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
 	if len(created) != 1 {
@@ -128,7 +128,7 @@ func TestBackupJobKeepsTheCredentialOutOfTheJobSpec(t *testing.T) {
 
 	dest := testDestination()
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", dest); err != nil {
+	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", dest); err != nil {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
 	rendered := renderJob(created[0])
@@ -170,7 +170,7 @@ func TestBackupCredentialSecretExistsBeforeTheJobAndNotAfter(t *testing.T) {
 	})
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", testDestination()); err != nil {
+	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", testDestination()); err != nil {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
 	secretAt, jobAt := indexOfAction(order, "secrets"), indexOfAction(order, "jobs")
@@ -204,7 +204,7 @@ func TestBackupCredentialSecretIsRemovedWhenTheJobFails(t *testing.T) {
 	})
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", testDestination()); err == nil {
+	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", testDestination()); err == nil {
 		t.Fatal("RunBackupJob should error when the Job fails")
 	}
 	name := backupCredSecretName(created[0].Name)
@@ -223,7 +223,7 @@ func TestBackupJobWithoutDestinationIsUnchanged(t *testing.T) {
 	succeedJobs(client, &created)
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", nil); err != nil {
+	if _, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", nil); err != nil {
 		t.Fatalf("RunBackupJob: %v", err)
 	}
 	pod := created[0].Spec.Template.Spec
@@ -278,7 +278,7 @@ func TestBackupOutcomeCarriesTheShippersReason(t *testing.T) {
 	}
 
 	a := New(client, "apps").WithAddonNamespace(addonNS)
-	outcome, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, "bk1", testDestination())
+	outcome, err := a.RunBackupJob(ctx, "shop", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment), "bk1", testDestination())
 	if err == nil {
 		t.Fatal("RunBackupJob should error when the Job failed")
 	}

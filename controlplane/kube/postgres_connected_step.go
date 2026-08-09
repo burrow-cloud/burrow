@@ -178,7 +178,7 @@ func (p *PostgresProvisioner) runConnectedStep(ctx context.Context, step Postgre
 // override must never leak into what an app is handed. A substituted implementation is inside the
 // target cluster by construction and uses the Target.
 func (p *PostgresProvisioner) runConnectedStepInProcess(ctx context.Context, step PostgresConnectedStep) error {
-	hostPort, err := p.dialHostPort(step.Environment)
+	hostPort, err := p.dialHostPort(step.Environment, step.Target.Instance)
 	if err != nil {
 		return err
 	}

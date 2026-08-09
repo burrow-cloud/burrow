@@ -961,8 +961,15 @@ func (c *Client) Apps(ctx context.Context, env string) ([]WorkloadStatus, error)
 
 // Addon is one installed (and, later, connected) add-on instance.
 type Addon struct {
+	// Name is the instance's name IN THE CLUSTER — what `kubectl get` shows. For an environment's
+	// first instance it is the same string as Label; for every later one it is a generated
+	// `burrow-<type>-<id>` the operator never types (ADR-0091 §2).
 	Name string `json:"name"`
 	Type string `json:"type"`
+	// Label is what a person calls this instance: what `--name` takes and what a guardrail key holds
+	// (ADR-0091 §1). Empty on a row from a control plane that predates labels, where the name is the
+	// answer.
+	Label string `json:"label,omitempty"`
 	// Environment is the environment this instance serves (ADR-0067 §1): each environment gets its
 	// own instance, so this is what distinguishes two rows of the same type.
 	Environment string `json:"environment,omitempty"`
@@ -1037,6 +1044,10 @@ type AddonBackups struct {
 // InstallAddonOptions is everything `addon install` carries beyond the add-on's type and its
 // environment.
 type InstallAddonOptions struct {
+	// Name is the LABEL of the instance to install: naming one stands a SECOND instance up beside the
+	// environment's own (ADR-0091 §1). Empty is the environment's default instance, which is what
+	// every add-on command has always meant.
+	Name string
 	// Confirm satisfies the addon.install guardrail's confirmation hold.
 	Confirm bool
 	// ArchiveDestination names the object-storage provider a Postgres instance archives to
@@ -1057,8 +1068,15 @@ type InstallAddonOptions struct {
 func (c *Client) InstallAddon(ctx context.Context, addonType, env string, opts InstallAddonOptions) (Addon, error) {
 	var out Addon
 	body := map[string]any{"type": addonType, "env": "", "confirm": opts.Confirm, "archive_destination": ""}
-	path := narrowing(narrowing("/v1/addons", "env", env), "archive-destination", opts.ArchiveDestination)
+	path := narrowing(narrowing(narrowing("/v1/addons", "env", env), "instance", opts.Name), "archive-destination", opts.ArchiveDestination)
 	err := c.do(ctx, http.MethodPost, path, body, &out)
+	if err != nil && opts.Name != "" {
+		// Named first when several narrowings were asked for: an instance in the wrong environment or
+		// with no archiving is at least an instance somebody asked to create, where this one changes
+		// an instance that is already serving.
+		what := fmt.Sprintf("this control plane cannot install a SECOND add-on instance, so nothing was installed: the same call against it would have re-applied the environment's own %s instance rather than standing up %q beside it", addonType, opts.Name)
+		return out, scopeRefusal(what, "more than one add-on instance per environment", err)
+	}
 	if err != nil && (env != "" || opts.ArchiveDestination != "") {
 		// The archive destination is named first when both were asked for: an instance in the wrong
 		// environment is visible and removable, an instance with no way back is neither.
@@ -1140,8 +1158,11 @@ func (c *Client) Addons(ctx context.Context) ([]Addon, error) {
 // this reports the retained volume names — the data volume a reinstall would reuse and the Postgres
 // backup volume, which outlives the database either way (ADR-0025/0031/0032).
 type RemoveAddonResult struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	// Instance is the LABEL the operator addressed the instance by (ADR-0091 §1). Empty from a
+	// control plane that predates labels, where Name is the answer.
+	Instance string `json:"instance,omitempty"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
 	// Namespace is where the add-on's resources, and any retained volume, live.
 	Namespace string `json:"namespace,omitempty"`
 	// DataDeleted reports whether the add-on's data volume was destroyed.
@@ -1167,6 +1188,10 @@ type RemoveAddonResult struct {
 // RemoveAddonOptions is everything `addon remove` carries beyond the add-on's name. It is a struct
 // rather than a run of positional booleans because this is the most destructive call in the API.
 type RemoveAddonOptions struct {
+	// Environment scopes a removal that names an instance by its LABEL rather than by its registry
+	// name (ADR-0091 §2): a label is unique within an environment, so `analytics` needs to know which
+	// one. A removal that names a registry name needs none of it and keeps its old shape.
+	Environment string
 	// DeleteData is the explicit opt-in that also DESTROYS the add-on's data volume — for Postgres,
 	// every attached app's database. Without it the removal tears down the workload and leaves the
 	// volume, so a reinstall picks the data back up.
@@ -1202,7 +1227,7 @@ func (c *Client) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 	if opts.DeleteData {
 		disposition = "delete"
 	}
-	path := "/v1/addons/" + url.PathEscape(name) + "/data/" + disposition
+	path := narrowing("/v1/addons/"+url.PathEscape(name), "env", opts.Environment) + "/data/" + disposition
 	q := url.Values{}
 	if opts.Confirm {
 		q.Set("confirm", "true")
@@ -1319,12 +1344,18 @@ type ConfigureAddonResult struct {
 
 // AddonSettings reports what can be configured on environment env's instance of an add-on and what
 // each setting is currently set to (ADR-0082 §1). Read-only.
-func (c *Client) AddonSettings(ctx context.Context, addonType, env string) (AddonSettingsResult, error) {
+func (c *Client) AddonSettings(ctx context.Context, addonType, env, instance string) (AddonSettingsResult, error) {
 	var out AddonSettingsResult
 	q := url.Values{}
 	q.Set("addon", addonType)
 	if env != "" {
 		q.Set("env", env)
+	}
+	// A query parameter, unlike the change below: this read displays a shape and decides nothing, so
+	// a control plane that drops it answers about the environment's default instance instead of
+	// refusing — which misinforms a reader rather than changing the wrong thing (ADR-0091 §4).
+	if instance != "" {
+		q.Set("instance", instance)
 	}
 	err := c.do(ctx, http.MethodGet, "/v1/addons/settings?"+q.Encode(), nil, &out)
 	return out, err
@@ -1336,18 +1367,27 @@ func (c *Client) AddonSettings(ctx context.Context, addonType, env string) (Addo
 // Growing proceeds. A shrink of the standby count is held until confirm is true, and a shrink of the
 // volume is refused whatever confirm says, because a volume cannot shrink: the refusal comes back
 // here rather than being written into a `Cluster` that then sits in a failed state.
-func (c *Client) ConfigureAddon(ctx context.Context, addonType, env, setting, value string, confirm bool) (ConfigureAddonResult, error) {
+func (c *Client) ConfigureAddon(ctx context.Context, addonType, env, instance, setting, value string, confirm bool) (ConfigureAddonResult, error) {
 	var out ConfigureAddonResult
 	body := map[string]any{"addon": addonType, "env": env, "setting": setting, "value": value, "confirm": confirm}
-	err := c.do(ctx, http.MethodPost, "/v1/addons/config", body, &out)
+	path := narrowing("/v1/addons/config", "instance", instance)
+	err := c.do(ctx, http.MethodPost, path, body, &out)
+	if err != nil && instance != "" {
+		what := fmt.Sprintf("this control plane cannot configure a NAMED add-on instance, so nothing was changed: the same call against it would have changed the environment's own %s instance rather than %q — growing a volume that can never shrink, or restarting every app attached to it", addonType, instance)
+		return out, scopeRefusal(what, "more than one add-on instance per environment", err)
+	}
 	return out, err
 }
 
-func (c *Client) AttachAddon(ctx context.Context, addonType, app, env, envKey string) (AttachResult, error) {
+func (c *Client) AttachAddon(ctx context.Context, addonType, app, env, instance, envKey string) (AttachResult, error) {
 	var out AttachResult
 	body := map[string]any{"addon": addonType, "app": app, "env": env}
-	path := narrowing("/v1/addons/attach", "env-key", envKey)
+	path := narrowing(narrowing("/v1/addons/attach", "instance", instance), "env-key", envKey)
 	err := c.do(ctx, http.MethodPost, path, body, &out)
+	if err != nil && instance != "" {
+		what := fmt.Sprintf("this control plane cannot attach an app to a NAMED add-on instance, so nothing was attached: the same call against it would have provisioned %q a database on the environment's own %s instance rather than on %q, rotated a password there, and reported it attached", app, addonType, instance)
+		return out, scopeRefusal(what, "more than one add-on instance per environment", err)
+	}
 	if err != nil && envKey != "" {
 		what := fmt.Sprintf("this control plane cannot write an attachment's connection string into a variable of your choosing, so nothing was attached: the same call against it would have written %q's connection string into DATABASE_URL rather than into %q — over whatever %q already holds there — and reported it attached", app, envKey, app)
 		return out, scopeRefusal(what, "naming the variable an attachment is written into", err)
@@ -1360,6 +1400,9 @@ func (c *Client) AttachAddon(ctx context.Context, addonType, app, env, envKey st
 // other does not, and a reader of `DetachAddon(ctx, "postgres", "web", "", true, true)` cannot tell
 // which is which.
 type DetachAddonOptions struct {
+	// Instance is the LABEL of the instance to detach from (ADR-0091 §3). Empty is the environment's
+	// default instance; detaching one attachment leaves every other one the app holds alone.
+	Instance string
 	// DeleteData also DESTROYS the app's database, with its rows (ADR-0090 §2). Without it the detach
 	// takes the app's access away and keeps the data, so re-attaching gets it back.
 	DeleteData bool
@@ -1389,7 +1432,7 @@ func (c *Client) DetachAddon(ctx context.Context, addonType, app, env string, op
 	if opts.DeleteData {
 		disposition = "delete"
 	}
-	path := narrowing("/v1/addons/detach/data/"+disposition, "env", env)
+	path := narrowing(narrowing("/v1/addons/detach/data/"+disposition, "env", env), "instance", opts.Instance)
 	if env == "" {
 		// The environment narrows nothing — the default one is an environment every control plane has
 		// — so the body keeps the shape it has always had for it.
@@ -1463,11 +1506,15 @@ type BackupResult struct {
 // storage, so a control plane in between drops the destination, writes the dump to the in-cluster
 // volume, and records a COMPLETED backup — a backup that reads as durable and is on the same disk as
 // the database it is insurance against. Nobody finds out until they need it (issue #485).
-func (c *Client) BackupAddon(ctx context.Context, addonType, app, env, destination string) (BackupResult, error) {
+func (c *Client) BackupAddon(ctx context.Context, addonType, app, env, instance, destination string) (BackupResult, error) {
 	var out BackupResult
 	body := map[string]any{"addon": addonType, "app": app, "env": "", "destination": ""}
-	path := narrowing(narrowing("/v1/addons/backup", "env", env), "destination", destination)
+	path := narrowing(narrowing(narrowing("/v1/addons/backup", "env", env), "instance", instance), "destination", destination)
 	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, path, body, &out)
+	if err != nil && instance != "" {
+		what := fmt.Sprintf("this control plane cannot back up a NAMED add-on instance, so nothing was backed up: the same call against it would have dumped %q's database from the environment's own %s instance rather than from %q, and recorded it as this one's", app, addonType, instance)
+		return out, scopeRefusal(what, "more than one add-on instance per environment", err)
+	}
 	if err != nil && (env != "" || destination != "") {
 		what := fmt.Sprintf("this control plane cannot back up a NAMED environment's instance, so nothing was backed up: the same call against it would have dumped %q's database from the DEFAULT environment's instance rather than from %q's", app, env)
 		predates := "per-environment add-on instances"
@@ -1491,10 +1538,15 @@ func (c *Client) BackupAddon(ctx context.Context, addonType, app, env, destinati
 //
 // destination names the object-storage provider holding the repository; empty resolves it, which
 // works when exactly one is registered. No secret value crosses this API.
-func (c *Client) BackupInstance(ctx context.Context, addonType, env, destination string) (BackupResult, error) {
+func (c *Client) BackupInstance(ctx context.Context, addonType, env, instance, destination string) (BackupResult, error) {
 	var out BackupResult
 	body := map[string]any{"addon": addonType, "env": env, "destination": destination}
-	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/backup-instance", body, &out)
+	path := narrowing("/v1/addons/backup-instance", "instance", instance)
+	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, path, body, &out)
+	if err != nil && instance != "" {
+		what := fmt.Sprintf("this control plane cannot take a base backup of a NAMED add-on instance, so nothing was backed up: the same call against it would have backed up the environment's own %s instance and recorded it as %q's", addonType, instance)
+		return out, scopeRefusal(what, "more than one add-on instance per environment", err)
+	}
 	return out, err
 }
 
@@ -1602,15 +1654,19 @@ func (c *Client) BackupHealth(ctx context.Context, addonType, app, env string) (
 // The ENVIRONMENT RIDES THE ROUTE, for the reason DetachAddon's does: a restore aimed at staging,
 // against a control plane that drops the field, overwrites the live database of whatever app of that
 // name is on the default environment's instance (issue #485).
-func (c *Client) RestoreAddon(ctx context.Context, addonType, app, backupID, env string, confirm bool) error {
+func (c *Client) RestoreAddon(ctx context.Context, addonType, app, backupID, env, instance string, confirm bool) error {
 	body := map[string]any{"addon": addonType, "app": app, "backup": backupID, "confirm": confirm}
-	if env == "" {
+	if env == "" && instance == "" {
 		// Unnarrowed, so the route and the body stay exactly as they were (see DetachAddon).
 		body["env"] = ""
 		return c.doWithin(ctx, c.budget.backup, http.MethodPost, "/v1/addons/restore", body, nil)
 	}
-	path := "/v1/addons/restore/env/" + url.PathEscape(env)
+	path := narrowing(narrowing("/v1/addons/restore", "env", env), "instance", instance)
 	err := c.doWithin(ctx, c.budget.backup, http.MethodPost, path, body, nil)
+	if err != nil && instance != "" {
+		what := fmt.Sprintf("this control plane cannot restore into a NAMED add-on instance, so nothing was restored: the same call against it would have overwritten the live database of %q on the environment's own %s instance rather than on %q", app, addonType, instance)
+		return scopeRefusal(what, "more than one add-on instance per environment", err)
+	}
 	if err != nil {
 		what := fmt.Sprintf("this control plane cannot restore into a NAMED environment, so nothing was restored: the same call against it would have overwritten the live database of %q on the default environment's instance rather than on %q's", app, env)
 		return scopeRefusal(what, "per-environment add-on instances", err)
@@ -1664,6 +1720,9 @@ type RestoreVerification struct {
 // RestoreInstanceOptions is everything `addon restore-instance` needs beyond the add-on type and the
 // environment. Exactly one recovery target is required — the server refuses zero and refuses several.
 type RestoreInstanceOptions struct {
+	// Instance is the LABEL of the instance to rewind (ADR-0091 §4). Empty is the environment's
+	// default instance.
+	Instance         string
 	Backup           string
 	ToTime           string
 	Latest           bool
@@ -1697,7 +1756,12 @@ func (c *Client) RestoreInstance(ctx context.Context, addonType, env string, opt
 		"destination":        opts.Destination,
 		"confirm":            opts.Confirm,
 	}
-	err := c.doWithin(ctx, c.budget.restoreInstance, http.MethodPost, "/v1/addons/restore-instance", body, &out)
+	path := narrowing("/v1/addons/restore-instance", "instance", opts.Instance)
+	err := c.doWithin(ctx, c.budget.restoreInstance, http.MethodPost, path, body, &out)
+	if err != nil && opts.Instance != "" {
+		what := fmt.Sprintf("this control plane cannot rewind a NAMED add-on instance, so nothing was restored: the same call against it would have rewound the environment's own %s instance rather than %q", addonType, opts.Instance)
+		return out, scopeRefusal(what, "more than one add-on instance per environment", err)
+	}
 	return out, err
 }
 
@@ -1751,18 +1815,22 @@ type SQLError struct {
 // The ENVIRONMENT RIDES THE ROUTE, for the reason RestoreAddon's does, and more sharply: a statement
 // aimed at staging, against a control plane that drops the field, runs against the app of that name
 // on the default environment's instance — and the statement may write (issue #485).
-func (c *Client) AddonSQL(ctx context.Context, addonType, app, env, statement string, confirm bool) (SQLResult, error) {
+func (c *Client) AddonSQL(ctx context.Context, addonType, app, env, instance, statement string, confirm bool) (SQLResult, error) {
 	var out SQLResult
 	body := map[string]any{"addon": addonType, "app": app, "statement": statement, "confirm": confirm}
-	if env == "" {
+	if env == "" && instance == "" {
 		// Unnarrowed, so the route and the body stay exactly as they were (see DetachAddon).
 		body["env"] = ""
 		return out, c.doWithin(ctx, c.budget.sql, http.MethodPost, "/v1/addons/sql", body, &out)
 	}
-	// The environment rides the ROUTE and only the route: one place carries the scope, so there is no
-	// second copy for a mismatch to hide in.
-	path := "/v1/addons/sql/env/" + url.PathEscape(env)
+	// The scope rides the ROUTE and only the route: one place carries it, so there is no second copy
+	// for a mismatch to hide in.
+	path := narrowing(narrowing("/v1/addons/sql", "env", env), "instance", instance)
 	if err := c.doWithin(ctx, c.budget.sql, http.MethodPost, path, body, &out); err != nil {
+		if instance != "" {
+			what := fmt.Sprintf("this control plane cannot run a statement against a NAMED add-on instance, so nothing was run: the same call against it would have reached %q's database on the environment's own %s instance rather than on %q — and the statement may write", app, addonType, instance)
+			return SQLResult{}, scopeRefusal(what, "more than one add-on instance per environment", err)
+		}
 		what := fmt.Sprintf("this control plane cannot run a statement against a NAMED environment, so nothing was run: the same call against it would have reached %q's database on the default environment's instance rather than on %q's", app, env)
 		return SQLResult{}, scopeRefusal(what, "per-environment add-on instances", err)
 	}

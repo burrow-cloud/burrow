@@ -33,9 +33,9 @@ func newConfigEngine(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Database
 	return e, k, d, prov
 }
 
-// defaultInstance is the name every consumer resolves the default environment's Postgres instance
-// at, which is also the name a confirmation asks to have typed back.
-func defaultInstance(t *testing.T) string {
+// defaultInstanceName is the name every consumer resolves the default environment's Postgres
+// instance at, which is also the name a confirmation asks to have typed back.
+func defaultInstanceName(t *testing.T) string {
 	t.Helper()
 	name, err := cp.AddonInstanceName(cp.AddonPostgres, cp.DefaultEnvironment)
 	if err != nil {
@@ -51,7 +51,7 @@ func attachApp(t *testing.T, e *cp.Engine, k *fake.Kubernetes, app string) {
 	if err := k.ApplyWorkload(context.Background(), cp.WorkloadSpec{App: app, Kind: cp.WorkloadDeployment, Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("ApplyWorkload %s: %v", app, err)
 	}
-	if _, err := e.AttachAddon(context.Background(), cp.AddonPostgres, app, cp.DefaultEnvironment, ""); err != nil {
+	if _, err := e.AttachAddon(context.Background(), cp.AddonPostgres, app, cp.DefaultEnvironment, cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon %s: %v", app, err)
 	}
 }
@@ -62,12 +62,12 @@ func attachApp(t *testing.T, e *cp.Engine, k *fake.Kubernetes, app string) {
 func TestAddonSettingsReportsTheShapeOfTheLiveInstance(t *testing.T) {
 	e, _, _, _ := newConfigEngine(t)
 
-	res, err := e.AddonSettings(context.Background(), cp.AddonPostgres, "")
+	res, err := e.AddonSettings(context.Background(), cp.AddonPostgres, "", "")
 	if err != nil {
 		t.Fatalf("AddonSettings: %v", err)
 	}
-	if res.Instance != defaultInstance(t) {
-		t.Errorf("instance = %q, want %q", res.Instance, defaultInstance(t))
+	if res.Instance != defaultInstanceName(t) {
+		t.Errorf("instance = %q, want %q", res.Instance, defaultInstanceName(t))
 	}
 	values := map[cp.AddonSetting]string{}
 	for _, s := range res.Settings {
@@ -96,7 +96,7 @@ func TestConfigureStandbysGrowsWithoutAsking(t *testing.T) {
 	if !res.Changed || res.From != "0" || res.To != "1" {
 		t.Errorf("result = %+v, want a change from 0 to 1", res)
 	}
-	shape, ok := k.AddonShape(defaultInstance(t))
+	shape, ok := k.AddonShape(defaultInstanceName(t))
 	if !ok || shape.Standbys != 1 {
 		t.Errorf("the cluster holds %+v (found=%v), want 1 standby: the result is only a claim, the instance is the fact", shape, ok)
 	}
@@ -206,7 +206,7 @@ func TestConfigureStorageGrows(t *testing.T) {
 	if !res.Changed || res.To != "50Gi" {
 		t.Errorf("result = %+v, want the volume grown to 50Gi", res)
 	}
-	if shape, _ := k.AddonShape(defaultInstance(t)); shape.Storage != "50Gi" {
+	if shape, _ := k.AddonShape(defaultInstanceName(t)); shape.Storage != "50Gi" {
 		t.Errorf("the cluster holds storage %q, want 50Gi", shape.Storage)
 	}
 }
@@ -272,8 +272,8 @@ func TestConfigureAddonAuditsWhatChangedFromWhatToWhat(t *testing.T) {
 	if row == nil {
 		t.Fatal("no addon_config audit row was written")
 	}
-	if row.Target != defaultInstance(t) {
-		t.Errorf("audit target = %q, want the instance %q", row.Target, defaultInstance(t))
+	if row.Target != defaultInstanceName(t) {
+		t.Errorf("audit target = %q, want the instance %q", row.Target, defaultInstanceName(t))
 	}
 	if row.Args["setting"] != "standbys" || row.Args["from"] != "0" || row.Args["to"] != "2" {
 		t.Errorf("audit args = %v, want the setting and both values", row.Args)

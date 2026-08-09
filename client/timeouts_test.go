@@ -86,11 +86,11 @@ func TestRequestBudgetCoversTheControlPlanesOwnBound(t *testing.T) {
 			return err
 		}},
 		{"backup", controlplane.MaxBackupWait, func(c *Client) error {
-			_, err := c.BackupAddon(ctx, "postgres", "app", "", "")
+			_, err := c.BackupAddon(ctx, "postgres", "app", "", "", "")
 			return err
 		}},
 		{"restore", controlplane.MaxBackupWait, func(c *Client) error {
-			return c.RestoreAddon(ctx, "postgres", "app", "b1", "", true)
+			return c.RestoreAddon(ctx, "postgres", "app", "b1", "", "", true)
 		}},
 		{"remove add-on", controlplane.MaxBackupWait, func(c *Client) error {
 			_, err := c.RemoveAddon(ctx, "postgres", RemoveAddonOptions{DeleteData: true, Confirm: true})

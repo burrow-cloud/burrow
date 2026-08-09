@@ -62,9 +62,13 @@ type AddonShape struct {
 // the subcommand-per-setting shape of ADR-0082 §1 carried down to the seam, so a partially-applied
 // pair of changes is not a state this can reach.
 type ConfigureInstanceRequest struct {
-	// Addon and Environment identify the instance, as everywhere else (AddonInstanceName).
+	// Addon and Environment say what kind of instance this is and whose data it holds; Instance is
+	// its name IN THE CLUSTER, resolved from the registry by the engine (ADR-0091 §2). All three are
+	// required: an environment may hold more than one instance, so the pair no longer selects one,
+	// and an adapter that composed the name itself would be the derivation that record removed.
 	Addon       AddonType
 	Environment string
+	Instance    string
 	// Standbys, when non-nil, is the new standby count. The adapter turns it into whatever the
 	// operator underneath counts — for CloudNativePG, one more than this.
 	Standbys *int
@@ -92,14 +96,19 @@ type AddonSettingInfo struct {
 type AddonSettingsResult struct {
 	Addon       AddonType `json:"addon"`
 	Environment string    `json:"environment"`
-	// Instance is the instance the values were read from, by the name every consumer resolves it at
-	// (AddonInstanceName). An environment holds one (ADR-0067 §1), so this is what `--env` selected.
+	// Instance is the LABEL of the instance the values were read from — what `--name` takes and what
+	// a guardrail key holds (ADR-0091 §1). An environment may hold more than one, so `--env` no
+	// longer selects it on its own; naming none means the environment's own.
 	Instance string             `json:"instance"`
 	Settings []AddonSettingInfo `json:"settings"`
 }
 
 // ConfigureAddonOptions is everything a change needs beyond the instance, the setting and the value.
 type ConfigureAddonOptions struct {
+	// Instance is the LABEL of the instance to configure (ADR-0082 §1's deferred selector, decided by
+	// ADR-0091 §4). Empty is the environment's default instance, which is what this command meant
+	// while an environment could hold only one.
+	Instance string
 	// Confirm is the operator saying they mean a SHRINK. Growing never consults it: adding capacity
 	// breaks nothing that exists and the cost is accepted by having typed the command (ADR-0082 §2).
 	//
@@ -177,28 +186,29 @@ func readAddressKey(attachmentKey string) string { return attachmentKey + "_READ
 // It reads the CLUSTER, not the registry. The registry records that an instance was installed and
 // with what image; the question this answers is what that instance IS right now, which is a property
 // of the object the operator is reconciling and can have been changed since.
-func (e *Engine) AddonSettings(ctx context.Context, t AddonType, env string) (AddonSettingsResult, error) {
+func (e *Engine) AddonSettings(ctx context.Context, t AddonType, env, instance string) (AddonSettingsResult, error) {
 	if err := configurableAddon(t); err != nil {
 		return AddonSettingsResult{}, err
 	}
-	// A read resolves the environment the way every other read does, so `addon config postgres` and
-	// `addon config postgres standbys 1` name the same instance from the same flags.
+	// A read resolves the environment and the instance the way every other read does, so `addon
+	// config postgres` and `addon config postgres standbys 1` name the same instance from the same
+	// flags.
 	targetEnv, _, err := e.resolveMutatingEnvironment(ctx, env)
 	if err != nil {
 		return AddonSettingsResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
-	instance, err := AddonInstanceName(t, targetEnv)
+	inst, err := e.resolveInstance(ctx, t, targetEnv, instance)
 	if err != nil {
 		return AddonSettingsResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
-	shape, err := e.k8s.AddonInstanceShape(ctx, t, targetEnv)
+	shape, err := e.k8s.AddonInstanceShape(ctx, t, targetEnv, inst.Name)
 	if err != nil {
 		return AddonSettingsResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
 	return AddonSettingsResult{
 		Addon:       t,
 		Environment: targetEnv,
-		Instance:    instance,
+		Instance:    instanceLabel(inst),
 		Settings: []AddonSettingInfo{
 			{
 				Setting:     AddonSettingStandbys,
@@ -238,29 +248,31 @@ func (e *Engine) ConfigureAddon(ctx context.Context, t AddonType, env string, se
 	if err != nil {
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
-	instance, err := AddonInstanceName(t, targetEnv)
+	inst, err := e.resolveInstance(ctx, t, targetEnv, opts.Instance)
 	if err != nil {
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
-	// The redacted audit args carry NAMES and NUMBERS only. `from` and `to` are added as soon as the
-	// current shape is known, so a row written on a refusal still says what was being attempted and
-	// what it was being attempted against (ADR-0082's "from what to what, and on which instance").
-	args := map[string]string{"addon": string(t), "env": targetEnv, "instance": instance, "setting": string(setting)}
+	// The redacted audit args carry NAMES and NUMBERS only, and the instance is recorded by the LABEL
+	// an operator reads (ADR-0091 §4). `from` and `to` are added as soon as the current shape is
+	// known, so a row written on a refusal still says what was being attempted and what it was being
+	// attempted against (ADR-0082's "from what to what, and on which instance").
+	label := instanceLabel(inst)
+	args := map[string]string{"addon": string(t), "env": targetEnv, "instance": label, "setting": string(setting)}
 
-	shape, err := e.k8s.AddonInstanceShape(ctx, t, targetEnv)
+	shape, err := e.k8s.AddonInstanceShape(ctx, t, targetEnv, inst.Name)
 	if err != nil {
-		e.recordExecution(ctx, auditOpAddonConfig, instance, args, err)
+		e.recordExecution(ctx, auditOpAddonConfig, label, args, err)
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
 
 	switch setting {
 	case AddonSettingStandbys:
-		return e.configureStandbys(ctx, t, targetEnv, ns, instance, shape, value, args, opts)
+		return e.configureStandbys(ctx, t, targetEnv, ns, inst, shape, value, args, opts)
 	case AddonSettingStorage:
-		return e.configureStorage(ctx, t, targetEnv, instance, shape, value, args)
+		return e.configureStorage(ctx, t, targetEnv, inst, shape, value, args)
 	default:
 		err := unknownSettingError(t, setting)
-		e.recordExecution(ctx, auditOpAddonConfig, instance, args, err)
+		e.recordExecution(ctx, auditOpAddonConfig, label, args, err)
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
 }
@@ -288,7 +300,8 @@ func unknownSettingError(t AddonType, setting AddonSetting) error {
 // adding a standby breaks nothing that exists, while removing one takes away something an app may be
 // using — so only one of them asks. The confirmation names the apps, not a count, for the reason
 // ADR-0064 §2 gives: a person about to break something should see what.
-func (e *Engine) configureStandbys(ctx context.Context, t AddonType, targetEnv, ns, instance string, shape AddonShape, value string, args map[string]string, opts ConfigureAddonOptions) (ConfigureAddonResult, error) {
+func (e *Engine) configureStandbys(ctx context.Context, t AddonType, targetEnv, ns string, inst AddonInfo, shape AddonShape, value string, args map[string]string, opts ConfigureAddonOptions) (ConfigureAddonResult, error) {
+	instance := instanceLabel(inst)
 	to, err := parseStandbys(value)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonConfig, instance, args, err)
@@ -310,7 +323,7 @@ func (e *Engine) configureStandbys(ctx context.Context, t AddonType, targetEnv, 
 	// same enumeration a physical restore uses and it is asked of the APPS rather than of the
 	// database, because the answer has to be available when the instance is the thing that is
 	// struggling — which is one reason somebody reaches for a scale-down.
-	apps, err := e.appsAttachedInEnvironment(ctx, ns, targetEnv)
+	apps, err := e.appsAttachedInEnvironment(ctx, ns, targetEnv, inst)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonConfig, instance, args, err)
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s: %w", t, err)
@@ -324,7 +337,7 @@ func (e *Engine) configureStandbys(ctx context.Context, t AddonType, targetEnv, 
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
 
-	if err := e.k8s.ConfigureAddonInstance(ctx, ConfigureInstanceRequest{Addon: t, Environment: targetEnv, Standbys: &to}); err != nil {
+	if err := e.k8s.ConfigureAddonInstance(ctx, ConfigureInstanceRequest{Addon: t, Environment: targetEnv, Instance: inst.Name, Standbys: &to}); err != nil {
 		e.recordExecution(ctx, auditOpAddonConfig, instance, args, err)
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s in environment %s: %w", t, targetEnv, err)
 	}
@@ -335,9 +348,9 @@ func (e *Engine) configureStandbys(ctx context.Context, t AddonType, targetEnv, 
 	// points at is unchanged: `-ro` selects standbys, and there are still some.
 	switch {
 	case from == 0 && to > 0:
-		result.ReadAddress = e.writeReadAddress(ctx, t, targetEnv, ns, apps)
+		result.ReadAddress = e.writeReadAddress(ctx, t, targetEnv, ns, inst, apps)
 	case from > 0 && to == 0:
-		result.ReadAddress = e.withdrawReadAddress(ctx, t, targetEnv, ns, apps)
+		result.ReadAddress = e.withdrawReadAddress(ctx, t, targetEnv, ns, inst, apps)
 	}
 	if result.ReadAddress.Action != ReadAddressUnchanged {
 		args["read_address"] = string(result.ReadAddress.Action)
@@ -356,7 +369,8 @@ func (e *Engine) configureStandbys(ctx context.Context, t AddonType, targetEnv, 
 // name would be agreeing to something achievable — so there is nothing to hold for confirmation. The
 // refusal names both sizes, because the interesting failure is a typo (`5Gi` for `50Gi`) rather than
 // a considered decision to make a database smaller.
-func (e *Engine) configureStorage(ctx context.Context, t AddonType, targetEnv, instance string, shape AddonShape, value string, args map[string]string) (ConfigureAddonResult, error) {
+func (e *Engine) configureStorage(ctx context.Context, t AddonType, targetEnv string, inst AddonInfo, shape AddonShape, value string, args map[string]string) (ConfigureAddonResult, error) {
+	instance := instanceLabel(inst)
 	to, err := parseStorageSize(value)
 	if err != nil {
 		e.recordExecution(ctx, auditOpAddonConfig, instance, args, err)
@@ -389,7 +403,7 @@ func (e *Engine) configureStorage(ctx context.Context, t AddonType, targetEnv, i
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s: %w", t, err)
 	}
 
-	if err := e.k8s.ConfigureAddonInstance(ctx, ConfigureInstanceRequest{Addon: t, Environment: targetEnv, Storage: value}); err != nil {
+	if err := e.k8s.ConfigureAddonInstance(ctx, ConfigureInstanceRequest{Addon: t, Environment: targetEnv, Instance: inst.Name, Storage: value}); err != nil {
 		e.recordExecution(ctx, auditOpAddonConfig, instance, args, err)
 		return ConfigureAddonResult{}, fmt.Errorf("addon config %s in environment %s: %w", t, targetEnv, err)
 	}
@@ -437,7 +451,7 @@ func plural(n int, one, many string) string {
 //
 // A per-app failure is recorded rather than raised. The standby exists by the time this runs; failing
 // the whole call would send an operator to repeat a scale-up that already happened.
-func (e *Engine) writeReadAddress(ctx context.Context, t AddonType, targetEnv, ns string, apps []string) ReadAddressChange {
+func (e *Engine) writeReadAddress(ctx context.Context, t AddonType, targetEnv, ns string, inst AddonInfo, apps []string) ReadAddressChange {
 	out := ReadAddressChange{Action: ReadAddressWritten, Apps: []string{}}
 	reader, ok := e.dbProvisioner.(AppReadAddresser)
 	if !ok {
@@ -453,14 +467,14 @@ func (e *Engine) writeReadAddress(ctx context.Context, t AddonType, targetEnv, n
 	}
 	k := e.k8s.WithNamespace(ns)
 	for _, app := range apps {
-		key, err := e.db.AddonEnvKey(ctx, string(t), app, targetEnv)
+		key, err := e.attachmentKey(ctx, t, app, targetEnv, inst)
 		if err != nil {
 			out.Stranded = append(out.Stranded, StrandedApp{App: app, Reason: readAddressStranded(t, app, targetEnv, "the variable its connection string is written under could not be read, so no read address was written for it")})
 			continue
 		}
 		// The returned url is a SECRET value: from here it is handed only to SetSecretValue and never
 		// logged, audited, or returned.
-		url, err := reader.AppReadURL(ctx, app, targetEnv)
+		url, err := reader.AppReadURL(ctx, app, targetEnv, inst.Name)
 		if err != nil {
 			out.Stranded = append(out.Stranded, StrandedApp{App: app, Reason: readAddressStranded(t, app, targetEnv, "its read address could not be composed")})
 			continue
@@ -489,11 +503,11 @@ func (e *Engine) writeReadAddress(ctx context.Context, t AddonType, targetEnv, n
 // gone it resolves to no endpoint at all, and an app that kept the variable would fail at its next
 // read rather than at the operation that caused it. A failure at the moment of the change is one
 // somebody can connect to the change.
-func (e *Engine) withdrawReadAddress(ctx context.Context, t AddonType, targetEnv, ns string, apps []string) ReadAddressChange {
+func (e *Engine) withdrawReadAddress(ctx context.Context, t AddonType, targetEnv, ns string, inst AddonInfo, apps []string) ReadAddressChange {
 	out := ReadAddressChange{Action: ReadAddressWithdrawn, Apps: []string{}}
 	k := e.k8s.WithNamespace(ns)
 	for _, app := range apps {
-		key, err := e.db.AddonEnvKey(ctx, string(t), app, targetEnv)
+		key, err := e.attachmentKey(ctx, t, app, targetEnv, inst)
 		if err != nil {
 			out.Stranded = append(out.Stranded, StrandedApp{App: app, Reason: readAddressStranded(t, app, targetEnv, "the variable its connection string is written under could not be read, so its read address was left in place and now resolves to nothing")})
 			continue

@@ -125,10 +125,10 @@ func attachAndDetach(t *testing.T, substitute bool) (trace []string, statements 
 	tr := &kubeTrace{}
 	tr.watch(t, p, dyn)
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase (substituted=%v): %v", substitute, err)
 	}
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("RevokeAppDatabase (substituted=%v): %v", substitute, err)
 	}
 	if !substitute {
@@ -205,10 +205,10 @@ func TestAConnectedStepSaysWhatItIsAndAsWhom(t *testing.T) {
 		return nil
 	})
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("RevokeAppDatabase: %v", err)
 	}
 	if len(steps) != 2 {
@@ -284,7 +284,7 @@ func TestAConnectedStepThatDidNotRunFailsTheOperation(t *testing.T) {
 	refused := errors.New("the job could not reach the instance")
 	p.WithConnectedStep(func(context.Context, PostgresConnectedStep) error { return refused })
 
-	dsn, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment)
+	dsn, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if !errors.Is(err, refused) {
 		t.Fatalf("EnsureAppDatabase err = %v, want the runner's refusal", err)
 	}
@@ -295,7 +295,7 @@ func TestAConnectedStepThatDidNotRunFailsTheOperation(t *testing.T) {
 		t.Errorf("the failure %q does not say which step did not happen", err)
 	}
 
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, refused) {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, refused) {
 		t.Fatalf("RevokeAppDatabase err = %v, want the runner's refusal", err)
 	}
 	// And the login role's object is still there, which is the honest state: nothing dropped the role,

@@ -53,14 +53,14 @@ func cnpgInstancesToStandbys(instances int64) int {
 // would report what an install once asked for; reading them off the claim would report what the
 // storage provider granted, which for an expansion in progress is the OLD size — and the value an
 // operator is comparing a new one against is the one that has been asked for.
-func (a *Adapter) AddonInstanceShape(ctx context.Context, t controlplane.AddonType, env string) (controlplane.AddonShape, error) {
+func (a *Adapter) AddonInstanceShape(ctx context.Context, t controlplane.AddonType, env, instance string) (controlplane.AddonShape, error) {
 	if t != controlplane.AddonPostgres {
 		return controlplane.AddonShape{}, fmt.Errorf("kube: the %s add-on has no configurable shape: %w", t, controlplane.ErrInvalid)
 	}
-	name, err := controlplane.AddonInstanceName(t, env)
-	if err != nil {
-		return controlplane.AddonShape{}, err
+	if instance == "" {
+		return controlplane.AddonShape{}, fmt.Errorf("kube: reading the shape of a %s instance in environment %q: no instance named: %w", t, env, controlplane.ErrInvalid)
 	}
+	name := instance
 	u, found, err := a.getCNPGCluster(ctx, name)
 	if err != nil {
 		return controlplane.AddonShape{}, err
@@ -101,10 +101,10 @@ func (a *Adapter) ConfigureAddonInstance(ctx context.Context, req controlplane.C
 	if req.Addon != controlplane.AddonPostgres {
 		return fmt.Errorf("kube: the %s add-on has no configurable shape: %w", req.Addon, controlplane.ErrInvalid)
 	}
-	name, err := controlplane.AddonInstanceName(req.Addon, req.Environment)
-	if err != nil {
-		return err
+	if req.Instance == "" {
+		return fmt.Errorf("kube: configuring a %s instance in environment %q: no instance named: %w", req.Addon, req.Environment, controlplane.ErrInvalid)
 	}
+	name := req.Instance
 	spec := map[string]any{}
 	switch {
 	case req.Standbys != nil:

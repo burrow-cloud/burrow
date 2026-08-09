@@ -5,6 +5,7 @@ package controlplane
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"time"
 )
@@ -23,9 +24,12 @@ const (
 	AddonCache AddonType = "cache"
 	// AddonPostgres is a PostgreSQL instance the agent attaches an app to — Burrow provisions a
 	// database and login role per app inside it and writes the app's DATABASE_URL into the app's
-	// per-environment Secret (ADR-0031). There is one instance PER ENVIRONMENT, not one per cluster:
+	// per-environment Secret (ADR-0031). Each environment gets its OWN instance, never a shared one:
 	// the environment, not a naming convention inside a shared server, is what isolates one
-	// environment's data from another's (ADR-0067 §1). The instance is a CloudNativePG `Cluster` and
+	// environment's data from another's (ADR-0067 §1). One per environment is the DEFAULT and not the
+	// maximum — an operator who needs a second server's worth of blast radius asks for one by name
+	// (`addon install postgres --name analytics`, ADR-0091 §1) — and an instance still belongs to
+	// exactly one environment however many an environment holds. The instance is a CloudNativePG `Cluster` and
 	// nothing else — Burrow writes one custom resource and the operator composes the workload, the
 	// volume and the services from it (ADR-0066 §1).
 	AddonPostgres AddonType = "postgres"
@@ -124,17 +128,29 @@ var addonCatalog = map[AddonType]AddonSpec{
 		// than what a Burrow-authored PersistentVolumeClaim requests.
 		StorageGi:    10,
 		Capabilities: []string{"database"},
-		Summary:      "PostgreSQL database (one instance per environment, a database and role per app)",
+		Summary:      "PostgreSQL database (a database and role per app, on one instance per environment by default)",
 	},
 }
 
-// AddonInstanceName is the name of add-on type t's instance in environment env: the registry key
-// (addons.name) and the resource name the instance's Deployment, Service, volume and — for Postgres
-// — its superuser Secret carry in the cluster. It is the ONE place an environment is turned into an
-// instance (ADR-0067 §1). Isolation comes from the instance rather than from a naming convention
-// inside a shared server, so there is deliberately no name two environments can both resolve to:
-// sharing one instance across environments is not merely discouraged, it is inexpressible
-// (ADR-0067 §5).
+// AddonInstanceName is the name of add-on type t's FIRST instance in environment env: the name that
+// instance's Deployment, Service, volume and — for Postgres — its superuser Secret carry in the
+// cluster, and the label the operator addresses it by.
+//
+// IT IS A NAME GENERATOR, NOT A LOOKUP (ADR-0091 §2). An environment may hold more than one instance
+// of a type, and the second one's name cannot be a function of `(type, environment)` — so nothing
+// resolves an existing instance through this function any more. The registry row is the mapping
+// between an instance's label and its name in the cluster, and it is the only mapping (see
+// GenerateAddonInstanceName for every instance past the first). This is called at CREATION time, to
+// decide what an environment's first instance is called.
+//
+// EACH ENVIRONMENT'S FIRST INSTANCE KEEPS THE NAME IT ALREADY HAS, which is why this derivation
+// survives ADR-0091 unchanged: `burrow-postgres` for the default environment, `burrow-postgres-staging`
+// for `staging`. Nothing on a live install moves, and because the label of a first instance is that
+// same name, no key an operator has already typed — a guardrail scope, an `addon remove` argument —
+// changes either (ADR-0091 §2, ADR-0067 §3).
+//
+// Isolation still comes from the instance rather than from a naming convention inside a shared
+// server, and an instance still belongs to exactly one environment (ADR-0067 §1, ADR-0091 §6).
 //
 // The DEFAULT environment keeps the unqualified name (burrow-postgres), which is what lets an
 // install predating environments carry on against the instance, the volume, and the superuser
@@ -167,6 +183,62 @@ func AddonInstanceName(t AddonType, env string) (string, error) {
 	return "burrow-" + string(t) + "-" + env, nil
 }
 
+// GenerateAddonInstanceName is the cluster name of an instance PAST an environment's first:
+// `burrow-<type>-<id>`, where id is a short generated string from [a-z0-9] (ADR-0091 §2).
+//
+// THE ID IS GENERATED, NOT DERIVED. It is not a hash of the label and not an encoding of the
+// environment, because a name with parts is a name whose parts can be got wrong: an environment name
+// and an instance label are drawn from the same alphabet, so `burrow-postgres-staging-x` is both the
+// instance `x` in `staging` and the first instance of an environment called `staging-x`. That is the
+// composed-name ambiguity cloud ADR-0029 removed from the managed product, where its consequence was
+// one tenant reaching another's database. Nothing recovers an environment or a label by splitting a
+// name; the registry row is the mapping.
+//
+// UNIQUENESS IS ENFORCED BY THE REGISTRY RATHER THAN ASSUMED FROM ENTROPY. The name is the registry's
+// primary key, so a collision is a refused insert and the caller mints another id — not a silent
+// adoption of somebody else's instance.
+//
+// The alphabet is forced rather than chosen: the same id has to be legal in a Kubernetes object name
+// and in everything Burrow composes from it — a CloudNativePG `Cluster` composes its Services as
+// `<cluster>-rw`, and a Service name is a DNS-1123 label — so lowercase alphanumeric is the
+// intersection.
+//
+// The operator never types this. `--name` takes the LABEL, and every Burrow surface resolves the
+// name back to it (ADR-0091 §1).
+func GenerateAddonInstanceName(t AddonType, id string) (string, error) {
+	if t == "" {
+		return "", fmt.Errorf("add-on instance: add-on type is empty: %w", ErrInvalid)
+	}
+	if id == "" || !instanceIDAlphabet.MatchString(id) {
+		return "", fmt.Errorf("add-on instance for %s: instance id %q is not a lowercase alphanumeric string: %w", t, id, ErrInvalid)
+	}
+	name := "burrow-" + string(t) + "-" + id
+	if len(name) > maxNameLen {
+		return "", fmt.Errorf("add-on instance for %s: instance id %q is too long: %w", t, id, ErrInvalid)
+	}
+	return name, nil
+}
+
+// instanceIDAlphabet is cloud ADR-0029's alphabet: lowercase alphanumeric and nothing else.
+var instanceIDAlphabet = regexp.MustCompile(`^[a-z0-9]+$`)
+
+// ValidateInstanceLabel checks what `--name` takes: the string a person types, every listing shows,
+// and a guardrail key holds (ADR-0091 §1). It is a DNS-1123 label because a first instance's label IS
+// its cluster name (ADR-0091 §2), so the two alphabets cannot be allowed to differ — a label that
+// could not also be a resource name would be one the first-instance case could not honour.
+//
+// It is deliberately NOT checked for uniqueness here: that is the registry's answer, and a check made
+// anywhere else is a check that can be raced.
+func ValidateInstanceLabel(label string) error {
+	if label == "" {
+		return fmt.Errorf("add-on instance: no name given: %w", ErrInvalid)
+	}
+	if len(label) > maxNameLen || !dns1123Label.MatchString(label) {
+		return fmt.Errorf("add-on instance: name %q is not a valid DNS-1123 label (lowercase letters, digits and dashes): %w", label, ErrInvalid)
+	}
+	return nil
+}
+
 // AddonDataVolumeName is the PersistentVolumeClaim holding the data of add-on type t's instance
 // named instance. It exists so a message about a removal names the volume that removal actually acts
 // on (ADR-0064 §3) — "this destroys the data volume X" is only informed consent while X is the
@@ -197,6 +269,20 @@ func AddonDataVolumeName(t AddonType, instance string) string {
 // is a signature that will omit it" — and a field on an options struct is exactly the kind of thing
 // a caller omits.
 type InstallAddonOptions struct {
+	// Name is the LABEL of the instance to install: `addon install postgres --name analytics` stands
+	// a second instance up beside the environment's own (ADR-0091 §1). Empty means the environment's
+	// default instance, which is what every add-on command has always meant and what a
+	// single-instance operator never has to say.
+	//
+	// It is a label rather than a resource name. An environment's FIRST instance is labelled with the
+	// name it already carries in the cluster (`burrow-postgres`), so an operator addressing today's
+	// instance is addressing it by exactly the string they always have; every later one gets a
+	// generated cluster name the operator never types (ADR-0091 §2).
+	//
+	// Installing a label that already exists in the environment is a re-install of that instance, not
+	// a second one: the identity of an instance is its label, and `addon install` has always been
+	// idempotent.
+	Name string
 	// Confirm satisfies the addon.install guardrail's confirmation hold (ADR-0020).
 	Confirm bool
 	// ArchiveDestination names which registered object-storage provider a Postgres instance archives
@@ -276,53 +362,60 @@ func LookupConnectBackend(name string) (ConnectBackend, bool) {
 // with it for the default environment, asserted by a test.
 const PostgresBackupVolume = "burrow-postgres-backups"
 
-// BackupVolumeName is the PersistentVolumeClaim holding add-on type t's dumps for environment env —
-// ONE CLAIM PER ENVIRONMENT, the same shape ADR-0067 §1 gives the instance those dumps come from.
+// BackupVolumeName is the PersistentVolumeClaim holding the dumps taken from ONE INSTANCE — one
+// claim per instance, the same shape ADR-0067 §1 gave the instance those dumps come from and
+// ADR-0091 §4 carries down to the instance itself.
 //
-// A dump is only ever taken from, and only ever restored into, one environment's instance. Sharing
-// one claim across environments would have put staging's and production's dumps for an app of the
-// same name on one disk, which the backup and restore Jobs of EITHER environment mount whole: the
-// registry rows would say which environment each dump came from while nothing on the volume did.
-// Isolation comes from the claim, not from a naming convention inside a shared one — the sentence
-// ADR-0067 §1 uses about the instance, one level down.
+// A dump is only ever taken from, and only ever restored into, one instance. Sharing one claim
+// across instances would have put two servers' dumps for an app of the same name on one disk, which
+// the backup and restore Jobs of EITHER instance mount whole: the registry rows would say which
+// instance each dump came from while nothing on the volume did. That is issue #339's shape with the
+// environment held constant, and it is why the claim follows the instance rather than the
+// environment now that an environment may hold more than one.
 //
 // THE NAMES CANNOT COLLIDE, and that is by construction rather than by convention:
 //
-//   - Across environments, because AddonInstanceName is already injective over (type, environment)
-//     and appending a fixed token preserves that. Two environments have no name they both resolve to.
-//   - Against the INSTANCE names sharing the add-on namespace, because a named environment's claim
-//     is separated by a DOT, and an instance name can never contain one: an add-on type has no dot
-//     and an environment name is a DNS-1123 *label*. Without that, an environment called
-//     `staging-backups` would name its instance, its Deployment, its Service and its data claim
-//     exactly what `staging`'s backup claim is called — the same class of collision this fixes.
+//   - Across instances, because the instance name is the registry's primary key and this appends a
+//     fixed token to it. Two instances have no name they both resolve to.
+//   - Against the INSTANCE names sharing the add-on namespace, because a claim is separated from its
+//     instance by a DOT, and an instance name can never contain one: an add-on type has no dot, an
+//     environment name is a DNS-1123 *label*, and a generated instance id is lowercase alphanumeric.
+//     Without that, an environment called `staging-backups` would name its instance, its Deployment,
+//     its Service and its data claim exactly what `staging`'s backup claim is called — the same class
+//     of collision this fixes.
 //
-// The DEFAULT environment keeps the unqualified name its claim already carries
+// THE DEFAULT ENVIRONMENT'S FIRST INSTANCE keeps the unqualified name its claim already carries
 // (PostgresBackupVolume), so no dump moves and no existing claim is renamed — the same exemption
-// ADR-0067 §3 gives the default environment's instance, for the same reason. That is the one name in
-// the family sitting inside the instance family's shape, which is why an environment called
-// `backups` is reserved (ReservedEnvironmentNames).
+// ADR-0067 §3 gives that instance, for the same reason. It is recognised by the instance NAME rather
+// than by an environment argument, which is what keeps this a pure function of the instance: the
+// unqualified `burrow-<type>` is the one instance that can be the default environment's first.
 //
-// env is REQUIRED, for AddonInstanceName's reason: a signature that can omit it is a signature that
-// will omit it, and the value it would default to is another environment's dumps.
-func BackupVolumeName(t AddonType, env string) (string, error) {
-	instance, err := AddonInstanceName(t, env)
-	if err != nil {
-		return "", fmt.Errorf("backup volume: %w", err)
+// instance is REQUIRED and is the instance's name in the CLUSTER (the registry key), not its label:
+// a claim is a cluster object and a label is a person's word for one. A signature that can omit it is
+// a signature that will omit it, and the value it would default to is another instance's dumps.
+func BackupVolumeName(t AddonType, instance string) (string, error) {
+	if t == "" {
+		return "", fmt.Errorf("backup volume: add-on type is empty: %w", ErrInvalid)
 	}
-	if env == DefaultEnvironment {
+	if instance == "" {
+		return "", fmt.Errorf("backup volume for %s: no instance named; every backup claim belongs to exactly one instance: %w", t, ErrInvalid)
+	}
+	if len(instance) > maxNameLen || !dns1123Label.MatchString(instance) {
+		return "", fmt.Errorf("backup volume for %s: instance %q is not a valid DNS-1123 label: %w", t, instance, ErrInvalid)
+	}
+	if instance == "burrow-"+string(t) {
 		return instance + defaultBackupVolumeSuffix, nil
 	}
 	return instance + backupVolumeSuffix, nil
 }
 
 const (
-	// defaultBackupVolumeSuffix makes the default environment's claim the name it already has
-	// (`burrow-postgres` + `-backups` = PostgresBackupVolume).
+	// defaultBackupVolumeSuffix makes the default environment's first instance's claim the name it
+	// already has (`burrow-postgres` + `-backups` = PostgresBackupVolume).
 	defaultBackupVolumeSuffix = "-backups"
-	// backupVolumeSuffix separates a named environment's claim from its instance with a character no
+	// backupVolumeSuffix separates every other instance's claim from its instance with a character no
 	// instance name can contain, so the two families cannot meet. A PersistentVolumeClaim name is a
-	// DNS-1123 subdomain, which admits the dot; an environment name is a DNS-1123 label, which does
-	// not.
+	// DNS-1123 subdomain, which admits the dot; an instance name is a DNS-1123 label, which does not.
 	backupVolumeSuffix = ".backups"
 )
 
@@ -397,8 +490,13 @@ type AddonRemoval struct {
 // database on the instance — the concrete scope of the consequence, whether that is "these lost their
 // data" or "these are disconnected until it is reinstalled".
 type RemoveAddonResult struct {
+	// Name is the instance's name in the CLUSTER, which is what was actually torn down.
 	Name string    `json:"name"`
 	Type AddonType `json:"type"`
+	// Instance is the LABEL the operator addressed it by (ADR-0091 §1) — the same string for an
+	// environment's first instance, and the readable half for every later one. It is reported so the
+	// result names the thing the operator typed rather than a generated id they have never seen.
+	Instance string `json:"instance,omitempty"`
 	// AddonRemoval is embedded so its fields (namespace, retained volumes) flatten into the JSON the
 	// agent reads — the removal facts are the result, not a nested detail of it.
 	AddonRemoval
@@ -424,13 +522,27 @@ type RemoveAddonResult struct {
 // AddonInfo is one installed add-on instance, as seen by `addon list` and the agent. It carries
 // no secret — when an add-on needs a credential it lives in a cluster Secret, never here.
 type AddonInfo struct {
+	// Name is the instance's name IN THE CLUSTER and the registry's primary key. For an
+	// environment's first instance it is the derived `burrow-<type>[-<env>]` (AddonInstanceName) and
+	// equal to Label; for every later one it is `burrow-<type>-<id>` with a generated id, and the
+	// operator never types it (ADR-0091 §2).
 	Name string    `json:"name"`
 	Type AddonType `json:"type"`
+	// Label is what a person calls this instance: what `--name` takes, what a guardrail key holds,
+	// and what every listing shows beside the cluster name (ADR-0091 §1). It is unique within an
+	// environment, which is what makes `<env>.<label>.<code>` an unambiguous guardrail key
+	// (ADR-0085 §1) without anything having to parse a composed name.
+	//
+	// A row written before ADR-0091 has its label backfilled to its name, so nothing an operator has
+	// already typed changes meaning. It is empty only on a value that has not been through the
+	// registry — a connected backend, or an install result before it is saved — where the name is the
+	// answer.
+	Label string `json:"label,omitempty"`
 	// Environment is the environment this instance serves — the canonical name, with the reserved
-	// "default" for the implicit one (ADR-0067 §1). Each environment gets its own instance, so this
-	// is what says which one this row is, and it is what an attach reads to decide which server to
-	// provision a database on. It is recorded rather than parsed back out of Name: the name is
-	// derived from the environment, never the other way round.
+	// "default" for the implicit one (ADR-0067 §1). An instance belongs to exactly ONE environment,
+	// however many instances an environment holds (ADR-0091 §6), so this is what says which
+	// environment's data this row is about, and (with Label) what selects it. It is recorded rather
+	// than parsed back out of Name: nothing recovers an environment by splitting a name (ADR-0091 §2).
 	Environment string `json:"environment,omitempty"`
 	// Mode is how the backend is provided: "installed" (Burrow deployed it) or "connected"
 	// (an existing backend the user runs). Installed-only for now; connect lands later (ADR-0026).
@@ -465,6 +577,28 @@ type AddonInfo struct {
 	// registry, for Warning's reason: it is a fact about an instance at one moment, not a fact about
 	// what an add-on is, and a persisted copy would go stale while continuing to read as current.
 	Backups *AddonBackups `json:"backups,omitempty"`
+}
+
+// AddonAttachment is one recorded attachment: which app, on which instance in which environment, and
+// the environment variable its connection string was written under. An app may hold several in one
+// environment — one per instance it is attached to (ADR-0091 §3) — and each one names its own
+// variable, because the first attachment has `DATABASE_URL` and Burrow refuses to invent a second
+// name the application was never told to read.
+//
+// It carries no connection string. The value lives in the app's Secret and never crosses a seam, an
+// API, or an audit row (ADR-0029/0031).
+type AddonAttachment struct {
+	// Addon is the add-on type the attachment is against; today only postgres has attachments.
+	Addon AddonType `json:"addon"`
+	// App is the application holding it, which is also the database's name (ADR-0031).
+	App string `json:"app"`
+	// Environment is the environment whose instance holds the database.
+	Environment string `json:"environment,omitempty"`
+	// Instance is the instance's name IN THE CLUSTER — the registry key, not the label, because this
+	// is what selects a server.
+	Instance string `json:"instance"`
+	// SecretKey is the variable the connection string was written under.
+	SecretKey string `json:"secret_key"`
 }
 
 // AddonBackupState is whether an add-on instance archives to object storage. It is a closed set so a

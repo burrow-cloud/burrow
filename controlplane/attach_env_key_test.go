@@ -25,7 +25,7 @@ func TestAttachDefaultKeyUnchanged(t *testing.T) {
 	ctx := context.Background()
 	e, k, d, _ := newPostgresEngine(t)
 
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "")
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{})
 	if err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
@@ -40,12 +40,12 @@ func TestAttachDefaultKeyUnchanged(t *testing.T) {
 	}
 	// And the recorded name for an attachment that named nothing reads back as the default, so an
 	// attachment made before this table existed and one made after are indistinguishable.
-	key, err := d.AddonEnvKey(ctx, string(cp.AddonPostgres), "web", cp.DefaultEnvironment)
+	key, recorded, err := d.AddonEnvKey(ctx, string(cp.AddonPostgres), "web", cp.DefaultEnvironment, defaultInstance(cp.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("AddonEnvKey: %v", err)
 	}
-	if key != cp.AppDatabaseURLKey {
-		t.Errorf("recorded key = %q, want %q", key, cp.AppDatabaseURLKey)
+	if !recorded || key != cp.AppDatabaseURLKey {
+		t.Errorf("recorded key = %q (%v), want %q", key, recorded, cp.AppDatabaseURLKey)
 	}
 }
 
@@ -55,7 +55,7 @@ func TestAttachWritesNamedKey(t *testing.T) {
 	ctx := context.Background()
 	e, k, d, _ := newPostgresEngine(t)
 
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "PG_DSN")
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "PG_DSN"})
 	if err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestAttachWritesNamedKey(t *testing.T) {
 	}
 	// The name is PERSISTED, not inferred: it is read back from the record, which is what detach,
 	// the dependency check and the restore cutover all consult.
-	key, err := d.AddonEnvKey(ctx, string(cp.AddonPostgres), "web", cp.DefaultEnvironment)
+	key, _, err := d.AddonEnvKey(ctx, string(cp.AddonPostgres), "web", cp.DefaultEnvironment, defaultInstance(cp.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("AddonEnvKey: %v", err)
 	}
@@ -91,10 +91,10 @@ func TestReattachKeepsTheChosenName(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL"); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("first AttachAddon: %v", err)
 	}
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "")
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{})
 	if err != nil {
 		t.Fatalf("re-AttachAddon: %v", err)
 	}
@@ -113,10 +113,10 @@ func TestAttachRenameMovesTheVariable(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("first AttachAddon: %v", err)
 	}
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL")
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"})
 	if err != nil {
 		t.Fatalf("renaming AttachAddon: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestAttachRefusesOccupiedSecretKey(t *testing.T) {
 	if err := k.SetSecretValue(ctx, "web", "DB_URL", "postgres://elsewhere/db"); err != nil {
 		t.Fatalf("seed secret: %v", err)
 	}
-	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL")
+	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"})
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("AttachAddon over an existing secret = %v, want ErrInvalid", err)
 	}
@@ -172,7 +172,7 @@ func TestAttachRefusesOccupiedConfigKey(t *testing.T) {
 	if err := d.SetAppEnv(ctx, "web", "DB_URL", "postgres://elsewhere/db"); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
-	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL")
+	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"})
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("AttachAddon over an existing config var = %v, want ErrInvalid", err)
 	}
@@ -187,10 +187,10 @@ func TestAttachOwnKeyIsNotAConflict(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL"); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("first AttachAddon: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL"); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("re-AttachAddon under the same name: %v", err)
 	}
 }
@@ -202,7 +202,7 @@ func TestAttachRejectsMalformedKey(t *testing.T) {
 	e, _, _, prov := newPostgresEngine(t)
 
 	for _, bad := range []string{"9LIVES", "has-a-dash", "has space", "has=equals"} {
-		if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", bad); !errors.Is(err, cp.ErrInvalid) {
+		if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: bad}); !errors.Is(err, cp.ErrInvalid) {
 			t.Errorf("AttachAddon(--as %q) = %v, want ErrInvalid", bad, err)
 		}
 	}
@@ -218,7 +218,7 @@ func TestDetachRemovesTheRecordedKey(t *testing.T) {
 	ctx := context.Background()
 	e, k, d, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL"); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
@@ -229,12 +229,12 @@ func TestDetachRemovesTheRecordedKey(t *testing.T) {
 	}
 	// The record goes with it, so a later attach starts from Burrow's default rather than inheriting
 	// a name for an attachment that no longer exists.
-	key, err := d.AddonEnvKey(ctx, string(cp.AddonPostgres), "web", cp.DefaultEnvironment)
+	_, recorded, err := d.AddonEnvKey(ctx, string(cp.AddonPostgres), "web", cp.DefaultEnvironment, defaultInstance(cp.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("AddonEnvKey: %v", err)
 	}
-	if key != cp.AppDatabaseURLKey {
-		t.Errorf("recorded key after detach = %q, want the default %q", key, cp.AppDatabaseURLKey)
+	if recorded {
+		t.Errorf("the attachment record survived the detach; a later attach would inherit a name for an attachment that no longer exists")
 	}
 }
 
@@ -245,7 +245,7 @@ func TestDetachRefusesWhenTheKeyCannotBeRead(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, prov := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL"); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	d.SetError(fake.OpAddonEnvKey, errors.New("database unavailable"))
@@ -268,7 +268,7 @@ func TestAppChecksProbeTheNamedKey(t *testing.T) {
 	installPostgresAddon(t, d, cp.DefaultEnvironment)
 	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "DB_URL"); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{EnvKey: "DB_URL"}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	rep, err := e.AppChecks(ctx, "web", "")

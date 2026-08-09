@@ -424,24 +424,30 @@ func (e *Engine) deriveDependencies(ctx context.Context, app, env, ns string) ([
 	// provisioned a database for this app (ADR-0031): attach creates the database and role there and
 	// writes DATABASE_URL into the app's Secret, so an app in that listing has, by construction, a
 	// credential in its environment pointing at a database Burrow made.
-	attached, known, err := e.hasProvisionedDatabase(ctx, app, env)
+	//
+	// AN APP MAY HOLD SEVERAL, one per instance it is attached to (ADR-0091 §3), so this is a list
+	// rather than a yes: an app reading from two databases has two dependencies, and a check that
+	// named only the first would report an app healthy while half of what it needs is unreachable.
+	instances, known, err := e.provisionedDatabases(ctx, app, env)
 	switch {
 	case err != nil:
 		return nil, "", err
-	case attached:
-		// WHETHER a database is attached is derived; WHAT THE VARIABLE IS CALLED is recorded, because
-		// no derivation can produce a name somebody chose (issue #462). A missing record answers
-		// AppDatabaseURLKey, which is what every attachment made before the name was a choice used, so
-		// this reads identically for them.
-		key, err := e.db.AddonEnvKey(ctx, string(AddonPostgres), app, envName(env))
-		if err != nil {
-			return nil, "", fmt.Errorf("reading the attachment's variable name: %w", err)
+	case len(instances) > 0:
+		for _, inst := range instances {
+			// WHETHER a database is attached is derived; WHAT THE VARIABLE IS CALLED is recorded,
+			// because no derivation can produce a name somebody chose (issue #462). A missing record
+			// answers AppDatabaseURLKey on the environment's default instance, which is what every
+			// attachment made before the name was a choice used, so this reads identically for them.
+			key, err := e.attachmentKey(ctx, AddonPostgres, app, envName(env), inst)
+			if err != nil {
+				return nil, "", fmt.Errorf("reading the attachment's variable name: %w", err)
+			}
+			deps = append(deps, Dependency{
+				Kind:        DependencyPostgres,
+				Provisioned: fmt.Sprintf("a database and login role on the Postgres instance %q in environment %s, with the connection string written into this app's Secret", instanceLabel(inst), env),
+				EnvKey:      key,
+			})
 		}
-		deps = append(deps, Dependency{
-			Kind:        DependencyPostgres,
-			Provisioned: fmt.Sprintf("a database and login role on environment %s's Postgres instance, with the connection string written into this app's Secret", env),
-			EnvKey:      key,
-		})
 	case !known:
 		notes = append(notes, "Burrow could not ask this environment's Postgres instance whether a database is attached to this app, so a database dependency may exist and is not listed")
 	}
@@ -475,32 +481,41 @@ func (e *Engine) deriveDependencies(ctx context.Context, app, env, ns string) ([
 	return deps, strings.Join(notes, "; "), nil
 }
 
-// hasProvisionedDatabase reports whether Burrow provisioned app a database on env's Postgres
-// instance, and whether it could tell. It reuses attachedApps rather than re-deriving the same fact,
-// so the set a removal warns about and the set a deploy checks are the same set read the same way.
-func (e *Engine) hasProvisionedDatabase(ctx context.Context, app, env string) (attached, known bool, err error) {
-	instance, err := AddonInstanceName(AddonPostgres, envName(env))
+// provisionedDatabases returns every Postgres instance in env that holds a Burrow-provisioned
+// database for app, and whether the question could be put at all. It reuses attachedApps rather than
+// re-deriving the same fact, so the set a removal warns about and the set a deploy checks are the
+// same set read the same way.
+//
+// IT ASKS EVERY INSTANCE IN THE ENVIRONMENT, because an environment may hold more than one and an app
+// may be attached to several (ADR-0091 §1, §3). An environment with no Postgres at all is a known
+// empty answer, not an unknown one.
+//
+// known=false means at least one instance would not answer. It is deliberately not collapsed into an
+// empty list: "this app has no database here" and "one of these servers did not reply" lead to
+// different deploys, which is the distinction attachedApps' second return exists for.
+func (e *Engine) provisionedDatabases(ctx context.Context, app, env string) ([]AddonInfo, bool, error) {
+	instances, err := e.db.AddonsInEnvironment(ctx, AddonPostgres, envName(env))
 	if err != nil {
-		return false, false, err
+		return nil, false, fmt.Errorf("reading the postgres add-ons in environment %s: %w", envName(env), err)
 	}
-	info, err := e.db.Addon(ctx, instance)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		// No Postgres add-on in this environment: nothing was provisioned, and that is known.
-		return false, true, nil
-	case err != nil:
-		return false, false, fmt.Errorf("reading the %s add-on: %w", instance, err)
-	}
-	apps, known := e.attachedApps(ctx, info)
-	if !known {
-		return false, false, nil
-	}
-	for _, a := range apps {
-		if a == app {
-			return true, true, nil
+	var (
+		attached []AddonInfo
+		known    = true
+	)
+	for _, inst := range instances {
+		apps, answered := e.attachedApps(ctx, inst)
+		if !answered {
+			known = false
+			continue
+		}
+		for _, a := range apps {
+			if a == app {
+				attached = append(attached, inst)
+				break
+			}
 		}
 	}
-	return false, true, nil
+	return attached, known, nil
 }
 
 // AppDatabaseURLKey is the DEFAULT environment variable Burrow writes an attached app's connection

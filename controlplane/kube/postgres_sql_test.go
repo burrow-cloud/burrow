@@ -79,7 +79,8 @@ func TestSQLRefusesBeforeConnecting(t *testing.T) {
 	p := NewPostgresProvisioner(client, nil, AddonInstanceTarget(addonNS))
 
 	base := controlplane.AppStatement{
-		App: "web", Env: controlplane.DefaultEnvironment, Namespace: "burrow-apps",
+		App: "web", Env: controlplane.DefaultEnvironment, Instance: testInstance(controlplane.DefaultEnvironment),
+		Namespace: "burrow-apps",
 		SecretKey: controlplane.AppDatabaseURLKey, Statement: "select 1",
 		Timeout: time.Second, MaxRows: 10,
 	}
@@ -113,7 +114,8 @@ func TestSQLRefusesBeforeConnecting(t *testing.T) {
 func TestSQLUnattachedAppIsNotFound(t *testing.T) {
 	ctx := context.Background()
 	q := controlplane.AppStatement{
-		App: "web", Env: controlplane.DefaultEnvironment, Namespace: "burrow-apps",
+		App: "web", Env: controlplane.DefaultEnvironment, Instance: testInstance(controlplane.DefaultEnvironment),
+		Namespace: "burrow-apps",
 		SecretKey: controlplane.AppDatabaseURLKey, Statement: "select 1",
 		Timeout: time.Second, MaxRows: 10,
 	}
@@ -148,7 +150,8 @@ func TestSQLDoesNotLeakTheConnectionString(t *testing.T) {
 	p := NewPostgresProvisioner(client, nil, AddonInstanceTarget(addonNS))
 
 	_, err := p.QueryAppDatabase(ctx, controlplane.AppStatement{
-		App: "web", Env: controlplane.DefaultEnvironment, Namespace: "burrow-apps",
+		App: "web", Env: controlplane.DefaultEnvironment, Instance: testInstance(controlplane.DefaultEnvironment),
+		Namespace: "burrow-apps",
 		SecretKey: controlplane.AppDatabaseURLKey, Statement: "select 1",
 		Timeout: time.Second, MaxRows: 10,
 	})
@@ -200,7 +203,7 @@ func TestAppReadURLNamesTheStandbyService(t *testing.T) {
 	})
 	p := NewPostgresProvisioner(client, nil, AddonInstanceTarget(addonNS))
 
-	url, err := p.AppReadURL(context.Background(), "web", controlplane.DefaultEnvironment)
+	url, err := p.AppReadURL(context.Background(), "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("AppReadURL: %v", err)
 	}
@@ -215,7 +218,7 @@ func TestAppReadURLNamesTheStandbyService(t *testing.T) {
 func TestAppReadURLIsNotFoundForAnUnattachedApp(t *testing.T) {
 	p := NewPostgresProvisioner(fake.NewSimpleClientset(), nil, AddonInstanceTarget(addonNS))
 
-	_, err := p.AppReadURL(context.Background(), "web", controlplane.DefaultEnvironment)
+	_, err := p.AppReadURL(context.Background(), "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if !errors.Is(err, controlplane.ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}

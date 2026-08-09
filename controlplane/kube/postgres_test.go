@@ -30,7 +30,7 @@ func TestMetricsCollectorDiscoversAppAndAddonNamespaces(t *testing.T) {
 	})
 	a := New(client, "apps").WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	cm, err := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
@@ -52,7 +52,7 @@ func TestMetricsCollectorDedupesWhenNamespacesEqual(t *testing.T) {
 	})
 	a := New(client, addonNS).WithAddonNamespace(addonNS)
 	spec, _ := controlplane.LookupAddon(controlplane.AddonMetrics)
-	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, nil); err != nil {
+	if _, err := a.DeployAddon(ctx, spec, controlplane.DefaultEnvironment, testInstanceOf(spec, controlplane.DefaultEnvironment), nil); err != nil {
 		t.Fatalf("DeployAddon: %v", err)
 	}
 	cm, _ := client.CoreV1().ConfigMaps(addonNS).Get(ctx, "burrow-metrics-collector", metav1.GetOptions{})
@@ -74,13 +74,13 @@ func TestProvisionerRejectsBadIdentifiers(t *testing.T) {
 
 	bad := []string{"a; DROP DATABASE x", "App", "1x", "", "-web", "web name", "web\"; --", "WEB", "web_db", "web;"}
 	for _, name := range bad {
-		if _, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+		if _, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("EnsureAppDatabase(%q) err = %v, want ErrInvalid", name, err)
 		}
-		if err := p.RevokeAppDatabase(ctx, name, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+		if err := p.RevokeAppDatabase(ctx, name, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("RevokeAppDatabase(%q) err = %v, want ErrInvalid", name, err)
 		}
-		if err := p.DropAppDatabase(ctx, name, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+		if err := p.DropAppDatabase(ctx, name, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("DropAppDatabase(%q) err = %v, want ErrInvalid", name, err)
 		}
 	}
@@ -93,7 +93,7 @@ func TestProvisionerAcceptsValidIdentifiers(t *testing.T) {
 	ctx := context.Background()
 	p, dyn, _ := provisionerFor(t, addonNS)
 	for _, name := range []string{"web", "my-app", "a", "web2", "a1b2-c3"} {
-		if _, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment); err != nil {
+		if _, err := p.EnsureAppDatabase(ctx, name, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 			t.Errorf("EnsureAppDatabase(%q): %v", name, err)
 			continue
 		}
@@ -129,16 +129,16 @@ func TestProvisionerRequiresAnEnvironment(t *testing.T) {
 	})
 
 	for _, env := range []string{"", "Staging", "not a label", "staging/prod"} {
-		if _, err := p.EnsureAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
+		if _, err := p.EnsureAppDatabase(ctx, "web", env, testInstance(env)); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("EnsureAppDatabase(web, %q) err = %v, want ErrInvalid", env, err)
 		}
-		if err := p.RevokeAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
+		if err := p.RevokeAppDatabase(ctx, "web", env, testInstance(env)); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("RevokeAppDatabase(web, %q) err = %v, want ErrInvalid", env, err)
 		}
-		if err := p.DropAppDatabase(ctx, "web", env); !errors.Is(err, controlplane.ErrInvalid) {
+		if err := p.DropAppDatabase(ctx, "web", env, testInstance(env)); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("DropAppDatabase(web, %q) err = %v, want ErrInvalid", env, err)
 		}
-		if _, err := p.ListAppDatabases(ctx, env); !errors.Is(err, controlplane.ErrInvalid) {
+		if _, err := p.ListAppDatabases(ctx, env, testInstance(env)); !errors.Is(err, controlplane.ErrInvalid) {
 			t.Errorf("ListAppDatabases(%q) err = %v, want ErrInvalid", env, err)
 		}
 	}
@@ -155,14 +155,14 @@ func TestProvisionerReachesTheEnvironmentsOwnInstance(t *testing.T) {
 		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
 	})
 
-	defHost, err := p.instanceHost(controlplane.DefaultEnvironment)
+	defHost, err := p.instanceHost(controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("instanceHost(default): %v", err)
 	}
 	if defHost != PostgresSecretName+"."+addonNS+".svc" {
 		t.Errorf("default-environment host = %q, want the pre-existing %s.%s.svc", defHost, PostgresSecretName, addonNS)
 	}
-	stgHost, err := p.instanceHost("staging")
+	stgHost, err := p.instanceHost("staging", testInstance("staging"))
 	if err != nil {
 		t.Fatalf("instanceHost(staging): %v", err)
 	}
@@ -173,7 +173,7 @@ func TestProvisionerReachesTheEnvironmentsOwnInstance(t *testing.T) {
 	// Attaching the same app name in staging provisions against STAGING's instance. The objects are
 	// separate objects naming a separate `Cluster`, so there is no state either attach could adopt
 	// from the other.
-	if _, err := p.EnsureAppDatabase(ctx, "web", "staging"); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", "staging", testInstance("staging")); err != nil {
 		t.Fatalf("EnsureAppDatabase(web, staging): %v", err)
 	}
 	obj, err := dyn.Resource(cnpgDatabaseGVR).Namespace(addonNS).
@@ -200,7 +200,7 @@ func TestAddonInstanceTargetIsTheInstanceAnExistingInstallAlreadyHas(t *testing.
 	// What burrowd builds when BURROW_ADDON_NAMESPACE is unset.
 	unconfigured := AddonInstanceTarget("")
 
-	target, err := unconfigured(controlplane.DefaultEnvironment)
+	target, err := unconfigured(controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("default environment: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestAddonInstanceTargetIsTheInstanceAnExistingInstallAlreadyHas(t *testing.
 
 	// A second environment keeps its own instance, beside the first rather than on top of it
 	// (ADR-0067 §1) — the environment still selects, it just selects within a configured set.
-	staging, err := unconfigured("staging")
+	staging, err := unconfigured("staging", testInstance("staging"))
 	if err != nil {
 		t.Fatalf("staging: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestAddonInstanceTargetIsTheInstanceAnExistingInstallAlreadyHas(t *testing.
 	}
 
 	// An install that DID set the add-on namespace is targeted at the namespace it set.
-	elsewhere, err := AddonInstanceTarget("other-addons")(controlplane.DefaultEnvironment)
+	elsewhere, err := AddonInstanceTarget("other-addons")(controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("configured namespace: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestAddonInstanceTargetIsTheInstanceAnExistingInstallAlreadyHas(t *testing.
 
 	// And the address the provisioner actually dials is that host on the add-on port.
 	p := NewPostgresProvisioner(fake.NewSimpleClientset(), nil, unconfigured)
-	hostPort, err := p.dialHostPort(controlplane.DefaultEnvironment)
+	hostPort, err := p.dialHostPort(controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("dialHostPort: %v", err)
 	}
@@ -254,11 +254,11 @@ func TestProvisionerActsOnlyOnTheInstanceItWasGiven(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: PostgresSecretName, Namespace: addonNS},
 		Data:       map[string][]byte{PostgresPasswordKey: []byte("supersecretpassword")},
 	})
-	p.target = func(string) (PostgresTarget, error) {
+	p.target = func(string, string) (PostgresTarget, error) {
 		return PostgresTarget{Instance: "tenant-postgres", Namespace: "tenant-addons"}, nil
 	}
 
-	host, err := p.instanceHost(controlplane.DefaultEnvironment)
+	host, err := p.instanceHost(controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("instanceHost: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestProvisionerActsOnlyOnTheInstanceItWasGiven(t *testing.T) {
 
 	// Provisioning lands on the configured instance, in the configured namespace — never on the
 	// default-named one sitting right there in the cluster the client is pointed at.
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("EnsureAppDatabase: %v", err)
 	}
 	obj, err := dyn.Resource(cnpgDatabaseGVR).Namespace("tenant-addons").
@@ -297,16 +297,16 @@ func TestProvisionerWithNoInstanceProvisionsNothing(t *testing.T) {
 	})
 	p.target = nil
 
-	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+	if _, err := p.EnsureAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("EnsureAppDatabase err = %v, want ErrInvalid", err)
 	}
-	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+	if err := p.RevokeAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("RevokeAppDatabase err = %v, want ErrInvalid", err)
 	}
-	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+	if err := p.DropAppDatabase(ctx, "web", controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("DropAppDatabase err = %v, want ErrInvalid", err)
 	}
-	if _, err := p.ListAppDatabases(ctx, controlplane.DefaultEnvironment); !errors.Is(err, controlplane.ErrInvalid) {
+	if _, err := p.ListAppDatabases(ctx, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); !errors.Is(err, controlplane.ErrInvalid) {
 		t.Errorf("ListAppDatabases err = %v, want ErrInvalid", err)
 	}
 }
@@ -410,7 +410,7 @@ func TestAttachRefusesAnAppNameItCannotServe(t *testing.T) {
 	p, dyn, _ := provisionerFor(t, addonNS)
 
 	longest := appNameOfLen(MaxPostgresAppNameLen)
-	if _, err := p.EnsureAppDatabase(ctx, longest, controlplane.DefaultEnvironment); err != nil {
+	if _, err := p.EnsureAppDatabase(ctx, longest, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Fatalf("the longest servable app name failed to attach: %v", err)
 	}
 	roles := dyn.Resource(cnpgDatabaseRoleGVR).Namespace(addonNS)
@@ -441,7 +441,7 @@ func TestAttachRefusesAnAppNameItCannotServe(t *testing.T) {
 	// attach wrote, not about the fake being empty.
 	before := len(dyn.Actions())
 	tooLong := appNameOfLen(MaxPostgresAppNameLen + 1)
-	_, err = p.EnsureAppDatabase(ctx, tooLong, controlplane.DefaultEnvironment)
+	_, err = p.EnsureAppDatabase(ctx, tooLong, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if !errors.Is(err, controlplane.ErrInvalid) {
 		t.Fatalf("EnsureAppDatabase(%d characters) err = %v, want ErrInvalid", len(tooLong), err)
 	}
@@ -470,10 +470,10 @@ func TestDetachStillReachesAnAppNameAttachWouldRefuse(t *testing.T) {
 	p, _, _ := provisionerFor(t, addonNS)
 
 	tooLong := appNameOfLen(MaxPostgresAppNameLen + 1)
-	if err := p.RevokeAppDatabase(ctx, tooLong, controlplane.DefaultEnvironment); err != nil {
+	if err := p.RevokeAppDatabase(ctx, tooLong, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Errorf("a detach of an over-budget app name failed: %v", err)
 	}
-	if err := p.DropAppDatabase(ctx, tooLong, controlplane.DefaultEnvironment); err != nil {
+	if err := p.DropAppDatabase(ctx, tooLong, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment)); err != nil {
 		t.Errorf("a --delete-data detach of an over-budget app name failed: %v", err)
 	}
 }

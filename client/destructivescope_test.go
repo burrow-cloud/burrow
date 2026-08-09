@@ -185,7 +185,7 @@ func TestRestoreAddonInEnvironmentRefusedRatherThanOverwritingProduction(t *test
 	var seen []string
 	srv := preScopeControlPlane(t, &seen)
 
-	err := newerClient(srv.URL).RestoreAddon(context.Background(), "postgres", "web", "backup-1", "staging", true)
+	err := newerClient(srv.URL).RestoreAddon(context.Background(), "postgres", "web", "backup-1", "staging", "", true)
 	scopeRefused(t, err, "nothing was restored", `"web"`, `"staging"`)
 	notReached(t, seen, "POST /v1/addons/restore")
 }
@@ -230,13 +230,13 @@ func TestDestructiveScopeRoutesOnAMatchedPair(t *testing.T) {
 			return c.DetachAddon(ctx, "postgres", "web", "staging", client.DetachAddonOptions{Confirm: true})
 		}, "POST", "/v1/addons/detach/data/keep/env/staging"},
 		{"restore in an environment", func() error {
-			return c.RestoreAddon(ctx, "postgres", "web", "backup-1", "staging", true)
+			return c.RestoreAddon(ctx, "postgres", "web", "backup-1", "staging", "", true)
 		}, "POST", "/v1/addons/restore/env/staging"},
 		// A statement carries its environment the same way, and for a sharper version of the same
 		// reason: a dropped environment runs the caller's SQL against another instance's database of
 		// the same name (ADR-0087 §1).
 		{"a statement in an environment", func() error {
-			_, err := c.AddonSQL(ctx, "postgres", "web", "staging", "select 1", false)
+			_, err := c.AddonSQL(ctx, "postgres", "web", "staging", "", "select 1", false)
 			return err
 		}, "POST", "/v1/addons/sql/env/staging"},
 	} {
@@ -274,7 +274,7 @@ func TestDestructiveScopeWithNoEnvironmentKeepsTheUnnarrowedRoute(t *testing.T) 
 	if err := c.DeleteApp(ctx, "web", "", true); err != nil {
 		t.Errorf("delete without an environment: %v", err)
 	}
-	if err := c.RestoreAddon(ctx, "postgres", "web", "backup-1", "", true); err != nil {
+	if err := c.RestoreAddon(ctx, "postgres", "web", "backup-1", "", "", true); err != nil {
 		t.Errorf("restore without an environment: %v", err)
 	}
 	for _, want := range []string{"DELETE /v1/apps/web", "POST /v1/addons/restore"} {

@@ -33,11 +33,50 @@ func newProvisionedAPI(t *testing.T) (http.Handler, *fake.Database) {
 	if err != nil {
 		t.Fatalf("engine: %v", err)
 	}
+	// An attach or a detach resolves the instance it acts on from the registry rather than deriving
+	// it (ADR-0091 §2), so the environments these tests reach need one registered. The default
+	// environment's instance is registered under the name it already has, and `staging`'s under its
+	// own; the guardrail policy is permissive so the installs land.
+	installAPIPostgres(t, e, d, cp.DefaultEnvironment)
 	h, err := api.New(api.Config{Engine: e, Token: token})
 	if err != nil {
 		t.Fatalf("api.New: %v", err)
 	}
 	return h, d
+}
+
+// installAPIPostgres registers an environment's own Postgres instance, which an attach, a detach, a
+// dump or a statement needs before it can resolve the instance it acts on out of the registry
+// (ADR-0091 §2). It restores the policy afterwards, so a test that means to exercise a guardrail
+// still starts from the policy it set.
+func installAPIPostgres(t *testing.T, e *cp.Engine, d *fake.Database, env string) {
+	t.Helper()
+	ctx := context.Background()
+	before, err := d.Policy(ctx)
+	if err != nil {
+		t.Fatalf("Policy: %v", err)
+	}
+	d.SetPolicy(cp.Policy{Dispositions: map[cp.GuardrailCode]cp.Disposition{cp.GuardrailAddonInstall: cp.DispositionAllow}})
+	if _, err := e.InstallAddon(ctx, cp.AddonPostgres, env, cp.InstallAddonOptions{Confirm: true}); err != nil {
+		t.Fatalf("InstallAddon(%s): %v", env, err)
+	}
+	d.SetPolicy(before)
+}
+
+// registerInstance puts an environment's own Postgres instance in the registry directly, for a test
+// that needs the row a detach resolves (ADR-0091 §2) without standing the instance up in the fake
+// cluster. Its label is its name, which is what an environment's first instance carries.
+func registerInstance(t *testing.T, d *fake.Database, env string) {
+	t.Helper()
+	name, err := cp.AddonInstanceName(cp.AddonPostgres, env)
+	if err != nil {
+		t.Fatalf("AddonInstanceName(%s): %v", env, err)
+	}
+	if err := d.SaveAddon(context.Background(), cp.AddonInfo{
+		Name: name, Label: name, Type: cp.AddonPostgres, Environment: env, Mode: "installed",
+	}); err != nil {
+		t.Fatalf("SaveAddon(%s): %v", env, err)
+	}
 }
 
 // Issue #485 moved four destructive narrowings out of a request parameter and into the route, so that
@@ -107,6 +146,7 @@ func TestEnvironmentRoutesCarryTheScopeAndTheOldFormsStillWork(t *testing.T) {
 			if err := d.CreateEnvironment(context.Background(), "staging", "burrow-apps-staging"); err != nil {
 				t.Fatalf("CreateEnvironment: %v", err)
 			}
+			registerInstance(t, d, "staging")
 
 			// Naming no environment at all is ambiguous with two registered — the refusal that makes
 			// the rest of this test mean something.
@@ -261,6 +301,7 @@ func TestDetachAddonLegacyRouteKeepsItsMeaningForOlderClients(t *testing.T) {
 			if err := d.CreateEnvironment(context.Background(), "staging", "burrow-apps-staging"); err != nil {
 				t.Fatalf("CreateEnvironment: %v", err)
 			}
+			registerInstance(t, d, "staging")
 			rr := do(h, "POST", route, token, `{"addon":"postgres","app":"web","env":"staging"}`)
 			if rr.Code != http.StatusOK {
 				t.Fatalf("an older client's detach = %d %s, want it still served", rr.Code, rr.Body.String())

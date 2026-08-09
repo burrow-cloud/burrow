@@ -69,6 +69,7 @@ func newAddonConfigCmd() *cobra.Command {
 // which is the only reason the settings need a listing of their own rather than living in help text.
 func newAddonConfigPostgresCmd() *cobra.Command {
 	o := &commonOpts{}
+	var instance string
 	cmd := &cobra.Command{
 		Use:   "postgres",
 		Short: "List what an environment's Postgres instance can be told, and what it is set to",
@@ -85,7 +86,7 @@ func newAddonConfigPostgresCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.AddonSettings(ctx, string(controlplane.AddonPostgres), o.env)
+			res, err := c.AddonSettings(ctx, string(controlplane.AddonPostgres), o.env, instance)
 			if err != nil {
 				return err
 			}
@@ -130,6 +131,7 @@ func newAddonConfigPostgresCmd() *cobra.Command {
 // to route read-only queries down the second connection, which is a code change and a deploy anyway.
 func newAddonConfigStandbysCmd() *cobra.Command {
 	o := &commonOpts{}
+	var instance string
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "standbys <n>",
@@ -151,11 +153,12 @@ func newAddonConfigStandbysCmd() *cobra.Command {
 			"Reducing the count asks first and names the apps it affects; raising it proceeds.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAddonConfigSet(cmd, o, controlplane.AddonSettingStandbys, args[0], confirm)
+			return runAddonConfigSet(cmd, o, instance, controlplane.AddonSettingStandbys, args[0], confirm)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to configure (default: the environment's own instance)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false,
 		"proceed with a REDUCTION without the typed-name prompt: fewer standbys is less of the instance surviving a lost pod, and going to zero withdraws the read address from every attached app. Raising the count never consults it.")
 	return cmd
@@ -169,6 +172,7 @@ func newAddonConfigStandbysCmd() *cobra.Command {
 // left to fail in a `Cluster` status field.
 func newAddonConfigStorageCmd() *cobra.Command {
 	o := &commonOpts{}
+	var instance string
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "storage <size>",
@@ -182,11 +186,12 @@ func newAddonConfigStorageCmd() *cobra.Command {
 			"The database keeps serving while the volume grows.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAddonConfigSet(cmd, o, controlplane.AddonSettingStorage, args[0], confirm)
+			return runAddonConfigSet(cmd, o, instance, controlplane.AddonSettingStorage, args[0], confirm)
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to configure (default: the environment's own instance)")
 	// The flag exists on both settings so the pair reads the same way, and it does nothing here: a
 	// volume shrink is a refusal rather than a confirmation, because there is nothing achievable for
 	// an operator to be agreeing to.
@@ -202,29 +207,29 @@ func newAddonConfigStorageCmd() *cobra.Command {
 // itself and refuses an unconfirmed reduction whatever this client believes — so a value that could
 // not be read here costs the prompt, never the safety. That is the same division `addon
 // restore-instance` draws between the notice it prints and the guardrail the server enforces.
-func runAddonConfigSet(cmd *cobra.Command, o *commonOpts, setting controlplane.AddonSetting, value string, confirm bool) error {
+func runAddonConfigSet(cmd *cobra.Command, o *commonOpts, instance string, setting controlplane.AddonSetting, value string, confirm bool) error {
 	ctx := cmd.Context()
 	c, err := o.client(ctx, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
 	addon := string(controlplane.AddonPostgres)
-	current, haveCurrent := addonSettingValue(ctx, c, addon, o.env, setting)
+	// THE INSTANCE THE PROMPT NAMES COMES FROM THE SERVER, not from a name composed here. An
+	// environment may hold more than one instance and only the first one's name is derivable
+	// (ADR-0091 §2), so the CLI reads the label off the same answer it reads the current value from —
+	// which is also the read that decides whether the prompt is needed at all.
+	current, label, haveCurrent := addonSettingValue(ctx, c, addon, o.env, instance, setting)
 	if !confirm && haveCurrent && isStandbyReduction(setting, current, value) {
 		// The typed-name gate goes to stderr so a --json run keeps a clean stdout.
-		instance, err := controlplane.AddonInstanceName(controlplane.AddonPostgres, configEnvironment(o.env))
-		if err != nil {
-			return err
-		}
 		if !stdinIsTerminal(cmd.InOrStdin()) {
-			return errStandbyReductionNeedsTerminal(instance, current, value)
+			return errStandbyReductionNeedsTerminal(label, current, value)
 		}
-		if err := confirmStandbyReduction(ctx, c, instance, o.env, current, value, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
+		if err := confirmStandbyReduction(ctx, c, label, o.env, current, value, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
 			return err
 		}
 		confirm = true
 	}
-	res, err := c.ConfigureAddon(ctx, addon, o.env, string(setting), value, confirm)
+	res, err := c.ConfigureAddon(ctx, addon, o.env, instance, string(setting), value, confirm)
 	if err != nil {
 		return err
 	}
@@ -234,19 +239,21 @@ func runAddonConfigSet(cmd *cobra.Command, o *commonOpts, setting controlplane.A
 	return o.emitChange(cmd.OutOrStdout(), res, addonConfigSummary(res))
 }
 
-// addonSettingValue reads one setting's current value, best-effort. An unreadable answer means the
-// caller falls through to the server, which is the authority on whether a change is a reduction.
-func addonSettingValue(ctx context.Context, c *client.Client, addon, env string, setting controlplane.AddonSetting) (string, bool) {
-	res, err := c.AddonSettings(ctx, addon, env)
+// addonSettingValue reads one setting's current value AND the instance's label, best-effort. An
+// unreadable answer means the caller falls through to the server, which is the authority on whether a
+// change is a reduction — and the prompt that would have named the instance is the thing being
+// skipped, so a label nobody could read costs nothing.
+func addonSettingValue(ctx context.Context, c *client.Client, addon, env, instance string, setting controlplane.AddonSetting) (value, label string, ok bool) {
+	res, err := c.AddonSettings(ctx, addon, env, instance)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	for _, s := range res.Settings {
 		if s.Setting == string(setting) {
-			return s.Value, s.Value != ""
+			return s.Value, res.Instance, s.Value != ""
 		}
 	}
-	return "", false
+	return "", res.Instance, false
 }
 
 // isStandbyReduction reports whether this change takes standbys away. A value that will not parse is

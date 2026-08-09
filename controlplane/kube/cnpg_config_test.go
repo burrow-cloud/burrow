@@ -65,7 +65,7 @@ func TestAddonInstanceShapeReadsTheCluster(t *testing.T) {
 	}
 	a, _, _ := cnpgRemovalAdapter(nil, configurableCluster(name, 3, "20Gi"))
 
-	shape, err := a.AddonInstanceShape(context.Background(), controlplane.AddonPostgres, controlplane.DefaultEnvironment)
+	shape, err := a.AddonInstanceShape(context.Background(), controlplane.AddonPostgres, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if err != nil {
 		t.Fatalf("AddonInstanceShape: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestAddonInstanceShapeReadsTheCluster(t *testing.T) {
 func TestAddonInstanceShapeIsNotFoundWithoutAnInstance(t *testing.T) {
 	a, _, _ := cnpgRemovalAdapter(nil)
 
-	_, err := a.AddonInstanceShape(context.Background(), controlplane.AddonPostgres, controlplane.DefaultEnvironment)
+	_, err := a.AddonInstanceShape(context.Background(), controlplane.AddonPostgres, controlplane.DefaultEnvironment, testInstance(controlplane.DefaultEnvironment))
 	if !errors.Is(err, controlplane.ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
@@ -100,7 +100,7 @@ func TestConfigureAddonInstanceSetsTheInstanceCount(t *testing.T) {
 	standbys := 2
 
 	if err := a.ConfigureAddonInstance(context.Background(), controlplane.ConfigureInstanceRequest{
-		Addon: controlplane.AddonPostgres, Environment: controlplane.DefaultEnvironment, Standbys: &standbys,
+		Addon: controlplane.AddonPostgres, Environment: controlplane.DefaultEnvironment, Instance: testInstance(controlplane.DefaultEnvironment), Standbys: &standbys,
 	}); err != nil {
 		t.Fatalf("ConfigureAddonInstance: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestConfigureAddonInstanceLeavesEverythingElseAlone(t *testing.T) {
 	a, _, dyn := cnpgRemovalAdapter(nil, configurableCluster(name, 1, "20Gi"))
 
 	if err := a.ConfigureAddonInstance(context.Background(), controlplane.ConfigureInstanceRequest{
-		Addon: controlplane.AddonPostgres, Environment: controlplane.DefaultEnvironment, Storage: "50Gi",
+		Addon: controlplane.AddonPostgres, Environment: controlplane.DefaultEnvironment, Instance: testInstance(controlplane.DefaultEnvironment), Storage: "50Gi",
 	}); err != nil {
 		t.Fatalf("ConfigureAddonInstance: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestConfigureAddonInstanceIsNotFoundWithoutAnInstance(t *testing.T) {
 	standbys := 1
 
 	err := a.ConfigureAddonInstance(context.Background(), controlplane.ConfigureInstanceRequest{
-		Addon: controlplane.AddonPostgres, Environment: controlplane.DefaultEnvironment, Standbys: &standbys,
+		Addon: controlplane.AddonPostgres, Environment: controlplane.DefaultEnvironment, Instance: testInstance(controlplane.DefaultEnvironment), Standbys: &standbys,
 	})
 	if !errors.Is(err, controlplane.ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)

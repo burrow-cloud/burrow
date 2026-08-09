@@ -176,9 +176,12 @@ type GuardrailScope struct {
 	Env string
 	// Name is the ONE thing the operation acts on, for a guardrail that declares itself scopable to
 	// one thing: an application for the app.* codes, an add-on instance for the addon.* ones, under
-	// the name AddonInstanceName produces (burrow-postgres, burrow-postgres-staging). There is one
-	// field because the code already says which kind it is, so a caller never has to choose between
-	// two that mean the same thing in different circumstances.
+	// the instance's LABEL (ADR-0091 §4) — `burrow-postgres` for an environment's own instance,
+	// `analytics` for one an operator added. Never the generated cluster name a later instance
+	// carries: a key nobody can read is a key nobody will write, and because a first instance's label
+	// IS its name, every disposition written before that record keeps matching. There is one field
+	// because the code already says which kind it is, so a caller never has to choose between two
+	// that mean the same thing in different circumstances.
 	Name string
 }
 
@@ -199,10 +202,9 @@ type GuardrailScope struct {
 // env-scopable would promise an override that is never read.
 //
 // The addon.* codes are nearly all NOT env-scoped, and not because of their prefix: an add-on
-// operation does name an environment, but its instance name already carries it
-// (AddonInstanceName: burrow-postgres, burrow-postgres-staging), so the name tier already draws the
-// per-environment line and an env tier over the top of it would be a second way to say the same
-// thing. `addon.sql` is the exception, and it is a DECLARED one: ADR-0087 §5 asks for a gradient set
+// operation does name an environment, but the instance it acts on is unique within one and its label
+// is what the name tier holds (ADR-0091 §4), so the name tier already draws the per-instance line and
+// an env tier over the top of it would be a second way to say the same thing. `addon.sql` is the exception, and it is a DECLARED one: ADR-0087 §5 asks for a gradient set
 // with `guard set --env <env> addon.sql …` — allow in development, deny in production — which is a
 // statement about the ENVIRONMENT rather than about one server, and an operator who added a second
 // Postgres instance to an environment should not have to repeat the disposition on it.

@@ -243,6 +243,7 @@ func newAddonCmd() *cobra.Command {
 func newAddonSQLCmd() *cobra.Command {
 	o := &connOpts{}
 	var statement string
+	var instance string
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "sql <addon> <app>",
@@ -272,13 +273,14 @@ func newAddonSQLCmd() *cobra.Command {
 				return err
 			}
 			return o.mutate(cmd, "addon_sql", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.AddonSQL(ctx, args[0], args[1], env, stmt, confirm)
+				return c.AddonSQL(ctx, args[0], args[1], env, instance, stmt, confirm)
 			})
 		},
 	}
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVarP(&statement, "statement", "c", "", "the `SQL` to run (or pipe it on stdin)")
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` holding the database (default: the environment's own instance)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a statement a guardrail holds for confirmation (the default disposition is deny, which this does not open)")
 	return cmd
 }
@@ -382,6 +384,7 @@ func newAddonInstallCmd() *cobra.Command {
 func newAddonAttachCmd() *cobra.Command {
 	o := &connOpts{}
 	var as string
+	var instance string
 	cmd := &cobra.Command{
 		Use:   "attach <addon> <app>",
 		Short: "Give an app its own database on the installed Postgres add-on and wire it in",
@@ -397,17 +400,24 @@ func newAddonAttachCmd() *cobra.Command {
 			"can be wired to it directly instead of copying one variable to another at start-up. --as on an\n" +
 			"already-attached app MOVES the variable — the result reports the removed name in\n" +
 			"previous_secret_key. A name the app's config or Secret already holds is REFUSED, naming what\n" +
-			"holds it, rather than overwriting a value that cannot be read back.",
+			"holds it, rather than overwriting a value that cannot be read back.\n\n" +
+			"An environment may hold more than one database instance. Without --name the app is attached to\n" +
+			"the environment's own; --name attaches it to another one that already exists, and an app may hold\n" +
+			"several attachments at once. A SECOND attachment must name its own variable with --as, because\n" +
+			"DATABASE_URL belongs to the first — Burrow refuses rather than inventing a name the application\n" +
+			"was never told to read. Creating an instance is a person's job: if the one you want is not there,\n" +
+			"say that a human can add it with `burrow addon install postgres --name <name>`.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "addon_attach", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.AttachAddon(ctx, args[0], args[1], env, as)
+				return c.AttachAddon(ctx, args[0], args[1], env, instance, as)
 			})
 		},
 	}
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().StringVar(&as, "as", "", "environment variable to write the connection string into (default DATABASE_URL, or the name this attachment already uses)")
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` to attach to (default: the environment's own instance)")
 	return cmd
 }
 
@@ -424,6 +434,7 @@ func newAddonAttachCmd() *cobra.Command {
 func newAddonBackupCmd() *cobra.Command {
 	o := &connOpts{}
 	var destination string
+	var instance string
 	cmd := &cobra.Command{
 		Use:   "backup <addon> <app>",
 		Short: "Back up an app's database on the installed Postgres add-on",
@@ -438,12 +449,13 @@ func newAddonBackupCmd() *cobra.Command {
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "addon_backup", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				return c.BackupAddon(ctx, args[0], args[1], env, destination)
+				return c.BackupAddon(ctx, args[0], args[1], env, instance, destination)
 			})
 		},
 	}
 	cmd.Flags().StringVar(&destination, "destination", "",
 		"the object-storage `provider` to write this backup to (only needed when more than one is registered)")
+	cmd.Flags().StringVar(&instance, "name", "", "the add-on `instance` holding the database (default: the environment's own instance)")
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	return cmd

@@ -34,7 +34,21 @@ func newPostgresEngine(t *testing.T) (*cp.Engine, *fake.Kubernetes, *fake.Databa
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// The default environment's instance is INSTALLED, because every consumer resolves the instance
+	// it acts on from the registry rather than deriving it (ADR-0091 §2): an attach into an
+	// environment with no Postgres in it is ErrNotFound, which is the honest answer and not what
+	// these tests are about.
+	installPostgresIn(t, e, cp.DefaultEnvironment)
 	return e, k, d, prov
+}
+
+// installPostgresIn puts an environment's own Postgres instance in the registry and in the fake
+// cluster, the way `addon install postgres --env <env>` does.
+func installPostgresIn(t *testing.T, e *cp.Engine, env string) {
+	t.Helper()
+	if _, err := e.InstallAddon(context.Background(), cp.AddonPostgres, env, cp.InstallAddonOptions{Confirm: true}); err != nil {
+		t.Fatalf("InstallAddon(%s): %v", env, err)
+	}
 }
 
 // TestPostgresCatalogEntry asserts the catalog carries a well-formed AddonPostgres entry: the
@@ -93,7 +107,7 @@ func TestAttachPostgres(t *testing.T) {
 		t.Fatalf("seed workload: %v", err)
 	}
 
-	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", "")
+	res, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{})
 	if err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
@@ -103,8 +117,8 @@ func TestAttachPostgres(t *testing.T) {
 	// The provisioner was asked to provision web IN A NAMED ENVIRONMENT: an unnamed operation
 	// resolves to the canonical "default", never to an empty environment the provisioner would have
 	// to interpret (ADR-0067 §1).
-	if got := prov.Ensured(); len(got) != 1 || got[0] != (fake.AppDatabase{App: "web", Env: cp.DefaultEnvironment}) {
-		t.Errorf("EnsureAppDatabase called with %v, want [{web default}]", got)
+	if got := prov.Ensured(); len(got) != 1 || got[0] != (fake.AppDatabase{App: "web", Env: cp.DefaultEnvironment, Instance: mustInstance(t, cp.AddonPostgres, cp.DefaultEnvironment)}) {
+		t.Errorf("EnsureAppDatabase called with %v, want one call naming web on the default environment's own instance", got)
 	}
 	if res.Environment != cp.DefaultEnvironment {
 		t.Errorf("result environment = %q, want %q", res.Environment, cp.DefaultEnvironment)
@@ -128,7 +142,7 @@ func TestAttachPostgres(t *testing.T) {
 func TestAttachPostgresNoWorkload(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon with no workload: %v", err)
 	}
 	if _, ok := k.SecretValue("web", "DATABASE_URL"); !ok {
@@ -140,10 +154,10 @@ func TestAttachPostgresNoWorkload(t *testing.T) {
 func TestAttachRejectsBadInput(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonCache, "web", "", ""); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AttachAddon(ctx, cp.AddonCache, "web", "", cp.AttachAddonOptions{}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("attach non-postgres err = %v, want ErrInvalid", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "Bad_Name", "", ""); !errors.Is(err, cp.ErrInvalid) {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "Bad_Name", "", cp.AttachAddonOptions{}); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("attach bad app name err = %v, want ErrInvalid", err)
 	}
 	if got := prov.Ensured(); len(got) != 0 {
@@ -165,7 +179,7 @@ func TestAttachWithoutProvisioner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); !errors.Is(err, cp.ErrNotImplemented) {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); !errors.Is(err, cp.ErrNotImplemented) {
 		t.Errorf("attach without provisioner err = %v, want ErrNotImplemented", err)
 	}
 }
@@ -179,7 +193,7 @@ func TestDetachPostgres(t *testing.T) {
 	if err := k.ApplyWorkload(ctx, cp.WorkloadSpec{App: "web", Kind: cp.WorkloadDeployment, Image: "busybox", Replicas: 1}); err != nil {
 		t.Fatalf("seed workload: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 
@@ -197,8 +211,8 @@ func TestDetachPostgres(t *testing.T) {
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon confirmed: %v", err)
 	}
-	if got := prov.Revoked(); len(got) != 1 || got[0] != (fake.AppDatabase{App: "web", Env: cp.DefaultEnvironment}) {
-		t.Errorf("RevokeAppDatabase called with %v, want [{web default}]", got)
+	if got := prov.Revoked(); len(got) != 1 || got[0] != (fake.AppDatabase{App: "web", Env: cp.DefaultEnvironment, Instance: mustInstance(t, cp.AddonPostgres, cp.DefaultEnvironment)}) {
+		t.Errorf("RevokeAppDatabase called with %v, want one call naming web on the default environment's own instance", got)
 	}
 	if got := prov.Dropped(); len(got) != 0 {
 		t.Errorf("a plain detach destroyed the database (%v); it keeps it, and only --delete-data destroys it (ADR-0090 §1)", got)
@@ -218,13 +232,13 @@ func TestDetachPostgres(t *testing.T) {
 func TestDetachKeepsTheDataAndReAttachGetsItBack(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, prov := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon: %v", err)
 	}
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("re-attach after a detach: %v", err)
 	}
 	if got := prov.Dropped(); len(got) != 0 {
@@ -240,14 +254,14 @@ func TestDetachKeepsTheDataAndReAttachGetsItBack(t *testing.T) {
 func TestDetachDeleteDataDestroysTheDatabase(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, prov := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{DeleteData: true, Confirm: true}); err != nil {
 		t.Fatalf("DetachAddon --delete-data: %v", err)
 	}
-	if got := prov.Dropped(); len(got) != 1 || got[0] != (fake.AppDatabase{App: "web", Env: cp.DefaultEnvironment}) {
-		t.Errorf("DropAppDatabase called with %v, want [{web default}]", got)
+	if got := prov.Dropped(); len(got) != 1 || got[0] != (fake.AppDatabase{App: "web", Env: cp.DefaultEnvironment, Instance: mustInstance(t, cp.AddonPostgres, cp.DefaultEnvironment)}) {
+		t.Errorf("DropAppDatabase called with %v, want one call naming web on the default environment's own instance", got)
 	}
 	if got := prov.Revoked(); len(got) != 0 {
 		t.Errorf("a data-destroying detach also revoked (%v); the two dispositions are separate calls, not a sequence", got)
@@ -263,7 +277,7 @@ func TestDetachDeleteDataDestroysTheDatabase(t *testing.T) {
 func TestDetachDeleteDataIsRecordedInTheAudit(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, _ := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{DeleteData: true, Confirm: true}); err != nil {
@@ -298,7 +312,7 @@ func TestAttachAuditRedactsURL(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, _ := newPostgresEngine(t)
 
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {
@@ -321,8 +335,12 @@ func TestAttachAuditRedactsURL(t *testing.T) {
 		// Args carry only the allowlist: addon + app + env + key names, nothing resembling a URL or
 		// password.
 		for key, v := range row.Args {
-			if key != "addon" && key != "app" && key != "env" && key != "key" && key != "delete_data" {
-				t.Errorf("audit row %s has unexpected arg key %q (only addon/app/env/key/delete_data allowed)", row.Operation, key)
+			// The allowlist is per operation: an install row names the type and the image it stood
+			// up, an attach/detach row names the instance it acted on (ADR-0091 §4). None of them
+			// carries a value.
+			allowed := map[string]bool{"addon": true, "app": true, "env": true, "instance": true, "key": true, "delete_data": true, "type": true, "image": true, "read_key": true}
+			if !allowed[key] {
+				t.Errorf("audit row %s has unexpected arg key %q", row.Operation, key)
 			}
 			if strings.Contains(v, "postgres://") || strings.Contains(v, "@burrow-postgres") || v == url {
 				t.Errorf("audit arg %q leaks a connection string: %q", key, v)
@@ -349,7 +367,7 @@ func TestAttachDoesNotLogTheURL(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	e, _, _, _ := newPostgresEngine(t)
-	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", ""); err != nil {
+	if _, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{}); err != nil {
 		t.Fatalf("AttachAddon: %v", err)
 	}
 	if err := e.DetachAddon(ctx, cp.AddonPostgres, "web", "", cp.DetachAddonOptions{Confirm: true}); err != nil {

@@ -353,10 +353,10 @@ func (k *Kubernetes) RestartedAt(app string) (time.Time, bool) {
 	return d.restartedAt, true
 }
 
-// DeployAddon models installing one add-on instance FOR ONE ENVIRONMENT: the instance is named by
-// controlplane.AddonInstanceName, so the default environment lands on the unqualified name an
-// existing install already has and any other environment gets a separate instance beside it
-// (ADR-0067 §1). Two environments therefore occupy two entries in this fake cluster, never one.
+// DeployAddon models installing one add-on instance: the instance is NAMED BY THE CALLER, which is
+// the engine handing down what it resolved out of the registry (ADR-0091 §2). Two environments
+// therefore occupy two entries in this fake cluster and never one, and so do two instances in one
+// environment.
 func (k *Kubernetes) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, env, instance string, archive *controlplane.ArchiveDestination) (controlplane.AddonInfo, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()

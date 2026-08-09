@@ -177,10 +177,13 @@ func (t PostgresTarget) ReadHost() string {
 type PostgresTargetFunc func(env, instance string) (PostgresTarget, error)
 
 // AddonInstanceTarget is the target of a single-tenant install — the one an existing install already
-// has, and the value burrowd is wired with: environment env's add-on instance (AddonInstanceName,
-// the single derivation shared with the installer and the registry — ADR-0067 §1) in the add-on
-// namespace burrowd was installed with. An empty namespace means the default one, so an install that
-// never set BURROW_ADDON_NAMESPACE names exactly the instance, Secret, and host it has always used.
+// has, and the value burrowd is wired with: the named instance, in the add-on namespace burrowd was
+// installed with. An empty namespace means the default one, so an install that never set
+// BURROW_ADDON_NAMESPACE names exactly the instance, Secret, and host it has always used.
+//
+// It composes NO name of its own. The instance arrives from the caller, which resolved it out of the
+// registry (ADR-0091 §2); what this adds is the namespace, which is configuration rather than
+// derivation (issue #519).
 func AddonInstanceTarget(addonNamespace string) PostgresTargetFunc {
 	if addonNamespace == "" {
 		addonNamespace = defaultAddonNamespace

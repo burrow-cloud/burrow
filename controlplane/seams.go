@@ -561,10 +561,12 @@ type Kubernetes interface {
 	// the instance's connection info (ADR-0025). Installing an already-installed add-on is
 	// idempotent.
 	//
-	// env is required and names which environment's instance this is (ADR-0067 §1): the resources are
-	// named by AddonInstanceName, so the default environment lands on exactly the names an existing
-	// install already has and any other environment gets its own instance beside it — its own pod,
-	// its own volume, and for Postgres its own superuser credential.
+	// env is required and names which environment this instance serves (ADR-0067 §1). instance is
+	// required and is what every resource is NAMED after — the engine resolves it out of the registry
+	// and hands it down (ADR-0091 §2), so an environment's first instance lands on exactly the names
+	// an existing install already has, another environment gets its own instance beside it, and a
+	// second instance in one environment gets a generated name of its own. Each has its own pod, its
+	// own volume, and for Postgres its own superuser credential.
 	//
 	// The add-on's TYPE decides what is written. Postgres is a CloudNativePG `Cluster` — one custom
 	// resource, from which the operator composes the workload, the volume and the services (ADR-0066

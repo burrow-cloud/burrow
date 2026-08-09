@@ -31,13 +31,13 @@ type AppDatabase struct {
 	Instance string
 }
 
-// Provisioner is an in-memory controlplane.DatabaseProvisioner. It models ONE INSTANCE PER
-// ENVIRONMENT (ADR-0067 §1): databases are held per environment, so provisioning `web` in two
-// environments yields two databases with two distinct connection strings, and the second call cannot
-// adopt the first's. It records the (app, environment) pairs it provisioned and returns a
-// deterministic connection string per pair, so an attach test can assert the engine threaded the URL
-// into the secret path without standing up Postgres. Errors can be injected to exercise the failure
-// path.
+// Provisioner is an in-memory controlplane.DatabaseProvisioner. It models databases held PER
+// INSTANCE (ADR-0067 §1, ADR-0091 §4): provisioning `web` on two instances yields two databases with
+// two distinct connection strings, and the second call cannot adopt the first's — whether the two
+// instances are in different environments or in the same one. It records the calls it was given and
+// returns a deterministic connection string per instance, so an attach test can assert the engine
+// threaded the URL into the secret path without standing up Postgres. Errors can be injected to
+// exercise the failure path.
 type Provisioner struct {
 	mu sync.Mutex
 	// databases maps instance -> app -> present, the fake's stand-in for "this instance holds these

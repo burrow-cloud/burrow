@@ -20,7 +20,7 @@ import (
 // what happens to what was there.
 //
 // THE RECOVERED INSTANCE COMES UP UNDER THE INSTANCE'S OWN NAME, and that decision is the shape of
-// everything below. CloudNativePG cannot recover in place; but `AddonInstanceName` is not a detail a
+// everything below. CloudNativePG cannot recover in place; but an instance's name is not a detail a
 // restore is free to move. It names the Service every DATABASE_URL resolves, the Secret the
 // provisioner reads the superuser password from, the `Cluster` a removal deletes and the instance a
 // physical backup is taken of — so a recovery that left a differently-named `Cluster` behind would

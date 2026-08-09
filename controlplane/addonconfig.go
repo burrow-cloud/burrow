@@ -96,8 +96,9 @@ type AddonSettingInfo struct {
 type AddonSettingsResult struct {
 	Addon       AddonType `json:"addon"`
 	Environment string    `json:"environment"`
-	// Instance is the instance the values were read from, by the name every consumer resolves it at
-	// (AddonInstanceName). An environment holds one (ADR-0067 §1), so this is what `--env` selected.
+	// Instance is the LABEL of the instance the values were read from — what `--name` takes and what
+	// a guardrail key holds (ADR-0091 §1). An environment may hold more than one, so `--env` no
+	// longer selects it on its own; naming none means the environment's own.
 	Instance string             `json:"instance"`
 	Settings []AddonSettingInfo `json:"settings"`
 }

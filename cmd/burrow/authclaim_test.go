@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -196,6 +197,51 @@ type failingTransport struct{}
 
 func (failingTransport) Connect(context.Context) (*client.Client, error) {
 	return nil, errors.New("the cluster is unreachable")
+}
+
+// TestLoginReportsTheSignInAndStillRecordsTheTarget puts the two halves together at the command
+// level: `burrow auth login --context <cluster>` prints what the sign-in did, and records the target
+// either way. The target is what somebody came for; the credential is the improvement.
+func TestLoginReportsTheSignInAndStillRecordsTheTarget(t *testing.T) {
+	stubAuth(t, authContexts(), false)
+	stubSignInControlPlane(t, http.StatusOK, `{
+		"principal_id":"p-1","principal":"ada","admin":true,
+		"credential_id":"c-1","kind":"user","install_id":"install-abc","token":"ada-token"}`)
+
+	var out bytes.Buffer
+	if err := runAuthLogin(context.Background(), authLoginOpts{kubeContext: "do-nyc1-cluster", name: "ada"}, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("runAuthLogin: %v", err)
+	}
+	if !strings.Contains(out.String(), "signed in as ada") {
+		t.Errorf("output does not report the credential:\n%s", out.String())
+	}
+	cfg := loadAuthConfig(t)
+	tgt, ok := cfg.LookupTarget("do-nyc1-cluster")
+	if !ok {
+		t.Fatalf("target was not recorded: %+v", cfg.Targets)
+	}
+	// The id is written on the SAME entry SetTarget wrote, not on a second pass over the config.
+	if tgt.InstallID != "install-abc" {
+		t.Errorf("recorded target InstallID = %q, want install-abc", tgt.InstallID)
+	}
+}
+
+// TestLoginRecordsTheTargetWhenNoCredentialIsIssued is the other half, and the one that must not
+// regress: choosing where you use Burrow works against a cluster that will not issue one.
+func TestLoginRecordsTheTargetWhenNoCredentialIsIssued(t *testing.T) {
+	stubAuth(t, authContexts(), false)
+	stubSignInControlPlane(t, http.StatusConflict, `{"error":"already claimed","code":"already_claimed"}`)
+
+	var out bytes.Buffer
+	if err := runAuthLogin(context.Background(), authLoginOpts{kubeContext: "do-nyc1-cluster"}, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("runAuthLogin: %v", err)
+	}
+	if got := loadAuthConfig(t).CurrentTarget; got != "do-nyc1-cluster" {
+		t.Errorf("active target = %q, want do-nyc1-cluster", got)
+	}
+	if !strings.Contains(out.String(), "shared token") {
+		t.Errorf("output does not say the shared token keeps working:\n%s", out.String())
+	}
 }
 
 // TestClaimRefusalNamesTheNextStep: each way burrowd can decline has a different next step, and a

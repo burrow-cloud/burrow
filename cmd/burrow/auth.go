@@ -162,8 +162,14 @@ func runAuthLogin(ctx context.Context, o authLoginOpts, in io.Reader, out io.Wri
 		return err
 	}
 	fmt.Fprintf(out, "\n%s Signed in to %s: %s.\n", okMark(out), target.Name, target.Describe())
-	if signIn.Line != "" {
-		fmt.Fprintln(out, signIn.Line)
+	// A credential that WAS issued is part of what just succeeded; one that was not is a caveat about
+	// a setup that works anyway. Marking them the same would either dress a caveat as an achievement
+	// or make signing in successfully read like something went wrong.
+	switch {
+	case signIn.Issued:
+		fmt.Fprintf(out, "%s %s\n", okMark(out), signIn.Line)
+	case signIn.Line != "":
+		fmt.Fprintf(out, "%s%s\n", note(out), signIn.Line)
 	}
 	fmt.Fprintln(out, "It is now your active target. See `burrow auth status`, or change it with `burrow auth switch <name>`.")
 	if hadPrevious && previous.Name != target.Name {

@@ -58,6 +58,14 @@ type Database struct {
 	// The operator-set operational limits (ADR-0068 §1), kept apart from policy above because a
 	// limit carries a value rather than a disposition.
 	limits controlplane.OperationalConfig
+
+	// Who Burrow knows and what they hold (ADR-0084 §2). credentialSeq keeps issue order so a
+	// principal's listing is deterministic when a test clock stamps several at the same instant.
+	// The credentials here carry a token HASH, never a token — the fake keeps the same discipline
+	// the store does, because a fake that is looser is a place a test can assert the wrong thing.
+	principals    map[string]controlplane.Principal
+	credentials   map[string]controlplane.Credential
+	credentialSeq []string
 }
 
 // NewDatabase returns an empty fake database with the default guardrail policy.
@@ -82,6 +90,8 @@ func NewDatabase() *Database {
 		depChecks:    make(map[string]bool),
 		attachments:  make(map[string]string),
 		limits:       controlplane.OperationalConfig{Values: map[controlplane.LimitCode]string{}},
+		principals:   make(map[string]controlplane.Principal),
+		credentials:  make(map[string]controlplane.Credential),
 	}
 }
 

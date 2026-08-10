@@ -12,6 +12,8 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/burrow-cloud/burrow/controlplane/kube"
@@ -320,4 +322,82 @@ func TestDetectIngressControllerReadiness(t *testing.T) {
 			t.Errorf("a ready controller in any namespace must report ingress usable, got %+v", caps.Ingress)
 		}
 	})
+}
+
+// staleMetricsClientset is a cluster whose Metrics API is registered and serving nothing — the
+// cluster in issue #561. Its metrics.k8s.io group comes back with an EMPTY version list, which is
+// what client-go hands a caller when the aggregation layer marks the version stale: a stale
+// GroupVersion is dropped by SplitGroupsAndResources and the group is appended regardless. The fake
+// clientset cannot express this (its discovery derives groups FROM the versions it is given), so
+// discovery is substituted wholesale.
+type staleMetricsClientset struct {
+	kubernetes.Interface
+	groups *metav1.APIGroupList
+}
+
+func (c staleMetricsClientset) Discovery() discovery.DiscoveryInterface {
+	return groupListDiscovery{groups: c.groups}
+}
+
+// groupListDiscovery answers ServerGroups from a fixed list and nothing else — every other method is
+// the embedded nil interface and panics if a detector reaches for one, which is the assertion that
+// detection stays a single discovery read needing no RBAC (ADR-0034).
+type groupListDiscovery struct {
+	discovery.DiscoveryInterface
+	groups *metav1.APIGroupList
+}
+
+func (d groupListDiscovery) ServerGroups() (*metav1.APIGroupList, error) { return d.groups, nil }
+
+// staleMetricsCluster is a cluster registering metrics.k8s.io with no usable version behind it.
+func staleMetricsCluster() kubernetes.Interface {
+	return staleMetricsClientset{
+		Interface: fake.NewSimpleClientset(),
+		groups: &metav1.APIGroupList{Groups: []metav1.APIGroup{
+			{Name: "apps", Versions: []metav1.GroupVersionForDiscovery{{GroupVersion: "apps/v1", Version: "v1"}}},
+			{Name: "metrics.k8s.io"}, // registered, every version stale
+		}},
+	}
+}
+
+// TestDetectMetricsServerStaleVersion is issue #561: matching the group NAME reported a broken
+// metrics-server as present, because the aggregation layer keeps the group and only its version goes
+// stale. The capability now says both things — registered, and not serving — so a caller that wants
+// "does kubectl top work" reads Present and gets the right answer, and a caller that wants "is
+// something already registered here" can still tell this cluster apart from an empty one.
+func TestDetectMetricsServerStaleVersion(t *testing.T) {
+	caps, err := kube.DetectMetricsServer(staleMetricsCluster())
+	if err != nil {
+		t.Fatalf("DetectMetricsServer: %v", err)
+	}
+	if caps.Present {
+		t.Errorf("a stale metrics.k8s.io group must not read as serving, got %+v", caps)
+	}
+	if !caps.Registered {
+		t.Errorf("a stale metrics.k8s.io group is still registered, got %+v", caps)
+	}
+
+	// A cluster with no group at all is neither.
+	empty := fake.NewSimpleClientset()
+	empty.Resources = []*metav1.APIResourceList{{GroupVersion: "apps/v1"}}
+	caps, err = kube.DetectMetricsServer(empty)
+	if err != nil {
+		t.Fatalf("DetectMetricsServer: %v", err)
+	}
+	if caps.Present || caps.Registered {
+		t.Errorf("no metrics.k8s.io group at all must read as absent, got %+v", caps)
+	}
+}
+
+// TestDetectCapabilitiesStaleMetricsAPI proves the whole capability report carries the distinction,
+// so `burrow cluster` on that cluster does not print "serving the Metrics API" over a metrics-server
+// that answers nothing.
+func TestDetectCapabilitiesStaleMetricsAPI(t *testing.T) {
+	caps, err := kube.DetectCapabilities(context.Background(), staleMetricsCluster())
+	if err != nil {
+		t.Fatalf("DetectCapabilities: %v", err)
+	}
+	if caps.MetricsServer.Present || !caps.MetricsServer.Registered {
+		t.Errorf("metrics-server = %+v, want registered and not serving", caps.MetricsServer)
+	}
 }

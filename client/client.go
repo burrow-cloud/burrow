@@ -656,9 +656,12 @@ type CertManagerCapability struct {
 
 // MetricsServerCapability reports whether metrics-server is serving the Kubernetes Metrics API
 // (detected via the metrics.k8s.io API group). It powers `kubectl top`, HPA autoscaling, and the
-// utilization layer of capacity reporting.
+// utilization layer of capacity reporting. Present is whether the API is actually SERVING — the
+// group advertises a usable version; Registered is whether the group merely exists, which a
+// metrics-server that has stopped answering also leaves behind (ADR-0096 §1).
 type MetricsServerCapability struct {
-	Present bool `json:"present"`
+	Present    bool `json:"present"`
+	Registered bool `json:"registered,omitempty"`
 }
 
 // CloudNativePGCapability reports the CloudNativePG operator (ADR-0066 §1). Present is whether its

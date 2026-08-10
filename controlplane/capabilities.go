@@ -96,12 +96,24 @@ type CertManagerCapability struct {
 	Present bool `json:"present"`
 }
 
-// MetricsServerCapability reports whether metrics-server is serving the Kubernetes Metrics API.
-// Present is true when the metrics.k8s.io API group is served — i.e. a metrics-server (or a
-// vendor's equivalent on k3s, GKE, or AKS) is registered — detected via API-group discovery, which
-// needs no RBAC.
+// MetricsServerCapability reports whether metrics-server is serving the Kubernetes Metrics API. It
+// is two facts rather than one because they fail apart, for the same reason CloudNativePGCapability
+// below is three (ADR-0096 §1):
+//
+//   - Present is whether the Metrics API is being SERVED — the metrics.k8s.io group advertises a
+//     usable version, so `kubectl top`, an HPA, and utilization reporting will get an answer. This
+//     is the only field a caller should treat as "metrics-server works".
+//   - Registered is whether the group exists at all. The Metrics API is served through the
+//     aggregation layer, so a metrics-server that has stopped answering leaves the group registered
+//     with its version marked stale. Registered without Present is precisely that state, and it must
+//     not read as installed — nor as absent, since something is already registered there.
+//
+// Both are detected via API-group discovery, which needs no RBAC. Discovery reports what the
+// aggregation layer advertises, not the result of a metrics query: see ADR-0096 §4 for what that
+// still cannot see.
 type MetricsServerCapability struct {
-	Present bool `json:"present"`
+	Present    bool `json:"present"`
+	Registered bool `json:"registered,omitempty"`
 }
 
 // CloudNativePGCapability reports the CloudNativePG operator, the cluster prerequisite ADR-0066 §1

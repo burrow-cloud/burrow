@@ -131,6 +131,20 @@ func TestMetricsAPIAvailableAbsent(t *testing.T) {
 	}
 }
 
+// TestMetricsAPIAvailableStaleVersion is the HPA side of issue #561: on the cluster where
+// metrics.k8s.io was registered and answering nothing, this reported the Metrics API available, so
+// an applied HorizontalPodAutoscaler passed without the warning that it will never scale. Reading
+// the same detector as the capability report, it now warns exactly as it does on an absent one.
+func TestMetricsAPIAvailableStaleVersion(t *testing.T) {
+	available, err := kube.New(staleMetricsCluster(), ns).MetricsAPIAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("MetricsAPIAvailable: %v", err)
+	}
+	if available {
+		t.Errorf("a registered but stale metrics.k8s.io group must not report the Metrics API available")
+	}
+}
+
 // TestAutoscalerActive reports true only while an HPA named after the app exists: absent before an
 // apply, present after, and absent again after a delete (NotFound → false, no error).
 func TestAutoscalerActive(t *testing.T) {

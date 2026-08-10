@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	_ "embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"runtime/debug"
@@ -386,7 +387,13 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 	// same on every cluster. It detects a vendor copy (k3s/GKE/AKS) and leaves it alone, installs the
 	// baseline where absent (EKS/DOKS/kind), and is opt-out via --minimal / --no-metrics-server. It is
 	// best-effort: a baseline hiccup must not fail an already-installed control plane.
-	if err := ensureMetricsServer(ctx, a.kubeconfig, a.kubeContext, cs, a.minimal || a.noMetricsServer, a.verbose, stdout, stderr); err != nil {
+	// force is false here and only reachable from `burrow cluster metrics install --force`: an
+	// install must never replace a registration it did not make without being asked to (ADR-0096 §3).
+	// A registered-but-not-serving Metrics API has already been reported in full, and the generic
+	// warning below is suppressed for it — its closing advice is to re-run install, which on that
+	// cluster reaches the same refusal a second time.
+	if err := ensureMetricsServer(ctx, a.kubeconfig, a.kubeContext, cs, a.minimal || a.noMetricsServer, false, a.verbose, stdout, stderr); err != nil &&
+		!errors.Is(err, errMetricsAPINotServing) {
 		fmt.Fprintf(stdout, "\n%scould not ensure the metrics-server baseline: %v\n"+
 			"The control plane is installed; ensure it later with a metrics-server manifest, or re-run install.\n", warning(stdout), err)
 	}

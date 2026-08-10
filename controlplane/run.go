@@ -89,7 +89,7 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	// command is the salient fact a reviewer reads, and the confirm prompt echoes it (ADR-0048 §5).
 	args := map[string]string{"command": command, "image": cur.Image, "env": envName(req.Env)}
 	if err := e.recordDecision(ctx, auditOpRun, req.App, args, GuardrailAppRun,
-		pol.evaluateGuardrail(GuardrailScope{Env: req.Env, Name: req.App}, "run", GuardrailAppRun, req.Confirm,
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: req.Env, Name: req.App}, "run", GuardrailAppRun, req.Confirm,
 			fmt.Sprintf("running %q in %s (%s)", command, req.App, cur.Image))); err != nil {
 		return RunResult{}, err
 	}

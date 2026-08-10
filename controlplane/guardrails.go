@@ -4,6 +4,7 @@
 package controlplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -89,9 +90,10 @@ const (
 	// shape is a gradient: `guard set --env dev addon.attach allow` for a sandbox where the agent
 	// building three services should not stop three times, confirm or deny in production.
 	//
-	// The disposition binds every caller, including the operator. The setting most operators will
-	// want is `guard set --binds agent addon.attach deny`, and that axis arrives with ADR-0094; this
-	// default is the correct one either way, since a built-in default binds every kind (ADR-0094 §3).
+	// The DEFAULT binds every caller, including the operator, because every built-in default does —
+	// that is what makes ADR-0094 §3's fall-through terminate closed. The setting most operators will
+	// want on top of it is `guard set --binds agent addon.attach deny`, which refuses the agent and
+	// leaves the operator reading the confirm underneath.
 	GuardrailAddonAttach GuardrailCode = "addon.attach"
 	// GuardrailAddonDetach: the operation would detach an app from an add-on — for Postgres,
 	// dropping the app's login role so that nothing it holds still authenticates, and KEEPING the
@@ -195,6 +197,16 @@ type GuardrailInfo struct {
 	// "global" for the global policy, or "default" for the built-in default. It is empty for the
 	// global listing.
 	Source string `json:"source,omitempty"`
+	// Binds is the credential kind the answering key was bound to, when the effective disposition came
+	// from a kind-bound key (ADR-0094 §6): `agent` for one stored under `agent:prod.website.app.deploy`.
+	// It is empty for a disposition that binds every caller, which is every disposition set without
+	// `--binds`.
+	//
+	// Source and Binds are INDEPENDENT axes and are reported separately for that reason. Source says
+	// which target tier answered; Binds says which caller the answering key bound. It is reported in
+	// every listing, including the global one, because a binding is a fact about the disposition
+	// itself rather than a consequence of how narrowly the listing was asked for.
+	Binds CredentialKind `json:"binds,omitempty"`
 }
 
 // GuardrailScope names what one operation targets, so its disposition can be resolved for exactly
@@ -357,8 +369,11 @@ func lookupGuardrail(code GuardrailCode) (guardrailDef, bool) {
 // Guardrails returns each known guardrail with its effective disposition under the global policy
 // (ADR-0020). Use GuardrailsFor to inspect the effective policy for an environment, or for one app
 // or add-on instance in it.
-func (p Policy) Guardrails() []GuardrailInfo {
-	return p.guardrails(GuardrailScope{})
+//
+// The context carries the caller whose kind the listing resolves for (ADR-0094 §6): an agent reading
+// the policy sees what binds the agent.
+func (p Policy) Guardrails(ctx context.Context) []GuardrailInfo {
+	return p.guardrails(ctx, GuardrailScope{})
 }
 
 // GuardrailsFor returns each known guardrail with its effective disposition for the named scope
@@ -380,16 +395,22 @@ func (p Policy) Guardrails() []GuardrailInfo {
 // and it does so in `prod` exactly as much as in `staging`. `prod` therefore appears in the key
 // (prod.website.app.run) where it is elided from the environment tier, and naming a thing always
 // consults its tier and always reports a Source.
-func (p Policy) GuardrailsFor(scope GuardrailScope) []GuardrailInfo {
-	return p.guardrails(scope)
+//
+// The listing resolves for the KIND OF THE CALLER ASKING (ADR-0094 §6), read off ctx like every other
+// resolution, so an agent reading the policy sees what binds the agent. A listing that showed the
+// human's answer to the agent would be worse than no listing: the agent would plan an operation the
+// policy has already refused. Where a kind-bound key answered, the entry's Binds names the kind, so a
+// human reading the same listing sees the binding rather than inferring it from a surprise.
+func (p Policy) GuardrailsFor(ctx context.Context, scope GuardrailScope) []GuardrailInfo {
+	return p.guardrails(ctx, scope)
 }
 
-func (p Policy) guardrails(scope GuardrailScope) []GuardrailInfo {
+func (p Policy) guardrails(ctx context.Context, scope GuardrailScope) []GuardrailInfo {
 	named := scope.Name != "" || (scope.Env != "" && scope.Env != DefaultEnvironment)
 	out := make([]GuardrailInfo, len(knownGuardrails))
 	for i, g := range knownGuardrails {
-		disp, source := p.dispositionSource(scope, g.code)
-		info := GuardrailInfo{Code: g.code, Disposition: disp, Description: g.description}
+		disp, source, binds := p.dispositionSource(ctx, scope, g.code)
+		info := GuardrailInfo{Code: g.code, Disposition: disp, Description: g.description, Binds: binds}
 		if named {
 			info.Source = source
 		}
@@ -439,12 +460,12 @@ func AsGuardrail(err error) (*GuardrailError, bool) {
 //
 // The replica CEILING is not evaluated here and is not a guardrail: it is an operational limit
 // whose breach is a validation failure, checked before any guardrail runs (ADR-0068 §2).
-func (p Policy) evaluateDeploy(scope GuardrailScope, replicas int32, confirmed bool) error {
-	if err := p.evaluateGuardrail(scope, "deploy", GuardrailAppDeploy, confirmed,
+func (p Policy) evaluateDeploy(ctx context.Context, scope GuardrailScope, replicas int32, confirmed bool) error {
+	if err := p.evaluateGuardrail(ctx, scope, "deploy", GuardrailAppDeploy, confirmed,
 		fmt.Sprintf("deploying a new release to %s", envName(scope.Env))); err != nil {
 		return err
 	}
-	return p.evaluateReplicas(scope, "deploy", replicas, confirmed)
+	return p.evaluateReplicas(ctx, scope, "deploy", replicas, confirmed)
 }
 
 // evaluateReplicas evaluates a requested replica count for op against the policy, given
@@ -456,9 +477,9 @@ func (p Policy) evaluateDeploy(scope GuardrailScope, replicas int32, confirmed b
 //
 // Zero is the only count a guardrail has an opinion about: scaling to zero takes an app offline,
 // which is a question of what may happen rather than of where a line is drawn.
-func (p Policy) evaluateReplicas(scope GuardrailScope, op string, replicas int32, confirmed bool) error {
+func (p Policy) evaluateReplicas(ctx context.Context, scope GuardrailScope, op string, replicas int32, confirmed bool) error {
 	if replicas == 0 {
-		return p.enforce(scope, op, GuardrailScaleToZero, confirmed, "scaling to zero replicas", 0, 0)
+		return p.enforce(ctx, scope, op, GuardrailScaleToZero, confirmed, "scaling to zero replicas", 0, 0)
 	}
 	return nil
 }
@@ -471,8 +492,8 @@ func (p Policy) evaluateReplicas(scope GuardrailScope, op string, replicas int32
 // The autoscaler's MAXIMUM is bounded by the replica ceiling exactly as a manual scale is, and for
 // the same reason it is checked before this runs rather than here: the ceiling is an operational
 // limit, not a guardrail (ADR-0068 §2).
-func (p Policy) evaluateAutoscale(scope GuardrailScope, confirmed bool) error {
-	return p.evaluateGuardrail(scope, "autoscale", GuardrailAutoscale, confirmed, "configuring autoscaling")
+func (p Policy) evaluateAutoscale(ctx context.Context, scope GuardrailScope, confirmed bool) error {
+	return p.evaluateGuardrail(ctx, scope, "autoscale", GuardrailAutoscale, confirmed, "configuring autoscaling")
 }
 
 // enforce applies the configured disposition for a tripped guardrail, producing the right
@@ -484,8 +505,15 @@ func (p Policy) evaluateAutoscale(scope GuardrailScope, confirmed bool) error {
 // A refusal NAMES the thing the disposition was set for. "app.deploy is denied for burrowd-cloud"
 // is a sentence an operator can act on; a bare "app.deploy is denied", on an install where it is
 // allowed for everything else, reads like a bug.
-func (p Policy) enforce(scope GuardrailScope, op string, code GuardrailCode, confirmed bool, what string, requested, limit int32) error {
-	disp, source := p.dispositionSource(scope, code)
+//
+// The context is what carries the CALLER's kind, and enforce is where it is read (ADR-0094 §1) — one
+// read for all seventeen places that evaluate a guardrail, every one of which already has a ctx in
+// hand because it passes the same one to recordDecision on the next line. Where the disposition that
+// answered was kind-bound, the refusal says so and says what the way out is: the reader is usually an
+// agent relaying to a human, and "ask someone to run it" leaves the guardrail in place where "ask
+// someone to relax the policy" does not (ADR-0094 §6).
+func (p Policy) enforce(ctx context.Context, scope GuardrailScope, op string, code GuardrailCode, confirmed bool, what string, requested, limit int32) error {
+	disp, source, binds := p.dispositionSource(ctx, scope, code)
 	switch disp {
 	case DispositionAllow:
 		return nil
@@ -499,7 +527,7 @@ func (p Policy) enforce(scope GuardrailScope, op string, code GuardrailCode, con
 			Requested:         requested,
 			Limit:             limit,
 			NeedsConfirmation: true,
-			Message:           what + " requires confirmation to proceed" + setFor(scope, source, code),
+			Message:           what + " requires confirmation to proceed" + setFor(scope, source, code) + bindsHint(binds),
 		}
 	default: // DispositionDeny, and any unconfigured/unknown disposition → deny (safe default)
 		return &GuardrailError{
@@ -507,9 +535,37 @@ func (p Policy) enforce(scope GuardrailScope, op string, code GuardrailCode, con
 			Code:      code,
 			Requested: requested,
 			Limit:     limit,
-			Message:   what + " is denied by the current guardrail policy" + setFor(scope, source, code) + relaxHint(scope, source, code),
+			Message:   what + " is denied by the current guardrail policy" + setFor(scope, source, code) + wayOut(scope, source, code, binds),
 		}
 	}
+}
+
+// wayOut is the clause a refusal ends with: the next step whoever reads it can actually take.
+//
+// A kind-bound disposition gets bindsHint INSTEAD of relaxHint, and the substitution is the point of
+// ADR-0094 §6 rather than a shortcut. Today the only relayable next step is "ask someone to relax the
+// policy", which means turning the protection off for everyone while the work happens; once the
+// disposition binds one kind of credential the next step is "ask someone to run it", which leaves the
+// guardrail exactly where it is. Printing both would bury the cheaper answer under the more damaging
+// one.
+func wayOut(scope GuardrailScope, source string, code GuardrailCode, binds CredentialKind) string {
+	if binds != "" {
+		return bindsHint(binds)
+	}
+	return relaxHint(scope, source, code)
+}
+
+// bindsHint names the credential kind the answering disposition bound, and the way past it. It is
+// empty for an unbound disposition, which binds everyone and has no such way past.
+//
+// The second clause is the load-bearing one. An agent reading this is relaying to a human, and what
+// that human needs to hear is that they can perform the operation themselves with their own
+// credential — not that somebody has to edit the policy first.
+func bindsHint(binds CredentialKind) string {
+	if binds == "" {
+		return ""
+	}
+	return fmt.Sprintf(" — this disposition binds %q credentials; an operator can run it with their own", binds)
 }
 
 // setFor names the app or add-on instance a disposition was set for, when that is the tier that
@@ -569,14 +625,15 @@ func relaxHint(scope GuardrailScope, source string, code GuardrailCode) string {
 
 // evaluateGuardrail applies a categorical guardrail — one that always trips when its
 // operation is attempted, like public exposure — using the configured disposition for the scope.
-func (p Policy) evaluateGuardrail(scope GuardrailScope, op string, code GuardrailCode, confirmed bool, what string) error {
-	return p.enforce(scope, op, code, confirmed, what, 0, 0)
+func (p Policy) evaluateGuardrail(ctx context.Context, scope GuardrailScope, op string, code GuardrailCode, confirmed bool, what string) error {
+	return p.enforce(ctx, scope, op, code, confirmed, what, 0, 0)
 }
 
-// disposition returns the configured disposition for a guardrail in the named scope, defaulting to
-// deny when it is unset or invalid — the safe default (ADR-0020, ADR-0035 phase 2c).
-func (p Policy) disposition(scope GuardrailScope, code GuardrailCode) Disposition {
-	d, _ := p.dispositionSource(scope, code)
+// disposition returns the configured disposition for a guardrail in the named scope, for the caller
+// on ctx, defaulting to deny when it is unset or invalid — the safe default (ADR-0020, ADR-0035
+// phase 2c).
+func (p Policy) disposition(ctx context.Context, scope GuardrailScope, code GuardrailCode) Disposition {
+	d, _, _ := p.dispositionSource(ctx, scope, code)
 	return d
 }
 
@@ -604,22 +661,79 @@ const (
 // environment's policy is the baseline the others diverge from, so a deny that protects production
 // is a deny everywhere until an environment opts out of it by name (ADR-0067 §2, ADR-0065 §3). The
 // name tier has no such baseline and is therefore consulted in `prod` too — see GuardrailsFor.
-func (p Policy) dispositionSource(scope GuardrailScope, code GuardrailCode) (Disposition, string) {
+//
+// # The caller's kind narrows WITHIN a tier, never across tiers (ADR-0094 §3)
+//
+// For a caller of kind K the lookups run, most specific first:
+//
+//  1. K:<env>.<name>.<code>
+//  2. <env>.<name>.<code>
+//  3. K:<env>.<code>
+//  4. <env>.<code>
+//  5. K:<code>
+//  6. <code>
+//  7. the built-in default — deny
+//
+// TARGET NARROWS BEFORE CALLER. A cluster-wide `agent:app.delete deny` does not beat a per-app
+// disposition somebody set deliberately for one app: ADR-0085 §1 established that the narrowest
+// target wins, and inverting it for the caller axis would let a wide setting silently override a
+// narrow one. What the operator targeted is the more specific statement; who is asking refines it.
+//
+// A KEY THAT DOES NOT BIND THE CALLER'S KIND IS NOT AN ANSWER — resolution simply continues to the
+// next lookup. That falls out of the ordering rather than being a rule of its own, and it is what
+// keeps a narrow binding from punching a hole through a wider deny: `agent:` on one app tightens that
+// app for agents and leaves every other tier reading exactly as it did. Falling through to `allow`
+// instead would mean that setting `agent:` on one app handed the human an allow for it regardless of
+// what the environment or the global policy said.
+//
+// The fall-through always TERMINATES CLOSED, because step 7 binds every kind. A caller matching
+// nothing is denied, which is where an unset guardrail has always landed.
+//
+// An empty kind — the shared install token, an internal reconcile, or a stored kind that is not one
+// of the three (see callerKindFromContext) — skips the odd-numbered steps entirely and matches only
+// the unbound keys. Every guardrail such an install has configured therefore resolves to exactly the
+// disposition it resolved to before this existed (ADR-0094 §4).
+//
+// The third return is the kind the ANSWERING key was bound to, empty when the key bound every caller.
+// It is what a refusal and a listing use to say the binding out loud.
+func (p Policy) dispositionSource(ctx context.Context, scope GuardrailScope, code GuardrailCode) (Disposition, string, CredentialKind) {
+	kind := callerKindFromContext(ctx)
 	def, known := lookupGuardrail(code)
 	if known && def.names != targetNothing && scope.Name != "" {
-		if d, ok := p.Dispositions[namePolicyKey(scope.Env, scope.Name, code)]; ok && d.Valid() {
-			return d, sourceName
+		if d, binds, ok := p.tier(kind, namePolicyKey(scope.Env, scope.Name, code)); ok {
+			return d, sourceName, binds
 		}
 	}
 	if (!known || def.envScoped) && scope.Env != "" && scope.Env != DefaultEnvironment {
-		if d, ok := p.Dispositions[envPolicyKey(scope.Env, code)]; ok && d.Valid() {
-			return d, sourceEnv
+		if d, binds, ok := p.tier(kind, envPolicyKey(scope.Env, code)); ok {
+			return d, sourceEnv, binds
 		}
 	}
-	if d, ok := p.Dispositions[code]; ok && d.Valid() {
-		return d, sourceGlobal
+	if d, binds, ok := p.tier(kind, code); ok {
+		return d, sourceGlobal, binds
 	}
-	return DispositionDeny, sourceDefault
+	return DispositionDeny, sourceDefault, ""
+}
+
+// tier answers one target tier for a caller of kind, or reports that this tier has nothing to say.
+//
+// The kind-bound key answers FIRST and the unbound key is the tier's answer for everyone else, which
+// is the whole of the caller axis: two rows at one tier, one bound and one not, express "different
+// answers for different kinds" without the disposition ever becoming anything but one word.
+//
+// An empty kind reaches only the unbound key. That is deliberate rather than incidental: an unknown
+// kind is not treated as `agent`, because on a shared-token install every caller is unknown and that
+// reading would make every operator their own agent (ADR-0094 §4).
+func (p Policy) tier(kind CredentialKind, key GuardrailCode) (Disposition, CredentialKind, bool) {
+	if kind != "" {
+		if d, ok := p.Dispositions[boundPolicyKey(kind, key)]; ok && d.Valid() {
+			return d, kind, true
+		}
+	}
+	if d, ok := p.Dispositions[key]; ok && d.Valid() {
+		return d, "", true
+	}
+	return "", "", false
 }
 
 // namePolicyKey composes the key a disposition for one app or one add-on instance is stored under:
@@ -643,4 +757,26 @@ func namePolicyKey(env, name string, code GuardrailCode) GuardrailCode {
 
 func envPolicyKey(env string, code GuardrailCode) GuardrailCode {
 	return GuardrailCode(env + "." + string(code))
+}
+
+// boundPolicyKey composes the key a disposition bound to one credential kind is stored under: the
+// kind, a colon, then the key the same disposition would have used unbound (ADR-0094 §2). So
+// `agent:app.delete` binds agent credentials cluster-wide and
+// `agent:prod.burrowd-cloud.app.deploy` binds them for that one app.
+//
+// This is a FOURTH SEGMENT on the same terms as the third: the policy key is a composed string that
+// nothing ever parses, so a new axis needs no migration of a TEXT PRIMARY KEY table (ADR-0085 §2).
+//
+// The COLON is unambiguous by construction, in both directions. Environment names, application names
+// and add-on instance names are DNS-1123 labels, and guardrail codes are dotted lowercase
+// identifiers, so no colon can appear in any other segment — a kind prefix cannot collide with
+// anything and no key needs escaping. The kinds themselves are a closed set of three, validated at
+// `guard set` against CredentialKind.Valid, so nothing arbitrary reaches this side of the colon.
+//
+// NO PRINCIPAL EVER APPEARS IN A POLICY KEY (ADR-0094 §7). One axis, three values, fixed at issuance.
+// A policy keyed on a person is an access-control list, which needs a grant model, an ownership model
+// and an escalation-prevention story — none of which any of this needs, and all of which would be
+// decided badly by acquiring them one key at a time.
+func boundPolicyKey(kind CredentialKind, key GuardrailCode) GuardrailCode {
+	return GuardrailCode(string(kind) + ":" + string(key))
 }

@@ -452,6 +452,14 @@ type Guardrail struct {
 	// or add-on instance asked about), "env" (an environment-specific override), "global" (the
 	// global policy), or "default" (the built-in default). It is empty in the global listing.
 	Source string `json:"source,omitempty"`
+	// Binds is the credential kind the answering disposition was bound to — "user", "agent" or
+	// "machine" (ADR-0094 §6). It is empty for a disposition that binds every caller, which is every
+	// disposition set without `--binds`.
+	//
+	// It is a separate axis from Source: Source says which target tier answered, Binds says which
+	// caller the answering key bound. A listing resolves for the kind of the CALLER READING IT, so an
+	// agent sees what binds the agent.
+	Binds string `json:"binds,omitempty"`
 }
 
 // Provider mirrors a control-plane provider registry entry (ADR-0023). It carries no
@@ -2373,8 +2381,8 @@ func (c *Client) Guardrails(ctx context.Context, scope GuardScope) ([]Guardrail,
 	var out struct {
 		Guardrails []Guardrail `json:"guardrails"`
 	}
-	if err := c.do(ctx, http.MethodGet, guardPath(scope, ""), nil, &out); err != nil {
-		return nil, guardScopeRefusal(scope, "", err)
+	if err := c.do(ctx, http.MethodGet, guardPath(scope, "", ""), nil, &out); err != nil {
+		return nil, guardScopeRefusal(scope, "", "", err)
 	}
 	return out.Guardrails, nil
 }
@@ -2384,15 +2392,19 @@ func (c *Client) Guardrails(ctx context.Context, scope GuardScope) ([]Guardrail,
 // env-prefixed code (ADR-0035 phase 2c); a name scopes it to one app or add-on instance in that
 // environment, storing env.name.code (ADR-0085 §1).
 //
-// A control plane too old to know the name tier answers the name-scoped route with a 404, so the
-// write is refused instead of landing one tier wider than it was meant to (see guardPath).
-func (c *Client) SetGuardrail(ctx context.Context, scope GuardScope, code, disposition string) ([]Guardrail, error) {
+// A non-empty binds binds the disposition to one kind of credential — "user", "agent" or "machine"
+// (ADR-0094 §2) — so it answers for callers holding that kind and the tier's unbound disposition
+// answers for everyone else. An empty binds is the ordinary case and binds every caller.
+//
+// A control plane too old to know either tier answers its route with a 404, so the write is refused
+// instead of landing wider than it was meant to (see guardPath).
+func (c *Client) SetGuardrail(ctx context.Context, scope GuardScope, binds, code, disposition string) ([]Guardrail, error) {
 	var out struct {
 		Guardrails []Guardrail `json:"guardrails"`
 	}
 	body := map[string]string{"disposition": disposition}
-	if err := c.do(ctx, http.MethodPut, guardPath(scope, code), body, &out); err != nil {
-		return nil, guardScopeRefusal(scope, code, err)
+	if err := c.do(ctx, http.MethodPut, guardPath(scope, binds, code), body, &out); err != nil {
+		return nil, guardScopeRefusal(scope, binds, code, err)
 	}
 	return out.Guardrails, nil
 }
@@ -2444,8 +2456,17 @@ func (c *Client) SetGuardrail(ctx context.Context, scope GuardScope, code, dispo
 // reach a control plane that shipped no earlier than it did. That is why `skip_final_backup` stays a
 // parameter on the removal, and why the physical backup's and physical restore's `env` and
 // `destination` do — those routes and their parameters shipped in the same release.
-func guardPath(scope GuardScope, code string) string {
+//
+// THE BINDING RIDES THE PATH TOO, and it is the rule's clearest case yet (ADR-0094 §2). A control
+// plane that predates the caller tier would ignore a `binds` parameter and store the disposition
+// UNBOUND — which binds the operator as well as the agent, the exact outcome the flag was reached for
+// to avoid — and answer 200. In the route it is a route the server does not have, so the handshake
+// refuses the call with nothing written.
+func guardPath(scope GuardScope, binds, code string) string {
 	path := "/v1/guard"
+	if binds != "" {
+		path += "/binds/" + url.PathEscape(binds)
+	}
 	if scope.Name != "" {
 		path += "/name/" + url.PathEscape(scope.Name)
 	}
@@ -2462,13 +2483,23 @@ func guardPath(scope GuardScope, code string) string {
 // like every other refusal so a --json caller and an agent branch on it the same way.
 const CodeScopeUnsupported = "scope_unsupported"
 
-// guardScopeRefusal words scopeRefusal for the guardrail name tier. It fires only for a name-scoped
-// call, because that is the only scope on this route a supported control plane can lack.
+// guardScopeRefusal words scopeRefusal for the two narrowing tiers on this route: the name tier
+// (ADR-0085) and the caller tier (ADR-0094). It fires only for a call that used one of them, because
+// an unnarrowed call has no wider scope it could have landed at.
+//
+// The BINDING is checked first, and it is the more urgent of the two: a control plane that dropped it
+// would have written a disposition binding every caller — including the operator the flag exists to
+// leave alone — where the name tier's failure widens the target instead. Both refuse before anything
+// is written, so the order only decides which sentence an operator reads.
 //
 // An empty code is the read and a code is the write, and the two are worded differently because
 // only one of them could have changed anything: "nothing was written" is the sentence an operator
-// needs, and printing it after a listing would be a lie about what was at stake.
-func guardScopeRefusal(scope GuardScope, code string, err error) error {
+// needs, and printing it after a listing would be a lie about what was at stake. A binding only ever
+// accompanies a write, so it has no read wording.
+func guardScopeRefusal(scope GuardScope, binds, code string, err error) error {
+	if binds != "" {
+		return scopeRefusal(fmt.Sprintf("this control plane cannot bind a guardrail to one kind of credential, so nothing was written: the same call without --binds would have set %q for EVERY caller, the operator included", code), "per-caller guardrail bindings", err)
+	}
 	if scope.Name == "" {
 		return err
 	}

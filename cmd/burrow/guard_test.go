@@ -313,3 +313,74 @@ func TestGuardListSourceColumnFollowsTheAnswer(t *testing.T) {
 		})
 	}
 }
+
+// TestGuardSetCarriesTheBinding is the caller tier at the surface (ADR-0094 §2): `--binds` rides the
+// path, ahead of the name, and the confirmation says what the write did NOT do — an operator who
+// binds a deny and reads back "set to deny" has no way to tell it apart from the blunt write they
+// were avoiding.
+func TestGuardSetCarriesTheBinding(t *testing.T) {
+	var gotPath, gotQuery string
+	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		cannedGuardrails(w, r)
+	}, "guard", "set", "app.deploy", "deny", "--binds", "agent", "--env", "prod", "--name", "burrowd-cloud")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotPath != "/v1/guard/binds/agent/name/burrowd-cloud/app.deploy" || !strings.Contains(gotQuery, "env=prod") {
+		t.Errorf("request = %s?%s, want /v1/guard/binds/agent/name/burrowd-cloud/app.deploy?env=prod", gotPath, gotQuery)
+	}
+	for _, want := range []string{"binds agent credentials only", "every other caller reads the disposition underneath it"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("confirmation %q is missing %q", out, want)
+		}
+	}
+	// Without --binds the request and the confirmation are exactly what they always were.
+	out, _, err = runCLI(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		cannedGuardrails(w, r)
+	}, "guard", "set", "app.deploy", "deny")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gotPath != "/v1/guard/app.deploy" {
+		t.Errorf("an unbound set went to %s, want /v1/guard/app.deploy", gotPath)
+	}
+	if strings.Contains(out, "binds") {
+		t.Errorf("an unbound set claims a binding: %q", out)
+	}
+}
+
+// TestGuardListShowsTheBindingWhenThereIsOne pins the read side (ADR-0094 §6). The BINDS column
+// appears only when a row has one, so the everyday listing keeps the width it had, and a human
+// reading a listing on an install that DOES bind something sees the binding rather than inferring it
+// from a surprise later.
+func TestGuardListShowsTheBindingWhenThereIsOne(t *testing.T) {
+	bound := func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"guardrails": []map[string]any{
+			{"code": "app.deploy", "disposition": "allow", "description": "deploy a new release"},
+			{"code": "app.delete", "disposition": "deny", "description": "delete an app entirely", "binds": "agent"},
+		}})
+	}
+	out, _, err := runCLI(t, bound, "guard", "list")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(out, "BINDS") {
+		t.Errorf("the listing hides a binding that exists:\n%s", out)
+	}
+	// The bound row names the kind; the unbound one says who it applies to rather than showing a
+	// dash, because "every caller" is the fact and not a missing value.
+	if !strings.Contains(out, "agent") || !strings.Contains(out, "everyone") {
+		t.Errorf("the BINDS column does not distinguish the two rows:\n%s", out)
+	}
+
+	// An install that binds nothing gets the listing it always had.
+	out, _, err = runCLI(t, cannedGuardrails, "guard", "list")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(out, "BINDS") {
+		t.Errorf("the listing grew a BINDS column with nothing bound:\n%s", out)
+	}
+}

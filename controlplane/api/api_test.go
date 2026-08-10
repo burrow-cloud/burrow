@@ -1629,3 +1629,85 @@ func TestSecretMountNoEnvOverTheAPI(t *testing.T) {
 		t.Errorf("un-mark response = %s, want the marking removed and the app back on envFrom", b)
 	}
 }
+
+// TestGuardEndpointsCarryTheBindingInTheRoute confirms the caller tier is reachable as a ROUTE
+// (ADR-0094 §2), which is what makes a control plane without it refuse the call rather than store a
+// disposition that binds every caller. Dropping a `--binds agent` does not widen a scope, it inverts
+// an intent: the operator asked to be left alone and would have been bound.
+func TestGuardEndpointsCarryTheBindingInTheRoute(t *testing.T) {
+	h, _, d := newAPI(t)
+	// The install has to issue per-caller credentials before a binding can bind anything (§4).
+	if err := d.CreatePrincipal(context.Background(), cp.Principal{ID: "p-1", Name: "ada", Admin: true}); err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+
+	rr := do(h, "PUT", "/v1/guard/binds/agent/app.delete", token, `{"disposition":"deny"}`)
+	if rr.Code != 200 {
+		t.Fatalf("guard set --binds agent = %d %s", rr.Code, rr.Body.String())
+	}
+	if got := storedPolicy(t, d).Dispositions[cp.GuardrailCode("agent:app.delete")]; got != cp.DispositionDeny {
+		t.Errorf("stored policy = %+v, want a deny under agent:app.delete", storedPolicy(t, d).Dispositions)
+	}
+	if _, ok := storedPolicy(t, d).Dispositions[cp.GuardrailAppDelete]; ok {
+		t.Errorf("the deny landed on the unbound key too, binding the operator: %+v", storedPolicy(t, d).Dispositions)
+	}
+
+	// The binding composes with the name tier, and the two segments keep their order.
+	rr = do(h, "PUT", "/v1/guard/binds/agent/name/burrowd-cloud/app.deploy?env=prod", token, `{"disposition":"deny"}`)
+	if rr.Code != 200 {
+		t.Fatalf("guard set --binds agent --name = %d %s", rr.Code, rr.Body.String())
+	}
+	if got := storedPolicy(t, d).Dispositions[cp.GuardrailCode("agent:prod.burrowd-cloud.app.deploy")]; got != cp.DispositionDeny {
+		t.Errorf("stored policy = %+v, want a deny under agent:prod.burrowd-cloud.app.deploy", storedPolicy(t, d).Dispositions)
+	}
+
+	// A kind outside the closed set is the engine's ErrInvalid -> 400, not a key nothing will match.
+	if rr := do(h, "PUT", "/v1/guard/binds/robot/app.delete", token, `{"disposition":"deny"}`); rr.Code != 400 {
+		t.Errorf("unknown kind = %d, want 400", rr.Code)
+	}
+}
+
+// TestGuardListingAnswersForTheCallerAsking is ADR-0094 §6 over HTTP: the listing resolves for the
+// kind of credential the REQUEST carries, so an agent reading the policy sees what binds the agent.
+// The kind comes from the authenticated caller on the request context and from nowhere else — there
+// is no query parameter for it, because a caller-declared kind would make a deny cooperative.
+func TestGuardListingAnswersForTheCallerAsking(t *testing.T) {
+	h, _, d := newAPI(t)
+	d.SetPolicy(cp.Policy{}.
+		With(cp.GuardrailAppDelete, cp.DispositionAllow).
+		With(cp.GuardrailCode("agent:app.delete"), cp.DispositionDeny))
+
+	// The shared install token carries no kind, so it reads the unbound disposition — the behaviour
+	// of every install nobody has signed in to.
+	rr := do(h, "GET", "/v1/guard", token, "")
+	if rr.Code != 200 {
+		t.Fatalf("guard list = %d %s", rr.Code, rr.Body.String())
+	}
+	if got := guardDisposition(t, rr.Body.Bytes(), "app.delete"); got != "allow" {
+		t.Errorf("the shared token reads app.delete = %q, want allow", got)
+	}
+	if strings.Contains(rr.Body.String(), `"binds"`) {
+		t.Errorf("an unbound answer reported a binding: %s", rr.Body.String())
+	}
+}
+
+// guardDisposition reads one guardrail's disposition out of a guard listing response.
+func guardDisposition(t *testing.T, body []byte, code string) string {
+	t.Helper()
+	var resp struct {
+		Guardrails []struct {
+			Code        string `json:"code"`
+			Disposition string `json:"disposition"`
+		} `json:"guardrails"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decoding the guard listing: %v", err)
+	}
+	for _, g := range resp.Guardrails {
+		if g.Code == code {
+			return g.Disposition
+		}
+	}
+	t.Fatalf("%s missing from the listing: %s", code, body)
+	return ""
+}

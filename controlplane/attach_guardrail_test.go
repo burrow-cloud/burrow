@@ -201,10 +201,14 @@ func TestAttachIsScopedByTheInstanceAndNotTheApp(t *testing.T) {
 	}
 }
 
-// TestAttachDenyBindsEveryCaller is the honest limit ADR-0095 §5 states, asserted rather than left in
-// prose: the disposition has no caller dimension, so a deny meant for an over-eager agent refuses the
-// operator's identical call too. ADR-0094 is the record that adds the axis; until it is built, this
-// is what `deny` means, and the test is here to fail loudly when that changes.
+// TestAttachDenyBindsEveryCaller asserts what an UNBOUND deny means, which is the same thing it has
+// always meant: it refuses whoever asked, the operator included.
+//
+// ADR-0095 §5 stated this as an honest limit because there was no caller dimension at all. There is
+// one now (ADR-0094), and this test is what pins the half that did not change: a disposition set
+// without `--binds` binds every kind, so an install that never uses the flag behaves exactly as it
+// did. The caller who wants the other behaviour asks for it — `guard set --binds agent
+// addon.attach deny` — and TestABoundDenyLeavesTheOtherKindsAlone covers that side.
 func TestAttachDenyBindsEveryCaller(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, _ := newPostgresEngine(t)

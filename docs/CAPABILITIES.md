@@ -1373,8 +1373,8 @@ per-environment stopped being the same statement.
 `burrow guard list [--env <name>] [--name <thing>]` shows the effective disposition and, for
 anything narrower than the whole cluster, which tier it came from: set for the named app or add-on
 instance, set for the environment, or inherited from the global policy or the built-in default.
-`burrow guard set [--env <name>] [--name <thing>] <code> <allow\|confirm\|deny>` persists an
-override in the control-plane database.
+`burrow guard set [--env <name>] [--name <thing>] [--binds <kind>] <code> <allow\|confirm\|deny>`
+persists an override in the control-plane database.
 
 `burrow-agent guard [--env <name>] [--name <thing>]` can **read** the same three tiers and cannot
 set any of them — structurally, the verb does not exist on that binary. It takes `--name` so an
@@ -1396,6 +1396,40 @@ burrow guard set --env prod --name website app.deploy deny   # one app
 from an environment of the same name, since both are DNS labels, so it is refused rather than
 guessed at. Reading is where guessing would cost most — an answer for every app in the `website`
 environment, returned for the `website` app, is the wider policy wearing the narrower one's label.
+
+A fourth axis says **which kind of caller a disposition binds**
+([ADR-0094](adr/0094-a-guardrail-can-bind-the-agent-and-leave-the-human-alone.md)). Without it a
+`deny` refuses whoever asked, the operator included, which is why operators reach for `confirm` in
+places that warrant the hard gate:
+
+```
+burrow guard set --binds agent --env prod --name burrowd-cloud app.deploy deny   # agents only
+burrow guard set --binds user --env dev app.delete allow                         # people only, in dev
+```
+
+`--binds` takes `user`, `agent` or `machine` — the credential kinds recorded at issuance
+([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §3), read from the stored
+credential row and never from the request. The disposition stays one word; what gains a dimension is
+the key it is stored under.
+
+The **target narrows before the caller**. Within each tier the kind-bound disposition answers for
+that kind and the tier's unbound disposition answers for everybody else, so a cluster-wide
+`--binds agent` never overrides something set deliberately for one app, and a key that does not bind
+the asking caller's kind is not an answer at all — resolution continues to the next tier, and the
+built-in `deny` at the bottom binds every kind. The axis relaxes as readily as it tightens, which is
+the second example above.
+
+`--binds` needs an install people have signed in to. The shared install token carries no kind, so a
+bound disposition would bind nobody; the set is refused rather than stored, naming `burrow auth
+login` as the fix. An install that never signs anybody in is unaffected by any of this: a disposition
+set without `--binds` binds every caller, exactly as every disposition always has.
+
+`guard list` resolves for the kind of the **caller asking**, so an agent reading the policy sees what
+binds the agent rather than what binds the human — a listing that answered otherwise would have the
+agent plan an operation the policy has already refused. A listing containing any bound disposition
+grows a `BINDS` column, and `--json` carries `binds` on the entries that have one. A refusal from a
+bound disposition names the kind and says an operator can run it with their own credential, which is
+a next step that leaves the guardrail in place.
 
 Both `guard` surfaces report a **second kind of limit** alongside the dispositions: the
 capabilities absent from the `burrow-agent` binary, each with what it is, why it is held back,

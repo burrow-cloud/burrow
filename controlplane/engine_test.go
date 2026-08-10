@@ -551,7 +551,7 @@ func TestGuardrailsListAndSet(t *testing.T) {
 	}
 
 	// A valid set is reflected on the next list.
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, cp.GuardrailScaleToZero, cp.DispositionAllow); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, "", cp.GuardrailScaleToZero, cp.DispositionAllow); err != nil {
 		t.Fatalf("SetGuardrail: %v", err)
 	}
 	gs, _ = e.Guardrails(ctx, cp.GuardrailScope{})
@@ -562,10 +562,10 @@ func TestGuardrailsListAndSet(t *testing.T) {
 	}
 
 	// Unknown guardrail and invalid disposition are rejected as ErrInvalid.
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, "nonsense", cp.DispositionAllow); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, "", "nonsense", cp.DispositionAllow); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("unknown guardrail err = %v, want ErrInvalid", err)
 	}
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, cp.GuardrailScaleToZero, "maybe"); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, "", cp.GuardrailScaleToZero, "maybe"); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("invalid disposition err = %v, want ErrInvalid", err)
 	}
 }

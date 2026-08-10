@@ -322,10 +322,11 @@ func DefaultPolicy() Policy {
 			// the data (ADR-0090). What it does that the old "provisions nothing destructive" reading
 			// missed is restart the app and, on a re-attach, rotate a password nothing can restore.
 			//
-			// The hold binds the operator as well as the agent until ADR-0094's caller-kind axis
-			// exists; a built-in default binds every kind in both worlds, so this row is unaffected
-			// when it lands. addon.attach is env-scopable, so the expected relief from the friction is
-			// `guard set --env dev addon.attach allow` rather than a cluster-wide one.
+			// The hold binds the operator as well as the agent, because a BUILT-IN DEFAULT binds every
+			// kind — that is what makes ADR-0094 §3's fall-through terminate closed. An operator who
+			// wants the hold to fall on the agent alone says so with `guard set --binds agent
+			// addon.attach confirm`. addon.attach is also env-scopable, so the expected relief from the
+			// friction is `guard set --env dev addon.attach allow` rather than a cluster-wide one.
 			GuardrailAddonAttach:  DispositionConfirm,
 			GuardrailAddonDetach:  DispositionConfirm,
 			GuardrailAddonRestore: DispositionConfirm,

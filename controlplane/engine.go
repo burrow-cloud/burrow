@@ -409,7 +409,7 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 		args["recovered"] = "build"
 	}
 	if err := e.recordDecision(ctx, auditOpDeploy, req.App, args, GuardrailAppDeploy,
-		pol.evaluateDeploy(GuardrailScope{Env: req.Env, Name: req.App}, replicas, req.Confirm)); err != nil {
+		pol.evaluateDeploy(ctx, GuardrailScope{Env: req.Env, Name: req.App}, replicas, req.Confirm)); err != nil {
 		return DeployResult{}, err
 	}
 
@@ -903,7 +903,7 @@ func (e *Engine) InstallAddon(ctx context.Context, t AddonType, env string, opts
 		// The scope name is the LABEL, never the generated cluster name: a key nobody can read is a
 		// key nobody will write, and because an environment's first instance is labelled with its own
 		// name, every disposition already written keeps matching (ADR-0091 §4).
-		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: label}, "addon install", GuardrailAddonInstall, opts.Confirm,
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: targetEnv, Name: label}, "addon install", GuardrailAddonInstall, opts.Confirm,
 			installConsequence(t, spec.Image, targetEnv, label))); err != nil {
 		return AddonInfo{}, err
 	}
@@ -1084,7 +1084,7 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 		// that existed before that record the two are the same string, so a disposition already
 		// written keeps matching; for a later one the label is the only readable half, and a key
 		// nobody can read is a key nobody will write.
-		pol.evaluateGuardrail(GuardrailScope{Env: info.Environment, Name: instanceLabel(info)}, "addon remove", GuardrailAddonRemove, opts.Confirm,
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: info.Environment, Name: instanceLabel(info)}, "addon remove", GuardrailAddonRemove, opts.Confirm,
 			removalConsequence(info, opts.DeleteData, apps, plan))); err != nil {
 		return RemoveAddonResult{}, err
 	}
@@ -1445,7 +1445,7 @@ func (e *Engine) AttachAddon(ctx context.Context, t AddonType, app, env string, 
 	// env-scopable, so the environment reaches the lookup as a tier of its own as well as through the
 	// instance (ADR-0095 §2).
 	if err := e.recordDecision(ctx, auditOpAddonAttach, app, args, GuardrailAddonAttach,
-		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instanceLabel(inst)}, "addon attach", GuardrailAddonAttach, opts.Confirm,
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: targetEnv, Name: instanceLabel(inst)}, "addon attach", GuardrailAddonAttach, opts.Confirm,
 			attachConsequence(t, app, targetEnv, instanceLabel(inst), key, current, recorded))); err != nil {
 		return AttachResult{}, err
 	}
@@ -1682,7 +1682,7 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 		// addon.* is not EnvScopable, so the environment reaches the lookup through the instance
 		// name rather than as a tier of its own; it is named in the message and the audit args
 		// (ADR-0035 phase 2c, ADR-0067 §1).
-		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instanceLabel(inst)}, "addon detach", GuardrailAddonDetach, opts.Confirm, consequence)); err != nil {
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: targetEnv, Name: instanceLabel(inst)}, "addon detach", GuardrailAddonDetach, opts.Confirm, consequence)); err != nil {
 		return err
 	}
 
@@ -1999,7 +1999,7 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, e
 		// and write a disposition against (ADR-0091 §4). addon.* is not EnvScopable, so the
 		// environment reaches the lookup through the instance rather than as a tier of its own
 		// (ADR-0035 phase 2c, ADR-0067 §1).
-		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instanceLabel(inst)}, "addon restore", GuardrailAddonRestore, confirm,
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: targetEnv, Name: instanceLabel(inst)}, "addon restore", GuardrailAddonRestore, confirm,
 			fmt.Sprintf("restoring %q on the %s instance %q in environment %s from backup %s (overwrites its live database)", app, t, instanceLabel(inst), targetEnv, backupID))); err != nil {
 		return err
 	}
@@ -2054,7 +2054,7 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 	}
 	args := map[string]string{"env": envName(env)}
 	if err := e.recordDecision(ctx, auditOpAppDelete, app, args, GuardrailAppDelete,
-		pol.evaluateGuardrail(GuardrailScope{Env: env, Name: app}, "app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app))); err != nil {
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: env, Name: app}, "app delete", GuardrailAppDelete, confirm, fmt.Sprintf("deleting the app %q (its workload, routing, and release history)", app))); err != nil {
 		return err
 	}
 
@@ -2377,7 +2377,7 @@ func (e *Engine) Scale(ctx context.Context, app, env string, replicas int32, con
 		return ScaleResult{}, fmt.Errorf("scale %s: loading guardrail policy: %w", app, err)
 	}
 	args := map[string]string{"replicas": strconv.Itoa(int(replicas)), "env": envName(env)}
-	if err := e.recordDecision(ctx, auditOpScale, app, args, "", pol.evaluateReplicas(GuardrailScope{Env: env, Name: app}, "scale", replicas, confirm)); err != nil {
+	if err := e.recordDecision(ctx, auditOpScale, app, args, "", pol.evaluateReplicas(ctx, GuardrailScope{Env: env, Name: app}, "scale", replicas, confirm)); err != nil {
 		return ScaleResult{}, err
 	}
 
@@ -2439,7 +2439,7 @@ func (e *Engine) Autoscale(ctx context.Context, app, env string, spec AutoscaleS
 		"memory": strconv.Itoa(int(spec.MemoryPercent)),
 		"env":    envName(env),
 	}
-	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale, pol.evaluateAutoscale(GuardrailScope{Env: env, Name: app}, confirm)); err != nil {
+	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale, pol.evaluateAutoscale(ctx, GuardrailScope{Env: env, Name: app}, confirm)); err != nil {
 		return AutoscaleResult{}, err
 	}
 
@@ -2492,7 +2492,7 @@ func (e *Engine) DisableAutoscale(ctx context.Context, app, env string, confirm 
 	}
 	args := map[string]string{"env": envName(env), "off": "true"}
 	if err := e.recordDecision(ctx, auditOpAutoscale, app, args, GuardrailAutoscale,
-		pol.evaluateGuardrail(GuardrailScope{Env: env, Name: app}, "autoscale", GuardrailAutoscale, confirm, "disabling autoscaling")); err != nil {
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: env, Name: app}, "autoscale", GuardrailAutoscale, confirm, "disabling autoscaling")); err != nil {
 		return err
 	}
 	if err := k.DeleteAutoscaler(ctx, app); err != nil {
@@ -2531,7 +2531,7 @@ func (e *Engine) Expose(ctx context.Context, req ExposeRequest) (ExposeResult, e
 	}
 	args := map[string]string{"host": req.Host, "port": strconv.Itoa(int(req.Port)), "tls": strconv.FormatBool(req.TLS), "env": envName(req.Env)}
 	if err := e.recordDecision(ctx, auditOpExpose, req.App, args, GuardrailExposePublic,
-		pol.evaluateGuardrail(GuardrailScope{Env: req.Env, Name: req.App}, "expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host))); err != nil {
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: req.Env, Name: req.App}, "expose", GuardrailExposePublic, req.Confirm, fmt.Sprintf("exposing %s at %s", req.App, req.Host))); err != nil {
 		return ExposeResult{}, err
 	}
 
@@ -2804,7 +2804,7 @@ func (e *Engine) Guardrails(ctx context.Context, scope GuardrailScope) ([]Guardr
 	if err != nil {
 		return nil, fmt.Errorf("guardrails: loading policy: %w", err)
 	}
-	return p.GuardrailsFor(scope), nil
+	return p.GuardrailsFor(ctx, scope), nil
 }
 
 // SetGuardrail sets one guardrail's disposition (ADR-0020). It rejects an unknown guardrail
@@ -2842,7 +2842,16 @@ func (e *Engine) Guardrails(ctx context.Context, scope GuardrailScope) ([]Guardr
 //     before the thing it names exists, and arming a deny ahead of an install is a reasonable order
 //     to work in; a name that never matches anything shows up as inherited dispositions under
 //     `guard list --name`.
-func (e *Engine) SetGuardrail(ctx context.Context, scope GuardrailScope, code GuardrailCode, d Disposition) error {
+//
+// With a BINDS it binds the disposition to one kind of credential (ADR-0094 §2), storing the key the
+// same write would have used with the kind and a colon in front of it — `agent:app.delete`,
+// `agent:prod.burrowd-cloud.app.deploy`. The disposition itself is unchanged: still one word, still
+// allow, confirm or deny. Binding narrows on the CALLER axis and composes with the target axes rather
+// than replacing them, so an operator can bind a global disposition, an environment's, or one app's.
+//
+// The kind must be one of the three ADR-0084 §3 defines, and it must be a kind this install actually
+// issues — see requireCredentialsForBinding, which is the refusal §4 asks for.
+func (e *Engine) SetGuardrail(ctx context.Context, scope GuardrailScope, binds CredentialKind, code GuardrailCode, d Disposition) error {
 	if !KnownGuardrail(code) {
 		// A limit code arriving here is the ADR-0068 §2 correction landing on someone who learned
 		// the old shape — `guard set app.replica_ceiling allow` was how the ceiling was turned off.
@@ -2856,8 +2865,11 @@ func (e *Engine) SetGuardrail(ctx context.Context, scope GuardrailScope, code Gu
 	if !d.Valid() {
 		return fmt.Errorf("set guardrail: invalid disposition %q (want allow, confirm, or deny): %w", d, ErrInvalid)
 	}
+	if err := e.checkBinding(ctx, binds); err != nil {
+		return err
+	}
 	if scope.Name != "" {
-		return e.setNamedGuardrail(ctx, scope, code, d)
+		return e.setNamedGuardrail(ctx, scope, binds, code, d)
 	}
 	stored := code
 	if scope.Env != "" && scope.Env != DefaultEnvironment {
@@ -2874,13 +2886,58 @@ func (e *Engine) SetGuardrail(ctx context.Context, scope GuardrailScope, code Gu
 		}
 		stored = envPolicyKey(scope.Env, code)
 	}
-	return e.db.SetGuardrail(ctx, stored, d)
+	return e.db.SetGuardrail(ctx, bindKey(binds, stored), d)
+}
+
+// checkBinding validates a `--binds` before anything is written (ADR-0094 §4). An empty binding is
+// the ordinary, unbound case and passes straight through.
+//
+// The kind must be one of the three ADR-0084 §3 defines: the set is closed, recorded at issuance, and
+// nothing else can ever be on the other side of a credential row, so a fourth value would be a key
+// nothing will ever match.
+//
+// AND THE INSTALL MUST ISSUE CREDENTIALS AT ALL. On an install nobody has signed in to, every request
+// carries the shared token, no request has a kind, and a kind-bound disposition would therefore bind
+// NOTHING. A protection that silently protects nothing is the worst available outcome, so it is
+// refused where it is asked for rather than discovered later, during whatever the deny existed to
+// prevent. The unbound disposition remains available and remains the honest answer for a shared-token
+// install: blunt, and it holds.
+//
+// Principals are the signal because a principal is what a credential belongs to and the two are
+// recorded together — ClaimFirstPrincipal writes the first principal and its first credential in one
+// transaction precisely so neither can exist without the other. An install with a principal has
+// issued a credential; one with none has issued nothing.
+func (e *Engine) checkBinding(ctx context.Context, binds CredentialKind) error {
+	if binds == "" {
+		return nil
+	}
+	if !binds.Valid() {
+		return fmt.Errorf("set guardrail: %q is not a credential kind (want user, agent, or machine): %w", binds, ErrInvalid)
+	}
+	ps, err := e.db.Principals(ctx)
+	if err != nil {
+		return fmt.Errorf("set guardrail: checking whether this install issues credentials: %w", err)
+	}
+	if len(ps) == 0 {
+		return fmt.Errorf("set guardrail: this install has no per-caller credentials, so a disposition bound to %q would bind nobody: every request carries the shared install token, which has no kind. Run `burrow auth login` first, or set the disposition without --binds so it binds every caller: %w", binds, ErrInvalid)
+	}
+	return nil
+}
+
+// bindKey applies a binding to a composed policy key, and is the one place the caller axis meets the
+// target axes. An unbound write stores the key it always stored, which is what makes an install that
+// never uses `--binds` byte-identical to one from before this existed.
+func bindKey(binds CredentialKind, key GuardrailCode) GuardrailCode {
+	if binds == "" {
+		return key
+	}
+	return boundPolicyKey(binds, key)
 }
 
 // setNamedGuardrail writes the disposition for one app or add-on instance (ADR-0085 §1). The
 // refusals it can produce are the point of it: each says what the guardrail actually targets, so an
 // operator learns the shape of the policy from the message rather than from the source.
-func (e *Engine) setNamedGuardrail(ctx context.Context, scope GuardrailScope, code GuardrailCode, d Disposition) error {
+func (e *Engine) setNamedGuardrail(ctx context.Context, scope GuardrailScope, binds CredentialKind, code GuardrailCode, d Disposition) error {
 	if !NameScopable(code) {
 		return fmt.Errorf("set guardrail: %q cannot be set for one thing by name: %s. Set it for the whole cluster with `burrow guard set %s %s`: %w",
 			code, GuardrailReach(code), code, d, ErrInvalid)
@@ -2898,7 +2955,7 @@ func (e *Engine) setNamedGuardrail(ctx context.Context, scope GuardrailScope, co
 	if err := e.requireEnvironment(ctx, scope.Env); err != nil {
 		return err
 	}
-	return e.db.SetGuardrail(ctx, namePolicyKey(scope.Env, scope.Name, code), d)
+	return e.db.SetGuardrail(ctx, bindKey(binds, namePolicyKey(scope.Env, scope.Name, code)), d)
 }
 
 // requireEnvironment refuses an environment that is not registered, so a typo lands as a clear
@@ -3108,7 +3165,7 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 		}
 	}
 	if err := e.recordDecision(ctx, auditOpRollback, app, args, GuardrailRollback,
-		pol.evaluateGuardrail(GuardrailScope{Env: env, Name: app}, "rollback", GuardrailRollback, opts.Confirm,
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: env, Name: app}, "rollback", GuardrailRollback, opts.Confirm,
 			fmt.Sprintf("rolling %q back to its previous release %s (image %s)", app, target.ID, target.Image))); err != nil {
 		return RollbackResult{}, err
 	}

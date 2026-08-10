@@ -42,14 +42,51 @@ to the credential it carries, what that lets it do, and what it cannot:
 burrowd (touching the cluster directly). The guardrails are the policy for what is allowed through
 burrowd. Different mechanisms; you need both.
 
-**One honest limitation, stated plainly.** Inside burrowd, the guardrails and the `burrow-agent` verb
-surface are what decide which operation may be called (and the guard verb is read-only). The scoped
-credential confines the agent to burrowd; it does not by itself enforce which burrowd operation the
-agent may call. Per-caller *authorization* — a guardrail that binds the agent and leaves the human
-alone — is future work
-([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §9), and the per-caller
-*identity* below is the groundwork it needs. A hardening-conscious operator should lean on the
-guardrails plus environment isolation, not assume the scope alone is a per-operation boundary.
+**A guardrail can bind the agent and leave you alone.** Inside burrowd, the guardrails and the
+`burrow-agent` verb surface are what decide which operation may be called (and the guard verb is
+read-only). The scoped credential confines the agent to burrowd; it does not by itself enforce which
+burrowd operation the agent may call — the guardrail policy does, and a disposition can now say
+**which kind of credential it binds**
+([ADR-0094](adr/0094-a-guardrail-can-bind-the-agent-and-leave-the-human-alone.md)):
+
+```sh
+burrow guard set --binds agent --env prod --name burrowd-cloud app.deploy deny
+```
+
+That refuses the deploy for anything holding an `agent` credential, and leaves your own credential
+reading whatever the policy says underneath it. The refusal the agent receives says so, and says what
+to relay: *"this disposition binds `agent` credentials; an operator can run it with their own."*
+
+Four things are worth knowing before you reach for it:
+
+- **`--binds` takes `user`, `agent` or `machine`** — the credential kinds recorded at issuance
+  ([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §3). The kind is read from
+  the stored credential row, never from the request, so a compromised agent cannot present itself as
+  a person.
+- **It composes with the other scopes rather than replacing them.** A binding can sit on the global
+  policy, on one environment, or on one app or add-on instance. Within a tier the bound disposition
+  answers for that kind and the unbound one answers for everybody else; the *target* still narrows
+  first, so a cluster-wide `--binds agent` does not override something you set deliberately for one
+  app.
+- **It relaxes as well as it tightens.** A global `app.delete deny` with
+  `guard set --binds user --env dev app.delete allow` under it lets you clean up a sandbox by hand
+  while the agent stays refused everywhere.
+- **It needs an install people have signed in to.** The shared install token carries no kind, so a
+  bound disposition would bind nobody — `guard set --binds` refuses on an install with no per-caller
+  credentials rather than storing a protection that protects nothing. Run `burrow auth login` first.
+  An install that never signs anybody in behaves exactly as it always has: a disposition set without
+  `--binds` binds every caller.
+
+`guard list` resolves for the kind of the caller asking, so an agent reading the policy sees what
+binds the agent, and a listing that contains any bound disposition grows a `BINDS` column so you can
+see the binding rather than discover it later. Every audited row already records the caller's kind
+next to the principal, so the trail distinguishes the two decisions with no new column.
+
+**This is not RBAC**, and it is deliberately not: one axis, three values, fixed at issuance, and no
+principal ever appears in a policy key. Whether a caller may issue a credential or grant the admin bit
+is a different question with a different answering seam. A hardening-conscious operator should still
+lean on the guardrails plus environment isolation, not assume the scope alone is a per-operation
+boundary.
 
 ### Route and identity are separate, and both are required
 

@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -71,20 +72,20 @@ func newGuardListCmd() *cobra.Command {
 				writeDefaultEnvironmentPolicyNotice(out, o.env)
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			if guardSourcesReported(gs) {
-				// The SOURCE column shows which tier each effective disposition came from: set for
-				// the named app or add-on instance, set for this environment, or inherited from the
-				// global policy or the built-in default. It is printed only when the control plane
-				// answered with tiers to name (see guardSourcesReported).
-				fmt.Fprintln(tw, "GUARDRAIL\tDISPOSITION\tSOURCE\tDESCRIPTION")
-				for _, g := range gs {
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", g.Code, g.Disposition, guardSourceLabel(g.Source, name), g.Description)
-				}
-			} else {
-				fmt.Fprintln(tw, "GUARDRAIL\tDISPOSITION\tDESCRIPTION")
-				for _, g := range gs {
-					fmt.Fprintf(tw, "%s\t%s\t%s\n", g.Code, g.Disposition, g.Description)
-				}
+			// The SOURCE column shows which tier each effective disposition came from: set for the
+			// named app or add-on instance, set for this environment, or inherited from the global
+			// policy or the built-in default. It is printed only when the control plane answered with
+			// tiers to name (see guardSourcesReported).
+			//
+			// The BINDS column names the credential kind an answering disposition was bound to
+			// (ADR-0094 §6), and is printed only when at least one row has one. That keeps the
+			// everyday listing — an install where nothing is bound — exactly the width it was, and
+			// makes a binding visible the moment one exists rather than something an operator infers
+			// from a surprise later.
+			sources, binds := guardSourcesReported(gs), guardBindingsReported(gs)
+			fmt.Fprintln(tw, guardHeader(sources, binds))
+			for _, g := range gs {
+				fmt.Fprintln(tw, guardRow(g, sources, binds, name))
 			}
 			if err := tw.Flush(); err != nil {
 				return err
@@ -145,6 +146,55 @@ func guardSourcesReported(gs []client.Guardrail) bool {
 	return false
 }
 
+// guardBindingsReported decides whether the listing carries a BINDS column, by the same rule: the
+// column appears when a row has something true to say and is absent otherwise (ADR-0094 §6).
+//
+// Most installs never bind a disposition, and on those every row comes back with an empty Binds, so
+// a column of dashes would be a permanent reminder of a feature nobody used. Where one IS bound the
+// column is what stops the binding from being invisible until somebody trips over it.
+func guardBindingsReported(gs []client.Guardrail) bool {
+	for _, g := range gs {
+		if g.Binds != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// guardHeader and guardRow render the listing's four possible column sets from the two optional
+// columns, so a header can never disagree with the row beneath it.
+func guardHeader(sources, binds bool) string {
+	cols := []string{"GUARDRAIL", "DISPOSITION"}
+	if sources {
+		cols = append(cols, "SOURCE")
+	}
+	if binds {
+		cols = append(cols, "BINDS")
+	}
+	return strings.Join(append(cols, "DESCRIPTION"), "\t")
+}
+
+func guardRow(g client.Guardrail, sources, binds bool, name string) string {
+	cols := []string{g.Code, g.Disposition}
+	if sources {
+		cols = append(cols, guardSourceLabel(g.Source, name))
+	}
+	if binds {
+		cols = append(cols, guardBindsLabel(g.Binds))
+	}
+	return strings.Join(append(cols, g.Description), "\t")
+}
+
+// guardBindsLabel renders which kind of credential a disposition binds. An unbound disposition reads
+// as "everyone" rather than as a dash, because that is the fact: it applies to every caller, which is
+// a statement about the policy and not a missing value.
+func guardBindsLabel(binds string) string {
+	if binds == "" {
+		return "everyone"
+	}
+	return binds
+}
+
 // writeDefaultEnvironmentPolicyNotice explains a listing for the default environment, which is the
 // global policy under another name (ADR-0067 §2) and is printed without a SOURCE column for that
 // reason. It is the read-side counterpart of the line `guard set --env prod` prints: an operator
@@ -191,18 +241,23 @@ func bindGuardName(flags *pflag.FlagSet, name *string, verb string) {
 
 func newGuardSetCmd() *cobra.Command {
 	o := &commonOpts{}
-	var name string
+	var name, binds string
 	cmd := &cobra.Command{
 		Use:   "set <guardrail> <allow|confirm|deny>",
 		Short: "Set a guardrail's disposition",
 		Long: "Set a guardrail's disposition, for the whole cluster, for one environment, or for one\n" +
-			"app or add-on instance in an environment.\n\n" +
+			"app or add-on instance in an environment. With --binds it applies to one kind of\n" +
+			"credential and leaves every other caller reading the disposition underneath it.\n\n" +
 			"  burrow guard set app.deploy confirm                                    every app, everywhere\n" +
 			"  burrow guard set --env staging app.deploy allow                        every app in staging\n" +
 			"  burrow guard set --env prod --name website app.deploy deny             one app\n" +
-			"  burrow guard set --env prod --name burrow-postgres addon.remove deny   one add-on instance\n\n" +
+			"  burrow guard set --env prod --name burrow-postgres addon.remove deny   one add-on instance\n" +
+			"  burrow guard set --binds agent --env prod --name website app.deploy deny\n" +
+			"                                                                         one app, agents only\n\n" +
 			"--name needs --env: on its own a name cannot be told apart from an environment of the\n" +
-			"same name. Not every guardrail can be set for one thing; those that cannot say why.",
+			"same name. Not every guardrail can be set for one thing; those that cannot say why.\n\n" +
+			"--binds needs an install people have signed in to, because it binds the KIND of credential\n" +
+			"a caller holds and the shared install token has no kind. Run `burrow auth login` first.",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -210,18 +265,22 @@ func newGuardSetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			gs, err := c.SetGuardrail(ctx, client.GuardScope{Env: o.env, Name: name}, args[0], args[1])
+			gs, err := c.SetGuardrail(ctx, client.GuardScope{Env: o.env, Name: name}, binds, args[0], args[1])
 			if err != nil {
 				return err
 			}
 			// The policy is written into whichever cluster this command reached, so it names that
 			// cluster like every other change does (ADR-0078 §4).
-			return o.emitChange(cmd.OutOrStdout(), gs, guardSetResult(args[0], args[1], o.env, name))
+			return o.emitChange(cmd.OutOrStdout(), gs, guardSetResult(args[0], args[1], o.env, name, binds))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	bindGuardName(cmd.Flags(), &name, "set it for")
+	// The kind is validated by the control plane, not here. It is a closed set of three, but whether
+	// this install ISSUES any of them is a fact only the control plane holds, and a client-side check
+	// on the spelling alone would refuse in one voice and accept in another.
+	cmd.Flags().StringVar(&binds, "binds", "", "bind the disposition to one kind of credential (user, agent, or machine); omit it to bind every caller")
 	return cmd
 }
 
@@ -238,17 +297,27 @@ func newGuardSetCmd() *cobra.Command {
 //
 // A name always keeps its environment, because there the environment is a segment of the policy key
 // rather than a synonym for the baseline (ADR-0085 §1).
-func guardSetResult(code, disposition, env, name string) string {
+//
+// A BINDING is reported as a clause on the end, and it says what the operator did NOT do as much as
+// what they did: "binds agent credentials only; every other caller reads the disposition underneath
+// it". An operator who binds a deny and reads back a line that says only "set to deny" has no way to
+// tell it apart from the blunt write they were avoiding.
+func guardSetResult(code, disposition, env, name, binds string) string {
+	var where string
 	switch {
 	case name != "":
-		return fmt.Sprintf("set guardrail %q to %q for %q in environment %q", code, disposition, name, envOrDefault(env))
+		where = fmt.Sprintf("set guardrail %q to %q for %q in environment %q", code, disposition, name, envOrDefault(env))
 	case env == controlplane.DefaultEnvironment:
-		return fmt.Sprintf("set guardrail %q to %q globally (%s is the default environment, so its policy is the global policy)", code, disposition, env)
+		where = fmt.Sprintf("set guardrail %q to %q globally (%s is the default environment, so its policy is the global policy)", code, disposition, env)
 	case env != "":
-		return fmt.Sprintf("set guardrail %q to %q in environment %q", code, disposition, env)
+		where = fmt.Sprintf("set guardrail %q to %q in environment %q", code, disposition, env)
 	default:
-		return fmt.Sprintf("set guardrail %q to %q globally", code, disposition)
+		where = fmt.Sprintf("set guardrail %q to %q globally", code, disposition)
 	}
+	if binds == "" {
+		return where
+	}
+	return where + fmt.Sprintf("; it binds %s credentials only, and every other caller reads the disposition underneath it", binds)
 }
 
 // envOrDefault names the environment a message refers to. The control plane refuses a name without

@@ -82,7 +82,7 @@ func TestReplicaCeilingDispositionsAreGone(t *testing.T) {
 	}
 	// The listing is derived from the known set, so it cannot offer a disposition for a code that
 	// is no longer a guardrail either.
-	for _, g := range p.Guardrails() {
+	for _, g := range p.Guardrails(ctx) {
 		if string(g.Code) == string(cp.LimitReplicaCeiling) {
 			t.Errorf("guard list reports %q, which is a limit rather than a guardrail", g.Code)
 		}

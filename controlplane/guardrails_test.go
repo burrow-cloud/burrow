@@ -4,6 +4,7 @@
 package controlplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,7 +36,7 @@ func TestEvaluateReplicas(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := c.policy.evaluateReplicas(GuardrailScope{}, "test", c.replicas, c.confirmed)
+			err := c.policy.evaluateReplicas(context.Background(), GuardrailScope{}, "test", c.replicas, c.confirmed)
 			if c.wantCode == "" {
 				if err != nil {
 					t.Fatalf("evaluateReplicas(%d, confirmed=%v) = %v, want allowed", c.replicas, c.confirmed, err)
@@ -92,7 +93,7 @@ func TestEvaluateDeploy(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := c.policy.evaluateDeploy(GuardrailScope{Env: c.env}, c.replicas, c.confirmed)
+			err := c.policy.evaluateDeploy(context.Background(), GuardrailScope{Env: c.env}, c.replicas, c.confirmed)
 			if c.wantCode == "" {
 				if err != nil {
 					t.Fatalf("evaluateDeploy(env=%q, %d, confirmed=%v) = %v, want allowed", c.env, c.replicas, c.confirmed, err)
@@ -137,14 +138,14 @@ func TestDispositionEnvFallback(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := p.disposition(GuardrailScope{Env: c.env}, GuardrailAppDelete); got != c.want {
+			if got := p.disposition(context.Background(), GuardrailScope{Env: c.env}, GuardrailAppDelete); got != c.want {
 				t.Errorf("disposition(%q, app.delete) = %q, want %q", c.env, got, c.want)
 			}
 		})
 	}
 
 	// A guardrail with no override anywhere reads as the deny-when-unset default, in any env.
-	if got := p.disposition(GuardrailScope{Env: "staging"}, GuardrailRollback); got != DispositionDeny {
+	if got := p.disposition(context.Background(), GuardrailScope{Env: "staging"}, GuardrailRollback); got != DispositionDeny {
 		t.Errorf("unset guardrail in staging = %q, want deny (the safe default)", got)
 	}
 }
@@ -156,13 +157,13 @@ func TestDispositionSource(t *testing.T) {
 		With(GuardrailAppDelete, DispositionAllow).
 		With(GuardrailCode("staging."+string(GuardrailAppDelete)), DispositionDeny)
 
-	if d, src := p.dispositionSource(GuardrailScope{Env: "staging"}, GuardrailAppDelete); d != DispositionDeny || src != "env" {
+	if d, src, _ := p.dispositionSource(context.Background(), GuardrailScope{Env: "staging"}, GuardrailAppDelete); d != DispositionDeny || src != "env" {
 		t.Errorf("staging app.delete = (%q, %q), want (deny, env)", d, src)
 	}
-	if d, src := p.dispositionSource(GuardrailScope{Env: "dev"}, GuardrailAppDelete); d != DispositionAllow || src != "global" {
+	if d, src, _ := p.dispositionSource(context.Background(), GuardrailScope{Env: "dev"}, GuardrailAppDelete); d != DispositionAllow || src != "global" {
 		t.Errorf("dev app.delete = (%q, %q), want (allow, global)", d, src)
 	}
-	if d, src := p.dispositionSource(GuardrailScope{Env: "staging"}, GuardrailRollback); d != DispositionDeny || src != "default" {
+	if d, src, _ := p.dispositionSource(context.Background(), GuardrailScope{Env: "staging"}, GuardrailRollback); d != DispositionDeny || src != "default" {
 		t.Errorf("staging app.rollback (unset) = (%q, %q), want (deny, default)", d, src)
 	}
 }
@@ -172,7 +173,7 @@ func TestDispositionSource(t *testing.T) {
 func TestGuardrailsForMarksSource(t *testing.T) {
 	p := DefaultPolicy().With(GuardrailCode("staging."+string(GuardrailAppDelete)), DispositionDeny)
 
-	for _, g := range p.GuardrailsFor(GuardrailScope{Env: "staging"}) {
+	for _, g := range p.GuardrailsFor(context.Background(), GuardrailScope{Env: "staging"}) {
 		if g.Source == "" {
 			t.Errorf("env listing left Source empty for %s", g.Code)
 		}
@@ -180,7 +181,7 @@ func TestGuardrailsForMarksSource(t *testing.T) {
 			t.Errorf("staging app.delete = (%q, %q), want (deny, env)", g.Disposition, g.Source)
 		}
 	}
-	for _, g := range p.Guardrails() {
+	for _, g := range p.Guardrails(context.Background()) {
 		if g.Source != "" {
 			t.Errorf("global listing should leave Source empty, got %q for %s", g.Source, g.Code)
 		}
@@ -235,7 +236,7 @@ func TestReplicaCeilingIsNotAGuardrail(t *testing.T) {
 	if KnownGuardrail(GuardrailCode(LimitReplicaCeiling)) {
 		t.Errorf("%q is still a guardrail code; a limit you can disposition away is not a limit (ADR-0068 §2)", LimitReplicaCeiling)
 	}
-	for _, g := range DefaultPolicy().Guardrails() {
+	for _, g := range DefaultPolicy().Guardrails(context.Background()) {
 		if string(g.Code) == string(LimitReplicaCeiling) {
 			t.Errorf("the default policy still lists %q", g.Code)
 		}
@@ -272,7 +273,7 @@ func TestAsGuardrailWrapped(t *testing.T) {
 func TestDenyRefusalSteersTowardScoping(t *testing.T) {
 	p := DefaultPolicy()
 
-	err := p.evaluateGuardrail(GuardrailScope{Env: "staging"}, "app delete", GuardrailAppDelete, true, "deleting the app")
+	err := p.evaluateGuardrail(context.Background(), GuardrailScope{Env: "staging"}, "app delete", GuardrailAppDelete, true, "deleting the app")
 	g, ok := AsGuardrail(err)
 	if !ok {
 		t.Fatalf("app.delete under the default policy = %v, want a GuardrailError", err)
@@ -284,13 +285,13 @@ func TestDenyRefusalSteersTowardScoping(t *testing.T) {
 	}
 
 	// With no named environment there is no name to print, so the placeholder keeps the --env shape.
-	err = p.evaluateGuardrail(GuardrailScope{}, "app delete", GuardrailAppDelete, true, "deleting the app")
+	err = p.evaluateGuardrail(context.Background(), GuardrailScope{}, "app delete", GuardrailAppDelete, true, "deleting the app")
 	g, _ = AsGuardrail(err)
 	if !strings.Contains(g.Message, "guard set --env <env> app.delete confirm") {
 		t.Errorf("unscoped app.delete refusal %q should still show the --env form", g.Message)
 	}
 
-	err = p.evaluateGuardrail(GuardrailScope{}, "domain remove", GuardrailDNSDelete, true, "removing the DNS record")
+	err = p.evaluateGuardrail(context.Background(), GuardrailScope{}, "domain remove", GuardrailDNSDelete, true, "removing the DNS record")
 	g, ok = AsGuardrail(err)
 	if !ok {
 		t.Fatalf("dns.delete under the default policy = %v, want a GuardrailError", err)
@@ -330,7 +331,7 @@ func TestNameTierWinsOverEnvironmentAndGlobal(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			d, src := p.dispositionSource(c.scope, GuardrailAppDeploy)
+			d, src, _ := p.dispositionSource(context.Background(), c.scope, GuardrailAppDeploy)
 			if d != c.want || src != c.wantSource {
 				t.Errorf("dispositionSource(%+v) = (%q, %q), want (%q, %q)", c.scope, d, src, c.want, c.wantSource)
 			}
@@ -352,18 +353,18 @@ func TestNameTierIsConsultedInTheDefaultEnvironment(t *testing.T) {
 
 	// An empty env and an explicit `prod` are the same key, so both find the row.
 	for _, env := range []string{"", DefaultEnvironment} {
-		d, src := p.dispositionSource(GuardrailScope{Env: env, Name: "control-plane"}, GuardrailAppDeploy)
+		d, src, _ := p.dispositionSource(context.Background(), GuardrailScope{Env: env, Name: "control-plane"}, GuardrailAppDeploy)
 		if d != DispositionDeny || src != sourceName {
 			t.Errorf("env %q: control-plane app.deploy = (%q, %q), want (deny, name)", env, d, src)
 		}
 	}
 	// And the listing marks a Source for it, where an unnamed prod listing leaves Source empty.
-	for _, g := range p.GuardrailsFor(GuardrailScope{Env: DefaultEnvironment, Name: "control-plane"}) {
+	for _, g := range p.GuardrailsFor(context.Background(), GuardrailScope{Env: DefaultEnvironment, Name: "control-plane"}) {
 		if g.Source == "" {
 			t.Errorf("named listing left Source empty for %s", g.Code)
 		}
 	}
-	for _, g := range p.GuardrailsFor(GuardrailScope{Env: DefaultEnvironment}) {
+	for _, g := range p.GuardrailsFor(context.Background(), GuardrailScope{Env: DefaultEnvironment}) {
 		if g.Source != "" {
 			t.Errorf("unnamed prod listing set Source %q for %s; prod's policy IS the global policy", g.Source, g.Code)
 		}
@@ -464,7 +465,7 @@ func TestNameScopableIsDeclaredNotInferred(t *testing.T) {
 func TestRefusalNamesTheThingItWasSetFor(t *testing.T) {
 	p := DefaultPolicy().With(GuardrailCode("prod.burrowd-cloud.app.deploy"), DispositionDeny)
 
-	err := p.evaluateGuardrail(GuardrailScope{Env: "prod", Name: "burrowd-cloud"}, "deploy", GuardrailAppDeploy, true, "deploying a new release")
+	err := p.evaluateGuardrail(context.Background(), GuardrailScope{Env: "prod", Name: "burrowd-cloud"}, "deploy", GuardrailAppDeploy, true, "deploying a new release")
 	g, ok := AsGuardrail(err)
 	if !ok {
 		t.Fatalf("deploy of the named app = %v, want a GuardrailError", err)
@@ -476,13 +477,13 @@ func TestRefusalNamesTheThingItWasSetFor(t *testing.T) {
 	}
 
 	// Another app in the same environment is not touched by that row at all.
-	if err := p.evaluateGuardrail(GuardrailScope{Env: "prod", Name: "website"}, "deploy", GuardrailAppDeploy, true, "deploying a new release"); err != nil {
+	if err := p.evaluateGuardrail(context.Background(), GuardrailScope{Env: "prod", Name: "website"}, "deploy", GuardrailAppDeploy, true, "deploying a new release"); err != nil {
 		t.Errorf("deploy of website = %v, want it to proceed under the default allow", err)
 	}
 
 	// An add-on instance's refusal names the instance and the add-on lever, not an app.
 	p = DefaultPolicy().With(GuardrailCode("prod.burrow-postgres.addon.restore_instance"), DispositionDeny)
-	err = p.evaluateGuardrail(GuardrailScope{Env: "prod", Name: "burrow-postgres"}, "addon restore-instance", GuardrailAddonRestoreInstance, true, "rewinding the instance")
+	err = p.evaluateGuardrail(context.Background(), GuardrailScope{Env: "prod", Name: "burrow-postgres"}, "addon restore-instance", GuardrailAddonRestoreInstance, true, "rewinding the instance")
 	g, _ = AsGuardrail(err)
 	for _, want := range []string{`for the add-on instance "burrow-postgres"`, "guard set --env prod --name burrow-postgres addon.restore_instance confirm"} {
 		if !strings.Contains(g.Message, want) {

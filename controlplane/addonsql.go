@@ -198,7 +198,7 @@ func (e *Engine) AddonSQL(ctx context.Context, req SQLRequest) (SQLResult, error
 		// Scoped by the INSTANCE like every other addon.* code, and by the ENVIRONMENT as well, which
 		// this one alone declares — ADR-0087 §5 asks for the gradient (allow in development, deny in
 		// production) that the environment tier is what expresses.
-		pol.evaluateGuardrail(GuardrailScope{Env: targetEnv, Name: instance}, "addon sql", GuardrailAddonSQL, req.Confirm,
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: targetEnv, Name: instance}, "addon sql", GuardrailAddonSQL, req.Confirm,
 			fmt.Sprintf("running a statement against %q's database on the %s instance %q in environment %s", req.App, req.Addon, instance, targetEnv))); err != nil {
 		return SQLResult{}, err
 	}

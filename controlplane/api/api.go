@@ -184,6 +184,16 @@ func New(cfg Config) (http.Handler, error) {
 	// already in the field (ADR-0039 §2–§3); nothing this repository ships sends it any more.
 	v1.HandleFunc("GET /v1/guard/name/{name}", s.guardList)
 	v1.HandleFunc("PUT /v1/guard/name/{name}/{code}", s.guardSet)
+	// The caller tier (ADR-0094) is a ROUTE for the same reason the name tier is, one axis over. It
+	// narrows a write, and a control plane that never learned it would drop a `--binds agent` and
+	// store the disposition UNBOUND — which binds the operator too, and is precisely the outcome the
+	// flag exists to avoid. As a route it is refused with the structured unknown-operation answer and
+	// nothing is written.
+	//
+	// There is no read counterpart: `guard list` resolves for the kind of the caller asking, which
+	// comes off the request's own credential rather than off the URL (ADR-0094 §6).
+	v1.HandleFunc("PUT /v1/guard/binds/{binds}/{code}", s.guardSet)
+	v1.HandleFunc("PUT /v1/guard/binds/{binds}/name/{name}/{code}", s.guardSet)
 	// The operational limits (ADR-0068). The write is reachable only from the operator CLI: the
 	// agent binary carries no `cluster config` verb at all, which is what the surface guard asserts
 	// — a bound the agent can raise is not a bound (ADR-0068 §4).
@@ -940,9 +950,14 @@ func (s *server) guardSet(w http.ResponseWriter, r *http.Request) {
 	// The env query scopes the set to a named environment (storing the env-prefixed code) and the
 	// name query to one app or add-on instance within it (storing env.name.code); neither sets the
 	// global disposition (ADR-0035 phase 2c, ADR-0085 §1).
+	//
+	// The binds segment binds the disposition to one kind of credential (ADR-0094 §2). It is absent
+	// from the read below deliberately: the updated policy is reported for the CALLER asking, exactly
+	// as `guard list` is, so an operator who has just bound a deny to `agent` sees their own answer.
 	scope := guardScope(r)
+	binds := controlplane.CredentialKind(r.PathValue("binds"))
 	code := controlplane.GuardrailCode(r.PathValue("code"))
-	if err := s.engine.SetGuardrail(r.Context(), scope, code, controlplane.Disposition(req.Disposition)); err != nil {
+	if err := s.engine.SetGuardrail(r.Context(), scope, binds, code, controlplane.Disposition(req.Disposition)); err != nil {
 		writeEngineError(w, err)
 		return
 	}

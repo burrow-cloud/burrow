@@ -44,3 +44,31 @@ func CallerFromContext(ctx context.Context) (Caller, bool) {
 	c, ok := ctx.Value(callerContextKey{}).(Caller)
 	return c, ok
 }
+
+// callerKindFromContext is the guardrail's read of the caller (ADR-0094 §1): the KIND of credential
+// behind the request, and nothing else about who holds it. Not the principal id, not the principal
+// name, and not the admin bit — which Caller deliberately does not carry, so that "may this caller do
+// this" keeps exactly one answering seam.
+//
+// It is read in ONE PLACE, inside Policy.dispositionSource, rather than threaded through the
+// seventeen sites that evaluate a guardrail. That is what keeps ADR-0084 §3's property — the kind
+// comes from the stored credential row, never from the request — a property of the system rather than
+// of seventeen call sites agreeing, and it is why the kind is not a field on GuardrailScope: a scope
+// names what an operation TARGETS, and a kind field would be seventeen chances to omit a value whose
+// omission does not fail but resolves to "binds nobody".
+//
+// An empty answer means NO KIND, which matches only the unbound policy keys (ADR-0094 §4). Three
+// situations produce it and all three are ordinary: the shared install token, which puts no Caller on
+// the context at all; an internal reconcile, which has no request behind it; and a stored kind that is
+// not one of the three ADR-0084 §3 defines. An unknown kind is deliberately NOT read as `agent` — on a
+// shared-token install every caller is unknown, so that reading would make every operator their own
+// agent, which is the defect ADR-0094 exists to remove.
+//
+// Kept a package var beside principalFromContext, for the same reason that one is: a test or the
+// managed product substitutes a resolver without touching a call site.
+var callerKindFromContext = func(ctx context.Context) CredentialKind {
+	if c, ok := CallerFromContext(ctx); ok && c.Kind.Valid() {
+		return c.Kind
+	}
+	return ""
+}

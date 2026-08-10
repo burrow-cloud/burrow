@@ -24,7 +24,7 @@ func TestDeployDeniedForOneAppOnly(t *testing.T) {
 	ctx := context.Background()
 	e, _, _ := newRoutingEngine(t, "burrow-apps")
 
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: cp.DefaultEnvironment, Name: "control-plane"}, cp.GuardrailAppDeploy, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: cp.DefaultEnvironment, Name: "control-plane"}, "", cp.GuardrailAppDeploy, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(prod, control-plane, app.deploy, deny): %v", err)
 	}
 
@@ -56,10 +56,10 @@ func TestNameScopedDispositionSurvivesTheEnvironmentTier(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging"}, cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging"}, "", cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
 		t.Fatalf("SetGuardrail(staging, app.delete, allow): %v", err)
 	}
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: "control-plane"}, cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: "control-plane"}, "", cp.GuardrailAppDelete, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(staging, control-plane, app.delete, deny): %v", err)
 	}
 	for _, app := range []string{"website", "control-plane"} {
@@ -95,7 +95,7 @@ func TestAddonGuardrailScopesToOneInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddonInstanceName: %v", err)
 	}
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: instance}, cp.GuardrailAddonInstall, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: instance}, "", cp.GuardrailAddonInstall, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(staging, %s, addon.install, deny): %v", instance, err)
 	}
 
@@ -126,7 +126,7 @@ func TestSetGuardrailNameValidation(t *testing.T) {
 	// A name with no environment is refused rather than quietly widened to the environment tier:
 	// `website.app.run` is the key an environment called `website` would produce, and nothing in the
 	// lookup could tell the two apart.
-	err := e.SetGuardrail(ctx, cp.GuardrailScope{Name: "website"}, cp.GuardrailAppRun, cp.DispositionDeny)
+	err := e.SetGuardrail(ctx, cp.GuardrailScope{Name: "website"}, "", cp.GuardrailAppRun, cp.DispositionDeny)
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetGuardrail(name without env) = %v, want ErrInvalid", err)
 	}
@@ -136,7 +136,7 @@ func TestSetGuardrailNameValidation(t *testing.T) {
 
 	// A guardrail whose effect is wider than one thing says how far it does reach, rather than
 	// reporting an unsupported flag.
-	err = e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: "website"}, cp.GuardrailDNSWrite, cp.DispositionAllow)
+	err = e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: "website"}, "", cp.GuardrailDNSWrite, cp.DispositionAllow)
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetGuardrail(dns.write, name) = %v, want ErrInvalid", err)
 	}
@@ -146,12 +146,12 @@ func TestSetGuardrailNameValidation(t *testing.T) {
 
 	// A name that is not a DNS label would put a dot in the composed key, which is the one thing
 	// that could make a key ambiguous.
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: "web.site"}, cp.GuardrailAppRun, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: "web.site"}, "", cp.GuardrailAppRun, cp.DispositionDeny); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetGuardrail(dotted name) = %v, want ErrInvalid", err)
 	}
 
 	// The environment still has to exist, so a typo is caught the way it is without a name.
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "ghost", Name: "website"}, cp.GuardrailAppRun, cp.DispositionDeny); !errors.Is(err, cp.ErrNotFound) {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "ghost", Name: "website"}, "", cp.GuardrailAppRun, cp.DispositionDeny); !errors.Is(err, cp.ErrNotFound) {
 		t.Errorf("SetGuardrail(unknown env, name) = %v, want ErrNotFound", err)
 	}
 
@@ -171,10 +171,10 @@ func TestGuardrailsForNameReportsTheTierThatAnswered(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging"}, cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging"}, "", cp.GuardrailAppDelete, cp.DispositionAllow); err != nil {
 		t.Fatalf("SetGuardrail(staging, app.delete): %v", err)
 	}
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: "website"}, cp.GuardrailAppRun, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: "website"}, "", cp.GuardrailAppRun, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(staging, website, app.run): %v", err)
 	}
 

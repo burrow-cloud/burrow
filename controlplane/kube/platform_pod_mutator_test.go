@@ -215,8 +215,12 @@ func TestPlatformPodMutatorSeesConstructedPodSpec(t *testing.T) {
 
 // TestNoPlatformPodMutatorLeavesAddonDeploymentUnchanged is ADR-0073 §4's obligation on the add-on
 // instance path: with nothing wired, the Deployment is byte-for-byte what it was before the hook
-// existed. The cache add-on is the plain case — no volume, no probe, no sidecar — so the whole
-// expected object fits here and any accidental change to the add-on pod's shape fails this test.
+// existed. The cache add-on is the plain case — no volume, no sidecar — so the whole expected
+// object fits here and any accidental change to the add-on pod's shape fails this test.
+//
+// The readiness probe is expressed through the renderer rather than spelled out, because what is
+// pinned here is the HOOK's non-effect and not the probe's shape; the probe's own form and timings
+// are pinned in addon_readiness_test.go.
 func TestNoPlatformPodMutatorLeavesAddonDeploymentUnchanged(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
@@ -250,9 +254,10 @@ func TestNoPlatformPodMutatorLeavesAddonDeploymentUnchanged(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
-						Name:  string(controlplane.AddonCache),
-						Image: "valkey:test",
-						Ports: []corev1.ContainerPort{{ContainerPort: 6379}},
+						Name:           string(controlplane.AddonCache),
+						Image:          "valkey:test",
+						Ports:          []corev1.ContainerPort{{ContainerPort: 6379}},
+						ReadinessProbe: readinessProbe(controlplane.ReadinessCheck{Port: 6379}),
 					}},
 				},
 			},

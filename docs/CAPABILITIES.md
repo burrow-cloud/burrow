@@ -879,8 +879,14 @@ reading the endpoint from `addon list` and setting it as app config. Log queries
 time range** (the Loki adapter hardcodes the last hour). Metrics queries are **instant only**;
 a range query exists in the engine but no CLI, agent verb, or API route reaches it. Add-on
 readiness is judged from the store Deployment alone, so a broken Fluent Bit DaemonSet or
-vmagent still reports ready. Postgres readiness is the `Cluster`'s ready-instance count, which is
-"a server is serving" and not "the operator agrees the instance is healthy".
+vmagent still reports ready. The store itself is judged on **answering** rather than starting: every
+Deployment-backed add-on carries a readiness probe on the port its endpoint names — an HTTP `/health`
+for the logs and metrics stores, a TCP connect for the cache, which speaks no HTTP — so the endpoint
+an install hands back is one that accepts connections, and `addon list` does not report a store
+`installed` before it can be reached. What a probe cannot prove is that the store is useful: a
+metrics store that answers `/health` and has nothing writing to it is ready and empty. Postgres
+readiness is the `Cluster`'s ready-instance count, which is "a server is serving" and not "the
+operator agrees the instance is healthy".
 
 ---
 

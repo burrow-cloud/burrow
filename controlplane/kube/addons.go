@@ -128,6 +128,15 @@ func (a *Adapter) DeployAddon(ctx context.Context, spec controlplane.AddonSpec, 
 						Args:         addonArgs(spec, a.limits.ClusterDuration(ctx, controlplane.LimitAddonMetricRetention)),
 						Ports:        []corev1.ContainerPort{{ContainerPort: spec.Port}},
 						VolumeMounts: mounts,
+						// The instance joins its Service when it ANSWERS, not when its container
+						// starts (AddonSpec.Readiness). This is the whole of what the endpoint
+						// returned below promises, and it is authored through the same resolver
+						// and the same renderer an app's probe takes (ADR-0076), so there is one
+						// mechanism rather than an add-on-shaped copy of it. LivenessProbe and
+						// StartupProbe stay unset here for the reason they stay unset there:
+						// ADR-0076 §1, a wrong liveness probe restarts a working container in a
+						// loop and presents as the crash loop it was installed to detect.
+						ReadinessProbe: readinessProbe(spec.Readiness()),
 					}},
 					Volumes: volumes,
 				},
@@ -446,6 +455,13 @@ func (a *Adapter) scrapeNamespaces() string {
 // is a live property of the cluster — the registry of what add-ons exist lives in the database — so
 // this is a cheap single-object probe. A missing workload is reported as not ready (false, nil);
 // only a real API error is returned.
+//
+// AVAILABLE MEANS ANSWERING, and it means that because of the readiness probe on the instance's
+// container and not because of anything computed here. Availability is derived from ready replicas,
+// and a container with no probe is ready the moment it is running — so this read, the endpoints
+// behind the add-on's Service, and the install's own rollout wait ALL used to report a store that
+// had not yet bound its socket. One probe fixes the three of them at once, because all three were
+// reading the same input.
 //
 // WHICH OBJECT IS THE ADD-ON is resolved here rather than assumed, and that is what keeps a Postgres
 // instance from reading as an ADR-0074 §6 discrepancy. §6's diagnosis is an ABSENCE — the registry

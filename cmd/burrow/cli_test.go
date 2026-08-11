@@ -194,7 +194,7 @@ func TestAudit(t *testing.T) {
 		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"entries": []map[string]any{
-				{"id": 2, "timestamp": "2026-06-23T12:00:01Z", "operation": "deploy", "target": "web", "principal": "shared-agent", "outcome": "executed"},
+				{"id": 2, "timestamp": "2026-06-23T12:00:01Z", "operation": "deploy", "target": "web", "principal": "ada", "caller": "agent", "outcome": "executed"},
 				{"id": 1, "timestamp": "2026-06-23T12:00:00Z", "operation": "deploy", "target": "web", "guardrail_code": "", "disposition": "allow", "outcome": "allowed"},
 			},
 		})
@@ -210,26 +210,30 @@ func TestAudit(t *testing.T) {
 			t.Errorf("query %q missing %q", gotQuery, want)
 		}
 	}
-	// Tabular output names the columns (including PRINCIPAL) and the rows; the principal cell
-	// carries the shared-agent actor (ADR-0038).
-	for _, want := range []string{"TIME", "OP", "TARGET", "PRINCIPAL", "OUTCOME", "GUARDRAIL", "deploy", "web", "shared-agent", "executed", "allowed"} {
+	// Tabular output names the columns and the rows. PRINCIPAL and CALLER are both rendered:
+	// who acted, and what kind of credential they held (ADR-0084 §9). A trail that recorded the
+	// kind and did not show it would answer "was that me or my agent" only through --json.
+	for _, want := range []string{"TIME", "OP", "TARGET", "PRINCIPAL", "CALLER", "OUTCOME", "GUARDRAIL", "deploy", "web", "ada", "agent", "executed", "allowed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q missing %q", out, want)
 		}
 	}
-	// The "allowed" row carries no principal, so its PRINCIPAL cell renders as a standalone dash
-	// (matching how other empty fields render). The "executed" row's "shared-agent" must not bleed
+	// The "allowed" row carries neither principal nor caller, so both cells render as standalone
+	// dashes (matching how other empty fields render). The "executed" row's values must not bleed
 	// onto it.
 	for _, line := range strings.Split(out, "\n") {
 		if !strings.Contains(line, "allowed") {
 			continue
 		}
-		fields := strings.Fields(line) // TIME(date) TIME(clock) OP TARGET PRINCIPAL OUTCOME GUARDRAIL
-		if len(fields) < 7 {
+		fields := strings.Fields(line) // TIME(date) TIME(clock) OP TARGET PRINCIPAL CALLER CLIENT OUTCOME GUARDRAIL
+		if len(fields) < 8 {
 			t.Fatalf("allowed row has too few columns: %q", line)
 		}
 		if principal := fields[4]; principal != "-" {
 			t.Errorf("allowed row PRINCIPAL cell = %q, want dash for empty principal", principal)
+		}
+		if caller := fields[5]; caller != "-" {
+			t.Errorf("allowed row CALLER cell = %q, want dash for empty caller", caller)
 		}
 	}
 }

@@ -1576,7 +1576,25 @@ execution (`executed` or `failed`).
 
 Each row carries the timestamp, operation, target, an allow-listed `args` map, the guardrail
 code and disposition, the outcome, a result string, the caller, the principal, and the
-client version. Operations recorded: `deploy`, `scale`, `autoscale`, `rollback`, `app_delete`,
+client version.
+
+**The principal is who acted and the caller is what kind of credential they held**
+([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §9). Once somebody has
+signed in, their rows name them (`ada`) and say whether the action came from their own terminal
+(`user`), the agent on their machine (`agent`), or an automation (`machine`) — so the same person's
+own deploy and their agent's deploy are one principal and two callers, and the difference is
+readable. The kind is read from the stored credential row and never from anything the request
+claimed about itself. The principal is recorded as the **name**, and it stays true afterwards: a
+principal is retired by being marked revoked, never deleted, and the name is unique across the
+install, so a row keeps naming exactly one person after they are gone.
+
+A request that presents the install's **shared token** names nobody, and the row says so:
+`shared-agent` / `control-plane`, the same pair every row carried before per-person credentials
+existed. Nothing infers an actor from an install having only one — a shared token is exactly the
+credential anybody may be holding. The same pair is recorded for an internal reconcile, which has no
+request behind it at all.
+
+Operations recorded: `deploy`, `scale`, `autoscale`, `rollback`, `app_delete`,
 `expose`, `dns_write`, `dns_delete`, `addon_install`, `addon_remove`, `addon_attach`,
 `addon_detach`, `addon_backup`, `addon_restore`, `run`.
 

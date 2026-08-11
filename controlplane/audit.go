@@ -67,14 +67,22 @@ type AuditEntry struct {
 	// Result is the execution result: empty on success, or a short error summary on a failed
 	// outcome. It never carries a secret value.
 	Result string `json:"result,omitempty"`
-	// Caller is the authenticated caller. Identity is coarse until an auth model exists
-	// (ADR-0027): today it is a constant naming the control-plane boundary.
+	// Caller is WHAT acted: the kind of credential behind the request — `user`, `agent` or
+	// `machine` (ADR-0084 §3) — or the control-plane boundary for a request that presented no
+	// per-caller credential at all. The kind is read from the stored credential row and never from
+	// anything the request said about itself, which is the property that makes the column worth
+	// reading (ADR-0084 §9).
 	Caller string `json:"caller,omitempty"`
-	// Principal is the acting identity — the actor behind the operation, distinct from Caller
-	// (the control-plane boundary that authenticated the request). Today every agent shares one
-	// ServiceAccount, so it is a constant ("shared-agent"); the principal seam (ADR-0038) is
-	// where a future TokenReview→SSO identity resolution fills in a real per-user value, so
-	// attribution becomes additive rather than a migration of past rows' meaning.
+	// Principal is WHO acted: the name of the principal the presented credential belongs to,
+	// distinct from Caller, which says only what kind of credential they held. A request that names
+	// nobody records the shared-agent constant rather than an actor it cannot identify.
+	//
+	// IT IS THE NAME AND NOT THE ID, and the name stays true for as long as the row does. A
+	// principal is retired by being marked revoked and is never deleted — precisely so the audit
+	// rows naming it keep meaning something — and the name is unique across the install, so it
+	// resolves to exactly one principal forever. Recording an id instead would make every reader
+	// join a table to recover a word they already recognise; recording both would put two
+	// identifiers in one column that other rows fill with a constant.
 	Principal string `json:"principal,omitempty"`
 	// ClientVersion is the release version of the client (the `burrow` CLI or `burrow-agent`) that
 	// drove the operation, read from the X-Burrow-Client-Version handshake header (ADR-0039). It
@@ -109,11 +117,19 @@ const auditCaller = "control-plane"
 // there is no per-caller answer to give and the constant says so rather than inventing one.
 const auditPrincipal = "shared-agent"
 
-// principalFromContext is the caller-identity seam (ADR-0084 §9): it resolves the acting principal
-// from the request context. The API layer authenticates the presented credential and puts the
-// resulting Caller on the context (ContextWithCaller); this reads it back, and falls through to the
-// shared-agent constant when there is none — the shared install token, which keeps working
-// unchanged, and an internal reconcile, which has no caller by construction.
+// principalFromContext is the caller-identity seam (ADR-0084 §9): it resolves WHO acted from the
+// request context. The API layer authenticates the presented credential and puts the resulting
+// Caller on the context (ContextWithCaller); this reads it back and records the principal's NAME —
+// see AuditEntry.Principal for why the name rather than the id.
+//
+// IT FALLS THROUGH TO THE CONSTANT RATHER THAN GUESSING. Three requests reach here with no
+// principal, and all three are ordinary: the shared install token, which names nobody by
+// construction and keeps working unchanged; an internal reconcile or background sweep, which has no
+// request behind it; and a caller on an install where nobody has signed in yet. A row that says
+// "shared-agent" is honest about knowing nothing, and it is the same word those rows carried before
+// credentials existed, so an install that never issues one sees no change at all. The alternative —
+// attributing the action to whoever happens to be the install's only principal — would be a trail
+// that names an actor who may not have been there.
 //
 // Kept a package var so a test or the managed product can substitute a resolver without touching
 // call sites.
@@ -124,18 +140,27 @@ var principalFromContext = func(ctx context.Context) string {
 	return auditPrincipal
 }
 
-// callerFromRequest resolves the CALLER column: what kind of credential acted, rather than who held
-// it. It is a function of the request rather than a constant because the answer differs per request
-// the moment credentials do — an operator at a terminal, that person's agent and a CI job are three
-// different callers, and a trail that recorded one word for all three answers none of the questions
-// asked of it afterwards (ADR-0084 §3, §9).
+// callerFromRequest resolves the CALLER column: WHAT acted, rather than who held it. It is a
+// function of the request rather than a constant because the answer differs per request the moment
+// credentials do — an operator at a terminal, that person's agent and a CI job are three different
+// callers, and a trail that recorded one word for all three answers none of the questions asked of
+// it afterwards (ADR-0084 §3, §9).
 //
-// The kind comes from the STORED credential row, never from anything the request said about itself.
-// A request with no per-caller credential records the control-plane boundary, exactly as every
-// request did before credentials existed.
+// IT READS THE KIND THROUGH callerKindFromContext, which is the same seam the guardrail evaluates a
+// caller-bound disposition through (ADR-0094 §1), and that shared read is deliberate. The row
+// carries both the disposition that applied and the credential it applied to, so if the two read the
+// kind by different routes a row could name a kind the guardrail never saw and a reader would
+// conclude a binding matched when it did not. One read means the trail always describes the caller
+// the way the decision was made about it.
+//
+// The consequence is at the edge and is the right one: a stored kind that is not one of ADR-0084
+// §3's three records the control-plane boundary rather than the unrecognised string, exactly as the
+// guardrail treats it as bound by nothing. The principal is still recorded, so such a row says who
+// acted and declines to say what they held, rather than asserting something neither half of the
+// system believes.
 func callerFromRequest(ctx context.Context) string {
-	if c, ok := CallerFromContext(ctx); ok && c.Kind != "" {
-		return string(c.Kind)
+	if k := callerKindFromContext(ctx); k != "" {
+		return string(k)
 	}
 	return auditCaller
 }

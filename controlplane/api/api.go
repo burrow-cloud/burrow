@@ -1848,12 +1848,16 @@ type metricsQueryResponse struct {
 	Samples []controlplane.MetricSample `json:"samples"`
 }
 
-// Note (ADR-0038, principal seam): there is no auth change here today — the control plane
-// authenticates with a single API token and every agent shares one ServiceAccount, so the
-// engine's principal seam (controlplane.principalFromContext) simply returns the shared-agent
-// constant. When per-user SSO lands, middleware wrapping these handlers would resolve the SSO
-// identity (e.g. via TokenReview) and put it on the request context here, and the engine seam
-// would read it off ctx — no call-site changes, and past audit rows keep their meaning.
+// Note (ADR-0084 §9, caller identity): nothing in this file resolves who is calling, and that is
+// the shape rather than an omission. `authenticate` does it once for every /v1 route — it turns the
+// presented token into a Caller and puts it on the request context — and the engine reads it back at
+// one seam when it records a row. So a handler passes r.Context() along and the trail names the
+// principal and the kind of credential they held, with no per-handler code to forget.
+//
+// A request that presents the install's shared token puts nothing on the context and records the
+// constants it always did, which is what keeps this additive for an install that has issued no
+// credential. When an identity provider later replaces the token lookup, it replaces it inside
+// `authenticate` and nothing here changes; past audit rows keep their meaning either way.
 
 func (s *server) audit(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()

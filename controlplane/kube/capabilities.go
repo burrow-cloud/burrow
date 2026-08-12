@@ -414,11 +414,28 @@ func detectCertManager(client kubernetes.Interface) (controlplane.CertManagerCap
 	return controlplane.CertManagerCapability{}, nil
 }
 
-// detectMetricsServer reports whether metrics-server is serving the Kubernetes Metrics API by
-// looking for the metrics.k8s.io group in API-group discovery. Discovery needs no RBAC (ADR-0034):
-// the presence of the group means a metrics-server (or a vendor's equivalent on k3s, GKE, or AKS)
-// is registered. This is also how install detects a vendor-shipped copy so it does not install a
-// second one (ADR-0054 §1).
+// DetectMetricsServer reports the Kubernetes Metrics API's situation. It is exported for the same
+// reason DetectCertManager is: `burrow cluster metrics install` has to know, and one detector is how
+// the install command and `burrow cluster` cannot disagree about the answer (ADR-0096 §2).
+func DetectMetricsServer(client kubernetes.Interface) (controlplane.MetricsServerCapability, error) {
+	return detectMetricsServer(client)
+}
+
+// detectMetricsServer reports whether metrics-server is SERVING the Kubernetes Metrics API, and
+// separately whether the group is merely registered. Discovery needs no RBAC (ADR-0034).
+//
+// Present requires the metrics.k8s.io group to advertise a usable version, not merely to exist
+// (ADR-0096 §1). The Metrics API is served through the AGGREGATION LAYER, not by the API server
+// itself, and that is the whole difference from detectCertManager above: when the backing service
+// stops answering, the aggregator keeps the group and marks its version stale, and client-go's
+// SplitGroupsAndResources drops a stale GroupVersion while still appending the group — so a group
+// with an EMPTY version list is exactly the shape of a broken metrics-server. `kubectl top` resolves
+// a version, which is why it answered "Metrics API not available" on a cluster this detector called
+// present (issue #561).
+//
+// Any usable version counts rather than v1beta1 specifically: v1beta1 is the only version that has
+// ever existed, so today the two rules agree, and if a future metrics-server serves a newer one this
+// reports it present instead of reporting absent and inviting install to write a second copy over it.
 func detectMetricsServer(client kubernetes.Interface) (controlplane.MetricsServerCapability, error) {
 	groups, err := client.Discovery().ServerGroups()
 	if err != nil {
@@ -426,7 +443,7 @@ func detectMetricsServer(client kubernetes.Interface) (controlplane.MetricsServe
 	}
 	for _, g := range groups.Groups {
 		if g.Name == metricsAPIGroup {
-			return controlplane.MetricsServerCapability{Present: true}, nil
+			return controlplane.MetricsServerCapability{Present: len(g.Versions) > 0, Registered: true}, nil
 		}
 	}
 	return controlplane.MetricsServerCapability{}, nil

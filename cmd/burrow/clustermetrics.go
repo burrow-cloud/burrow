@@ -23,6 +23,7 @@ type clusterMetricsOptions struct {
 	kubeconfig  string
 	kubeContext string
 	dryRun      bool
+	force       bool
 	verbose     bool
 }
 
@@ -59,6 +60,10 @@ func newClusterMetricsCmd() *cobra.Command {
 			"It never installs over a copy the platform already ships. k3s, GKE, and AKS serve the\n" +
 			"Metrics API themselves; EKS, DOKS, and kind do not. A cluster already serving it is left\n" +
 			"exactly as it is.\n\n" +
+			"A cluster where the Metrics API is registered and answering nothing is reported and left\n" +
+			"alone too: that is a broken metrics-server, not a missing one, and re-applying a manifest\n" +
+			"does not fix a kubelet it cannot scrape. `--force` applies the baseline anyway, for the case\n" +
+			"where the workload is gone and only the APIService is left behind.\n\n" +
 			"This is not `burrow addon install metrics`. That provisions a VictoriaMetrics instance for\n" +
 			"one environment, which stores and answers queries about metrics over time; this installs the\n" +
 			"cluster component that reports current usage at all, once per cluster.",
@@ -76,6 +81,7 @@ func newClusterMetricsCmd() *cobra.Command {
 	install.Flags().StringVar(&o.kubeconfig, "kubeconfig", "", "path to kubeconfig (default: ambient)")
 	bindLifecycleContext(install.Flags(), &o.kubeContext)
 	install.Flags().BoolVar(&o.dryRun, "dry-run", false, "print the manifest instead of applying it")
+	install.Flags().BoolVar(&o.force, "force", false, "apply the baseline even when the Metrics API is already registered (replaces whatever registered it, including the platform's own copy)")
 	install.Flags().BoolVar(&o.verbose, "verbose", false, "show every resource burrow applies instead of a summary")
 
 	parent.AddCommand(install)
@@ -94,7 +100,8 @@ func newClusterMetricsCmd() *cobra.Command {
 // The apply failure is returned rather than reported and swallowed. install treats a baseline hiccup
 // as non-fatal because the control plane is already up and that is the run's real subject; here the
 // baseline IS the subject, and a command that could not do the one thing it was asked to do must exit
-// non-zero.
+// non-zero. A Metrics API that is registered and serving nothing exits non-zero for the same reason
+// (ADR-0096 §3): the command was asked for a working Metrics API and there is not one.
 func runClusterMetricsInstall(ctx context.Context, o clusterMetricsOptions, stdout, stderr io.Writer) error {
 	// dry-run prints the manifest without contacting the cluster, the same way `cluster install
 	// --dry-run` does, so it stays reviewable and pipeable. The detect-and-skip is left unresolved:
@@ -116,5 +123,5 @@ func runClusterMetricsInstall(ctx context.Context, o clusterMetricsOptions, stdo
 	if err != nil {
 		return err
 	}
-	return ensureMetricsServer(ctx, o.kubeconfig, o.kubeContext, cs, false, o.verbose, stdout, stderr)
+	return ensureMetricsServer(ctx, o.kubeconfig, o.kubeContext, cs, false, o.force, o.verbose, stdout, stderr)
 }

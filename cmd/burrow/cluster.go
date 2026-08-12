@@ -25,7 +25,7 @@ func toClientCaps(c controlplane.ClusterCapabilities) client.ClusterCapabilities
 		Storage:       client.StorageCapability{DefaultPresent: c.Storage.DefaultPresent, DefaultClass: c.Storage.DefaultClass, Classes: c.Storage.Classes},
 		LoadBalancer:  client.LoadBalancerCapability{Supported: c.LoadBalancer.Supported, Inferred: c.LoadBalancer.Inferred, Provider: c.LoadBalancer.Provider},
 		CertManager:   client.CertManagerCapability{Present: c.CertManager.Present},
-		MetricsServer: client.MetricsServerCapability{Present: c.MetricsServer.Present},
+		MetricsServer: client.MetricsServerCapability{Present: c.MetricsServer.Present, Registered: c.MetricsServer.Registered},
 		CloudNativePG: client.CloudNativePGCapability{Present: c.CloudNativePG.Present, Ready: c.CloudNativePG.Ready, Version: c.CloudNativePG.Version, Pinned: c.CloudNativePG.Pinned},
 		PgBackRest:    client.PgBackRestCapability{Present: c.PgBackRest.Present, Ready: c.PgBackRest.Ready, Pinned: c.PgBackRest.Pinned},
 		ControlPlaneDatabase: client.ControlPlaneDatabaseCapability{
@@ -258,15 +258,25 @@ func certManagerLine(c client.CertManagerCapability) string {
 	return "not installed"
 }
 
-// metricsServerLine reports the baseline that serves the Metrics API. The absent case names the
-// command that fixes it rather than saying install would have added it: the clusters that read
-// "absent" here are exactly the ones install already ran on without it (issue #524), so pointing at
-// install points at the run that has already happened.
+// metricsServerLine reports the baseline that serves the Metrics API, in the three states it can be
+// in — the shape cloudNativePGLine below has, and for the same reason: they need different things
+// done about them. The absent case names the command that fixes it rather than saying install would
+// have added it: the clusters that read "absent" here are exactly the ones install already ran on
+// without it (issue #524), so pointing at install points at the run that has already happened.
+//
+// The middle state — registered and not answering — does NOT name that command, because the command
+// declines to install over a registration it did not make (ADR-0096 §3) and pointing at it would
+// walk the reader into a refusal. It names the workload to go and look at instead.
 func metricsServerLine(m client.MetricsServerCapability) string {
-	if m.Present {
+	switch {
+	case m.Present:
 		return "serving the Metrics API (kubectl top, HPA autoscaling, utilization)"
+	case m.Registered:
+		return "registered but not serving the Metrics API — metrics-server is installed and not " +
+			"answering (kubectl -n kube-system get pods -l k8s-app=metrics-server)"
+	default:
+		return "not serving the Metrics API (needed for HPA autoscaling; burrow cluster metrics install)"
 	}
-	return "not serving the Metrics API (needed for HPA autoscaling; burrow cluster metrics install)"
 }
 
 // cloudNativePGLine reports the CloudNativePG operator. The three states it can be in are said
@@ -383,9 +393,15 @@ func capabilitySummary(caps client.ClusterCapabilities) string {
 		parts = append(parts, "cert-manager not installed")
 	}
 
-	if caps.MetricsServer.Present {
+	// The one-line summary says the middle state too. "present" and "absent" are both false of a
+	// registered metrics-server that answers nothing, and this line is what an install run leaves
+	// behind on the terminal (ADR-0096 §1).
+	switch {
+	case caps.MetricsServer.Present:
 		parts = append(parts, "metrics-server present")
-	} else {
+	case caps.MetricsServer.Registered:
+		parts = append(parts, "metrics-server registered but not serving")
+	default:
 		parts = append(parts, "metrics-server absent")
 	}
 

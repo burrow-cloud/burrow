@@ -16,9 +16,10 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-// metricsAPIGroup is the API group metrics-server serves. Its presence in API-group discovery means
-// metrics-server is installed, so an applied HorizontalPodAutoscaler can read the CPU/memory metrics
-// it scales on. Discovery needs no RBAC (ADR-0034).
+// metricsAPIGroup is the API group metrics-server serves. A group ADVERTISING A USABLE VERSION in
+// API-group discovery means metrics-server is answering, so an applied HorizontalPodAutoscaler can
+// read the CPU/memory metrics it scales on; the bare group name means only that something registered
+// the API, which a broken metrics-server also does (ADR-0096 §1). Discovery needs no RBAC (ADR-0034).
 const metricsAPIGroup = "metrics.k8s.io"
 
 // ApplyAutoscaler creates or updates an autoscaling/v2 HorizontalPodAutoscaler named after app,
@@ -76,21 +77,19 @@ func (a *Adapter) AutoscalerActive(ctx context.Context, app string) (bool, error
 	return true, nil
 }
 
-// MetricsAPIAvailable reports whether the metrics.k8s.io API group is served, i.e. metrics-server is
-// installed. It reads API-group discovery, which needs no RBAC (ADR-0034). A discovery error is
+// MetricsAPIAvailable reports whether the metrics.k8s.io API group is being SERVED, i.e. a
+// metrics-server is registered AND answering. It shares detectMetricsServer with the capability
+// report and `burrow cluster metrics install`, so the warning an HPA apply prints cannot disagree
+// with what those two say (ADR-0096 §2) — and a registered-but-stale group, the state that made an
+// HPA look supported while `kubectl top` was dead, warns like an absent one. A discovery error is
 // returned so the caller can decide; the engine treats it as "absent" and warns rather than failing,
 // so a probe hiccup never blocks applying an HPA.
 func (a *Adapter) MetricsAPIAvailable(ctx context.Context) (bool, error) {
-	groups, err := a.client.Discovery().ServerGroups()
+	caps, err := detectMetricsServer(a.client)
 	if err != nil {
-		return false, fmt.Errorf("kube: discovering API groups: %w", err)
+		return false, err
 	}
-	for _, g := range groups.Groups {
-		if g.Name == metricsAPIGroup {
-			return true, nil
-		}
-	}
-	return false, nil
+	return caps.Present, nil
 }
 
 // buildAutoscaler renders the desired HorizontalPodAutoscaler for app: it targets the app's

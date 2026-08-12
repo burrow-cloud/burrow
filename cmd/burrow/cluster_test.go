@@ -99,6 +99,28 @@ func TestClusterReportOrphanIngressClass(t *testing.T) {
 	}
 }
 
+// TestClusterReportStaleMetricsAPI asserts the middle state renders as itself: a metrics-server
+// that is registered and answering nothing is neither "serving" nor "not installed", and reading
+// either of those sends the operator somewhere wrong (issue #561, ADR-0096 §1). The line must also
+// not point at `burrow cluster metrics install`, which declines that cluster.
+func TestClusterReportStaleMetricsAPI(t *testing.T) {
+	caps := fullCaps()
+	caps.MetricsServer = client.MetricsServerCapability{Present: false, Registered: true}
+
+	var b bytes.Buffer
+	writeClusterReport(&b, caps)
+	out := b.String()
+	if !strings.Contains(out, "registered but not serving the Metrics API") {
+		t.Errorf("report missing the registered-but-not-serving state\n%s", out)
+	}
+	if strings.Contains(out, "burrow cluster metrics install") {
+		t.Errorf("the broken-baseline line must not point at a command that refuses it\n%s", out)
+	}
+	if got := capabilitySummary(caps); !strings.Contains(got, "metrics-server registered but not serving") {
+		t.Errorf("summary = %q, want the registered-but-not-serving state", got)
+	}
+}
+
 func TestCapabilitySummaryBareMetal(t *testing.T) {
 	caps := client.ClusterCapabilities{
 		Ingress:  client.IngressCapability{Present: false},

@@ -513,9 +513,28 @@ echo "--- installed add-ons (should show cache, mode installed) ---"
 
 echo "=== PING the cache from inside the cluster (proves it is reachable) ==="
 # The test host cannot resolve in-cluster Service DNS, so PING from a one-shot in-cluster pod.
+#
+# RETRY, for the same reason the Loki seed below does. `rollout status` returning success means the
+# pod passed its readiness probe, which is what puts it in the Service's endpoints -- it does not
+# mean every node's kube-proxy has PROGRAMMED that endpoint yet. A single PING fired immediately
+# after the rollout can therefore be refused by a backing service that is genuinely up, and this
+# check has failed exactly that way: `Connection refused` two seconds after
+# `deployment "burrow-cache" successfully rolled out`.
+#
+# The retry does not weaken what is being proved. The assertion is still that the endpoint the
+# install PRINTED answers PONG; it just stops the assertion from depending on endpoint programming
+# winning a two-second race. A cache that never answers still fails, and takes a minute to say so.
 cache_out=$(kubectl --kubeconfig "$KCFG" -n burrow-addons run cache-ping \
   --image=valkey/valkey:8.0 --restart=Never --attach --rm -q -- \
-  valkey-cli -h burrow-cache.burrow-addons.svc -p 6379 ping 2>&1 || true)
+  sh -c '
+    for i in $(seq 1 20); do
+      out=$(valkey-cli -h burrow-cache.burrow-addons.svc -p 6379 ping 2>&1)
+      case "$out" in *PONG*) echo "$out"; exit 0;; esac
+      echo "ping attempt $i -> $out" >&2
+      sleep 3
+    done
+    echo "$out"; exit 1
+  ' 2>&1 || true)
 echo "$cache_out"
 if ! grep -q "PONG" <<<"$cache_out"; then
   echo "FAIL: the cache did not answer PING with PONG"

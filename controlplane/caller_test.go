@@ -85,3 +85,95 @@ func TestCallerRoundTripsThroughTheContext(t *testing.T) {
 		t.Errorf("caller = %+v, want %+v", got, want)
 	}
 }
+
+// TestAuditRowOutlivesThePrincipalItNames: the trail keeps naming ada after her principal is
+// retired and her credential stops authenticating. This is the property that decides what "who"
+// means in the column (AuditEntry.Principal): the NAME, recorded at write time, not a reference
+// resolved at read time.
+//
+// The name can be recorded on its own because it cannot come to mean somebody else. A principal is
+// marked revoked rather than deleted, the name is unique across the install, and nothing renames
+// one — so "ada" resolves to exactly one principal forever, including after she is gone. A row that
+// stored an id instead would be true and unreadable; a row that resolved a reference at read time
+// would go blank exactly when somebody is reading the trail to find out what a departed colleague
+// did.
+func TestAuditRowOutlivesThePrincipalItNames(t *testing.T) {
+	ctx := context.Background()
+	e, d, clock := newIdentityEngine(t)
+	d.SetPolicy(permissive())
+
+	p, issued, err := e.ClaimFirstPrincipal(ctx, "ada")
+	if err != nil {
+		t.Fatalf("ClaimFirstPrincipal: %v", err)
+	}
+	caller, err := e.AuthenticateCredential(ctx, issued.Token)
+	if err != nil {
+		t.Fatalf("AuthenticateCredential: %v", err)
+	}
+	if _, err := e.Deploy(cp.ContextWithCaller(ctx, caller), cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	// She leaves. Her principal is retired, which stops every credential she holds.
+	if err := d.RevokePrincipal(ctx, p.ID, clock.Now()); err != nil {
+		t.Fatalf("RevokePrincipal: %v", err)
+	}
+	if _, err := e.AuthenticateCredential(ctx, issued.Token); err == nil {
+		t.Fatal("a retired principal's credential still authenticates; the rest of this test proves nothing")
+	}
+
+	rows := targetRows(auditRows(t, d, "deploy"), "web")
+	if len(rows) == 0 {
+		t.Fatal("no deploy audit rows")
+	}
+	for i, r := range rows {
+		if r.Principal != "ada" {
+			t.Errorf("row[%d] principal = %q after the principal was retired, want ada — the row records what was "+
+				"true when it was written", i, r.Principal)
+		}
+		if r.Caller != string(cp.CredentialKindUser) {
+			t.Errorf("row[%d] caller = %q, want user", i, r.Caller)
+		}
+	}
+}
+
+// TestAnUnrecognisedKindRecordsTheBoundaryAndKeepsThePrincipal: a caller whose stored kind is not
+// one of ADR-0084 §3's three records the control-plane boundary in the CALLER column and still
+// records WHO acted.
+//
+// The kind is read through callerKindFromContext, the one seam the guardrail evaluates a
+// caller-bound disposition through (ADR-0094 §1), and that is the point. The row carries both the
+// disposition that applied and the credential it applied to; if the audit read the kind by a second
+// route it could name a kind the guardrail never saw, and a reader would conclude a binding matched
+// when it did not. Reading it once means the trail describes the caller the way the decision was
+// made about it.
+//
+// The principal is unaffected, because it is a different fact and it is known. The row says who
+// acted and declines to say what they held, which is the honest pair.
+func TestAnUnrecognisedKindRecordsTheBoundaryAndKeepsThePrincipal(t *testing.T) {
+	e, _, d, _ := newEngine(t, permissive())
+
+	ctx := cp.ContextWithCaller(context.Background(), cp.Caller{
+		PrincipalID:   "p-1",
+		PrincipalName: "ada",
+		Kind:          cp.CredentialKind("root"),
+		CredentialID:  "c-1",
+	})
+	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1, Confirm: true}); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	rows := targetRows(auditRows(t, d, "deploy"), "web")
+	if len(rows) == 0 {
+		t.Fatal("no deploy audit rows")
+	}
+	for i, r := range rows {
+		if r.Caller != "control-plane" {
+			t.Errorf("row[%d] caller = %q, want control-plane: an unrecognised kind is bound by nothing to the "+
+				"guardrail, so the trail must not name it as though it were", i, r.Caller)
+		}
+		if r.Principal != "ada" {
+			t.Errorf("row[%d] principal = %q, want ada: who acted is known, and is a different fact from what "+
+				"they held", i, r.Principal)
+		}
+	}
+}

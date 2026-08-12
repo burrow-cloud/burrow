@@ -24,8 +24,10 @@ func newAuditCmd() *cobra.Command {
 		Use:   "audit",
 		Short: "Review the audit log of guarded operations and guardrail decisions",
 		Long: "audit lists the control plane's append-only record of guarded, mutating operations and\n" +
-			"the guardrail decision and outcome for each — what the agent did, when, and whether a\n" +
-			"guardrail allowed, held, or denied it. Newest first. Filter by app, operation, or outcome.\n" +
+			"the guardrail decision and outcome for each — what was done, when, and whether a guardrail\n" +
+			"allowed, held, or denied it. PRINCIPAL is who acted and CALLER is the kind of credential\n" +
+			"they held (user, agent, machine); a request on the install's shared token names nobody and\n" +
+			"reads shared-agent / control-plane. Newest first. Filter by app, operation, or outcome.\n" +
 			"The log records redacted metadata only; it never holds an env value or a secret.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -47,10 +49,14 @@ func newAuditCmd() *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "TIME\tOP\tTARGET\tPRINCIPAL\tCLIENT\tOUTCOME\tGUARDRAIL")
+			// PRINCIPAL is who acted, CALLER is what kind of credential they held (ADR-0084 §9).
+			// The two sit side by side because they answer different questions and the pair is what
+			// makes a row actionable: the same person's terminal and their agent are one principal
+			// and two callers, so "did I do this or did my agent" is only readable with both.
+			fmt.Fprintln(tw, "TIME\tOP\tTARGET\tPRINCIPAL\tCALLER\tCLIENT\tOUTCOME\tGUARDRAIL")
 			for _, e := range entries {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-					e.Timestamp.Format("2006-01-02 15:04:05"), e.Operation, dash(e.Target), dash(e.Principal), dash(e.ClientVersion), e.Outcome, dash(e.GuardrailCode))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					e.Timestamp.Format("2006-01-02 15:04:05"), e.Operation, dash(e.Target), dash(e.Principal), dash(e.Caller), dash(e.ClientVersion), e.Outcome, dash(e.GuardrailCode))
 			}
 			return tw.Flush()
 		},

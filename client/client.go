@@ -560,11 +560,14 @@ type AuditEntry struct {
 	Disposition   string            `json:"disposition,omitempty"`
 	Outcome       string            `json:"outcome"`
 	Result        string            `json:"result,omitempty"`
-	Caller        string            `json:"caller,omitempty"`
-	// Principal is the acting identity (the actor), distinct from Caller (the control-plane
-	// boundary). The json tag must match the engine's AuditEntry.Principal tag exactly — the two
-	// structs serialize/deserialize across the API, and a mismatched tag would silently drop the
-	// field (ADR-0038).
+	// Caller is WHAT acted: the kind of credential behind the request (`user`, `agent`, `machine`),
+	// or `control-plane` for a request that presented no per-caller credential — the install's
+	// shared token, or an internal path with no request behind it (ADR-0084 §3, §9).
+	Caller string `json:"caller,omitempty"`
+	// Principal is WHO acted: the name of the principal that credential belongs to, or the
+	// `shared-agent` constant for a request that names nobody. The json tag must match the engine's
+	// AuditEntry.Principal tag exactly — the two structs serialize/deserialize across the API, and a
+	// mismatched tag would silently drop the field (ADR-0038).
 	Principal string `json:"principal,omitempty"`
 	// ClientVersion is the release version of the client that drove the operation, from the
 	// X-Burrow-Client-Version handshake (ADR-0039). Empty for a pre-handshake client. The json tag

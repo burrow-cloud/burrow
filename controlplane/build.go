@@ -154,6 +154,22 @@ func (e *Engine) runBuild(ctx context.Context, intent BuildIntent, source Source
 // wrote it to (ADR-0030). The token is returned to the caller in memory and is NEVER placed in an
 // error: a read failure names the provider and the key, never the value.
 func (e *Engine) resolveSourceCredential(ctx context.Context, repo string) (SourceCredential, error) {
+	// A resolver, when one is wired, answers INSTEAD of the persisted provider store, and is handed the
+	// repo so the credential it returns can be scoped to exactly the repository about to be cloned
+	// (ADR-0057 §5). It is consulted first because a deployment that has one has no provider rows to
+	// consult: the managed product's credential is a short-lived, per-repository token minted on
+	// demand, which is deliberately never written to Postgres and so cannot be found by the lookup
+	// below.
+	//
+	// A resolver that has nothing for this repo returns the zero credential and no error, and the
+	// clone proceeds anonymously — the same disposition a public repository gets here.
+	if e.sourceCredentials != nil {
+		cred, err := e.sourceCredentials.SourceCredential(ctx, repo)
+		if err != nil {
+			return SourceCredential{}, fmt.Errorf("resolving the source credential: %w", err)
+		}
+		return cred, nil
+	}
 	host := gitHost(repo)
 	if host == "" {
 		return SourceCredential{}, nil

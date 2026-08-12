@@ -85,6 +85,9 @@ type Engine struct {
 	// (ADR-0054 §5). Optional: when empty, the deploy falls back to referencing the internal push
 	// endpoint (an in-cluster registry installed without a public ingress).
 	buildPublicRegistry string
+	// sourceCredentials resolves a build's clone credential per-repository when wired; nil falls back
+	// to the persisted provider store. See Deps.
+	sourceCredentials SourceCredentialResolver
 	// appNamespace is the namespace burrowd deploys apps into (BURROW_NAMESPACE) — the namespace
 	// the default environment `prod` maps to (ADR-0067 §3: the environment's NAME and its NAMESPACE
 	// are separate values, which is what lets an install predating the change gain `prod` without
@@ -184,6 +187,11 @@ type Deps struct {
 	// internal push endpoint. burrowd sets it from BURROW_BUILD_PUBLIC_REGISTRY, which
 	// `burrow cluster registry install --host` wires to the registry's public ingress hostname.
 	BuildPublicRegistry string
+	// SourceCredentials, when set, resolves the clone credential for a build INSTEAD of the persisted
+	// provider store, and is handed the repository so what it returns can be scoped to it
+	// (ADR-0057 §5). Optional — nil keeps the provider-store lookup, which is what a self-hosted
+	// install uses and what `provider add` writes to.
+	SourceCredentials SourceCredentialResolver
 	// TokenSource mints the secret half of a credential (ADR-0084 §2). Optional — nil is allowed,
 	// and issuing a credential errors cleanly (ErrNotImplemented) rather than inventing randomness
 	// the engine is not supposed to read. Authenticating and revoking work without it.
@@ -250,6 +258,7 @@ func New(d Deps) (*Engine, error) {
 		buildLedger:         d.BuildLedger,
 		buildRegistry:       d.BuildRegistry,
 		buildPublicRegistry: d.BuildPublicRegistry,
+		sourceCredentials:   d.SourceCredentials,
 		appNamespace:        appNamespace,
 		tokens:              d.TokenSource,
 		authz:               authz,

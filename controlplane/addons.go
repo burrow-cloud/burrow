@@ -71,6 +71,14 @@ type AddonSpec struct {
 	Image string
 	// Port is the service port the app (or the agent, for an observability add-on) reaches it on.
 	Port int32
+	// HealthPath is the path the backing service answers a readiness check on; empty makes the
+	// check a TCP connect against Port instead.
+	//
+	// It is a per-type property because only the catalog entry can know it. VictoriaLogs and
+	// VictoriaMetrics both serve /health, which is the service saying it is serving; ValKey speaks
+	// RESP and answers nothing over HTTP, so an open socket is all Burrow can prove about it
+	// without running a command inside the pod.
+	HealthPath string
 	// StorageGi requests a persistent volume of this size in GiB; 0 is ephemeral. Stateful
 	// stores (logs, metrics) persist so data survives a restart.
 	StorageGi int
@@ -81,6 +89,35 @@ type AddonSpec struct {
 	Summary string
 }
 
+// Readiness is the probe Burrow authors on an add-on instance's container, so the instance joins
+// its Service when it ANSWERS rather than when its container starts.
+//
+// Without one the endpoint an install returns names a socket that refuses connections for the first
+// seconds of its life, and every layer above says the add-on is ready at once: the endpoints
+// controller routes to the pod, Deployment availability counts a started container as an available
+// replica, and the install's own rollout wait returns on that same already-true signal. The agent's
+// intended next move is to wire an app to the endpoint it was just handed, so the first connection
+// fails for a reason that has nothing to do with the app.
+//
+// IT IS DERIVED FROM Port RATHER THAN DECLARED BESIDE IT. The port the probe checks and the port
+// the Service publishes are one fact, and an entry that carried them separately is an entry where
+// one can be changed without the other — which produces an instance that never becomes ready, the
+// loudest possible form of the failure ADR-0076 §6 warns about.
+//
+// This is the resolved shape a user application's probe takes, rendered by the same code (ADR-0076),
+// so add-ons and apps cannot drift into two mechanisms for one question. §1 holds unchanged —
+// readiness only, never liveness — and §2 holds by construction, because a ReadinessCheck cannot
+// address anything but the pod's own port. §3's refusal to guess is honoured rather than waived:
+// it withholds a probe from an app whose port Burrow does not know, and Burrow pinned this image
+// and chose this port, so there is nothing here to guess.
+//
+// Postgres never reaches this. It has no Burrow-authored container — CloudNativePG composes the
+// pods from the `Cluster` (ADR-0066 §1), and its readiness is the operator's own answer — so the
+// deploy path returns before any container is built.
+func (s AddonSpec) Readiness() ReadinessCheck {
+	return ReadinessCheck{Port: s.Port, Path: s.HealthPath}
+}
+
 // addonCatalog is the curated, compiled-in set of add-ons Burrow can install. Only
 // permissively-licensed backing services belong here (ADR-0025).
 var addonCatalog = map[AddonType]AddonSpec{
@@ -89,6 +126,7 @@ var addonCatalog = map[AddonType]AddonSpec{
 		Backend:      "victorialogs",
 		Image:        "victoriametrics/victoria-logs:v1.51.0", // VictoriaLogs, Apache-2.0
 		Port:         9428,
+		HealthPath:   "/health",
 		StorageGi:    10,
 		Capabilities: []string{"logs"},
 		Summary:      "log aggregation (VictoriaLogs)",
@@ -98,6 +136,7 @@ var addonCatalog = map[AddonType]AddonSpec{
 		Backend:      "victoriametrics",
 		Image:        "victoriametrics/victoria-metrics:v1.115.0", // VictoriaMetrics single-node, Apache-2.0
 		Port:         8428,
+		HealthPath:   "/health",
 		StorageGi:    10,
 		Capabilities: []string{"metrics"},
 		Summary:      "metrics (VictoriaMetrics + a vmagent scraper)",
@@ -107,6 +146,10 @@ var addonCatalog = map[AddonType]AddonSpec{
 		Backend: "valkey",
 		Image:   "valkey/valkey:8.0", // ValKey, BSD-3
 		Port:    6379,
+		// No health path: ValKey serves RESP and not HTTP, so its readiness check is a TCP connect
+		// on the port above. That proves the process bound the socket and nothing more — which is
+		// exactly the claim the endpoint makes, and all Burrow can prove without running
+		// `valkey-cli PING` inside the pod.
 		// Ephemeral: a cache is rebuildable, so it gets no persistent volume and no collector —
 		// the generic deploy path (Deployment + Service) is all it needs. The agent reads the
 		// endpoint from `addon list` and wires the app to it.
@@ -122,6 +165,8 @@ var addonCatalog = map[AddonType]AddonSpec{
 		Backend: "cloudnative-pg",
 		Image:   CNPGPostgresImage,
 		Port:    5432,
+		// No health path, and no probe of Burrow's authored either: there is no Burrow-authored
+		// container here at all. CloudNativePG composes the pods, and it sets their probes.
 		// Persistent: a database is durable state, so it gets a volume. Unlike every other add-on the
 		// claim is not Burrow's — the operator composes it from the `Cluster` and names it
 		// `<instance>-1` (AddonDataVolumeName) — so this size is what the `Cluster` asks for rather

@@ -314,47 +314,34 @@ func TestGuardListSourceColumnFollowsTheAnswer(t *testing.T) {
 	}
 }
 
-// TestGuardSetCarriesTheBinding is the caller tier at the surface (ADR-0094 §2): `--binds` rides the
-// path, ahead of the name, and the confirmation says what the write did NOT do — an operator who
-// binds a deny and reads back "set to deny" has no way to tell it apart from the blunt write they
-// were avoiding.
-func TestGuardSetCarriesTheBinding(t *testing.T) {
-	var gotPath, gotQuery string
+// TestGuardSetTakesNoBindingFlag pins ADR-0097 at the surface: there is no `--binds`, because a
+// guardrail holds the agent and a setting with one correct value is not a setting. The flag's own
+// failure mode is why it is gone — omitted, it silently froze the operator along with the agent,
+// which is the defect it had been introduced to fix.
+func TestGuardSetTakesNoBindingFlag(t *testing.T) {
+	_, _, err := runCLI(t, cannedGuardrails, "guard", "set", "app.deploy", "deny", "--binds", "agent")
+	if err == nil {
+		t.Fatal("--binds was accepted; it should no longer exist")
+	}
+	if !strings.Contains(err.Error(), "binds") {
+		t.Errorf("the refusal should name the unknown flag, got %v", err)
+	}
+
+	var gotPath string
 	out, _, err := runCLI(t, func(w http.ResponseWriter, r *http.Request) {
-		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
-		cannedGuardrails(w, r)
-	}, "guard", "set", "app.deploy", "deny", "--binds", "agent", "--env", "prod", "--name", "burrowd-cloud")
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if gotPath != "/v1/guard/binds/agent/name/burrowd-cloud/app.deploy" || !strings.Contains(gotQuery, "env=prod") {
-		t.Errorf("request = %s?%s, want /v1/guard/binds/agent/name/burrowd-cloud/app.deploy?env=prod", gotPath, gotQuery)
-	}
-	for _, want := range []string{"binds agent credentials only", "every other caller reads the disposition underneath it"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("confirmation %q is missing %q", out, want)
-		}
-	}
-	// Without --binds the request and the confirmation are exactly what they always were.
-	out, _, err = runCLI(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		cannedGuardrails(w, r)
-	}, "guard", "set", "app.deploy", "deny")
+	}, "guard", "set", "app.deploy", "deny", "--env", "prod", "--name", "burrowd-cloud")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if gotPath != "/v1/guard/app.deploy" {
-		t.Errorf("an unbound set went to %s, want /v1/guard/app.deploy", gotPath)
+	if gotPath != "/v1/guard/name/burrowd-cloud/app.deploy" {
+		t.Errorf("request = %s, want the name-scoped path with no binding segment", gotPath)
 	}
 	if strings.Contains(out, "binds") {
-		t.Errorf("an unbound set claims a binding: %q", out)
+		t.Errorf("the confirmation still talks about binding: %q", out)
 	}
 }
-
-// TestGuardListShowsTheBindingWhenThereIsOne pins the read side (ADR-0094 §6). The BINDS column
-// appears only when a row has one, so the everyday listing keeps the width it had, and a human
-// reading a listing on an install that DOES bind something sees the binding rather than inferring it
-// from a surprise later.
 func TestGuardListShowsTheBindingWhenThereIsOne(t *testing.T) {
 	bound := func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"guardrails": []map[string]any{

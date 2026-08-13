@@ -241,23 +241,20 @@ func bindGuardName(flags *pflag.FlagSet, name *string, verb string) {
 
 func newGuardSetCmd() *cobra.Command {
 	o := &commonOpts{}
-	var name, binds string
+	var name string
 	cmd := &cobra.Command{
 		Use:   "set <guardrail> <allow|confirm|deny>",
 		Short: "Set a guardrail's disposition",
 		Long: "Set a guardrail's disposition, for the whole cluster, for one environment, or for one\n" +
-			"app or add-on instance in an environment. With --binds it applies to one kind of\n" +
-			"credential and leaves every other caller reading the disposition underneath it.\n\n" +
+			"app or add-on instance in an environment.\n\n" +
 			"  burrow guard set app.deploy confirm                                    every app, everywhere\n" +
 			"  burrow guard set --env staging app.deploy allow                        every app in staging\n" +
 			"  burrow guard set --env prod --name website app.deploy deny             one app\n" +
-			"  burrow guard set --env prod --name burrow-postgres addon.remove deny   one add-on instance\n" +
-			"  burrow guard set --binds agent --env prod --name website app.deploy deny\n" +
-			"                                                                         one app, agents only\n\n" +
+			"  burrow guard set --env prod --name burrow-postgres addon.remove deny   one add-on instance\n\n" +
+			"A guardrail holds your AGENT. You and your CI are allowed everything regardless of what\n" +
+			"is set here, because your Kubernetes access already decides what you can do.\n\n" +
 			"--name needs --env: on its own a name cannot be told apart from an environment of the\n" +
-			"same name. Not every guardrail can be set for one thing; those that cannot say why.\n\n" +
-			"--binds needs an install people have signed in to, because it binds the KIND of credential\n" +
-			"a caller holds and the shared install token has no kind. Run `burrow auth login` first.",
+			"same name. Not every guardrail can be set for one thing; those that cannot say why.",
 		Args: exactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -265,22 +262,22 @@ func newGuardSetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			gs, err := c.SetGuardrail(ctx, client.GuardScope{Env: o.env, Name: name}, binds, args[0], args[1])
+			gs, err := c.SetGuardrail(ctx, client.GuardScope{Env: o.env, Name: name}, "", args[0], args[1])
 			if err != nil {
 				return err
 			}
 			// The policy is written into whichever cluster this command reached, so it names that
 			// cluster like every other change does (ADR-0078 §4).
-			return o.emitChange(cmd.OutOrStdout(), gs, guardSetResult(args[0], args[1], o.env, name, binds))
+			return o.emitChange(cmd.OutOrStdout(), gs, guardSetResult(args[0], args[1], o.env, name, ""))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	bindGuardName(cmd.Flags(), &name, "set it for")
-	// The kind is validated by the control plane, not here. It is a closed set of three, but whether
-	// this install ISSUES any of them is a fact only the control plane holds, and a client-side check
-	// on the spelling alone would refuse in one voice and accept in another.
-	cmd.Flags().StringVar(&binds, "binds", "", "bind the disposition to one kind of credential (user, agent, or machine); omit it to bind every caller")
+	// There is no flag for WHOM a disposition holds, because there is one answer: the agent
+	// (ADR-0097 §2). A person and a CI machine are allowed everything regardless of what is set here,
+	// so a flag to say so would be a setting with one correct value -- and the one it had got the
+	// answer wrong by omission, silently freezing the operator along with the agent.
 	return cmd
 }
 

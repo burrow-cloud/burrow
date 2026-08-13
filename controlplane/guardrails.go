@@ -644,6 +644,10 @@ const (
 	sourceEnv     = "env"
 	sourceGlobal  = "global"
 	sourceDefault = "default"
+	// sourceCaller is the answer for a caller a guardrail does not hold at all -- a person or a CI
+	// machine (ADR-0097 §1). It is a source rather than a disposition tier because nothing was looked
+	// up: the policy has no say over that caller.
+	sourceCaller = "caller"
 )
 
 // dispositionSource resolves a guardrail's effective disposition for a scope and reports which tier
@@ -697,39 +701,42 @@ const (
 // The third return is the kind the ANSWERING key was bound to, empty when the key bound every caller.
 // It is what a refusal and a listing use to say the binding out loud.
 func (p Policy) dispositionSource(ctx context.Context, scope GuardrailScope, code GuardrailCode) (Disposition, string, CredentialKind) {
-	kind := callerKindFromContext(ctx)
+	// A guardrail holds the AGENT. A person and a CI machine are allowed everything, always, with no
+	// confirmation: their Kubernetes RBAC is the ceiling on what they can do, so anything refused here
+	// they can do with kubectl a second later, and refusing them buys nothing but confusion
+	// (ADR-0097 §1).
+	//
+	// AN UNKNOWN KIND IS STILL HELD, and that is the load-bearing half. On an install without
+	// per-caller credentials nobody has a kind, including the agent — reading "unknown" as a person
+	// would switch every guardrail off for exactly the installs that have only the agent to hold.
+	switch callerKindFromContext(ctx) {
+	case CredentialKindUser, CredentialKindMachine:
+		return DispositionAllow, sourceCaller, ""
+	}
 	def, known := lookupGuardrail(code)
 	if known && def.names != targetNothing && scope.Name != "" {
-		if d, binds, ok := p.tier(kind, namePolicyKey(scope.Env, scope.Name, code)); ok {
+		if d, binds, ok := p.tier(namePolicyKey(scope.Env, scope.Name, code)); ok {
 			return d, sourceName, binds
 		}
 	}
 	if (!known || def.envScoped) && scope.Env != "" && scope.Env != DefaultEnvironment {
-		if d, binds, ok := p.tier(kind, envPolicyKey(scope.Env, code)); ok {
+		if d, binds, ok := p.tier(envPolicyKey(scope.Env, code)); ok {
 			return d, sourceEnv, binds
 		}
 	}
-	if d, binds, ok := p.tier(kind, code); ok {
+	if d, binds, ok := p.tier(code); ok {
 		return d, sourceGlobal, binds
 	}
 	return DispositionDeny, sourceDefault, ""
 }
 
-// tier answers one target tier for a caller of kind, or reports that this tier has nothing to say.
+// tier answers one target tier, or reports that this tier has nothing to say.
 //
-// The kind-bound key answers FIRST and the unbound key is the tier's answer for everyone else, which
-// is the whole of the caller axis: two rows at one tier, one bound and one not, express "different
-// answers for different kinds" without the disposition ever becoming anything but one word.
-//
-// An empty kind reaches only the unbound key. That is deliberate rather than incidental: an unknown
-// kind is not treated as `agent`, because on a shared-token install every caller is unknown and that
-// reading would make every operator their own agent (ADR-0094 §4).
-func (p Policy) tier(kind CredentialKind, key GuardrailCode) (Disposition, CredentialKind, bool) {
-	if kind != "" {
-		if d, ok := p.Dispositions[boundPolicyKey(kind, key)]; ok && d.Valid() {
-			return d, kind, true
-		}
-	}
+// There is no caller axis on the key any more (ADR-0097 §2): a disposition holds the agent, which the
+// caller check above has already decided, so a tier is one lookup. A row written under the old
+// kind-bound key is inert rather than migrated — the flag that wrote one is gone and no install is
+// known to have used it.
+func (p Policy) tier(key GuardrailCode) (Disposition, CredentialKind, bool) {
 	if d, ok := p.Dispositions[key]; ok && d.Valid() {
 		return d, "", true
 	}

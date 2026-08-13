@@ -171,7 +171,9 @@ func newRootCmd() *cobra.Command {
 // same question a second time (actedon.go). kubeContext/installID/contextResolved memoise what the
 // privileged path resolved (clustercontext.go), so a command that resolves the cluster more than
 // once gets one answer; notedStale does the same for the stale-handle note, which describes
-// configuration that cannot change mid-invocation and so is worth saying exactly once. All of them
+// configuration that cannot change mid-invocation and so is worth saying exactly once. managed
+// records which KIND of target the connection went to, so the hints printed afterwards can name a
+// remedy the reader can actually carry out (targethints.go). All of them
 // are per-invocation state on a per-command struct, not global state: newRootCmd builds a fresh
 // commonOpts for every command on every run, which is what keeps two commands in one process from
 // seeing each other's target.
@@ -189,6 +191,7 @@ type commonOpts struct {
 	installID       string
 	contextResolved bool
 	notedStale      bool
+	managed         bool
 }
 
 // bindCommon registers the shared flags on the flag set, defaulting from the environment.
@@ -315,6 +318,9 @@ func (o *commonOpts) eitherTargetClient(ctx context.Context, stderr io.Writer) (
 	if err != nil {
 		return nil, err
 	}
+	// The same record resolveConnect keeps, for the commands that reach either target kind without
+	// going through it (targethints.go).
+	o.managed = cloud
 	if cloud {
 		return o.connect(ctx, tgt)
 	}
@@ -642,6 +648,10 @@ func (o *commonOpts) resolveConnect(ctx context.Context, stderr io.Writer, chang
 	if err != nil {
 		return nil, "", err
 	}
+	// Record the target KIND for the hints this command prints after it has connected
+	// (targethints.go). It is taken from the resolved target rather than asked for again, so the
+	// advice cannot describe a different target from the one the command acted on.
+	o.managed = tgt.cloudEndpoint != ""
 	// Printing it here is what lets the result line stay quiet about it: this line names the
 	// environment (ADR-0036, #460), and a result that appended the target again would answer the
 	// same question twice, in two vocabularies. It is recorded rather than inferred so the rule

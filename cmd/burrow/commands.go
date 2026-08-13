@@ -138,7 +138,7 @@ func newDeployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			human := deployHuman(app, res)
+			human := deployHuman(app, res, o.onManagedTarget())
 			// The deploy-time dependency check's result (ADR-0076 §4), printed only when something
 			// did not pass. It follows the deploy line rather than replacing it, because the deploy
 			// succeeded: the check is a report about a live release, not a verdict on it.
@@ -207,14 +207,14 @@ func newLogsCmd() *cobra.Command {
 			// leads and the log lines are the last, uninterrupted thing (a bottom note would be missed,
 			// and never appear at all once these logs are streamed/followed). `app logs` reads live Kubernetes
 			// pod logs (current pods only, lost on restart/reschedule), which is easy to mistake for
-			// a durable history, so it points at the logs add-on for retained, queryable logs. Stderr
-			// keeps it off a piped or redirected log stream; skipped for --json (metadata-free result).
+			// a durable history, so it points at the logs add-on for retained, queryable logs. How it
+			// points there depends on the target: installing the add-on is an operator's job and is
+			// refused on the managed product, where the platform already runs one (targethints.go).
+			// Stderr keeps it off a piped or redirected log stream; skipped for --json
+			// (metadata-free result).
 			if !o.json {
 				stderr := cmd.ErrOrStderr()
-				fmt.Fprintln(stderr,
-					"Source: live Kubernetes pod logs — current pods only, not retained across restarts. "+
-						"For durable, queryable history across replicas, install the logs add-on "+
-						"(`burrow addon install logs`), then query with `burrow addon logs`.")
+				fmt.Fprintln(stderr, logsSourceNote(o.onManagedTarget()))
 				fmt.Fprintln(stderr, strings.Repeat("─", 60))
 			}
 			lines, err := c.Logs(ctx, args[0], env, tail)
@@ -269,7 +269,7 @@ func newRollbackCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			human := rollbackHuman(args[0], res)
+			human := rollbackHuman(args[0], res, o.onManagedTarget())
 			// The hints follow the result line rather than replacing it, because the rollback happened:
 			// a skipped hook is a fact about how it happened, not a verdict on whether it did.
 			for _, hint := range res.Hints {

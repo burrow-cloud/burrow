@@ -78,7 +78,7 @@ func newBuildCmd() *cobra.Command {
 			// A build ends in a deploy, so it reports the deploy's outcome in the deploy's words —
 			// including a rollout that did not become ready, which a build is no less likely to
 			// produce than an explicit deploy (ADR-0092 §2). The build's own result leads the line.
-			human := fmt.Sprintf("built %s (digest %s); %s", app, res.Digest, deployHuman(app, res.Deploy))
+			human := fmt.Sprintf("built %s (digest %s); %s", app, res.Digest, deployHuman(app, res.Deploy, o.onManagedTarget()))
 			if err := o.emitChange(cmd.OutOrStdout(), res, human); err != nil {
 				return err
 			}

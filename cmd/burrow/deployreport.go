@@ -34,7 +34,10 @@ import (
 
 // deployHuman renders a finished deploy for a person: the release line, and — when the rollout did
 // not settle or was never observed — what actually happened to it.
-func deployHuman(app string, res client.DeployResult) string {
+//
+// managed is the kind of target this deploy went to. It reaches only the settle-timeout line, whose
+// remedy is an operator's on a cluster and a read on the managed product (targethints.go).
+func deployHuman(app string, res client.DeployResult, managed bool) string {
 	rel := res.Release
 	head := fmt.Sprintf("deployed %s as release %s (image %s, %d replica(s), %s)",
 		app, rel.ID, rel.Image, rel.Replicas, rel.Status)
@@ -55,7 +58,7 @@ func deployHuman(app string, res client.DeployResult) string {
 		}
 		return head
 	default:
-		return rolloutFailureHuman(app, res)
+		return rolloutFailureHuman(app, res, managed)
 	}
 }
 
@@ -68,7 +71,7 @@ func deployHuman(app string, res client.DeployResult) string {
 // that is still going, which a large image pull legitimately is — so it names the bound's setting
 // and says the rollout continues. Every other reason is a pod reporting a blocking condition, which
 // is a rollout that will not finish on its own.
-func rolloutFailureHuman(app string, res client.DeployResult) string {
+func rolloutFailureHuman(app string, res client.DeployResult, managed bool) string {
 	rel, out := res.Release, res.Rollout
 	var b strings.Builder
 	if out.Reason == controlplane.ReasonDeadlineExceeded {
@@ -94,7 +97,7 @@ func rolloutFailureHuman(app string, res client.DeployResult) string {
 		fmt.Fprintf(&b, "  release %s (the one this replaces) may still be serving; nothing was rolled back.\n", res.SupersededReleaseID)
 	}
 	if out.Reason == controlplane.ReasonDeadlineExceeded {
-		b.WriteString("  Kubernetes is still rolling it out. Raise the bound with `burrow cluster config set deploy.settle_timeout <duration>` if this app legitimately takes longer.\n")
+		b.WriteString("  " + settleTimeoutHint(managed))
 	}
 	fmt.Fprintf(&b, "  next: burrow app status %s, burrow app logs %s", app, app)
 	return b.String()

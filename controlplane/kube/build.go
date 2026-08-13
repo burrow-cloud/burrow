@@ -789,7 +789,9 @@ func registryAuthConfig(cred controlplane.SourceCredential, push controlplane.Pu
 		if err := push.Validate(); err != nil {
 			return "", err
 		}
-		auths[push.Registry] = entry{Auth: basicAuth(push.Username, push.Password)}
+		// Trimmed, because the key is what buildah looks the credential up by: a host carrying a stray
+		// space is a key nothing ever matches, and the resulting push is a silent anonymous one.
+		auths[strings.TrimSpace(push.Registry)] = entry{Auth: basicAuth(push.Username, push.Password)}
 	}
 	raw, err := json.Marshal(struct {
 		Auths map[string]entry `json:"auths"`

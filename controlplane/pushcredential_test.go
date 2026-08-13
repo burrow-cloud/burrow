@@ -188,7 +188,9 @@ func TestBuildRefusesAPushCredentialForAnotherRegistry(t *testing.T) {
 }
 
 // TestBuildAcceptsAPushCredentialWhoseHostDiffersInCase keeps the host match from being stricter than
-// the thing it is matching. DNS is case-insensitive, so two spellings of one host are one host.
+// the thing it is matching. DNS is case-insensitive, so two spellings of one host are one host — and
+// what reaches the builder is the TARGET's spelling, because the docker config.json the builder
+// writes is looked up by the host in the reference being pushed, character for character.
 func TestBuildAcceptsAPushCredentialWhoseHostDiffersInCase(t *testing.T) {
 	res := &stubPushCredentials{cred: cp.PushCredential{
 		Registry: "Reg.Internal:5000", Username: "tenant-42", Password: "s3cret",
@@ -202,8 +204,12 @@ func TestBuildAcceptsAPushCredentialWhoseHostDiffersInCase(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if b.LastPushCredential().IsZero() {
-		t.Error("the credential was dropped over a difference in case")
+	got := b.LastPushCredential()
+	if got.IsZero() {
+		t.Fatal("the credential was dropped over a difference in case")
+	}
+	if got.Registry != "reg.internal:5000" {
+		t.Errorf("builder push credential registry = %q, want the push target's own spelling of the host", got.Registry)
 	}
 }
 

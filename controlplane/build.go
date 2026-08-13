@@ -263,9 +263,15 @@ func (e *Engine) resolvePushCredential(ctx context.Context, targetImage string) 
 	if err := push.Validate(); err != nil {
 		return PushCredential{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
-	if target := RegistryHost(targetImage); !sameRegistryHost(push.Registry, target) {
+	target := RegistryHost(targetImage)
+	if !sameRegistryHost(push.Registry, target) {
 		return PushCredential{}, fmt.Errorf("push credential is for registry %q but the push target is %q: %w", push.Registry, target, ErrInvalid)
 	}
+	// The host handed on is the TARGET's spelling of it, not the credential's. A docker config.json is
+	// looked up by the host in the image reference being pushed, character for character; the match
+	// above is deliberately more forgiving than that lookup, so a credential accepted on a difference
+	// in case or a stray space would otherwise be written under a key nothing ever reads.
+	push.Registry = target
 	return push, nil
 }
 

@@ -32,6 +32,10 @@ var _ controlplane.Builder = (*BuildAdapter)(nil)
 // bracketing the whole build as one opaque stage (issue #503).
 var _ controlplane.ProgressBuilder = (*BuildAdapter)(nil)
 
+// The adapter can authenticate a push to a registry the source credential does not cover, by writing
+// a second entry into the same mounted docker config.json (issue #584).
+var _ controlplane.PushCredentialBuilder = (*BuildAdapter)(nil)
+
 const (
 	// defaultGitImage is the image the clone init container runs. It only needs `git`; a minimal
 	// git image keeps the pull small. Phase 3's install wiring (ADR-0053 §5) may override it.
@@ -319,7 +323,7 @@ func (b *BuildAdapter) WithBuildPodMutator(fn func(*corev1.PodSpec)) *BuildAdapt
 // caller does NOT touch the deploy path on error (ADR-0053 §4). It blocks until the Job succeeds or
 // fails, or the build timeout elapses.
 func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) (string, error) {
-	return b.BuildAttributed(ctx, controlplane.BuildIntent{}, source, targetImage, insecure, cred, nil)
+	return b.build(ctx, controlplane.BuildIntent{}, source, targetImage, insecure, cred, controlplane.PushCredential{}, nil)
 }
 
 // BuildWithProgress is Build, reporting the build's stages as the Job reaches them (issue #503): the
@@ -327,12 +331,11 @@ func (b *BuildAdapter) Build(ctx context.Context, source controlplane.SourceRef,
 // often enough that the response survives a proxy's read timeout. Its result and its errors are
 // Build's, exactly — reporting is beside the build, never part of it.
 func (b *BuildAdapter) BuildWithProgress(ctx context.Context, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, progress func(controlplane.DeployEvent)) (string, error) {
-	return b.BuildAttributed(ctx, controlplane.BuildIntent{}, source, targetImage, insecure, cred, progress)
+	return b.build(ctx, controlplane.BuildIntent{}, source, targetImage, insecure, cred, controlplane.PushCredential{}, progress)
 }
 
 // BuildAttributed is BuildWithProgress, additionally recording what the build is FOR on the build Job
-// itself (issue #504) — the app, the environment, and the reference its deploy pins. It is the one
-// implementation the other two entry points delegate to.
+// itself (issue #504) — the app, the environment, and the reference its deploy pins.
 //
 // THE JOB IS WHERE THE INTENT BELONGS, because the Job is what survives. It outlives the request that
 // created it, it outlives the goroutine waiting on it, and it outlives burrowd; the caller's call
@@ -343,6 +346,28 @@ func (b *BuildAdapter) BuildWithProgress(ctx context.Context, source controlplan
 //
 // progress may be nil, meaning nobody asked to observe this build.
 func (b *BuildAdapter) BuildAttributed(ctx context.Context, intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, progress func(controlplane.DeployEvent)) (string, error) {
+	return b.build(ctx, intent, source, targetImage, insecure, cred, controlplane.PushCredential{}, progress)
+}
+
+// BuildWithPushCredential is BuildAttributed, additionally authenticating the push to targetImage
+// with a registry credential of its own (issue #584) — the case the source-provider credential cannot
+// express, because that one names a provider and the provider fixes both the git host and the
+// registry host.
+//
+// The push credential goes into the SAME mounted docker config.json the source credential's registry
+// entry goes into, keyed by its own host. That is the whole mechanism: the file already exists for
+// this reason, buildah already reads it through $REGISTRY_AUTH_FILE, and a config.json is a map from
+// registry host to credential — so a second registry is a second entry, not a second mechanism. The
+// password reaches the cluster only inside that Secret's data; it is never a Job env var, a command
+// line, or anything the Job spec carries.
+//
+// progress may be nil, meaning nobody asked to observe this build.
+func (b *BuildAdapter) BuildWithPushCredential(ctx context.Context, intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, push controlplane.PushCredential, progress func(controlplane.DeployEvent)) (string, error) {
+	return b.build(ctx, intent, source, targetImage, insecure, cred, push, progress)
+}
+
+// build is the one implementation every entry point above delegates to.
+func (b *BuildAdapter) build(ctx context.Context, intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, push controlplane.PushCredential, progress func(controlplane.DeployEvent)) (string, error) {
 	if progress == nil {
 		progress = func(controlplane.DeployEvent) {}
 	}
@@ -351,6 +376,12 @@ func (b *BuildAdapter) BuildAttributed(ctx context.Context, intent controlplane.
 	}
 	if strings.TrimSpace(targetImage) == "" {
 		return "", fmt.Errorf("kube: build: target image reference is empty: %w", controlplane.ErrInvalid)
+	}
+	// A push credential with no registry host cannot be written into a docker config.json, whose
+	// entries are keyed by host. Refuse before any Job or Secret exists; the error names the missing
+	// field, never the password.
+	if err := push.Validate(); err != nil {
+		return "", fmt.Errorf("kube: build: %w: %w", controlplane.ErrInvalid, err)
 	}
 
 	// Fail fast when the build cannot schedule (issue #274). A build pod requests a quarter CPU /
@@ -374,7 +405,7 @@ func (b *BuildAdapter) BuildAttributed(ctx context.Context, intent controlplane.
 	// and cannot create namespaces or cluster RBAC itself (least privilege) — the same reason
 	// `burrow env add` creates per-environment namespaces kubeconfig-side rather than at runtime.
 	name := buildJobName(source, targetImage)
-	job := b.buildJob(ctx, name, intent, source, targetImage, insecure, cred)
+	job := b.buildJob(ctx, name, intent, source, targetImage, insecure, cred, push)
 	jobs := b.client.BatchV1().Jobs(b.namespace)
 	created, err := jobs.Create(ctx, job, metav1.CreateOptions{})
 	switch {
@@ -418,13 +449,13 @@ func (b *BuildAdapter) BuildAttributed(ctx context.Context, intent controlplane.
 		return "", fmt.Errorf("kube: creating build job %q: %w", name, err)
 	}
 
-	// When a source-provider credential was resolved, materialize it into a Secret in the build
-	// namespace that the Job mounts (ADR-0057 §4). It is owned by the Job, so it is garbage-collected
-	// when the Job is reaped (on success, or by the TTL controller on failure) — the token never
-	// outlives the build. The token reaches Kubernetes only here, written straight into the Secret; it
-	// is never a Job env var, a command line, or an API response.
-	if !cred.IsZero() {
-		if err := b.ensureBuildCredentials(ctx, credSecretName(name), created, cred); err != nil {
+	// When a credential was resolved — for the clone, for the push, or both — materialize it into a
+	// Secret in the build namespace that the Job mounts (ADR-0057 §4, issue #584). It is owned by the
+	// Job, so it is garbage-collected when the Job is reaped (on success, or by the TTL controller on
+	// failure) — no secret outlives the build. Both reach Kubernetes only here, written straight into
+	// the Secret; neither is ever a Job env var, a command line, or an API response.
+	if !cred.IsZero() || !push.IsZero() {
+		if err := b.ensureBuildCredentials(ctx, credSecretName(name), created, cred, push); err != nil {
 			return "", err
 		}
 	}
@@ -521,7 +552,7 @@ func buildJobName(source controlplane.SourceRef, targetImage string) string {
 //
 // ctx is taken for the operational configuration read behind buildJobTTLSeconds, not for a cluster
 // call: this function constructs an object and sends nothing.
-func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential) *batchv1.Job {
+func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, push controlplane.PushCredential) *batchv1.Job {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
 	var backoff int32
 	ttl := buildJobTTLSeconds(ctx, b.limits)
@@ -575,24 +606,30 @@ func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent control
 		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 
-	// A source-provider credential (ADR-0057) is consumed by MOUNTING, never by passing: the clone
-	// reads its gitconfig (url.insteadOf token rewrite) via GIT_CONFIG_GLOBAL, and buildah reads its
-	// docker config.json via REGISTRY_AUTH_FILE. The token itself lives only in the mounted Secret's
-	// data — it is never one of these env values, so it never appears in the Job spec or a command line.
+	// A credential (ADR-0057, issue #584) is consumed by MOUNTING, never by passing: the clone reads
+	// its gitconfig (url.insteadOf token rewrite) via GIT_CONFIG_GLOBAL, and buildah reads its docker
+	// config.json via REGISTRY_AUTH_FILE. The secret values live only in the mounted Secret's data —
+	// they are never one of these env values, so they never appear in the Job spec or a command line.
+	//
+	// The two halves are mounted INDEPENDENTLY, because the two credentials are independent. A push
+	// credential with no source credential is an ordinary case — a public repo pushed to a private
+	// registry — and it must mount the registry auth WITHOUT the gitconfig: a Secret volume item that
+	// names an absent key leaves the pod unable to start, which would turn a public build into a
+	// permanent Pending.
+	secretName := credSecretName(name)
 	if !cred.IsZero() {
-		secretName := credSecretName(name)
-		volumes = append(volumes,
-			corev1.Volume{Name: "git-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-				SecretName: secretName,
-				Items:      []corev1.KeyToPath{{Key: gitConfigFile, Path: gitConfigFile}},
-			}}},
-			corev1.Volume{Name: "registry-auth", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-				SecretName: secretName,
-				Items:      []corev1.KeyToPath{{Key: registryAuthFile, Path: registryAuthFile}},
-			}}},
-		)
+		volumes = append(volumes, corev1.Volume{Name: "git-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: secretName,
+			Items:      []corev1.KeyToPath{{Key: gitConfigFile, Path: gitConfigFile}},
+		}}})
 		cloneMounts = append(cloneMounts, corev1.VolumeMount{Name: "git-creds", MountPath: gitCredsPath, ReadOnly: true})
 		cloneEnv = append(cloneEnv, corev1.EnvVar{Name: "GIT_CONFIG_GLOBAL", Value: gitCredsPath + "/" + gitConfigFile})
+	}
+	if !cred.IsZero() || !push.IsZero() {
+		volumes = append(volumes, corev1.Volume{Name: "registry-auth", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: secretName,
+			Items:      []corev1.KeyToPath{{Key: registryAuthFile, Path: registryAuthFile}},
+		}}})
 		buildMounts = append(buildMounts, corev1.VolumeMount{Name: "registry-auth", MountPath: registryAuthPath, ReadOnly: true})
 		buildEnv = append(buildEnv, corev1.EnvVar{Name: "REGISTRY_AUTH_FILE", Value: registryAuthPath + "/" + registryAuthFile})
 	}
@@ -659,26 +696,35 @@ func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent control
 	return job
 }
 
-// credSecretName is the deterministic name of the source-provider credential Secret for a build Job.
+// credSecretName is the deterministic name of the credential Secret for a build Job.
 // It is derived from the Job name so a re-run reuses it, and it is owned by the Job so it is
 // garbage-collected when the Job is reaped (ADR-0057 §4).
 func credSecretName(jobName string) string { return jobName + "-creds" }
 
-// ensureBuildCredentials writes the source-provider token into a Secret in the build namespace that
-// the Job mounts (ADR-0057 §4). The Secret holds two materializations of the ONE token: a gitconfig
-// whose url.insteadOf rewrite authenticates the private clone, and a docker config.json that
-// authenticates buildah's push/pull to the provider's registry. It is owned by the build Job so
-// Kubernetes garbage-collects it when the Job is reaped. The token is written straight into the
-// Secret data and is never logged or placed in an error — a write failure names the Secret only.
-func (b *BuildAdapter) ensureBuildCredentials(ctx context.Context, secretName string, owner *batchv1.Job, cred controlplane.SourceCredential) error {
-	gitcfg, err := gitCredentialConfig(cred)
-	if err != nil {
-		return fmt.Errorf("kube: building git credentials for build %q: %w", owner.Name, err)
+// ensureBuildCredentials writes a build's credentials into a Secret in the build namespace that the
+// Job mounts (ADR-0057 §4, issue #584). The Secret holds up to two files: a gitconfig whose
+// url.insteadOf rewrite authenticates the private clone, and a docker config.json holding an entry per
+// registry the build authenticates against — the source provider's, the push target's, or both. It is
+// owned by the build Job so Kubernetes garbage-collects it when the Job is reaped. The secret values
+// are written straight into the Secret data and are never logged or placed in an error — a write
+// failure names the Secret only.
+//
+// A key is written only when there is something to put in it, matching what buildJob mounts: a build
+// with a push credential and a public source gets a config.json and no gitconfig.
+func (b *BuildAdapter) ensureBuildCredentials(ctx context.Context, secretName string, owner *batchv1.Job, cred controlplane.SourceCredential, push controlplane.PushCredential) error {
+	data := map[string][]byte{}
+	if !cred.IsZero() {
+		gitcfg, err := gitCredentialConfig(cred)
+		if err != nil {
+			return fmt.Errorf("kube: building git credentials for build %q: %w", owner.Name, err)
+		}
+		data[gitConfigFile] = []byte(gitcfg)
 	}
-	dockercfg, err := registryAuthConfig(cred)
+	dockercfg, err := registryAuthConfig(cred, push)
 	if err != nil {
 		return fmt.Errorf("kube: building registry credentials for build %q: %w", owner.Name, err)
 	}
+	data[registryAuthFile] = []byte(dockercfg)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
@@ -692,10 +738,7 @@ func (b *BuildAdapter) ensureBuildCredentials(ctx context.Context, secretName st
 			}},
 		},
 		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			gitConfigFile:    []byte(gitcfg),
-			registryAuthFile: []byte(dockercfg),
-		},
+		Data: data,
 	}
 	if _, err := b.client.CoreV1().Secrets(b.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		// The error names the Secret only — never the token value.
@@ -718,28 +761,50 @@ func gitCredentialConfig(cred controlplane.SourceCredential) (string, error) {
 	return fmt.Sprintf("[url %q]\n\tinsteadOf = %s\n", authed, base), nil
 }
 
-// registryAuthConfig renders a docker config.json authenticating the provider's registry host with
-// the same token, for buildah's $REGISTRY_AUTH_FILE (ADR-0057 §4). One provider token covers both the
-// git clone and the registry (§1), so the build's push and any private base-image pull authenticate
-// with it too.
-func registryAuthConfig(cred controlplane.SourceCredential) (string, error) {
-	host := cred.Provider.RegistryHost()
-	if host == "" {
-		return "", fmt.Errorf("provider %q has no registry host", cred.Provider)
-	}
-	auth := base64.StdEncoding.EncodeToString([]byte(cred.Provider.GitUser() + ":" + cred.Token))
-	cfg := struct {
-		Auths map[string]struct {
-			Auth string `json:"auth"`
-		} `json:"auths"`
-	}{Auths: map[string]struct {
+// registryAuthConfig renders the docker config.json buildah reads through $REGISTRY_AUTH_FILE
+// (ADR-0057 §4), holding one entry per registry the build authenticates against.
+//
+// The source-provider credential contributes an entry for the provider's own registry, because one
+// provider token covers both the git clone and that registry (ADR-0057 §1) — so a private base-image
+// pull and a push to ghcr.io authenticate with it. The push credential contributes an entry for the
+// push target's registry, which is the case the provider token cannot express at all (issue #584).
+// Either may be absent; a config.json with no entries is valid and is what an anonymous build gets.
+//
+// A config.json is a MAP from registry host to credential, which is exactly why a second registry
+// needs no second mechanism. When both name the same host the push credential wins: it was resolved
+// for this specific push, while the provider entry is a side effect of who hosts the source.
+func registryAuthConfig(cred controlplane.SourceCredential, push controlplane.PushCredential) (string, error) {
+	type entry struct {
 		Auth string `json:"auth"`
-	}{host: {Auth: auth}}}
-	raw, err := json.Marshal(cfg)
+	}
+	auths := map[string]entry{}
+	if !cred.IsZero() {
+		host := cred.Provider.RegistryHost()
+		if host == "" {
+			return "", fmt.Errorf("provider %q has no registry host", cred.Provider)
+		}
+		auths[host] = entry{Auth: basicAuth(cred.Provider.GitUser(), cred.Token)}
+	}
+	if !push.IsZero() {
+		if err := push.Validate(); err != nil {
+			return "", err
+		}
+		auths[push.Registry] = entry{Auth: basicAuth(push.Username, push.Password)}
+	}
+	raw, err := json.Marshal(struct {
+		Auths map[string]entry `json:"auths"`
+	}{Auths: auths})
 	if err != nil {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+// basicAuth encodes a username and secret the way a docker config.json entry carries them: the
+// base64 of "user:secret". The secret is only ever encoded into Secret data by the caller — this
+// returns a value, and never logs or wraps one.
+func basicAuth(user, secret string) string {
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + secret))
 }
 
 // buildPodSecurityContext is the pod-level restricted PodSecurity floor for a build (ADR-0053 §7):

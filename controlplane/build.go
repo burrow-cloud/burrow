@@ -78,6 +78,16 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}
 
+	// Resolve the credential that authenticates the PUSH, if a resolver is wired (issue #584). It is
+	// resolved HERE, and not by the builder, for the same reason insecure is decided here: the engine
+	// is the single place that knows what the push target actually is — it is the code just above that
+	// either took the caller's target or defaulted to the in-cluster registry. A self-hosted install
+	// wires no resolver, resolves the zero credential, and pushes anonymously exactly as before.
+	push, err := e.resolvePushCredential(ctx, pushTarget)
+	if err != nil {
+		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
+	}
+
 	// Build inside the cluster, pushing to pushTarget. A builder error is terminal for the build:
 	// surface it and do NOT touch the deploy path — nothing is rolled out, no release is recorded
 	// (ADR-0053 §4).
@@ -89,7 +99,7 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 	// discarded. Recorded against the build, the same intent is readable by the reconciler below, by
 	// a later pass, and by a restarted control plane.
 	intent := BuildIntent{App: req.App, Env: envName(req.Env), Image: deployBase}
-	digest, err := e.runBuild(ctx, intent, req.Source, pushTarget, insecure, cred, req.Progress)
+	digest, err := e.runBuild(ctx, intent, req.Source, pushTarget, insecure, cred, push, req.Progress)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("build %s: %w", req.App, err)
 	}
@@ -134,7 +144,23 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 // because attribution is not a report: it is what makes the build recoverable after the watcher has
 // gone, and it is needed EXACTLY in the case where no reporter exists to want it (issue #504). It
 // costs one label and two annotations on an object the adapter was creating anyway.
-func (e *Engine) runBuild(ctx context.Context, intent BuildIntent, source SourceRef, target string, insecure bool, cred SourceCredential, reporter func(DeployEvent)) (string, error) {
+func (e *Engine) runBuild(ctx context.Context, intent BuildIntent, source SourceRef, target string, insecure bool, cred SourceCredential, push PushCredential, reporter func(DeployEvent)) (string, error) {
+	// A push credential is only ever handed to a builder that asked to carry one (issue #584), and the
+	// wider seam is taken ONLY when there is one to carry: with nothing to hand over the dispatch below
+	// is byte-for-byte the one every build took before this existed, whether or not the wired builder
+	// implements PushCredentialBuilder.
+	//
+	// A resolved credential that the builder cannot take is a REFUSAL, not a downgrade. Falling through
+	// would push under no identity at all, against a registry the operator configured a credential for
+	// — and if that registry accepts anonymous writes, the build would succeed and nothing would ever
+	// say the credential was dropped.
+	if !push.IsZero() {
+		pb, ok := e.builder.(PushCredentialBuilder)
+		if !ok {
+			return "", fmt.Errorf("the configured builder cannot authenticate a push to %q: %w", target, ErrNotImplemented)
+		}
+		return pb.BuildWithPushCredential(ctx, intent, source, target, insecure, cred, push, reporter)
+	}
 	if ab, ok := e.builder.(AttributedBuilder); ok {
 		return ab.BuildAttributed(ctx, intent, source, target, insecure, cred, reporter)
 	}
@@ -207,6 +233,50 @@ func (e *Engine) resolveSourceCredential(ctx context.Context, repo string) (Sour
 		return SourceCredential{}, fmt.Errorf("reading the %s source token (key %q): %w", providerType, p.SecretKey, err)
 	}
 	return SourceCredential{Provider: providerType, Token: token}, nil
+}
+
+// resolvePushCredential returns the credential that authenticates the push to targetImage, or the
+// zero PushCredential when no resolver is wired or the resolver has nothing for this target — an
+// anonymous push, which is what a self-hosted install makes to its own in-cluster registry and what
+// every build made before this existed (issue #584). The password is returned to the caller in memory
+// and is NEVER placed in an error: a failure names the target, never the value.
+//
+// THE CREDENTIAL MUST BE FOR THE REGISTRY BEING PUSHED TO, and a mismatch is refused here rather than
+// carried into the build. The resolver is handed the exact target the push will use, so a credential
+// coming back for a different host is a resolver bug, and it is one that is otherwise silent: a
+// docker config.json is keyed by host, so buildah would simply never present the mismatched entry and
+// the push would go out anonymous. That fails at the registry as a bare 401 that names neither the
+// credential nor the host it was for — or, on a registry that accepts anonymous writes, does not fail
+// at all. Refusing costs nothing a correct resolver notices, and it keeps a tenant's registry password
+// from being written into a build Job's Secret that was never going to present it.
+func (e *Engine) resolvePushCredential(ctx context.Context, targetImage string) (PushCredential, error) {
+	if e.pushCredentials == nil {
+		return PushCredential{}, nil
+	}
+	push, err := e.pushCredentials.PushCredential(ctx, targetImage)
+	if err != nil {
+		return PushCredential{}, fmt.Errorf("resolving the push credential: %w", err)
+	}
+	if push.IsZero() {
+		return PushCredential{}, nil
+	}
+	if err := push.Validate(); err != nil {
+		return PushCredential{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	if target := RegistryHost(targetImage); !sameRegistryHost(push.Registry, target) {
+		return PushCredential{}, fmt.Errorf("push credential is for registry %q but the push target is %q: %w", push.Registry, target, ErrInvalid)
+	}
+	return push, nil
+}
+
+// sameRegistryHost reports whether two registry hosts are the same one. Hosts are compared
+// case-insensitively because DNS is, and after trimming, because a configured value routinely carries
+// whitespace a human left behind. Nothing else is normalised: a port is part of the host (an image
+// reference carries it that way), and two spellings that resolve to the same registry through a
+// mirror or an alias are deliberately NOT the same host here — which of those are interchangeable is
+// a fact about someone's registry topology, not something the engine can know.
+func sameRegistryHost(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // gitHost extracts the host from an HTTPS git clone URL (e.g. "https://github.com/u/app" ->

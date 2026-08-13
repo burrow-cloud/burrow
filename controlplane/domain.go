@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -138,6 +139,78 @@ type SourceCredential struct {
 
 // IsZero reports whether the credential carries no token — the public-source, credential-free path.
 func (c SourceCredential) IsZero() bool { return c.Token == "" }
+
+// PushCredentialResolver answers, for one push target, the credential that authenticates the PUSH of
+// the image a build produces (issue #584).
+//
+// It mirrors SourceCredentialResolver deliberately: the engine consults it just before a build, hands
+// it the thing about to be acted on, and hands what comes back to the Builder seam without persisting
+// it. Passing the target image reference is the whole point — a resolver can scope what it returns to
+// exactly the registry and repository about to be written, rather than to everything the credential
+// could reach.
+//
+// Returning the zero PushCredential with a nil error means "nothing for this target", and the push
+// proceeds anonymously — which is what every self-hosted install does against its own in-cluster
+// registry. An error means the credential could not be determined, and the build fails rather than
+// silently falling back to an anonymous push: a registry that refuses anonymous writes would fail the
+// build later and less clearly, and one that ACCEPTS them would quietly store an unattributed image.
+//
+// Implementations must treat the returned Password as PushCredential's doc requires: never logged,
+// never placed in an error, never stored.
+type PushCredentialResolver interface {
+	PushCredential(ctx context.Context, targetImage string) (PushCredential, error)
+}
+
+// PushCredential is a resolved REGISTRY credential the in-cluster build uses to authenticate the push
+// of the image it just built (issue #584). The engine resolves it just before a build and hands it to
+// the Builder seam, which mounts it into the build Job — the password is never a Job env var, a
+// command-line argument, or anything the agent sees. The zero value means anonymous push, which is
+// the path every self-hosted install takes against its own in-cluster registry.
+//
+// IT IS NOT A SourceCredential WITH A DIFFERENT PROVIDER, and that is the whole reason it exists. A
+// SourceCredential names a ProviderType, and the provider fixes the git host and the registry host
+// TOGETHER (ADR-0057 §1): one GitHub token clones from github.com and pushes to ghcr.io. That is
+// exactly right while the push target belongs to the source's provider, and it has no way to express
+// a push to a THIRD registry — a per-tenant registry on the managed product's own fleet, Docker Hub,
+// Harbor, Artifactory, ECR — which is not a source provider at all and has no ProviderType to name.
+// Modelling one as a provider would mean inventing a provider with no git host, whose "token" is
+// really half of a username/password pair. So this type models what a registry actually authenticates
+// with: a HOST, a username, and a password. It is the write-path counterpart of RegistryAuth, which
+// carries the same basic-auth pair for the read-only tag listing but needs no host, because there the
+// host is already fixed by the reference being listed.
+type PushCredential struct {
+	// Registry is the registry host the credential authenticates, in the form an image reference
+	// carries it — the host with its port when it has one (e.g. "ghcr.io",
+	// "registry.example.com:5000"). It is required whenever a password is set: a docker config.json
+	// entry is keyed by host, and a credential with nowhere to be presented is a secret written into
+	// a build for no reason.
+	Registry string
+	// Username is the registry username. A registry that authenticates a token alone still wants a
+	// placeholder here (ghcr.io takes any non-empty user); which placeholder is the resolver's
+	// business, not the engine's.
+	Username string
+	// Password is the registry password or token VALUE. It lives in memory in burrowd only long
+	// enough to be written into the build Job's mounted Secret. It is a SECRET under exactly the
+	// rules SourceCredential.Token is under: never logged, never placed in an error or an API
+	// response, never stored in Postgres, never a Job env var or command-line argument.
+	Password string
+}
+
+// IsZero reports whether the credential carries no password — the anonymous-push path.
+func (c PushCredential) IsZero() bool { return c.Password == "" }
+
+// Validate reports whether the credential is usable: a credential that carries a password must name
+// the registry host it is for, since a docker config.json entry is keyed by host. The error names the
+// missing field only — never the password.
+func (c PushCredential) Validate() error {
+	if c.IsZero() {
+		return nil
+	}
+	if strings.TrimSpace(c.Registry) == "" {
+		return fmt.Errorf("push credential names no registry host")
+	}
+	return nil
+}
 
 // ReleaseStatus is the lifecycle state of a Release.
 type ReleaseStatus string

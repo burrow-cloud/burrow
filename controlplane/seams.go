@@ -251,6 +251,42 @@ type AttributedBuilder interface {
 	BuildAttributed(ctx context.Context, intent BuildIntent, source SourceRef, targetImage string, insecure bool, cred SourceCredential, progress func(DeployEvent)) (digest string, err error)
 }
 
+// PushCredentialBuilder is a Builder that can authenticate the PUSH of the image it built to a
+// registry the source credential does not cover (issue #584). Build's cred authenticates the clone
+// and, where the source provider also hosts a registry, the push to THAT registry — one token, one
+// party. When the push target is a third registry, that credential has no answer for it and the push
+// goes out anonymous; a registry forced to accept an anonymous write cannot then refuse an anonymous
+// read of what it just accepted, which is what a per-tenant registry boundary needs it to do.
+//
+// It is a SEPARATE, OPTIONAL interface rather than a wider Builder for the same two reasons
+// ProgressBuilder is. Authenticating a push to somewhere other than the source provider is not part
+// of what a builder must do — a Builder that only ever pushes to the in-cluster registry or to the
+// source provider's own is still a correct Builder, and that is what every self-hosted install is.
+// And Builder is public API a separate implementation (the managed product's sandboxed executor,
+// ADR-0053 §6) satisfies: widening the method would break every implementation that never asked to
+// carry a second credential.
+//
+// The engine takes this seam ONLY when it has a non-zero push credential to hand over. With nothing
+// to hand over it takes exactly the seam it took before — so a builder that implements this behaves
+// identically to one that does not for every build that supplies no push credential. When a push
+// credential IS resolved and the wired builder does not implement this, the build is refused rather
+// than pushed anonymously: silently dropping a credential the operator configured would push under an
+// identity nobody chose, and against a registry that accepts anonymous writes that failure is
+// invisible.
+type PushCredentialBuilder interface {
+	Builder
+	// BuildWithPushCredential is BuildAttributed, additionally authenticating the push to targetImage
+	// with push. Its result and its errors are Build's, exactly. progress MAY be nil, meaning nobody
+	// asked to observe this build.
+	//
+	// push is a registry credential for the push target's own host, resolved by the engine from the
+	// same guarded store cred comes from. An implementation consumes it by MOUNTING it into the build,
+	// exactly as it does cred: PushCredential.Password is a secret that must not be logged, echoed,
+	// placed in an error, or passed as a Job env var or command-line argument. The zero value
+	// (IsZero) is the anonymous push every self-hosted install makes to its in-cluster registry.
+	BuildWithPushCredential(ctx context.Context, intent BuildIntent, source SourceRef, targetImage string, insecure bool, cred SourceCredential, push PushCredential, progress func(DeployEvent)) (digest string, err error)
+}
+
 // StrandedBuild is a build that SUCCEEDED and whose deploy never ran (issue #504). It is the state
 // the control plane notices and finishes: the image exists, the tenant has already paid for it in
 // time and in whatever build budget applies, and the only thing missing is the release.

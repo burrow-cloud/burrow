@@ -45,6 +45,10 @@ func newBuildEngineWithRegistry(t *testing.T, registry string) (*cp.Engine, *fak
 		Kubernetes: k, Database: d, Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
 		IDs: fake.NewIDs(), Resolver: fake.NewResolver(), Credentials: fake.NewCredentials(),
 		DNS: fake.NewDNSFactory(), Builder: b, BuildRegistry: registry,
+		// The in-cluster registry these tests model is the one `burrow cluster registry install`
+		// deploys: plain HTTP, no certificate. Stated rather than inherited, because Deps zero-values
+		// this to false — a caller who wires an engine directly does not silently skip TLS.
+		BuildRegistryInsecure: true,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -97,6 +101,7 @@ func newBuildEngineWithPublicRegistry(t *testing.T, internal, public string) (*c
 		Kubernetes: k, Database: d, Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
 		IDs: fake.NewIDs(), Resolver: fake.NewResolver(), Credentials: fake.NewCredentials(),
 		DNS: fake.NewDNSFactory(), Builder: b, BuildRegistry: internal, BuildPublicRegistry: public,
+		BuildRegistryInsecure: true,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -523,5 +528,46 @@ func TestBuildResolverErrorFailsTheBuild(t *testing.T) {
 	}
 	if b.LastTarget() != "" {
 		t.Error("the builder ran despite the credential resolver failing; a build must not start with a credential nobody could resolve")
+	}
+}
+
+// TestBuildToATLSInClusterRegistryPushesVerified is the other half of ADR-0054 §5, and the reason
+// BuildRegistryInsecure exists at all. Whether the default push target speaks plain HTTP is a
+// property of the INSTALL: `burrow cluster registry install` deploys a registry with no certificate,
+// but an in-cluster registry that terminates its own TLS is also a real deployment (the managed
+// product's, cloud ADR-0058).
+//
+// While this was hardcoded true, such a registry was pushed to with --tls-verify=false — skipping a
+// verification that would have SUCCEEDED — and the Cloud Native Buildpacks branch, which refuses to
+// push to a plain-HTTP target, refused over an endpoint that was not plain HTTP. Both follow from
+// this one boolean, so this test pins it directly.
+func TestBuildToATLSInClusterRegistryPushesVerified(t *testing.T) {
+	const internal = "registry.example.com:5000"
+	k, d := fake.NewKubernetes(), fake.NewDatabase()
+	d.SetPolicy(permissive())
+	b := fake.NewBuilder()
+	b.SetDigest("sha256:beef")
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Database: d, Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs: fake.NewIDs(), Resolver: fake.NewResolver(), Credentials: fake.NewCredentials(),
+		DNS: fake.NewDNSFactory(), Builder: b, BuildRegistry: internal,
+		// The registry terminates its own TLS: nothing about the push should be insecure.
+		BuildRegistryInsecure: false,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := e.Build(context.Background(), cp.BuildRequest{
+		App:    "web",
+		Source: cp.SourceRef{Repo: "https://github.com/acme/web", Ref: "v1.0.0"},
+	}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got, want := b.LastTarget(), internal+"/web:build"; got != want {
+		t.Errorf("builder push target = %q, want the in-cluster endpoint %q", got, want)
+	}
+	if b.LastInsecure() {
+		t.Error("a default build to a TLS-terminating in-cluster registry must be pushed verified, not insecure")
 	}
 }

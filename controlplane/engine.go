@@ -85,6 +85,9 @@ type Engine struct {
 	// (ADR-0054 §5). Optional: when empty, the deploy falls back to referencing the internal push
 	// endpoint (an in-cluster registry installed without a public ingress).
 	buildPublicRegistry string
+	// buildRegistryInsecure reports whether buildRegistry serves plain HTTP — see Deps for why this is
+	// configuration rather than the constant it used to be.
+	buildRegistryInsecure bool
 	// sourceCredentials resolves a build's clone credential per-repository when wired; nil falls back
 	// to the persisted provider store. See Deps.
 	sourceCredentials SourceCredentialResolver
@@ -187,6 +190,21 @@ type Deps struct {
 	// internal push endpoint. burrowd sets it from BURROW_BUILD_PUBLIC_REGISTRY, which
 	// `burrow cluster registry install --host` wires to the registry's public ingress hostname.
 	BuildPublicRegistry string
+	// BuildRegistryInsecure reports whether BuildRegistry serves plain HTTP, which decides how the
+	// build pushes to it: a plain-HTTP push needs buildah's --tls-verify=false, and the Cloud Native
+	// Buildpacks lifecycle has no insecure-push handling at all, so a no-Dockerfile build to such a
+	// registry is refused rather than failing on an obscure TLS error (ADR-0054 §5).
+	//
+	// It DEFAULTS TO TRUE for BuildRegistry, because that is what `burrow cluster registry install`
+	// deploys: a registry on a ClusterIP with no certificate. It was formerly hardcoded to true at the
+	// single call site, which is why this exists — an in-cluster registry that terminates TLS is now a
+	// real deployment (the managed product's, cloud ADR-0058), and against one the hardcoded value is
+	// wrong in both directions: it skips verification on a push that could be verified, and it refuses
+	// buildpacks with a message describing a plain-HTTP endpoint that is not there.
+	//
+	// burrowd sets it from BURROW_BUILD_REGISTRY_INSECURE. It is read only when a build defaults to
+	// BuildRegistry; an explicitly targeted external registry is always pushed over verified TLS.
+	BuildRegistryInsecure bool
 	// SourceCredentials, when set, resolves the clone credential for a build INSTEAD of the persisted
 	// provider store, and is handed the repository so what it returns can be scoped to it
 	// (ADR-0057 §5). Optional — nil keeps the provider-store lookup, which is what a self-hosted
@@ -237,32 +255,33 @@ func New(d Deps) (*Engine, error) {
 		authz = NewDatabaseAuthorizer(d.Database)
 	}
 	return &Engine{
-		k8s:                 d.Kubernetes,
-		db:                  d.Database,
-		clock:               d.Clock,
-		ids:                 d.IDs,
-		resolver:            d.Resolver,
-		credentials:         d.Credentials,
-		dns:                 d.DNS,
-		authoritative:       d.AuthoritativeResolver,
-		probe:               d.HTTPProbe,
-		after:               d.After,
-		objectStore:         d.ObjectStore,
-		logs:                d.Logs,
-		metrics:             d.Metrics,
-		dbProvisioner:       d.DatabaseProvisioner,
-		prober:              d.ClusterProber,
-		capacity:            d.CapacityProber,
-		registry:            d.RegistryClient,
-		builder:             d.Builder,
-		buildLedger:         d.BuildLedger,
-		buildRegistry:       d.BuildRegistry,
-		buildPublicRegistry: d.BuildPublicRegistry,
-		sourceCredentials:   d.SourceCredentials,
-		appNamespace:        appNamespace,
-		tokens:              d.TokenSource,
-		authz:               authz,
-		hookLock:            newHookLock(),
+		k8s:                   d.Kubernetes,
+		db:                    d.Database,
+		clock:                 d.Clock,
+		ids:                   d.IDs,
+		resolver:              d.Resolver,
+		credentials:           d.Credentials,
+		dns:                   d.DNS,
+		authoritative:         d.AuthoritativeResolver,
+		probe:                 d.HTTPProbe,
+		after:                 d.After,
+		objectStore:           d.ObjectStore,
+		logs:                  d.Logs,
+		metrics:               d.Metrics,
+		dbProvisioner:         d.DatabaseProvisioner,
+		prober:                d.ClusterProber,
+		capacity:              d.CapacityProber,
+		registry:              d.RegistryClient,
+		builder:               d.Builder,
+		buildLedger:           d.BuildLedger,
+		buildRegistry:         d.BuildRegistry,
+		buildPublicRegistry:   d.BuildPublicRegistry,
+		sourceCredentials:     d.SourceCredentials,
+		buildRegistryInsecure: d.BuildRegistryInsecure,
+		appNamespace:          appNamespace,
+		tokens:                d.TokenSource,
+		authz:                 authz,
+		hookLock:              newHookLock(),
 	}, nil
 }
 

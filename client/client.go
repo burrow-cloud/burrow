@@ -2140,18 +2140,30 @@ func (c *Client) WaitReachable(ctx context.Context, app, env string, timeout tim
 // SetConfig upserts one non-secret config var for an app (ADR-0028). By default the running workload
 // rolls so the app picks the value up; noRestart only persists, landing the change on the next
 // deploy.
-func (c *Client) SetConfig(ctx context.Context, app, env, key, value string, noRestart bool) error {
-	body := map[string]any{"env": env, "key": key, "value": value, "no_restart": noRestart}
+//
+// It is gated by the app.config guardrail, held for confirmation by default because the write rolls
+// the app (ADR-0098). A held write returns a guardrail error the caller surfaces for approval and
+// re-invokes with confirm set; nothing is persisted until it does.
+func (c *Client) SetConfig(ctx context.Context, app, env, key, value string, noRestart, confirm bool) error {
+	body := map[string]any{"env": env, "key": key, "value": value, "no_restart": noRestart, "confirm": confirm}
 	return c.do(ctx, http.MethodPost, c.appPath(app, "config"), body, nil)
 }
 
 // UnsetConfig removes one config var for an app (ADR-0028). By default the running workload rolls; with
 // noRestart the removal only persists and lands on the next deploy. env names the target environment
-// (ADR-0035 phase 2b).
-func (c *Client) UnsetConfig(ctx context.Context, app, env, key string, noRestart bool) error {
+// (ADR-0035 phase 2b). It is gated by the same app.config guardrail SetConfig is (ADR-0098), and
+// carries confirm as a query parameter because a DELETE has no body.
+func (c *Client) UnsetConfig(ctx context.Context, app, env, key string, noRestart, confirm bool) error {
 	path := "/v1/apps/" + url.PathEscape(app) + "/config/" + url.PathEscape(key)
+	q := url.Values{}
 	if noRestart {
-		path += "?no_restart=true"
+		q.Set("no_restart", "true")
+	}
+	if confirm {
+		q.Set("confirm", "true")
+	}
+	if len(q) > 0 {
+		path += "?" + q.Encode()
 	}
 	return c.do(ctx, http.MethodDelete, withEnv(path, env), nil, nil)
 }

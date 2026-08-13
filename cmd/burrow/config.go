@@ -21,8 +21,9 @@ func newAppConfigCmd() *cobra.Command {
 		Long: "config manages an app's config vars: non-secret configuration set as environment\n" +
 			"variables, the single source of truth for the app's config, sourced into the workload\n" +
 			"at deploy time. Setting or unsetting a config var rolls the running app so it picks the\n" +
-			"change up; pass --no-restart to defer the change to the next deploy. For secrets, use a\n" +
-			"Secret, not config (config vars are non-secret).",
+			"change up; pass --no-restart to defer the change to the next deploy. Because the write\n" +
+			"rolls the app, it is gated by the app.config guardrail (confirm by default). For secrets,\n" +
+			"use a Secret, not config (config vars are non-secret).",
 	}
 	cmd.AddCommand(newAppConfigSetCmd(), newAppConfigListCmd(), newAppConfigUnsetCmd())
 	return cmd
@@ -30,7 +31,7 @@ func newAppConfigCmd() *cobra.Command {
 
 func newAppConfigSetCmd() *cobra.Command {
 	o := &commonOpts{}
-	var noRestart bool
+	var noRestart, confirm bool
 	cmd := &cobra.Command{
 		Use:   "set <app> KEY=VALUE",
 		Short: "Set (upsert) a config var for an app",
@@ -47,7 +48,7 @@ func newAppConfigSetCmd() *cobra.Command {
 				return err
 			}
 			for k, v := range kv.m {
-				if err := c.SetConfig(ctx, app, env, k, v, noRestart); err != nil {
+				if err := c.SetConfig(ctx, app, env, k, v, noRestart, confirm); err != nil {
 					return err
 				}
 				human := fmt.Sprintf("set %s on %s", k, app)
@@ -64,12 +65,13 @@ func newAppConfigSetCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "persist the change without rolling the running workload; it lands on the next deploy")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a config write the app.config guardrail holds for confirmation")
 	return cmd
 }
 
 func newAppConfigUnsetCmd() *cobra.Command {
 	o := &commonOpts{}
-	var noRestart bool
+	var noRestart, confirm bool
 	cmd := &cobra.Command{
 		Use:   "unset <app> KEY",
 		Short: "Remove a config var from an app",
@@ -81,7 +83,7 @@ func newAppConfigUnsetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.UnsetConfig(ctx, app, env, key, noRestart); err != nil {
+			if err := c.UnsetConfig(ctx, app, env, key, noRestart, confirm); err != nil {
 				return err
 			}
 			human := fmt.Sprintf("unset %s on %s", key, app)
@@ -94,6 +96,7 @@ func newAppConfigUnsetCmd() *cobra.Command {
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "persist the change without rolling the running workload; it lands on the next deploy")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a config removal the app.config guardrail holds for confirmation")
 	return cmd
 }
 

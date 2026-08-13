@@ -449,8 +449,9 @@ func TestDomainRemoveDenied(t *testing.T) {
 }
 
 // TestUnguardedVerbsExecute covers the Phase 2b verbs that are NOT guarded — unpublish, addon attach,
-// addon backup, config set/unset, secret unset — each executing straight through the envelope with the
-// result the control plane returns. These carry no --confirm flag by design.
+// addon backup, secret unset — each executing straight through the envelope with the result the
+// control plane returns. `config set` and `config unset` left this list with ADR-0098 and are
+// covered by TestConfigWriteHeldThenConfirm.
 func TestUnguardedVerbsExecute(t *testing.T) {
 	f := newFakeCP(t)
 	f.handler = func(w http.ResponseWriter, _ *http.Request) {
@@ -463,8 +464,6 @@ func TestUnguardedVerbsExecute(t *testing.T) {
 		{"unpublish", "web"},
 		{"addon", "attach", "postgres", "web"},
 		{"addon", "backup", "postgres", "web"},
-		{"config", "set", "web", "LOG_LEVEL=debug"},
-		{"config", "unset", "web", "LOG_LEVEL"},
 		{"secret", "unset", "web", "OLD_KEY"},
 	}
 	for _, args := range cases {
@@ -475,6 +474,54 @@ func TestUnguardedVerbsExecute(t *testing.T) {
 		}
 		if code != exitCodeExecuted {
 			t.Errorf("run(%v) exit code = %d, want 0", args, code)
+		}
+	}
+}
+
+// TestConfigWriteHeldThenConfirm covers a config write through the confirm flow (ADR-0098). Without
+// --confirm the app.config guardrail holds it (held_for_confirmation, exit 2) and the binary does not
+// self-confirm; a human re-runs it with --confirm and it executes. `config set` carries confirm in
+// the body and `config unset` in the query, since a DELETE has none, so both shapes are exercised.
+func TestConfigWriteHeldThenConfirm(t *testing.T) {
+	f := newFakeCP(t)
+	f.handler = func(w http.ResponseWriter, r *http.Request) {
+		confirm := r.URL.Query().Get("confirm") == "true"
+		if r.Method == http.MethodPost {
+			var body struct {
+				Confirm bool `json:"confirm"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			confirm = body.Confirm
+		}
+		if !confirm {
+			held(w, "set config", "app.config", "setting the config var LOG_LEVEL on \"web\" (which rolls the running app) requires confirmation")
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"app": "web", "key": "LOG_LEVEL"})
+	}
+
+	for _, args := range [][]string{
+		{"config", "set", "web", "LOG_LEVEL=debug"},
+		{"config", "unset", "web", "LOG_LEVEL"},
+	} {
+		out, code := runMutate(t, f, args...)
+		oc := decodeOutcome(t, out)
+		if oc.Outcome != outcomeHeld || oc.Code != "app.config" {
+			t.Fatalf("run(%v) outcome = %q code = %q, want held_for_confirmation app.config", args, oc.Outcome, oc.Code)
+		}
+		if !oc.ConfirmRequired {
+			t.Errorf("run(%v) held write must set confirm_required", args)
+		}
+		if code != exitCodeHeld {
+			t.Errorf("run(%v) exit code = %d, want %d", args, code, exitCodeHeld)
+		}
+
+		out, code = runMutate(t, f, append(args, "--confirm")...)
+		if oc := decodeOutcome(t, out); oc.Outcome != outcomeExecuted {
+			t.Fatalf("run(%v --confirm) outcome = %q, want executed", args, oc.Outcome)
+		}
+		if code != exitCodeExecuted {
+			t.Errorf("run(%v --confirm) exit code = %d, want 0", args, code)
 		}
 	}
 }

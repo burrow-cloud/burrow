@@ -62,7 +62,7 @@ func TestPreDeployHookRunsFromTheNewImage(t *testing.T) {
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("first Deploy: %v", err)
 	}
-	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", true); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", true, false); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	setHook(ctx, t, e, "web", "", cp.HookPreDeploy, "./manage.py", "migrate")
@@ -183,7 +183,7 @@ func TestPreDeployHookThatNeverFinishesAbortsTheDeploy(t *testing.T) {
 func TestFailedHookKeepsItsOutputOutOfTheAuditLog(t *testing.T) {
 	ctx := context.Background()
 	e, k, d, _ := newEngine(t, permissive())
-	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", true); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", true, false); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	setHook(ctx, t, e, "web", "", cp.HookPreDeploy, "./migrate")

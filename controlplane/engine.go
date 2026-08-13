@@ -651,8 +651,13 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 // is the single source of truth for the app's config. By default the change re-applies the running
 // workload so it rolls and the running app picks the value up; with noRestart the value is only
 // persisted and lands on the next deploy. An app with no running release simply persists and
-// skips the apply — not an error. Config vars are non-secret, so there is no guardrail.
-func (e *Engine) SetConfig(ctx context.Context, app, env, key, value string, noRestart bool) error {
+// skips the apply — not an error.
+//
+// It is gated by the app.config guardrail, held for confirmation by default (ADR-0098). The reason
+// is the re-apply rather than the content: a config write ROLLS THE APP, so it is an
+// availability-affecting operation whether or not the value is a secret. confirm satisfies a
+// confirm disposition; nothing satisfies a deny.
+func (e *Engine) SetConfig(ctx context.Context, app, env, key, value string, noRestart, confirm bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("set config: %w: %w", ErrInvalid, err)
 	}
@@ -663,19 +668,38 @@ func (e *Engine) SetConfig(ctx context.Context, app, env, key, value string, noR
 	if err != nil {
 		return fmt.Errorf("set config %s: %w", app, err)
 	}
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return fmt.Errorf("set config %s: loading guardrail policy: %w", app, err)
+	}
+	args := configAuditArgs(env, key, noRestart)
+	if err := e.recordDecision(ctx, auditOpConfigSet, app, args, GuardrailAppConfig,
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: env, Name: app}, "set config", GuardrailAppConfig, confirm,
+			configWhat("setting", key, app, noRestart))); err != nil {
+		return err
+	}
 	if err := e.db.SetAppEnv(ctx, app, key, value); err != nil {
+		e.recordExecution(ctx, auditOpConfigSet, app, args, err)
 		return fmt.Errorf("set config %s: persisting %s: %w", app, key, err)
 	}
-	if noRestart {
-		return nil
+	if !noRestart {
+		if err := e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app, envName(env)); err != nil {
+			e.recordExecution(ctx, auditOpConfigSet, app, args, err)
+			return err
+		}
 	}
-	return e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app, envName(env))
+	e.recordExecution(ctx, auditOpConfigSet, app, args, nil)
+	return nil
 }
 
 // UnsetConfig removes one config var for an app from the config store (ADR-0028). Like SetConfig it
 // re-applies the running workload by default so the running app drops the value, or only
 // persists with noRestart. An app with no running release simply persists and skips the apply.
-func (e *Engine) UnsetConfig(ctx context.Context, app, env, key string, noRestart bool) error {
+//
+// It is gated by the same app.config guardrail SetConfig is, one code for both directions
+// (ADR-0098): removing the variable an app reads at startup rolls it into the same place a wrong
+// value does.
+func (e *Engine) UnsetConfig(ctx context.Context, app, env, key string, noRestart, confirm bool) error {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return fmt.Errorf("unset config: %w: %w", ErrInvalid, err)
 	}
@@ -686,13 +710,51 @@ func (e *Engine) UnsetConfig(ctx context.Context, app, env, key string, noRestar
 	if err != nil {
 		return fmt.Errorf("unset config %s: %w", app, err)
 	}
+	pol, err := e.db.Policy(ctx)
+	if err != nil {
+		return fmt.Errorf("unset config %s: loading guardrail policy: %w", app, err)
+	}
+	args := configAuditArgs(env, key, noRestart)
+	if err := e.recordDecision(ctx, auditOpConfigUnset, app, args, GuardrailAppConfig,
+		pol.evaluateGuardrail(ctx, GuardrailScope{Env: env, Name: app}, "unset config", GuardrailAppConfig, confirm,
+			configWhat("removing", key, app, noRestart))); err != nil {
+		return err
+	}
 	if err := e.db.UnsetAppEnv(ctx, app, key); err != nil {
+		e.recordExecution(ctx, auditOpConfigUnset, app, args, err)
 		return fmt.Errorf("unset config %s: removing %s: %w", app, key, err)
 	}
-	if noRestart {
-		return nil
+	if !noRestart {
+		if err := e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app, envName(env)); err != nil {
+			e.recordExecution(ctx, auditOpConfigUnset, app, args, err)
+			return err
+		}
 	}
-	return e.reapplyEnv(ctx, e.k8s.WithNamespace(ns), app, envName(env))
+	e.recordExecution(ctx, auditOpConfigUnset, app, args, nil)
+	return nil
+}
+
+// configAuditArgs is the redacted argument set a config write records (ADR-0027, ADR-0098): the
+// environment, the config KEY, and whether the workload was left alone. The VALUE is never among
+// them — a config var is non-secret by convention rather than by enforcement, and a trail that
+// preserved a mistaken one would be the worst place for it to survive.
+func configAuditArgs(env, key string, noRestart bool) map[string]string {
+	args := map[string]string{"env": envName(env), "key": key}
+	if noRestart {
+		args["no_restart"] = "true"
+	}
+	return args
+}
+
+// configWhat is the phrase a config guardrail's hold or refusal describes itself with. It names the
+// key and the app, so the human reading a relayed hold is approving something specific rather than
+// "a config change", and it says whether the app will roll — which is the whole reason the guardrail
+// exists, and the one thing --no-restart changes about the operation.
+func configWhat(verb, key, app string, noRestart bool) string {
+	if noRestart {
+		return fmt.Sprintf("%s the config var %s on %q (the running app is not rolled; the change lands on the next deploy)", verb, key, app)
+	}
+	return fmt.Sprintf("%s the config var %s on %q (which rolls the running app)", verb, key, app)
 }
 
 // ListConfig returns the app's non-secret config store (ADR-0028). An app with no config yields an

@@ -171,7 +171,7 @@ func TestReapplyEnvPreservesReplicas(t *testing.T) {
 	if _, err := e.Scale(ctx, "web", "", 6, false); err != nil {
 		t.Fatalf("Scale: %v", err)
 	}
-	if err := e.SetConfig(ctx, "web", "", "K", "V", false); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "K", "V", false, false); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	spec, _ := k.Spec("web")

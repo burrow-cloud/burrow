@@ -383,7 +383,7 @@ func TestConfigReapplyCarriesTheProbe(t *testing.T) {
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "ghcr.io/u/web:1.0.0", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
-	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", false); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", false, false); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	spec, _ := k.Spec("web")

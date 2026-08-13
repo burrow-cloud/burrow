@@ -199,6 +199,20 @@ func bindEnv(flags *pflag.FlagSet, o *commonOpts) {
 	flags.StringVar(&o.env, "env", "", "environment to operate in (default: the default environment)")
 }
 
+// bindAllEnvironments registers --all-environments/-A, the explicit way to ask a READ to span every
+// environment at once (issue #570). It is the flag form of a widening that an omitted --env used to
+// perform silently on the backup listings, where an empty environment reached the server as "no
+// filter" — so a pinned environment was ignored and a listing answered about environments nobody had
+// asked about. Scope is narrow by default and widened on request, which is the `kubectl -A`
+// convention and the one a reader already has.
+//
+// It is bound only on the two listings. A command that ACTS — backup, restore — runs against exactly
+// one instance in exactly one environment, so "every environment" is not a scope those verbs have,
+// and a flag that cannot be honoured is worse than an absent one.
+func bindAllEnvironments(flags *pflag.FlagSet, all *bool) {
+	flags.BoolVarP(all, "all-environments", "A", false, "report on every environment, not only the one this command is scoped to")
+}
+
 // bindClientFlags registers the control-plane connection flags without --namespace, so a command
 // that needs --namespace for a different meaning (e.g. `env add`, where it is the environment's
 // namespace) can bind the control-plane namespace under its own flag name.
@@ -386,6 +400,54 @@ type target struct {
 	installID string
 }
 
+// chosenEnv applies the one precedence rule for which environment a command operates in: an explicit
+// --env wins, and with no flag it is whatever the active target resolved to — the pinned handle's
+// environment, or the one the followed kube context registers. It is a method rather than two lines
+// at each call site so the rule cannot be spelled two ways, which is exactly how the add-on backup
+// commands came to answer "no --env" with "every environment" while every other command answered it
+// with "the active one" (issue #570).
+func (o *commonOpts) chosenEnv(resolvedEnv string) string {
+	if o.env != "" {
+		return o.env
+	}
+	return resolvedEnv
+}
+
+// operationEnv resolves that same environment for the commands that connect through client rather
+// than resolveAndConnect, which returns it alongside the connection. Those commands resolve the
+// CLUSTER through the selected target and deliberately consult no environment handle for it
+// (ADR-0036), so an operation of theirs that IS scoped to an environment — backing up an app's
+// database, restoring one — has to ask for the environment separately. This is that question, and it
+// is the only thing it answers: nothing here decides which cluster is connected to.
+//
+// It resolves rather than errors. An environment that cannot be worked out is returned empty and
+// left to the caller, because every failure available here — an unreadable config, a target whose
+// context has been renamed away — is one the connection is about to report in its own words, and a
+// second error raised from the environment question would replace a message about the actual problem
+// with a vaguer one.
+func (o *commonOpts) operationEnv() string {
+	if o.env != "" {
+		return o.env
+	}
+	// --control-plane names the control plane outright, so no target is consulted for it — the same
+	// early return requireCluster, clusterContext and resolveTarget make.
+	if o.controlPlane != "" {
+		return ""
+	}
+	cfg, err := localconfig.Load()
+	if err != nil {
+		return ""
+	}
+	// ResolveOperate rather than Resolve: the environment is the same question against either kind of
+	// target, and refusing to answer it for the managed product here would mean refusing it in place
+	// of the connection, which has its own answer for that case.
+	resolved, err := localconfig.ResolveOperate(cfg, o.kubeconfig)
+	if err != nil {
+		return ""
+	}
+	return o.chosenEnv(resolved.Env)
+}
+
 // resolveTarget decides which cluster + environment a per-app command targets (ADR-0036). With
 // --control-plane it talks to that URL directly and sends the raw --env, unchanged. Otherwise it
 // resolves the active handle (the pinned one, or the current kube context in follow mode) and
@@ -423,10 +485,7 @@ func (o *commonOpts) resolveTarget() (target, error) {
 	if o.context != "" {
 		kubeContext = o.context
 	}
-	env := resolved.Env
-	if o.env != "" {
-		env = o.env
-	}
+	env := o.chosenEnv(resolved.Env)
 	cpn := resolved.ControlPlaneNamespace
 	if o.namespace != "" && o.namespace != connect.DefaultNamespace {
 		cpn = o.namespace

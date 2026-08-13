@@ -259,10 +259,23 @@ const fluentBitImage = "fluent/fluent-bit:3.2.10"
 // fluentBitConfig tails the node's container logs (CRI format) and forwards each record to the
 // VictoriaLogs store at host:9428 over its JSON-lines ingestion API, keeping the source filename
 // (which encodes pod/namespace/container) as the stream field. %s is the store service name.
+//
+// The parser filter is what puts a POD on every record. The store is queried through
+// controlplane/logs.VictoriaLogs, which reads each line's pod from kubernetes_pod_name; without a
+// step that writes that field nothing does, and every record comes back with a blank source
+// (issue #586). It is derived from the filename rather than from the Kubernetes API on purpose: the
+// API route is the kubernetes filter, which needs a ServiceAccount and RBAC this collector
+// deliberately does not have.
+//
+// It is an ordinary field, NOT a stream field. A stream field's cost is per-stream cardinality —
+// the thing that makes a log store expensive — and the pod name is already inside the filename that
+// keys the stream, so promoting it would buy nothing and the field carries the pod at the price of
+// one short repeated column, which the store compresses per block.
 const fluentBitConfig = `[SERVICE]
     Flush        5
     Log_Level    info
     Daemon       Off
+    Parsers_File burrow-parsers.conf
 [INPUT]
     Name             tail
     Path             /var/log/containers/*.log
@@ -271,6 +284,13 @@ const fluentBitConfig = `[SERVICE]
     multiline.parser cri
     Skip_Long_Lines  On
     Mem_Buf_Limit    16MB
+[FILTER]
+    Name         parser
+    Match        *
+    Key_Name     filename
+    Parser       burrow_container_filename
+    Reserve_Data On
+    Preserve_Key On
 [OUTPUT]
     Name    http
     Match   *
@@ -282,13 +302,42 @@ const fluentBitConfig = `[SERVICE]
     Json_date_format iso8601
 `
 
+// fluentBitParsersFile is the file name the parsers above are mounted under, inside Fluent Bit's
+// config directory. The burrow- prefix keeps it clear of the image's own parsers.conf, and it is
+// both the ConfigMap key and the mount path's last segment so the two cannot drift.
+const fluentBitParsersFile = "burrow-parsers.conf"
+
+// fluentBitParsers reads the pod name out of a container log's path. The kubelet names those files
+// <pod>_<namespace>_<container>-<container-id>.log, and none of pod, namespace or container may
+// contain an underscore, so the first underscore-delimited segment of the basename is the pod.
+//
+// Only the pod is captured. The namespace and the container name sit right beside it and are
+// deliberately left alone: this is the field the query path already promises to return, and
+// scoping a query to an app is a separate question about what an app filter should match on.
+//
+// A path that does not match this shape leaves the record untouched — Fluent Bit's parser filter
+// forwards a record it could not parse — so an unfamiliar log layout costs a blank pod, never a
+// dropped line.
+const fluentBitParsers = `[PARSER]
+    Name  burrow_container_filename
+    Format regex
+    Regex ^(?:.*/)?(?<kubernetes_pod_name>[^_/]+)_[^_/]+_.+\.log$
+`
+
 func (a *Adapter) deployLogsCollector(ctx context.Context, store string, labels map[string]string, _ int32) error {
 	name := store + "-collector"
 	cmLabels := map[string]string{nameLabel: name, managedByLabel: managedByValue, addonLabel: labels[addonLabel]}
 
+	// Created, never updated, like every other object an add-on install writes: an existing
+	// collector keeps the config it was installed with, and a changed config reaches it through
+	// `burrow addon remove logs` (data-preserving by default — the store's volume is retained and a
+	// re-install lands back on it) followed by `burrow addon install logs`.
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: a.addonNamespace, Labels: cmLabels},
-		Data:       map[string]string{"fluent-bit.conf": fmt.Sprintf(fluentBitConfig, store)},
+		Data: map[string]string{
+			"fluent-bit.conf":    fmt.Sprintf(fluentBitConfig, store),
+			fluentBitParsersFile: fluentBitParsers,
+		},
 	}
 	if _, err := a.client.CoreV1().ConfigMaps(a.addonNamespace).Create(ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("kube: creating collector config %q: %w", name, err)
@@ -314,6 +363,9 @@ func (a *Adapter) deployLogsCollector(ctx context.Context, store string, labels 
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "varlog", MountPath: "/var/log", ReadOnly: true},
 							{Name: "config", MountPath: "/fluent-bit/etc/fluent-bit.conf", SubPath: "fluent-bit.conf"},
+							// Beside the main config, because [SERVICE] Parsers_File resolves
+							// relative to it.
+							{Name: "config", MountPath: "/fluent-bit/etc/" + fluentBitParsersFile, SubPath: fluentBitParsersFile},
 						},
 					}},
 					Volumes: []corev1.Volume{

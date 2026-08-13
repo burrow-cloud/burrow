@@ -43,6 +43,13 @@ func NewVictoriaLogs(hc *http.Client) VictoriaLogs {
 // VictoriaLogs answers /select/logsql/query as newline-delimited JSON, one object per record
 // with _time and _msg fields; an empty query matches everything. A non-empty token is sent as an
 // Authorization: Bearer header for an authenticated store.
+//
+// The pod comes from kubernetes_pod_name, which the shipped collector writes for exactly this
+// reason (controlplane/kube's fluentBitParsers). The two are one contract: renaming the field on
+// either side blanks the source beside every line, and reading a field no collector writes is how
+// this went unnoticed for as long as it did (issue #586). "pod" and "kubernetes.pod_name" are
+// accepted after it for a store filled by someone else's collector; a record carrying none of the
+// three yields an empty Pod, which every renderer treats as "unknown" rather than printing a gap.
 func (v VictoriaLogs) QueryLogs(ctx context.Context, endpoint, query string, limit int, token string) ([]controlplane.LogEntry, error) {
 	if strings.TrimSpace(query) == "" {
 		query = "*"

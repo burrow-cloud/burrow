@@ -63,7 +63,11 @@ func newGuardListCmd() *cobra.Command {
 			// surface-guard test pins to that tree, so the two answers agree. It rides in the
 			// --json report, which burrow-agent consumes; the human table below is dispositions
 			// only (issue #445).
-			absent := agentsurface.AbsentFromAgentSurface()
+			//
+			// Worded for the target readClient just connected to, so the remedies a tenant is
+			// handed are ones a tenant can carry out (issue #582, targethints.go). The list and
+			// its reasons are the same either way: only who performs each one moves.
+			absent := agentsurface.AbsentFromAgentSurface(o.onManagedTarget())
 			out := cmd.OutOrStdout()
 			if o.json {
 				return emit(out, true, agentsurface.NewGuardReport(scope, gs, absent), "")

@@ -81,7 +81,7 @@ func TestTier1CapabilitiesAreReported(t *testing.T) {
 		"agent install",
 	}
 	got := map[string]Capability{}
-	for _, c := range AbsentFromAgentSurface() {
+	for _, c := range AbsentFromAgentSurface(false) {
 		got[c.Path] = c
 	}
 	for _, path := range want {
@@ -106,7 +106,7 @@ func TestAbsentFromSubtractsRegisteredPaths(t *testing.T) {
 	for _, c := range catalogue {
 		all = append(all, c.Path)
 	}
-	if got := AbsentFrom(all); len(got) != 0 {
+	if got := AbsentFrom(all, false); len(got) != 0 {
 		t.Errorf("AbsentFrom(every path) reported %d absent capabilities, want none", len(got))
 	}
 
@@ -118,7 +118,7 @@ func TestAbsentFromSubtractsRegisteredPaths(t *testing.T) {
 		}
 	}
 	var found *Capability
-	for _, c := range AbsentFrom(without) {
+	for _, c := range AbsentFrom(without, false) {
 		if c.Path == "addon backup" {
 			found = &c
 			break
@@ -139,14 +139,14 @@ func TestAbsentFromSubtractsRegisteredPaths(t *testing.T) {
 // report. One table, two readers, no overlap and no gap.
 func TestAgentSurfaceIsTheAgentHalf(t *testing.T) {
 	surface := AgentSurface()
-	for _, c := range AbsentFromAgentSurface() {
+	for _, c := range AbsentFromAgentSurface(false) {
 		if _, ok := surface[c.Path]; ok {
 			t.Errorf("%q is reported as absent from the agent binary and is also on its allow-list", c.Path)
 		}
 	}
-	if len(surface)+len(AbsentFromAgentSurface()) != len(catalogue) {
+	if len(surface)+len(AbsentFromAgentSurface(false)) != len(catalogue) {
 		t.Errorf("allow-list (%d) + absent (%d) != catalogue (%d); every capability belongs to exactly one side",
-			len(surface), len(AbsentFromAgentSurface()), len(catalogue))
+			len(surface), len(AbsentFromAgentSurface(false)), len(catalogue))
 	}
 }
 
@@ -177,7 +177,7 @@ func TestGuardReportKeepsTheTwoGroupsApart(t *testing.T) {
 		t.Errorf("unscoped guard report carries a scope: %s", b)
 	}
 
-	b, err = json.Marshal(NewGuardReport(client.GuardScope{}, nil, AbsentFromAgentSurface()))
+	b, err = json.Marshal(NewGuardReport(client.GuardScope{}, nil, AbsentFromAgentSurface(false)))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestGuardReportKeepsTheTwoGroupsApart(t *testing.T) {
 // vendor rather than a burrow command that does not exist.
 func TestBucketDeletionIsHeldBackFromEveryBurrowSurface(t *testing.T) {
 	var got *Capability
-	for _, c := range AbsentFromAgentSurface() {
+	for _, c := range AbsentFromAgentSurface(false) {
 		if c.Path == "bucket delete" {
 			cap := c
 			got = &cap

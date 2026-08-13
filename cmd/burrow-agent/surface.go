@@ -49,6 +49,12 @@ func commandPaths(root *cobra.Command) []string {
 // that is absent and LEGIBLE is instead a refusal the agent can relay: "removing an add-on is not
 // something I can do, and here is who can." A hand-maintained second list would eventually stop
 // describing this binary and quietly turn that refusal back into a dead end; subtraction cannot.
-func absentCapabilities(root *cobra.Command) []agentsurface.Capability {
-	return agentsurface.AbsentFrom(commandPaths(root))
+//
+// managed says which kind of target this invocation reached, and it decides WHO the agent is told to
+// hand each capability to — nothing else. The list and the reason for each entry are the shape of
+// this binary and are identical everywhere; the person who can perform one is not, since about half
+// the operator commands named here are refused to a managed tenant (issue #582). An agent relaying
+// "here is who can" needs that half to be true of the reader it is relaying to.
+func absentCapabilities(root *cobra.Command, managed bool) []agentsurface.Capability {
+	return agentsurface.AbsentFrom(commandPaths(root), managed)
 }

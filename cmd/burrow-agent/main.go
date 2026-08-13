@@ -89,6 +89,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 }
 
 // connOpts holds the control-plane connection flags every command binds.
+//
+// managed records which KIND of target resolve reached, the same fact the operator CLI keeps under
+// the same name (cmd/burrow's targethints.go). One command reads it: `guard` reports the capabilities
+// absent from this binary, and who performs each one instead is a property of the target while the
+// list itself is not (issue #582). It is per-invocation state on a per-command struct, since each
+// command builds its own connOpts, and it is false until resolve has spoken — including for
+// --control-plane, which names a control plane outright and consults no target, so the answer there
+// is the operator wording a self-hosted install reached that way needs.
 type connOpts struct {
 	controlPlane string
 	token        string
@@ -96,6 +104,7 @@ type connOpts struct {
 	context      string
 	namespace    string
 	env          string
+	managed      bool
 }
 
 // bindConn registers the shared connection flags, defaulting from the environment.
@@ -154,6 +163,9 @@ func (o *connOpts) resolve(ctx context.Context, stderr io.Writer) (*client.Clien
 	if err != nil {
 		return nil, "", targetname.Named{}, err
 	}
+	// Recorded at resolution, from the target actually reached, so a report worded for the target
+	// cannot describe a different one (issue #582).
+	o.managed = resolved.Cloud()
 	if resolved.Cloud() {
 		return o.resolveCloud(ctx, cfg, resolved)
 	}

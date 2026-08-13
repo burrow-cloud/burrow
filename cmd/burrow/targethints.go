@@ -51,6 +51,25 @@ func (o *commonOpts) onManagedTarget() bool {
 	return o.managed
 }
 
+// recordSelectedTarget records the kind of the ACTIVE TARGET, for a command that words its output for
+// a target without connecting to one.
+//
+// `burrow agent capabilities` is the case (issue #582). It reads a compiled-in catalogue and reaches
+// no control plane at all, so there is no resolution to record the fact at and nothing to record it
+// FROM except the selected target itself. That is a weaker statement than the one resolveConnect
+// makes — it names the target this invocation WOULD act through rather than one it did — and for a
+// command that acts on nothing it is the strongest true one available, which is why it is a separate
+// method rather than a second way of doing what those already do.
+//
+// It reads the local config and nothing else: no kubeconfig, no network, no credential, so the
+// command still answers on a machine where nothing is installed. selectedCloudTarget is the same read
+// `burrow version` uses to word a line it prints without acting (clusteronly.go), and sharing it is
+// what keeps two answers to "is the managed product selected" from disagreeing.
+func (o *commonOpts) recordSelectedTarget() {
+	_, cloud := selectedCloudTarget()
+	o.managed = cloud
+}
+
 // logsSourceNote is the paragraph `burrow app logs` prints ahead of the log lines: what the reader
 // is looking at, and where a durable history comes from instead.
 //

@@ -82,6 +82,17 @@ binds the agent, and a listing that contains any bound disposition grows a `BIND
 see the binding rather than discover it later. Every audited row already records the caller's kind
 next to the principal, so the trail distinguishes the two decisions with no new column.
 
+**A lock is not one of these layers, and it is not a security control.** `burrow lock <app>` (and
+`burrow lock addon <instance>`) is state on the thing itself: locked, deleting the app, removing the
+instance, and `addon detach --delete-data` refuse, and everything else carries on. It refuses *every*
+caller, including you at your own terminal with your own admin kubeconfig — which is exactly why it
+is not a boundary: anyone with write access to the namespace deletes the same objects with `kubectl`
+and never touches Burrow. It buys one thing, and it is worth having on its own terms: the destructive
+path through Burrow takes a separate command whose only purpose is to permit destruction, so the
+decision and the act happen at two different moments. Neither verb exists on `burrow-agent`, so the
+agent can see a lock and report it and cannot remove one. Do not substitute it for a guardrail or for
+the scoped credential; use it alongside them, on the things you would not want to lose.
+
 **This is not RBAC**, and it is deliberately not: one axis, three values, fixed at issuance, and no
 principal ever appears in a policy key. Whether a caller may issue a credential or grant the admin bit
 is a different question with a different answering seam. A hardening-conscious operator should still

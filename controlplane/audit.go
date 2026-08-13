@@ -235,6 +235,15 @@ const (
 	// the trail does not become the place a mistaken one is preserved.
 	auditOpConfigSet   = "config_set"
 	auditOpConfigUnset = "config_unset"
+	// auditOpLock and auditOpUnlock are the two halves of the lock (cloud ADR-0060 §6). Both are
+	// recorded and the UNLOCK is the line worth reading: a deletion preceded by an unlock a moment
+	// earlier is a person doing what they meant to, while an unlock with no deletion after it is a
+	// lock somebody removed and forgot to restore — the state the mechanism most wants visible.
+	//
+	// Neither carries a guardrail decision row, because neither verb has a guardrail. A lock is not
+	// policy about a caller, so there is no disposition to record; the row is the execution.
+	auditOpLock   = "lock"
+	auditOpUnlock = "unlock"
 	// auditOpHook is one lifecycle hook's execution (ADR-0072). It carries no guardrail decision row
 	// of its own: a hook runs as part of a deploy or a rollback and is gated by that operation's
 	// guardrail, so the decision was already recorded under `deploy` or `rollback`.

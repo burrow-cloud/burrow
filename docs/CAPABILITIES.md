@@ -59,7 +59,8 @@ This file is the place both questions get answered together.
 | Auto-deploy on a new tag | `burrow app auto-deploy <app> <patch\|minor\|major\|off>` | burrowd polls the registry (~5 min, jittered) and fires the same guarded deploy for an in-level upgrade. Outbound-only, so it works on a NAT'd cluster. | [0052](adr/0052-pull-based-passive-deploy.md), [0058](adr/0058-auto-deploy-is-opt-in.md) |
 | Declare a health endpoint | `burrow app health set <app> --path /healthz [--port N]` | Turns the default TCP readiness check into an HTTP GET of that path; `burrow app health unset` returns to the default and `burrow app health show` reports what is in force. See [Health checks](#health-checks). | [0076](adr/0076-health-checks-readiness-only-and-dependencies-at-deploy-time.md) |
 | Deploy-time dependency checks | `burrow app checks show <app>`, `burrow-agent checks <app>`, plus `checks disable` / `checks enable` | After a deploy, Burrow verifies the things it **provisioned** for the app from inside the app's own container: an attached database (connect with the app's own `DATABASE_URL`, `SELECT 1`) and a published port (request it, report the status code). Derived from the registry, never configured. **Reported, never fatal** — a failure does not roll back and does not fail the deploy. See [Deploy-time dependency checks](#deploy-time-dependency-checks). | [0076](adr/0076-health-checks-readiness-only-and-dependencies-at-deploy-time.md) |
-| Delete an app | `burrow app delete <app>` | Removes the workload, its Service and Ingress, and its release history. Guarded by `app.delete`, **denied by default** — relax the guardrail (ideally per environment) before the verb will run on either CLI. | [0024](adr/0024-cli-command-taxonomy.md), [0065](adr/0065-what-belongs-on-the-agent-surface.md) |
+| Delete an app | `burrow app delete <app>` | Removes the workload, its Service and Ingress, and its release history. Guarded by `app.delete`, **denied by default** — relax the guardrail (ideally per environment) before the verb will run on either CLI. A **locked** app refuses regardless of the disposition, until somebody runs `burrow unlock <app>`. | [0024](adr/0024-cli-command-taxonomy.md), [0065](adr/0065-what-belongs-on-the-agent-surface.md) |
+| Lock a thing against destruction | `burrow lock <app>`, `burrow lock addon <instance>`, and `burrow unlock` for either | Locked, the operations that cannot be undone refuse: deleting the app, removing the add-on instance, and `addon detach --delete-data`. Everything else is untouched. **Operator CLI only** — neither verb exists on `burrow-agent`. See [Locks](#locks). | cloud ADR-0060 |
 
 Every verb above except `auto-deploy` and `hook` also exists on `burrow-agent` (`deploy`, `scale`,
 `autoscale`, `rollback`, `run`, `delete`, `apps`, `status`, `history`, `health`/`health set`/
@@ -1494,6 +1495,55 @@ Limits:
 
 ---
 
+## Locks
+
+A lock is **state on a thing** — one app, or one add-on instance — and it is deliberately not a
+guardrail (cloud ADR-0060). A guardrail asks *who is calling* and answers accordingly; a lock asks
+nothing about the caller, and refuses the person who set it.
+
+```sh
+burrow lock website            # and: burrow lock addon burrow-postgres
+burrow unlock website          # and: burrow unlock addon burrow-postgres
+```
+
+**Locked, these refuse:**
+
+| Operation | Refused because |
+| --- | --- |
+| `burrow app delete <app>` | the workload, routing and release history do not come back |
+| `burrow addon remove <instance>` | the instance is what holds the data |
+| `burrow addon detach <addon> <app> --delete-data` | the database and every row in it are destroyed |
+
+**Locked, everything else proceeds normally**: deploys, rollbacks, scaling, restarts, attaching,
+config changes, and an ordinary `addon detach`, which keeps the database so a re-attach gets it
+back. Those all undo by doing them again, and a lock that interrupted them would be one an operator
+turns off and leaves off.
+
+The refusal **names the unlock command** and carries the `locked` code over the API (HTTP 422). It
+is not `needs_confirmation`: `--confirm` cannot satisfy it, and neither can calling as somebody
+else. Deleting a locked app therefore takes two commands — an unlock, then a confirmed delete — and
+neither makes the other redundant.
+
+A few properties worth stating plainly:
+
+- **It is not a security control**, and nothing here should be read as one. Anyone with write
+  access to the namespace deletes the same objects with `kubectl` and never touches Burrow. What a
+  lock buys is that the path *through Burrow* takes a separate command whose only purpose is to
+  permit destruction.
+- **Neither verb is on the agent surface.** `burrow-agent` can neither lock nor unlock; a
+  mechanism whose value is that a person performs a second deliberate act is worth nothing if one
+  caller performs both. The agent *can* see a lock — it rides on `status`, `burrow app list`, and
+  `burrow addon list` — and `burrow-agent guard` reports both verbs as absent, so an agent that
+  meets a locked refusal can say what stands in the way and who removes it.
+- **`unlock` takes no `--confirm`.** The unlock *is* the deliberate act; a confirmation on top
+  would make the pair ceremony.
+- **Both acts are audited**, as `lock` and `unlock`. The unlock is the line worth reading: an
+  unlock with no deletion after it is a lock somebody removed and forgot to restore.
+- **It is per environment.** `prod`'s lock on `website` says nothing about `staging`'s, which is
+  the point — acting on production while meaning staging is the mistake the mechanism exists for.
+
+---
+
 ## Operational limits
 
 A limit is a **bound a human sets**, and it is deliberately not a guardrail
@@ -1701,6 +1751,7 @@ pinned by tests that fail if a verb is added or removed.
 `cluster install`, `cluster upgrade`, `cluster bootstrap`, `cluster ingress install`,
 `cluster registry install`, `cluster postgres install`, `cluster config set`, `join`, `env add`,
 `guard set`, `app secret set`, `app auto-deploy`, `app hook set`, `app checks enable`/`app checks disable`,
+`lock`, `unlock`,
 `addon remove`, `addon remove --delete-data`,
 `addon connect`, `addon detach`, `addon detach --delete-data`,
 `addon restore`, `addon restore-instance`, `addon config`,

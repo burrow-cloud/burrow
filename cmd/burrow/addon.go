@@ -1685,9 +1685,11 @@ func newAddonListCmd() *cobra.Command {
 				// what the instance is called in Kubernetes. The two are the same for an environment's
 				// first instance and differ for every later one, and this listing is where somebody
 				// holding a generated name off `kubectl get` finds out what it is (ADR-0091 §2).
-				fmt.Fprintln(tw, "NAME\tCLUSTER\tTYPE\tENV\tMODE\tENDPOINT\tCAPABILITIES")
+				fmt.Fprintln(tw, "NAME\tCLUSTER\tTYPE\tENV\tMODE\tLOCKED\tENDPOINT\tCAPABILITIES")
 				for _, a := range listing.Addons {
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", addonLabel(a), a.Name, a.Type, addonEnvColumn(a), a.Mode, a.Endpoint, strings.Join(a.Capabilities, ","))
+					// LOCKED sits with the instance's identity rather than at the end: it is the
+					// instance holding the data that a lock most matters on (cloud ADR-0060 §1).
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", addonLabel(a), a.Name, a.Type, addonEnvColumn(a), a.Mode, lockedColumn(a.Locked), a.Endpoint, strings.Join(a.Capabilities, ","))
 				}
 				if err := tw.Flush(); err != nil {
 					return err

@@ -54,6 +54,9 @@ type Database struct {
 	// The variable name each attachment's connection string was written under (issue #462). An
 	// absent entry means DATABASE_URL: the default did not move when the name became a choice.
 	attachments map[string]string // "addon\x00app\x00env" -> env var name
+	// What is locked (cloud ADR-0060), keyed "subject\x00env\x00name". An absent entry means
+	// unlocked, which is what everything starts as: the map holds what somebody protected.
+	locks map[string]controlplane.Lock
 
 	// The operator-set operational limits (ADR-0068 §1), kept apart from policy above because a
 	// limit carries a value rather than a disposition.
@@ -89,6 +92,7 @@ func NewDatabase() *Database {
 		secretDirs:   make(map[string]string),
 		depChecks:    make(map[string]bool),
 		attachments:  make(map[string]string),
+		locks:        make(map[string]controlplane.Lock),
 		limits:       controlplane.OperationalConfig{Values: map[controlplane.LimitCode]string{}},
 		principals:   make(map[string]controlplane.Principal),
 		credentials:  make(map[string]controlplane.Credential),

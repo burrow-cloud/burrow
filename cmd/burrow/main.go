@@ -148,6 +148,12 @@ func newRootCmd() *cobra.Command {
 		// operating — and it is top level rather than under `app` because its whole point is that it
 		// spans every object Burrow manages, not one app.
 		grouped(newFailuresCmd(), groupOperate),
+		// The lock and its removal (cloud ADR-0060). They sit under Operate beside the things they
+		// protect, and top level rather than under `app`, because one command covers an app and an
+		// add-on instance — and because a person reaching for protection should not have to know
+		// which noun the thing they are protecting is filed under.
+		grouped(newLockCmd(), groupOperate),
+		grouped(newUnlockCmd(), groupOperate),
 		// Govern: guardrail policy and the audit trail.
 		grouped(newGuardCmd(), groupGovern),
 		grouped(newAuditCmd(), groupGovern),

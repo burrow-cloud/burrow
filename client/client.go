@@ -276,6 +276,9 @@ type WorkloadStatus struct {
 	// "CrashLoopBackOff"), for branching without parsing the prose. See ADR-0006, ADR-0074 §2.
 	Issue       string `json:"issue,omitempty"`
 	IssueReason string `json:"issue_reason,omitempty"`
+	// Locked reports whether the app carries a lock, so deleting it refuses until somebody unlocks
+	// it (cloud ADR-0060). It is control-plane state, not something read from the cluster.
+	Locked bool `json:"locked,omitempty"`
 }
 
 type DeployResult struct {
@@ -321,6 +324,9 @@ type StatusResult struct {
 	// Coverage is what the observer was doing over that window. An empty Failures list means
 	// "nothing broke" only if Coverage says something was watching.
 	Coverage Coverage `json:"coverage"`
+	// Locked reports whether the app is locked (cloud ADR-0060 §5), so a reader — a person or an
+	// agent — learns that deleting it takes an unlock BEFORE trying a delete that would refuse.
+	Locked bool `json:"locked,omitempty"`
 }
 
 type ScaleResult struct {
@@ -996,6 +1002,9 @@ type Addon struct {
 	Endpoint     string   `json:"endpoint"`
 	Capabilities []string `json:"capabilities"`
 	Ready        bool     `json:"ready"`
+	// Locked reports whether this instance is locked, so removing it — and detaching from it with
+	// --delete-data — refuses until somebody unlocks it (cloud ADR-0060).
+	Locked bool `json:"locked,omitempty"`
 	// Warning is a non-blocking note about the install, not persisted anywhere: today, that the
 	// instance was created WITHOUT write-ahead-log archiving because the cluster has no pgBackRest
 	// plugin, even though an object-storage destination is registered (ADR-0066 §3). Empty when
@@ -2674,6 +2683,54 @@ type HealthResult struct {
 	Hint string `json:"hint,omitempty"`
 	// AppliesOn says when the reported probe reaches the running pods, when it is not there yet.
 	AppliesOn string `json:"applies_on,omitempty"`
+}
+
+// LockResult is what `lock` and `unlock` report (cloud ADR-0060): the resulting state rather than
+// the change, so locking something already locked reads the same as locking it now. Changed says
+// whether this call is what changed it, so a person who meant to be the one removing a lock can tell
+// that somebody else already had.
+type LockResult struct {
+	// Subject is what kind of thing is locked: "app" or "addon_instance".
+	Subject     string `json:"subject"`
+	Name        string `json:"name"`
+	Environment string `json:"environment"`
+	Locked      bool   `json:"locked"`
+	// LockedAt is when the lock was set; zero when the subject is not locked.
+	LockedAt time.Time `json:"locked_at,omitempty"`
+	Changed  bool      `json:"changed"`
+}
+
+// LockApp locks an app so deleting it refuses until somebody unlocks it (cloud ADR-0060). It is
+// idempotent and destroys nothing, so it takes no confirmation.
+func (c *Client) LockApp(ctx context.Context, app, env string) (LockResult, error) {
+	var out LockResult
+	err := c.do(ctx, http.MethodPut, withEnv(c.appPath(app, "lock"), env), nil, &out)
+	return out, err
+}
+
+// UnlockApp removes an app's lock. It takes no confirmation flag: the unlock IS the deliberate act,
+// and a confirmation on top would make the pair ceremony. Deleting a locked app still takes both an
+// unlock and a confirmed delete (cloud ADR-0060 §7).
+func (c *Client) UnlockApp(ctx context.Context, app, env string) (LockResult, error) {
+	var out LockResult
+	err := c.do(ctx, http.MethodDelete, withEnv(c.appPath(app, "lock"), env), nil, &out)
+	return out, err
+}
+
+// LockAddon locks an add-on instance, so removing it — and detaching an app from it with
+// --delete-data — refuses until somebody unlocks it. name is the instance's label, or its name in
+// the cluster; both resolve the way a removal resolves them.
+func (c *Client) LockAddon(ctx context.Context, name, env string) (LockResult, error) {
+	var out LockResult
+	err := c.do(ctx, http.MethodPut, withEnv("/v1/addons/"+url.PathEscape(name)+"/lock", env), nil, &out)
+	return out, err
+}
+
+// UnlockAddon removes an add-on instance's lock.
+func (c *Client) UnlockAddon(ctx context.Context, name, env string) (LockResult, error) {
+	var out LockResult
+	err := c.do(ctx, http.MethodDelete, withEnv("/v1/addons/"+url.PathEscape(name)+"/lock", env), nil, &out)
+	return out, err
 }
 
 // Health returns an app's declared health endpoint and the readiness probe Burrow authors from it

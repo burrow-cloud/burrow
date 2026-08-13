@@ -606,6 +606,12 @@ type AddonInfo struct {
 	// Ready is a live property — whether the instance's backing workload is available. It is probed
 	// from the cluster at list time and never persisted in the registry.
 	Ready bool `json:"ready"`
+	// Locked reports whether this instance carries a lock, so removing it — and detaching an app
+	// from it with --delete-data — refuses until somebody unlocks it (cloud ADR-0060). Like Ready it
+	// is filled in at list time rather than stored on the registry row: the lock is its own record,
+	// keyed by the instance's label and environment, and a copy on this row would be free to drift
+	// from the fact the destructive path actually reads.
+	Locked bool `json:"locked,omitempty"`
 	// Warning is a non-blocking note about the operation that produced this row. It is NOT persisted
 	// — the registry holds what an add-on IS, and this is a fact about one install — so it is empty
 	// on every row read back from the registry and only ever set on the value an install returns.

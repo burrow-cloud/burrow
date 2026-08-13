@@ -946,6 +946,13 @@ func (e *Engine) ListApps(ctx context.Context, env string) ([]WorkloadStatus, er
 	if err != nil {
 		return nil, fmt.Errorf("list apps: reading cluster: %w", err)
 	}
+	// Lock state is control-plane state, so it is filled in here rather than derived from the
+	// cluster: the listing is where a person sees that something is protected, and a lock nobody can
+	// see is a lock somebody removes and forgets to restore (cloud ADR-0060 §5, Consequences).
+	locked := e.lockedNames(ctx, LockSubjectApp, envName(env))
+	for i := range apps {
+		apps[i].Locked = locked[lockKey(envName(env), apps[i].App)]
+	}
 	return apps, nil
 }
 
@@ -1091,7 +1098,12 @@ func (e *Engine) ListAddons(ctx context.Context) ([]AddonInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list addons: reading the registry: %w", err)
 	}
+	// Every environment's locks in one read, keyed the way the rows are: by (environment, label).
+	// The listing spans environments, so narrowing to one would report an instance in another
+	// environment as unlocked, which is the one wrong answer this flag must never give.
+	locked := e.lockedNames(ctx, LockSubjectAddonInstance, "")
 	for i := range addons {
+		addons[i].Locked = locked[lockKey(envName(addons[i].Environment), instanceLabel(addons[i]))]
 		if addons[i].Mode != "installed" {
 			continue
 		}
@@ -1147,6 +1159,13 @@ func (e *Engine) RemoveAddon(ctx context.Context, name string, opts RemoveAddonO
 	// From here the removal acts on the instance the registry named, never on the caller's string:
 	// a label and a cluster name are the same value only for an environment's first instance.
 	name = info.Name
+	// A LOCK REFUSES BEFORE ANYTHING IS PLANNED (cloud ADR-0060 §2). The instance holds the data,
+	// which is why it is lockable at all: an app's workload is something a deploy recreates, and
+	// what is on this volume is not. The lock is keyed by the label, the half an operator types.
+	if err := e.refuseIfLocked(ctx, LockSubjectAddonInstance, envName(info.Environment), instanceLabel(info),
+		"removing this add-on instance", unlockCommand(LockSubjectAddonInstance, instanceLabel(info), envName(info.Environment))); err != nil {
+		return RemoveAddonResult{}, fmt.Errorf("remove addon %s: %w", name, err)
+	}
 	apps, appsKnown := e.attachedApps(ctx, info)
 
 	// Planned before the guardrail so the held confirmation says whether a copy will be made, and
@@ -1758,6 +1777,17 @@ func (e *Engine) DetachAddon(ctx context.Context, t AddonType, app, env string, 
 		}
 		key = AppDatabaseURLKey
 	}
+	// A LOCK REFUSES THE DATA-DESTROYING DETACH AND NOTHING ELSE (cloud ADR-0060 §2). An ordinary
+	// detach keeps the database precisely so a re-attach gets it back, so it undoes by being redone
+	// and a lock that blocked it would be a lock somebody switched off. `--delete-data` is the form
+	// that cannot be undone, and it is the flag rather than the detach that the lock is about.
+	if opts.DeleteData {
+		if err := e.refuseIfLocked(ctx, LockSubjectAddonInstance, targetEnv, instanceLabel(inst),
+			"detaching with --delete-data, which would destroy this app's database on it",
+			unlockCommand(LockSubjectAddonInstance, instanceLabel(inst), targetEnv)); err != nil {
+			return fmt.Errorf("detach addon %s for %s: %w", t, app, err)
+		}
+	}
 	args := map[string]string{"addon": string(t), "app": app, "env": targetEnv, "instance": instanceLabel(inst), "key": key, "delete_data": strconv.FormatBool(opts.DeleteData)}
 	// WHAT THE HOLD SAYS FOLLOWS WHAT THE CALL DOES. The guardrail guards losing an app's access to
 	// its data, which is disruptive and worth a confirmation; it is not the gate on destroying the
@@ -2102,6 +2132,27 @@ func (e *Engine) RestoreAddon(ctx context.Context, t AddonType, app, backupID, e
 	return nil
 }
 
+// appExists reports whether app is a thing Burrow manages in the named (canonical) environment: it
+// has recorded releases, or a live workload in ns. It is shared by the operations that must not act
+// on a name nobody deployed — the delete, which would otherwise report success for a teardown of
+// nothing, and the lock, where a lock on a typo reads exactly like protection and is not.
+func (e *Engine) appExists(ctx context.Context, k Kubernetes, app, env string) (bool, error) {
+	releases, err := e.db.Releases(ctx, app, env)
+	if err != nil {
+		return false, fmt.Errorf("reading release history: %w", err)
+	}
+	if len(releases) > 0 {
+		return true, nil
+	}
+	if _, err := k.WorkloadStatus(ctx, app); err != nil {
+		if !errors.Is(err, ErrNotFound) {
+			return false, fmt.Errorf("reading workload: %w", err)
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
 // DeleteApp removes an app entirely: its workload, its routing (Service/Ingress), and its
 // release history, so the app disappears from the apps listing and from status. It is guarded
 // by app.delete, which holds the destructive teardown for confirmation by default (ADR-0020).
@@ -2120,22 +2171,21 @@ func (e *Engine) DeleteApp(ctx context.Context, app, env string, confirm bool) e
 
 	// Existence: an app exists if it has releases OR a live workload. Determine this before
 	// evaluating the guardrail so an unknown app is ErrNotFound rather than a confirm prompt.
-	releases, err := e.db.Releases(ctx, app, envName(env))
+	exists, err := e.appExists(ctx, k, app, envName(env))
 	if err != nil {
-		return fmt.Errorf("delete app %s: reading release history: %w", app, err)
-	}
-	exists := len(releases) > 0
-	if !exists {
-		if _, err := k.WorkloadStatus(ctx, app); err != nil {
-			if !errors.Is(err, ErrNotFound) {
-				return fmt.Errorf("delete app %s: reading workload: %w", app, err)
-			}
-		} else {
-			exists = true
-		}
+		return fmt.Errorf("delete app %s: %w", app, err)
 	}
 	if !exists {
 		return fmt.Errorf("delete app %s: unknown app: %w", app, ErrNotFound)
+	}
+
+	// A LOCK REFUSES BEFORE THE GUARDRAIL IS ASKED (cloud ADR-0060 §2). The two answer different
+	// questions and the order matters for what the caller is told: a guardrail hold says "re-issue
+	// this with --confirm", which is advice a locked delete cannot act on. Deleting a locked app
+	// takes an unlock AND a confirmed delete, and neither makes the other redundant (§7).
+	if err := e.refuseIfLocked(ctx, LockSubjectApp, envName(env), app,
+		"deleting this app", unlockCommand(LockSubjectApp, app, envName(env))); err != nil {
+		return fmt.Errorf("delete app %s: %w", app, err)
 	}
 
 	pol, err := e.db.Policy(ctx)
@@ -2422,6 +2472,10 @@ func (e *Engine) Status(ctx context.Context, app, env string) (StatusResult, err
 		return StatusResult{}, fmt.Errorf("status %s: %w", app, errF)
 	}
 	res.Failures, res.Coverage = failures, cov
+	// Whether this app is locked (cloud ADR-0060 §5). It rides on status rather than being
+	// discoverable only by attempting a delete, because an agent that can SEE the lock reports "this
+	// is locked and a person unlocks it" instead of learning the same fact from a refusal.
+	res.Locked = e.lockedNames(ctx, LockSubjectApp, envName(env))[lockKey(envName(env), app)]
 	return res, nil
 }
 

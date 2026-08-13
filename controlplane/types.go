@@ -171,6 +171,12 @@ type WorkloadStatus struct {
 	// Each value is the raw Kubernetes reason string wherever Kubernetes has one. Empty whenever
 	// Issue is empty.
 	IssueReason string `json:"issue_reason,omitempty"`
+	// Locked reports whether this app carries a lock, so deleting it refuses until somebody unlocks
+	// it (cloud ADR-0060). It is CONTROL-PLANE state filled in by the engine, not something read
+	// from the cluster: the Kubernetes seam never sets it, and a workload the engine did not enrich
+	// reports false. It rides here so lock state is visible wherever an app is listed rather than
+	// discoverable only by attempting to destroy it.
+	Locked bool `json:"locked,omitempty"`
 }
 
 // WorkloadEventKind names what a workload watch is reporting (ADR-0079 §1). Two of the four kinds

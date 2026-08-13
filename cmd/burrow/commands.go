@@ -50,12 +50,14 @@ func newAppListCmd() *cobra.Command {
 			// Size the columns from the data through a tabwriter so a long image reference
 			// keeps its gutter to the next column instead of colliding with it (#306).
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tIMAGE\tREPLICAS\tAVAILABLE\tISSUE")
+			fmt.Fprintln(tw, "NAME\tIMAGE\tREPLICAS\tAVAILABLE\tLOCKED\tISSUE")
 			for _, a := range apps {
 				// Show the raw issue reason (e.g. ImagePullBackOff) so a wedged rollout is visible
 				// here without opening `burrow app logs`; the full actionable message and fix live in
 				// `burrow app status` and the --json output (#307).
-				fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%t\t%s\n", a.App, a.Image, a.ReadyReplicas, a.DesiredReplicas, a.Available, a.IssueReason)
+				// LOCKED is a column rather than a footnote because a lock nobody sees is a lock
+				// somebody removes and forgets to restore (cloud ADR-0060, Consequences).
+				fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%t\t%s\t%s\n", a.App, a.Image, a.ReadyReplicas, a.DesiredReplicas, a.Available, lockedColumn(a.Locked), a.IssueReason)
 			}
 			return tw.Flush()
 		},
@@ -509,6 +511,16 @@ func newAppDeleteCmd() *cobra.Command {
 	return cmd
 }
 
+// lockedColumn renders lock state for a listing: the word for a locked thing, a dash for the rest.
+// A dash rather than "no" keeps the column quiet on the install where nothing is locked, and leaves
+// the one row that IS locked the only thing with a word in it.
+func lockedColumn(locked bool) string {
+	if locked {
+		return "locked"
+	}
+	return "-"
+}
+
 func formatStatus(w io.Writer, res client.StatusResult) string {
 	s := "app: " + res.App + "\n"
 	if res.HasRelease {
@@ -527,6 +539,12 @@ func formatStatus(w io.Writer, res client.StatusResult) string {
 		}
 	} else {
 		s += "workload: not running"
+	}
+	// The lock, when there is one (cloud ADR-0060 §5). It is printed only when the app is locked:
+	// unlocked is what everything is, and a line saying so on every status would be the noise that
+	// makes the one that matters easy to skim past.
+	if res.Locked {
+		s += "\nlocked: yes — deleting this app refuses until `burrow unlock " + res.App + "` is run. Deploys, rollbacks and scaling are unaffected."
 	}
 	return s + formatStatusFailures(w, res, time.Now())
 }

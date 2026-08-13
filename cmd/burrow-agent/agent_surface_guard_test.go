@@ -121,6 +121,14 @@ var adminVerbFragments = []string{
 	// mistaken argument can reach outside the cluster entirely (ADR-0063 §5, ADR-0065 tier 1).
 	// Burrow performs no bucket deletion on either CLI; these fragments assert its absence here
 	// rather than leaving it a property of what the command tree happens to register today.
+	// The lock and its removal (cloud ADR-0060 §4). The fragment catches both spellings, since
+	// "unlock" contains "lock" and nothing else on this surface does — "rollback" does not. It is
+	// caught here for a reason unlike the rest of this list: neither verb is dangerous in itself,
+	// and it is UNLOCKING that must stay off the surface, because a mechanism whose value is that
+	// destruction takes a second deliberate human act is worth nothing if one caller performs both.
+	// Locking is absent for symmetry — a lock the agent sets is one the agent is trusted to reason
+	// about, and the protection is the operator's to place.
+	"lock",
 	"bucket_delete",
 	"bucket_remove",
 	"bucket_destroy",

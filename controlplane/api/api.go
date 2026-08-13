@@ -112,6 +112,13 @@ func New(cfg Config) (http.Handler, error) {
 	// whether Burrow keeps verifying what it handed the app, so it lives on this admin API only.
 	v1.HandleFunc("GET /v1/apps/{app}/checks", s.getChecks)
 	v1.HandleFunc("PUT /v1/apps/{app}/checks", s.setChecks)
+	// lock: PUT locks an app so deleting it refuses, DELETE unlocks it (cloud ADR-0060). Both are
+	// operator actions and neither is an agent verb — a mechanism whose value is that a second
+	// deliberate human act is required is worth nothing if one caller can perform both acts. The
+	// state is READ through status and the apps listing rather than through a GET of its own, so an
+	// agent learns a thing is locked from the answer it was already reading.
+	v1.HandleFunc("PUT /v1/apps/{app}/lock", s.lockApp)
+	v1.HandleFunc("DELETE /v1/apps/{app}/lock", s.unlockApp)
 	// next-tag suggests the app's next semver release tags from its current running tag (ADR-0052 §8).
 	// It is read-only guidance the agent applies to its own build; there is no mutating counterpart.
 	v1.HandleFunc("GET /v1/apps/{app}/next-tag", s.nextTag)
@@ -360,6 +367,10 @@ func New(cfg Config) (http.Handler, error) {
 	// instance and dropped, it does both to the environment's main one (ADR-0091 §4). The read
 	// displays a shape and decides nothing.
 	v1.HandleFunc("POST /v1/addons/config/instance/{instance}", s.configureAddon)
+	// The same two verbs for an add-on INSTANCE (cloud ADR-0060 §1). The instance is the half that
+	// holds the data, so if only one of the two were lockable it should have been this one.
+	v1.HandleFunc("PUT /v1/addons/{name}/lock", s.lockAddon)
+	v1.HandleFunc("DELETE /v1/addons/{name}/lock", s.unlockAddon)
 	v1.HandleFunc("GET /v1/addons", s.listAddonsHandler)
 	v1.HandleFunc("DELETE /v1/addons/{name}", s.removeAddon)
 	// What the removal does to the DATA is a route, and BOTH dispositions are, because here it is
@@ -468,6 +479,53 @@ func (s *server) deleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"app": app})
+}
+
+// lockApp locks one app so deleting it refuses until somebody unlocks it (cloud ADR-0060). It takes
+// no body and no confirmation: the lock is additive and destroys nothing, so there is nothing to
+// confirm.
+func (s *server) lockApp(w http.ResponseWriter, r *http.Request) {
+	res, err := s.engine.LockApp(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// unlockApp removes an app's lock. It takes no confirmation either, and that is a decision rather
+// than an omission: the unlock IS the deliberate act the mechanism is built around, and a
+// confirmation on top would make the pair ceremony. Deleting a locked app still takes both an unlock
+// and a confirmed delete — `--confirm` is unchanged and composes with this (cloud ADR-0060 §7).
+func (s *server) unlockApp(w http.ResponseWriter, r *http.Request) {
+	res, err := s.engine.UnlockApp(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// lockAddon locks one add-on instance, so removing it — and detaching an app from it with
+// --delete-data — refuses. The name is resolved the way a removal resolves it: a registry name, else
+// a label in the named environment.
+func (s *server) lockAddon(w http.ResponseWriter, r *http.Request) {
+	res, err := s.engine.LockAddonInstance(r.Context(), r.PathValue("name"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// unlockAddon removes an add-on instance's lock.
+func (s *server) unlockAddon(w http.ResponseWriter, r *http.Request) {
+	res, err := s.engine.UnlockAddonInstance(r.Context(), r.PathValue("name"), r.URL.Query().Get("env"))
+	if err != nil {
+		writeEngineError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // deploy applies an image to an app (ADR-0007). A caller that sends `Accept: application/x-ndjson`
@@ -2234,6 +2292,16 @@ func engineError(err error) (int, errorResponse) {
 		return http.StatusUnprocessableEntity, errorResponse{
 			Error: err.Error(), Code: string(l.Code), Requested: &req, Limit: &lim,
 		}
+	}
+	// A locked subject is a structured refusal with its own code, and it is deliberately NOT reported
+	// as a guardrail one (cloud ADR-0060 §3). A guardrail refusal says "policy says this caller may
+	// not", and a client that reads one knows two things it must not conclude here: that re-issuing
+	// with confirm=true may work, and that a different caller may succeed. Neither is true of a lock,
+	// which holds for everybody and is removed only by a separate command against the thing itself.
+	// NeedsConfirmation stays absent for exactly that reason — there is nothing to confirm — and the
+	// unlock command rides in the error text, which is what the agent relays to a person.
+	if _, ok := controlplane.AsLocked(err); ok {
+		return http.StatusUnprocessableEntity, errorResponse{Error: err.Error(), Code: "locked"}
 	}
 	if g, ok := controlplane.AsGuardrail(err); ok {
 		req, lim := g.Requested, g.Limit

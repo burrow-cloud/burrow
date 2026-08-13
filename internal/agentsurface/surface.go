@@ -388,6 +388,36 @@ var catalogue = []Capability{
 		Command: "the vendor's own CLI (e.g. `aws s3 rb`, `b2 bucket delete`), run by a human",
 	},
 
+	// The lock, and the act that removes it (cloud ADR-0060 §4). Neither verb is on the agent
+	// surface, and the reason is unlike every other entry here: it is not that the blast radius is
+	// too wide or the change irreversible — locking destroys nothing and unlocking destroys nothing.
+	// It is that the mechanism's whole value is that destruction takes a SECOND deliberate act by a
+	// person, and two acts by one caller in one loop are one act. An agent that could unlock could
+	// delete, and the lock would be a delay rather than a protection.
+	//
+	// They are REPORTED for the reason ADR-0065 §5 gives and this record leans on hardest (§5): the
+	// agent CAN see a lock — it rides on `status` and on the listings — and a refusal names it. An
+	// agent that reads the refusal, finds the capability here, and tells its person "this is locked,
+	// and here is the command that unlocks it" has turned a dead end into a handover. Without these
+	// entries it would relay a refusal it cannot explain, or retry against one that never changes.
+	{
+		Surface: Operator,
+		Path:    "lock",
+		What:    "locks an app or an add-on instance, so the operations that cannot be undone refuse",
+		Why: "a lock is a person's protection of their own thing, and it holds against every caller " +
+			"including whoever set it (cloud ADR-0060 §3); it is not policy about the agent, which is " +
+			"what `guard` is for",
+		Command: "burrow lock <app>",
+	},
+	{
+		Surface: Operator,
+		Path:    "unlock",
+		What:    "removes a lock, so the app or add-on instance can be destroyed again",
+		Why: "the lock's only property is that destroying something takes a second deliberate act by a " +
+			"person (cloud ADR-0060 §4); an agent that could perform both acts would have performed one",
+		Command: "burrow unlock <app>",
+	},
+
 	// Governance. `guard set` is load-bearing twice over: it is what an operator uses to relax or
 	// tighten a guardrail, and its absence here is what makes every tier-2 `deny` trustworthy
 	// rather than advisory (ADR-0065 "Consequences"). If the agent could set its own guardrails,

@@ -190,9 +190,17 @@ var commandClasses = map[string]commandClass{
 	// reduction has a gate of its own and is exercised where that gate is tested, not here.
 	"addon config postgres standbys": {class: classChanges, why: "changes how many standbys an existing Postgres instance runs, which provisions hardware (ADR-0082)", args: []string{"addon", "config", "postgres", "standbys", "1"}},
 	"addon config postgres storage":  {class: classChanges, why: "grows an existing Postgres instance's data volume, which cannot be undone (ADR-0082 §2)", args: []string{"addon", "config", "postgres", "storage", "50Gi"}},
-	"guard set":                      {class: classChanges, why: "rewrites the guardrail policy the agent runs under", args: []string{"guard", "set", "app.deploy", "allow"}},
-	"cluster config set":             {class: classChanges, why: "writes an operational limit", args: []string{"cluster", "config", "set", "app.replicas.max", "5"}},
-	"config provider add":            {class: classChanges, why: "registers a provider credential through the control plane", args: []string{"config", "provider", "add", "cloudflare"}},
+	// The lock and its removal (cloud ADR-0060). Both write state on the target's control plane, and
+	// the unlock is the one that has to name where it landed: unlocking production while meaning
+	// staging is precisely the mistake the lock exists to interrupt, and it would otherwise be
+	// discovered by the delete that follows.
+	"lock":                {class: classChanges, why: "locks an app on the target's control plane, so deleting it refuses", args: []string{"lock", "web"}},
+	"lock addon":          {class: classChanges, why: "locks an add-on instance, so removing it refuses", args: []string{"lock", "addon", "postgres"}},
+	"unlock":              {class: classChanges, why: "removes an app's lock, which is what permits it to be deleted", args: []string{"unlock", "web"}},
+	"unlock addon":        {class: classChanges, why: "removes an add-on instance's lock, which is what permits it to be removed", args: []string{"unlock", "addon", "postgres"}},
+	"guard set":           {class: classChanges, why: "rewrites the guardrail policy the agent runs under", args: []string{"guard", "set", "app.deploy", "allow"}},
+	"cluster config set":  {class: classChanges, why: "writes an operational limit", args: []string{"cluster", "config", "set", "app.replicas.max", "5"}},
+	"config provider add": {class: classChanges, why: "registers a provider credential through the control plane", args: []string{"config", "provider", "add", "cloudflare"}},
 }
 
 // changeGuardRationale is appended to every failure here so the message teaches rather than merely

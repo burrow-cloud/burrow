@@ -120,9 +120,16 @@ const (
 	OpSetSecretsDir           Op = "SetSecretsDir"
 	OpDependencyChecksEnabled Op = "DependencyChecksEnabled"
 	OpSetDependencyChecks     Op = "SetDependencyChecks"
-	OpAddonEnvKey             Op = "AddonEnvKey"
-	OpSetAddonEnvKey          Op = "SetAddonEnvKey"
-	OpDeleteAddonEnvKey       Op = "DeleteAddonEnvKey"
+	// What is locked (cloud ADR-0060). OpLock is the read the destructive paths make, so injecting
+	// an error on it is how a test asserts that an unreadable lock refuses rather than proceeds.
+	OpLock       Op = "Lock"
+	OpSetLock    Op = "SetLock"
+	OpDeleteLock Op = "DeleteLock"
+	OpLocks      Op = "Locks"
+
+	OpAddonEnvKey       Op = "AddonEnvKey"
+	OpSetAddonEnvKey    Op = "SetAddonEnvKey"
+	OpDeleteAddonEnvKey Op = "DeleteAddonEnvKey"
 
 	// Who Burrow knows and what they hold (ADR-0084 §2, §3).
 	OpClaimFirstPrincipal  Op = "ClaimFirstPrincipal"

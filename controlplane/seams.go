@@ -1053,6 +1053,24 @@ type Database interface {
 	// never recorded one is a no-op.
 	DeleteDependencyCheckSettings(ctx context.Context, app string) error
 
+	// Lock returns the lock on one subject — an app, or an add-on instance — in the named
+	// environment, or ErrNotFound when it is not locked (cloud ADR-0060 §1). The destructive paths
+	// read it before they do anything, so the answer has to be a fact rather than a default: a
+	// missing row is reported as ErrNotFound rather than as a zero Lock, so a caller cannot read "I
+	// could not tell" as "it is not locked" and destroy the one thing somebody asked Burrow to keep.
+	Lock(ctx context.Context, subject LockSubject, env, name string) (Lock, error)
+	// SetLock locks a subject. It is an upsert and leaves an existing lock's timestamp alone: the row
+	// answers "since when has this been protected", and a second person asserting the same protection
+	// is not a new answer to that question.
+	SetLock(ctx context.Context, lock Lock) error
+	// DeleteLock removes a subject's lock. Unlocking something that is not locked is a no-op, not an
+	// error — it is the state the caller asked for.
+	DeleteLock(ctx context.Context, subject LockSubject, env, name string) error
+	// Locks returns the locks of one subject kind in one environment, name order — what the listings
+	// read so lock state is visible where a thing is listed rather than discoverable only by
+	// attempting to destroy it (cloud ADR-0060 §5). An empty environment returns every environment's.
+	Locks(ctx context.Context, subject LockSubject, env string) ([]Lock, error)
+
 	// AddonEnvKey returns the environment variable name app's attachment to addon's INSTANCE in env
 	// was written under (ADR-0031, issue #462) — the one fact about an attachment that cannot be
 	// derived, since a derivation can only ever produce the name nobody chose — and whether a row was

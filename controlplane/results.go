@@ -213,6 +213,10 @@ type StatusResult struct {
 	// Coverage is what the observer was doing over that same window. It is never omitted, because
 	// an empty Failures list means "nothing broke" only if something was watching.
 	Coverage Coverage `json:"coverage"`
+	// Locked reports whether this app is locked, so deleting it refuses until somebody unlocks it
+	// (cloud ADR-0060 §5). An agent that reads it can say what stands in the way of a delete before
+	// it tries one, instead of learning the same fact from a refusal it cannot act on.
+	Locked bool `json:"locked,omitempty"`
 }
 
 // ScaleResult reports the outcome of a scale.

@@ -432,3 +432,96 @@ func TestBuildNonProviderHostHasNoCredential(t *testing.T) {
 		t.Errorf("builder credential = %+v, want zero for a non-provider host", got)
 	}
 }
+
+// stubSourceCredentials records the repo it was asked about and answers with a fixed credential or
+// error, so the tests below can assert BOTH that the seam is consulted and that it is told WHICH
+// repository is about to be cloned — the property that lets a resolver scope what it returns.
+type stubSourceCredentials struct {
+	gotRepo string
+	cred    cp.SourceCredential
+	err     error
+}
+
+func (s *stubSourceCredentials) SourceCredential(_ context.Context, repo string) (cp.SourceCredential, error) {
+	s.gotRepo = repo
+	return s.cred, s.err
+}
+
+// newBuildEngineWithResolver wires an engine whose clone credential comes from a resolver rather
+// than the persisted provider store.
+func newBuildEngineWithResolver(t *testing.T, res cp.SourceCredentialResolver) (*cp.Engine, *fake.Builder) {
+	t.Helper()
+	k, d := fake.NewKubernetes(), fake.NewDatabase()
+	d.SetPolicy(permissive())
+	b := fake.NewBuilder()
+	b.SetDigest("sha256:beef")
+	e, err := cp.New(cp.Deps{
+		Kubernetes: k, Database: d, Clock: fake.NewClock(time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)),
+		IDs: fake.NewIDs(), Resolver: fake.NewResolver(), Credentials: fake.NewCredentials(),
+		DNS: fake.NewDNSFactory(), Builder: b, BuildRegistry: "reg.internal:5000",
+		SourceCredentials: res,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return e, b
+}
+
+// TestBuildAsksTheResolverForTheRepoBeingCloned is ADR-0057 §5's point. The persisted provider store
+// keys a LONG-LIVED token by host; a deployment that mints a SHORT-LIVED token per repository has no
+// row to read and no key to read it by, so it answers here instead — and it is told the repository,
+// which is what lets the credential be scoped to the one clone rather than to everything it could
+// reach.
+func TestBuildAsksTheResolverForTheRepoBeingCloned(t *testing.T) {
+	res := &stubSourceCredentials{cred: cp.SourceCredential{Provider: cp.ProviderGitHub, Token: "ghs_scoped"}}
+	e, b := newBuildEngineWithResolver(t, res)
+
+	if _, err := e.Build(context.Background(), cp.BuildRequest{
+		App:    "web",
+		Source: cp.SourceRef{Repo: "https://github.com/acme/web", Ref: "v1.0.0"},
+	}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.gotRepo != "https://github.com/acme/web" {
+		t.Errorf("resolver was asked about %q, want the repo being cloned", res.gotRepo)
+	}
+	if got := b.LastCredential(); got.Token != "ghs_scoped" || got.Provider != cp.ProviderGitHub {
+		t.Errorf("builder credential = %+v, want the resolver's", got)
+	}
+}
+
+// TestBuildResolverNothingClonesAnonymously keeps the public-repository path working through the new
+// seam: a resolver with nothing for this repo returns the zero credential and no error, which is the
+// same disposition a public clone has always had.
+func TestBuildResolverNothingClonesAnonymously(t *testing.T) {
+	res := &stubSourceCredentials{}
+	e, b := newBuildEngineWithResolver(t, res)
+
+	if _, err := e.Build(context.Background(), cp.BuildRequest{
+		App:    "web",
+		Source: cp.SourceRef{Repo: "https://github.com/acme/public", Ref: "v1.0.0"},
+	}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if got := b.LastCredential(); got.Token != "" {
+		t.Errorf("builder credential = %+v, want the zero credential (anonymous clone)", got)
+	}
+}
+
+// TestBuildResolverErrorFailsTheBuild is the fail-closed direction. A resolver that cannot determine
+// the credential must not degrade into an anonymous clone: that clone fails later, inside a build
+// Job, as a git prompt failure that names nothing the caller can act on.
+func TestBuildResolverErrorFailsTheBuild(t *testing.T) {
+	res := &stubSourceCredentials{err: errors.New("minting the installation token")}
+	e, b := newBuildEngineWithResolver(t, res)
+
+	if _, err := e.Build(context.Background(), cp.BuildRequest{
+		App:    "web",
+		Source: cp.SourceRef{Repo: "https://github.com/acme/web", Ref: "v1.0.0"},
+	}); err == nil {
+		t.Fatal("Build with a failing credential resolver: want an error, got nil")
+	}
+	if b.LastTarget() != "" {
+		t.Error("the builder ran despite the credential resolver failing; a build must not start with a credential nobody could resolve")
+	}
+}

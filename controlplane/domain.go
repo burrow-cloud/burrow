@@ -4,6 +4,7 @@
 package controlplane
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"time"
@@ -96,6 +97,27 @@ func (s SourceRef) Validate() error {
 		return fmt.Errorf("source ref (a commit or tag) is empty")
 	}
 	return nil
+}
+
+// SourceCredentialResolver answers, for one repository, the credential that authenticates a clone of
+// it — replacing the persisted-provider lookup for deployments whose credential cannot live in that
+// store (ADR-0057 §5).
+//
+// It exists because the store's shape assumes a LONG-LIVED token per provider host: `provider add`
+// writes one, and the engine reads it back by key. A managed deployment mints a SHORT-LIVED token per
+// repository instead, on demand, and deliberately never persists it — so there is no row to read and
+// no key to read it by. Passing the repo is the whole point: a resolver can scope what it returns to
+// exactly the repository about to be cloned rather than to everything the credential could reach.
+//
+// Returning the zero SourceCredential with a nil error means "nothing for this repo", and the clone
+// proceeds anonymously — the same disposition a public repository already gets. An error means the
+// credential could not be determined, and the build fails rather than silently falling back to an
+// anonymous clone that would fail later and less clearly.
+//
+// Implementations must treat the returned Token as SourceCredential's doc requires: never logged,
+// never placed in an error, never stored.
+type SourceCredentialResolver interface {
+	SourceCredential(ctx context.Context, repo string) (SourceCredential, error)
 }
 
 // SourceCredential is a resolved source-provider credential the in-cluster build uses to

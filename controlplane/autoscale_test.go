@@ -108,7 +108,7 @@ func TestAutoscaleGuardrail(t *testing.T) {
 	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging"}, "", cp.GuardrailAutoscale, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(asOperator(ctx), cp.GuardrailScope{Env: "staging"}, "", cp.GuardrailAutoscale, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail(staging, app.autoscale): %v", err)
 	}
 	_, err := e.Autoscale(ctx, "web", "staging", cp.AutoscaleSpec{MinReplicas: 1, MaxReplicas: 5, CPUPercent: 80}, false)

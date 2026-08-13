@@ -20,9 +20,15 @@ credentials).
 
 `burrow-agent` and the human CLI operate path (`deploy`, `status`, `logs`, `rollback`, `scale`, …) default
 to that scoped kubeconfig, so **the agent's reachable credential is confined to the control plane**:
-even a shelled-out `kubectl` pointed at it is denied everything except reaching burrowd, and the
-guardrails become binding by construction rather than resting only on the shell-denies below. The
-kubeconfig is the real trust boundary — so the highest-value hardening step is to make the scoped
+even a shelled-out `kubectl` pointed at it is denied everything except reaching burrowd, rather than
+the agent merely being asked not to go around it by the shell-denies below.
+
+That is one of the two things a binding guardrail needs. The other is that burrowd refuses to let an
+agent credential change the policy or mint an identity
+([ADR-0099](adr/0099-an-agent-may-not-rewrite-its-own-limits.md)) — a wall the agent cannot walk
+around is worth nothing if it can move the wall — and neither half holds without the other.
+
+The kubeconfig is the real trust boundary — so the highest-value hardening step is to make the scoped
 credential the *only* kubeconfig the agent can reach (point its `KUBECONFIG` at the scoped file, or
 run it in a container/VM that carries only that credential).
 
@@ -36,51 +42,61 @@ to the credential it carries, what that lets it do, and what it cannot:
 | You, via `kubectl` | your admin kubeconfig (`~/.kube/config`) | Everything on the cluster: any resource, any namespace, cluster-scoped objects, exec, delete, RBAC. No Burrow guardrails. | Nothing restricts it. Full cluster admin, and it is what installs Burrow. |
 | You, via `burrow` (setup and governance): `install`, `upgrade`, `cluster ingress install`, `config registry`, `config provider`, `env add`, `env list --discover`, `guard set`, `addon`, `domain`, `audit` | your admin kubeconfig | Install/upgrade Burrow, write its namespaces/RBAC/secrets, set the guardrail policy, configure registry and DNS-provider credentials, install add-ons, manage DNS, read the audit log. | These are admin operations. `guard set` lives here on purpose: only the human, with admin, changes guardrails. |
 | You, via `burrow` (operate an app): `app deploy`/`status`/`logs`/`scale`/`rollback`/`autoscale`, `app config`/`secret`, `publish` | the scoped agent kubeconfig (falls back to admin if none) | Operate apps through burrowd, with every action guardrail-checked and audited. | Reach the cluster around burrowd; the guardrails gate what is allowed. You still have kubectl for raw access. |
-| Your agent, via `burrow-agent` | only the scoped kubeconfig (`~/.burrow/agents/<env>`), granting exactly: proxy to the `burrowd` Service, and `get` the `burrowd-api-token` Secret | The `burrow-agent` operate-verbs only (deploy, status, logs, scale, rollback, autoscale, config, secret list/unset, publish, addons, domains, reachability, metrics/logs query, guard read-only, audit read), every mutating verb guardrailed and audited. `addon sql` is on the list too and is **denied by default** — see below. | Anything else on the cluster: no arbitrary kubectl, no other Secrets, no other namespaces, no cluster-scoped reads, no exec, and it cannot change guardrails. It cannot leave burrowd. |
+| Your agent, via `burrow-agent` | only the scoped kubeconfig (`~/.burrow/agents/<env>`), granting exactly: proxy to the `burrowd` Service, and `get` the `burrowd-api-token` Secret | The `burrow-agent` operate-verbs only (deploy, status, logs, scale, rollback, autoscale, config, secret list/unset, publish, addons, domains, reachability, metrics/logs query, guard read-only, audit read), every mutating verb guardrailed and audited. `addon sql` is on the list too and is **denied by default** — see below. | Anything else on the cluster: no arbitrary kubectl, no other Secrets, no other namespaces, no cluster-scoped reads, no exec. It cannot leave burrowd — and inside burrowd it cannot change a guardrail or mint an identity, whatever it sends: burrowd refuses both from an `agent` credential ([ADR-0099](adr/0099-an-agent-may-not-rewrite-its-own-limits.md)). |
 
 **Two independent layers.** The scoped credential is the wall that keeps the agent from going around
 burrowd (touching the cluster directly). The guardrails are the policy for what is allowed through
 burrowd. Different mechanisms; you need both.
 
-**A guardrail can bind the agent and leave you alone.** Inside burrowd, the guardrails and the
+**A guardrail holds the agent and leaves you alone.** Inside burrowd, the guardrails and the
 `burrow-agent` verb surface are what decide which operation may be called (and the guard verb is
 read-only). The scoped credential confines the agent to burrowd; it does not by itself enforce which
-burrowd operation the agent may call — the guardrail policy does, and a disposition can now say
-**which kind of credential it binds**
-([ADR-0094](adr/0094-a-guardrail-can-bind-the-agent-and-leave-the-human-alone.md)):
+burrowd operation the agent may call — the guardrail policy does, and **a disposition holds callers
+of kind `agent`** ([ADR-0097](adr/0097-guardrails-hold-the-agent-and-nobody-else.md)):
 
 ```sh
-burrow guard set --binds agent --env prod --name burrowd-cloud app.deploy deny
+burrow guard set --env prod --name burrowd-cloud app.deploy deny
 ```
 
 That refuses the deploy for anything holding an `agent` credential, and leaves your own credential
-reading whatever the policy says underneath it. The refusal the agent receives says so, and says what
-to relay: *"this disposition binds `agent` credentials; an operator can run it with their own."*
+alone: a person and a CI machine are allowed everything, always, because their Kubernetes access
+already decides what they can do and a refusal here would be undone by `kubectl` a second later. The
+refusal the agent receives names the exact command that would move the disposition, so what it hands
+you is a decision to take rather than a dead end. There is no `--binds` flag — which caller a
+disposition holds is the rule now, not an option on each one.
 
-Four things are worth knowing before you reach for it:
+Three things are worth knowing:
 
-- **`--binds` takes `user`, `agent` or `machine`** — the credential kinds recorded at issuance
-  ([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §3). The kind is read from
-  the stored credential row, never from the request, so a compromised agent cannot present itself as
-  a person.
-- **It composes with the other scopes rather than replacing them.** A binding can sit on the global
-  policy, on one environment, or on one app or add-on instance. Within a tier the bound disposition
-  answers for that kind and the unbound one answers for everybody else; the *target* still narrows
-  first, so a cluster-wide `--binds agent` does not override something you set deliberately for one
-  app.
-- **It relaxes as well as it tightens.** A global `app.delete deny` with
-  `guard set --binds user --env dev app.delete allow` under it lets you clean up a sandbox by hand
-  while the agent stays refused everywhere.
-- **It needs an install people have signed in to.** The shared install token carries no kind, so a
-  bound disposition would bind nobody — `guard set --binds` refuses on an install with no per-caller
-  credentials rather than storing a protection that protects nothing. Run `burrow auth login` first.
-  An install that never signs anybody in behaves exactly as it always has: a disposition set without
-  `--binds` binds every caller.
+- **The kind is recorded at issuance and read from the stored credential row**, never from the
+  request ([ADR-0084](adr/0084-everyone-who-uses-burrow-carries-their-own-token.md) §3), so a
+  compromised agent cannot present itself as a person.
+- **A caller with no kind is held exactly as an agent is.** On an install nobody has signed in to,
+  every request carries the shared install token and nothing has a kind — the agent included — so
+  reading "unknown" as a person would switch every guardrail off for precisely the installs that have
+  only an agent to hold.
+- **The dispositions still narrow by target.** Global, per environment, or per app or add-on
+  instance, with the narrowest target answering.
+
+**And the agent cannot change the policy that holds it**
+([ADR-0099](adr/0099-an-agent-may-not-rewrite-its-own-limits.md)). Two doors used to be open, and the
+second did not need the first: the route that sets a disposition asked nothing about the caller, and
+an admin's *agent* credential — the admin bit belongs to the principal, so it carries — could create
+an invitation, redeem it, and come back holding a `user` credential that every disposition allows.
+Both are closed the same way: **a credential of kind `agent` may not write policy and may not mint
+identity**, at every shape of those routes. The refusal is not a guardrail decision, so no
+`--confirm` satisfies it and nothing can be relaxed to open it.
+
+Two consequences to plan around:
+
+- **Reading stays open to everybody.** An agent that can see what binds it can explain a refusal to
+  you, which is why `guard list` exists. Only the writes refuse.
+- **Changing policy takes your own credential.** `burrow guard set` from a machine that has never run
+  `burrow auth login` now refuses and says so, because the shared install token has no kind. Sign in
+  first; that is the same act that gives you a revocable credential of your own.
 
 `guard list` resolves for the kind of the caller asking, so an agent reading the policy sees what
-binds the agent, and a listing that contains any bound disposition grows a `BINDS` column so you can
-see the binding rather than discover it later. Every audited row already records the caller's kind
-next to the principal, so the trail distinguishes the two decisions with no new column.
+holds the agent. Every audited row already records the caller's kind next to the principal, so the
+trail distinguishes the two decisions with no new column.
 
 **A lock is not one of these layers, and it is not a security control.** `burrow lock <app>` (and
 `burrow lock addon <instance>`) is state on the thing itself: locked, deleting the app, removing the
@@ -168,16 +184,18 @@ and nothing lists what a principal holds. Until it does, the lever for a comprom
 rotating the install, and the separate credential is buying attribution rather than a faster answer.
 Plan for that when you decide how much to rely on it.
 
-**What this does not yet give you.** The kind is recorded and read from the stored row, never from
-the request — but `Policy.enforce` still takes no caller, so a `deny` binds the agent and the person
-identically. A guardrail that binds the agent and leaves the human alone is the decision above, still
-unmade. Until it is, the agent's separate credential buys revocation and attribution, not a narrower
-set of operations.
+**What the kind goes on to decide.** It is recorded at issuance and read from the stored row, never
+from the request, and two decisions rest on it: a disposition holds callers of kind `agent` and
+leaves you alone ([ADR-0097](adr/0097-guardrails-hold-the-agent-and-nobody-else.md)), and an `agent`
+credential may not write policy or mint an identity
+([ADR-0099](adr/0099-an-agent-may-not-rewrite-its-own-limits.md)). So the agent's separate credential
+reaches strictly less than yours, on top of the revocation and attribution it already bought.
 
-Two further limits to know. An **admin's** agent credential is an admin's credential: it belongs to
-the same principal, so it can invite and issue exactly as the person can. And an invitation is
-authorization spent at issue rather than at exchange, so an admin who invites somebody and changes
-their mind should revoke the principal rather than assume an unexchanged invitation is inert.
+That second decision is what makes an **admin's** agent credential safe to hold: it belongs to the
+same principal, so it carries the admin bit, and the kind is what stops it inviting and issuing as
+the person can. One limit remains: an invitation is authorization spent at issue rather than at
+exchange, so an admin who invites somebody and changes their mind should revoke the principal rather
+than assume an unexchanged invitation is inert.
 
 **One verb reaches application DATA, and it is closed until you open it.** `burrow-agent addon sql`
 runs a statement against one app's database ([ADR-0087](adr/0087-running-sql-against-an-attached-database.md)).
@@ -286,8 +304,10 @@ credential; only `burrow-agent`, the agent's surface, fails closed.
 A coding agent (Claude Code, Cursor, …) still runs with a shell, so the shell-denies below are
 defense in depth on top of that boundary. Unless you restrict it, it can:
 
-- run the `burrow` CLI directly — including `burrow guard set`, changing the very guardrails
-  meant to constrain it; and
+- run the `burrow` CLI directly — including `burrow guard set`. burrowd refuses a policy write from
+  the agent's own credential, so this is not the open door it once was; what makes it still worth
+  denying is that the human CLI presents **your** credential from `~/.burrow/credentials`, which an
+  agent with a shell on your machine can read. The refusal binds a credential, not a process; and
 - use `kubectl` with a broader kubeconfig — if one is still reachable in its environment — to
   operate the cluster directly, bypassing Burrow entirely.
 

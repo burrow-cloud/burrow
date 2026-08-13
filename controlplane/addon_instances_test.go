@@ -307,7 +307,7 @@ func TestAGuardrailScopesByTheLabel(t *testing.T) {
 		pol.Dispositions = map[cp.GuardrailCode]cp.Disposition{}
 	}
 	d.SetPolicy(pol)
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: cp.DefaultEnvironment, Name: "analytics"}, "", cp.GuardrailAddonRemove, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(asOperator(ctx), cp.GuardrailScope{Env: cp.DefaultEnvironment, Name: "analytics"}, "", cp.GuardrailAddonRemove, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail: %v", err)
 	}
 

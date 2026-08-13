@@ -117,7 +117,7 @@ func TestSetGuardrailRejectsALimitCode(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newEngine(t, permissive())
 
-	err := e.SetGuardrail(ctx, cp.GuardrailScope{}, "", cp.GuardrailCode(cp.LimitReplicaCeiling), cp.DispositionAllow)
+	err := e.SetGuardrail(asOperator(ctx), cp.GuardrailScope{}, "", cp.GuardrailCode(cp.LimitReplicaCeiling), cp.DispositionAllow)
 	if !errors.Is(err, cp.ErrInvalid) {
 		t.Fatalf("guard set on a limit code = %v, want ErrInvalid", err)
 	}

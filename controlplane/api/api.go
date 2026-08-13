@@ -2303,6 +2303,18 @@ func engineError(err error) (int, errorResponse) {
 	if _, ok := controlplane.AsLocked(err); ok {
 		return http.StatusUnprocessableEntity, errorResponse{Error: err.Error(), Code: "locked"}
 	}
+	// A write of policy or of identity attempted by an agent credential is 403 with a code of its own
+	// (ADR-0099 §4). It is deliberately NOT reported as a guardrail refusal and NOT as a plain
+	// `forbidden`: no disposition governs it, `--confirm` does not satisfy it, and the remedy is a
+	// different credential rather than a different request. NeedsConfirmation stays absent for the
+	// reason it stays absent on a lock — there is nothing to confirm — and the way through rides in
+	// the error text, which is what the agent relays to its person.
+	//
+	// It is classified ahead of the ErrForbidden case below, which it wraps, so the specific answer
+	// survives rather than collapsing into the generic one.
+	if _, ok := controlplane.AsOperatorOnly(err); ok {
+		return http.StatusForbidden, errorResponse{Error: err.Error(), Code: "operator_only"}
+	}
 	if g, ok := controlplane.AsGuardrail(err); ok {
 		req, lim := g.Requested, g.Limit
 		return http.StatusUnprocessableEntity, errorResponse{

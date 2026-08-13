@@ -419,15 +419,21 @@ var catalogue = []Capability{
 	},
 
 	// Governance. `guard set` is load-bearing twice over: it is what an operator uses to relax or
-	// tighten a guardrail, and its absence here is what makes every tier-2 `deny` trustworthy
-	// rather than advisory (ADR-0065 "Consequences"). If the agent could set its own guardrails,
-	// the middle tier would collapse in a single step.
+	// tighten a guardrail, and holding it back is what makes every tier-2 `deny` trustworthy rather
+	// than advisory (ADR-0065 "Consequences"). If the agent could set its own guardrails, the middle
+	// tier would collapse in a single step.
+	//
+	// ITS ABSENCE FROM THIS BINARY IS NOT WHAT ENFORCES THAT, and it never was: the agent runs with a
+	// shell and the route is an ordinary API call. What enforces it is that burrowd refuses a policy
+	// write from a credential of kind `agent` (ADR-0099 §1). The absence is what makes the limit
+	// LEGIBLE — the agent can say which command it is and who runs it — which is this catalogue's job.
 	{
 		Surface: Operator,
 		Path:    "guard set",
 		What:    "sets a guardrail's disposition (allow/confirm/deny), globally or per environment",
-		Why: "an agent that could rewrite its own guardrails would have none (ADR-0020, ADR-0065); the " +
-			"dispositions this command reports are exactly the limits the agent cannot move",
+		Why: "an agent that could rewrite its own guardrails would have none, so burrowd refuses a " +
+			"policy write from an agent credential however it is sent (ADR-0099); the dispositions " +
+			"this command reports are exactly the limits the agent cannot move",
 		Command: "burrow guard set [--env <name>] <code> <allow|confirm|deny>",
 	},
 	// Operational limits. ADR-0068 §4 puts SETTING a limit beside `guard set` in ADR-0065's tier 1,

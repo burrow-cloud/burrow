@@ -2996,6 +2996,17 @@ func (e *Engine) Guardrails(ctx context.Context, scope GuardrailScope) ([]Guardr
 // The kind must be one of the three ADR-0084 §3 defines, and it must be a kind this install actually
 // issues — see requireCredentialsForBinding, which is the refusal §4 asks for.
 func (e *Engine) SetGuardrail(ctx context.Context, scope GuardrailScope, binds CredentialKind, code GuardrailCode, d Disposition) error {
+	// A CREDENTIAL OF KIND `agent` MAY NOT WRITE POLICY (ADR-0099 §1), and the check is first so that
+	// what a refused caller learns is that this is not theirs to set, rather than whether they spelled
+	// the code right. It sits on the engine method rather than on the handler because the route has
+	// several shapes — global, per environment, per name, and the compatibility form that carries a
+	// binding — and a rule enforced per shape is a rule the next shape forgets.
+	//
+	// The kind comes off the request context through the seam a disposition is resolved with, so an
+	// unknown kind is held exactly as an agent's is (ADR-0099 §3).
+	if err := refuseAgentWrite(callerKindFromContext(ctx), opSetGuardrail); err != nil {
+		return err
+	}
 	if !KnownGuardrail(code) {
 		// A limit code arriving here is the ADR-0068 §2 correction landing on someone who learned
 		// the old shape — `guard set app.replica_ceiling allow` was how the ceiling was turned off.

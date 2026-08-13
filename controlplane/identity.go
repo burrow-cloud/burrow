@@ -93,6 +93,11 @@ func (e *Engine) ClaimFirstPrincipal(ctx context.Context, name string) (Principa
 //
 // admin grants the new principal the bit as well, which is likewise admin-only.
 func (e *Engine) CreatePrincipal(ctx context.Context, caller Caller, name string, admin bool) (Principal, error) {
+	// An agent may not mint identity (ADR-0099 §2). The check is on the method rather than on its one
+	// caller today, because what makes the rule hold is that every way to a principal passes it.
+	if err := refuseAgentWrite(caller.Kind, opCreatePrincipal); err != nil {
+		return Principal{}, err
+	}
 	name, err := validPrincipalName(name)
 	if err != nil {
 		return Principal{}, err
@@ -119,6 +124,12 @@ func (e *Engine) CreatePrincipal(ctx context.Context, caller Caller, name string
 // Authorization is the seam's, not this function's: an admin issues for anybody, and a non-admin
 // issues an agent credential for themselves and nothing else (ADR-0084 §2).
 func (e *Engine) IssueCredential(ctx context.Context, caller Caller, req IssueCredentialRequest) (IssuedCredential, error) {
+	// An agent may not mint identity (ADR-0099 §2), and this is the method every issued credential
+	// but the first claim passes through — including the agent's own, which is why an agent cannot
+	// provision a second agent for itself either.
+	if err := refuseAgentWrite(caller.Kind, opIssueCredential); err != nil {
+		return IssuedCredential{}, err
+	}
 	if !req.Kind.Valid() {
 		return IssuedCredential{}, fmt.Errorf("%w: credential kind %q is not one of %s, %s, %s",
 			ErrInvalid, req.Kind, CredentialKindUser, CredentialKindAgent, CredentialKindMachine)
@@ -160,10 +171,11 @@ func (e *Engine) IssueCredential(ctx context.Context, caller Caller, req IssueCr
 // reach under a different name (ADR-0084 §2). Setting up or re-provisioning an agent is routine, and
 // needing an admin for it every time is how people end up sharing one credential again.
 //
-// WHAT IT DOES NOT DO IS BIND THE AGENT TO LESS. The kind is recorded, and recording it is what makes
-// a caller-aware guardrail possible; today `Policy.enforce` takes no caller, so a `deny` binds this
-// credential exactly as hard as it binds the person's. That is ADR-0084 §9's "makes the answer
-// available", and the answer itself is a decision that has not been taken.
+// WHAT THE KIND GOES ON TO DECIDE. Recording it is what made a caller-aware guardrail possible, and
+// the answer ADR-0084 §9 left open has since been given twice: a disposition holds callers of kind
+// `agent` and leaves a person and a machine alone (ADR-0097), and this credential may not write
+// policy or mint identity (ADR-0099). So the credential issued here reaches strictly less than the
+// person's, which is the point of it being separate.
 func (e *Engine) IssueAgentCredential(ctx context.Context, caller Caller) (Principal, IssuedCredential, error) {
 	if caller.PrincipalID == "" {
 		return Principal{}, IssuedCredential{}, fmt.Errorf("%w: the request carries no authenticated principal", ErrForbidden)
@@ -203,6 +215,14 @@ func (e *Engine) IssueAgentCredential(ctx context.Context, caller Caller) (Princ
 // here rather than one write. It does NOT change their admin bit: an invitation is a way in, not a
 // way to be promoted, and a re-invite that quietly granted admin would be a promotion nobody typed.
 func (e *Engine) InvitePrincipal(ctx context.Context, caller Caller, name string, admin bool) (Principal, IssuedCredential, error) {
+	// An agent may not mint identity (ADR-0099 §2). This is the first half of the round trip the
+	// record closes: an invitation is exchanged for a credential of kind `user`, for which every
+	// disposition resolves to allow, so an agent that can create one can walk out of every guardrail
+	// that holds it. The admin bit does not distinguish the caller here — an admin's agent credential
+	// carries it — which is why the KIND is what is checked.
+	if err := refuseAgentWrite(caller.Kind, opCreateInvitation); err != nil {
+		return Principal{}, IssuedCredential{}, err
+	}
 	name, err := validPrincipalName(name)
 	if err != nil {
 		return Principal{}, IssuedCredential{}, err
@@ -259,6 +279,13 @@ func (e *Engine) InvitePrincipal(ctx context.Context, caller Caller, name string
 func (e *Engine) RedeemInvitation(ctx context.Context, caller Caller) (Principal, IssuedCredential, error) {
 	if caller.PrincipalID == "" {
 		return Principal{}, IssuedCredential{}, fmt.Errorf("%w: the request carries no authenticated principal", ErrForbidden)
+	}
+	// The other half of the round trip (ADR-0099 §2). An invitation is issued as a `user` credential
+	// today, so an agent presenting one is not a shape that occurs — and that is precisely why the
+	// check belongs here rather than being left to the surrounding facts, which is what made the
+	// first door open in the first place.
+	if err := refuseAgentWrite(caller.Kind, opRedeemInvitation); err != nil {
+		return Principal{}, IssuedCredential{}, err
 	}
 	if !caller.Enrollment {
 		return Principal{}, IssuedCredential{}, fmt.Errorf(

@@ -387,6 +387,14 @@ func DefaultPolicy() Policy {
 			// and approves the exact command before it runs. An operator can relax it to allow in a safe
 			// environment (e.g. staging) or harden it to deny in prod with `guard set --env prod app.run`.
 			GuardrailAppRun: DispositionConfirm,
+			// Writing an app's config store is held for confirmation by default (ADR-0098), on the same
+			// reasoning app.run gets: the change is arbitrary and it RE-APPLIES the running workload, so
+			// the app rolls and comes back with an environment somebody changed. That the value is
+			// non-secret describes what it is, not what writing it does. An operator can relax it where
+			// the friction is not worth it — `guard set --env dev app.config allow` — or harden it to
+			// deny on an app whose configuration is checked at startup, where a bad roll does not come
+			// back on its own.
+			GuardrailAppConfig: DispositionConfirm,
 			// Creating a bucket at an object-storage provider is held for confirmation (ADR-0063 §5,
 			// ADR-0065 tier 3): it is additive and reversible, but it creates a billable resource at a
 			// third party, so a human approves it. Deleting a bucket has no disposition here because

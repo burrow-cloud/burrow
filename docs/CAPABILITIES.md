@@ -488,6 +488,7 @@ arguments; both stores are sourced at deploy time.
 | `list` shows | keys **and values** | **keys only** |
 | Scope | **app-global** — the same values apply in every environment | **per-environment**, because the Secret lives in the environment's namespace |
 | On set/unset | re-applies the workload so the change rolls; `--no-restart` skips it | patches a `burrow.cloud/restarted-at` annotation so the change rolls; `--no-restart` skips it. An app with a `--no-env` key re-applies the workload instead (see below) |
+| Guarded by | `app.config`, **confirm** by default — the write rolls the app, whatever the value is ([ADR-0098](adr/0098-a-config-write-is-guarded.md)). `--no-restart` is not a way past it: the value still lands in the store and the next deploy carries it | nothing. `secret set` is absent from the agent binary and `secret unset` carries no value |
 | With no running release | persisted, applied at the next deploy | persisted, applied at the next deploy |
 | On `burrow-agent` | `config set` / `config unset` / `config` — **yes** | `secret unset`, `secret mount` / `unmount` / `mounts`, and key listing — **`secret set` does not exist on the agent binary** |
 
@@ -531,7 +532,9 @@ file cannot silently return a credential to the environment.
 
 Two more limits: keys must match `^[A-Za-z_][A-Za-z0-9_]*$`, and **Burrow enforces no size
 limit** on a value — the effective ceiling is Kubernetes' own Secret size limit, unenforced
-and unsurfaced. Neither store is guardrailed.
+and unsurfaced. The config store is guardrailed by `app.config`
+([ADR-0098](adr/0098-a-config-write-is-guarded.md)); the secret store is not, because setting a value
+is absent from the agent binary and removing a key carries no value.
 
 ---
 
@@ -1334,7 +1337,7 @@ Guardrails are policy evaluated in the control plane, between the agent and the 
 - **`deny`** — refused; `--confirm` cannot bypass it. An unset or invalid disposition also
   reads as deny.
 
-These are all sixteen, in listing order, with their defaults. **Env-scopable** says whether a
+These are all eighteen, in listing order, with their defaults. **Env-scopable** says whether a
 guardrail can be set for one environment; **`--name`** says what one name of it refers to — the one
 app or the one add-on instance its effect stops at, or nothing where the effect is wider than either:
 
@@ -1356,6 +1359,7 @@ app or the one add-on instance its effect stops at, or nothing where the effect 
 | `app.rollback` | rolling back to the previous release | `allow` | yes | app |
 | `app.autoscale` | configuring autoscaling | `allow` | yes | app |
 | `app.run` | running a one-off command in the app's image | `confirm` | yes | app |
+| `app.config` | setting or removing an app's non-secret config vars, which rolls the app | `confirm` | yes | app |
 | `bucket.create` | creating a bucket at an object-storage provider | `confirm` | no | — |
 
 The three with no `--name` act on things outside the cluster that no app or add-on owns. Where a
@@ -1474,11 +1478,14 @@ Limits:
 - **`app.replica_ceiling` is no longer a guardrail.** It is an operational limit — see
   [Operational limits](#operational-limits) below. Exceeding it is a validation failure, not a
   disposition, and any stored disposition for it was dropped by the schema migration.
-- **Several mutating operations are not guardrailed at all**: `app config set/unset`,
+- **Several mutating operations are not guardrailed at all**:
   `app health set/unset`, `app secret set/unset`, `app unpublish`, `addon backup`, `addon connect`,
   `config provider add`, `app auto-deploy`, `env add/remove`, and `guard set` itself. Some are
-  deliberate (config and secrets destroy nothing); `unpublish` taking an app offline without a gate
-  is worth knowing. `addon attach` was on this list until
+  deliberate (a secret value is absent from the agent binary entirely); `unpublish` taking an app
+  offline without a gate is worth knowing. `app config set/unset` was on this list until
+  [ADR-0098](adr/0098-a-config-write-is-guarded.md): "config vars are non-secret" described the
+  value and left out that writing one re-applies the running workload, so it rolls the app.
+  `addon attach` was on this list until
   [ADR-0095](adr/0095-attaching-a-database-is-held-for-a-human.md): "attach provisions rather than
   destroys" was true and left out that it provisions on a server every other app shares, restarts the
   app, and rotates a password on a re-attach.

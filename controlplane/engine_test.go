@@ -31,9 +31,13 @@ func newEngine(t *testing.T, policy cp.Policy) (*cp.Engine, *fake.Kubernetes, *f
 	return e, k, d, c
 }
 
-// permissive avoids guardrail interference for tests not about guardrails.
+// permissive avoids guardrail interference for tests not about guardrails. app.config is allowed here
+// for the same reason scale-to-zero is: it is held for confirmation by default (ADR-0098), and a test
+// about what a config write DOES should not be asserting the guardrail on the way in.
 func permissive() cp.Policy {
-	return cp.DefaultPolicy().With(cp.GuardrailScaleToZero, cp.DispositionAllow)
+	return cp.DefaultPolicy().
+		With(cp.GuardrailScaleToZero, cp.DispositionAllow).
+		With(cp.GuardrailAppConfig, cp.DispositionAllow)
 }
 
 // ceiling builds an operational configuration whose CLUSTER replica ceiling is n, for tests that
@@ -196,7 +200,7 @@ func TestReapplyEnvKeepsCurrentReleaseID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
-	if err := e.SetConfig(ctx, "web", "", "K", "V", false); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "K", "V", false, false); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	spec, ok := k.Spec("web")

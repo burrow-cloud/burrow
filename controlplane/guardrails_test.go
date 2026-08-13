@@ -422,6 +422,7 @@ func TestNameScopableIsDeclaredNotInferred(t *testing.T) {
 		GuardrailRollback:             "app",
 		GuardrailAutoscale:            "app",
 		GuardrailAppRun:               "app",
+		GuardrailAppConfig:            "app",
 		GuardrailAddonInstall:         "add-on instance",
 		GuardrailAddonRemove:          "add-on instance",
 		GuardrailAddonAttach:          "add-on instance",

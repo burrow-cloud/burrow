@@ -475,18 +475,23 @@ func newAddonBackupCmd() *cobra.Command {
 	return cmd
 }
 
-// newConfigSetCmd sets (upserts) one NON-SECRET config var for an app. Not guarded. For secret values
-// there is deliberately no agent verb — a secret value never routes through the agent (ADR-0029).
+// newConfigSetCmd sets (upserts) one NON-SECRET config var for an app. Gated by the app.config
+// guardrail (confirm by default, ADR-0098) — the write re-applies the running workload, so it rolls
+// the app whatever the value is. For secret values there is deliberately no agent verb — a secret
+// value never routes through the agent (ADR-0029).
 func newConfigSetCmd() *cobra.Command {
 	o := &connOpts{}
-	var noRestart bool
+	var noRestart, confirm bool
 	cmd := &cobra.Command{
 		Use:   "set <app> KEY=VALUE",
 		Short: "Set (upsert) a non-secret config var for an app",
 		Long: "Set (upsert) a NON-SECRET config var for an app, sourced into the workload at deploy time. By\n" +
 			"default the running app is rolled so it picks the change up; pass --no-restart to only persist it\n" +
-			"and let it land on the next deploy. For SECRETS, do not use config — config vars are non-secret,\n" +
-			"and a secret value never routes through this channel (the human sets secrets with the burrow CLI).",
+			"and let it land on the next deploy. Because the write rolls the app, it is gated by the\n" +
+			"app.config guardrail (confirm by default): a held write returns held_for_confirmation with exit\n" +
+			"code 2, and a human re-runs it with --confirm. For SECRETS, do not use config — config vars are\n" +
+			"non-secret, and a secret value never routes through this channel (the human sets secrets with\n" +
+			"the burrow CLI).",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, value, found := strings.Cut(args[1], "=")
@@ -494,7 +499,7 @@ func newConfigSetCmd() *cobra.Command {
 				return fmt.Errorf("expected KEY=VALUE, got %q", args[1])
 			}
 			return o.mutate(cmd, "config_set", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				if err := c.SetConfig(ctx, args[0], env, key, value, noRestart); err != nil {
+				if err := c.SetConfig(ctx, args[0], env, key, value, noRestart, confirm); err != nil {
 					return nil, err
 				}
 				return map[string]any{"app": args[0], "key": key}, nil
@@ -504,22 +509,28 @@ func newConfigSetCmd() *cobra.Command {
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "persist the change without rolling the running workload; it lands on the next deploy")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a config write a guardrail holds for confirmation (supply only after the human approves)")
 	return cmd
 }
 
-// newConfigUnsetCmd removes one NON-SECRET config var from an app. Not guarded.
+// newConfigUnsetCmd removes one NON-SECRET config var from an app. Gated by the same app.config
+// guardrail the set is (ADR-0098): one code covers both directions, because removing the variable an
+// app reads at startup rolls it into the same place a wrong value does.
 func newConfigUnsetCmd() *cobra.Command {
 	o := &connOpts{}
-	var noRestart bool
+	var noRestart, confirm bool
 	cmd := &cobra.Command{
 		Use:   "unset <app> KEY",
 		Short: "Remove a non-secret config var from an app",
 		Long: "Remove a NON-SECRET config var from an app. By default the running app is rolled so it drops\n" +
-			"the value; pass --no-restart to only persist the removal and let it land on the next deploy.",
+			"the value; pass --no-restart to only persist the removal and let it land on the next deploy.\n" +
+			"Because the removal rolls the app, it is gated by the app.config guardrail (confirm by default):\n" +
+			"a held removal returns held_for_confirmation with exit code 2, and a human re-runs it with\n" +
+			"--confirm.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.mutate(cmd, "config_unset", func(ctx context.Context, c *client.Client, env string) (any, error) {
-				if err := c.UnsetConfig(ctx, args[0], env, args[1], noRestart); err != nil {
+				if err := c.UnsetConfig(ctx, args[0], env, args[1], noRestart, confirm); err != nil {
 					return nil, err
 				}
 				return map[string]any{"app": args[0], "key": args[1]}, nil
@@ -529,6 +540,7 @@ func newConfigUnsetCmd() *cobra.Command {
 	bindConn(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "persist the removal without rolling the running workload; it lands on the next deploy")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm a config removal a guardrail holds for confirmation (supply only after the human approves)")
 	return cmd
 }
 

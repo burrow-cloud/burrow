@@ -384,7 +384,7 @@ func TestRollbackFiresPostDeployToldItWasARollback(t *testing.T) {
 func TestPostDeployHookGetsTheAppsConfigToo(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newEngine(t, permissive())
-	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", true); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", true, false); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	setHook(ctx, t, e, "web", "", cp.HookPostDeploy, "./smoke")

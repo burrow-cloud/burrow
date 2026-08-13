@@ -190,8 +190,8 @@ var catalogue = []Capability{
 	// Config and secrets: app-scoped values. Setting a secret VALUE is deliberately absent
 	// (ADR-0029) and appears below as an Operator capability.
 	{Surface: Agent, Path: "config", What: "read-only: one app's non-secret config vars"},
-	{Surface: Agent, Path: "config set", What: "writes a non-secret config var on one app"},
-	{Surface: Agent, Path: "config unset", What: "removes a non-secret config var from one app"},
+	{Surface: Agent, Path: "config set", What: "writes a non-secret config var on one app, rolling it, guarded by app.config"},
+	{Surface: Agent, Path: "config unset", What: "removes a non-secret config var from one app, rolling it, guarded by app.config"},
 	{Surface: Agent, Path: "secret", What: "read-only: one app's secret KEY names, never values"},
 	{Surface: Agent, Path: "secret unset", What: "removes one app secret by key; carries no value"},
 	// Projecting a secret into a file (ADR-0089 §7). Tier 3: the effect is the one app named, it is

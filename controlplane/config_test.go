@@ -16,7 +16,7 @@ func TestSetConfigPersistsAndLists(t *testing.T) {
 	e, _, _, _ := newEngine(t, permissive())
 
 	// No running release yet: set still persists and is a no-op apply, not an error.
-	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", false); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", false, false); err != nil {
 		t.Fatalf("SetConfig (no release): %v", err)
 	}
 	cfg, err := e.ListConfig(ctx, "web", "")
@@ -36,7 +36,7 @@ func TestSetConfigRollsRunningWorkload(t *testing.T) {
 	}
 
 	// A default set re-applies the workload: the new value appears in the live spec.
-	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", false); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", false, false); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	spec, ok := k.Spec("web")
@@ -60,7 +60,7 @@ func TestSetConfigNoRestartDoesNotRoll(t *testing.T) {
 	}
 
 	// --no-restart persists but does not re-apply: the live spec keeps the old (empty) env.
-	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", true); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", true, false); err != nil {
 		t.Fatalf("SetConfig no-restart: %v", err)
 	}
 	spec, _ := k.Spec("web")
@@ -86,17 +86,17 @@ func TestSetConfigNoRestartDoesNotRoll(t *testing.T) {
 func TestUnsetConfigRemovesAndRolls(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newEngine(t, permissive())
-	if err := e.SetConfig(ctx, "web", "", "A", "1", true); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "A", "1", true, false); err != nil {
 		t.Fatalf("SetConfig A: %v", err)
 	}
-	if err := e.SetConfig(ctx, "web", "", "B", "2", true); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "B", "2", true, false); err != nil {
 		t.Fatalf("SetConfig B: %v", err)
 	}
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 
-	if err := e.UnsetConfig(ctx, "web", "", "A", false); err != nil {
+	if err := e.UnsetConfig(ctx, "web", "", "A", false, false); err != nil {
 		t.Fatalf("UnsetConfig: %v", err)
 	}
 	cfg, _ := e.ListConfig(ctx, "web", "")
@@ -120,13 +120,13 @@ func TestConfigInvalidKey(t *testing.T) {
 	ctx := context.Background()
 	e, _, _, _ := newEngine(t, permissive())
 
-	if err := e.SetConfig(ctx, "web", "", "1BAD", "x", true); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetConfig(ctx, "web", "", "1BAD", "x", true, false); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetConfig bad key err = %v, want ErrInvalid", err)
 	}
-	if err := e.SetConfig(ctx, "web", "", "has-dash", "x", true); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetConfig(ctx, "web", "", "has-dash", "x", true, false); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("SetConfig dashed key err = %v, want ErrInvalid", err)
 	}
-	if err := e.UnsetConfig(ctx, "web", "", "", true); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.UnsetConfig(ctx, "web", "", "", true, false); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("UnsetConfig empty key err = %v, want ErrInvalid", err)
 	}
 	if _, err := e.ListConfig(ctx, "BadApp!", ""); !errors.Is(err, cp.ErrInvalid) {
@@ -138,7 +138,7 @@ func TestRollbackRendersCurrentStoreConfig(t *testing.T) {
 	ctx := context.Background()
 	e, k, _, _ := newEngine(t, permissive())
 
-	if err := e.SetConfig(ctx, "web", "", "A", "1", true); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "A", "1", true, false); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
 	if _, err := e.Deploy(ctx, cp.DeployRequest{App: "web", Image: "img:1", Replicas: 1}); err != nil {
@@ -149,7 +149,7 @@ func TestRollbackRendersCurrentStoreConfig(t *testing.T) {
 	}
 	// Change config after v2 but before rollback: the rollback must render the CURRENT store
 	// config, not whatever v1 had snapshotted.
-	if err := e.SetConfig(ctx, "web", "", "A", "2", true); err != nil {
+	if err := e.SetConfig(ctx, "web", "", "A", "2", true, false); err != nil {
 		t.Fatalf("SetConfig after v2: %v", err)
 	}
 

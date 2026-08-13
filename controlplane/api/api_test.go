@@ -1090,7 +1090,13 @@ func TestLogs(t *testing.T) {
 }
 
 func TestConfigEndpoints(t *testing.T) {
-	h, k, _ := newAPI(t)
+	h, k, d := newAPI(t)
+	// A config write is guarded (ADR-0098) and this test is about the endpoints, not the guardrail,
+	// so allow it here; the hold and the confirm are TestConfigWriteIsHeldUntilConfirmed's subject.
+	d.SetPolicy(cp.Policy{}.
+		With(cp.GuardrailRollback, cp.DispositionAllow).
+		With(cp.GuardrailAppDeploy, cp.DispositionAllow).
+		With(cp.GuardrailAppConfig, cp.DispositionAllow))
 	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
 
 	// Set rolls the workload by default: the value reaches the live spec.
@@ -1135,6 +1141,38 @@ func TestConfigEndpoints(t *testing.T) {
 	// An invalid config key is a 400.
 	if rec := do(h, "POST", "/v1/apps/web/config", token, `{"key":"1BAD","value":"x"}`); rec.Code != http.StatusBadRequest {
 		t.Errorf("bad key = %d, want 400", rec.Code)
+	}
+}
+
+// TestConfigWriteIsHeldUntilConfirmed covers the app.config guardrail at the endpoints (ADR-0098).
+// A held write is a 422 with needs_confirmation and nothing persisted; the same call with confirm
+// proceeds. The unset path carries confirm as a query parameter, since a DELETE has no body, so both
+// shapes are exercised.
+func TestConfigWriteIsHeldUntilConfirmed(t *testing.T) {
+	h, _, d := newAPI(t)
+	d.SetPolicy(cp.Policy{}.
+		With(cp.GuardrailAppDeploy, cp.DispositionAllow).
+		With(cp.GuardrailAppConfig, cp.DispositionConfirm))
+	do(h, "POST", "/v1/apps/web/deploy", token, `{"image":"img:1","replicas":1}`)
+
+	rec := do(h, "POST", "/v1/apps/web/config", token, `{"key":"LOG_LEVEL","value":"debug"}`)
+	if rec.Code != 422 || !strings.Contains(rec.Body.String(), `"needs_confirmation":true`) {
+		t.Fatalf("unconfirmed set = %d %s, want 422 needs_confirmation", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, "GET", "/v1/apps/web/config", token, ""); strings.Contains(rec.Body.String(), "LOG_LEVEL") {
+		t.Errorf("a held write persisted the value: %s", rec.Body.String())
+	}
+
+	if rec := do(h, "POST", "/v1/apps/web/config", token, `{"key":"LOG_LEVEL","value":"debug","confirm":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("confirmed set = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Unset: held without the query parameter, executed with it.
+	if rec := do(h, "DELETE", "/v1/apps/web/config/LOG_LEVEL", token, ""); rec.Code != 422 {
+		t.Fatalf("unconfirmed unset = %d %s, want 422", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, "DELETE", "/v1/apps/web/config/LOG_LEVEL?confirm=true", token, ""); rec.Code != http.StatusOK {
+		t.Fatalf("confirmed unset = %d %s", rec.Code, rec.Body.String())
 	}
 }
 

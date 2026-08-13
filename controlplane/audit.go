@@ -225,6 +225,16 @@ const (
 	// the operator's own confirmation rather than a disposition anything could be set to.
 	auditOpAddonConfig = "addon_config"
 	auditOpRun         = "run"
+	// auditOpConfigSet and auditOpConfigUnset are the two halves of a config write, both gated by the
+	// one app.config guardrail (ADR-0098). They are separate OPERATIONS because a reader asking what
+	// happened to an app wants to see which way the store moved; they share one CODE because the
+	// question a disposition answers — may the agent write this app's config — has one answer.
+	//
+	// Their args carry the config KEY and never the value, which is the redaction boundary ADR-0027
+	// draws for the env store: a config var is non-secret by convention rather than by enforcement, and
+	// the trail does not become the place a mistaken one is preserved.
+	auditOpConfigSet   = "config_set"
+	auditOpConfigUnset = "config_unset"
 	// auditOpHook is one lifecycle hook's execution (ADR-0072). It carries no guardrail decision row
 	// of its own: a hook runs as part of a deploy or a rollback and is gated by that operation's
 	// guardrail, so the decision was already recorded under `deploy` or `rollback`.

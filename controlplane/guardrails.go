@@ -172,6 +172,29 @@ const (
 	// the human sees and approves the exact command before it runs, and prod is the environment to
 	// keep gated. The guardrail gates whether the command runs, not what it does (ADR-0048 §5).
 	GuardrailAppRun GuardrailCode = "app.run"
+	// GuardrailAppConfig: the operation would write an app's non-secret config store — set a config
+	// var or remove one (ADR-0098). Held for confirmation by default, and the reason is not the
+	// content of the value: a config write RE-APPLIES THE RUNNING WORKLOAD by default, so the app
+	// rolls and comes back with an environment somebody changed. "Non-secret" describes what the
+	// value is and says nothing about what writing it does.
+	//
+	// ONE code covers both set and unset. Splitting them would buy the ability to allow removing a
+	// variable while holding its creation, which is not a want anybody has: both write the same store
+	// and both roll the same app, and an app that comes back missing the variable it reads at startup
+	// is in the same place as one that comes back with a wrong value.
+	//
+	// Confirm rather than deny, because the confirmation CAN be an informed one — "set DATABASE_HOST
+	// on web in prod" is a sentence a reader can act on, which is the test ADR-0087 §5 set — and
+	// because setting configuration is the ordinary loop the product exists for. Confirm rather than
+	// allow because the value is arbitrary: nothing bounds what an app does with an environment it
+	// did not expect, and a wrong value is not visible until the pods roll.
+	//
+	// It is env-scopable, and the expected shape is a gradient set with
+	// `guard set --env <env> app.config …`: allow in development, where an agent iterating on
+	// configuration should not stop on every variable, and confirm or deny in production. Its
+	// deny form is what an operator reaches for on an app whose configuration is checked at startup
+	// against something outside it — a rolled app that refuses to serve does not come back on its own.
+	GuardrailAppConfig GuardrailCode = "app.config"
 	// GuardrailBucketCreate: the operation would create a bucket at an object-storage provider
 	// (ADR-0063 §5). Held for confirmation by default, which is ADR-0065's THIRD tier: creating a
 	// bucket is additive, reversible, and part of a legitimate workflow, but it costs money at a
@@ -310,6 +333,7 @@ var knownGuardrails = []guardrailDef{
 	{code: GuardrailRollback, description: "roll an application back to its previous release", envScoped: true, names: targetApp},
 	{code: GuardrailAutoscale, description: "configure autoscaling for an application", envScoped: true, names: targetApp},
 	{code: GuardrailAppRun, description: "run a one-off command inside an application's own image and environment", envScoped: true, names: targetApp},
+	{code: GuardrailAppConfig, description: "set or remove an application's non-secret config vars, re-applying the running workload", envScoped: true, names: targetApp},
 	{code: GuardrailBucketCreate, description: "create a bucket at an object-storage provider (deleting one is not a Burrow operation at all)",
 		reach: "a bucket is storage at a provider outside the cluster, in a global namespace no single app or add-on owns"},
 }

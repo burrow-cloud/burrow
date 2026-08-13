@@ -735,17 +735,20 @@ func (s *server) setConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.decode(w, r, &req) {
 		return
 	}
-	if err := s.engine.SetConfig(r.Context(), r.PathValue("app"), req.Env, req.Key, req.Value, req.NoRestart); err != nil {
+	if err := s.engine.SetConfig(r.Context(), r.PathValue("app"), req.Env, req.Key, req.Value, req.NoRestart, req.Confirm); err != nil {
 		writeEngineError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"app": r.PathValue("app"), "key": req.Key})
 }
 
+// unsetConfig removes one config var. Like the other DELETE-shaped mutations it carries confirm as a
+// query parameter rather than a body, since a DELETE has no body to read it from.
 func (s *server) unsetConfig(w http.ResponseWriter, r *http.Request) {
 	noRestart := r.URL.Query().Get("no_restart") == "true"
+	confirm := r.URL.Query().Get("confirm") == "true"
 	key := r.PathValue("key")
-	if err := s.engine.UnsetConfig(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), key, noRestart); err != nil {
+	if err := s.engine.UnsetConfig(r.Context(), r.PathValue("app"), r.URL.Query().Get("env"), key, noRestart, confirm); err != nil {
 		writeEngineError(w, err)
 		return
 	}
@@ -928,6 +931,9 @@ type configSetRequest struct {
 	Key       string `json:"key"`
 	Value     string `json:"value"`
 	NoRestart bool   `json:"no_restart,omitempty"`
+	// Confirm satisfies the app.config guardrail's confirmation hold (ADR-0098). A held write maps to
+	// 422 with needs_confirmation and nothing is persisted.
+	Confirm bool `json:"confirm,omitempty"`
 }
 
 func (s *server) guardList(w http.ResponseWriter, r *http.Request) {

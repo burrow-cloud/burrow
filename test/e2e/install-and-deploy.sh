@@ -251,13 +251,34 @@ echo "--- audit trail lists the guarded operations through CLI -> API -> burrowd
 # Exercise the real env path end-to-end through the full stack:
 #   burrow CLI -> control-plane API -> in-cluster burrowd -> Postgres store,
 #   then rendered inline into the Deployment pod template, which rolls the workload.
-# Two assertions, both deterministic and bounded:
-#   1. `app config list` round-trips the value through CLI -> API -> burrowd -> Postgres.
-#   2. a default (restarting) `app config set` mutates the live Deployment pod template, so
+# Three assertions, all deterministic and bounded:
+#   1. an unconfirmed write is HELD by the app.config guardrail and persists nothing.
+#   2. `app config list` round-trips the value through CLI -> API -> burrowd -> Postgres.
+#   3. a default (restarting) `app config set` mutates the live Deployment pod template, so
 #      the var reaches the container — read straight off the Deployment, no log timing.
 # =============================================================================
+echo "=== env: an unconfirmed config write is held by the app.config guardrail (ADR-0098) ==="
+# A config write re-applies the running workload, so it rolls the app — which is why it is guarded
+# at all, confirm by default. This run holds even though a human is driving it: the capstone
+# authenticates with the SHARED INSTALL TOKEN, which carries no credential kind, and an unknown kind
+# is held exactly as an agent is (ADR-0097). That is deliberate rather than an oversight — it is
+# what keeps guardrails working on installs that have issued no per-caller credentials, which is
+# most of them. So every config write below passes --confirm.
+if held_out=$("$BURROW" app config set web BURROW_E2E_ENV=held-not-written --kubeconfig "$KCFG" 2>&1); then
+  echo "FAIL: an unconfirmed 'app config set' succeeded; the app.config guardrail did not hold it"
+  exit 1
+fi
+grep -q "app.config" <<<"$held_out" \
+  || { echo "FAIL: the refusal did not name the app.config guardrail (got: $held_out)"; exit 1; }
+held_list=$("$BURROW" app config list web --kubeconfig "$KCFG")
+if grep -q "BURROW_E2E_ENV" <<<"$held_list"; then
+  echo "FAIL: a held config write persisted the value anyway"
+  exit 1
+fi
+echo "--- held config write refused and nothing persisted ---"
+
 echo "=== env: set a variable on the running app (rolls the Deployment) ==="
-"$BURROW" app config set web BURROW_E2E_ENV=hello-from-store --kubeconfig "$KCFG"
+"$BURROW" app config set web BURROW_E2E_ENV=hello-from-store --confirm --kubeconfig "$KCFG"
 
 echo "=== config: assert the value round-trips through app config list ==="
 config_list_out=$("$BURROW" app config list web --kubeconfig "$KCFG")
@@ -277,7 +298,9 @@ fi
 echo "--- env rendered into the pod template: BURROW_E2E_ENV=$env_in_template ---"
 
 echo "=== env: unset removes the variable from the store ==="
-"$BURROW" app config unset web BURROW_E2E_ENV --no-restart --kubeconfig "$KCFG"
+# --no-restart skips the roll, not the guardrail: the removal still reaches the app on its next
+# deploy, so it is held on the same disposition the set was (ADR-0098).
+"$BURROW" app config unset web BURROW_E2E_ENV --no-restart --confirm --kubeconfig "$KCFG"
 config_list_after=$("$BURROW" app config list web --kubeconfig "$KCFG")
 if grep -q "BURROW_E2E_ENV" <<<"$config_list_after"; then
   echo "FAIL: BURROW_E2E_ENV still present after unset"

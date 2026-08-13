@@ -143,7 +143,7 @@ func TestConfigWriteIsScopedPerAppAndEnvironment(t *testing.T) {
 		t.Fatalf("AddEnvironment: %v", err)
 	}
 	// Deny it for one app in one environment; everything else keeps the allow underneath.
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{Env: "staging", Name: "burrowd-cloud"}, "", cp.GuardrailAppConfig, cp.DispositionDeny); err != nil {
+	if err := e.SetGuardrail(asOperator(ctx), cp.GuardrailScope{Env: "staging", Name: "burrowd-cloud"}, "", cp.GuardrailAppConfig, cp.DispositionDeny); err != nil {
 		t.Fatalf("SetGuardrail: %v", err)
 	}
 

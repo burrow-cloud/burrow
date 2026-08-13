@@ -306,8 +306,14 @@ metadata:
 # through the Kubernetes API-server proxy, ADR-0014) and `get` on the burrowd-api-token Secret so
 # it can read the control-plane API token. Both are resourceNames-scoped to exactly those objects.
 # There is nothing else: no pods, no other services, no other secrets, no list/watch, no other
-# namespace, no cluster-scoped read — so the guardrails in burrowd become binding by construction
-# (ADR-0021), not merely by shell-denies.
+# namespace, no cluster-scoped read — so the agent cannot go AROUND burrowd, rather than merely being
+# asked not to by shell-denies (ADR-0021).
+#
+# That is one of the two things a binding guardrail needs, and this Role is only the first: it
+# confines the agent to burrowd. What stops the agent relaxing a guardrail once it is there is that
+# burrowd refuses a policy write, and an identity mint, from a credential of kind `agent` (ADR-0099).
+# Neither half holds without the other — a wall the agent cannot walk around is worth nothing if it
+# can move the wall.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

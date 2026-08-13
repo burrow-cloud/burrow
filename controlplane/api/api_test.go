@@ -61,6 +61,10 @@ func newAPIConfig(t *testing.T, version, installID string) (http.Handler, *fake.
 		Resolver:    fake.NewResolver(),
 		Credentials: fake.NewCredentials(),
 		DNS:         fake.NewDNSFactory(),
+		// A token source, so a test that needs a caller with a KIND can claim one. Writing the
+		// guardrail policy takes a person's own credential (ADR-0099 §1), and the shared token these
+		// tests otherwise present has no kind.
+		TokenSource: fake.NewTokens(),
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)
@@ -72,23 +76,40 @@ func newAPIConfig(t *testing.T, version, installID string) (http.Handler, *fake.
 	return h, k, d
 }
 
+// operatorToken claims the install and returns the token of the person who claimed it: a credential
+// of kind `user`, which is what a policy write requires (ADR-0099 §1).
+//
+// It goes through the real claim route rather than writing a credential row, so what these tests
+// present is a token that authenticated the way a person's does.
+func operatorToken(t *testing.T, h http.Handler) string {
+	t.Helper()
+	rec := claim(h, token, "operator")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("claim: %d %s", rec.Code, rec.Body.String())
+	}
+	return decodeCredential(t, rec).Token
+}
+
 func TestGuardEndpoints(t *testing.T) {
 	h, _, _ := newAPI(t)
+	op := operatorToken(t, h)
 
+	// The READ stays on the install's shared token, because reading the policy is open to every
+	// caller (ADR-0099 §1) and the write below is the half that is not.
 	if rr := do(h, "GET", "/v1/guard", token, ""); rr.Code != 200 || !strings.Contains(rr.Body.String(), "app.scale_to_zero") {
 		t.Fatalf("guard list = %d %s", rr.Code, rr.Body.String())
 	}
 
-	rr := do(h, "PUT", "/v1/guard/app.scale_to_zero", token, `{"disposition":"allow"}`)
+	rr := do(h, "PUT", "/v1/guard/app.scale_to_zero", op, `{"disposition":"allow"}`)
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"disposition":"allow"`) {
 		t.Fatalf("guard set = %d %s", rr.Code, rr.Body.String())
 	}
 
 	// Invalid disposition and unknown guardrail are rejected (ErrInvalid -> 400).
-	if rr := do(h, "PUT", "/v1/guard/app.scale_to_zero", token, `{"disposition":"nope"}`); rr.Code != 400 {
+	if rr := do(h, "PUT", "/v1/guard/app.scale_to_zero", op, `{"disposition":"nope"}`); rr.Code != 400 {
 		t.Errorf("invalid disposition code = %d, want 400", rr.Code)
 	}
-	if rr := do(h, "PUT", "/v1/guard/bogus", token, `{"disposition":"allow"}`); rr.Code != 400 {
+	if rr := do(h, "PUT", "/v1/guard/bogus", op, `{"disposition":"allow"}`); rr.Code != 400 {
 		t.Errorf("unknown guardrail code = %d, want 400", rr.Code)
 	}
 }
@@ -98,8 +119,9 @@ func TestGuardEndpoints(t *testing.T) {
 // of ignoring the name and writing the environment-wide entry (issue #472, ADR-0039 §4).
 func TestGuardEndpointsCarryTheNameInTheRoute(t *testing.T) {
 	h, _, d := newAPI(t)
+	op := operatorToken(t, h)
 
-	rr := do(h, "PUT", "/v1/guard/name/website/app.deploy?env=prod", token, `{"disposition":"deny"}`)
+	rr := do(h, "PUT", "/v1/guard/name/website/app.deploy?env=prod", op, `{"disposition":"deny"}`)
 	if rr.Code != 200 {
 		t.Fatalf("guard set for one app = %d %s", rr.Code, rr.Body.String())
 	}
@@ -116,7 +138,7 @@ func TestGuardEndpointsCarryTheNameInTheRoute(t *testing.T) {
 	}
 
 	// The engine's refusals are unchanged by the move: a name with no environment is still 400.
-	if rr := do(h, "PUT", "/v1/guard/name/website/app.deploy", token, `{"disposition":"deny"}`); rr.Code != 400 {
+	if rr := do(h, "PUT", "/v1/guard/name/website/app.deploy", op, `{"disposition":"deny"}`); rr.Code != 400 {
 		t.Errorf("name without env = %d, want 400", rr.Code)
 	}
 }
@@ -130,8 +152,9 @@ func TestGuardEndpointsCarryTheNameInTheRoute(t *testing.T) {
 // (ADR-0039 §2–§3); current clients send the route form above.
 func TestGuardEndpointsCarryTheName(t *testing.T) {
 	h, _, d := newAPI(t)
+	op := operatorToken(t, h)
 
-	rr := do(h, "PUT", "/v1/guard/app.deploy?env=prod&name=website", token, `{"disposition":"deny"}`)
+	rr := do(h, "PUT", "/v1/guard/app.deploy?env=prod&name=website", op, `{"disposition":"deny"}`)
 	if rr.Code != 200 {
 		t.Fatalf("guard set for one app = %d %s", rr.Code, rr.Body.String())
 	}
@@ -150,11 +173,11 @@ func TestGuardEndpointsCarryTheName(t *testing.T) {
 	}
 
 	// A name with no environment is refused at the server, as ErrInvalid -> 400.
-	if rr := do(h, "PUT", "/v1/guard/app.deploy?name=website", token, `{"disposition":"deny"}`); rr.Code != 400 {
+	if rr := do(h, "PUT", "/v1/guard/app.deploy?name=website", op, `{"disposition":"deny"}`); rr.Code != 400 {
 		t.Errorf("name without env = %d, want 400", rr.Code)
 	}
 	// So is a name on a guardrail whose effect is wider than one thing.
-	if rr := do(h, "PUT", "/v1/guard/dns.write?env=prod&name=website", token, `{"disposition":"allow"}`); rr.Code != 400 {
+	if rr := do(h, "PUT", "/v1/guard/dns.write?env=prod&name=website", op, `{"disposition":"allow"}`); rr.Code != 400 {
 		t.Errorf("name on dns.write = %d, want 400", rr.Code)
 	}
 }
@@ -164,28 +187,35 @@ func TestGuardEndpointsCarryTheName(t *testing.T) {
 // cannot be env-scoped (400) (ADR-0035 phase 2c).
 func TestGuardEndpointsEnvScoped(t *testing.T) {
 	h, _, d := newAPI(t)
+	op := operatorToken(t, h)
 	if err := d.CreateEnvironment(context.Background(), "staging", "burrow-apps-staging"); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
 
-	// Scope app.delete to staging: the response reflects the env-specific disposition with its source.
-	rr := do(h, "PUT", "/v1/guard/app.delete?env=staging", token, `{"disposition":"deny"}`)
-	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"source":"env"`) {
+	// Scope app.delete to staging, and read what was STORED. The response body cannot show it: a set
+	// resolves the policy for the caller who asked (ADR-0094 §6), and the caller here is a person,
+	// for whom every disposition resolves to allow from the caller tier (ADR-0097 §1). The stored key
+	// is the assertion that survives both.
+	rr := do(h, "PUT", "/v1/guard/app.delete?env=staging", op, `{"disposition":"deny"}`)
+	if rr.Code != 200 {
 		t.Fatalf("env guard set = %d %s", rr.Code, rr.Body.String())
+	}
+	if got := storedPolicy(t, d).Dispositions[cp.GuardrailCode("staging.app.delete")]; got != cp.DispositionDeny {
+		t.Fatalf("stored policy = %+v, want a deny under staging.app.delete", storedPolicy(t, d).Dispositions)
 	}
 	// The global policy is untouched: a plain list does not carry the env source.
 	if rr := do(h, "GET", "/v1/guard", token, ""); rr.Code != 200 || strings.Contains(rr.Body.String(), `"source"`) {
 		t.Errorf("global guard list leaked an env source = %d %s", rr.Code, rr.Body.String())
 	}
 	// An unknown environment is a 404.
-	if rr := do(h, "PUT", "/v1/guard/app.delete?env=ghost", token, `{"disposition":"deny"}`); rr.Code != 404 {
+	if rr := do(h, "PUT", "/v1/guard/app.delete?env=ghost", op, `{"disposition":"deny"}`); rr.Code != 404 {
 		t.Errorf("unknown env code = %d, want 404", rr.Code)
 	}
 	if rr := do(h, "GET", "/v1/guard?env=ghost", token, ""); rr.Code != 404 {
 		t.Errorf("unknown env list code = %d, want 404", rr.Code)
 	}
 	// A cluster-level guardrail cannot be env-scoped (400).
-	if rr := do(h, "PUT", "/v1/guard/addon.install?env=staging", token, `{"disposition":"deny"}`); rr.Code != 400 {
+	if rr := do(h, "PUT", "/v1/guard/addon.install?env=staging", op, `{"disposition":"deny"}`); rr.Code != 400 {
 		t.Errorf("cluster-level env scope code = %d, want 400", rr.Code)
 	}
 }
@@ -813,7 +843,8 @@ func TestLimitEndpoints(t *testing.T) {
 // (ADR-0068 §2).
 func TestGuardSetRejectsALimitCode(t *testing.T) {
 	h, _, _ := newAPI(t)
-	rec := do(h, "PUT", "/v1/guard/app.replica_ceiling", token, `{"disposition":"allow"}`)
+	op := operatorToken(t, h)
+	rec := do(h, "PUT", "/v1/guard/app.replica_ceiling", op, `{"disposition":"allow"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
@@ -1674,12 +1705,12 @@ func TestSecretMountNoEnvOverTheAPI(t *testing.T) {
 // an intent: the operator asked to be left alone and would have been bound.
 func TestGuardEndpointsCarryTheBindingInTheRoute(t *testing.T) {
 	h, _, d := newAPI(t)
-	// The install has to issue per-caller credentials before a binding can bind anything (§4).
-	if err := d.CreatePrincipal(context.Background(), cp.Principal{ID: "p-1", Name: "ada", Admin: true}); err != nil {
-		t.Fatalf("CreatePrincipal: %v", err)
-	}
+	// The install has to issue per-caller credentials before a binding can bind anything (§4), and
+	// claiming is what issues the first one — the same act that gives the write below a caller of
+	// kind `user` to travel on (ADR-0099 §1).
+	op := operatorToken(t, h)
 
-	rr := do(h, "PUT", "/v1/guard/binds/agent/app.delete", token, `{"disposition":"deny"}`)
+	rr := do(h, "PUT", "/v1/guard/binds/agent/app.delete", op, `{"disposition":"deny"}`)
 	if rr.Code != 200 {
 		t.Fatalf("guard set --binds agent = %d %s", rr.Code, rr.Body.String())
 	}
@@ -1691,7 +1722,7 @@ func TestGuardEndpointsCarryTheBindingInTheRoute(t *testing.T) {
 	}
 
 	// The binding composes with the name tier, and the two segments keep their order.
-	rr = do(h, "PUT", "/v1/guard/binds/agent/name/burrowd-cloud/app.deploy?env=prod", token, `{"disposition":"deny"}`)
+	rr = do(h, "PUT", "/v1/guard/binds/agent/name/burrowd-cloud/app.deploy?env=prod", op, `{"disposition":"deny"}`)
 	if rr.Code != 200 {
 		t.Fatalf("guard set --binds agent --name = %d %s", rr.Code, rr.Body.String())
 	}
@@ -1700,7 +1731,7 @@ func TestGuardEndpointsCarryTheBindingInTheRoute(t *testing.T) {
 	}
 
 	// A kind outside the closed set is the engine's ErrInvalid -> 400, not a key nothing will match.
-	if rr := do(h, "PUT", "/v1/guard/binds/robot/app.delete", token, `{"disposition":"deny"}`); rr.Code != 400 {
+	if rr := do(h, "PUT", "/v1/guard/binds/robot/app.delete", op, `{"disposition":"deny"}`); rr.Code != 400 {
 		t.Errorf("unknown kind = %d, want 400", rr.Code)
 	}
 }

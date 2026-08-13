@@ -157,11 +157,22 @@ for flag in "" "--confirm"; do
     || { echo "FAIL: hello is gone — the delete executed instead of being refused"; exit 1; }
 done
 
+# Changing the policy takes a credential of your own (ADR-0099): burrowd refuses a policy write
+# from an agent credential, and from the install's shared token, which has no kind at all — reading
+# "no kind" as a person would leave the policy writable on exactly the installs that have only an
+# agent to hold. So the operator signs in first, which is one command and is what a person does on
+# their own machine. Everything above this line runs on the shared token, unchanged: deploying,
+# reading status, and being refused a delete are not policy writes.
+echo "=== burrow auth login (a policy write takes the operator's own credential) ==="
+"$BURROW" auth login --context "$CTX" --kubeconfig "$KCFG" --name quickstart \
+  || { echo "FAIL: 'burrow auth login' did not succeed"; exit 1; }
+
 # The deny is the operator's starting point, not a wall: relaxing the guardrail is what makes the
-# verb reachable, and only this CLI can do it (`burrow-agent` has no `guard set`). The doc
-# describes this lever rather than pulling it — it leaves the app in place for the agent path —
-# so this is the one step the test takes beyond the walkthrough, and it is the half of the
-# guardrail story a deny-only assertion would leave unproven.
+# verb reachable, and only this CLI can do it (`burrow-agent` has no `guard set`, and burrowd
+# refuses one from an agent credential however it is sent). The doc describes this lever rather
+# than pulling it — it leaves the app in place for the agent path — so this is the one step the
+# test takes beyond the walkthrough, and it is the half of the guardrail story a deny-only
+# assertion would leave unproven.
 echo "=== burrow guard set app.delete confirm, then the delete goes through with --confirm ==="
 "$BURROW" guard set app.delete confirm --kubeconfig "$KCFG" \
   || { echo "FAIL: 'burrow guard set app.delete confirm' did not succeed"; exit 1; }

@@ -87,7 +87,9 @@ Burrow is installed and ready in namespace "burrow".
 
 Apps deploy into the environment "prod" (namespace "burrow-apps").
 It is called "prod" because a single environment is production, and it carries production-grade
-guardrails: deleting an app or a DNS record is denied until you relax it. Loosen one with
+guardrails: deleting an app or a DNS record is denied until you relax it. Changing the policy
+takes a credential of your own, so sign in first and then loosen one:
+  burrow auth login --context <cluster>
   burrow guard set app.delete confirm
 Add a second environment when you want one:  burrow env add staging
 ```
@@ -167,7 +169,19 @@ hold.
 
 **The deny is a starting point, not a verdict** — it is where a guardrail sits until you say
 otherwise. You relax it with `burrow guard set`, which only this CLI has, and the shape to reach
-for is one environment at a time:
+for is one environment at a time.
+
+Changing the policy takes a credential of your own, so sign in once first:
+
+```sh
+burrow auth login --context <your-kube-context>
+```
+
+That claims this install as its admin and hands you a token of your own, stored under
+`~/.burrow/`. Everything above needed none of it — deploying, reading status, and being refused a
+delete all work on the install's shared token. What the shared token cannot do is rewrite the
+policy, because it says nothing about who is asking, and a guardrail that anybody holding it can
+lift is not one ([ADR-0099](adr/0099-an-agent-may-not-rewrite-its-own-limits.md)). Then:
 
 ```sh
 burrow guard set --env dev app.delete allow       # let the agent tidy up after itself in dev

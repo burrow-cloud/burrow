@@ -47,6 +47,19 @@ func ceiling(n int) cp.OperationalConfig {
 	return cp.OperationalConfig{}.With(cp.LimitReplicaCeiling, strconv.Itoa(n))
 }
 
+// asOperator returns ctx as a request carrying a PERSON's own credential, which is what writing the
+// guardrail policy now takes (ADR-0099 §1). Tests that set a disposition are setting a fixture, and
+// the party that sets one in production is an operator at a terminal.
+//
+// It wraps the SetGuardrail call only, never the ctx the operation under test runs on. A person is
+// exempt from every disposition (ADR-0097 §1), so a test that ran its deploy or its delete on this
+// context would be asserting a guardrail that had been switched off for the caller.
+func asOperator(ctx context.Context) context.Context {
+	return cp.ContextWithCaller(ctx, cp.Caller{
+		PrincipalID: "p-operator", PrincipalName: "operator", Kind: cp.CredentialKindUser,
+	})
+}
+
 // mustGuardrail asserts err is a guardrail refusal with the given code.
 func mustGuardrail(t *testing.T, err error, code cp.GuardrailCode) {
 	t.Helper()
@@ -555,7 +568,7 @@ func TestGuardrailsListAndSet(t *testing.T) {
 	}
 
 	// A valid set is reflected on the next list.
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, "", cp.GuardrailScaleToZero, cp.DispositionAllow); err != nil {
+	if err := e.SetGuardrail(asOperator(ctx), cp.GuardrailScope{}, "", cp.GuardrailScaleToZero, cp.DispositionAllow); err != nil {
 		t.Fatalf("SetGuardrail: %v", err)
 	}
 	gs, _ = e.Guardrails(ctx, cp.GuardrailScope{})
@@ -566,10 +579,10 @@ func TestGuardrailsListAndSet(t *testing.T) {
 	}
 
 	// Unknown guardrail and invalid disposition are rejected as ErrInvalid.
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, "", "nonsense", cp.DispositionAllow); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetGuardrail(asOperator(ctx), cp.GuardrailScope{}, "", "nonsense", cp.DispositionAllow); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("unknown guardrail err = %v, want ErrInvalid", err)
 	}
-	if err := e.SetGuardrail(ctx, cp.GuardrailScope{}, "", cp.GuardrailScaleToZero, "maybe"); !errors.Is(err, cp.ErrInvalid) {
+	if err := e.SetGuardrail(asOperator(ctx), cp.GuardrailScope{}, "", cp.GuardrailScaleToZero, "maybe"); !errors.Is(err, cp.ErrInvalid) {
 		t.Errorf("invalid disposition err = %v, want ErrInvalid", err)
 	}
 }

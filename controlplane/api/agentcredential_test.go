@@ -87,10 +87,15 @@ func TestTheAgentCredentialRouteTakesNoKind(t *testing.T) {
 	if agent.Kind != "agent" {
 		t.Fatalf("kind = %q, want agent", agent.Kind)
 	}
-	// Asking again from the AGENT's own credential gets an agent credential too: the path is the
-	// kind, so a caller holding one cannot trade up to a `user` credential through this route.
-	second := decodeCredential(t, agentCredential(h, agent.Token))
-	if second.Kind != "agent" {
-		t.Errorf("an agent asking through its own credential got kind %q, want agent", second.Kind)
+	// Asking again from the AGENT's own credential is refused outright: an agent may not mint
+	// identity at all (ADR-0099 §2). The route being the kind already stopped it trading up to a
+	// `user` credential here; what this closes is the agent issuing itself further credentials of
+	// any sort, which is the same authority read one step further out.
+	rec := agentCredential(h, agent.Token)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("an agent issued itself a credential = %d %s, want 403", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"operator_only"`) {
+		t.Errorf("refusal = %q, want the operator_only code — this is not a guardrail decision", rec.Body.String())
 	}
 }

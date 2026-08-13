@@ -363,8 +363,11 @@ func DefaultPolicy() Policy {
 			// Deleting a public DNS record is denied by default (ADR-0065 §3, tier 2): it takes an
 			// application off the internet, and the record may not be one Burrow created, so a confirm
 			// prompt protects only an attentive reader. It fails reversibility, not scope, so the
-			// operator decides — `guard set dns.delete confirm` turns it back on. That lever is on the
-			// operator CLI only, so relaxing it is a deliberate human act the agent cannot perform.
+			// operator decides — `guard set dns.delete confirm` turns it back on. Relaxing it is a
+			// deliberate human act the agent cannot perform, and what makes that true is that the
+			// route which writes a disposition REFUSES an agent credential (ADR-0099 §1) — not that
+			// the verb is absent from the agent binary, which only ever meant the agent had to reach
+			// the API another way.
 			//
 			// This deny is cluster-wide and cannot be relaxed for one environment: EnvScopable keys on
 			// the `app.` prefix, so an operator who wants the agent managing DNS in development but not

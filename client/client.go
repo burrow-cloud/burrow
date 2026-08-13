@@ -124,6 +124,13 @@ const CodeUnknownOperation = "unknown_operation"
 // credential was accepted, and the Burrow on the other end is not the one the target was pointed at.
 const CodeInstallMismatch = "install_mismatch"
 
+// CodeOperatorOnly is the machine-readable code burrowd returns when a credential of kind `agent` —
+// or one with no kind at all, which is held the same way — tries to write the guardrail policy or to
+// mint an identity (ADR-0099). It is deliberately distinct from a guardrail refusal and from a plain
+// `forbidden`: no disposition governs it, `--confirm` does not satisfy it, and the way through is a
+// person's own credential rather than a different request.
+const CodeOperatorOnly = "operator_only"
+
 func (e *APIError) Error() string {
 	hint := ""
 	if e.NeedsConfirmation {

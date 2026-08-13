@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -277,6 +278,103 @@ pg_restore --clean --if-exists -d %q %q`, app, dump)
 	job := a.backupJob(name, claim, script, connEnv, nil, "")
 	_, rerr := a.runJobAwaitSize(ctx, job, name)
 	return rerr
+}
+
+// backupVolumeIdentifier and backupFileName bound what may be interpolated into the removal Job's
+// shell script. The path and the claim come off a registry row rather than out of a caller's
+// argument, but the row is only ever as trustworthy as the write that made it, and this is the one
+// backup script whose operand is a DELETE. Constraining both to a plain identifier alphabet means no
+// value reaching the script can carry a quote, a substitution, or a separator, so the script cannot
+// be made to unlink anything but the one dump the row names.
+var (
+	backupVolumeIdentifier = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*$`)
+	backupFileName         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+)
+
+// RemoveBackupFile deletes ONE dump from the claim it was written to, via a one-shot Job that mounts
+// that claim and unlinks that path — the cluster half of removing a backup (the row is the other
+// half, and the engine removes both).
+//
+// volume and path are the RECORDED ones, passed in rather than derived from the app and the
+// environment, because the derivation has a history: dumps taken before backups were held per
+// environment are on the single claim that existed then (ADR-0067 §1). Re-deriving here would point
+// the Job at a file that is not there and let the caller record bytes as removed while they sit on a
+// volume nothing is looking at any more.
+//
+// It is IDEMPOTENT in both directions. A claim that does not exist holds no dump, so it is success
+// without building a Job at all; `rm -f` makes an absent file success too. Removing a backup is the
+// operation whose caller must be able to run it twice — a prune interrupted between the bytes and
+// the row retries the pair — and an "already gone" reported as a failure is a failure every caller
+// then has to decide to ignore.
+//
+// THE JOB HOLDS NO DATABASE CREDENTIAL, unlike the backup and restore Jobs built beside it: it
+// unlinks a file and never dials a server, so it is given no connection env and no secretKeyRef. It
+// runs the same postgres image only because that image is already on the node — the alternative is
+// an extra pull, and an extra dependency, for `rm`.
+//
+// A RESTORE ALREADY READING THIS DUMP IS NOT CORRUPTED BY IT. `rm` unlinks the name; a pg_restore
+// that has the file open keeps reading the same inode to the end. The other order is a restore that
+// has not opened it yet, and pg_restore reads the archive's table of contents before it drops
+// anything, so that restore fails at open with the database untouched. Both outcomes are loud and
+// neither is a half-restored database — which is why removal does not need to hold a lock against
+// restore to be safe.
+func (a *Adapter) RemoveBackupFile(ctx context.Context, backupID, volume, path string) error {
+	if backupID == "" || !backupFileName.MatchString(backupID) {
+		return fmt.Errorf("kube: removing a backup's dump: backup id %q is not a valid identifier: %w", backupID, controlplane.ErrInvalid)
+	}
+	if !backupVolumeIdentifier.MatchString(volume) {
+		return fmt.Errorf("kube: removing backup %q: volume %q is not a valid claim name: %w", backupID, volume, controlplane.ErrInvalid)
+	}
+	if err := validateBackupDumpPath(path); err != nil {
+		return fmt.Errorf("kube: removing backup %q: %w", backupID, err)
+	}
+
+	// A claim that is not there cannot be holding the dump, and creating it to delete a file from it
+	// would leave a 10Gi volume behind for every backup ever pruned off a claim already reclaimed.
+	// This is why removal does NOT go through ensureBackupPVC the way backup and restore do.
+	if _, err := a.client.CoreV1().PersistentVolumeClaims(a.addonNamespace).Get(ctx, volume, metav1.GetOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("kube: removing backup %q: reading volume %q: %w", backupID, volume, err)
+	}
+
+	// -f so an already-removed dump exits zero. The directory the dump sat in is deliberately left
+	// alone: it is shared by every backup of that app, and removing it on the last one would race a
+	// backup being taken at the same moment.
+	script := fmt.Sprintf("set -e\nrm -f %q", path)
+	name := backupRemoveJobName(backupID)
+	job := a.backupJob(name, volume, script, nil, nil, "")
+	_, err := a.runJobAwaitSize(ctx, job, name)
+	return err
+}
+
+// backupRemoveJobName is the Job name for removing a backup's dump. It is distinct from
+// backupJobName so a removal can never be mistaken for the backup itself — by BackupJobPresent,
+// which answers "is this backup still being taken", or by anyone reading the namespace.
+func backupRemoveJobName(backupID string) string { return "burrow-pg-backup-rm-" + backupID }
+
+// validateBackupDumpPath accepts only a path of the shape the backup Job writes:
+// <backupMountPath>/<app>/<id>.dump, each segment a plain identifier. It is checked rather than
+// trusted because this is the argument to a delete: a row whose path was written by some future
+// caller, or edited in the database, must not be able to reach a file outside the layout — and
+// ".." is excluded by the segment alphabet rather than by a scan for it.
+func validateBackupDumpPath(path string) error {
+	rest, ok := strings.CutPrefix(path, backupMountPath+"/")
+	if !ok {
+		return fmt.Errorf("dump path %q is not on the backup volume (want %s/<app>/<id>.dump): %w", path, backupMountPath, controlplane.ErrInvalid)
+	}
+	segments := strings.Split(rest, "/")
+	if len(segments) != 2 {
+		return fmt.Errorf("dump path %q is not of the form %s/<app>/<id>.dump: %w", path, backupMountPath, controlplane.ErrInvalid)
+	}
+	if err := validateAppIdentifier(segments[0]); err != nil {
+		return fmt.Errorf("dump path %q: %w", path, err)
+	}
+	if !backupFileName.MatchString(segments[1]) || !strings.HasSuffix(segments[1], ".dump") {
+		return fmt.Errorf("dump path %q does not name a dump file: %w", path, controlplane.ErrInvalid)
+	}
+	return nil
 }
 
 // backupJob builds a one-shot Job in the add-on namespace running the postgres image with script,

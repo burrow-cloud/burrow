@@ -812,6 +812,27 @@ func (d *Database) GetBackup(ctx context.Context, id string) (controlplane.Backu
 	return b, nil
 }
 
+// DeleteBackup removes a backup's row, matching the store: an id that is not there is a no-op and
+// returns nil, so a caller retrying a prune does not have to tell "removed" from "already gone".
+func (d *Database) DeleteBackup(ctx context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.errs[OpDeleteBackup]; err != nil {
+		return err
+	}
+	if _, ok := d.backups[id]; !ok {
+		return nil
+	}
+	delete(d.backups, id)
+	for i, seen := range d.backupSeq {
+		if seen == id {
+			d.backupSeq = append(d.backupSeq[:i], d.backupSeq[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
 // CreateEnvironment registers a named environment, rejecting a duplicate name with an
 // ErrInvalid-wrapped error (the name is the primary key), matching the store.
 func (d *Database) CreateEnvironment(ctx context.Context, name, namespace string) error {

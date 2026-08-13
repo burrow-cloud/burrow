@@ -205,6 +205,13 @@ const (
 	auditOpAddonDetach  = "addon_detach"
 	auditOpAddonBackup  = "addon_backup"
 	auditOpAddonRestore = "addon_restore"
+	// auditOpAddonBackupDelete is the removal of a backup — the dump and its record together. It is
+	// audited for the reason the log exists at all (ADR-0027): a backup that is not there is
+	// discovered during an incident, and "when did it go, and what removed it" has to be answerable
+	// then. A removal driven by a retention rule is exactly the case that needs it, because nobody
+	// watched it happen. The row carries the add-on, app, environment, backup id, kind and
+	// destination — the object key and the credential that reached it are not recorded.
+	auditOpAddonBackupDelete = "addon_backup_delete"
 	// auditOpAddonRestoreInstance is a PHYSICAL restore of a whole instance (ADR-0066 §4). It is a
 	// separate operation from auditOpAddonRestore rather than the same one with different args,
 	// because the two have different blast radii and an audit trail that collapsed them would answer

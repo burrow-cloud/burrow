@@ -40,6 +40,7 @@ type Kubernetes struct {
 	autoscalers map[string]controlplane.AutoscaleSpec  // app -> applied HPA spec (namespace-keyed)
 	backups     *[]backupCall                          // RunBackupJob calls, in order
 	restores    *[]backupCall                          // RunRestoreJob calls, in order
+	removals    *[]RemoveBackupFileCall                // RemoveBackupFile calls, in order
 	runs        *[]runCall                             // RunJob calls, in order
 	rollouts    *[]rolloutCall                         // AwaitRollout calls, in order
 	rolloutOut  map[string]controlplane.RolloutOutcome // app -> canned AwaitRollout answer, when overridden
@@ -289,6 +290,7 @@ func NewKubernetes() *Kubernetes {
 		autoscalers:      make(map[string]controlplane.AutoscaleSpec),
 		backups:          &[]backupCall{},
 		restores:         &[]backupCall{},
+		removals:         &[]RemoveBackupFileCall{},
 		runs:             &[]runCall{},
 		rollouts:         &[]rolloutCall{},
 		rolloutOut:       make(map[string]controlplane.RolloutOutcome),
@@ -1404,6 +1406,38 @@ func (k *Kubernetes) RunRestoreJob(ctx context.Context, app, env, instance, back
 	}
 	*k.restores = append(*k.restores, backupCall{App: app, Env: env, Instance: instance, BackupID: backupID})
 	return nil
+}
+
+// RemoveBackupFileCall records one RemoveBackupFile invocation. It keeps the VOLUME and the PATH
+// rather than an app and an environment, because that is the whole point of the call: the engine
+// must drive the removal from what the row recorded, not from what it would derive today, and a
+// recorded call that dropped them could not tell the two apart.
+type RemoveBackupFileCall struct {
+	BackupID string
+	Volume   string
+	Path     string
+}
+
+// RemoveBackupFile records the removal and reports success, matching the adapter's idempotence: an
+// absent file and an absent claim are both success there, so there is no "not found" for the fake to
+// model. A test that wants the failure path injects one with SetError(OpRemoveBackupFile, err).
+func (k *Kubernetes) RemoveBackupFile(ctx context.Context, backupID, volume, path string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	// Recorded BEFORE an injected failure, so a test can assert what the engine asked for on the
+	// path where the removal fails — which is the path the ordering argument turns on.
+	*k.removals = append(*k.removals, RemoveBackupFileCall{BackupID: backupID, Volume: volume, Path: path})
+	if err := k.errs[OpRemoveBackupFile]; err != nil {
+		return err
+	}
+	return nil
+}
+
+// BackupRemovals returns the RemoveBackupFile calls, in order.
+func (k *Kubernetes) BackupRemovals() []RemoveBackupFileCall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]RemoveBackupFileCall(nil), *k.removals...)
 }
 
 // SetRunResult sets the canned RunResult the next RunJob calls return, modelling a command's captured

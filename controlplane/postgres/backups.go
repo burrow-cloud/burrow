@@ -160,6 +160,25 @@ func (s *Store) GetBackup(ctx context.Context, id string) (controlplane.Backup, 
 	return b, nil
 }
 
+// DeleteBackup removes a backup's row. It is the registry half of removing a backup; the bytes are
+// removed by the engine, which drives this write LAST so a failure between the two leaves a row
+// pointing at a dump that is gone rather than a dump nothing points at.
+//
+// Deleting a backup that is not there is a NO-OP and returns nil. The row is the thing being removed
+// and it is already absent, so there is nothing to report: a retention pass retried after a crash,
+// or two passes racing over the same expired backup, must not have to tell "I removed it" and
+// "somebody else already had" apart. That is the opposite of SetBackupStatus and FailBackup, which
+// describe a backup and therefore have something to say when the id names none.
+func (s *Store) DeleteBackup(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("postgres: delete backup: empty ID")
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM postgres_backups WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("postgres: delete backup %s: %w", id, err)
+	}
+	return nil
+}
+
 func scanBackup(sc scanner) (controlplane.Backup, error) {
 	var (
 		b       controlplane.Backup

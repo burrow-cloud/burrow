@@ -516,3 +516,93 @@ func TestAddonVolumeOwnerAttributesEachClaim(t *testing.T) {
 		t.Error("a claim with no Burrow labels was attributed to an add-on")
 	}
 }
+
+// TestRemoveBackupFileUnlinksTheRecordedDump asserts the removal Job mounts the claim the ROW named,
+// unlinks the path the row named, and carries no database credential — it deletes a file and has no
+// business reaching a Postgres server.
+func TestRemoveBackupFileUnlinksTheRecordedDump(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(&corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: controlplane.PostgresBackupVolume, Namespace: addonNS},
+	})
+	var created []*batchv1.Job
+	succeedJobs(client, &created)
+
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	dump := controlplane.BackupPath("shop", "bk1")
+	if err := a.RemoveBackupFile(ctx, "bk1", controlplane.PostgresBackupVolume, dump); err != nil {
+		t.Fatalf("RemoveBackupFile: %v", err)
+	}
+	if len(created) != 1 {
+		t.Fatalf("created %d jobs, want 1", len(created))
+	}
+	job := created[0]
+	if job.Name != backupRemoveJobName("bk1") {
+		t.Errorf("job name = %q, want %q — a removal must not be mistaken for the backup itself", job.Name, backupRemoveJobName("bk1"))
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	cmd := strings.Join(c.Command, " ")
+	if !strings.Contains(cmd, "rm -f") || !strings.Contains(cmd, dump) {
+		t.Errorf("command does not unlink the recorded dump: %q", cmd)
+	}
+	if len(c.Env) != 0 {
+		t.Errorf("the removal Job carries env %v, want none: it needs no database credential", c.Env)
+	}
+	claim := job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim
+	if claim == nil || claim.ClaimName != controlplane.PostgresBackupVolume {
+		t.Errorf("job mounts %+v, want the claim the row named (%s)", claim, controlplane.PostgresBackupVolume)
+	}
+}
+
+// TestRemoveBackupFileAbsentVolumeIsSuccess asserts a claim that is not there is success and builds
+// no Job. Ensuring the claim first — the way backup and restore do — would create a 10Gi volume for
+// every backup pruned off a claim that was already reclaimed.
+func TestRemoveBackupFileAbsentVolumeIsSuccess(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	var created []*batchv1.Job
+	succeedJobs(client, &created)
+
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+	if err := a.RemoveBackupFile(ctx, "bk1", "burrow-postgres-staging-backups", controlplane.BackupPath("shop", "bk1")); err != nil {
+		t.Fatalf("RemoveBackupFile with no claim = %v, want nil", err)
+	}
+	if len(created) != 0 {
+		t.Errorf("created %d jobs, want 0", len(created))
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(addonNS).Get(ctx, "burrow-postgres-staging-backups", metav1.GetOptions{}); err == nil {
+		t.Error("removing a backup created the claim it was removing from")
+	}
+}
+
+// TestRemoveBackupFileRefusesAPathOffTheLayout asserts the operand of a delete is checked rather
+// than trusted: only <mount>/<app>/<id>.dump is accepted, so no row can send the Job at a file
+// outside the layout the backup Job writes.
+func TestRemoveBackupFileRefusesAPathOffTheLayout(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(&corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: controlplane.PostgresBackupVolume, Namespace: addonNS},
+	})
+	var created []*batchv1.Job
+	succeedJobs(client, &created)
+	a := New(client, "apps").WithAddonNamespace(addonNS)
+
+	for _, path := range []string{
+		"/etc/passwd",
+		backupMountPath + "/../etc/passwd",
+		backupMountPath + "/shop/bk1.dump; rm -rf /",
+		backupMountPath + "/shop/notadump",
+		backupMountPath + "/shop/sub/bk1.dump",
+	} {
+		if err := a.RemoveBackupFile(ctx, "bk1", controlplane.PostgresBackupVolume, path); !errors.Is(err, controlplane.ErrInvalid) {
+			t.Errorf("RemoveBackupFile(%q) = %v, want ErrInvalid", path, err)
+		}
+	}
+	// A claim name off the alphabet is refused on the same grounds.
+	if err := a.RemoveBackupFile(ctx, "bk1", "backups; rm -rf /", controlplane.BackupPath("shop", "bk1")); !errors.Is(err, controlplane.ErrInvalid) {
+		t.Errorf("RemoveBackupFile with an invalid claim = %v, want ErrInvalid", err)
+	}
+	if len(created) != 0 {
+		t.Errorf("created %d jobs for refused arguments, want 0", len(created))
+	}
+}

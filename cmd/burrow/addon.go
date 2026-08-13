@@ -96,7 +96,7 @@ func newAddonBackupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.BackupAddon(ctx, args[0], args[1], o.env, instance, destination)
+			res, err := c.BackupAddon(ctx, args[0], args[1], o.operationEnv(), instance, destination)
 			if err != nil {
 				return err
 			}
@@ -145,7 +145,7 @@ func newAddonBackupInstanceCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.BackupInstance(ctx, args[0], o.env, instance, destination)
+			res, err := c.BackupInstance(ctx, args[0], o.operationEnv(), instance, destination)
 			if err != nil {
 				return err
 			}
@@ -174,24 +174,40 @@ func backupWhere(b client.Backup) string {
 }
 
 // newAddonBackupsCmd is `burrow addon backups postgres [<app>]`: list recorded backups, newest
-// first. With no app it lists every app's backups. Read-only.
+// first. With no app it lists every app's backups in the environment the command is scoped to;
+// --all-environments lists every environment's. Read-only.
 func newAddonBackupsCmd() *cobra.Command {
 	o := &commonOpts{}
+	var allEnvironments bool
 	cmd := &cobra.Command{
 		Use:   "backups <addon> [<app>]",
 		Short: "List recorded database backups (id, app, time, size)",
-		Args:  cobra.RangeArgs(1, 2),
+		Long: "backups lists the dumps Burrow has recorded, newest first, and says where each one\n" +
+			"actually went.\n\n" +
+			"It lists ONE environment's backups: the environment this command is targeting, which --env\n" +
+			"overrides. That is deliberate — an id chosen from this list is handed to a restore that\n" +
+			"overwrites a live database, and an id is opaque, so a list spanning environments is a list\n" +
+			"a restore cannot check. Pass --all-environments to see every environment's anyway; the ENV\n" +
+			"column says which is which.\n\n" +
+			"With no app it lists every app's.",
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			app := ""
 			if len(args) == 2 {
 				app = args[1]
 			}
+			// The scope is settled before anything is contacted, so a contradictory pair of flags is
+			// refused rather than answered from one of them.
+			env, err := o.backupScope(allEnvironments)
+			if err != nil {
+				return err
+			}
 			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			backups, err := c.Backups(ctx, args[0], app, o.env)
+			backups, err := c.Backups(ctx, args[0], app, env)
 			if err != nil {
 				return err
 			}
@@ -200,7 +216,13 @@ func newAddonBackupsCmd() *cobra.Command {
 				return emit(out, true, backups, "")
 			}
 			if len(backups) == 0 {
-				fmt.Fprintln(out, "No backups recorded. Create one with `burrow addon backup postgres <app>`.")
+				// An empty listing says which environment it looked in, so "there are no backups" is
+				// never read as an answer about a wider scope than the one that was searched.
+				if env != "" {
+					fmt.Fprintf(out, "No backups recorded in environment %s. Create one with `burrow addon backup postgres <app>`,\nor pass --all-environments to look in every environment.\n", env)
+					return nil
+				}
+				fmt.Fprintln(out, "No backups recorded in any environment. Create one with `burrow addon backup postgres <app>`.")
 				return nil
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
@@ -226,6 +248,7 @@ func newAddonBackupsCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	bindAllEnvironments(cmd.Flags(), &allEnvironments)
 	return cmd
 }
 
@@ -239,6 +262,7 @@ func newAddonBackupsCmd() *cobra.Command {
 // it left the cluster, which a listing can only show one row at a time.
 func newAddonBackupHealthCmd() *cobra.Command {
 	o := &commonOpts{}
+	var allEnvironments bool
 	cmd := &cobra.Command{
 		Use:   "backup-health <addon> [<app>]",
 		Short: "Report backup coverage: last successful backup, last failure, destination reachability",
@@ -248,7 +272,9 @@ func newAddonBackupHealthCmd() *cobra.Command {
 			"The two ages are different questions. An in-cluster dump shares a failure domain with the\n" +
 			"database it came from, so only a backup that reached an object store is one that survives\n" +
 			"losing the cluster — and that is the age worth watching.\n\n" +
-			"With no app it spans every app; with no --env, every environment. Read-only.",
+			"It reports on ONE environment: the one this command is targeting, which --env overrides.\n" +
+			"Pass --all-environments to report across every environment at once. With no app it spans\n" +
+			"every app in that scope. Read-only.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -256,11 +282,15 @@ func newAddonBackupHealthCmd() *cobra.Command {
 			if len(args) == 2 {
 				app = args[1]
 			}
+			env, err := o.backupScope(allEnvironments)
+			if err != nil {
+				return err
+			}
 			c, err := o.client(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			health, err := c.BackupHealth(ctx, args[0], app, o.env)
+			health, err := c.BackupHealth(ctx, args[0], app, env)
 			if err != nil {
 				return err
 			}
@@ -269,8 +299,39 @@ func newAddonBackupHealthCmd() *cobra.Command {
 	}
 	bindCommon(cmd.Flags(), o)
 	bindEnv(cmd.Flags(), o)
+	bindAllEnvironments(cmd.Flags(), &allEnvironments)
 	return cmd
 }
+
+// backupScope is the environment a backup READ is scoped to, and the whole of issue #570 lives in
+// it. The two listings send an environment that the server reads as a FILTER, where an empty value
+// means no filter at all — so an omitted --env used to widen the answer to every environment, while
+// the same omission on every other command means the active one. The listing was accurate about what
+// it did and that was the problem: two conventions for one empty flag, and the wider of them on the
+// commands whose output picks the backup a restore then overwrites a live database with.
+//
+// So a scope is always named. With nothing to resolve — no handle registered for this cluster, or a
+// control plane named outright with --control-plane — it is the default environment, which is what
+// an unnamed environment means everywhere else in the CLI and on the server (ADR-0067 §2). The empty
+// value keeps its meaning on the wire, and --all-environments is now the only thing that sends it.
+func (o *commonOpts) backupScope(allEnvironments bool) (string, error) {
+	if allEnvironments {
+		if o.env != "" {
+			return "", errEnvAndAllEnvironments
+		}
+		return "", nil
+	}
+	if env := o.operationEnv(); env != "" {
+		return env, nil
+	}
+	return controlplane.DefaultEnvironment, nil
+}
+
+// errEnvAndAllEnvironments refuses the two scope flags together rather than picking one. Either
+// choice would be silently wrong for somebody: --env winning ignores an explicit request for
+// everything, and --all-environments winning ignores an explicitly named environment.
+var errEnvAndAllEnvironments = errors.New(
+	"--env names one environment and --all-environments asks for every one, so only one of them can be honoured; pass whichever was meant")
 
 // backupHealthHuman renders the health report for a human. The summary leads, because it is the
 // answer; the observations follow as the evidence for it. A destination that did not answer is
@@ -356,7 +417,7 @@ func newAddonRestoreCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.RestoreAddon(ctx, args[0], args[1], backup, o.env, instance, confirm); err != nil {
+			if err := c.RestoreAddon(ctx, args[0], args[1], backup, o.operationEnv(), instance, confirm); err != nil {
 				return err
 			}
 			human := fmt.Sprintf("restored %q from backup %s", args[1], backup)
@@ -433,6 +494,13 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 					return fmt.Errorf("--to-time %q is not an RFC3339 instant (for example 2026-08-01T14:30:00Z)", toTime)
 				}
 			}
+			// ONE RESOLUTION, READ ONCE, USED BY ALL THREE. The environment names the instance in the
+			// prompt, is the environment the notice says is being rewound, and is the environment the
+			// call acts in — so resolving it three times would let the sentence somebody reads and the
+			// instance that is actually destroyed come from different answers. Resolving it here also
+			// keeps it ahead of the off-terminal refusal below, which it can be because it reads local
+			// configuration only and contacts nothing (operationEnv).
+			env := o.operationEnv()
 			// THE NAME IN THE PROMPT IS THE LABEL THE OPERATOR TYPES, and it is settled without
 			// contacting anything: --name when one was given, and otherwise the label of the
 			// environment's FIRST instance, which is its own derived name and the one instance whose
@@ -442,7 +510,7 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 			// that far (ADR-0064 §2).
 			label := instance
 			if label == "" {
-				derived, err := controlplane.AddonInstanceName(controlplane.AddonType(addon), restoreEnvironment(o.env))
+				derived, err := controlplane.AddonInstanceName(controlplane.AddonType(addon), restoreEnvironment(env))
 				if err != nil {
 					return err
 				}
@@ -459,11 +527,11 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 			}
 			// The typed-name gate goes to stderr so a --json run keeps a clean stdout.
 			if !ackDataLoss {
-				if err := confirmRestoreInstance(ctx, c, label, o.env, recoveryTargetLabel(backup, toTime), skipSafety, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
+				if err := confirmRestoreInstance(ctx, c, label, env, recoveryTargetLabel(backup, toTime), skipSafety, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
 					return err
 				}
 			}
-			res, err := c.RestoreInstance(ctx, addon, o.env, client.RestoreInstanceOptions{
+			res, err := c.RestoreInstance(ctx, addon, env, client.RestoreInstanceOptions{
 				Instance:         instance,
 				Backup:           backup,
 				ToTime:           toTime,
@@ -531,7 +599,7 @@ func recoveryTargetLabel(backup, toTime string) string {
 	}
 }
 
-// restoreEnvironment resolves the environment flag for the purpose of NAMING the instance in the
+// restoreEnvironment names the resolved environment for the purpose of NAMING the instance in the
 // notice. An unnamed environment is the default one, which is what the server resolves it to when
 // exactly one environment is registered; with several the server refuses, so the name printed here
 // is never the one a restore silently went to.

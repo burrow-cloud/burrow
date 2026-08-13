@@ -260,6 +260,11 @@ func newAddonBackupsCmd() *cobra.Command {
 // It is a separate command from `backups` because it answers a different question. `backups` lists
 // what exists; this says whether what exists amounts to coverage — and in particular whether any of
 // it left the cluster, which a listing can only show one row at a time.
+//
+// It reads through readClient, so it answers on either kind of target. That difference from `backups`
+// is the same difference: a verdict about coverage is a shape the managed product can report the
+// PLATFORM's backups in, where a listing of the tenant's own records has nothing to list
+// (clusteronly.go, cloud issue #302).
 func newAddonBackupHealthCmd() *cobra.Command {
 	o := &commonOpts{}
 	var allEnvironments bool
@@ -286,7 +291,9 @@ func newAddonBackupHealthCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			// readClient, not client: the question is whether the data is safe, and it is the
+			// tenant's data on either kind of target (cloud issue #208).
+			c, err := o.readClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

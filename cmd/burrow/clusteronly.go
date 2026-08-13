@@ -47,7 +47,7 @@ import (
 //     state. It reads and writes the local config only and touches no cluster.
 //   - The reads that call commonOpts.readClient instead: `guard list`, `cluster config list`,
 //     `audit`, `failures`, `env list`, and — added by the sweep of the whole surface — `addon list`,
-//     `addon logs` and `addon metrics`. They were refused here because they shared a connection
+//     `addon logs`, `addon metrics` and `addon backup-health`. They were refused here because they shared a connection
 //     path with the writes beside them, not because they needed a cluster — each is a route the
 //     managed control plane answers, and the refusal was the client not knowing it existed rather
 //     than the route being absent (cloud issue #202). They act on either kind of target now.
@@ -71,19 +71,34 @@ import (
 //     attach a database their own `burrow` refused. Where an attach genuinely needs holding, that is
 //     a guardrail in the control plane, which binds every caller (ADR-0095).
 //
-//     `addon backups` and `addon backup-health` are reads whose routes answer too, and they stay
-//     refused for a third reason that is neither of those: on the managed product the backups are
-//     the PLATFORM's, taken of an instance the tenant does not operate, and none of them is recorded
-//     in the tenant's own registry. Both commands would therefore report, accurately and uselessly,
-//     that a tenant has no backups — `backups` while pointing at `burrow addon backup`, which
-//     refuses there. What a managed tenant should be told about the backups of their database is a
-//     product statement, and it is not one a client change can make.
+//     `addon backup-health` was refused for a third reason that is neither of those, and it no
+//     longer holds. The reason ran: on the managed product the backups are the PLATFORM's, taken of
+//     an instance the tenant does not operate and recorded in no tenant registry, so the command
+//     would report accurately and uselessly that a tenant has no backups. What that argument
+//     actually established is that the ANSWER was missing, not that the question was the wrong one
+//     — and "is my data safe?" is a fair question from whoever owns the data. The managed product
+//     is going to answer it per app database (cloud issue #302), so the command reads through
+//     commonOpts.readClient and reaches a managed target. What it reports there is that issue's,
+//     and until it lands a managed tenant sees the engine's own empty answer.
+//
+//     `addon backups` stays refused, although it is the sibling read and shares that history. The
+//     difference is what each is for. `backup-health` is a verdict — coverage, ages, whether
+//     anything left the cluster — which is a shape the platform's own backups can be reported in
+//     without the tenant holding a single record of their own. `backups` is a listing OF THOSE
+//     RECORDS, and a managed tenant has none; it would print an empty table and, from this file's
+//     own code, tell the reader to make one with `burrow addon backup`, which the managed API now
+//     answers as a verb it does not offer (cloud issue #208). Moving it would ship that sentence to
+//     a tenant who cannot act on it, and not shipping it means changing what the command prints,
+//     which is the same product statement #302 is about. It moves when it has rows to list.
 //
 //     `addon sql` is a read in the sense that matters to a person and is NOT one here. It opens a
-//     SQL connection from burrowd, and the managed control plane does not run in the fleet its
-//     tenants' databases are in and may not dial into one (cloud ADR-0036 §1). Its route is not
-//     absent and the tenant guardrail policy holds it at `confirm`, so what it needs is an execution
-//     path inside the fleet, not a different client.
+//     SQL connection from burrowd, which cannot work on the managed product — but the managed
+//     product does not run that code: cloud ADR-0039 replaced the seam behind the route with one
+//     that carries the statement to the fleet and runs it beside the database, which is how a
+//     managed tenant queries their own data today. So the execution path this file used to say was
+//     missing exists, the route answers, and the tenant guardrail policy's `confirm` on it is live.
+//     What is left is a product decision about the client — arbitrary SQL against live data is a
+//     change, whatever the verb is called — and it is the last of cloud issue #208's inversions.
 
 // refuseCloudTarget reports why a cluster-only command cannot run, or nil when it can. It reads the
 // local config and nothing else: no kubeconfig, no network, no credential.

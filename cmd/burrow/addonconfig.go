@@ -110,7 +110,10 @@ func newAddonConfigPostgresCmd() *cobra.Command {
 				fmt.Fprintf(out, "  %s — %s\n", s.Setting, s.Consequence)
 			}
 			fmt.Fprintln(out)
-			fmt.Fprintln(out, "Change one with `burrow addon config postgres <setting> <value>`.")
+			// Changing a setting reaches a cluster and is refused on the managed product, where the
+			// instance is the platform's, so what closes the listing depends on the target
+			// (targethints.go).
+			fmt.Fprintln(out, addonConfigListTail(o.onManagedTarget()))
 			return nil
 		},
 	}

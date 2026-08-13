@@ -88,7 +88,7 @@ func TestFormatSQLResultTruncationIsLoud(t *testing.T) {
 		RowCount:    2,
 		Truncated:   true,
 		RowLimit:    2,
-	})
+	}, false)
 	head, _, _ := strings.Cut(out, "\n")
 	if !strings.Contains(head, "cut off") {
 		t.Errorf("headline %q does not say the result was cut off", head)
@@ -108,7 +108,7 @@ func TestFormatSQLResultNullIsNotEmpty(t *testing.T) {
 		Columns:  []string{"a", "b"},
 		Rows:     [][]*string{{nil, ptr("")}},
 		RowCount: 1,
-	})
+	}, false)
 	if !strings.Contains(out, "NULL") {
 		t.Errorf("a NULL did not render as NULL:\n%s", out)
 	}
@@ -119,7 +119,7 @@ func TestFormatSQLResultNullIsNotEmpty(t *testing.T) {
 func TestFormatSQLResultDatabaseErrorReadsAsAnOutcome(t *testing.T) {
 	out := formatSQLResult("web", client.SQLResult{
 		Error: &client.SQLError{Message: `relation "users" does not exist`, SQLState: "42P01", Hint: "check the schema"},
-	})
+	}, false)
 	for _, want := range []string{"42P01", `relation "users" does not exist`, "check the schema"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output does not carry %q:\n%s", want, out)
@@ -130,7 +130,7 @@ func TestFormatSQLResultDatabaseErrorReadsAsAnOutcome(t *testing.T) {
 // TestFormatSQLResultNoRowSet asserts a statement that returned no rows reports its command tag and
 // what it changed, rather than an empty table standing in for "it worked".
 func TestFormatSQLResultNoRowSet(t *testing.T) {
-	out := formatSQLResult("web", client.SQLResult{Command: "UPDATE 3", RowsAffected: 3})
+	out := formatSQLResult("web", client.SQLResult{Command: "UPDATE 3", RowsAffected: 3}, false)
 	if !strings.Contains(out, "UPDATE 3") || !strings.Contains(out, "3 row(s) affected") {
 		t.Errorf("output does not report the command tag and rows affected:\n%s", out)
 	}

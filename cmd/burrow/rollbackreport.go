@@ -31,7 +31,10 @@ import (
 
 // rollbackHuman renders a finished rollback for a person: the result line, and — when the rollout did
 // not settle or was never observed — what actually happened to it.
-func rollbackHuman(app string, res client.RollbackResult) string {
+//
+// managed is the kind of target this rollback went to, and reaches the settle-timeout line only, as
+// it does in deployHuman: the same bound, so the same sentence (targethints.go).
+func rollbackHuman(app string, res client.RollbackResult, managed bool) string {
 	rel := res.Release
 	head := fmt.Sprintf("rolled %s back to release %s (image %s) as release %s",
 		app, res.RolledBackToReleaseID, rel.Image, rel.ID)
@@ -52,7 +55,7 @@ func rollbackHuman(app string, res client.RollbackResult) string {
 		}
 		return head
 	default:
-		return rollbackFailureHuman(app, res)
+		return rollbackFailureHuman(app, res, managed)
 	}
 }
 
@@ -71,7 +74,7 @@ func rollbackHuman(app string, res client.RollbackResult) string {
 // this failed rollback is now that release, and what it supersedes is the release just fled. So a
 // second rollback returns to exactly where this one started. The escape is a deploy of a release
 // chosen deliberately, which is what `burrow app history` is for.
-func rollbackFailureHuman(app string, res client.RollbackResult) string {
+func rollbackFailureHuman(app string, res client.RollbackResult, managed bool) string {
 	rel, out := res.Release, res.Rollout
 	var b strings.Builder
 	if out.Reason == controlplane.ReasonDeadlineExceeded {
@@ -96,7 +99,7 @@ func rollbackFailureHuman(app string, res client.RollbackResult) string {
 			res.SupersededReleaseID, app)
 	}
 	if out.Reason == controlplane.ReasonDeadlineExceeded {
-		b.WriteString("  Kubernetes is still rolling it out. Raise the bound with `burrow cluster config set deploy.settle_timeout <duration>` if this app legitimately takes longer.\n")
+		b.WriteString("  " + settleTimeoutHint(managed))
 	}
 	fmt.Fprintf(&b, "  next: burrow app status %s, burrow app logs %s", app, app)
 	return b.String()

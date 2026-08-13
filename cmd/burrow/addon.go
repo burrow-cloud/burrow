@@ -1198,7 +1198,7 @@ func newAddonSQLCmd() *cobra.Command {
 			// can delete, so every statement is treated as one that changed something and names the
 			// target it ran against (ADR-0078 §4) — the honest reading of a verb whose effect Burrow
 			// deliberately does not inspect (ADR-0087 §6).
-			return o.emitChange(cmd.OutOrStdout(), res, formatSQLResult(args[1], res))
+			return o.emitChange(cmd.OutOrStdout(), res, formatSQLResult(args[1], res, o.onManagedTarget()))
 		},
 	}
 	bindCommon(cmd.Flags(), o)
@@ -1254,7 +1254,10 @@ func readStatement(cmd *cobra.Command, statement, file string) (string, error) {
 //
 // A truncated result says so and names the limit to raise, because a short answer nobody was told
 // about is the failure this whole shape exists to avoid. No em-dashes: it is user-facing CLI output.
-func formatSQLResult(app string, res client.SQLResult) string {
+//
+// managed is the kind of target the statement ran against. `addon sql` reaches both (clusteronly.go),
+// and the cap is raised with an operator command on only one of them (targethints.go).
+func formatSQLResult(app string, res client.SQLResult, managed bool) string {
 	var b strings.Builder
 	if res.Error != nil {
 		// The database's own words, unmodified, with the SQLSTATE that makes it identifiable.
@@ -1300,8 +1303,7 @@ func formatSQLResult(app string, res client.SQLResult) string {
 	}
 	_ = tw.Flush()
 	if res.Truncated {
-		fmt.Fprintf(&b, "Narrow the statement, or raise the cap with `burrow cluster config set --env %s addon.sql_rows <n>`.",
-			envOrDefaultName(res.Environment))
+		b.WriteString(sqlRowCapHint(managed, envOrDefaultName(res.Environment)))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

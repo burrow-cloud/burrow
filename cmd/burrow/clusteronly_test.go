@@ -75,22 +75,22 @@ func unreachableCluster(t *testing.T) string {
 //     `addon attach` was on this list and is not any more (cloudChangeCommands below): the product
 //     decision it was waiting on had already been taken everywhere except the client, since
 //     provisioning a tenant's database over POST /v1/addons/attach is what the managed product does
-//     (cloud issue #215).
+//     (cloud issue #215). `addon sql` followed it, and for the reason that list gives.
 //
 // `cluster` and `cluster capacity` stay for a third reason: the route answers, but what it describes
 // is the operator's cluster — its nodes, its capacity, its top consumers across every tenant — so
 // what a tenant should see there is a decision nobody has taken.
 //
-// `addon backups` and `addon backup-health` stay for a fourth: their routes answer and what they
-// return is the tenant's, but on the managed product the backups are the platform's, taken of an
-// instance the tenant does not operate and recorded nowhere in the tenant's registry. Both would
-// report that a managed tenant has no backups, and `backups` would point at `burrow addon backup` to
-// make some — a command that refuses there. What a tenant is told about that is a product statement.
+// `addon backups` stays for a fourth: its route answers and what it returns is the tenant's, but on
+// the managed product the backups are the platform's, taken of an instance the tenant does not
+// operate and recorded nowhere in the tenant's registry. It would print an empty table and point at
+// `burrow addon backup` to fill it — a verb the managed API no longer offers. `addon backup-health`
+// shared that reason and no longer stays: a verdict about coverage is the shape the platform's own
+// backups get reported in (cloudReadCommands below, cloud issue #302).
 //
-// `addon sql` stays for a fifth, and it is not a client problem at all: it opens a SQL connection
-// FROM burrowd, and the managed control plane runs outside the fleet holding its tenants' databases
-// and may not dial into one (cloud ADR-0036 §1). Its route is not absent and the tenant policy holds
-// it at `confirm`; what is missing is an execution path inside the fleet.
+// `addon sql` was on this list for a fifth reason — that it needed an execution path inside the
+// fleet rather than a different client — and cloud ADR-0039 built one, so the route answers on the
+// managed product and the command reaches it (cloudChangeCommands below).
 var clusterOnlyCommands = [][]string{
 	{"guard", "set", "app.delete", "deny"},
 	{"cluster"},
@@ -100,8 +100,6 @@ var clusterOnlyCommands = [][]string{
 	{"addon", "install", "logs"},
 	{"addon", "remove", "logs"},
 	{"addon", "backups", "postgres"},
-	{"addon", "backup-health", "postgres"},
-	{"addon", "sql", "postgres", "web", "--statement", "select 1"},
 	{"app", "domain", "add", "example.com", "--address", "203.0.113.1"},
 	{"app", "domain", "remove", "example.com"},
 	{"config", "provider", "list"},
@@ -121,8 +119,14 @@ var clusterOnlyCommands = [][]string{
 // The path is listed with the command so the test asserts WHERE it went and not merely that it did
 // not fail — a read that quietly fell back to a kubeconfig would still print a table.
 //
-// The last three are the add-on reads. `logs query` and `metrics query` are POSTs, which is the
+// The last four are the add-on reads. `logs query` and `metrics query` are POSTs, which is the
 // transport and not the test: a query does not fit in a path, and neither changes anything.
+//
+// `addon backup-health` is the newest and did not arrive with that sweep. It was refused for a
+// reason of its own — the backups a managed tenant has are the platform's, so the command had
+// nothing true to say — and that reason established that the answer was missing, not that a tenant
+// asking whether their data is safe was asking the wrong thing. The managed answer is cloud issue
+// #302's; being able to ask is this.
 var cloudReadCommands = []struct {
 	args []string
 	path string
@@ -135,6 +139,7 @@ var cloudReadCommands = []struct {
 	{[]string{"addon", "list"}, "/v1/addons"},
 	{[]string{"addon", "logs"}, "/v1/logs/query"},
 	{[]string{"addon", "metrics", "up"}, "/v1/metrics/query"},
+	{[]string{"addon", "backup-health", "postgres"}, "/v1/addons/backup-health"},
 }
 
 // cloudChangeCommands is the third part: the commands that CHANGE a tenant and are allowed to, so
@@ -143,15 +148,23 @@ var cloudReadCommands = []struct {
 // allows every guardrail on a person's credential (cloud issue #208). What puts one here is the
 // product having decided a tenant may.
 //
-// `addon attach` is the first and, today, the only one. Provisioning a tenant's database is what the
-// managed product does; POST /v1/addons/attach is how, and it is the route every attach on the
-// platform has gone through (cloud issue #215).
+// `addon attach` is the first. Provisioning a tenant's database is what the managed product does;
+// POST /v1/addons/attach is how, and it is the route every attach on the platform has gone through
+// (cloud issue #215).
+//
+// `addon sql` is the second, and it is here rather than among the reads because Burrow does not tell
+// a read from a write and does not try (ADR-0087 §6). The decision it was waiting on is the same
+// shape as attach's: the database holds the tenant's own data, and a tenant's `burrow-agent` could
+// already run a statement against it while their own `burrow` refused (cloud issue #208). What it
+// was ALSO waiting on — somewhere to run the statement, since burrowd's connection is opened inside
+// the cluster — cloud ADR-0039 built: the statement goes to the fleet and runs beside the database.
 var cloudChangeCommands = []struct {
 	args   []string
 	method string
 	path   string
 }{
 	{[]string{"addon", "attach", "postgres", "web"}, http.MethodPost, "/v1/addons/attach"},
+	{[]string{"addon", "sql", "postgres", "web", "--statement", "select 1"}, http.MethodPost, "/v1/addons/sql"},
 }
 
 // cannedTenantReads answers every route in cloudReadCommands from one body. The keys are disjoint
@@ -174,6 +187,13 @@ func cannedTenantReads(w http.ResponseWriter, _ *http.Request) {
 			{"name": "platform-metrics", "type": "metrics", "mode": "connected", "endpoint": "http://vmselect.obs.svc:8481/select/1/prometheus", "capabilities": []string{"metrics"}},
 		},
 		"samples": []map[string]any{},
+		// The backup-health fields. They sit in the same body because the keys are disjoint from every
+		// other decoder's, and they are the platform's answer in shape if not yet in substance: a
+		// verdict, with no record of the tenant's own behind it (cloud issue #302).
+		"addon":       "postgres",
+		"state":       "never",
+		"observed_at": "2026-08-12T00:00:00Z",
+		"summary":     "postgres: no backup recorded for this tenant",
 	})
 }
 

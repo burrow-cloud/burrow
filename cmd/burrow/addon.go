@@ -260,6 +260,11 @@ func newAddonBackupsCmd() *cobra.Command {
 // It is a separate command from `backups` because it answers a different question. `backups` lists
 // what exists; this says whether what exists amounts to coverage — and in particular whether any of
 // it left the cluster, which a listing can only show one row at a time.
+//
+// It reads through readClient, so it answers on either kind of target. That difference from `backups`
+// is the same difference: a verdict about coverage is a shape the managed product can report the
+// PLATFORM's backups in, where a listing of the tenant's own records has nothing to list
+// (clusteronly.go, cloud issue #302).
 func newAddonBackupHealthCmd() *cobra.Command {
 	o := &commonOpts{}
 	var allEnvironments bool
@@ -286,7 +291,9 @@ func newAddonBackupHealthCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			// readClient, not client: the question is whether the data is safe, and it is the
+			// tenant's data on either kind of target (cloud issue #208).
+			c, err := o.readClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -1139,6 +1146,15 @@ func metricLabels(labels map[string]string) string {
 // no upper bound on what a statement does, and where a confirmation cannot be an informed one,
 // holding for confirmation is theatre (ADR-0087 §5). An operator opens it per environment with
 // `burrow guard set --env <env> addon.sql allow`.
+//
+// It connects through changeClient, so it acts on a Burrow Cloud target as well as a cluster. The
+// paragraph above describes the OPEN-SOURCE path; the managed product replaced that seam with one
+// that carries the statement to the fleet and runs it beside the database (cloud ADR-0039), so the
+// route answers there and a tenant's own `burrow-agent` has been able to reach it while their `burrow`
+// refused — the inversion cloud issue #208 exists to close, over the tenant's own data. changeClient
+// rather than readClient because Burrow does not tell a read from a write and does not try: a
+// statement is treated as one that changed something everywhere else in this command, and where it
+// may run is not the place to start guessing otherwise.
 func newAddonSQLCmd() *cobra.Command {
 	o := &commonOpts{}
 	var statement, file, instance string
@@ -1168,7 +1184,9 @@ func newAddonSQLCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			// changeClient, not client: the managed control plane serves this route too, and the
+			// data the statement reaches is the tenant's own (cloud issue #208).
+			c, err := o.changeClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

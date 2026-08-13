@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/burrow-cloud/burrow/controlplane"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
 
@@ -74,6 +76,12 @@ func fakeBackupCluster(got *backupRequest) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(map[string]any{"addon": "postgres", "summary": "backups: none recorded"})
 		case strings.Contains(r.URL.Path, "/addons/backups"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"backups": []any{}})
+		case strings.Contains(r.URL.Path, "/addons/restore-instance"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"addon": "postgres", "environment": got.bodyEnv, "instance": "burrow-postgres-staging",
+				"recovery_target": "the newest state in the repository", "safety_backup": "bk0",
+				"apps": []string{"web"}, "reconnected": []string{"web"},
+			})
 		default:
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"backup": map[string]any{
@@ -220,16 +228,74 @@ func TestBackupWritesActInThePinnedEnvironment(t *testing.T) {
 	}
 }
 
-// TestExplicitEnvStillWins keeps the flag's precedence: naming an environment is somebody being
-// deliberate, and it overrides the pin exactly as it does on every other command.
-func TestExplicitEnvStillWins(t *testing.T) {
+// TestRestoreInstanceRewindsThePinnedEnvironment is the same defect at its largest blast radius: a
+// physical restore takes back EVERY database on an instance, so an operator with staging pinned and
+// no --env typed was rewinding production. The environment is resolved once and reaches the call,
+// which is also what makes the typed-name prompt name the instance that is actually destroyed.
+func TestRestoreInstanceRewindsThePinnedEnvironment(t *testing.T) {
 	kubeconfig, got := backupScopeFixture(t)
 	pinStagingHandle(t)
 
-	runAddon(t, kubeconfig, "addon", "backups", "postgres", "--env", "prod")
+	runAddon(t, kubeconfig, "addon", "restore-instance", "postgres", "--latest", "--acknowledge-data-loss", "--confirm")
 
-	if got.env() != "prod" {
-		t.Errorf("sent environment %q, want the named environment prod (path %q)", got.env(), got.path)
+	if got.env() != "staging" {
+		t.Errorf("restore-instance rewound environment %q, want the pinned environment staging (path %q)", got.env(), got.path)
+	}
+}
+
+// TestRestoreInstanceNamesThePinnedInstanceInItsRefusal reaches the resolved environment by its
+// other route: the label in the off-terminal refusal is derived from the environment BEFORE anything
+// is contacted (ADR-0064 §2), so it is the one place the resolution is visible without a connection
+// — and a prompt that named another environment's instance would be asking for consent to the wrong
+// thing.
+func TestRestoreInstanceNamesThePinnedInstanceInItsRefusal(t *testing.T) {
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	tempConfig(t)
+	forbidCloud(t)
+	kubeconfig := unreachableCluster(t)
+	pinStagingHandle(t)
+
+	origTerm := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return false }
+	t.Cleanup(func() { stdinIsTerminal = origTerm })
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"addon", "restore-instance", "postgres", "--latest", "--kubeconfig", kubeconfig}, &out, &errb)
+	if err == nil {
+		t.Fatal("restore-instance off a terminal was accepted without --acknowledge-data-loss")
+	}
+	want, nameErr := controlplane.AddonInstanceName(controlplane.AddonPostgres, "staging")
+	if nameErr != nil {
+		t.Fatalf("derive instance name: %v", nameErr)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("refusal %q does not name the pinned environment's instance %q", err, want)
+	}
+}
+
+// TestExplicitEnvStillWins keeps the flag's precedence: naming an environment is somebody being
+// deliberate, and it overrides the pin exactly as it does on every other command. It holds on the
+// listing and on the rewind alike, since a restore aimed by hand at an environment other than the
+// pinned one is precisely when the flag has to be obeyed.
+func TestExplicitEnvStillWins(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"backups", []string{"addon", "backups", "postgres", "--env", "prod"}},
+		{"restore-instance", []string{"addon", "restore-instance", "postgres", "--latest", "--acknowledge-data-loss", "--confirm", "--env", "prod"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kubeconfig, got := backupScopeFixture(t)
+			pinStagingHandle(t)
+
+			runAddon(t, kubeconfig, tc.args...)
+
+			if got.env() != "prod" {
+				t.Errorf("%s sent environment %q, want the named environment prod (path %q)", tc.name, got.env(), got.path)
+			}
+		})
 	}
 }
 
@@ -252,6 +318,27 @@ func TestEnvAndAllEnvironmentsAreRefusedTogether(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %s", err, want)
 		}
+	}
+}
+
+// TestRestoreInstanceRefusesAllEnvironments asserts the parser refuses the widening flag rather than
+// accepting and ignoring it, on the verb where being wrong about scope destroys data. The refusal
+// lands before anything is contacted: the fake cluster fails the test if it is reached.
+func TestRestoreInstanceRefusesAllEnvironments(t *testing.T) {
+	t.Setenv("BURROW_CONTROL_PLANE_URL", "")
+	t.Setenv("BURROW_API_TOKEN", "")
+	tempConfig(t)
+	forbidCloud(t)
+	kubeconfig := unreachableCluster(t)
+	pinStagingHandle(t)
+
+	var out, errb bytes.Buffer
+	err := run(context.Background(), []string{"addon", "restore-instance", "postgres", "--latest", "-A", "--acknowledge-data-loss", "--confirm", "--kubeconfig", kubeconfig}, &out, &errb)
+	if err == nil {
+		t.Fatal("restore-instance accepted -A; a rewind acts on one instance in one environment")
+	}
+	if !strings.Contains(err.Error(), "unknown shorthand flag") {
+		t.Errorf("refusal = %q, want the parser rejecting the flag outright", err)
 	}
 }
 

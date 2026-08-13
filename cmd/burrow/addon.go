@@ -494,6 +494,13 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 					return fmt.Errorf("--to-time %q is not an RFC3339 instant (for example 2026-08-01T14:30:00Z)", toTime)
 				}
 			}
+			// ONE RESOLUTION, READ ONCE, USED BY ALL THREE. The environment names the instance in the
+			// prompt, is the environment the notice says is being rewound, and is the environment the
+			// call acts in — so resolving it three times would let the sentence somebody reads and the
+			// instance that is actually destroyed come from different answers. Resolving it here also
+			// keeps it ahead of the off-terminal refusal below, which it can be because it reads local
+			// configuration only and contacts nothing (operationEnv).
+			env := o.operationEnv()
 			// THE NAME IN THE PROMPT IS THE LABEL THE OPERATOR TYPES, and it is settled without
 			// contacting anything: --name when one was given, and otherwise the label of the
 			// environment's FIRST instance, which is its own derived name and the one instance whose
@@ -503,7 +510,7 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 			// that far (ADR-0064 §2).
 			label := instance
 			if label == "" {
-				derived, err := controlplane.AddonInstanceName(controlplane.AddonType(addon), restoreEnvironment(o.env))
+				derived, err := controlplane.AddonInstanceName(controlplane.AddonType(addon), restoreEnvironment(env))
 				if err != nil {
 					return err
 				}
@@ -520,11 +527,11 @@ func newAddonRestoreInstanceCmd() *cobra.Command {
 			}
 			// The typed-name gate goes to stderr so a --json run keeps a clean stdout.
 			if !ackDataLoss {
-				if err := confirmRestoreInstance(ctx, c, label, o.env, recoveryTargetLabel(backup, toTime), skipSafety, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
+				if err := confirmRestoreInstance(ctx, c, label, env, recoveryTargetLabel(backup, toTime), skipSafety, cmd.InOrStdin(), cmd.ErrOrStderr()); err != nil {
 					return err
 				}
 			}
-			res, err := c.RestoreInstance(ctx, addon, o.env, client.RestoreInstanceOptions{
+			res, err := c.RestoreInstance(ctx, addon, env, client.RestoreInstanceOptions{
 				Instance:         instance,
 				Backup:           backup,
 				ToTime:           toTime,
@@ -592,7 +599,7 @@ func recoveryTargetLabel(backup, toTime string) string {
 	}
 }
 
-// restoreEnvironment resolves the environment flag for the purpose of NAMING the instance in the
+// restoreEnvironment names the resolved environment for the purpose of NAMING the instance in the
 // notice. An unnamed environment is the default one, which is what the server resolves it to when
 // exactly one environment is registered; with several the server refuses, so the name printed here
 // is never the one a restore silently went to.

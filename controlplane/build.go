@@ -37,9 +37,15 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 	// public pull resolve to the same stored image — a registry's stored repo path is independent of
 	// the endpoint host used to reach it.
 	pushTarget, deployBase := req.TargetImage, req.TargetImage
-	// insecure marks the push as targeting the in-cluster registry, which serves plain HTTP in-cluster
-	// (ADR-0054 §5). This is the single place that knows the in-cluster endpoint is plain HTTP: only
-	// the default path below sets it; an explicit external target is always pushed over TLS.
+	// insecure marks the push as targeting a plain-HTTP registry (ADR-0054 §5). Only the default path
+	// below can set it; an explicit external target is always pushed over verified TLS.
+	//
+	// It reads buildRegistryInsecure rather than asserting true, because whether the in-cluster
+	// registry speaks plain HTTP is a property of the install, not of the code. `burrow cluster
+	// registry install` deploys one that does, which is why that setting defaults to true; an
+	// in-cluster registry terminating its own certificate is also a real deployment now, and against
+	// one a hardcoded true skips a verification that would have succeeded and refuses buildpacks over
+	// a plain-HTTP endpoint that does not exist.
 	insecure := false
 	if req.TargetImage == "" {
 		// No explicit target: default to the optional in-cluster registry when one is wired — the
@@ -50,7 +56,7 @@ func (e *Engine) Build(ctx context.Context, req BuildRequest) (BuildResult, erro
 			return BuildResult{}, fmt.Errorf("build %s: target image reference is empty and no in-cluster registry is configured to default to: %w", req.App, ErrInvalid)
 		}
 		pushTarget = defaultBuildTarget(e.buildRegistry, req.App)
-		insecure = true
+		insecure = e.buildRegistryInsecure
 		// Reference the public host for the deploy so the node pulls through the ingress. Fall back to
 		// the internal push target only when no public host is wired (an in-cluster registry installed
 		// without a public ingress), preserving the earlier single-endpoint behavior.

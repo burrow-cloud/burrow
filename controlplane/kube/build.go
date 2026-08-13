@@ -160,6 +160,11 @@ git -C ` + workspacePath + ` checkout -q FETCH_HEAD`
 // from an external registry stays verified. The Cloud Native Buildpacks lifecycle has no equivalent
 // insecure-push handling wired yet, so a no-Dockerfile build to a plain-HTTP registry fails fast with
 // an actionable message rather than an obscure TLS error (documented follow-up, ADR-0054 §5).
+//
+// $TARGET_INSECURE is now a property of the INSTALL rather than a constant: an in-cluster registry
+// that terminates its own TLS leaves it unset, which restores verification on the buildah push and
+// lets the buildpacks branch run at all. That is why the refusal below names the flag — the condition
+// it reports is fixable, and on a registry with a certificate it should never be reached.
 const buildScript = `set -eu
 PUSH_TLS_FLAGS=""
 if [ "${TARGET_INSECURE:-}" = "true" ]; then
@@ -186,7 +191,7 @@ if [ -f ` + workspacePath + `/Dockerfile ]; then
 else
   # No Dockerfile: the Cloud Native Buildpacks lifecycle detects and builds (ADR-0053 §4).
   if [ "${TARGET_INSECURE:-}" = "true" ]; then
-    echo "the no-Dockerfile Cloud Native Buildpacks path cannot yet push to the plain-HTTP in-cluster registry; add a Dockerfile, or push to an external registry with an explicit target (buildpacks insecure push is a follow-up, ADR-0054 §5)" >&2
+    echo "the no-Dockerfile Cloud Native Buildpacks path cannot push to a plain-HTTP registry, and this build's target is one; add a Dockerfile, push to an external registry with an explicit target, or give the in-cluster registry a certificate and set BURROW_BUILD_REGISTRY_INSECURE=false (buildpacks insecure push is a follow-up, ADR-0054 §5)" >&2
     exit 1
   fi
   /cnb/lifecycle/creator -app=` + workspacePath + ` "$TARGET_IMAGE"

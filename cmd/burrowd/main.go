@@ -340,11 +340,16 @@ func startControlPlane(ctx context.Context, dsn, token string, apiHandler *atomi
 		BuildLedger: builder,
 		// The zero-config default push target for an in-cluster build with no explicit target (ADR-0053
 		// §5): the in-cluster registry `burrow cluster registry install` deploys, whose in-cluster
-		// Service reference it wires here via BURROW_BUILD_REGISTRY. The build pushes here in-cluster
-		// over plain HTTP. Empty when no in-cluster registry is installed, in which case a build must
-		// name its own target; a caller-supplied target always overrides this, so external registries
-		// stay fully supported.
+		// Service reference it wires here via BURROW_BUILD_REGISTRY. Empty when no in-cluster registry
+		// is installed, in which case a build must name its own target; a caller-supplied target always
+		// overrides this, so external registries stay fully supported.
 		BuildRegistry: os.Getenv("BURROW_BUILD_REGISTRY"),
+		// Whether that registry serves plain HTTP. True unless BURROW_BUILD_REGISTRY_INSECURE says
+		// otherwise, because the registry `burrow cluster registry install` deploys has no certificate
+		// — so an install that sets nothing keeps exactly the behavior it had when this was a constant.
+		// Set it false for an in-cluster registry that terminates TLS, which both restores certificate
+		// verification on the push and unblocks the Cloud Native Buildpacks path (ADR-0054 §5).
+		BuildRegistryInsecure: envBoolDefaultTrue(os.Getenv("BURROW_BUILD_REGISTRY_INSECURE")),
 		// The PUBLIC registry host the in-cluster build's resulting deploy references so the node pulls
 		// through the ingress over TLS, distinct from the internal push endpoint above (ADR-0054 §5).
 		// `burrow cluster registry install --host` wires it via BURROW_BUILD_PUBLIC_REGISTRY; empty
@@ -653,4 +658,23 @@ func withConnectTimeout(dsn string, timeout time.Duration) string {
 		return dsn
 	}
 	return strings.TrimSpace(dsn) + " connect_timeout=" + strconv.Itoa(secs)
+}
+
+// envBoolDefaultTrue reads a boolean environment variable whose absence means TRUE.
+//
+// The default direction is the point. BURROW_BUILD_REGISTRY_INSECURE describes the registry `burrow
+// cluster registry install` deploys, which serves plain HTTP, so an install that sets nothing must
+// behave exactly as it did when the value was a constant. Only an operator who has given their
+// in-cluster registry a certificate says so, and they say it by setting this to false.
+//
+// An UNPARSEABLE value also yields true, for the same reason: this decides whether a push skips TLS
+// verification, and the safe reading of a typo is the one that does not silently start trusting a
+// certificate chain nobody has checked — it fails the build loudly against a plain-HTTP registry
+// instead of failing quietly against a TLS one.
+func envBoolDefaultTrue(v string) bool {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		return true
+	}
+	return parsed
 }

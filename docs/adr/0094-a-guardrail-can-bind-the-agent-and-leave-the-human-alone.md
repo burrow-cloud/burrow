@@ -2,7 +2,7 @@
 
 ## Status
 
-✅ Accepted
+⛔ Superseded by [ADR-0097](0097-guardrails-hold-the-agent-and-nobody-else.md)
 
 ## TL;DR
 

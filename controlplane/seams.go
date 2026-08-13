@@ -742,6 +742,27 @@ type Kubernetes interface {
 	// instance selects the server and the claim, on the same terms as RunBackupJob's.
 	RunRestoreJob(ctx context.Context, app, env, instance, backupID string) error
 
+	// RemoveBackupFile deletes ONE dump from the backup volume it was written to, via a one-shot Job
+	// that mounts that claim and unlinks that path. It is the cluster half of removing a backup: the
+	// registry row is the other half, and the two are removed together by the engine so a retention
+	// policy has something to prune with (the policy itself is not Burrow's here).
+	//
+	// volume and path are the values RECORDED ON THE ROW, not values derived from the app and the
+	// environment. The derivation changed once already — every dump taken before backups were held
+	// per environment is on the one claim that existed then — so deriving them here would send the
+	// Job at a file that is not there and report the bytes deleted when they are still on a disk
+	// (the same gap checkBackupVolume exists to close on the restore path).
+	//
+	// It is IDEMPOTENT and says so deliberately: an absent file, and an absent claim, are both
+	// success. Removing a backup is the one operation whose caller has to be able to run it twice —
+	// a prune interrupted between the bytes and the row retries the whole pair — so "it is already
+	// gone" must not be a failure the caller special-cases.
+	//
+	// The Job carries NO database credential: it unlinks a file and has no business reaching a
+	// Postgres server. That is the one respect in which it is deliberately unlike its neighbours
+	// above, both of which connect as the superuser.
+	RemoveBackupFile(ctx context.Context, backupID, volume, path string) error
+
 	// RunPhysicalBackup asks CloudNativePG for a base backup of environment env's whole instance and
 	// waits for the answer (ADR-0066 §2). It CREATES A CUSTOM RESOURCE and reads `.status`: a
 	// `postgresql.cnpg.io/v1 Backup` with method `plugin`, handled by the pgBackRest plugin. Burrow
@@ -967,6 +988,20 @@ type Database interface {
 	ListBackups(ctx context.Context, app, env string) ([]Backup, error)
 	// GetBackup returns the backup with the given id, or ErrNotFound.
 	GetBackup(ctx context.Context, id string) (Backup, error)
+	// DeleteBackup removes a recorded backup's row — the registry half of removing a backup, beside
+	// the Kubernetes seam's RemoveBackupFile and the object store's DeleteObject. It is scoped by id,
+	// like GetBackup and the two status writes: a backup is addressed by its own identifier
+	// everywhere, and a delete that took an app or an environment instead would be a bulk operation
+	// wearing a single row's name.
+	//
+	// Deleting a backup that is already gone is a NO-OP, not ErrNotFound, and that is the difference
+	// from SetBackupStatus and FailBackup beside it. Those two are writes ABOUT a backup, so an
+	// unknown id means the caller is describing something that does not exist. This one is a write to
+	// make a backup not exist, and the state it is asked for is the state it found — reporting that
+	// as an error would make every caller wrap it in an errors.Is(ErrNotFound) that means "fine",
+	// which is a check that eventually gets written wrong. A prune retried after a crash, and two
+	// prunes racing over the same expired backup, both land here.
+	DeleteBackup(ctx context.Context, id string) error
 	// PendingBackups returns the recorded backups still in `pending` that were created before
 	// `before`, oldest first — the candidates for ADR-0074 §6's "a backup row still pending whose Job
 	// no longer exists". The cutoff is the caller's, not the store's: it is what separates a backup

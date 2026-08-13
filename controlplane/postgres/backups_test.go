@@ -332,3 +332,67 @@ func TestStoreBackupKindRoundTrip(t *testing.T) {
 		t.Errorf("volume = %q, want the pre-per-environment claim %q", stated.Volume, cp.PostgresBackupVolume)
 	}
 }
+
+// TestStoreDeleteBackup exercises the removal half of the backup index against a real database: a
+// recorded row is deleted and gone from both the get and the listing, removing it again is success
+// rather than ErrNotFound, and an id that never existed is the same answer. That idempotence is what
+// lets a caller pruning expired backups retry after a crash without telling "I removed it" and
+// "somebody else already had" apart.
+func TestStoreDeleteBackup(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t)
+	app := t.Name() + "-app"
+
+	b := cp.Backup{
+		ID:          t.Name() + "-b1",
+		App:         app,
+		Environment: cp.DefaultEnvironment,
+		CreatedAt:   time.Date(2026, 8, 11, 1, 0, 0, 0, time.UTC),
+		Path:        "/backups/" + app + "/" + t.Name() + "-b1.dump",
+		Volume:      cp.PostgresBackupVolume,
+		Status:      cp.BackupCompleted,
+	}
+	keep := cp.Backup{
+		ID:          t.Name() + "-b2",
+		App:         app,
+		Environment: cp.DefaultEnvironment,
+		CreatedAt:   time.Date(2026, 8, 11, 2, 0, 0, 0, time.UTC),
+		Path:        "/backups/" + app + "/" + t.Name() + "-b2.dump",
+		Volume:      cp.PostgresBackupVolume,
+		Status:      cp.BackupCompleted,
+	}
+	for _, rec := range []cp.Backup{b, keep} {
+		if err := s.RecordBackup(ctx, rec); err != nil {
+			t.Fatalf("RecordBackup %s: %v", rec.ID, err)
+		}
+	}
+
+	if err := s.DeleteBackup(ctx, b.ID); err != nil {
+		t.Fatalf("DeleteBackup: %v", err)
+	}
+	if _, err := s.GetBackup(ctx, b.ID); !errors.Is(err, cp.ErrNotFound) {
+		t.Errorf("GetBackup after delete = %v, want ErrNotFound", err)
+	}
+
+	// Only the named row went.
+	list, err := s.ListBackups(ctx, app, "")
+	if err != nil {
+		t.Fatalf("ListBackups: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != keep.ID {
+		t.Fatalf("ListBackups = %+v, want only %s", list, keep.ID)
+	}
+
+	// Removing it a second time, and removing an id that never existed, are both success.
+	if err := s.DeleteBackup(ctx, b.ID); err != nil {
+		t.Errorf("second DeleteBackup = %v, want nil", err)
+	}
+	if err := s.DeleteBackup(ctx, t.Name()+"-never-recorded"); err != nil {
+		t.Errorf("DeleteBackup of an unknown id = %v, want nil", err)
+	}
+	// An empty id is a caller error rather than a no-op: it names no row, and accepting it would
+	// make a bug that lost the id look like a successful prune.
+	if err := s.DeleteBackup(ctx, ""); err == nil {
+		t.Error("DeleteBackup with an empty id = nil, want an error")
+	}
+}

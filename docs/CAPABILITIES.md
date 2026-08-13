@@ -636,7 +636,7 @@ refused by name, naming that command.
 
 | Add-on | Image | Port | Storage | Extra workload |
 | --- | --- | --- | --- | --- |
-| `logs` | `victoriametrics/victoria-logs:v1.51.0` | 9428 | 10Gi PVC | a Fluent Bit DaemonSet (`fluent/fluent-bit:3.2.10`) reading `/var/log`, tolerating all taints |
+| `logs` | `victoriametrics/victoria-logs:v1.51.0` | 9428 | 10Gi PVC | a Fluent Bit DaemonSet (`fluent/fluent-bit:3.2.10`) reading `/var/log`, tolerating all taints. Each record is keyed by its source `filename` and carries `kubernetes_pod_name`, parsed out of that filename rather than read from the Kubernetes API — the collector holds no credential and needs none |
 | `metrics` | `victoriametrics/victoria-metrics:v1.115.0` | 8428 | 10Gi PVC, retention per `addon.metric_retention` (default 744h — the month it was) | a vmagent Deployment (`victoriametrics/vmagent:v1.115.0`) scraping the app **and** add-on namespaces |
 | `cache` | `valkey/valkey:8.0` | 6379 | **none — ephemeral** | — |
 | `postgres` | `ghcr.io/cloudnative-pg/postgresql:17.10-minimal-trixie`, run by the CloudNativePG operator (`1.30.0`) — the **minimal** operand variant, because the standard one bundles barman-cloud, which shells out to GPL-3.0 tooling (ADR-0066 §3) | 5432 | 10Gi, on a claim the operator composes and names `<instance>-1` | none — CNPG's instance manager exports the metrics a sidecar used to |
@@ -1965,6 +1965,9 @@ Two different surfaces, and picking the wrong one is a common mistake.
   off. A zero timestamp means no time could be read for that line, not that the field is unused.
 - **`burrow addon logs` / `burrow-agent logs-query`** queries the durable logs add-on (or a
   connected Loki) in LogsQL or LogQL. This is the surface for "what happened an hour ago".
+  Each record carries the message, the store's timestamp, and the pod that emitted it — from
+  `kubernetes_pod_name` on VictoriaLogs, from the `pod` stream label on Loki. A record from a
+  collector that writes neither reports no pod rather than a wrong one.
 
 For metrics, `--metrics-port` on a deploy annotates the Pod so the metrics add-on's scraper
 finds `/metrics`; queries go through `burrow addon metrics` / `burrow-agent metrics-query`.

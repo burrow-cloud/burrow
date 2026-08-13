@@ -306,6 +306,7 @@ func TestNoPlatformPodMutatorLeavesLogsCollectorUnchanged(t *testing.T) {
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "varlog", MountPath: "/var/log", ReadOnly: true},
 							{Name: "config", MountPath: "/fluent-bit/etc/fluent-bit.conf", SubPath: "fluent-bit.conf"},
+							{Name: "config", MountPath: "/fluent-bit/etc/" + fluentBitParsersFile, SubPath: fluentBitParsersFile},
 						},
 					}},
 					Volumes: []corev1.Volume{

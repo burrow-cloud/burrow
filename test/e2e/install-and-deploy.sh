@@ -429,6 +429,31 @@ fi
 echo "--- marker round-tripped through the logs pipeline ---"
 printf '%s\n' "$last_out" | grep "BURROW_E2E_LOGLINE" | head -n 3 || true
 
+echo "=== assert each returned record names the pod that emitted it ==="
+# The collector derives the pod from the container log's path and the VictoriaLogs adapter reads
+# it back out of kubernetes_pod_name; before that parser existed, every record came back with a
+# blank pod and nothing failed (issue #586). --json is the exact shape the agent consumes, and the
+# pod of the fixture's replica is named after its Deployment, so this asserts a value rather than
+# merely a key. Bounded poll: the marker has already round-tripped, so this is only re-reading.
+pod_found=
+pod_out=
+for _ in $(seq 1 6); do
+  pod_out=$("$BURROW" addon logs 'BURROW_E2E_LOGLINE' --json --kubeconfig "$KCFG" 2>&1 || true)
+  if grep -q '"pod": "burrow-e2e-logger-' <<<"$pod_out"; then
+    pod_found=1
+    break
+  fi
+  sleep 5
+done
+
+if [ -z "$pod_found" ]; then
+  echo "FAIL: log records came back without the emitting pod ('pod' blank or absent)"
+  echo "--- last query output ---"
+  printf '%s\n' "$pod_out"
+  exit 1 # the ERR trap dumps diagnostics
+fi
+printf '%s\n' "$pod_out" | grep '"pod": "burrow-e2e-logger-' | head -n 3 || true
+
 echo "=== tidy up the logs add-on and the logger fixture (best-effort) ==="
 # Cleanup is non-fatal — the cluster is deleted after the run regardless.
 "$BURROW" addon remove burrow-logs --confirm --kubeconfig "$KCFG" || true

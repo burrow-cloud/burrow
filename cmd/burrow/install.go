@@ -440,7 +440,9 @@ func runInstall(ctx context.Context, a installArgs, stdout, stderr io.Writer) er
 func writeDefaultEnvironmentNotice(w io.Writer, appNamespace string) {
 	fmt.Fprintf(w, "\nApps deploy into the environment %q (namespace %q).\n", controlplane.DefaultEnvironment, appNamespace)
 	fmt.Fprintf(w, "It is called %q because a single environment is production, and it carries production-grade\n"+
-		"guardrails: deleting an app or a DNS record is denied until you relax it. Loosen one with\n"+
+		"guardrails: deleting an app or a DNS record is denied until you relax it. Changing the policy\n"+
+		"takes a credential of your own, so sign in first and then loosen one:\n"+
+		"  burrow auth login --context <cluster>\n"+
 		"  burrow guard set app.delete confirm\n"+
 		"Add a second environment when you want one:  burrow env add staging\n",
 		controlplane.DefaultEnvironment)

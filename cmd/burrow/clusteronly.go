@@ -57,11 +57,15 @@ import (
 //     answer, because what they describe is the operator's cluster — its nodes, its headroom, its
 //     top consumers across every tenant — and what a tenant should see of that is a decision nobody
 //     has taken.
-//   - `addon attach`, on commonOpts.changeClient. A command that CHANGES a tenant needs more than a
-//     route that answers: it needs the product to have said a tenant may. For attach it has —
-//     provisioning a tenant's database over POST /v1/addons/attach is what the managed product does,
-//     and it is the route every attach on the platform has gone through (cloud issue #215). The rest
-//     of the add-on writes stay here because that second question is still open for them.
+//   - `addon attach` and `addon sql`, on commonOpts.changeClient. A command that CHANGES a tenant
+//     needs more than a route that answers: it needs the product to have said a tenant may. For
+//     attach it has — provisioning a tenant's database over POST /v1/addons/attach is what the
+//     managed product does, and it is the route every attach on the platform has gone through (cloud
+//     issue #215). For `sql` it has too: the database holds the tenant's own data, and their
+//     `burrow-agent` could already run a statement against it while their `burrow` refused, which is
+//     the inversion cloud issue #208 exists to close and the wrong way round for the surface
+//     ADR-0065 keeps deliberately narrower. The rest of the add-on writes stay here because that
+//     second question is still open for them.
 //
 //     Worth being exact about what the refusal was worth, because it is easy to read it as a control
 //     it never was: `tenantguard.PersonPolicy` allows every guardrail on a person's credential, so
@@ -91,14 +95,12 @@ import (
 //     a tenant who cannot act on it, and not shipping it means changing what the command prints,
 //     which is the same product statement #302 is about. It moves when it has rows to list.
 //
-//     `addon sql` is a read in the sense that matters to a person and is NOT one here. It opens a
-//     SQL connection from burrowd, which cannot work on the managed product — but the managed
-//     product does not run that code: cloud ADR-0039 replaced the seam behind the route with one
-//     that carries the statement to the fleet and runs it beside the database, which is how a
-//     managed tenant queries their own data today. So the execution path this file used to say was
-//     missing exists, the route answers, and the tenant guardrail policy's `confirm` on it is live.
-//     What is left is a product decision about the client — arbitrary SQL against live data is a
-//     change, whatever the verb is called — and it is the last of cloud issue #208's inversions.
+//     `addon sql` moved with attach rather than with the reads, and deliberately. Burrow does not
+//     tell a read from a write and does not try (ADR-0087 §6), so a statement is a change here as
+//     it is everywhere else in that command — which makes changeClient the seam and the product
+//     decision, not the transport, the thing that had to be taken. It was taken: the data is the
+//     tenant's, and the alternative was a tenant whose agent could query their database while they
+//     could not.
 
 // refuseCloudTarget reports why a cluster-only command cannot run, or nil when it can. It reads the
 // local config and nothing else: no kubeconfig, no network, no credential.

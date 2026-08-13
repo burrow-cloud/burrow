@@ -1146,6 +1146,15 @@ func metricLabels(labels map[string]string) string {
 // no upper bound on what a statement does, and where a confirmation cannot be an informed one,
 // holding for confirmation is theatre (ADR-0087 §5). An operator opens it per environment with
 // `burrow guard set --env <env> addon.sql allow`.
+//
+// It connects through changeClient, so it acts on a Burrow Cloud target as well as a cluster. The
+// paragraph above describes the OPEN-SOURCE path; the managed product replaced that seam with one
+// that carries the statement to the fleet and runs it beside the database (cloud ADR-0039), so the
+// route answers there and a tenant's own `burrow-agent` has been able to reach it while their `burrow`
+// refused — the inversion cloud issue #208 exists to close, over the tenant's own data. changeClient
+// rather than readClient because Burrow does not tell a read from a write and does not try: a
+// statement is treated as one that changed something everywhere else in this command, and where it
+// may run is not the place to start guessing otherwise.
 func newAddonSQLCmd() *cobra.Command {
 	o := &commonOpts{}
 	var statement, file, instance string
@@ -1175,7 +1184,9 @@ func newAddonSQLCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, err := o.client(ctx, cmd.ErrOrStderr())
+			// changeClient, not client: the managed control plane serves this route too, and the
+			// data the statement reaches is the tenant's own (cloud issue #208).
+			c, err := o.changeClient(ctx, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}

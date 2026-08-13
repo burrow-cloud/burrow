@@ -75,7 +75,7 @@ func unreachableCluster(t *testing.T) string {
 //     `addon attach` was on this list and is not any more (cloudChangeCommands below): the product
 //     decision it was waiting on had already been taken everywhere except the client, since
 //     provisioning a tenant's database over POST /v1/addons/attach is what the managed product does
-//     (cloud issue #215).
+//     (cloud issue #215). `addon sql` followed it, and for the reason that list gives.
 //
 // `cluster` and `cluster capacity` stay for a third reason: the route answers, but what it describes
 // is the operator's cluster — its nodes, its capacity, its top consumers across every tenant — so
@@ -88,11 +88,9 @@ func unreachableCluster(t *testing.T) string {
 // shared that reason and no longer stays: a verdict about coverage is the shape the platform's own
 // backups get reported in (cloudReadCommands below, cloud issue #302).
 //
-// `addon sql` stays for a fifth, and it is a product decision rather than the plumbing gap this list
-// used to record. The route answers on the managed product — cloud ADR-0039 runs the statement on
-// the fleet instead of dialling the instance from burrowd — and the tenant policy holds it at
-// `confirm`. What has not been decided is whether a person's CLI hands arbitrary SQL against live
-// data to a managed target, which is a change however the verb reads (cloud issue #208).
+// `addon sql` was on this list for a fifth reason — that it needed an execution path inside the
+// fleet rather than a different client — and cloud ADR-0039 built one, so the route answers on the
+// managed product and the command reaches it (cloudChangeCommands below).
 var clusterOnlyCommands = [][]string{
 	{"guard", "set", "app.delete", "deny"},
 	{"cluster"},
@@ -102,7 +100,6 @@ var clusterOnlyCommands = [][]string{
 	{"addon", "install", "logs"},
 	{"addon", "remove", "logs"},
 	{"addon", "backups", "postgres"},
-	{"addon", "sql", "postgres", "web", "--statement", "select 1"},
 	{"app", "domain", "add", "example.com", "--address", "203.0.113.1"},
 	{"app", "domain", "remove", "example.com"},
 	{"config", "provider", "list"},
@@ -151,15 +148,23 @@ var cloudReadCommands = []struct {
 // allows every guardrail on a person's credential (cloud issue #208). What puts one here is the
 // product having decided a tenant may.
 //
-// `addon attach` is the first and, today, the only one. Provisioning a tenant's database is what the
-// managed product does; POST /v1/addons/attach is how, and it is the route every attach on the
-// platform has gone through (cloud issue #215).
+// `addon attach` is the first. Provisioning a tenant's database is what the managed product does;
+// POST /v1/addons/attach is how, and it is the route every attach on the platform has gone through
+// (cloud issue #215).
+//
+// `addon sql` is the second, and it is here rather than among the reads because Burrow does not tell
+// a read from a write and does not try (ADR-0087 §6). The decision it was waiting on is the same
+// shape as attach's: the database holds the tenant's own data, and a tenant's `burrow-agent` could
+// already run a statement against it while their own `burrow` refused (cloud issue #208). What it
+// was ALSO waiting on — somewhere to run the statement, since burrowd's connection is opened inside
+// the cluster — cloud ADR-0039 built: the statement goes to the fleet and runs beside the database.
 var cloudChangeCommands = []struct {
 	args   []string
 	method string
 	path   string
 }{
 	{[]string{"addon", "attach", "postgres", "web"}, http.MethodPost, "/v1/addons/attach"},
+	{[]string{"addon", "sql", "postgres", "web", "--statement", "select 1"}, http.MethodPost, "/v1/addons/sql"},
 }
 
 // cannedTenantReads answers every route in cloudReadCommands from one body. The keys are disjoint

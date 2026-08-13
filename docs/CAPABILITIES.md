@@ -1793,13 +1793,22 @@ refused, and say what would change the answer (see [Guardrails](#guardrails)).
 **An absent capability is legible rather than a dead end** (ADR-0065 §7). `burrow agent capabilities`
 lists them on the operator CLI, and `burrow guard list --json`
 and `burrow-agent guard` both report them alongside the dispositions: what each one
-is, why it is not on the agent surface, who can perform it ("the burrow operator CLI, run by a
-human with the cluster's admin kubeconfig"), and the exact command that person runs. So an agent
-asked to remove an add-on relays "that is not something I can do, and here is who can" instead of
-`unknown command`. That matters beyond politeness: ADR-0065 §5 notes a dead end is what invites an
+is, why it is not on the agent surface, who can perform it, and the command that person runs. So an
+agent asked to remove an add-on relays "that is not something I can do, and here is who can" instead
+of `unknown command`. That matters beyond politeness: ADR-0065 §5 notes a dead end is what invites an
 agent to route around the control channel entirely and reach for `kubectl` or a shell, which is
 the failure [ADR-0021](adr/0021-guardrails-require-control-plane-only-agent-access.md) says Burrow
 cannot close from the inside.
+
+**The list is the same on every target; who performs each one is not.** `burrow-agent` is one binary
+and withholds the same capabilities for the same reasons whether it is pointed at a self-hosted
+cluster or at Burrow Cloud, so the catalogue, and every reason in it, reads identically on both. The
+answer to "who can" moves, because on the managed product the reader is a tenant and roughly half the
+operator commands are refused to one. Each entry that needs it therefore carries a second remedy:
+either a command a tenant can run — `burrow cluster config list` and `burrow guard list` show the
+limits and dispositions in force, `burrow auth login` is how a machine gets access — or, where the
+platform performs the capability itself, a plain statement of that and no command at all. On a
+self-hosted install the listing is unchanged: every row names the operator command it always did.
 
 `burrow-agent` derives the report by subtracting the command paths it actually registers from the
 catalogue, so a verb taken out of the binary becomes legible in `guard` with no second edit. The

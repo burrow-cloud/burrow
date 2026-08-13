@@ -217,7 +217,7 @@ func TestAddonConfigIsAbsentFromTheAgentSurface(t *testing.T) {
 	if _, onSurface := agentsurface.AgentSurface()["addon config"]; onSurface {
 		t.Fatal("`addon config` is on the agent surface; ADR-0082 §4 keeps it off, because it provisions hardware")
 	}
-	for _, c := range agentsurface.AbsentFromAgentSurface() {
+	for _, c := range agentsurface.AbsentFromAgentSurface(false) {
 		if c.Path != "addon config" {
 			continue
 		}

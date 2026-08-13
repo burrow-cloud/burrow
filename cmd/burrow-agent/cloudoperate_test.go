@@ -6,12 +6,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/burrow-cloud/burrow/internal/agentsurface"
 	"github.com/burrow-cloud/burrow/internal/cloudcred"
 	"github.com/burrow-cloud/burrow/localconfig"
 )
@@ -163,5 +165,63 @@ func TestAgentRefusesKubeconfigFlagsAgainstACloudTarget(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--context") || !strings.Contains(err.Error(), "no cluster of its own") {
 		t.Errorf("error = %q, want it to name the flag and why it cannot apply", err)
+	}
+}
+
+// TestGuardOnCloudTargetHandsTheAgentARemedyATenantCanCarryOut is issue #582 on this binary. `guard`
+// reports the capabilities absent from it so the agent can say "that is not something I can do, and
+// here is who can" — and the second half has to be true of the person it is relayed to. Against the
+// managed product that person is a tenant, and `burrow addon remove` is refused to them, so the
+// entry names who operates the instance instead and no command at all.
+//
+// What must NOT change is the list: the same capabilities, held back for the same reasons. An agent
+// whose catalogue shrank on the managed product would report a boundary that had moved when only the
+// remedy had.
+func TestGuardOnCloudTargetHandsTheAgentARemedyATenantCanCarryOut(t *testing.T) {
+	signedInToCloud(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"guardrails":[{"code":"app.deploy","disposition":"allow","description":"deploy an app"}]}`))
+	}))
+	defer srv.Close()
+	pointCloudAt(t, srv.URL)
+
+	var out, errb bytes.Buffer
+	if err := run(context.Background(), []string{"guard"}, &out, &errb); err != nil {
+		t.Fatalf("burrow-agent guard against a cloud target: %v\nstderr: %s", err, errb.String())
+	}
+	var got agentsurface.GuardReport
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("guard output is not a guard report: %v\n%s", err, out.String())
+	}
+
+	byPath := map[string]agentsurface.Capability{}
+	for _, c := range got.AbsentCapabilities {
+		byPath[c.Path] = c
+	}
+	remove, ok := byPath["addon remove"]
+	if !ok {
+		t.Fatal("guard does not report `addon remove` as absent on a managed target")
+	}
+	if remove.Command != "" {
+		t.Errorf("guard hands a tenant %q, which the managed product refuses; there is no tenant-side "+
+			"removal to name, and the honest answer is who operates the instance", remove.Command)
+	}
+	if !strings.Contains(remove.Who, "platform") {
+		t.Errorf("`addon remove` reports who = %q on a managed target, want the platform that operates "+
+			"the instance", remove.Who)
+	}
+	// The boundary itself is the binary's and does not move: same list, same reasons.
+	cluster := agentsurface.AbsentFrom(commandPaths(newRootCmd()), false)
+	if len(cluster) != len(got.AbsentCapabilities) {
+		t.Fatalf("a managed target reports %d absent capabilities and a cluster reports %d",
+			len(got.AbsentCapabilities), len(cluster))
+	}
+	for _, c := range cluster {
+		m := byPath[c.Path]
+		if m.What != c.What || m.Why != c.Why {
+			t.Errorf("%q is reported differently on the two targets; only who performs it may differ", c.Path)
+		}
 	}
 }

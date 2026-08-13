@@ -233,7 +233,7 @@ func TestRestoreInstanceNeedsExactlyOneTarget(t *testing.T) {
 // the grounds that "there's a confirmation anyway".
 func TestRestoreInstanceIsAbsentFromTheAgentSurface(t *testing.T) {
 	var found *agentsurface.Capability
-	for _, c := range agentsurface.AbsentFromAgentSurface() {
+	for _, c := range agentsurface.AbsentFromAgentSurface(false) {
 		if c.Path == "addon restore-instance" {
 			found = &c
 			break

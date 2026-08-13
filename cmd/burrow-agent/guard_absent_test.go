@@ -80,7 +80,7 @@ func TestGuardReportsAbsentCapabilities(t *testing.T) {
 // removed verb back into a dead end.
 func TestAbsentReportTracksTheBinary(t *testing.T) {
 	root := newRootCmd()
-	before := absentPaths(absentCapabilities(root))
+	before := absentPaths(absentCapabilities(root, false))
 	if before["addon attach"] {
 		t.Fatal("`addon attach` is reported absent while the binary still registers it")
 	}
@@ -89,7 +89,7 @@ func TestAbsentReportTracksTheBinary(t *testing.T) {
 	addon := findCommand(t, root, "addon")
 	addon.RemoveCommand(findCommand(t, addon, "attach"))
 
-	after := absentCapabilities(root)
+	after := absentCapabilities(root, false)
 	if !absentPaths(after)["addon attach"] {
 		t.Fatal("a verb removed from the command tree is not reported as absent; the report would have " +
 			"to be edited a second time to stay true, and an un-edited report is a dead end")
@@ -125,7 +125,7 @@ func TestGuardStaysReadOnly(t *testing.T) {
 
 	// Reporting the absent capabilities is a local computation over this binary's own command
 	// tree, so the read adds no request and no write to the control plane.
-	if len(absentCapabilities(newRootCmd())) == 0 {
+	if len(absentCapabilities(newRootCmd(), false)) == 0 {
 		t.Error("absentCapabilities reported nothing for the real command tree")
 	}
 }
@@ -176,7 +176,7 @@ func TestBucketDeletionIsAbsentAndLegible(t *testing.T) {
 	}
 
 	var deletion *agentsurface.Capability
-	for _, c := range absentCapabilities(newRootCmd()) {
+	for _, c := range absentCapabilities(newRootCmd(), false) {
 		if c.Path == "bucket delete" {
 			cap := c
 			deletion = &cap

@@ -131,11 +131,134 @@ func TestAgentCapabilitiesDoesNotShadowToolWiring(t *testing.T) {
 // command cannot be told from a broken one.
 func TestWriteAbsentCapabilitiesSaysSoWhenEmpty(t *testing.T) {
 	var b bytes.Buffer
-	writeAbsentCapabilities(&b, nil)
+	writeAbsentCapabilities(&b, nil, false)
 	if !strings.Contains(b.String(), "No capabilities are absent from burrow-agent") {
 		t.Errorf("an empty list renders as %q, want a sentence saying nothing is absent", b.String())
 	}
 	if strings.Contains(b.String(), "CAPABILITY") {
 		t.Errorf("an empty list still prints a table header:\n%s", b.String())
+	}
+}
+
+// The tests below are issue #582: the catalogue's RUN INSTEAD column is the largest concentration of
+// operator commands a managed tenant can reach, and about half of them are refused to one. They reuse
+// operatorCommands and assertNoOperatorCommand from targethints_test.go deliberately — that list is
+// the project's one answer to "what does the managed product refuse", and a second list shaped
+// differently would be worse than either.
+
+// TestManagedCapabilityCatalogueNamesNoRefusedCommand is the rule, applied to every row at once. A
+// remedy printed to a tenant must be something a tenant can carry out, whether it is a command or a
+// sentence about who performs it.
+func TestManagedCapabilityCatalogueNamesNoRefusedCommand(t *testing.T) {
+	for _, c := range agentsurface.AbsentFromAgentSurface(true) {
+		assertNoOperatorCommand(t, "the managed remedy for "+c.Path, c.Command)
+		assertNoOperatorCommand(t, "the managed `who` for "+c.Path, c.Who)
+	}
+}
+
+// TestManagedCapabilityListingSaysTheBoundaryIsUnchanged guards against the way this fix could
+// mislead. The second column is reworded on the managed product and the first is not, and a reader
+// who noticed only the rewording could conclude the agent is held tighter there. So the listing says
+// outright that the list does not depend on the target, and only the remedy does.
+func TestManagedCapabilityListingSaysTheBoundaryIsUnchanged(t *testing.T) {
+	var b bytes.Buffer
+	writeAbsentCapabilities(&b, agentsurface.AbsentFromAgentSurface(true), true)
+	got := b.String()
+	for _, want := range []string{
+		"does not depend on your target",
+		"same capabilities for the same reasons everywhere",
+		"who performs each one instead",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the managed listing is missing %q, so a reworded column is all the reader sees:\n%s", want, got)
+		}
+	}
+	// A row the platform performs names no command, so the column heads the answer rather than an
+	// instruction to run one.
+	if !strings.Contains(got, "INSTEAD") || strings.Contains(got, "RUN INSTEAD") {
+		t.Errorf("the managed listing heads its second column RUN INSTEAD, over rows that name no command:\n%s", got)
+	}
+	if !strings.Contains(got, "the platform, which") {
+		t.Errorf("no managed row names the platform as who performs it:\n%s", got)
+	}
+}
+
+// TestSelfHostedCapabilityListingIsUnchanged is the other half of the guarantee, and the one worth
+// being strict about: a self-hosted operator's catalogue does not change at all. Every row still
+// prints the operator command it always did, under the heading it always had, with none of the
+// managed prose anywhere in the output.
+func TestSelfHostedCapabilityListingIsUnchanged(t *testing.T) {
+	absent := agentsurface.AbsentFromAgentSurface(false)
+	var b bytes.Buffer
+	writeAbsentCapabilities(&b, absent, false)
+	got := b.String()
+	if !strings.Contains(got, "CAPABILITY") || !strings.Contains(got, "RUN INSTEAD") {
+		t.Fatalf("the self-hosted listing lost its columns:\n%s", got)
+	}
+	for _, c := range absent {
+		if !strings.Contains(got, c.Path) || !strings.Contains(got, c.Command) {
+			t.Errorf("the self-hosted listing no longer carries %q -> %q:\n%s", c.Path, c.Command, got)
+		}
+	}
+	for _, unwanted := range []string{"does not depend on your target", "the platform, which", "managed product"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("the self-hosted listing carries managed wording (%q):\n%s", unwanted, got)
+		}
+	}
+}
+
+// TestAgentCapabilitiesOnCloudTargetIsWordedForATenant runs the command the way a tenant does, with
+// the managed product as the active target. It is the wiring that is under test as much as the
+// wording: the command connects to nothing, so the target kind is read from the selected target
+// rather than recorded at a connection (targethints.go, recordSelectedTarget).
+func TestAgentCapabilitiesOnCloudTargetIsWordedForATenant(t *testing.T) {
+	signedInToCloud(t)
+
+	out := runAgentCapabilities(t)
+	assertNoOperatorCommand(t, "the capability listing on a managed target", out)
+	for _, want := range []string{
+		"absent from burrow-agent entirely",
+		"does not depend on your target",
+		"addon remove",
+		"the platform, which provisions and operates the add-on instance",
+		"burrow cluster config list",
+		"burrow lock <app>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the managed capability listing is missing %q:\n%s", want, out)
+		}
+	}
+
+	// --json carries the same substitution, since that is what burrow-agent's own report is compared
+	// against and what an agent relays to the person in front of it.
+	var report agentsurface.AbsentCapabilitiesReport
+	if err := json.Unmarshal([]byte(runAgentCapabilities(t, "--json")), &report); err != nil {
+		t.Fatalf("unmarshal the managed report: %v", err)
+	}
+	if len(report.AbsentCapabilities) == 0 {
+		t.Fatal("the managed report lists no absent capabilities")
+	}
+	for _, c := range report.AbsentCapabilities {
+		assertNoOperatorCommand(t, "the managed JSON remedy for "+c.Path, c.Command+" "+c.Who)
+		if c.Who == "" {
+			t.Errorf("%q is reported to a tenant with nobody named who can perform it", c.Path)
+		}
+	}
+}
+
+// TestAgentCapabilitiesWithNoCloudTargetKeepsTheOperatorCommands is the end-to-end counterpart: with
+// no managed target selected the command answers exactly as it always has, which is what a
+// self-hosted operator and a machine with nothing installed yet both get.
+func TestAgentCapabilitiesWithNoCloudTargetKeepsTheOperatorCommands(t *testing.T) {
+	tempConfig(t)
+
+	out := runAgentCapabilities(t)
+	for _, want := range []string{"RUN INSTEAD", "burrow addon remove <name>", "burrow cluster upgrade"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the self-hosted capability listing is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "does not depend on your target") {
+		t.Errorf("the self-hosted listing carries the managed sentence:\n%s", out)
 	}
 }

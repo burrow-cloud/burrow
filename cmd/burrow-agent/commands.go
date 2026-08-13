@@ -478,8 +478,10 @@ func newGuardCmd() *cobra.Command {
 					return nil, err
 				}
 				// Derived from the command tree this binary actually registers, so a verb dropped
-				// from the binary becomes legible here with no second edit.
-				return agentsurface.NewGuardReport(scope, gs, absentCapabilities(cmd.Root())), nil
+				// from the binary becomes legible here with no second edit, and worded for the
+				// target withClient just resolved so the "who can" half is true of whoever the
+				// agent relays it to (issue #582).
+				return agentsurface.NewGuardReport(scope, gs, absentCapabilities(cmd.Root(), o.managed)), nil
 			})
 		},
 	}

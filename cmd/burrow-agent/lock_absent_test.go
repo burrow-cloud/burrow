@@ -37,7 +37,7 @@ func TestAgentCarriesNoLockVerb(t *testing.T) {
 // dead end, and a dead end is what pushes an agent off the control channel entirely (ADR-0065 §5).
 func TestLockAndUnlockAreReportedAsAbsent(t *testing.T) {
 	byPath := map[string]agentsurface.Capability{}
-	for _, c := range absentCapabilities(newRootCmd()) {
+	for _, c := range absentCapabilities(newRootCmd(), false) {
 		byPath[c.Path] = c
 	}
 	for _, path := range []string{"lock", "unlock"} {

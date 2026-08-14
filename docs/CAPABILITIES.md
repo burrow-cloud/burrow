@@ -385,6 +385,16 @@ left in place for diagnosis). Job names are content-derived, so re-running the s
 repo/ref/target reuses a succeeded or active build. A capacity pre-flight refuses the build
 when no node has room.
 
+**A build's pods say which app they are building.** The Job and the pod it creates both carry
+`burrow.cloud/build-app` and `burrow.cloud/build-environment` (the app and environment the build's
+deploy targets) and `app.kubernetes.io/component: build`. The pod matters on its own because a log
+collector reads the labels of the pod a line came from and knows nothing about the Job above it, so
+build output is attributable to an app by its plain name, and the component label is what separates
+it from that app's own running pods. `app.kubernetes.io/name` on a build's objects is the Job's own
+content-derived name, not the app — it is the selector Burrow reads a build's pods by. A build
+started without a recorded intent carries the component label and nothing else, because nothing
+recorded an app.
+
 **A build that succeeds is not discarded when its client goes away.** The build Job outlives the
 request that started it, so it also carries what it is for — the app, the environment, and the
 reference its deploy pins. burrowd sweeps for build Jobs that succeeded and whose deploy never ran

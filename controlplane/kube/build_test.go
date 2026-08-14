@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1012,6 +1013,66 @@ func TestBuildNamespaceConfigurable(t *testing.T) {
 	}
 	if got := (*defCreated)[0].Namespace; got != buildNamespace {
 		t.Errorf("default job namespace = %q, want %q", got, buildNamespace)
+	}
+}
+
+// TestBuildPodIsLabelledWithTheAppItIsBuilding asserts a build's POD names the app and environment it
+// is building for. A log collector reads the labels of the pod a line came from and knows nothing
+// about the Job above it, so intent that stops at the Job attributes every build log line to the
+// Job's hashed name instead of to an app (issue #588).
+//
+// It also asserts what did NOT change: app.kubernetes.io/name on a build pod is still the JOB name,
+// which is the selector the digest read, the phase read, and the shared job-pod helpers all use.
+func TestBuildPodIsLabelledWithTheAppItIsBuilding(t *testing.T) {
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "abc123"}
+	const target = "reg.burrow.svc/shop:build"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	b := NewBuilder(client)
+	if _, err := b.BuildAttributed(context.Background(), testIntent, source, target, false, controlplane.SourceCredential{}, nil); err != nil {
+		t.Fatalf("BuildAttributed: %v", err)
+	}
+	job := (*created)[0]
+	pod := job.Spec.Template.Labels
+
+	if got := pod[buildAppLabel]; got != testIntent.App {
+		t.Errorf("pod label %s = %q, want %q (the app, not the build's own name)", buildAppLabel, got, testIntent.App)
+	}
+	if got := pod[buildEnvLabel]; got != testIntent.Env {
+		t.Errorf("pod label %s = %q, want %q", buildEnvLabel, got, testIntent.Env)
+	}
+	// The component is what separates a build's pods from the app's own running pods, so a reader
+	// does not have to recognize a namespace name to tell them apart.
+	if got := pod[componentLabel]; got != componentBuild {
+		t.Errorf("pod label %s = %q, want %q", componentLabel, got, componentBuild)
+	}
+	if got := pod[nameLabel]; got != job.Name {
+		t.Errorf("pod label %s = %q, want the job name %q — every read of a build's pods selects on it", nameLabel, got, job.Name)
+	}
+	// The Job and its pod template must not share one map instance: a later one-sided edit would
+	// silently change both.
+	if reflect.ValueOf(job.Labels).Pointer() == reflect.ValueOf(job.Spec.Template.Labels).Pointer() {
+		t.Error("the Job and its pod template share one label map")
+	}
+}
+
+// TestAnUnattributedBuildPodIsStillMarkedAsABuild asserts the component label does not depend on
+// intent. A build started without one still has to be distinguishable from an app's own pods; only
+// the app and environment are missing, because nothing recorded them.
+func TestAnUnattributedBuildPodIsStillMarkedAsABuild(t *testing.T) {
+	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "abc123"}
+	const target = "reg.burrow.svc/shop:build"
+	client, created := buildFakeSucceeding(t, source, target, validDigest)
+
+	if _, err := NewBuilder(client).Build(context.Background(), source, target, false, controlplane.SourceCredential{}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	pod := (*created)[0].Spec.Template.Labels
+	if got := pod[componentLabel]; got != componentBuild {
+		t.Errorf("pod label %s = %q, want %q", componentLabel, got, componentBuild)
+	}
+	if _, ok := pod[buildAppLabel]; ok {
+		t.Errorf("an unattributed build's pod carries %s", buildAppLabel)
 	}
 }
 

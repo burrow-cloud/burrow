@@ -553,7 +553,7 @@ func buildJobName(source controlplane.SourceRef, targetImage string) string {
 // ctx is taken for the operational configuration read behind buildJobTTLSeconds, not for a cluster
 // call: this function constructs an object and sends nothing.
 func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent controlplane.BuildIntent, source controlplane.SourceRef, targetImage string, insecure bool, cred controlplane.SourceCredential, push controlplane.PushCredential) *batchv1.Job {
-	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
+	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue, componentLabel: componentBuild}
 	var backoff int32
 	ttl := buildJobTTLSeconds(ctx, b.limits)
 
@@ -634,31 +634,34 @@ func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent control
 		buildEnv = append(buildEnv, corev1.EnvVar{Name: "REGISTRY_AUTH_FILE", Value: registryAuthPath + "/" + registryAuthFile})
 	}
 
-	// The Job's OWN metadata carries what the build is for; the pod template's labels stay exactly as
-	// they were, because they are how this adapter finds a build's pods and nothing about the deploy
-	// belongs on them. A zero intent adds nothing at all.
-	jobLabels := labels
-	var annotations map[string]string
-	if intentLabels, intentAnnotations := buildIntentMetadata(intent); len(intentLabels) > 0 {
-		jobLabels = make(map[string]string, len(labels)+len(intentLabels))
-		for k, v := range labels {
-			jobLabels[k] = v
-		}
-		for k, v := range intentLabels {
-			jobLabels[k] = v
-		}
-		annotations = intentAnnotations
-	}
+	// THE POD CARRIES WHAT THE JOB CARRIES. A log collector reads the labels of the POD a line came
+	// from, never those of the object that created it, so intent that stopped at the Job left every
+	// build log line attributed to `burrow-build-<hash>` — a per-build name nothing downstream can
+	// map back to an app (issue #588). The same labels on the pod template make a build's output
+	// attributable to the app it was building, by the app's own plain name.
+	//
+	// NOTHING EXISTING MOVES. `app.kubernetes.io/name` on a build pod stays the JOB name: it is the
+	// selector every path that reads a build's pods uses — the digest read, the clone/build phase
+	// read, and the shared job-pod helpers — and repointing it at the app would break all of them
+	// and collide with the app's own workload. The intent labels are ADDED alongside it, and the
+	// component label separates a build's pods from the app's own without a reader having to
+	// recognize a namespace name.
+	//
+	// A zero intent adds nothing at all. Intent stamped onto an EXISTING Job (the idempotent re-run
+	// path) does not reach that Job's pods: a Job's pod template is immutable once created, and its
+	// pods may already be running. The pods of the run that created the Job carry that run's intent,
+	// which is the case attribution needs.
+	intentLabels, annotations := buildIntentMetadata(intent)
 
 	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: jobLabels, Annotations: annotations},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.namespace, Labels: mergedLabels(labels, intentLabels), Annotations: annotations},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff,
 			// The TTL controller reaps this Job and its pods buildJobTTLSeconds after it finishes,
 			// covering both successes and failures uniformly (issue #280).
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: mergedLabels(labels, intentLabels)},
 				Spec: corev1.PodSpec{
 					RestartPolicy:   corev1.RestartPolicyNever,
 					SecurityContext: buildPodSecurityContext(),
@@ -694,6 +697,20 @@ func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent control
 		b.podMutator(&job.Spec.Template.Spec)
 	}
 	return job
+}
+
+// mergedLabels returns base overlaid with extra. It builds a FRESH map on every call so the Job and
+// its pod template never share one instance: two ObjectMetas pointing at the same map is a footgun
+// that turns any later single-sided edit into a silent edit of both.
+func mergedLabels(base, extra map[string]string) map[string]string {
+	merged := make(map[string]string, len(base)+len(extra))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	return merged
 }
 
 // credSecretName is the deterministic name of the credential Secret for a build Job.

@@ -41,6 +41,13 @@ const (
 	nameLabel      = "app.kubernetes.io/name"
 	managedByLabel = "app.kubernetes.io/managed-by"
 	managedByValue = "burrow"
+	// componentLabel names WHICH PART of an app an object is, on the Kubernetes-recommended key.
+	// Burrow sets it only where an object belongs to an app without BEING the app, so a reader that
+	// knows nothing about Burrow can still tell the two apart. Today that is a build
+	// (componentBuild); the app's own workload carries no component, because it is the whole app.
+	componentLabel = "app.kubernetes.io/component"
+	// componentBuild is componentLabel's value on a build's Job and on the pods it creates.
+	componentBuild = "build"
 	// defaultIngressClass is the IngressClass `burrow ingress install` creates (ingress-nginx).
 	// The exposed app's Ingress is bound to it so the controller adopts and routes it.
 	defaultIngressClass = "nginx"

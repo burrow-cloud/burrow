@@ -72,7 +72,8 @@ func completeStoredJob(t *testing.T, client *fake.Clientset, name string, comple
 }
 
 // TestBuildRecordsWhatItIsForOnTheJob asserts the intent is written onto the Job at creation. The Job
-// is the only thing that survives a disconnect, so it is the only place the intent can live.
+// is the only thing that survives a disconnect, so it is where the intent has to live to be readable
+// after the caller has gone.
 func TestBuildRecordsWhatItIsForOnTheJob(t *testing.T) {
 	source := controlplane.SourceRef{Repo: "https://github.com/acme/shop", Ref: "abc123"}
 	const target = "reg.burrow.svc/shop:build"
@@ -95,9 +96,10 @@ func TestBuildRecordsWhatItIsForOnTheJob(t *testing.T) {
 	if got := job.Annotations[buildImageAnnotation]; got != testIntent.Image {
 		t.Errorf("job annotation %s = %q, want %q", buildImageAnnotation, got, testIntent.Image)
 	}
-	// The pod template is how this adapter finds a build's pods; nothing about the deploy belongs on it.
-	if _, ok := job.Spec.Template.Labels[buildAppLabel]; ok {
-		t.Errorf("the pod template carries %s; the intent belongs on the Job alone", buildAppLabel)
+	// The pod template carries it too: a log collector reads pod labels, so intent that stops at the
+	// Job leaves a build's output attributed to the Job's hashed name (issue #588).
+	if got := job.Spec.Template.Labels[buildAppLabel]; got != testIntent.App {
+		t.Errorf("pod template label %s = %q, want %q", buildAppLabel, got, testIntent.App)
 	}
 }
 

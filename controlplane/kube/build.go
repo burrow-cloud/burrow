@@ -76,6 +76,21 @@ const (
 	buildHomePath = "/home/build"
 	// buildTmpPath backs /tmp for the same reason.
 	buildTmpPath = "/tmp"
+	// layersPath is where the Cloud Native Buildpacks lifecycle writes the layers it builds, the
+	// report.toml the digest is read back from, and its own analysis metadata. It is a writable
+	// emptyDir for the same reason $HOME and /tmp are.
+	//
+	// It is the lifecycle's DEFAULT path, deliberately: the path is recorded into the produced
+	// image as CNB_LAYERS_DIR and travels with it for the life of that image, so an unconventional
+	// one is carried by every application forever in exchange for nothing. The Dockerfile path
+	// never touches the directory — an unused empty one costs a buildah build nothing.
+	layersPath = "/layers"
+	// cnbCreator is the Cloud Native Buildpacks lifecycle binary the no-Dockerfile branch runs. It
+	// runs every phase of a build in one process — detect, analyze, restore, build, export — and
+	// pushes the exported image itself, so the branch needs no separate push step. The path is fixed
+	// by the buildpacks specification (every builder image publishes the lifecycle at /cnb/lifecycle),
+	// so it is a property of the ecosystem rather than of the burrow-builder image.
+	cnbCreator = "/cnb/lifecycle/creator"
 
 	// buildContainerName / cloneContainerName are fixed names (not derived from any app or ref) so
 	// the digest read-back never depends on caller input.
@@ -169,6 +184,17 @@ git -C ` + workspacePath + ` checkout -q FETCH_HEAD`
 // that terminates its own TLS leaves it unset, which restores verification on the buildah push and
 // lets the buildpacks branch run at all. That is why the refusal below names the flag — the condition
 // it reports is fixable, and on a registry with a certificate it should never be reached.
+//
+// The buildpacks branch tests for the lifecycle BEFORE running it, and refuses with a sentence when
+// it is absent. The builder image bundles one, so this is not the expected path — but the branch
+// invokes an absolute path inside an image the install can override (BURROW_BUILD_IMAGE), and an
+// image without a lifecycle produced `sh: /cnb/lifecycle/creator: No such file or directory` as the
+// entire explanation a user got for a failed build (issue #590). A missing builder is a legible
+// refusal, in the same voice as the insecure-registry one above, whatever image is wired.
+//
+// The lifecycle is given `-no-color` because its output is not read on a terminal: it is captured
+// from the pod's log and replayed through a CLI or a console, where the ANSI escapes it writes by
+// default are noise rather than emphasis.
 const buildScript = `set -eu
 PUSH_TLS_FLAGS=""
 if [ "${TARGET_INSECURE:-}" = "true" ]; then
@@ -194,12 +220,16 @@ if [ -f ` + workspacePath + `/Dockerfile ]; then
   cat /tmp/digest > /dev/termination-log
 else
   # No Dockerfile: the Cloud Native Buildpacks lifecycle detects and builds (ADR-0053 §4).
+  if [ ! -x ` + cnbCreator + ` ]; then
+    echo "this source has no Dockerfile, so the build needs the Cloud Native Buildpacks lifecycle, and the builder image running this build does not carry one at ` + cnbCreator + `; add a Dockerfile to the repository, upgrade to a burrowd release whose builder image bundles the lifecycle, or point the build at one with BURROW_BUILD_IMAGE" >&2
+    exit 1
+  fi
   if [ "${TARGET_INSECURE:-}" = "true" ]; then
     echo "the no-Dockerfile Cloud Native Buildpacks path cannot push to a plain-HTTP registry, and this build's target is one; add a Dockerfile, push to an external registry with an explicit target, or give the in-cluster registry a certificate and set BURROW_BUILD_REGISTRY_INSECURE=false (buildpacks insecure push is a follow-up, ADR-0054 §5)" >&2
     exit 1
   fi
-  /cnb/lifecycle/creator -app=` + workspacePath + ` "$TARGET_IMAGE"
-  grep -o 'sha256:[0-9a-f]\{64\}' /layers/report.toml | head -n1 > /dev/termination-log
+  ` + cnbCreator + ` -app=` + workspacePath + ` -layers=` + layersPath + ` -no-color "$TARGET_IMAGE"
+  grep -o 'sha256:[0-9a-f]\{64\}' ` + layersPath + `/report.toml | head -n1 > /dev/termination-log
 fi`
 
 // BuildAdapter is the production controlplane.Builder: it runs an in-cluster build as a Kubernetes
@@ -599,11 +629,17 @@ func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent control
 		workspace,
 		{Name: "home", MountPath: buildHomePath},
 		{Name: "tmp", MountPath: buildTmpPath},
+		// The buildpacks lifecycle writes every layer it builds here before exporting them, so this
+		// is the largest write path a no-Dockerfile build has. It is mounted for BOTH branches
+		// because the branch is chosen inside the pod, after the clone, from the cloned tree — the
+		// Job is built before anyone knows which builder will run (ADR-0053 §3).
+		{Name: "layers", MountPath: layersPath},
 	}
 	volumes := []corev1.Volume{
 		{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: "layers", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 
 	// A credential (ADR-0057, issue #584) is consumed by MOUNTING, never by passing: the clone reads
@@ -631,7 +667,16 @@ func (b *BuildAdapter) buildJob(ctx context.Context, name string, intent control
 			Items:      []corev1.KeyToPath{{Key: registryAuthFile, Path: registryAuthFile}},
 		}}})
 		buildMounts = append(buildMounts, corev1.VolumeMount{Name: "registry-auth", MountPath: registryAuthPath, ReadOnly: true})
-		buildEnv = append(buildEnv, corev1.EnvVar{Name: "REGISTRY_AUTH_FILE", Value: registryAuthPath + "/" + registryAuthFile})
+		buildEnv = append(buildEnv,
+			corev1.EnvVar{Name: "REGISTRY_AUTH_FILE", Value: registryAuthPath + "/" + registryAuthFile},
+			// The SAME mounted file, named the way the OTHER builder looks for it: the buildpacks
+			// lifecycle does not read $REGISTRY_AUTH_FILE — it resolves registry credentials through
+			// the docker keychain, which reads $DOCKER_CONFIG as the DIRECTORY holding a config.json.
+			// Without this a buildpacks build authenticates against nothing and its push to a private
+			// registry is refused. buildah prefers $REGISTRY_AUTH_FILE, so naming the file twice
+			// changes nothing about the Dockerfile path.
+			corev1.EnvVar{Name: "DOCKER_CONFIG", Value: registryAuthPath},
+		)
 	}
 
 	// THE POD CARRIES WHAT THE JOB CARRIES. A log collector reads the labels of the POD a line came

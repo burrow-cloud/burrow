@@ -335,6 +335,12 @@ func TestBuildJobSpec(t *testing.T) {
 	if !strings.Contains(script, "creator") {
 		t.Errorf("build script has no Buildpacks lifecycle branch (the no-Dockerfile case):\n%s", script)
 	}
+	// The lifecycle is TESTED FOR before it is invoked. Without the test, a builder image that does
+	// not carry one answers a failed build with `sh: /cnb/lifecycle/creator: No such file or
+	// directory` and nothing else (issue #590).
+	if !strings.Contains(script, "[ ! -x "+cnbCreator+" ]") {
+		t.Errorf("build script invokes the Buildpacks lifecycle without testing for it first:\n%s", script)
+	}
 	if !strings.Contains(script, "/dev/termination-log") {
 		t.Errorf("build script does not write the digest to the termination-log:\n%s", script)
 	}
@@ -370,6 +376,16 @@ func TestBuildJobSpec(t *testing.T) {
 		}
 		if c.Resources.Requests.Cpu().IsZero() || c.Resources.Requests.Memory().IsZero() {
 			t.Errorf("container %q has no CPU/memory request", c.Name)
+		}
+	}
+
+	// Every write path the build container has is mounted, whichever builder the pod ends up
+	// choosing: the workspace, $HOME, /tmp, and the layers directory the Buildpacks lifecycle
+	// writes into. The choice is made inside the pod from the cloned tree, so the Job cannot mount
+	// only the paths one branch needs (ADR-0053 §3).
+	for _, want := range []string{workspacePath, buildHomePath, buildTmpPath, layersPath} {
+		if !mountsPath(build.VolumeMounts, want) {
+			t.Errorf("build container does not mount %s; the build writes there", want)
 		}
 	}
 
@@ -829,6 +845,12 @@ func TestBuildWithSourceCredential(t *testing.T) {
 	if !mountsVolume(build.VolumeMounts, "registry-auth") {
 		t.Error("build does not mount the registry-auth volume")
 	}
+	// The SAME file, named for the other builder: the Buildpacks lifecycle resolves registry
+	// credentials through the docker keychain, which reads $DOCKER_CONFIG as a directory. Without
+	// it a no-Dockerfile build authenticates as nobody and its push is refused.
+	if got := envValue(build.Env, "DOCKER_CONFIG"); got != registryAuthPath {
+		t.Errorf("build DOCKER_CONFIG = %q, want the mounted docker config directory %q", got, registryAuthPath)
+	}
 
 	// The invariant that matters: the token is NOT in the Job spec anywhere — not an env value, not a
 	// command, not a volume. It lives only in the separate Secret object (asserted above).
@@ -1080,6 +1102,17 @@ func TestAnUnattributedBuildPodIsStillMarkedAsABuild(t *testing.T) {
 func mountsVolume(mounts []corev1.VolumeMount, name string) bool {
 	for _, m := range mounts {
 		if m.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// mountsPath reports whether a volume is mounted AT a path, which is what a build script writing
+// to that path depends on — the volume's name is an implementation detail it never sees.
+func mountsPath(mounts []corev1.VolumeMount, path string) bool {
+	for _, m := range mounts {
+		if m.MountPath == path {
 			return true
 		}
 	}

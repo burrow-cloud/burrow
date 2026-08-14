@@ -377,7 +377,12 @@ Two build paths, plus the option of bringing an image you built yourself
 The in-cluster build ([ADR-0053](adr/0053-in-cluster-build-from-source.md)), concretely: an
 `alpine/git:2.45.2` init container does a depth-1 fetch and checkout; the build container is
 `ghcr.io/burrow-cloud/burrow-builder` and picks **buildah when a Dockerfile is present** and
-the **Cloud Native Buildpacks lifecycle when it is not**. One attempt (`backoffLimit: 0`),
+the **Cloud Native Buildpacks lifecycle when it is not**. The builder image carries both: it is
+built on Heroku's Cloud Native Buildpacks builder for Ubuntu 26.04, so a repository with no
+Dockerfile is detected and built by the buildpacks for .NET, Go, Java, Node.js, PHP, Python, Ruby
+and Scala, and the image it produces runs on that builder's own Ubuntu run image. A repository
+that matches no buildpack is refused by the lifecycle's detect phase, which names every buildpack
+it tried and why each declined. One attempt (`backoffLimit: 0`),
 250m CPU / 512Mi requested and 2 CPU / 2Gi limited, a 30-minute wait, and a
 `ttlSecondsAfterFinished` on the finished Job set from `build.job_retention` (three days by default
 — see [Operational limits](#operational-limits); a success is deleted immediately, a failure is
@@ -422,7 +427,9 @@ Sharp edges on that path:
   inside a container needs it, and the trust argument is that the cluster and the source both
   belong to the same single tenant. The clone init container keeps the restricted floor.
 - The **Buildpacks (no-Dockerfile) path cannot push to the plain-HTTP in-cluster registry.**
-  It fails fast and says so; push to an external registry with `--image` instead.
+  It fails fast and says so; push to an external registry with `--image` instead. A no-Dockerfile
+  build against a builder image that carries no lifecycle is refused the same way, by name, rather
+  than by a shell error about a missing file.
 - **Private git works, over HTTPS only.** A source-provider credential
   ([ADR-0057](adr/0057-source-provider-credentials.md)) is
   mounted as a git credential helper and a registry auth file, keyed by host —

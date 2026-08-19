@@ -689,7 +689,11 @@ func (e *Engine) SetConfig(ctx context.Context, app, env, key, value string, noR
 			configWhat("setting", key, app, noRestart))); err != nil {
 		return err
 	}
-	if err := e.db.SetAppEnv(ctx, app, key, value); err != nil {
+	// The environment goes to the store with the write (ADR-0028): what is stored is app-global, but
+	// which environment the change was made in is a fact the engine holds — it resolved that
+	// environment's namespace above and re-applies that environment's workload below — and an
+	// implementation of the seam has no way to reconstruct it.
+	if err := e.db.SetAppEnv(ctx, app, envName(env), key, value); err != nil {
 		e.recordExecution(ctx, auditOpConfigSet, app, args, err)
 		return fmt.Errorf("set config %s: persisting %s: %w", app, key, err)
 	}
@@ -731,7 +735,8 @@ func (e *Engine) UnsetConfig(ctx context.Context, app, env, key string, noRestar
 			configWhat("removing", key, app, noRestart))); err != nil {
 		return err
 	}
-	if err := e.db.UnsetAppEnv(ctx, app, key); err != nil {
+	// The environment travels with the removal for SetConfig's reason.
+	if err := e.db.UnsetAppEnv(ctx, app, envName(env), key); err != nil {
 		e.recordExecution(ctx, auditOpConfigUnset, app, args, err)
 		return fmt.Errorf("unset config %s: removing %s: %w", app, key, err)
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	cp "github.com/burrow-cloud/burrow/controlplane"
+	"github.com/burrow-cloud/burrow/controlplane/internal/fake"
 )
 
 func TestSetConfigPersistsAndLists(t *testing.T) {
@@ -19,7 +20,7 @@ func TestSetConfigPersistsAndLists(t *testing.T) {
 	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", false, false); err != nil {
 		t.Fatalf("SetConfig (no release): %v", err)
 	}
-	cfg, err := e.ListConfig(ctx, "web", "")
+	cfg, err := e.ListConfig(ctx, "web", cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("ListConfig: %v", err)
 	}
@@ -166,5 +167,86 @@ func TestRollbackRendersCurrentStoreConfig(t *testing.T) {
 	}
 	if spec.Env["A"] != "2" {
 		t.Errorf("spec env = %+v, want A=2 (current store value), not the v1 snapshot", spec.Env)
+	}
+}
+
+// TestConfigWriteCarriesTheEnvironment pins what the config seam is told, as distinct from what it
+// stores. A config write happens IN an environment — the engine resolves that environment's
+// namespace and re-applies that environment's workload — and until the environment travelled with
+// the write, an implementation of controlplane.Database saw two indistinguishable calls for a
+// staging change and a production one.
+//
+// The other half of the assertion is that carrying it changed nothing: what an app READS is still
+// app-global (ADR-0028), so a value set while pointed at staging is in the config production
+// renders, and a removal made anywhere removes it everywhere. That is the behaviour
+// `docs/CAPABILITIES.md` promises, and the reason the environment is not on AppEnv.
+func TestConfigWriteCarriesTheEnvironment(t *testing.T) {
+	ctx := context.Background()
+	e, _, d, _ := newEngine(t, permissive())
+	if _, err := e.AddEnvironment(ctx, "staging", "burrow-apps-staging"); err != nil {
+		t.Fatalf("AddEnvironment: %v", err)
+	}
+
+	// --no-restart throughout: this is about the store call, and no app is deployed anywhere.
+	if err := e.SetConfig(ctx, "web", "staging", "LOG_LEVEL", "debug", true, false); err != nil {
+		t.Fatalf("SetConfig (staging): %v", err)
+	}
+	// The default environment is named rather than left empty: with a second environment
+	// registered, Burrow refuses to pick one for a mutating operation.
+	if err := e.SetConfig(ctx, "web", cp.DefaultEnvironment, "REGION", "eu", true, false); err != nil {
+		t.Fatalf("SetConfig (default environment): %v", err)
+	}
+	if err := e.UnsetConfig(ctx, "web", "staging", "REGION", true, false); err != nil {
+		t.Fatalf("UnsetConfig (staging): %v", err)
+	}
+
+	want := []fake.AppEnvWrite{
+		{App: "web", Env: "staging", Key: "LOG_LEVEL"},
+		{App: "web", Env: cp.DefaultEnvironment, Key: "REGION"},
+		{App: "web", Env: "staging", Key: "REGION", Unset: true},
+	}
+	got := d.AppEnvWrites()
+	if len(got) != len(want) {
+		t.Fatalf("writes = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("write %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// The default environment's config holds the staging write and has lost the key staging
+	// removed: one store per app, not one per environment.
+	cfg, err := e.ListConfig(ctx, "web", "")
+	if err != nil {
+		t.Fatalf("ListConfig: %v", err)
+	}
+	if cfg["LOG_LEVEL"] != "debug" {
+		t.Errorf("config = %+v, want the staging write visible in the default environment", cfg)
+	}
+	if _, present := cfg["REGION"]; present {
+		t.Errorf("config = %+v, want REGION removed everywhere", cfg)
+	}
+}
+
+// TestConfigWriteCarriesTheCanonicalEnvironmentName pins the OTHER half of the seam's contract: the
+// name that arrives is canonical (ADR-0067 §2), so an implementation keying anything off it never
+// has to know that an empty selector and "prod" are the same environment. A caller may leave the
+// environment unnamed when there is only one, and that is the case this covers — with a second
+// environment registered Burrow refuses to choose for a mutating operation at all.
+func TestConfigWriteCarriesTheCanonicalEnvironmentName(t *testing.T) {
+	ctx := context.Background()
+	e, _, d, _ := newEngine(t, permissive())
+
+	if err := e.SetConfig(ctx, "web", "", "LOG_LEVEL", "debug", true, false); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := e.UnsetConfig(ctx, "web", "", "LOG_LEVEL", true, false); err != nil {
+		t.Fatalf("UnsetConfig: %v", err)
+	}
+	for _, w := range d.AppEnvWrites() {
+		if w.Env != cp.DefaultEnvironment {
+			t.Errorf("write %+v carried %q, want the canonical %q", w, w.Env, cp.DefaultEnvironment)
+		}
 	}
 }

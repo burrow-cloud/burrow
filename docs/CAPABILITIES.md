@@ -495,8 +495,15 @@ Limits worth knowing before you plan around this surface:
 ## Configuration and secrets
 
 Two separate stores with deliberately different transport ([ADR-0028](adr/0028-app-config-and-secrets.md),
-[ADR-0029](adr/0029-secrets-through-the-control-plane.md)). `deploy` takes no environment
-arguments; both stores are sourced at deploy time.
+[ADR-0029](adr/0029-secrets-through-the-control-plane.md)). `deploy` takes no config or secret
+arguments; both stores are sourced at deploy time, **for the environment being deployed into**.
+
+**Both stores are per environment.** A config var is stored under (app, environment, key), so
+`burrow app config set web LOG_LEVEL=debug --env staging` sets it in staging and nowhere else, and a
+deploy to production renders production's own values. There is no shared or "applies everywhere"
+scope to fall back to: a key that is not set in the environment being deployed into is simply not in
+the app's environment there. The direct consequence is that **a newly added environment starts with
+no config at all** — see [Environments](#environments).
 
 | | `burrow app config` | `burrow app secret` |
 | --- | --- | --- |
@@ -504,7 +511,7 @@ arguments; both stores are sourced at deploy time.
 | Stored in | the control-plane Postgres (`app_env`) | a Kubernetes Secret, `burrow-app-<app>-secrets`, in the app's namespace |
 | Reaches the Pod as | individual `env` entries inlined in the Pod template | `envFrom` a `secretRef` on that one Secret (`optional: true`), plus a **file per mounted key** |
 | `list` shows | keys **and values** | **keys only** |
-| Scope | **app-global** — the same values apply in every environment | **per-environment**, because the Secret lives in the environment's namespace |
+| Scope | **per-environment** — a config var is set in one environment and read only there | **per-environment**, because the Secret lives in the environment's namespace |
 | On set/unset | re-applies the workload so the change rolls; `--no-restart` skips it | patches a `burrow.cloud/restarted-at` annotation so the change rolls; `--no-restart` skips it. An app with a `--no-env` key re-applies the workload instead (see below) |
 | Guarded by | `app.config`, **confirm** by default — the write rolls the app, whatever the value is ([ADR-0098](adr/0098-a-config-write-is-guarded.md)). `--no-restart` is not a way past it: the value still lands in the store and the next deploy carries it | nothing. `secret set` is absent from the agent binary and `secret unset` carries no value |
 | With no running release | persisted, applied at the next deploy | persisted, applied at the next deploy |
@@ -1302,11 +1309,20 @@ Two distinct things share the name, and conflating them is the usual source of c
 | Command | What it does |
 | --- | --- |
 | `burrow env` / `env list` | Lists local handles, marks the active one, and marks any whose kube context is no longer in your kubeconfig. `--discover` probes every kube context for an installed burrowd and registers a handle for each. With a Burrow Cloud target active there are no local handles: the listing reads the **registered environments** from the control plane instead and marks the default. `--discover` has no kubeconfig to walk there and is refused. |
-| `burrow env add <name>` | Creates the namespace and burrowd's Role/RoleBinding in it, registers the environment with burrowd, and records a local handle. Namespace defaults to `<app-namespace>-<name>`. |
+| `burrow env add <name>` | Creates the namespace and burrowd's Role/RoleBinding in it, registers the environment with burrowd, and records a local handle. Namespace defaults to `<app-namespace>-<name>`. **The new environment starts empty** — see below. |
 | `burrow env use <name>` / `env follow` | Pins the active environment, or clears the pin so it follows the current kube context. `env use --context <context>` re-points the handle first, which is what a renamed kube context needs. |
 | `burrow env rename <old> <new>` | Renames a local handle. |
 | `burrow env remove <name>` | Deletes the **local handle only** — and the minted agent kubeconfig under `~/.burrow/agents/`. It does not unregister the environment in burrowd. |
 | `burrow-agent environments` | Lists what the agent can see. Read-only, local. |
+
+**A new environment starts empty.** Nothing is copied from the environment you added it beside.
+It has no config ([Configuration and secrets](#configuration-and-secrets) — config is stored per
+environment, with no shared scope underneath it), no secrets (they live in the new namespace's own
+Secret), no add-on instance ([Add-ons](#add-ons) — one instance per type per environment) and no
+releases. An app deployed into it comes up on its image's own defaults until its config is set
+there, which is a working deploy rather than a failed one, so it is worth setting config before the
+first deploy rather than after. `burrow app config list <app> --env <name>` shows what an environment
+currently holds, and `burrow app config list <app> --env prod` shows what to reproduce.
 
 A pinned handle whose kube context has been **renamed away** keeps working when the handle carries a
 scoped agent credential: that credential holds the API server, the CA and the token, so nothing on

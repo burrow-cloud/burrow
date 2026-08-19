@@ -458,10 +458,14 @@ func (e *Engine) deploy(ctx context.Context, req DeployRequest, prov deployProve
 	}
 	prev, hasPrev := lastDeployed(releases)
 
-	// Env is app-global current state held in the store, the single source of truth (ADR-0028):
-	// load it here and render it into the workload rather than taking it from the request, so a
-	// release boots with whatever env the app currently has set.
-	env, err := e.db.AppEnv(ctx, req.App)
+	// Config is current state held in the store, the single source of truth (ADR-0028): load it
+	// here and render it into the workload rather than taking it from the request, so a release
+	// boots with whatever config the app currently has set. It is read FOR THE ENVIRONMENT BEING
+	// DEPLOYED INTO — config is keyed per (app, environment), so this is that environment's values
+	// and no other's. Deploying into an environment nothing has been set in is therefore a workload
+	// with no config, which is the correct answer for a newly registered environment rather than a
+	// read that failed.
+	env, err := e.db.AppEnv(ctx, req.App, envName(req.Env))
 	if err != nil {
 		return DeployResult{}, fmt.Errorf("deploy %s: reading env: %w", req.App, err)
 	}
@@ -689,10 +693,10 @@ func (e *Engine) SetConfig(ctx context.Context, app, env, key, value string, noR
 			configWhat("setting", key, app, noRestart))); err != nil {
 		return err
 	}
-	// The environment goes to the store with the write (ADR-0028): what is stored is app-global, but
-	// which environment the change was made in is a fact the engine holds — it resolved that
-	// environment's namespace above and re-applies that environment's workload below — and an
-	// implementation of the seam has no way to reconstruct it.
+	// The environment goes to the store WITH the write and is part of what identifies the row
+	// (ADR-0028): config is keyed per (app, environment, key), so this writes the value for the
+	// environment resolved above — the same one whose workload is re-applied below — and leaves the
+	// same key in every other environment as it was.
 	if err := e.db.SetAppEnv(ctx, app, envName(env), key, value); err != nil {
 		e.recordExecution(ctx, auditOpConfigSet, app, args, err)
 		return fmt.Errorf("set config %s: persisting %s: %w", app, key, err)
@@ -735,7 +739,8 @@ func (e *Engine) UnsetConfig(ctx context.Context, app, env, key string, noRestar
 			configWhat("removing", key, app, noRestart))); err != nil {
 		return err
 	}
-	// The environment travels with the removal for SetConfig's reason.
+	// The environment travels with the removal for SetConfig's reason: it removes this
+	// environment's row, and the same key set in another environment is untouched.
 	if err := e.db.UnsetAppEnv(ctx, app, envName(env), key); err != nil {
 		e.recordExecution(ctx, auditOpConfigUnset, app, args, err)
 		return fmt.Errorf("unset config %s: removing %s: %w", app, key, err)
@@ -773,35 +778,39 @@ func configWhat(verb, key, app string, noRestart bool) string {
 	return fmt.Sprintf("%s the config var %s on %q (which rolls the running app)", verb, key, app)
 }
 
-// ListConfig returns the app's non-secret config store (ADR-0028). An app with no config yields an
-// empty map and no error.
+// ListConfig returns the app's non-secret config in env (ADR-0028). Config is per environment, so
+// this lists what is set THERE — a value set in another environment is not in the listing. An app
+// with no config in env yields an empty map and no error, which is what every app in a newly
+// registered environment starts with.
 func (e *Engine) ListConfig(ctx context.Context, app, env string) (map[string]string, error) {
 	if err := (App{Name: app}).Validate(); err != nil {
 		return nil, fmt.Errorf("list config: %w: %w", ErrInvalid, err)
 	}
-	// Resolve the environment so an unknown name is a clear error, even though the config store is
-	// app-global today: its values are sourced into whichever environment's namespace a deploy
-	// targets (ADR-0035 phase 2b).
+	// Resolve the environment before reading, so an unknown name is a clear error rather than an
+	// empty listing. The distinction matters more now that config is per environment: a typo in
+	// --env and an environment that genuinely holds no config would otherwise look identical.
 	if _, err := e.resolveNamespace(ctx, env); err != nil {
 		return nil, fmt.Errorf("list config %s: %w", app, err)
 	}
-	cfg, err := e.db.AppEnv(ctx, app)
+	cfg, err := e.db.AppEnv(ctx, app, envName(env))
 	if err != nil {
 		return nil, fmt.Errorf("list config %s: %w", app, err)
 	}
 	return cfg, nil
 }
 
-// reapplyEnv re-renders the running workload with the current store env so a mutation rolls the
-// Deployment (ADR-0028).
+// reapplyEnv re-renders the running workload with env's current config so a mutation rolls the
+// Deployment (ADR-0028). It rolls the environment the write was made in, and only that one.
 func (e *Engine) reapplyEnv(ctx context.Context, k Kubernetes, app, env string) error {
 	_, err := e.reapplyWorkload(ctx, k, "set env", app, env)
 	return err
 }
 
 // reapplyWorkload re-renders the running workload from the app's currently running release and the
-// current store state, so an out-of-band change (a config var, a declared health endpoint, a new
-// exposure) rolls the Deployment and reaches the running pods. op names the calling operation for
+// current store state IN env, so an out-of-band change (a config var, a declared health endpoint, a
+// new exposure) rolls the Deployment and reaches the running pods of that environment. env is the
+// canonical environment name, and it selects the config the render reads as well as the release
+// history: re-applying staging must not push production's values at staging's pods. op names the calling operation for
 // the error messages. It reports whether a workload was actually re-applied: with no running release
 // there is nothing to roll, so the change is persisted and lands on the next deploy — a no-op, not
 // an error, and the false return is what lets a caller say so on its surface.
@@ -814,7 +823,7 @@ func (e *Engine) reapplyWorkload(ctx context.Context, k Kubernetes, op, app, env
 	if !ok {
 		return false, nil // no running workload yet; the change lands on the next deploy
 	}
-	cfg, err := e.db.AppEnv(ctx, app)
+	cfg, err := e.db.AppEnv(ctx, app, env)
 	if err != nil {
 		return false, fmt.Errorf("%s %s: reading env: %w", op, app, err)
 	}
@@ -1681,7 +1690,10 @@ func (e *Engine) attachReadAddress(ctx context.Context, k Kubernetes, t AddonTyp
 // the conflict").
 //
 // Two sources can hold it, and both are checked because the app cannot tell them apart at runtime —
-// its environment is the config store and the per-app Secret merged. A Secret key is the destructive
+// its environment is the config store and the per-app Secret merged. Both are read for the
+// environment being attached in: config is keyed per (app, environment) and the Secret lives in
+// that environment's namespace, so a key free here can still be taken in another environment, and
+// an attach there is refused on its own evidence rather than on this one's. A Secret key is the destructive
 // case: the value is unreadable, so overwriting it destroys a credential permanently. A config key
 // is the confusing one: both would render into the workload under one name, and which wins is not
 // something a user should have to know.
@@ -1704,9 +1716,9 @@ func (e *Engine) refuseOccupiedEnvKey(ctx context.Context, k Kubernetes, app, en
 	default:
 		return fmt.Errorf("%s could not be checked against %s's existing secrets, and attaching would overwrite a value that cannot be read back: %w", key, app, err)
 	}
-	cfg, err := e.db.AppEnv(ctx, app)
+	cfg, err := e.db.AppEnv(ctx, app, env)
 	if err != nil {
-		return fmt.Errorf("%s could not be checked against %s's config: %w", key, app, err)
+		return fmt.Errorf("%s could not be checked against %s's config in %s: %w", key, app, env, err)
 	}
 	if _, taken := cfg[key]; taken {
 		return fmt.Errorf("%s is already a config var of %s, and the app would see two values under one name; remove it with `burrow config unset %s %s` or attach under another name: %w", key, app, app, key, ErrInvalid)
@@ -3341,10 +3353,10 @@ func (e *Engine) Rollback(ctx context.Context, app, env string, opts RollbackOpt
 		return RollbackResult{}, err
 	}
 
-	// Env is app-global current state, not snapshotted per release (ADR-0028): a rollback
-	// restores the prior image and command but renders the env the app currently has set, not
-	// whatever was in effect when the target was first deployed.
-	cfg, err := e.db.AppEnv(ctx, app)
+	// Config is current state, not snapshotted per release (ADR-0028): a rollback restores the prior
+	// image and command but renders the config the app currently has set in THIS environment, not
+	// whatever was in effect when the target was first deployed and not another environment's.
+	cfg, err := e.db.AppEnv(ctx, app, envName(env))
 	if err != nil {
 		return RollbackResult{}, fmt.Errorf("rollback %s: reading env: %w", app, err)
 	}

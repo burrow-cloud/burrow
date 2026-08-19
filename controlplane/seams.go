@@ -888,18 +888,23 @@ type Database interface {
 	// has none is a no-op, not an error.
 	DeleteReleases(ctx context.Context, app string) error
 
-	// AppEnv returns the non-secret environment store for app: the app-global current
-	// config rendered into the workload at apply time (ADR-0028). An app with no env yields
-	// an empty map and no error.
+	// AppEnv returns the non-secret config store for app in env: the current config rendered into
+	// that environment's workload at apply time (ADR-0028). env is the canonical name of the
+	// environment ("prod" for the default one, ADR-0067 §2), already resolved and validated by the
+	// caller, positioned after the app as every other environment-carrying method here positions it.
 	//
-	// It takes NO environment, and the absence is the store's semantics rather than an oversight:
-	// one app's config is the same set of values wherever that app is deployed, which is what
-	// `docs/CAPABILITIES.md` promises a user and what the `app_env` table's (app, key) primary key
-	// records. Deploy, rollback, a re-apply and a one-off command all render the workload from this
-	// one read, so narrowing it to an environment would not carry information — it would hand a
-	// running app a SUBSET of the config it has today, in every environment that never happened to
-	// be the one a value was written in.
-	AppEnv(ctx context.Context, app string) (map[string]string, error)
+	// CONFIG IS PER ENVIRONMENT, and this read is the whole of it: it returns the rows written in
+	// env and nothing else. There is no wildcard scope and no fall-back to a shared set, so an app's
+	// staging config and its production config are two independent sets of values that happen to
+	// share key names. Deploy, rollback, a re-apply and a one-off command each read the environment
+	// they are acting on, so a value set in staging never reaches production and a production value
+	// is never narrowed away by something staging did.
+	//
+	// An app with no config in env yields an empty map and no error. That is the ordinary answer for
+	// a NEWLY REGISTERED ENVIRONMENT, which starts with no config: an app deployed into one runs on
+	// its image's own defaults until config is set there, and an implementation must return empty
+	// rather than borrow another environment's values to fill the gap.
+	AppEnv(ctx context.Context, app, env string) (map[string]string, error)
 	// SetAppEnv upserts one env key for app in the store. env is the canonical name of the
 	// environment the write was made in ("prod" for the default environment, ADR-0067 §2), already
 	// resolved and validated by the caller.

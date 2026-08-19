@@ -65,10 +65,11 @@ func (e *Engine) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("run %s: no deployed release to run a command in — deploy it first: %w", req.App, ErrNotFound)
 	}
 
-	// Env is the app-global config store, sourced into the Job exactly as a deploy sources it
-	// (ADR-0028) so the command sees the same non-secret config; the per-app Secret is injected by
-	// the kube seam, so no secret value passes through here.
-	env, err := e.db.AppEnv(ctx, req.App)
+	// Config is read for the environment the command runs in and sourced into the Job exactly as a
+	// deploy into that environment sources it (ADR-0028), so the command sees what the app there
+	// sees — not another environment's values, and not a union of them. The per-app Secret is
+	// injected by the kube seam, so no secret value passes through here.
+	env, err := e.db.AppEnv(ctx, req.App, envName(req.Env))
 	if err != nil {
 		return RunResult{}, fmt.Errorf("run %s: reading env: %w", req.App, err)
 	}

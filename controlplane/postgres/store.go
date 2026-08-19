@@ -197,54 +197,54 @@ func (s *Store) DeleteReleases(ctx context.Context, app string) error {
 	return nil
 }
 
-// AppEnv returns the non-secret environment store for app (ADR-0028). An app with no env
-// yields an empty map and no error.
-func (s *Store) AppEnv(ctx context.Context, app string) (map[string]string, error) {
-	const q = `SELECT key, value FROM app_env WHERE app = $1`
-	rows, err := s.db.QueryContext(ctx, q, app)
+// AppEnv returns the non-secret config store for app IN env (ADR-0028). The table is keyed by
+// (app, environment, key), so this returns that environment's rows and only those: a value set in
+// another environment is not visible here, and there is no shared scope underneath to fall back to.
+// An app with no config in env yields an empty map and no error — which is what every app in a
+// newly registered environment gets, because a new environment starts with no config at all.
+func (s *Store) AppEnv(ctx context.Context, app, env string) (map[string]string, error) {
+	const q = `SELECT key, value FROM app_env WHERE app = $1 AND environment = $2`
+	rows, err := s.db.QueryContext(ctx, q, app, env)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: app env for %q: %w", app, err)
+		return nil, fmt.Errorf("postgres: app env for %q in %q: %w", app, env, err)
 	}
 	defer rows.Close()
 
-	env := map[string]string{}
+	cfg := map[string]string{}
 	for rows.Next() {
 		var k, v string
 		if err := rows.Scan(&k, &v); err != nil {
-			return nil, fmt.Errorf("postgres: app env for %q: %w", app, err)
+			return nil, fmt.Errorf("postgres: app env for %q in %q: %w", app, env, err)
 		}
-		env[k] = v
+		cfg[k] = v
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: app env for %q: %w", app, err)
+		return nil, fmt.Errorf("postgres: app env for %q in %q: %w", app, env, err)
 	}
-	return env, nil
+	return cfg, nil
 }
 
-// SetAppEnv upserts one env key for app. The environment the write was made in is accepted and
-// deliberately NOT stored, which is why it arrives here as a blank: this store is app-global by
-// design (ADR-0028), the `app_env` table is keyed by (app, key) with no environment column, and the
-// value it holds is rendered into the workload in every environment the app is deployed to. Writing
-// the environment into the row would be a schema change and a change of meaning, not a record of
-// one. The seam carries it for implementations that act per-environment on a config write; Postgres
-// records exactly what it has always recorded.
-func (s *Store) SetAppEnv(ctx context.Context, app, _, key, value string) error {
+// SetAppEnv upserts one config key for app in env. The environment is part of the row's key
+// (migration 00037), so the same key set in two environments is two rows with two values, and the
+// ON CONFLICT target names all three columns — an upsert in staging must not overwrite production's
+// value for the same key.
+func (s *Store) SetAppEnv(ctx context.Context, app, env, key, value string) error {
 	const q = `
-INSERT INTO app_env (app, key, value) VALUES ($1, $2, $3)
-ON CONFLICT (app, key) DO UPDATE SET value = EXCLUDED.value`
-	if _, err := s.db.ExecContext(ctx, q, app, key, value); err != nil {
-		return fmt.Errorf("postgres: set app env %q for %q: %w", key, app, err)
+INSERT INTO app_env (app, environment, key, value) VALUES ($1, $2, $3, $4)
+ON CONFLICT (app, environment, key) DO UPDATE SET value = EXCLUDED.value`
+	if _, err := s.db.ExecContext(ctx, q, app, env, key, value); err != nil {
+		return fmt.Errorf("postgres: set app env %q for %q in %q: %w", key, app, env, err)
 	}
 	return nil
 }
 
-// UnsetAppEnv removes one env key for app. Removing a key that is not set is a no-op. The
-// environment is blank here for SetAppEnv's reason, and the removal is app-global for the same
-// one: there is a single row behind the key, so it goes everywhere at once.
-func (s *Store) UnsetAppEnv(ctx context.Context, app, _, key string) error {
-	const q = `DELETE FROM app_env WHERE app = $1 AND key = $2`
-	if _, err := s.db.ExecContext(ctx, q, app, key); err != nil {
-		return fmt.Errorf("postgres: unset app env %q for %q: %w", key, app, err)
+// UnsetAppEnv removes one config key for app in env. It removes THAT environment's row only — the
+// same key in another environment is a different row and is left alone. Removing a key that is not
+// set in env is a no-op.
+func (s *Store) UnsetAppEnv(ctx context.Context, app, env, key string) error {
+	const q = `DELETE FROM app_env WHERE app = $1 AND environment = $2 AND key = $3`
+	if _, err := s.db.ExecContext(ctx, q, app, env, key); err != nil {
+		return fmt.Errorf("postgres: unset app env %q for %q in %q: %w", key, app, env, err)
 	}
 	return nil
 }

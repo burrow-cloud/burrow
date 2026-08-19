@@ -169,7 +169,7 @@ func TestAttachRefusesOccupiedConfigKey(t *testing.T) {
 	ctx := context.Background()
 	e, _, d, _ := newPostgresEngine(t)
 
-	if err := d.SetAppEnv(ctx, "web", "DB_URL", "postgres://elsewhere/db"); err != nil {
+	if err := d.SetAppEnv(ctx, "web", cp.DefaultEnvironment, "DB_URL", "postgres://elsewhere/db"); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 	_, err := e.AttachAddon(ctx, cp.AddonPostgres, "web", "", cp.AttachAddonOptions{Confirm: true, EnvKey: "DB_URL"})

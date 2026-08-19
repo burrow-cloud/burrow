@@ -134,7 +134,7 @@ func TestDeployHappyPath(t *testing.T) {
 	e, k, d, _ := newEngine(t, permissive())
 
 	// Env is sourced from the app's config store at deploy time, not from the request (ADR-0028).
-	if err := d.SetAppEnv(ctx, "web", "K", "V"); err != nil {
+	if err := d.SetAppEnv(ctx, "web", cp.DefaultEnvironment, "K", "V"); err != nil {
 		t.Fatalf("SetAppEnv: %v", err)
 	}
 

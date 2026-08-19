@@ -221,8 +221,14 @@ func (s *Store) AppEnv(ctx context.Context, app string) (map[string]string, erro
 	return env, nil
 }
 
-// SetAppEnv upserts one env key for app.
-func (s *Store) SetAppEnv(ctx context.Context, app, key, value string) error {
+// SetAppEnv upserts one env key for app. The environment the write was made in is accepted and
+// deliberately NOT stored, which is why it arrives here as a blank: this store is app-global by
+// design (ADR-0028), the `app_env` table is keyed by (app, key) with no environment column, and the
+// value it holds is rendered into the workload in every environment the app is deployed to. Writing
+// the environment into the row would be a schema change and a change of meaning, not a record of
+// one. The seam carries it for implementations that act per-environment on a config write; Postgres
+// records exactly what it has always recorded.
+func (s *Store) SetAppEnv(ctx context.Context, app, _, key, value string) error {
 	const q = `
 INSERT INTO app_env (app, key, value) VALUES ($1, $2, $3)
 ON CONFLICT (app, key) DO UPDATE SET value = EXCLUDED.value`
@@ -232,8 +238,10 @@ ON CONFLICT (app, key) DO UPDATE SET value = EXCLUDED.value`
 	return nil
 }
 
-// UnsetAppEnv removes one env key for app. Removing a key that is not set is a no-op.
-func (s *Store) UnsetAppEnv(ctx context.Context, app, key string) error {
+// UnsetAppEnv removes one env key for app. Removing a key that is not set is a no-op. The
+// environment is blank here for SetAppEnv's reason, and the removal is app-global for the same
+// one: there is a single row behind the key, so it goes everywhere at once.
+func (s *Store) UnsetAppEnv(ctx context.Context, app, _, key string) error {
 	const q = `DELETE FROM app_env WHERE app = $1 AND key = $2`
 	if _, err := s.db.ExecContext(ctx, q, app, key); err != nil {
 		return fmt.Errorf("postgres: unset app env %q for %q: %w", key, app, err)

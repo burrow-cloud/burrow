@@ -19,21 +19,26 @@ var _ controlplane.Database = (*Database)(nil)
 // copied in and out, so callers never share Env/Command memory with the store — the
 // same isolation a real database gives. Errors can be injected per operation.
 type Database struct {
-	mu         sync.Mutex
-	byID       map[string]controlplane.Release
-	order      map[string][]string // app -> release IDs, save order, deduplicated
-	providers  map[string]controlplane.Provider
-	addons     map[string]controlplane.AddonInfo
-	appEnv     map[string]map[string]string                       // app -> key -> value
-	hooks      map[string]controlplane.Hook                       // (app, env, phase) -> configured lifecycle hook
-	autoDeploy map[string]map[string]controlplane.AutoDeployLevel // app -> env -> level
-	reason     map[string]map[string]string                       // app -> env -> disable reason
-	audit      []controlplane.AuditEntry                          // append-only, in append order
-	backups    map[string]controlplane.Backup
-	backupSeq  []string                            // backup IDs in record order, for deterministic newest-first listing
-	envs       map[string]controlplane.Environment // registered environments by name
-	errs       map[Op]error
-	policy     controlplane.Policy
+	mu        sync.Mutex
+	byID      map[string]controlplane.Release
+	order     map[string][]string // app -> release IDs, save order, deduplicated
+	providers map[string]controlplane.Provider
+	addons    map[string]controlplane.AddonInfo
+	appEnv    map[string]map[string]string // app -> key -> value
+	// Every config write in the order it was made, WITH the environment it was made in. Storage
+	// above stays app-global, exactly as Postgres is, so the fake is never the looser of the two;
+	// this is a separate log of what the seam was told, which is the only place the environment a
+	// write belongs to survives in an implementation that does not act on it.
+	appEnvWrites []AppEnvWrite
+	hooks        map[string]controlplane.Hook                       // (app, env, phase) -> configured lifecycle hook
+	autoDeploy   map[string]map[string]controlplane.AutoDeployLevel // app -> env -> level
+	reason       map[string]map[string]string                       // app -> env -> disable reason
+	audit        []controlplane.AuditEntry                          // append-only, in append order
+	backups      map[string]controlplane.Backup
+	backupSeq    []string                            // backup IDs in record order, for deterministic newest-first listing
+	envs         map[string]controlplane.Environment // registered environments by name
+	errs         map[Op]error
+	policy       controlplane.Policy
 	// The failure ledger and its coverage record (ADR-0074 §4). They are separate from the audit
 	// slice above for the same reason they are separate tables in the store: one is what Burrow was
 	// asked to do, the other is what happened afterwards, and only the second is pruned (§7).
@@ -391,8 +396,32 @@ func (d *Database) AppEnv(ctx context.Context, app string) (map[string]string, e
 	return out, nil
 }
 
-// SetAppEnv upserts one env key for app.
-func (d *Database) SetAppEnv(ctx context.Context, app, key, value string) error {
+// AppEnvWrite is one config write the fake was asked to perform, and the environment it was made
+// in. It exists so a test can assert the environment REACHED the seam: the value itself is
+// app-global once written, so nothing about the stored config could ever show which environment
+// put it there.
+type AppEnvWrite struct {
+	App string
+	Env string
+	Key string
+	// Unset distinguishes the two directions. A removal carries no value, so a zero Value on a
+	// write and a removal would otherwise read the same.
+	Unset bool
+}
+
+// AppEnvWrites returns a copy of every config write made through the seam, in order.
+func (d *Database) AppEnvWrites() []AppEnvWrite {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]AppEnvWrite, len(d.appEnvWrites))
+	copy(out, d.appEnvWrites)
+	return out
+}
+
+// SetAppEnv upserts one env key for app. env is recorded in the write log and NOT in the stored
+// config: the value is app-global once written, which is the real store's behaviour and therefore
+// has to be the fake's.
+func (d *Database) SetAppEnv(ctx context.Context, app, env, key, value string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[OpSetAppEnv]; err != nil {
@@ -402,17 +431,20 @@ func (d *Database) SetAppEnv(ctx context.Context, app, key, value string) error 
 		d.appEnv[app] = make(map[string]string)
 	}
 	d.appEnv[app][key] = value
+	d.appEnvWrites = append(d.appEnvWrites, AppEnvWrite{App: app, Env: env, Key: key})
 	return nil
 }
 
-// UnsetAppEnv removes one env key for app. Removing a key that is not set is a no-op.
-func (d *Database) UnsetAppEnv(ctx context.Context, app, key string) error {
+// UnsetAppEnv removes one env key for app. Removing a key that is not set is a no-op. env is
+// recorded for SetAppEnv's reason, and the removal is app-global for the same one.
+func (d *Database) UnsetAppEnv(ctx context.Context, app, env, key string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[OpUnsetAppEnv]; err != nil {
 		return err
 	}
 	delete(d.appEnv[app], key)
+	d.appEnvWrites = append(d.appEnvWrites, AppEnvWrite{App: app, Env: env, Key: key, Unset: true})
 	return nil
 }
 

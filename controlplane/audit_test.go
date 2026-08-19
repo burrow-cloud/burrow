@@ -287,10 +287,10 @@ func TestAuditRedactsEnvValues(t *testing.T) {
 	ctx := context.Background()
 
 	const secretValue = "super-secret-token-value"
-	if err := d.SetAppEnv(ctx, "web", "API_KEY", secretValue); err != nil {
+	if err := d.SetAppEnv(ctx, "web", cp.DefaultEnvironment, "API_KEY", secretValue); err != nil {
 		t.Fatalf("SetAppEnv: %v", err)
 	}
-	if err := d.SetAppEnv(ctx, "web", "DB_HOST", "db.internal"); err != nil {
+	if err := d.SetAppEnv(ctx, "web", cp.DefaultEnvironment, "DB_HOST", "db.internal"); err != nil {
 		t.Fatalf("SetAppEnv: %v", err)
 	}
 

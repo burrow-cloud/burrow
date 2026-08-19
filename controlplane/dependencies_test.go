@@ -199,7 +199,7 @@ func TestDeployRunsTheDerivedCheckInTheAppsOwnImage(t *testing.T) {
 	ctx := context.Background()
 	installPostgresAddon(t, d, cp.DefaultEnvironment)
 	prov.SetAttachedApps(cp.DefaultEnvironment, "web")
-	if err := d.SetAppEnv(ctx, "web", "LOG_LEVEL", "debug"); err != nil {
+	if err := d.SetAppEnv(ctx, "web", cp.DefaultEnvironment, "LOG_LEVEL", "debug"); err != nil {
 		t.Fatalf("SetAppEnv: %v", err)
 	}
 	k.SetRunResult(cp.RunResult{Stdout: probeStdout(cp.DependencyResult{

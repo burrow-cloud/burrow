@@ -25,10 +25,10 @@ type Database struct {
 	providers map[string]controlplane.Provider
 	addons    map[string]controlplane.AddonInfo
 	appEnv    map[string]map[string]string // "app\x00env" -> key -> value
-	// Every config write in the order it was made, WITH the environment it was made in. Storage
-	// above stays app-global, exactly as Postgres is, so the fake is never the looser of the two;
-	// this is a separate log of what the seam was told, which is the only place the environment a
-	// write belongs to survives in an implementation that does not act on it.
+	// Every config write in the order it was made, WITH the environment it was made in. The storage
+	// above is keyed by environment exactly as Postgres is, so the fake is never the looser of the
+	// two; this log adds the ORDER and the DIRECTION of the writes, which reading the store back
+	// cannot show — a set followed by an unset leaves the same state as no write at all.
 	appEnvWrites []AppEnvWrite
 	hooks        map[string]controlplane.Hook                       // (app, env, phase) -> configured lifecycle hook
 	autoDeploy   map[string]map[string]controlplane.AutoDeployLevel // app -> env -> level

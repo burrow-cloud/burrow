@@ -177,7 +177,8 @@ func newDeployCmd() *cobra.Command {
 			"To run something other than the image's default entrypoint, pass the command after a --\n" +
 			"separator, like kubectl run:\n" +
 			"  burrow-agent deploy worker --image myrepo/app:1.2.3 -- ./worker --queue emails\n\n" +
-			"Config and secrets are a separate, app-global store sourced at deploy time — not passed here.\n" +
+			"Config and secrets are separate, per-environment stores sourced at deploy time — not passed\n" +
+			"here, and set in the environment being deployed to.\n" +
 			"Deploying no longer resets the replica count: omit --replicas to preserve the current scale.\n\n" +
 			"Deploy is allowed by default; an operator may set the app.deploy guardrail to hold it for\n" +
 			"confirmation (e.g. in prod) or deny it. When held, the outcome says so — relay it and re-run\n" +
@@ -247,7 +248,8 @@ func newBuildCmd() *cobra.Command {
 			"built image is pushed to --image and the resulting deploy pins its digest.\n\n" +
 			"This is the OPTIONAL in-cluster build path, not the default: deploy stays by image reference,\n" +
 			"and build is a front-end that ends where deploy begins. Config and secrets are the same\n" +
-			"app-global store sourced at deploy time — set them beforehand, not here.\n\n" +
+			"per-environment stores sourced at deploy time — set them beforehand in the environment\n" +
+			"being deployed to, not here.\n\n" +
 			"Build ends in a deploy, so it is gated by the app.deploy guardrail: an operator may hold it\n" +
 			"for confirmation (e.g. in prod) or deny it. When held, the outcome says so — relay it and\n" +
 			"re-run with --confirm ONLY after the human approves.",

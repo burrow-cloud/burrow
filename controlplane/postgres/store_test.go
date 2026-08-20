@@ -367,16 +367,24 @@ func TestStoreRoundTripsEnvCommandAndTime(t *testing.T) {
 	}
 }
 
-// TestStoreAppEnvRoundTrip exercises the per-app non-secret env store (ADR-0028) against a
-// real database: set upserts, list returns the current map, and unset removes a key.
+// TestStoreAppEnvRoundTrip exercises the per-app, per-environment non-secret config store
+// (ADR-0028) against a real database: set upserts, list returns that environment's current map,
+// and unset removes a key from that environment only.
+//
+// The isolation assertions are the point. Config is keyed (app, environment, key) since migration
+// 00037, and the two properties that keying exists for cannot be observed with one environment: the
+// same key set in two environments must hold two values, and a removal in one must leave the other
+// alone. Both are asserted in both directions, because a read that returned everything and a read
+// that returned nothing each pass a one-sided check.
 func TestStoreAppEnvRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t)
 	app := t.Name() + "-web"
 	other := t.Name() + "-api"
+	staging := envLabel(t, "staging")
 
-	// An app with no env yields an empty map, not an error.
-	got, err := s.AppEnv(ctx, app)
+	// An app with no config in an environment yields an empty map, not an error.
+	got, err := s.AppEnv(ctx, app, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("AppEnv (empty): %v", err)
 	}
@@ -394,12 +402,12 @@ func TestStoreAppEnvRoundTrip(t *testing.T) {
 	if err := s.SetAppEnv(ctx, app, cp.DefaultEnvironment, "LOG_LEVEL", "info"); err != nil {
 		t.Fatalf("SetAppEnv (upsert): %v", err)
 	}
-	// A different app's env is isolated.
+	// A different app's config is isolated.
 	if err := s.SetAppEnv(ctx, other, cp.DefaultEnvironment, "LOG_LEVEL", "trace"); err != nil {
-		t.Fatalf("SetAppEnv (other): %v", err)
+		t.Fatalf("SetAppEnv (other app): %v", err)
 	}
 
-	got, err = s.AppEnv(ctx, app)
+	got, err = s.AppEnv(ctx, app, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("AppEnv: %v", err)
 	}
@@ -407,30 +415,48 @@ func TestStoreAppEnvRoundTrip(t *testing.T) {
 		t.Errorf("AppEnv = %v, want {LOG_LEVEL:info FEATURE:on}", got)
 	}
 
-	// A write made in ANOTHER environment lands in the same app-global store and reads back
-	// alongside the rest (ADR-0028). This is the property the seam's environment must not have
-	// quietly turned into a filter: an app deployed to prod renders the value a staging write set,
-	// because there is one config store per app and not one per environment.
-	if err := s.SetAppEnv(ctx, app, "staging", "REGION", "eu"); err != nil {
-		t.Fatalf("SetAppEnv (other environment): %v", err)
+	// THE SAME KEY IN ANOTHER ENVIRONMENT IS ANOTHER ROW. The upsert conflicts on all three key
+	// columns, so writing LOG_LEVEL in staging must not overwrite the default environment's value —
+	// and staging must not see the key the default environment alone holds.
+	if err := s.SetAppEnv(ctx, app, staging, "LOG_LEVEL", "trace"); err != nil {
+		t.Fatalf("SetAppEnv (staging): %v", err)
 	}
-	got, err = s.AppEnv(ctx, app)
+	got, err = s.AppEnv(ctx, app, staging)
 	if err != nil {
-		t.Fatalf("AppEnv after a write in another environment: %v", err)
+		t.Fatalf("AppEnv (staging): %v", err)
 	}
-	if got["REGION"] != "eu" {
-		t.Errorf("AppEnv = %v, want a staging write to be visible app-globally", got)
+	if got["LOG_LEVEL"] != "trace" {
+		t.Errorf("AppEnv (staging) = %v, want LOG_LEVEL:trace", got)
 	}
-	// And the removal is app-global too, whichever environment asks for it.
-	if err := s.UnsetAppEnv(ctx, app, cp.DefaultEnvironment, "REGION"); err != nil {
-		t.Fatalf("UnsetAppEnv (other environment): %v", err)
+	if _, present := got["FEATURE"]; present {
+		t.Errorf("AppEnv (staging) = %v, want FEATURE absent — it is set in %s only", got, cp.DefaultEnvironment)
 	}
-	got, err = s.AppEnv(ctx, app)
+	got, err = s.AppEnv(ctx, app, cp.DefaultEnvironment)
 	if err != nil {
-		t.Fatalf("AppEnv after the cross-environment unset: %v", err)
+		t.Fatalf("AppEnv after the staging write: %v", err)
 	}
-	if _, present := got["REGION"]; present {
-		t.Errorf("AppEnv = %v, want REGION removed everywhere", got)
+	if got["LOG_LEVEL"] != "info" {
+		t.Errorf("AppEnv = %v, want LOG_LEVEL:info — the staging write must not reach %s", got, cp.DefaultEnvironment)
+	}
+
+	// AND A REMOVAL IS PER ENVIRONMENT TOO. Unsetting LOG_LEVEL in staging leaves the default
+	// environment's row exactly where it was.
+	if err := s.UnsetAppEnv(ctx, app, staging, "LOG_LEVEL"); err != nil {
+		t.Fatalf("UnsetAppEnv (staging): %v", err)
+	}
+	got, err = s.AppEnv(ctx, app, staging)
+	if err != nil {
+		t.Fatalf("AppEnv (staging) after unset: %v", err)
+	}
+	if _, present := got["LOG_LEVEL"]; present {
+		t.Errorf("AppEnv (staging) = %v, want LOG_LEVEL removed", got)
+	}
+	got, err = s.AppEnv(ctx, app, cp.DefaultEnvironment)
+	if err != nil {
+		t.Fatalf("AppEnv after the staging unset: %v", err)
+	}
+	if got["LOG_LEVEL"] != "info" {
+		t.Errorf("AppEnv = %v, want LOG_LEVEL:info to survive a staging unset", got)
 	}
 
 	// Unset removes a key; removing a missing key is a no-op.
@@ -440,7 +466,7 @@ func TestStoreAppEnvRoundTrip(t *testing.T) {
 	if err := s.UnsetAppEnv(ctx, app, cp.DefaultEnvironment, "NOPE"); err != nil {
 		t.Fatalf("UnsetAppEnv (absent): %v", err)
 	}
-	got, err = s.AppEnv(ctx, app)
+	got, err = s.AppEnv(ctx, app, cp.DefaultEnvironment)
 	if err != nil {
 		t.Fatalf("AppEnv after unset: %v", err)
 	}

@@ -15,8 +15,9 @@ import (
 
 // DeployRequest is the small, code-free description of a deploy: a pullable image plus
 // metadata (ADR-0004). No code travels here. Env is deliberately absent: an app's
-// non-secret config is an independently-managed, app-global store, sourced at apply time
-// rather than passed per deploy (ADR-0028) — set it with SetConfig before deploying.
+// non-secret config is an independently-managed store, sourced at apply time rather than passed per
+// deploy (ADR-0028) — set it with SetConfig before deploying. It is read for the environment named
+// below, so a deploy into an environment nothing has been set in renders no config at all.
 type DeployRequest struct {
 	App string `json:"app"`
 	// Env is the environment to deploy into (ADR-0035 phase 2b): empty or "prod" targets the default

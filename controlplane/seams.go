@@ -888,34 +888,36 @@ type Database interface {
 	// has none is a no-op, not an error.
 	DeleteReleases(ctx context.Context, app string) error
 
-	// AppEnv returns the non-secret environment store for app: the app-global current
-	// config rendered into the workload at apply time (ADR-0028). An app with no env yields
-	// an empty map and no error.
+	// AppEnv returns the non-secret config store for app in env: the current config rendered into
+	// that environment's workload at apply time (ADR-0028). env is the canonical name of the
+	// environment ("prod" for the default one, ADR-0067 §2), already resolved and validated by the
+	// caller, positioned after the app as every other environment-carrying method here positions it.
 	//
-	// It takes NO environment, and the absence is the store's semantics rather than an oversight:
-	// one app's config is the same set of values wherever that app is deployed, which is what
-	// `docs/CAPABILITIES.md` promises a user and what the `app_env` table's (app, key) primary key
-	// records. Deploy, rollback, a re-apply and a one-off command all render the workload from this
-	// one read, so narrowing it to an environment would not carry information — it would hand a
-	// running app a SUBSET of the config it has today, in every environment that never happened to
-	// be the one a value was written in.
-	AppEnv(ctx context.Context, app string) (map[string]string, error)
-	// SetAppEnv upserts one env key for app in the store. env is the canonical name of the
-	// environment the write was made in ("prod" for the default environment, ADR-0067 §2), already
-	// resolved and validated by the caller.
+	// CONFIG IS PER ENVIRONMENT, and this read is the whole of it: it returns the rows written in
+	// env and nothing else. There is no wildcard scope and no fall-back to a shared set, so an app's
+	// staging config and its production config are two independent sets of values that happen to
+	// share key names. Deploy, rollback, a re-apply and a one-off command each read the environment
+	// they are acting on, so a value set in staging never reaches production and a production value
+	// is never narrowed away by something staging did.
 	//
-	// The environment is carried for the IMPLEMENTATION's benefit, not the store's. What is written
-	// stays app-global — AppEnv reads it back everywhere, and Postgres therefore keys the row by
-	// (app, key) and does not record env at all. What the parameter buys is that an implementation
-	// of this seam can tell which environment a config write belongs to and act per-environment on
-	// it: announce it, hold it, mirror it, meter it, or refuse it. The engine has always known which
-	// environment it was (it re-applies exactly that environment's workload immediately afterwards)
-	// and, before this parameter existed, dropped the fact on the way through.
+	// An app with no config in env yields an empty map and no error. That is the ordinary answer for
+	// a NEWLY REGISTERED ENVIRONMENT, which starts with no config: an app deployed into one runs on
+	// its image's own defaults until config is set there, and an implementation must return empty
+	// rather than borrow another environment's values to fill the gap.
+	AppEnv(ctx context.Context, app, env string) (map[string]string, error)
+	// SetAppEnv upserts one config key for app IN env. env is the canonical name of the environment
+	// the write was made in ("prod" for the default environment, ADR-0067 §2), already resolved and
+	// validated by the caller.
+	//
+	// The environment is part of what identifies the row, not metadata beside it: the value lands in
+	// env alone, and the same key in another environment keeps the value it has. An implementation
+	// that stored the write app-globally would be a store where setting a value in staging silently
+	// changed production, which is the behaviour this key exists to remove — and it can still act on
+	// the environment for its own reasons (announce it, hold it, mirror it, meter it, refuse it).
 	SetAppEnv(ctx context.Context, app, env, key, value string) error
-	// UnsetAppEnv removes one env key for app from the store. Removing a key that is not set
-	// is a no-op, not an error. env carries the environment the removal was made in, for
-	// SetAppEnv's reason and with the same app-global effect: the key leaves every environment,
-	// because there was only ever one copy of it.
+	// UnsetAppEnv removes one config key for app IN env, leaving the same key in every other
+	// environment where it was. Removing a key that is not set in env is a no-op, not an error, so
+	// a removal aimed at an environment that never held the key changes nothing anywhere.
 	UnsetAppEnv(ctx context.Context, app, env, key string) error
 
 	// AppHook returns the command app runs at phase in env — the lifecycle hook configured beside the

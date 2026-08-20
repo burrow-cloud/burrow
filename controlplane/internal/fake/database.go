@@ -24,11 +24,11 @@ type Database struct {
 	order     map[string][]string // app -> release IDs, save order, deduplicated
 	providers map[string]controlplane.Provider
 	addons    map[string]controlplane.AddonInfo
-	appEnv    map[string]map[string]string // app -> key -> value
-	// Every config write in the order it was made, WITH the environment it was made in. Storage
-	// above stays app-global, exactly as Postgres is, so the fake is never the looser of the two;
-	// this is a separate log of what the seam was told, which is the only place the environment a
-	// write belongs to survives in an implementation that does not act on it.
+	appEnv    map[string]map[string]string // "app\x00env" -> key -> value
+	// Every config write in the order it was made, WITH the environment it was made in. The storage
+	// above is keyed by environment exactly as Postgres is, so the fake is never the looser of the
+	// two; this log adds the ORDER and the DIRECTION of the writes, which reading the store back
+	// cannot show — a set followed by an unset leaves the same state as no write at all.
 	appEnvWrites []AppEnvWrite
 	hooks        map[string]controlplane.Hook                       // (app, env, phase) -> configured lifecycle hook
 	autoDeploy   map[string]map[string]controlplane.AutoDeployLevel // app -> env -> level
@@ -381,25 +381,35 @@ func (d *Database) DeleteReleases(ctx context.Context, app string) error {
 	return nil
 }
 
-// AppEnv returns a copy of the non-secret env store for app. An app with no env yields an
-// empty map and no error.
-func (d *Database) AppEnv(ctx context.Context, app string) (map[string]string, error) {
+// appEnvKey keys the config store by (app, environment) — the first two columns of the real
+// store's primary key — so the fake cannot be more permissive than Postgres about which
+// environment a value belongs to.
+func appEnvKey(app, env string) string {
+	return app + "\x00" + env
+}
+
+// AppEnv returns a copy of the non-secret config store for app in env. It returns that
+// environment's values only: a key set in another environment is absent here, exactly as the real
+// store's (app, environment, key) primary key makes it absent. An app with no config in env — the
+// state of every app in a newly registered environment — yields an empty map and no error.
+func (d *Database) AppEnv(ctx context.Context, app, env string) (map[string]string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[OpAppEnv]; err != nil {
 		return nil, err
 	}
-	out := make(map[string]string, len(d.appEnv[app]))
-	for k, v := range d.appEnv[app] {
+	stored := d.appEnv[appEnvKey(app, env)]
+	out := make(map[string]string, len(stored))
+	for k, v := range stored {
 		out[k] = v
 	}
 	return out, nil
 }
 
 // AppEnvWrite is one config write the fake was asked to perform, and the environment it was made
-// in. It exists so a test can assert the environment REACHED the seam: the value itself is
-// app-global once written, so nothing about the stored config could ever show which environment
-// put it there.
+// in. The stored config is keyed by environment too, so a test can assert the outcome by reading it
+// back; this log is the ORDER and the DIRECTION of the writes, which the store alone cannot show —
+// a set followed by an unset leaves the same state as no write at all.
 type AppEnvWrite struct {
 	App string
 	Env string
@@ -418,32 +428,34 @@ func (d *Database) AppEnvWrites() []AppEnvWrite {
 	return out
 }
 
-// SetAppEnv upserts one env key for app. env is recorded in the write log and NOT in the stored
-// config: the value is app-global once written, which is the real store's behaviour and therefore
-// has to be the fake's.
+// SetAppEnv upserts one config key for app in env. The value lands under (app, env) and nowhere
+// else, so setting a key in one environment leaves the same key in another environment untouched —
+// the real store's upsert conflicts on all three columns, and a fake that overwrote across
+// environments would let a test pass that Postgres would fail.
 func (d *Database) SetAppEnv(ctx context.Context, app, env, key, value string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[OpSetAppEnv]; err != nil {
 		return err
 	}
-	if d.appEnv[app] == nil {
-		d.appEnv[app] = make(map[string]string)
+	k := appEnvKey(app, env)
+	if d.appEnv[k] == nil {
+		d.appEnv[k] = make(map[string]string)
 	}
-	d.appEnv[app][key] = value
+	d.appEnv[k][key] = value
 	d.appEnvWrites = append(d.appEnvWrites, AppEnvWrite{App: app, Env: env, Key: key})
 	return nil
 }
 
-// UnsetAppEnv removes one env key for app. Removing a key that is not set is a no-op. env is
-// recorded for SetAppEnv's reason, and the removal is app-global for the same one.
+// UnsetAppEnv removes one config key for app in env, leaving the same key in other environments
+// alone. Removing a key that is not set in env is a no-op.
 func (d *Database) UnsetAppEnv(ctx context.Context, app, env, key string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := d.errs[OpUnsetAppEnv]; err != nil {
 		return err
 	}
-	delete(d.appEnv[app], key)
+	delete(d.appEnv[appEnvKey(app, env)], key)
 	d.appEnvWrites = append(d.appEnvWrites, AppEnvWrite{App: app, Env: env, Key: key, Unset: true})
 	return nil
 }

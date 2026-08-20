@@ -75,8 +75,14 @@ type Adapter struct {
 	// (ADR-0048) — after it is constructed and before the object is sent to the API server. It
 	// carries cluster requirements the engine cannot know about — a toleration for a tainted node
 	// pool, a mandated runtimeClassName, a priority or topology policy. nil (the default) leaves the
-	// constructed object exactly as it is. Wired via WithPodMutator.
-	podMutator func(*corev1.PodSpec)
+	// constructed object exactly as it is.
+	//
+	// It takes a PodIdentity because the pod specs it reaches belong to DIFFERENT apps, and a hook
+	// that cannot tell them apart can only carry policy that is uniform across every app on the
+	// cluster. There is ONE field rather than one per spelling: WithAppPodMutator stores a hook
+	// directly, and WithPodMutator stores one that discards the identity, so a wiring author still
+	// gets last-wire-wins and every call site still applies exactly one hook.
+	podMutator func(PodIdentity, *corev1.PodSpec)
 	// platformPodMutator is the ADR-0073 §2 extension point for the other half of the split: an
 	// OPTIONAL hook applied to every pod spec this adapter authors that runs BURROW's own image
 	// rather than the app's — the add-on instances, the log and metrics collectors, and the backup
@@ -178,9 +184,125 @@ func (a *Adapter) WithAddonNamespace(ns string) *Adapter {
 // It is compiled into the binary by whoever operates that binary, not supplied at runtime.
 //
 // Returns the adapter for chaining.
+//
+// Deprecated: an app's pod is authored for a named app in a named namespace, and this spelling
+// cannot say which — so a mutator wired through it must apply the same policy to every app on the
+// cluster. Use WithAppPodMutator, whose hook is handed a PodIdentity alongside the same pod spec.
+// This method is kept, unchanged and working, because it is a public seam an embedder may already
+// have compiled against; it wires the same single hook, so the two spellings do not stack and the
+// last one wired is the one that runs.
 func (a *Adapter) WithPodMutator(fn func(*corev1.PodSpec)) *Adapter {
+	if fn == nil {
+		a.podMutator = nil
+		return a
+	}
+	return a.WithAppPodMutator(func(_ PodIdentity, pod *corev1.PodSpec) { fn(pod) })
+}
+
+// PodIdentity names WHOSE pod an app-path mutator has been handed, so a hook can decide per app
+// rather than per cluster. It accompanies every call to the hook wired by WithAppPodMutator, and it
+// describes the object about to be written: the app it belongs to, the namespace it is being written
+// into, and which of the app-image pods it is.
+//
+// # Why the identity is these three fields and not a spec
+//
+// The two app-image paths do not share a request type — a Deployment is built from a
+// controlplane.WorkloadSpec and a one-off run from a controlplane.RunSpec — so there is no existing
+// value that could be handed over on both. Synthesising one for the path that lacks it is the move
+// ADR-0077 §2 rejects at the controller seam: it invents a value that never exists, and a field read
+// off it means something different from what its name says. These three fields are ones BOTH paths
+// genuinely have, in scope where the hook is applied, with no new plumbing behind them.
+//
+// It also deliberately carries no configuration, no environment variables and no secret key names.
+// The hook is trusted but unvalidated (ADR-0061), and widening what it is shown is not free.
+//
+// # It says namespace, not environment
+//
+// Namespace is what this adapter has: an environment-scoped view is a copy with a different
+// namespace (WithNamespace, ADR-0035 phase 2), and neither WorkloadSpec nor RunSpec carries an
+// environment name. It is also the more honest answer, because the namespace is what the pod is
+// actually written into. An embedder that keys its own policy on something else — an environment, a
+// tenant — maps the namespace onto it on their side; the seam does not learn how anyone stores
+// their policy, which is what keeps it a Kubernetes fact rather than one deployment's schema.
+type PodIdentity struct {
+	// App is the app the pod runs, as the engine names it: WorkloadSpec.App on the deploy path and
+	// RunSpec.App on the run path. It is never empty on either.
+	App string
+	// Namespace is the namespace the object is being written into — this adapter view's app
+	// namespace, so an environment-scoped view reports that environment's namespace rather than the
+	// default one.
+	Namespace string
+	// Workload says WHICH app-image pod this is, because the two are not interchangeable to a hook:
+	// a run pod arrives with RestartPolicy Never already set and is gone when its command exits,
+	// while the Deployment's pod template is rewritten on every rollout.
+	Workload PodWorkload
+}
+
+// PodWorkload names the app-image pod an app-path mutator is being applied to. It is separate from
+// controlplane.WorkloadKind, which names the Kubernetes resource the app's long-running workload
+// maps to (Deployment, later StatefulSet): a one-off run is not one of those, and folding it in
+// would put a value in that type which no deploy can ever request.
+type PodWorkload string
+
+const (
+	// PodWorkloadDeployment is the app's long-running Deployment pod template (ADR-0061 §1),
+	// re-authored on every write of the Deployment.
+	PodWorkloadDeployment PodWorkload = "deployment"
+	// PodWorkloadRun is the one-off command Job pod of ADR-0048 — the app's own image, in the app's
+	// namespace, with the app's environment, for one command.
+	PodWorkloadRun PodWorkload = "run"
+)
+
+// WithAppPodMutator registers a hook the adapter applies to the pod specs it authors for an app,
+// after each is constructed and before the object is sent to the API server. It is WithPodMutator's
+// reach and timing exactly (ADR-0061), with the app's identity handed over alongside the pod spec.
+//
+// Everything WithPodMutator's documentation states still holds and is not repeated here: which pods
+// are covered and which take the platform or build hooks instead, that the hook runs on EVERY write
+// and must therefore be idempotent, that it must tolerate a Job pod as well as a Deployment's, and
+// that it is trusted, in-process and unvalidated. A nil mutator leaves every object this adapter
+// constructs exactly as it is today.
+//
+// # What the identity is for
+//
+// The hook reaches pods belonging to different apps, and until it is told which, the only policy it
+// can express is one that is true of every app on the cluster. A toleration for a tainted pool
+// usually is. A runtime class is not: an operator running one app's image under a sandboxed runtime
+// and another's under the default has no way to say so through an identity-free hook, and the ways
+// around it are the ones ADR-0073 §2 already rejected for the platform split — key off a container
+// image or a label and reconstruct a classification the engine had in hand, where a wrong branch
+// applies the wrong policy to the wrong workload.
+//
+// The identity is a fact about the object being written, and it is the SAME fact on both app-image
+// paths: `burrow app run` names the same app as the deploy it runs beside, so a per-app policy
+// reaches the run pod without the wiring author restating it.
+//
+// # It does not replace WithPodMutator, it subsumes it
+//
+// Both spellings wire the same single hook. Wiring one after the other REPLACES rather than layers,
+// which is what wiring the same hook twice has always done, and every call site applies exactly one
+// mutator. WithPodMutator is retained and unchanged for embedders already compiled against it.
+//
+// WithPlatformPodMutator is deliberately untouched. Its pods run Burrow's own images — add-on
+// instances, collectors, the backup and restore Jobs — and none of them belongs to an app, so the
+// identity that makes this hook useful has nothing to say there. ADR-0077 §2 states that its
+// signature and reach stay as they are.
+//
+// Returns the adapter for chaining.
+func (a *Adapter) WithAppPodMutator(fn func(PodIdentity, *corev1.PodSpec)) *Adapter {
 	a.podMutator = fn
 	return a
+}
+
+// applyAppPodMutator runs the app-path hook over a fully-constructed pod spec, if one is wired,
+// naming the app the pod belongs to. Every site that authors a pod running the APP's own image calls
+// this as its last step before the object is written, exactly as applyPlatformPodMutator is the last
+// step for Burrow's own images. A nil mutator is a no-op, which is what makes ADR-0061 §3's
+// byte-for-byte guarantee hold at both call sites at once.
+func (a *Adapter) applyAppPodMutator(id PodIdentity, pod *corev1.PodSpec) {
+	if a.podMutator != nil {
+		a.podMutator(id, pod)
+	}
 }
 
 // WithPlatformPodMutator registers a hook the adapter applies to the pod specs it authors that run
@@ -1298,9 +1420,12 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 	// buildDeployment go through here — the create and the update in ApplyWorkload — the mutation is
 	// re-applied on every rollout instead of being dropped by the first one (ADR-0061 §2). No mutator
 	// leaves the Deployment exactly as built above (ADR-0061 §3).
-	if a.podMutator != nil {
-		a.podMutator(&dep.Spec.Template.Spec)
-	}
+	//
+	// The identity is the app this Deployment is for and the namespace it is being written into —
+	// a.namespace, so an environment-scoped view (WithNamespace) reports that environment's
+	// namespace rather than the default one, and a per-app policy follows the app into it.
+	a.applyAppPodMutator(PodIdentity{App: spec.App, Namespace: a.namespace, Workload: PodWorkloadDeployment},
+		&dep.Spec.Template.Spec)
 	return dep
 }
 

@@ -95,8 +95,9 @@ import (
 type placementHook string
 
 const (
-	// hookApp is Adapter.WithPodMutator: pods running the APP's own image (ADR-0061, ADR-0073 §2).
-	hookApp placementHook = "WithPodMutator"
+	// hookApp is Adapter.WithAppPodMutator: pods running the APP's own image (ADR-0061, ADR-0073 §2).
+	// Adapter.WithPodMutator is the same hook under its earlier, identity-free spelling.
+	hookApp placementHook = "WithAppPodMutator"
 	// hookPlatform is Adapter.WithPlatformPodMutator: pods running BURROW's own images on Burrow's
 	// behalf (ADR-0073 §2).
 	hookPlatform placementHook = "WithPlatformPodMutator"
@@ -223,7 +224,9 @@ Why this test exists:
 What to do — pick by WHOSE IMAGE runs in the pod (ADR-0073 §2):
 
   - The APP's own image (the Deployment's pod template, a one-off run Job): apply the app hook,
-    Adapter.WithPodMutator, via "if a.podMutator != nil { a.podMutator(&spec) }".
+    Adapter.WithAppPodMutator, via "a.applyAppPodMutator(PodIdentity{...}, &spec)". The identity
+    names the app the pod belongs to and the namespace it is being written into, both of which the
+    builder already has; a hook that is not told them can only carry policy true of every app.
   - BURROW's own image, on Burrow's behalf (an add-on instance, a collector, a backup or restore
     Job): apply the platform hook, Adapter.WithPlatformPodMutator, via
     "a.applyPlatformPodMutator(&spec)".
@@ -280,10 +283,15 @@ func hooksThatReached(pod corev1.PodSpec) []placementHook {
 // markedAdapter is an Adapter with BOTH of its hooks wired, each to its own marker. Wiring both at
 // once is what makes the assertion specific: the test can tell "the platform hook reached this pod"
 // from "a hook reached this pod", and misclassification fails rather than passing.
+//
+// The app hook is wired through WithAppPodMutator, the spelling a new path should use. What it is
+// told about the pod is not asserted here — this guard is about WHICH hook reaches WHICH pod, and
+// the identity itself is pinned in app_pod_identity_test.go.
 func markedAdapter(client kubernetes.Interface) *Adapter {
+	markApp := markPod(hookApp)
 	return New(client, guardAppNamespace).
 		WithAddonNamespace(addonNS).
-		WithPodMutator(markPod(hookApp)).
+		WithAppPodMutator(func(_ PodIdentity, pod *corev1.PodSpec) { markApp(pod) }).
 		WithPlatformPodMutator(markPod(hookPlatform))
 }
 
@@ -651,10 +659,12 @@ func podSpecLiteralLine(fset *token.FileSet, fn *ast.FuncDecl, alias string) (in
 	return line, found
 }
 
-// hooksAppliedIn reports which placement hooks fn applies, deduplicated. The platform hook has its
-// own helper, so it is recognized by name. The app and build hooks are both a call of a field
-// called podMutator, on two different types, so they are told apart by the receiver — which is also
-// the honest reading: Adapter's podMutator IS the app hook and BuildAdapter's IS the build hook.
+// hooksAppliedIn reports which placement hooks fn applies, deduplicated. The app and platform hooks
+// each have their own helper on Adapter, so they are recognized by name. The build hook is a call of
+// a field called podMutator on BuildAdapter, and the same field name on Adapter is still recognized
+// as the app hook, so a call site that applies the hook inline rather than through the helper is not
+// invisible to the scan — the receiver tells the two apart, which is also the honest reading:
+// Adapter's podMutator IS the app hook and BuildAdapter's IS the build hook.
 func hooksAppliedIn(fn *ast.FuncDecl) []placementHook {
 	recv := receiverTypeName(fn)
 	seen := map[placementHook]bool{}
@@ -668,6 +678,8 @@ func hooksAppliedIn(fn *ast.FuncDecl) []placementHook {
 			return true
 		}
 		switch sel.Sel.Name {
+		case "applyAppPodMutator":
+			seen[hookApp] = true
 		case "applyPlatformPodMutator":
 			seen[hookPlatform] = true
 		case "podMutator":

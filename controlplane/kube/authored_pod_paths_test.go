@@ -291,7 +291,7 @@ func markedAdapter(client kubernetes.Interface) *Adapter {
 	markApp := markPod(hookApp)
 	return New(client, guardAppNamespace).
 		WithAddonNamespace(addonNS).
-		WithAppPodMutator(func(_ PodIdentity, pod *corev1.PodSpec) { markApp(pod) }).
+		WithAppPodMutator(func(_ PodIdentity, pod *corev1.PodSpec) error { markApp(pod); return nil }).
 		WithPlatformPodMutator(markPod(hookPlatform))
 }
 

@@ -21,7 +21,10 @@ import (
 func probeJob(t *testing.T, spec controlplane.RunSpec) *corev1.PodSpec {
 	t.Helper()
 	a := New(fake.NewSimpleClientset(), "burrow-apps")
-	job := a.runJob("burrow-run-check-1", spec)
+	job, err := a.runJob("burrow-run-check-1", spec)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
 	return &job.Spec.Template.Spec
 }
 
@@ -196,7 +199,10 @@ func TestProbePodTakesPlacementPolicy(t *testing.T) {
 	a := New(fake.NewSimpleClientset(), "burrow-apps").WithPodMutator(func(p *corev1.PodSpec) {
 		p.NodeSelector = map[string]string{"pool": "tenant"}
 	})
-	job := a.runJob("burrow-run-check-1", checkSpec())
+	job, err := a.runJob("burrow-run-check-1", checkSpec())
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
 	pod := job.Spec.Template.Spec
 	if pod.NodeSelector["pool"] != "tenant" {
 		t.Errorf("nodeSelector = %v, want the mutator's; a check pod that cannot schedule reports as a check that did not run", pod.NodeSelector)
@@ -211,7 +217,10 @@ func TestProbePodTakesPlacementPolicy(t *testing.T) {
 func TestProbeJobIsCreatedInTheAppsNamespace(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	a := New(cs, "burrow-apps")
-	job := a.runJob("burrow-run-check-1", checkSpec())
+	job, err := a.runJob("burrow-run-check-1", checkSpec())
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
 	if _, err := cs.BatchV1().Jobs("burrow-apps").Create(context.Background(), job, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create: %v", err)
 	}

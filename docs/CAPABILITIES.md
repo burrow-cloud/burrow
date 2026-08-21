@@ -180,7 +180,7 @@ which nothing can create, read back and delete a file under — so a volume depe
 to be invented rather than derived.
 
 The one escape hatch is `Adapter.WithAppPodMutator` ([ADR-0061](adr/0061-deploy-pod-mutator-seam.md)),
-a `func(kube.PodIdentity, *corev1.PodSpec)` applied on both create and update. It is a
+a `func(kube.PodIdentity, *corev1.PodSpec) error` applied on both create and update. It is a
 **compile-time seam for an embedder**: nothing in this repository wires one, and it is not reachable
 from the CLI or the API. A nil mutator leaves the Deployment byte-for-byte unchanged, which is
 pinned by a test.
@@ -193,7 +193,11 @@ and another's under the default has nothing to key on. The namespace is the one 
 view actually writes into, so a per-app policy follows the app into a named environment.
 `Adapter.WithPodMutator`, the earlier identity-free `func(*corev1.PodSpec)` spelling, is retained and
 still works for an embedder already compiled against it; both spellings wire the same single hook, so
-the last one wired is the one that runs.
+the last one wired is the one that runs. Only the identity-carrying spelling can **refuse**: a hook
+that returns an error stops the write, so nothing reaches the API server and `ApplyWorkload` or
+`RunJob` fails carrying the hook's own message. A hook reading per-app policy can fail to read it,
+and the alternatives to saying so are to guess at a policy nobody chose or to poison the object until
+the API server rejects it for an unrelated-looking reason.
 
 It also covers the **one-off command Job** of `burrow app run`
 ([ADR-0048](adr/0048-one-off-command-runner.md)), which runs the app's own image in the app's

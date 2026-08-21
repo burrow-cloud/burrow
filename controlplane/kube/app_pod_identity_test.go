@@ -5,10 +5,14 @@ package kube
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -17,16 +21,23 @@ import (
 	"github.com/burrow-cloud/burrow/controlplane"
 )
 
-// The widened app hook keeps ITS exact signature too, for the same reason placement_test.go pins the
-// other two: a convenience change that quietly reshapes a public seam is a source break for an
-// embedder who finds out at compile time in their own repository rather than in this one.
-var _ func(*Adapter, func(PodIdentity, *corev1.PodSpec)) *Adapter = (*Adapter).WithAppPodMutator
+// The app hook's signature is pinned for the same reason placement_test.go pins the other two: a
+// convenience change that quietly reshapes a public seam is a source break for an embedder who finds
+// out at compile time in their own repository rather than in this one.
+//
+// THIS LINE WAS EDITED DELIBERATELY when the hook grew its error return, and that is worth saying
+// out loud, because a pin edited quietly is a pin defeated. The two lines in placement_test.go were
+// NOT edited: WithPodMutator and WithPlatformPodMutator keep their exact types, so an install wired
+// through either needs no change. What moved is the spelling released in v0.14.0-rc.53 and adopted
+// by nobody — see the record for why that is a break worth taking rather than a fourth name for one
+// mechanism.
+var _ func(*Adapter, func(PodIdentity, *corev1.PodSpec) error) *Adapter = (*Adapter).WithAppPodMutator
 
 // recordIdentities returns a mutator that appends every identity it is handed, and the slice it
 // appends to. The pod spec is left alone: these tests are about what the hook is TOLD, not what it
 // does with it.
-func recordIdentities(seen *[]PodIdentity) func(PodIdentity, *corev1.PodSpec) {
-	return func(id PodIdentity, _ *corev1.PodSpec) { *seen = append(*seen, id) }
+func recordIdentities(seen *[]PodIdentity) func(PodIdentity, *corev1.PodSpec) error {
+	return func(id PodIdentity, _ *corev1.PodSpec) error { *seen = append(*seen, id); return nil }
 }
 
 // applyWorkloadFor drives ApplyWorkload against a fake clientset for one app, so the identity under
@@ -44,7 +55,7 @@ func applyWorkloadFor(t *testing.T, a controlplane.Kubernetes, app string) {
 // wired, and returns the Job the adapter sent to the API server. The Job reads back terminal on the
 // first get so RunJob returns immediately; no pod is seeded, so nothing is captured — this is about
 // the authored object and the identity that accompanied it.
-func runJobWithIdentityHook(t *testing.T, ns, app string, fn func(PodIdentity, *corev1.PodSpec)) *batchv1.Job {
+func runJobWithIdentityHook(t *testing.T, ns, app string, fn func(PodIdentity, *corev1.PodSpec) error) *batchv1.Job {
 	t.Helper()
 	client := fake.NewSimpleClientset()
 
@@ -95,9 +106,10 @@ func TestAppPodMutatorIsToldWhichAppTheDeploymentIsFor(t *testing.T) {
 // arrives with RestartPolicy Never already set.
 func TestAppPodMutatorIsToldTheSameAppForARun(t *testing.T) {
 	var seen []PodIdentity
-	job := runJobWithIdentityHook(t, "apps", "shop", func(id PodIdentity, pod *corev1.PodSpec) {
+	job := runJobWithIdentityHook(t, "apps", "shop", func(id PodIdentity, pod *corev1.PodSpec) error {
 		seen = append(seen, id)
 		pod.RuntimeClassName = ptrTo("kata")
+		return nil
 	})
 
 	want := PodIdentity{App: "shop", Namespace: "apps", Workload: PodWorkloadRun}
@@ -137,10 +149,11 @@ func TestAppPodIdentityReportsTheEnvironmentNamespace(t *testing.T) {
 func TestAppPodMutatorCarriesPerAppPolicy(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
-	a := New(client, "apps").WithAppPodMutator(func(id PodIdentity, pod *corev1.PodSpec) {
+	a := New(client, "apps").WithAppPodMutator(func(id PodIdentity, pod *corev1.PodSpec) error {
 		if id.App == "untrusted" {
 			pod.RuntimeClassName = ptrTo("kata")
 		}
+		return nil
 	})
 	applyWorkloadFor(t, a, "untrusted")
 	applyWorkloadFor(t, a, "trusted")
@@ -177,7 +190,7 @@ func TestWithPodMutatorStillWiresTheSameSingleHook(t *testing.T) {
 
 	var identityCalls, plainCalls int
 	a := New(client, "apps").
-		WithAppPodMutator(func(PodIdentity, *corev1.PodSpec) { identityCalls++ }).
+		WithAppPodMutator(func(PodIdentity, *corev1.PodSpec) error { identityCalls++; return nil }).
 		WithPodMutator(func(pod *corev1.PodSpec) {
 			plainCalls++
 			pod.NodeSelector = map[string]string{"pool": "tenant"}
@@ -206,10 +219,207 @@ func TestWithPodMutatorStillWiresTheSameSingleHook(t *testing.T) {
 func TestWithPodMutatorNilLeavesNoHookWired(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	a := New(client, "apps").
-		WithAppPodMutator(func(PodIdentity, *corev1.PodSpec) { t.Error("the replaced hook must not run") }).
+		WithAppPodMutator(func(PodIdentity, *corev1.PodSpec) error { t.Error("the replaced hook must not run"); return nil }).
 		WithPodMutator(nil)
 	if a.podMutator != nil {
 		t.Fatal("WithPodMutator(nil) left a hook wired")
 	}
 	applyWorkloadFor(t, a, "shop") // would panic if nil were wrapped rather than cleared
+}
+
+// errRefused is what a hook that cannot decide returns. The tests below require the caller to be
+// able to recover it with errors.Is, because an embedder's own error is the whole reason this
+// return value exists: a refusal reported as an opaque string would leave them unable to tell their
+// own failure from one of Burrow's.
+var errRefused = errors.New("the app's runtime could not be read")
+
+// refuse is a hook that shapes nothing and refuses everything. It also records whether it was asked,
+// so a test can tell "the hook refused" from "the hook was never called".
+func refuse(calls *int) func(PodIdentity, *corev1.PodSpec) error {
+	return func(PodIdentity, *corev1.PodSpec) error {
+		*calls++
+		return errRefused
+	}
+}
+
+// refusalClient is a fake cluster that REFUSES to create a run Job, so a test asserting "this run
+// never started" fails fast rather than hanging. Without it a regression that let a refused run reach
+// the API server would leave RunJob waiting out its ten-minute deadline, and a guard whose failure
+// mode is a ten-minute hang is one somebody will delete rather than fix.
+func refusalClient(t *testing.T) *fake.Clientset {
+	t.Helper()
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("create", "jobs", func(clienttesting.Action) (bool, runtime.Object, error) {
+		t.Error("a run Job was created despite the mutator refusing")
+		return true, nil, errors.New("this Job must never have been created")
+	})
+	return client
+}
+
+// TestARefusingAppPodMutatorFailsTheDeployAndWritesNothing is the reason the hook returns an error.
+//
+// A hook carrying per-app policy reads that policy from somewhere, and the read can fail. The
+// outcomes available without an error return are to guess — running the pod under a policy nobody
+// chose — or to poison the spec so the API server rejects it, which reports the refusal as whatever
+// validation error the poison happens to trigger. This asserts the third outcome: the deploy fails,
+// the hook's own error is recoverable from the one the caller gets, and NO Deployment exists.
+func TestARefusingAppPodMutatorFailsTheDeployAndWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	calls := 0
+	a := New(client, "apps").WithAppPodMutator(refuse(&calls))
+
+	err := a.ApplyWorkload(ctx, controlplane.WorkloadSpec{App: "shop", Image: "shop:v1", Replicas: 1})
+	if err == nil {
+		t.Fatal("ApplyWorkload succeeded with a refusing mutator; a pod nobody could shape must not be written")
+	}
+	if !errors.Is(err, errRefused) {
+		t.Errorf("ApplyWorkload error = %v, want the hook's own error to survive: an embedder cannot act on a refusal it cannot recognise", err)
+	}
+	if calls != 1 {
+		t.Errorf("the hook was called %d times, want exactly 1: a refusal is not a conflict and must not be retried", calls)
+	}
+	if _, err := client.AppsV1().Deployments("apps").Get(ctx, "shop", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("a Deployment exists after a refused mutator (get returned %v); the object must never reach the API server", err)
+	}
+}
+
+// TestARefusingAppPodMutatorFailsAnUpdateWithoutTouchingTheLiveObject is the redeploy half. It
+// matters more than the create: the app is already serving, and a refusal that half-applied would
+// replace a working pod template with one shaped by a policy that could not be read.
+func TestARefusingAppPodMutatorFailsAnUpdateWithoutTouchingTheLiveObject(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	spec := controlplane.WorkloadSpec{App: "shop", Image: "shop:v1", Replicas: 1}
+
+	shaped := New(client, "apps").WithAppPodMutator(func(_ PodIdentity, pod *corev1.PodSpec) error {
+		pod.RuntimeClassName = ptrTo("runsc")
+		return nil
+	})
+	if err := shaped.ApplyWorkload(ctx, spec); err != nil {
+		t.Fatalf("ApplyWorkload (create): %v", err)
+	}
+
+	calls := 0
+	spec.Image = "shop:v2"
+	if err := New(client, "apps").WithAppPodMutator(refuse(&calls)).ApplyWorkload(ctx, spec); err == nil {
+		t.Fatal("the redeploy succeeded with a refusing mutator")
+	}
+	if calls != 1 {
+		t.Errorf("the hook was called %d times on the update path, want exactly 1", calls)
+	}
+
+	dep, err := client.AppsV1().Deployments("apps").Get(ctx, "shop", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := dep.Spec.Template.Spec.Containers[0].Image; got != "shop:v1" {
+		t.Errorf("the live Deployment moved to %q; a refused redeploy must leave the serving object exactly as it was", got)
+	}
+	if got := dep.Spec.Template.Spec.RuntimeClassName; got == nil || *got != "runsc" {
+		t.Errorf("the live pod template's RuntimeClassName = %v, want it untouched at \"runsc\"", got)
+	}
+}
+
+// TestARefusingAppPodMutatorFailsARunAndCreatesNoJob is the other app-image path. The refusal has to
+// arrive here as an error rather than as a Job nobody can schedule: RunJob is synchronous with a
+// ten-minute bound, so a Job created anyway would report as a timeout ten minutes later instead of
+// as the reason it never started.
+func TestARefusingAppPodMutatorFailsARunAndCreatesNoJob(t *testing.T) {
+	ctx := context.Background()
+	client := refusalClient(t)
+	calls := 0
+
+	_, err := New(client, "apps").WithAppPodMutator(refuse(&calls)).RunJob(ctx, controlplane.RunSpec{
+		App: "shop", ID: "r1", Image: "shop:v1", Command: []string{"echo", "hi"},
+	})
+	if err == nil {
+		t.Fatal("RunJob succeeded with a refusing mutator")
+	}
+	if !errors.Is(err, errRefused) {
+		t.Errorf("RunJob error = %v, want the hook's own error to survive", err)
+	}
+	if calls != 1 {
+		t.Errorf("the hook was called %d times, want exactly 1", calls)
+	}
+}
+
+// TestTheRefusalNamesTheAppAndWhichPodItWas pins what the adapter adds to the hook's own message. A
+// hook writes its error without knowing which of an app's two pods it was applied to, and "the
+// runtime could not be read" means something different on a redeploy than on a one-off command.
+func TestTheRefusalNamesTheAppAndWhichPodItWas(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		run  func(a *Adapter) error
+		want string
+	}{
+		{"deploy", func(a *Adapter) error {
+			return a.ApplyWorkload(ctx, controlplane.WorkloadSpec{App: "shop", Image: "shop:v1", Replicas: 1})
+		}, string(PodWorkloadDeployment)},
+		{"run", func(a *Adapter) error {
+			_, err := a.RunJob(ctx, controlplane.RunSpec{App: "shop", ID: "r1", Image: "shop:v1", Command: []string{"echo"}})
+			return err
+		}, string(PodWorkloadRun)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			err := tc.run(New(refusalClient(t), "apps").WithAppPodMutator(refuse(&calls)))
+			if err == nil {
+				t.Fatal("the operation succeeded with a refusing mutator")
+			}
+			for _, want := range []string{"shop", "apps", tc.want, errRefused.Error()} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestAMutatorThatReturnsNilAuthorsWhatItAlwaysDid keeps ADR-0061 §3 standing across the widening: a
+// hook that shapes the pod and reports no error produces the same object as before the error return
+// existed, and an adapter with no hook at all is untouched.
+func TestAMutatorThatReturnsNilAuthorsWhatItAlwaysDid(t *testing.T) {
+	ctx := context.Background()
+	spec := controlplane.WorkloadSpec{App: "shop", Image: "shop:v1", Replicas: 1}
+
+	bare := fake.NewSimpleClientset()
+	if err := New(bare, "apps").ApplyWorkload(ctx, spec); err != nil {
+		t.Fatalf("ApplyWorkload (no hook): %v", err)
+	}
+	unhooked, err := bare.AppsV1().Deployments("apps").Get(ctx, "shop", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if unhooked.Spec.Template.Spec.NodeSelector != nil {
+		t.Errorf("an adapter with no hook shaped the pod: %+v", unhooked.Spec.Template.Spec.NodeSelector)
+	}
+
+	hooked := fake.NewSimpleClientset()
+	shape := func(pod *corev1.PodSpec) { pod.NodeSelector = map[string]string{"pool": "tenant"} }
+	// The two spellings of the one hook must produce the SAME pod, which is what keeps ADR-0100 §3's
+	// "one mechanism, two names" true now that only one of them can refuse.
+	viaPlain := fake.NewSimpleClientset()
+	if err := New(hooked, "apps").WithAppPodMutator(func(_ PodIdentity, pod *corev1.PodSpec) error {
+		shape(pod)
+		return nil
+	}).ApplyWorkload(ctx, spec); err != nil {
+		t.Fatalf("ApplyWorkload (identity hook): %v", err)
+	}
+	if err := New(viaPlain, "apps").WithPodMutator(shape).ApplyWorkload(ctx, spec); err != nil {
+		t.Fatalf("ApplyWorkload (plain hook): %v", err)
+	}
+	a, err := hooked.AppsV1().Deployments("apps").Get(ctx, "shop", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	b, err := viaPlain.AppsV1().Deployments("apps").Get(ctx, "shop", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !apiequality.Semantic.DeepEqual(a.Spec.Template.Spec, b.Spec.Template.Spec) {
+		t.Errorf("the two spellings authored different pods:\nWithAppPodMutator: %+v\nWithPodMutator:    %+v",
+			a.Spec.Template.Spec, b.Spec.Template.Spec)
+	}
 }

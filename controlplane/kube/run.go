@@ -34,14 +34,18 @@ const (
 // image and its config env plus per-app Secret via envFrom (ADR-0048 §2), then waits for it to
 // finish and captures the pod's output and the container's exit code into a RunResult (ADR-0048 §3).
 // A non-zero exit is a normal structured outcome, NOT an error: the error return is reserved for a
-// launch, poll, or timeout failure. The finished Job is garbage-collected by Kubernetes' native
+// launch, poll, or timeout failure, and for an app pod mutator that refused to shape the Job's pod
+// (WithAppPodMutator), in which case no Job is created at all. The finished Job is garbage-collected by Kubernetes' native
 // ttlSecondsAfterFinished (ADR-0048 §7), set from spec.TTLSeconds — no imperative reap.
 func (a *Adapter) RunJob(ctx context.Context, spec controlplane.RunSpec) (controlplane.RunResult, error) {
 	if err := validateAppIdentifier(spec.App); err != nil {
 		return controlplane.RunResult{}, err
 	}
 	name := fmt.Sprintf("burrow-run-%s", spec.ID)
-	job := a.runJob(name, spec)
+	job, err := a.runJob(name, spec)
+	if err != nil {
+		return controlplane.RunResult{}, fmt.Errorf("kube: building run job %q: %w", name, err)
+	}
 	jobs := a.client.BatchV1().Jobs(a.namespace)
 	if _, err := jobs.Create(ctx, job, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return controlplane.RunResult{}, fmt.Errorf("kube: creating run job %q: %w", name, err)
@@ -133,7 +137,7 @@ func (a *Adapter) captureRun(ctx context.Context, jobName string) (controlplane.
 // The pod is then handed to the ADR-0061 mutator, exactly as the app Deployment's pod template is:
 // a run is the app's own image in the app's namespace with the app's environment, so it belongs
 // under the same placement and runtime policy the app itself was deployed under.
-func (a *Adapter) runJob(name string, spec controlplane.RunSpec) *batchv1.Job {
+func (a *Adapter) runJob(name string, spec controlplane.RunSpec) (*batchv1.Job, error) {
 	labels := map[string]string{nameLabel: name, managedByLabel: managedByValue}
 	var backoff int32
 	ttl := spec.TTLSeconds
@@ -189,7 +193,13 @@ func (a *Adapter) runJob(name string, spec controlplane.RunSpec) *batchv1.Job {
 	// The identity handed over names the SAME app the Deployment's does, which is the point: a
 	// per-app policy the deploy was given reaches the run pod without the wiring author restating it.
 	// Workload distinguishes the two, because a run pod is a Job pod and a hook may need to know.
-	a.applyAppPodMutator(PodIdentity{App: spec.App, Namespace: a.namespace, Workload: PodWorkloadRun},
-		&job.Spec.Template.Spec)
-	return job
+	// A hook that refuses stops the run here, with the Job built and never created. That is the same
+	// outcome the deploy path takes, and it matters more here than there: a run is synchronous with a
+	// ten-minute bound, so a refusal that produced a Job anyway would be reported to the caller as a
+	// timeout ten minutes later instead of as the reason it did not start.
+	if err := a.applyAppPodMutator(PodIdentity{App: spec.App, Namespace: a.namespace, Workload: PodWorkloadRun},
+		&job.Spec.Template.Spec); err != nil {
+		return nil, err
+	}
+	return job, nil
 }

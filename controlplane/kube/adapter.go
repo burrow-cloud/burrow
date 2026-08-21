@@ -80,9 +80,14 @@ type Adapter struct {
 	// It takes a PodIdentity because the pod specs it reaches belong to DIFFERENT apps, and a hook
 	// that cannot tell them apart can only carry policy that is uniform across every app on the
 	// cluster. There is ONE field rather than one per spelling: WithAppPodMutator stores a hook
-	// directly, and WithPodMutator stores one that discards the identity, so a wiring author still
-	// gets last-wire-wins and every call site still applies exactly one hook.
-	podMutator func(PodIdentity, *corev1.PodSpec)
+	// directly, and WithPodMutator stores one that discards the identity and reports no error, so a
+	// wiring author still gets last-wire-wins and every call site still applies exactly one hook.
+	//
+	// It RETURNS AN ERROR because a hook that reads per-app policy can fail to read it, and the only
+	// answers available to a hook that cannot report that are to guess or to corrupt the object it
+	// was handed. The error aborts the write: nothing reaches the API server and the caller's deploy
+	// fails carrying the hook's own message.
+	podMutator func(PodIdentity, *corev1.PodSpec) error
 	// platformPodMutator is the ADR-0073 §2 extension point for the other half of the split: an
 	// OPTIONAL hook applied to every pod spec this adapter authors that runs BURROW's own image
 	// rather than the app's — the add-on instances, the log and metrics collectors, and the backup
@@ -196,7 +201,7 @@ func (a *Adapter) WithPodMutator(fn func(*corev1.PodSpec)) *Adapter {
 		a.podMutator = nil
 		return a
 	}
-	return a.WithAppPodMutator(func(_ PodIdentity, pod *corev1.PodSpec) { fn(pod) })
+	return a.WithAppPodMutator(func(_ PodIdentity, pod *corev1.PodSpec) error { fn(pod); return nil })
 }
 
 // PodIdentity names WHOSE pod an app-path mutator has been handed, so a hook can decide per app
@@ -277,11 +282,33 @@ const (
 // paths: `burrow app run` names the same app as the deploy it runs beside, so a per-app policy
 // reaches the run pod without the wiring author restating it.
 //
+// # A hook may refuse, and a refusal stops the write
+//
+// The hook returns an error. Returning nil is the ordinary outcome and means "the pod is as I want
+// it"; returning an error means "I could not decide what this pod should be", and the object is NOT
+// written — ApplyWorkload and RunJob fail with the hook's own message, before anything reaches the
+// API server.
+//
+// A hook that carries a per-app policy has to read that policy from somewhere, and a read can fail.
+// Without an error to return, such a hook has exactly two ways out and both are worse than a failed
+// deploy. It can guess — apply some default and let the pod run under a policy nobody chose, which
+// is the outcome least likely to be noticed and hardest to explain afterwards. Or it can corrupt the
+// spec deliberately, writing a value it knows the API server will reject, which does stop the write
+// but reports the refusal as whatever validation error that value happens to trigger; an operator
+// reading it is told their runtime class is not a valid DNS subdomain, and has to already know that
+// this means a database was unreachable. An error return costs one branch at each call site and
+// replaces both.
+//
+// It does not weaken ADR-0061 §3. A nil mutator is still a no-op, and a mutator that returns nil
+// still authors byte-for-byte the object it authored before this seam existed; only a hook that
+// explicitly refuses changes what happens, and what happens is that nothing happens.
+//
 // # It does not replace WithPodMutator, it subsumes it
 //
 // Both spellings wire the same single hook. Wiring one after the other REPLACES rather than layers,
 // which is what wiring the same hook twice has always done, and every call site applies exactly one
-// mutator. WithPodMutator is retained and unchanged for embedders already compiled against it.
+// mutator. WithPodMutator is retained and unchanged for embedders already compiled against it: its
+// hook cannot fail, so the wrapper reports nil and the write proceeds exactly as it always has.
 //
 // WithPlatformPodMutator is deliberately untouched. Its pods run Burrow's own images — add-on
 // instances, collectors, the backup and restore Jobs — and none of them belongs to an app, so the
@@ -289,7 +316,7 @@ const (
 // signature and reach stay as they are.
 //
 // Returns the adapter for chaining.
-func (a *Adapter) WithAppPodMutator(fn func(PodIdentity, *corev1.PodSpec)) *Adapter {
+func (a *Adapter) WithAppPodMutator(fn func(PodIdentity, *corev1.PodSpec) error) *Adapter {
 	a.podMutator = fn
 	return a
 }
@@ -297,12 +324,24 @@ func (a *Adapter) WithAppPodMutator(fn func(PodIdentity, *corev1.PodSpec)) *Adap
 // applyAppPodMutator runs the app-path hook over a fully-constructed pod spec, if one is wired,
 // naming the app the pod belongs to. Every site that authors a pod running the APP's own image calls
 // this as its last step before the object is written, exactly as applyPlatformPodMutator is the last
-// step for Burrow's own images. A nil mutator is a no-op, which is what makes ADR-0061 §3's
-// byte-for-byte guarantee hold at both call sites at once.
-func (a *Adapter) applyAppPodMutator(id PodIdentity, pod *corev1.PodSpec) {
-	if a.podMutator != nil {
-		a.podMutator(id, pod)
+// step for Burrow's own images. A nil mutator is a no-op returning nil, which is what makes ADR-0061
+// §3's byte-for-byte guarantee hold at both call sites at once.
+//
+// A hook that returns an error ABORTS THE WRITE. Its callers build the object and then return, so
+// nothing is sent to the API server and the operation fails with the hook's own reason attached —
+// see WithAppPodMutator's "a hook may refuse" section for why that is the only honest outcome.
+//
+// The error names the app, the namespace and which pod it was, because a hook's own message is
+// written without knowing which of an app's two pods it was applied to, and "the runtime could not
+// be read" is a different event on a redeploy than on a one-off command.
+func (a *Adapter) applyAppPodMutator(id PodIdentity, pod *corev1.PodSpec) error {
+	if a.podMutator == nil {
+		return nil
 	}
+	if err := a.podMutator(id, pod); err != nil {
+		return fmt.Errorf("the pod mutator refused the %s pod of app %q in namespace %q: %w", id.Workload, id.App, id.Namespace, err)
+	}
+	return nil
 }
 
 // WithPlatformPodMutator registers a hook the adapter applies to the pod specs it authors that run
@@ -396,13 +435,24 @@ func (a *Adapter) ApplyWorkload(ctx context.Context, spec controlplane.WorkloadS
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		existing, err := deployments.Get(ctx, spec.App, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
-			_, err := deployments.Create(ctx, a.buildDeployment(spec), metav1.CreateOptions{})
+			// A mutator that refuses stops the write here, before anything is created. It is not a
+			// conflict, so RetryOnConflict returns it rather than re-running the closure: a hook that
+			// cannot answer will not answer differently three times in a row, and retrying would turn
+			// one legible refusal into a delay.
+			dep, err := a.buildDeployment(spec)
+			if err != nil {
+				return err
+			}
+			_, err = deployments.Create(ctx, dep, metav1.CreateOptions{})
 			return err
 		}
 		if err != nil {
 			return err
 		}
-		desired := a.buildDeployment(spec)
+		desired, err := a.buildDeployment(spec)
+		if err != nil {
+			return err
+		}
 		desired.ResourceVersion = existing.ResourceVersion
 		_, err = deployments.Update(ctx, desired, metav1.UpdateOptions{})
 		return err
@@ -1358,7 +1408,7 @@ func (a *Adapter) buildIngress(spec controlplane.ExposeSpec) *networkingv1.Ingre
 	}
 }
 
-func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deployment {
+func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) (*appsv1.Deployment, error) {
 	labels := map[string]string{nameLabel: spec.App, managedByLabel: managedByValue}
 	selector := map[string]string{nameLabel: spec.App}
 
@@ -1424,9 +1474,11 @@ func (a *Adapter) buildDeployment(spec controlplane.WorkloadSpec) *appsv1.Deploy
 	// The identity is the app this Deployment is for and the namespace it is being written into —
 	// a.namespace, so an environment-scoped view (WithNamespace) reports that environment's
 	// namespace rather than the default one, and a per-app policy follows the app into it.
-	a.applyAppPodMutator(PodIdentity{App: spec.App, Namespace: a.namespace, Workload: PodWorkloadDeployment},
-		&dep.Spec.Template.Spec)
-	return dep
+	if err := a.applyAppPodMutator(PodIdentity{App: spec.App, Namespace: a.namespace, Workload: PodWorkloadDeployment},
+		&dep.Spec.Template.Spec); err != nil {
+		return nil, err
+	}
+	return dep, nil
 }
 
 // appEnvironment assembles everything a container gets from the app's config and its per-app Secret:

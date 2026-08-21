@@ -18,9 +18,13 @@ import (
 // of its environment back into the one process most likely to hand it to a child.
 
 // jobPod builds the run Job's pod spec without a cluster.
-func jobPod(spec controlplane.RunSpec) *corev1.PodSpec {
+func jobPod(t *testing.T, spec controlplane.RunSpec) *corev1.PodSpec {
+	t.Helper()
 	a := New(fake.NewSimpleClientset(), "burrow-apps")
-	job := a.runJob("burrow-run-1", spec)
+	job, err := a.runJob("burrow-run-1", spec)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
 	return &job.Spec.Template.Spec
 }
 
@@ -37,7 +41,7 @@ func runSpec() controlplane.RunSpec {
 // TestRunJobWithNoFileOnlyKeyIsUnchanged: the app that marked nothing keeps the wholesale envFrom the
 // run Job always had, so a one-off command still sees DATABASE_URL and every other secret.
 func TestRunJobWithNoFileOnlyKeyIsUnchanged(t *testing.T) {
-	pod := jobPod(runSpec())
+	pod := jobPod(t, runSpec())
 
 	from := pod.Containers[0].EnvFrom
 	if len(from) != 1 || from[0].SecretRef == nil || from[0].SecretRef.Name != controlplane.AppSecretName("web") {
@@ -58,7 +62,7 @@ func TestRunJobDoesNotSourceAFileOnlyKey(t *testing.T) {
 		{App: "web", Key: "KUBECONFIG", Filename: "kubeconfig", NoEnv: true},
 	}}
 	spec.SecretEnvKeys = []string{"DATABASE_URL"}
-	pod := jobPod(spec)
+	pod := jobPod(t, spec)
 
 	if len(pod.Containers[0].EnvFrom) != 0 {
 		t.Fatalf("EnvFrom = %+v, want none: envFrom sources every key the Secret holds, including the one the app took out of its environment",

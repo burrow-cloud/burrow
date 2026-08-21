@@ -185,8 +185,11 @@ func (a *Adapter) runJob(name string, spec controlplane.RunSpec) *batchv1.Job {
 	// no toleration and no runtimeClassName on a cluster whose app pods only schedule with them, and
 	// the failure is quiet: the Job sits Pending until RunJob's ten-minute deadline and reports a
 	// timeout rather than an unschedulable pod. No mutator leaves the Job exactly as built above.
-	if a.podMutator != nil {
-		a.podMutator(&job.Spec.Template.Spec)
-	}
+	//
+	// The identity handed over names the SAME app the Deployment's does, which is the point: a
+	// per-app policy the deploy was given reaches the run pod without the wiring author restating it.
+	// Workload distinguishes the two, because a run pod is a Job pod and a hook may need to know.
+	a.applyAppPodMutator(PodIdentity{App: spec.App, Namespace: a.namespace, Workload: PodWorkloadRun},
+		&job.Spec.Template.Spec)
 	return job
 }

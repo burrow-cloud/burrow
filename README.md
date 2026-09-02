@@ -8,8 +8,6 @@
 
 **Production grade self hosting for your apps, operated by the AI agent you already use.** Point [Claude Code](https://claude.com/claude-code), Cursor, Codex, or your own agent at your Kubernetes cluster and it deploys, scales, debugs, and rolls back your apps. It drives `burrow-agent`, a scoped CLI, but the credentials and the guardrails live in a control plane you own. Every risky move (deploying to prod, deleting an app, exposing to the internet, DNS and add-on changes) is gated by a policy you set: the agent proposes, you decide, and the boundary is enforced in code the agent can't reach past, not an instruction it might ignore.
 
-Burrow runs its own site on Burrow, live at [burrow-cloud.dev](https://burrow-cloud.dev).
-
 It is not another git deploy host. Vercel and friends run your app on *their* platform; Burrow
 operates *your* cluster (real Kubernetes, done right), and goes past the app to the whole
 stack. The agent writes the integration code, and Burrow stands up and runs the backing
